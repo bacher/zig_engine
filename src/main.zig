@@ -23,7 +23,9 @@ pub fn main() !void {
     var window_context = try WindowContext.init(allocator);
     defer window_context.deinit();
 
-    const engine = try Engine.init(allocator, window_context);
+    const engine = try Engine.init(allocator, window_context, .{
+        .onUpdate = onUpdate,
+    });
     defer engine.deinit();
 
     // const scale_factor = scale_factor: {
@@ -47,4 +49,14 @@ pub fn main() !void {
     // zgui.getStyle().scaleAllSizes(scale_factor);
 
     engine.runLoop();
+}
+
+fn onUpdate(engine: *Engine) void {
+    _ = engine;
+
+    // zgui.backend.newFrame(
+    //     engine.gctx.swapchain_descriptor.width,
+    //     engine.gctx.swapchain_descriptor.height,
+    // );
+    // zgui.showDemoWindow(null);
 }

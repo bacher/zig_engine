@@ -12,8 +12,13 @@ const Vertex = @import("./types.zig").Vertex;
 const WindowContext = @import("./glue.zig").WindowContext;
 
 pub const Engine = struct {
+    const Callbacks = struct {
+        onUpdate: ?*const fn (engine: *Engine) void,
+    };
+
     allocator: std.mem.Allocator,
     window_context: WindowContext,
+    callbacks: Callbacks,
 
     gctx: *zgpu.GraphicsContext,
 
@@ -26,7 +31,11 @@ pub const Engine = struct {
     depth_texture: zgpu.TextureHandle,
     depth_texture_view: zgpu.TextureViewHandle,
 
-    pub fn init(allocator: std.mem.Allocator, window_context: WindowContext) !*Engine {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        window_context: WindowContext,
+        callbacks: Callbacks,
+    ) !*Engine {
         const gctx = window_context.gctx;
 
         // Create a bind group layout needed for our render pipeline.
@@ -122,6 +131,7 @@ pub const Engine = struct {
         engine.* = .{
             .allocator = allocator,
             .window_context = window_context,
+            .callbacks = callbacks,
             .gctx = gctx,
             .pipeline = pipeline,
             .bind_group = bind_group,
@@ -134,12 +144,9 @@ pub const Engine = struct {
     }
 
     pub fn update(engine: *Engine) void {
-        _ = engine;
-        // zgui.backend.newFrame(
-        //     engine.gctx.swapchain_descriptor.width,
-        //     engine.gctx.swapchain_descriptor.height,
-        // );
-        // zgui.showDemoWindow(null);
+        if (engine.callbacks.onUpdate) |callback| {
+            callback(engine);
+        }
     }
 
     pub fn draw(engine: *Engine) void {
