@@ -5,9 +5,9 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 const zgui = @import("zgui");
 const zm = @import("zmath");
+const WindowContext = @import("./engine/glue.zig").WindowContext;
 
 const content_dir = @import("build_options").content_dir;
-const window_title = "zig-gamedev: triangle (wgpu)";
 
 const wgsl_vs = @embedFile("./shaders/vs.wgsl");
 const wgsl_fs = @embedFile("./shaders/fs.wgsl");
@@ -30,11 +30,11 @@ const DemoState = struct {
     depth_texture_view: zgpu.TextureViewHandle,
 };
 
-fn init(allocator: std.mem.Allocator, window: *zglfw.Window) !DemoState {
+fn init(allocator: std.mem.Allocator, window_context: WindowContext) !DemoState {
     const gctx = try zgpu.GraphicsContext.create(
         allocator,
         .{
-            .window = window,
+            .window = window_context.window,
             .fn_getTime = @ptrCast(&zglfw.getTime),
             .fn_getFramebufferSize = @ptrCast(&zglfw.Window.getFramebufferSize),
             .fn_getWin32Window = @ptrCast(&zglfw.getWin32Window),
@@ -298,9 +298,6 @@ fn createDepthTexture(gctx: *zgpu.GraphicsContext) struct {
 }
 
 pub fn main() !void {
-    try zglfw.init();
-    defer zglfw.terminate();
-
     // Change current working directory to where the executable is located.
     {
         var buffer: [1024]u8 = undefined;
@@ -308,22 +305,19 @@ pub fn main() !void {
         std.posix.chdir(path) catch {};
     }
 
-    zglfw.windowHintTyped(.client_api, .no_api);
-
-    const window = try zglfw.Window.create(1600, 1000, window_title, null);
-    defer window.destroy();
-    window.setSizeLimits(400, 400, -1, -1);
-
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
     const allocator = gpa.allocator();
 
-    var demo = try init(allocator, window);
+    var window_context = try WindowContext.init(allocator);
+    defer window_context.deinit();
+
+    var demo = try init(allocator, window_context);
     defer deinit(allocator, &demo);
 
     const scale_factor = scale_factor: {
-        const scale = window.getContentScale();
+        const scale = window_context.window.getContentScale();
         break :scale_factor @max(scale[0], scale[1]);
     };
 
@@ -333,7 +327,7 @@ pub fn main() !void {
     _ = zgui.io.addFontFromFile(content_dir ++ "Roboto-Medium.ttf", math.floor(16.0 * scale_factor));
 
     zgui.backend.init(
-        window,
+        window_context.window,
         demo.gctx.device,
         @intFromEnum(zgpu.GraphicsContext.swapchain_format),
         @intFromEnum(wgpu.TextureFormat.undef),
@@ -342,7 +336,7 @@ pub fn main() !void {
 
     zgui.getStyle().scaleAllSizes(scale_factor);
 
-    while (!window.shouldClose() and window.getKey(.escape) != .press) {
+    while (!window_context.window.shouldClose() and window_context.window.getKey(.escape) != .press) {
         zglfw.pollEvents();
         update(&demo);
         draw(&demo);
