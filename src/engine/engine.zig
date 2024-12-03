@@ -9,15 +9,18 @@ const gltf_loader = @import("gltf_loader");
 const wgsl_vs = @embedFile("../shaders/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/fs.wgsl");
 
-const Vertex = @import("./types.zig").Vertex;
+const types = @import("./types.zig");
+const Vertex = types.Vertex;
+const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
+const load_buffer = @import("./load_buffer.zig");
 
 const ModelDescriptor = struct {
     model: gltf_loader.GltfLoader,
-    positions: BufferInfo,
-    normal: BufferInfo,
-    texcoord: BufferInfo,
-    index: BufferInfo,
+    positions: BufferDescriptor,
+    normal: BufferDescriptor,
+    texcoord: BufferDescriptor,
+    index: BufferDescriptor,
 };
 
 pub const Engine = struct {
@@ -313,12 +316,12 @@ pub const Engine = struct {
         // we should not explicitly deinit buffers because the whole
         // arena will be deinited at the end of this function.
 
-        const positions_buffer_info = try loadBufferIntoGpu([3]f32, engine.gctx, .vertex, buffers.positions);
-        const normal_buffer_info = try loadBufferIntoGpu([3]f32, engine.gctx, .vertex, buffers.normals);
-        const texcoord_buffer_info = try loadBufferIntoGpu([2]f32, engine.gctx, .vertex, buffers.texcoord);
-        const index_buffer_info = try loadBufferIntoGpu([3]u16, engine.gctx, .index, buffers.indexes);
+        const positions_buffer_info = try load_buffer.loadBufferIntoGpu([3]f32, engine.gctx, .vertex, buffers.positions);
+        const normal_buffer_info = try load_buffer.loadBufferIntoGpu([3]f32, engine.gctx, .vertex, buffers.normals);
+        const texcoord_buffer_info = try load_buffer.loadBufferIntoGpu([2]f32, engine.gctx, .vertex, buffers.texcoord);
+        const index_buffer_info = try load_buffer.loadBufferIntoGpu([3]u16, engine.gctx, .index, buffers.indexes);
 
-        const buffers_info = ModelDescriptor{
+        const model_descriptor = ModelDescriptor{
             .model = model,
             .positions = positions_buffer_info,
             .normal = normal_buffer_info,
@@ -326,7 +329,7 @@ pub const Engine = struct {
             .index = index_buffer_info,
         };
 
-        try engine.models_hash.put(loaded_model_id, buffers_info);
+        try engine.models_hash.put(loaded_model_id, model_descriptor);
         Engine.next_loaded_model_id += 1;
 
         return loaded_model_id;
@@ -376,36 +379,4 @@ fn createDepthTexture(gctx: *zgpu.GraphicsContext) struct {
         .texture = texture,
         .view = view,
     };
-}
-
-const BufferInfo = struct {
-    handle: zgpu.BufferHandle,
-    buffer: wgpu.Buffer,
-};
-
-const BufferType = enum {
-    index,
-    vertex,
-};
-
-fn loadBufferIntoGpu(comptime T: type, gctx: *zgpu.GraphicsContext, buffer_type: BufferType, data: []T) !BufferInfo {
-    const handle = gctx.createBuffer(.{
-        .usage = .{
-            .copy_dst = true,
-            .vertex = buffer_type == BufferType.vertex,
-            .index = buffer_type == BufferType.index,
-        },
-        .size = @sizeOf(T) * data.len,
-    });
-
-    if (gctx.lookupResource(handle)) |buffer| {
-        gctx.queue.writeBuffer(buffer, 0, T, data);
-
-        return .{
-            .handle = handle,
-            .buffer = buffer,
-        };
-    } else {
-        return error.BufferIsNotReady;
-    }
 }
