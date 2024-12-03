@@ -28,6 +28,14 @@ pub fn main() !void {
     });
     defer engine.deinit();
 
+    {
+        const model_filename = try std.fs.path.join(allocator, &.{ content_dir, "man/man.gltf.json" });
+        defer allocator.free(model_filename);
+
+        const model_id = try engine.loadModel(model_filename);
+        std.debug.print("Loaded model ID: {d}\n", .{model_id});
+    }
+
     // const scale_factor = scale_factor: {
     //     const scale = window_context.window.getContentScale();
     //     break :scale_factor @max(scale[0], scale[1]);

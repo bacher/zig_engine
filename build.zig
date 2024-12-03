@@ -46,16 +46,22 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("zmath", zmath.module("root"));
 
+    const gltf_loader = b.dependency("gltf_loader", .{
+        .target = target,
+    });
+    exe.root_module.addImport("gltf_loader", gltf_loader.module("root"));
+
     // Deps end
 
     const exe_options = b.addOptions();
     exe.root_module.addOptions("build_options", exe_options);
-    exe_options.addOption([]const u8, "content_dir", "content/");
+    const content_path_name = "content";
+    exe_options.addOption([]const u8, "content_dir", content_path_name);
 
     const install_content_step = b.addInstallDirectory(.{
-        .source_dir = b.path("content/"),
+        .source_dir = b.path(content_path_name),
         .install_dir = .{ .custom = "" },
-        .install_subdir = b.pathJoin(&.{ "bin", "content/" }),
+        .install_subdir = b.pathJoin(&.{ "bin", content_path_name }),
     });
     exe.step.dependOn(&install_content_step.step);
 

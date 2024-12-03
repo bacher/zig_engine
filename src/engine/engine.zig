@@ -4,6 +4,7 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 const zglfw = @import("zglfw");
 const zmath = @import("zmath");
+const gltf_loader = @import("gltf_loader");
 
 const wgsl_vs = @embedFile("../shaders/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/fs.wgsl");
@@ -12,6 +13,11 @@ const Vertex = @import("./types.zig").Vertex;
 const WindowContext = @import("./glue.zig").WindowContext;
 
 pub const Engine = struct {
+    pub const LoadedModelId = enum(u32) { _ };
+
+    var is_instanced: bool = false;
+    var next_loaded_model_id: u32 = 0;
+
     const Callbacks = struct {
         onUpdate: ?*const fn (engine: *Engine) void,
     };
@@ -31,11 +37,17 @@ pub const Engine = struct {
     depth_texture: zgpu.TextureHandle,
     depth_texture_view: zgpu.TextureViewHandle,
 
+    models_hash: std.AutoHashMap(LoadedModelId, gltf_loader.GltfLoader),
+
     pub fn init(
         allocator: std.mem.Allocator,
         window_context: WindowContext,
         callbacks: Callbacks,
     ) !*Engine {
+        if (Engine.is_instanced) {
+            return error.EngineCanHaveOnlyOneInstance;
+        }
+
         const gctx = window_context.gctx;
 
         // Create a bind group layout needed for our render pipeline.
@@ -139,7 +151,9 @@ pub const Engine = struct {
             .index_buffer = index_buffer,
             .depth_texture = depth.texture,
             .depth_texture_view = depth.view,
+            .models_hash = std.AutoHashMap(LoadedModelId, gltf_loader.GltfLoader).init(allocator),
         };
+        Engine.is_instanced = true;
         return engine;
     }
 
@@ -276,6 +290,20 @@ pub const Engine = struct {
         }
     }
 
+    pub fn loadModel(engine: *Engine, model_name: []const u8) !LoadedModelId {
+        std.debug.print("Load model: {s}\n", .{model_name});
+
+        const model = try gltf_loader.GltfLoader.init(engine.allocator, model_name);
+        errdefer model.deinit();
+
+        const loaded_model_id: LoadedModelId = @enumFromInt(Engine.next_loaded_model_id);
+
+        try engine.models_hash.put(loaded_model_id, model);
+        Engine.next_loaded_model_id += 1;
+
+        return loaded_model_id;
+    }
+
     pub fn runLoop(engine: *Engine) void {
         const window = engine.window_context.window;
 
@@ -287,7 +315,13 @@ pub const Engine = struct {
     }
 
     pub fn deinit(engine: *Engine) void {
+        var iterator = engine.models_hash.iterator();
+        while (iterator.next()) |entry| {
+            entry.value_ptr.deinit();
+        }
+        engine.models_hash.deinit();
         engine.allocator.destroy(engine);
+        Engine.is_instanced = false;
     }
 };
 
