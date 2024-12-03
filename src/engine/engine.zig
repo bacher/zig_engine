@@ -31,6 +31,7 @@ pub const Engine = struct {
 
     const Callbacks = struct {
         onUpdate: ?*const fn (engine: *Engine) void,
+        onRender: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder) void,
     };
 
     allocator: std.mem.Allocator,
@@ -259,7 +260,8 @@ pub const Engine = struct {
                     pass.drawIndexed(3, 1, 0, 0, 0);
                 }
             }
-            {
+
+            if (engine.callbacks.onRender) |onRender| {
                 const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
                     .view = back_buffer_view,
                     .load_op = .load,
@@ -275,7 +277,7 @@ pub const Engine = struct {
                     pass.release();
                 }
 
-                // zgui.backend.draw(pass);
+                onRender(engine, pass);
             }
 
             break :commands encoder.finish(null);

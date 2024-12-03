@@ -25,6 +25,7 @@ pub fn main() !void {
 
     const engine = try Engine.init(allocator, window_context, .{
         .onUpdate = onUpdate,
+        .onRender = onRender,
     });
     defer engine.deinit();
 
@@ -67,4 +68,11 @@ fn onUpdate(engine: *Engine) void {
     //     engine.gctx.swapchain_descriptor.height,
     // );
     // zgui.showDemoWindow(null);
+}
+
+fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder) void {
+    _ = engine;
+    _ = pass;
+
+    // zgui.backend.draw(pass);
 }
