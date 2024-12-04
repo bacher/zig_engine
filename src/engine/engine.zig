@@ -89,12 +89,6 @@ pub const Engine = struct {
             }};
 
             const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
-                .vertex = wgpu.VertexState{
-                    .module = vs_module,
-                    .entry_point = "main",
-                    .buffer_count = vertex_buffers.len,
-                    .buffers = &vertex_buffers,
-                },
                 .primitive = wgpu.PrimitiveState{
                     .front_face = .ccw,
                     .cull_mode = .back,
@@ -105,11 +99,17 @@ pub const Engine = struct {
                     .depth_write_enabled = true,
                     .depth_compare = .less,
                 },
+                .vertex = wgpu.VertexState{
+                    .module = vs_module,
+                    .entry_point = "main",
+                    .buffers = &vertex_buffers,
+                    .buffer_count = vertex_buffers.len,
+                },
                 .fragment = &wgpu.FragmentState{
                     .module = fs_module,
                     .entry_point = "main",
-                    .target_count = color_targets.len,
                     .targets = &color_targets,
+                    .target_count = color_targets.len,
                 },
             };
             break :pipeline gctx.createRenderPipeline(pipeline_layout, pipeline_descriptor);
@@ -193,8 +193,8 @@ pub const Engine = struct {
                     .depth_clear_value = 1.0,
                 };
                 const render_pass_info = wgpu.RenderPassDescriptor{
-                    .color_attachment_count = color_attachments.len,
                     .color_attachments = &color_attachments,
+                    .color_attachment_count = color_attachments.len,
                     .depth_stencil_attachment = &depth_attachment,
                 };
                 const pass = encoder.beginRenderPass(render_pass_info);
@@ -232,8 +232,8 @@ pub const Engine = struct {
                     .store_op = .store,
                 }};
                 const render_pass_info = wgpu.RenderPassDescriptor{
-                    .color_attachment_count = color_attachments.len,
                     .color_attachments = &color_attachments,
+                    .color_attachment_count = color_attachments.len,
                 };
                 const pass = encoder.beginRenderPass(render_pass_info);
                 defer {
