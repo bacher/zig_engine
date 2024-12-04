@@ -10,14 +10,13 @@ const wgsl_vs = @embedFile("../shaders/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/fs.wgsl");
 
 const types = @import("./types.zig");
-const Vertex = types.Vertex;
 const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
 const load_buffer = @import("./load_buffer.zig");
 
 const ModelDescriptor = struct {
     model: gltf_loader.GltfLoader,
-    positions: BufferDescriptor,
+    position: BufferDescriptor,
     normal: BufferDescriptor,
     texcoord: BufferDescriptor,
     index: BufferDescriptor,
@@ -42,9 +41,6 @@ pub const Engine = struct {
 
     pipeline: zgpu.RenderPipelineHandle,
     bind_group: zgpu.BindGroupHandle,
-
-    vertex_buffer: zgpu.BufferHandle,
-    index_buffer: zgpu.BufferHandle,
 
     depth_texture: zgpu.TextureHandle,
     depth_texture_view: zgpu.TextureViewHandle,
@@ -84,12 +80,12 @@ pub const Engine = struct {
 
             const vertex_attributes = [_]wgpu.VertexAttribute{
                 .{ .format = .float32x3, .offset = 0, .shader_location = 0 },
-                .{ .format = .float32x3, .offset = @offsetOf(Vertex, "color"), .shader_location = 1 },
+                // .{ .format = .float32x3, .offset = @offsetOf(Vertex, "color"), .shader_location = 1 },
             };
             const vertex_buffers = [_]wgpu.VertexBufferLayout{.{
-                .array_stride = @sizeOf(Vertex),
-                .attribute_count = vertex_attributes.len,
+                .array_stride = @sizeOf([3]f32),
                 .attributes = &vertex_attributes,
+                .attribute_count = vertex_attributes.len,
             }};
 
             const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
@@ -101,7 +97,7 @@ pub const Engine = struct {
                 },
                 .primitive = wgpu.PrimitiveState{
                     .front_face = .ccw,
-                    .cull_mode = .none,
+                    .cull_mode = .back,
                     .topology = .triangle_list,
                 },
                 .depth_stencil = &wgpu.DepthStencilState{
@@ -128,26 +124,6 @@ pub const Engine = struct {
             },
         });
 
-        // Create a vertex buffer.
-        const vertex_buffer = gctx.createBuffer(.{
-            .usage = .{ .copy_dst = true, .vertex = true },
-            .size = 3 * @sizeOf(Vertex),
-        });
-        const vertex_data = [_]Vertex{
-            .{ .position = [3]f32{ 0.0, 0.5, 0.0 }, .color = [3]f32{ 1.0, 0.0, 0.0 } },
-            .{ .position = [3]f32{ -0.5, -0.5, 0.0 }, .color = [3]f32{ 0.0, 1.0, 0.0 } },
-            .{ .position = [3]f32{ 0.5, -0.5, 0.0 }, .color = [3]f32{ 0.0, 0.0, 1.0 } },
-        };
-        gctx.queue.writeBuffer(gctx.lookupResource(vertex_buffer).?, 0, Vertex, vertex_data[0..]);
-
-        // Create an index buffer.
-        const index_buffer = gctx.createBuffer(.{
-            .usage = .{ .copy_dst = true, .index = true },
-            .size = 3 * @sizeOf(u32),
-        });
-        const index_data = [_]u32{ 0, 1, 2 };
-        gctx.queue.writeBuffer(gctx.lookupResource(index_buffer).?, 0, u32, index_data[0..]);
-
         // Create a depth texture and its 'view'.
         const depth = createDepthTexture(gctx);
 
@@ -159,8 +135,6 @@ pub const Engine = struct {
             .gctx = gctx,
             .pipeline = pipeline,
             .bind_group = bind_group,
-            .vertex_buffer = vertex_buffer,
-            .index_buffer = index_buffer,
             .depth_texture = depth.texture,
             .depth_texture_view = depth.view,
             .models_hash = std.AutoHashMap(LoadedModelId, ModelDescriptor).init(allocator),
@@ -203,8 +177,6 @@ pub const Engine = struct {
             defer encoder.release();
 
             pass: {
-                const vb_info = gctx.lookupResourceInfo(engine.vertex_buffer) orelse break :pass;
-                const ib_info = gctx.lookupResourceInfo(engine.index_buffer) orelse break :pass;
                 const pipeline = gctx.lookupResource(engine.pipeline) orelse break :pass;
                 const bind_group = gctx.lookupResource(engine.bind_group) orelse break :pass;
                 const depth_view = gctx.lookupResource(engine.depth_texture_view) orelse break :pass;
@@ -231,33 +203,25 @@ pub const Engine = struct {
                     pass.release();
                 }
 
-                pass.setVertexBuffer(0, vb_info.gpuobj.?, 0, vb_info.size);
-                pass.setIndexBuffer(ib_info.gpuobj.?, .uint32, 0, ib_info.size);
-
                 pass.setPipeline(pipeline);
 
-                // Draw triangle 1.
-                {
-                    const object_to_world = zmath.mul(zmath.rotationY(t), zmath.translation(-1.0, 0.0, 0.0));
+                var iterator = engine.models_hash.iterator();
+
+                while (iterator.next()) |model| {
+                    const position = model.value_ptr.position;
+                    const index = model.value_ptr.index;
+
+                    position.applyVertexBuffer(pass, 0);
+                    index.applyIndexBuffer(pass);
+
+                    const object_to_world = zmath.mul(zmath.rotationY(t), zmath.translation(0.0, 0.0, 0.0));
                     const object_to_clip = zmath.mul(object_to_world, cam_world_to_clip);
 
                     const mem = gctx.uniformsAllocate(zmath.Mat, 1);
                     mem.slice[0] = zmath.transpose(object_to_clip);
 
                     pass.setBindGroup(0, bind_group, &.{mem.offset});
-                    pass.drawIndexed(3, 1, 0, 0, 0);
-                }
-
-                // Draw triangle 2.
-                {
-                    const object_to_world = zmath.mul(zmath.rotationY(0.75 * t), zmath.translation(1.0, 0.0, 0.0));
-                    const object_to_clip = zmath.mul(object_to_world, cam_world_to_clip);
-
-                    const mem = gctx.uniformsAllocate(zmath.Mat, 1);
-                    mem.slice[0] = zmath.transpose(object_to_clip);
-
-                    pass.setBindGroup(0, bind_group, &.{mem.offset});
-                    pass.drawIndexed(3, 1, 0, 0, 0);
+                    pass.drawIndexed(index.elements_count * 3, 1, 0, 0, 0);
                 }
             }
 
@@ -325,7 +289,7 @@ pub const Engine = struct {
 
         const model_descriptor = ModelDescriptor{
             .model = model,
-            .positions = positions_buffer_info,
+            .position = positions_buffer_info,
             .normal = normal_buffer_info,
             .texcoord = texcoord_buffer_info,
             .index = index_buffer_info,
