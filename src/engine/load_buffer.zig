@@ -2,6 +2,7 @@ const std = @import("std");
 
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
+const gltf_loader = @import("gltf_loader");
 
 const types = @import("./types.zig");
 const BufferDescriptor = types.BufferDescriptor;
@@ -11,7 +12,7 @@ pub fn loadBufferIntoGpu(
     comptime T: type,
     gctx: *zgpu.GraphicsContext,
     comptime buffer_type: BufferType,
-    data: []T,
+    buffer_data: gltf_loader.ModelBuffer(T),
 ) !BufferDescriptor {
     const index_format: wgpu.IndexFormat = comptime result: {
         const ElementType = std.meta.Elem(T);
@@ -27,27 +28,25 @@ pub fn loadBufferIntoGpu(
         }
     };
 
-    const buffer_size = @sizeOf(T) * data.len;
-
     const handle = gctx.createBuffer(.{
         .usage = .{
             .copy_dst = true,
             .vertex = buffer_type == BufferType.vertex,
             .index = buffer_type == BufferType.index,
         },
-        .size = buffer_size,
+        .size = buffer_data.buffer.len,
     });
 
     if (gctx.lookupResource(handle)) |gpu_buffer| {
-        gctx.queue.writeBuffer(gpu_buffer, 0, T, data);
+        gctx.queue.writeBuffer(gpu_buffer, 0, u8, buffer_data.buffer);
 
         return .{
             .type = buffer_type,
             .index_format = index_format,
             .handle = handle,
             .gpu_buffer = gpu_buffer,
-            .elements_count = @intCast(data.len),
-            .buffer_size = buffer_size,
+            .elements_count = @intCast(buffer_data.data.len),
+            .buffer_size = @sizeOf(T) * buffer_data.data.len,
         };
     } else {
         return error.BufferIsNotReady;
