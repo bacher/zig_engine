@@ -60,7 +60,7 @@ pub fn main() !void {
 
     // zgui.getStyle().scaleAllSizes(scale_factor);
 
-    engine.runLoop();
+    try engine.runLoop();
 }
 
 fn onUpdate(engine: *Engine) void {

@@ -12,6 +12,7 @@ const wgsl_fs = @embedFile("../shaders/fs.wgsl");
 const types = @import("./types.zig");
 const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
+const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const load_buffer = @import("./load_buffer.zig");
 
 const ModelDescriptor = struct {
@@ -21,6 +22,8 @@ const ModelDescriptor = struct {
     texcoord: BufferDescriptor,
     index: BufferDescriptor,
 };
+
+const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 
 pub const Engine = struct {
     pub const LoadedModelId = enum(u32) { _ };
@@ -42,8 +45,7 @@ pub const Engine = struct {
     pipeline: zgpu.RenderPipelineHandle,
     bind_group: zgpu.BindGroupHandle,
 
-    depth_texture: zgpu.TextureHandle,
-    depth_texture_view: zgpu.TextureViewHandle,
+    depth_texture: DepthTexture,
 
     models_hash: std.AutoHashMap(LoadedModelId, ModelDescriptor),
 
@@ -124,8 +126,7 @@ pub const Engine = struct {
             },
         });
 
-        // Create a depth texture and its 'view'.
-        const depth = createDepthTexture(gctx);
+        const depth_texture = try DepthTexture.init(gctx);
 
         const engine = try allocator.create(Engine);
         engine.* = .{
@@ -135,8 +136,7 @@ pub const Engine = struct {
             .gctx = gctx,
             .pipeline = pipeline,
             .bind_group = bind_group,
-            .depth_texture = depth.texture,
-            .depth_texture_view = depth.view,
+            .depth_texture = depth_texture,
             .models_hash = std.AutoHashMap(LoadedModelId, ModelDescriptor).init(allocator),
         };
         Engine.is_instanced = true;
@@ -149,7 +149,7 @@ pub const Engine = struct {
         }
     }
 
-    pub fn draw(engine: *Engine) void {
+    pub fn draw(engine: *Engine) GraphicsContextState {
         const gctx = engine.gctx;
 
         const fb_width = gctx.swapchain_descriptor.width;
@@ -179,7 +179,6 @@ pub const Engine = struct {
             pass: {
                 const pipeline = gctx.lookupResource(engine.pipeline) orelse break :pass;
                 const bind_group = gctx.lookupResource(engine.bind_group) orelse break :pass;
-                const depth_view = gctx.lookupResource(engine.depth_texture_view) orelse break :pass;
 
                 const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
                     .view = back_buffer_view,
@@ -187,7 +186,7 @@ pub const Engine = struct {
                     .store_op = .store,
                 }};
                 const depth_attachment = wgpu.RenderPassDepthStencilAttachment{
-                    .view = depth_view,
+                    .view = engine.depth_texture.view,
                     .depth_load_op = .clear,
                     .depth_store_op = .store,
                     .depth_clear_value = 1.0,
@@ -252,19 +251,7 @@ pub const Engine = struct {
 
         const gctx_state = gctx.present();
 
-        switch (gctx_state) {
-            .normal_execution => {},
-            .swap_chain_resized => {
-                // Release old depth texture.
-                gctx.releaseResource(engine.depth_texture_view);
-                gctx.destroyResource(engine.depth_texture);
-
-                // Create a new depth texture to match the new window size.
-                const depth = createDepthTexture(gctx);
-                engine.depth_texture = depth.texture;
-                engine.depth_texture_view = depth.view;
-            },
-        }
+        return gctx_state;
     }
 
     pub fn loadModel(engine: *Engine, model_name: []const u8) !LoadedModelId {
@@ -301,13 +288,27 @@ pub const Engine = struct {
         return loaded_model_id;
     }
 
-    pub fn runLoop(engine: *Engine) void {
+    fn recreateDepthTexture(engine: *Engine) !void {
+        // Release old depth texture.
+        engine.depth_texture.deinit();
+        // Create a new depth texture to match the new window size.
+        engine.depth_texture = try DepthTexture.init(engine.gctx);
+    }
+
+    pub fn runLoop(engine: *Engine) !void {
         const window = engine.window_context.window;
 
         while (!window.shouldClose() and window.getKey(.escape) != .press) {
             zglfw.pollEvents();
             engine.update();
-            engine.draw();
+            const gctx_state = engine.draw();
+
+            switch (gctx_state) {
+                .normal_execution => {},
+                .swap_chain_resized => {
+                    try engine.recreateDepthTexture();
+                },
+            }
         }
     }
 
@@ -321,28 +322,3 @@ pub const Engine = struct {
         Engine.is_instanced = false;
     }
 };
-
-fn createDepthTexture(gctx: *zgpu.GraphicsContext) struct {
-    texture: zgpu.TextureHandle,
-    view: zgpu.TextureViewHandle,
-} {
-    const texture = gctx.createTexture(.{
-        .usage = .{ .render_attachment = true },
-        .dimension = .tdim_2d,
-        .size = .{
-            .width = gctx.swapchain_descriptor.width,
-            .height = gctx.swapchain_descriptor.height,
-            .depth_or_array_layers = 1,
-        },
-        .format = .depth32_float,
-        .mip_level_count = 1,
-        .sample_count = 1,
-    });
-
-    const view = gctx.createTextureView(texture, .{});
-
-    return .{
-        .texture = texture,
-        .view = view,
-    };
-}
