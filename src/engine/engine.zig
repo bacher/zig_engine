@@ -80,19 +80,30 @@ pub const Engine = struct {
                 .format = zgpu.GraphicsContext.swapchain_format,
             }};
 
-            const vertex_attributes = [_]wgpu.VertexAttribute{
-                .{ .format = .float32x3, .offset = 0, .shader_location = 0 },
-                // .{ .format = .float32x3, .offset = @offsetOf(Vertex, "color"), .shader_location = 1 },
+            const vertex_buffers = [_]wgpu.VertexBufferLayout{
+                // position
+                .{
+                    .array_stride = @sizeOf([3]f32),
+                    .attributes = &.{.{ .format = .float32x3, .offset = 0, .shader_location = 0 }},
+                    .attribute_count = 1,
+                },
+                // normal
+                .{
+                    .array_stride = @sizeOf([3]f32),
+                    .attributes = &.{.{ .format = .float32x3, .offset = 0, .shader_location = 1 }},
+                    .attribute_count = 1,
+                },
+                // texcoord
+                .{
+                    .array_stride = @sizeOf([2]f32),
+                    .attributes = &.{.{ .format = .float32x2, .offset = 0, .shader_location = 2 }},
+                    .attribute_count = 1,
+                },
             };
-            const vertex_buffers = [_]wgpu.VertexBufferLayout{.{
-                .array_stride = @sizeOf([3]f32),
-                .attributes = &vertex_attributes,
-                .attribute_count = vertex_attributes.len,
-            }};
 
             const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
                 .primitive = wgpu.PrimitiveState{
-                    .front_face = .ccw,
+                    .front_face = .cw,
                     .cull_mode = .back,
                     .topology = .triangle_list,
                 },
@@ -208,9 +219,13 @@ pub const Engine = struct {
 
                 while (iterator.next()) |model| {
                     const position = model.value_ptr.position;
+                    const normal = model.value_ptr.normal;
+                    const texcoord = model.value_ptr.texcoord;
                     const index = model.value_ptr.index;
 
                     position.applyVertexBuffer(pass, 0);
+                    normal.applyVertexBuffer(pass, 1);
+                    texcoord.applyVertexBuffer(pass, 2);
                     index.applyIndexBuffer(pass);
 
                     const object_to_world = zmath.mul(zmath.rotationY(t), zmath.translation(0.0, 0.0, 0.0));

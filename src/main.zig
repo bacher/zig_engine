@@ -32,7 +32,7 @@ pub fn main() !void {
     {
         const model_filename = try std.fs.path.join(allocator, &.{
             content_dir,
-            "man-blender-minus-1/man.gltf",
+            "man/man.gltf",
         });
         defer allocator.free(model_filename);
 
