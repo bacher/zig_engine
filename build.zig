@@ -46,9 +46,16 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("zmath", zmath.module("root"));
 
+    const zstbi = b.dependency("zstbi", .{
+        .target = target,
+    });
+    exe.root_module.addImport("zstbi", zstbi.module("root"));
+    exe.linkLibrary(zstbi.artifact("zstbi"));
+
     const gltf_loader = b.dependency("gltf_loader", .{
         .target = target,
     });
+    gltf_loader.module("root").addImport("zstbi", zstbi.module("root"));
     exe.root_module.addImport("gltf_loader", gltf_loader.module("root"));
 
     // Deps end

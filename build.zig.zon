@@ -77,6 +77,11 @@
             .hash = "1220081d55b58b968d953db1afc2fb01b2f5733929144e69522461ce25fa6450d84e",
         },
 
+        .zstbi = .{
+            .url = "https://github.com/zig-gamedev/zstbi/archive/3f3f6b21e369666f089a4a328986ad7d0414fb11.tar.gz",
+            .hash = "122009ea2ff8496071dbe447731a62e6c7c731b6aca5ac3a01992a8d3330d4482a88",
+        },
+
         .gltf_loader = .{
             .path = "../gltf_loader",
         }

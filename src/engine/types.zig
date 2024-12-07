@@ -41,3 +41,18 @@ pub const BufferDescriptor = struct {
         );
     }
 };
+
+pub const TextureDescriptor = struct {
+    texture_handle: zgpu.TextureHandle,
+    texture: wgpu.Texture,
+    view_handle: zgpu.TextureViewHandle,
+    view: wgpu.TextureView,
+
+    pub fn applyTexture(
+        descriptor: *const TextureDescriptor,
+        pass: wgpu.RenderPassEncoder,
+    ) void {
+        _ = descriptor;
+        _ = pass;
+    }
+};

@@ -4,6 +4,7 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 const zglfw = @import("zglfw");
 const zmath = @import("zmath");
+const zstbi = @import("zstbi");
 const gltf_loader = @import("gltf_loader");
 
 const wgsl_vs = @embedFile("../shaders/vs.wgsl");
@@ -14,13 +15,20 @@ const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const load_buffer = @import("./load_buffer.zig");
+const load_texture = @import("./load_texture.zig");
 
 const ModelDescriptor = struct {
-    model: gltf_loader.GltfLoader,
+    // model: gltf_loader.GltfLoader,
     position: BufferDescriptor,
     normal: BufferDescriptor,
     texcoord: BufferDescriptor,
     index: BufferDescriptor,
+    color_texture: types.TextureDescriptor,
+
+    fn deinit(model_description: ModelDescriptor) void {
+        _ = model_description;
+        // model_description.model.deinit();
+    }
 };
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
@@ -57,6 +65,8 @@ pub const Engine = struct {
         if (Engine.is_instanced) {
             return error.EngineCanHaveOnlyOneInstance;
         }
+
+        zstbi.init(allocator);
 
         const gctx = window_context.gctx;
 
@@ -273,7 +283,7 @@ pub const Engine = struct {
         std.debug.print("Load model: {s}\n", .{model_name});
 
         const model = try gltf_loader.GltfLoader.init(engine.allocator, model_name);
-        errdefer model.deinit();
+        defer model.deinit();
 
         const loaded_model_id: LoadedModelId = @enumFromInt(Engine.next_loaded_model_id);
 
@@ -284,17 +294,23 @@ pub const Engine = struct {
         // we should not explicitly deinit buffers because the whole
         // arena will be deinited at the end of this function.
 
+        var color_texture_image = try model.loadTextureData("man.png");
+        defer color_texture_image.deinit();
+
         const positions_buffer_info = try load_buffer.loadBufferIntoGpu([3]f32, engine.gctx, .vertex, buffers.positions);
         const normal_buffer_info = try load_buffer.loadBufferIntoGpu([3]f32, engine.gctx, .vertex, buffers.normals);
         const texcoord_buffer_info = try load_buffer.loadBufferIntoGpu([2]f32, engine.gctx, .vertex, buffers.texcoord);
         const index_buffer_info = try load_buffer.loadBufferIntoGpu([3]u16, engine.gctx, .index, buffers.indexes);
 
+        const color_texture = try load_texture.loadTextureIntoGpu(engine.gctx, color_texture_image);
+
         const model_descriptor = ModelDescriptor{
-            .model = model,
+            // .model = model,
             .position = positions_buffer_info,
             .normal = normal_buffer_info,
             .texcoord = texcoord_buffer_info,
             .index = index_buffer_info,
+            .color_texture = color_texture,
         };
 
         try engine.models_hash.put(loaded_model_id, model_descriptor);
@@ -330,9 +346,10 @@ pub const Engine = struct {
     pub fn deinit(engine: *Engine) void {
         var iterator = engine.models_hash.iterator();
         while (iterator.next()) |entry| {
-            entry.value_ptr.model.deinit();
+            entry.value_ptr.deinit();
         }
         engine.models_hash.deinit();
+        zstbi.deinit();
         engine.allocator.destroy(engine);
         Engine.is_instanced = false;
     }
