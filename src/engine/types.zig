@@ -55,4 +55,21 @@ pub const TextureDescriptor = struct {
         _ = descriptor;
         _ = pass;
     }
+
+    pub fn generateMipmaps(
+        descriptor: *const TextureDescriptor,
+        gctx: *zgpu.GraphicsContext,
+        allocator: std.mem.Allocator,
+    ) !void {
+        const commands = commands: {
+            const encoder = gctx.device.createCommandEncoder(null);
+            defer encoder.release();
+
+            gctx.generateMipmaps(allocator, encoder, descriptor.texture_handle);
+
+            break :commands encoder.finish(null);
+        };
+        defer commands.release();
+        gctx.submit(&.{commands});
+    }
 };

@@ -5,7 +5,16 @@ const zstbi = @import("zstbi");
 
 const TextureDescriptor = @import("./types.zig").TextureDescriptor;
 
-pub fn loadTextureIntoGpu(gctx: *zgpu.GraphicsContext, image: zstbi.Image) !TextureDescriptor {
+pub const LoadTextureOptions = struct {
+    generate_mipmaps: bool = false,
+};
+
+pub fn loadTextureIntoGpu(
+    gctx: *zgpu.GraphicsContext,
+    allocator: std.mem.Allocator,
+    image: zstbi.Image,
+    options: ?LoadTextureOptions,
+) !TextureDescriptor {
     const texture_handle = gctx.createTexture(.{
         .usage = .{
             .texture_binding = true,
@@ -41,10 +50,18 @@ pub fn loadTextureIntoGpu(gctx: *zgpu.GraphicsContext, image: zstbi.Image) !Text
         image.data,
     );
 
-    return .{
+    const texture_descriptor = TextureDescriptor{
         .texture_handle = texture_handle,
         .texture = texture,
         .view_handle = view_handle,
         .view = view,
     };
+
+    if (options) |opt| {
+        if (opt.generate_mipmaps) {
+            try texture_descriptor.generateMipmaps(gctx, allocator);
+        }
+    }
+
+    return texture_descriptor;
 }

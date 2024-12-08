@@ -302,7 +302,12 @@ pub const Engine = struct {
         const texcoord_buffer_info = try load_buffer.loadBufferIntoGpu([2]f32, engine.gctx, .vertex, buffers.texcoord);
         const index_buffer_info = try load_buffer.loadBufferIntoGpu([3]u16, engine.gctx, .index, buffers.indexes);
 
-        const color_texture = try load_texture.loadTextureIntoGpu(engine.gctx, color_texture_image);
+        const color_texture = try load_texture.loadTextureIntoGpu(
+            engine.gctx,
+            engine.allocator,
+            color_texture_image,
+            .{ .generate_mipmaps = true },
+        );
 
         const model_descriptor = ModelDescriptor{
             // .model = model,
