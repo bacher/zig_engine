@@ -14,22 +14,7 @@ const types = @import("./types.zig");
 const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
-const load_buffer = @import("./load_buffer.zig");
-const load_texture = @import("./load_texture.zig");
-
-const ModelDescriptor = struct {
-    // model: gltf_loader.GltfLoader,
-    position: BufferDescriptor,
-    normal: BufferDescriptor,
-    texcoord: BufferDescriptor,
-    index: BufferDescriptor,
-    color_texture: types.TextureDescriptor,
-
-    fn deinit(model_description: ModelDescriptor) void {
-        _ = model_description;
-        // model_description.model.deinit();
-    }
-};
+const ModelDescriptor = @import("./model.zig").ModelDescriptor;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 
@@ -280,44 +265,9 @@ pub const Engine = struct {
     }
 
     pub fn loadModel(engine: *Engine, model_name: []const u8) !LoadedModelId {
-        std.debug.print("Load model: {s}\n", .{model_name});
-
-        const model = try gltf_loader.GltfLoader.init(engine.allocator, model_name);
-        defer model.deinit();
+        const model_descriptor = try ModelDescriptor.init(engine.gctx, engine.allocator, model_name);
 
         const loaded_model_id: LoadedModelId = @enumFromInt(Engine.next_loaded_model_id);
-
-        var arena = std.heap.ArenaAllocator.init(engine.allocator);
-        defer arena.deinit();
-
-        const buffers = try model.loadModelBuffers(arena.allocator());
-        // we should not explicitly deinit buffers because the whole
-        // arena will be deinited at the end of this function.
-
-        var color_texture_image = try model.loadTextureData("man.png");
-        defer color_texture_image.deinit();
-
-        const positions_buffer_info = try load_buffer.loadBufferIntoGpu([3]f32, engine.gctx, .vertex, buffers.positions);
-        const normal_buffer_info = try load_buffer.loadBufferIntoGpu([3]f32, engine.gctx, .vertex, buffers.normals);
-        const texcoord_buffer_info = try load_buffer.loadBufferIntoGpu([2]f32, engine.gctx, .vertex, buffers.texcoord);
-        const index_buffer_info = try load_buffer.loadBufferIntoGpu([3]u16, engine.gctx, .index, buffers.indexes);
-
-        const color_texture = try load_texture.loadTextureIntoGpu(
-            engine.gctx,
-            engine.allocator,
-            color_texture_image,
-            .{ .generate_mipmaps = true },
-        );
-
-        const model_descriptor = ModelDescriptor{
-            // .model = model,
-            .position = positions_buffer_info,
-            .normal = normal_buffer_info,
-            .texcoord = texcoord_buffer_info,
-            .index = index_buffer_info,
-            .color_texture = color_texture,
-        };
-
         try engine.models_hash.put(loaded_model_id, model_descriptor);
         Engine.next_loaded_model_id += 1;
 
