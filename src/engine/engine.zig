@@ -17,6 +17,7 @@ const BindGroupDefinition = @import("./bind_group.zig").BindGroupDefinition;
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ModelDescriptor = @import("./model_descriptor.zig").ModelDescriptor;
 const Model = @import("./model.zig").Model;
+const Scene = @import("./scene.zig").Scene;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 
@@ -42,6 +43,8 @@ pub const Engine = struct {
     texture_sampler: zgpu.SamplerHandle,
 
     models_hash: std.AutoHashMap(LoadedModelId, Model),
+
+    active_scene: ?*Scene,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -135,6 +138,7 @@ pub const Engine = struct {
             .depth_texture = depth_texture,
             .texture_sampler = texture_sampler,
             .models_hash = std.AutoHashMap(LoadedModelId, Model).init(allocator),
+            .active_scene = null,
         };
         Engine.is_instanced = true;
         return engine;
@@ -152,6 +156,17 @@ pub const Engine = struct {
         zstbi.deinit();
         engine.allocator.destroy(engine);
         Engine.is_instanced = false;
+    }
+
+    pub fn createScene(engine: *Engine) !*Scene {
+        // const scene = Scene.init(engine, engine.allocator);
+        const scene = try Scene.init(engine.allocator);
+
+        if (engine.active_scene == null) {
+            engine.active_scene = scene;
+        }
+
+        return scene;
     }
 
     pub fn update(engine: *Engine) void {

@@ -29,7 +29,7 @@ pub fn main() !void {
     });
     defer engine.deinit();
 
-    {
+    const man_model_id = man_model_id: {
         const model_filename = try std.fs.path.join(allocator, &.{
             content_dir,
             "man/man.gltf",
@@ -38,7 +38,19 @@ pub fn main() !void {
 
         const model_id = try engine.loadModel(model_filename);
         std.debug.print("Loaded model ID: {d}\n", .{model_id});
-    }
+
+        break :man_model_id model_id;
+    };
+
+    const scene = try engine.createScene();
+    defer scene.deinit();
+
+    _ = man_model_id;
+    // const game_object = try scene.addObject(.{
+    //     // .model_id = man_model_id,
+    //     .position = .{ 0, 0, 0 },
+    // });
+    // _ = game_object;
 
     // const scale_factor = scale_factor: {
     //     const scale = window_context.window.getContentScale();
