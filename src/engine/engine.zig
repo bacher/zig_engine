@@ -13,8 +13,10 @@ const wgsl_fs = @embedFile("../shaders/fs.wgsl");
 const types = @import("./types.zig");
 const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
+const BindGroupDefinition = @import("./bind_group.zig").BindGroupDefinition;
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
-const ModelDescriptor = @import("./model.zig").ModelDescriptor;
+const ModelDescriptor = @import("./model_descriptor.zig").ModelDescriptor;
+const Model = @import("./model.zig").Model;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 
@@ -29,18 +31,17 @@ pub const Engine = struct {
         onRender: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder) void,
     };
 
+    gctx: *zgpu.GraphicsContext,
     allocator: std.mem.Allocator,
     window_context: WindowContext,
     callbacks: Callbacks,
 
-    gctx: *zgpu.GraphicsContext,
-
     pipeline: zgpu.RenderPipelineHandle,
-    bind_group: zgpu.BindGroupHandle,
-
+    bind_group_def: BindGroupDefinition,
     depth_texture: DepthTexture,
+    texture_sampler: zgpu.SamplerHandle,
 
-    models_hash: std.AutoHashMap(LoadedModelId, ModelDescriptor),
+    models_hash: std.AutoHashMap(LoadedModelId, Model),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -55,13 +56,9 @@ pub const Engine = struct {
 
         const gctx = window_context.gctx;
 
-        // Create a bind group layout needed for our render pipeline.
-        const bind_group_layout = gctx.createBindGroupLayout(&.{
-            zgpu.bufferEntry(0, .{ .vertex = true }, .uniform, true, 0),
-        });
-        defer gctx.releaseResource(bind_group_layout);
+        const bind_group_def = BindGroupDefinition.init(gctx);
 
-        const pipeline_layout = gctx.createPipelineLayout(&.{bind_group_layout});
+        const pipeline_layout = gctx.createPipelineLayout(&.{bind_group_def.bind_group_layout});
         defer gctx.releaseResource(pipeline_layout);
 
         const pipeline = pipeline: {
@@ -123,14 +120,7 @@ pub const Engine = struct {
             break :pipeline gctx.createRenderPipeline(pipeline_layout, pipeline_descriptor);
         };
 
-        const bind_group = gctx.createBindGroup(bind_group_layout, &.{
-            .{
-                .binding = 0,
-                .buffer_handle = gctx.uniforms.buffer,
-                .offset = 0,
-                .size = @sizeOf(zmath.Mat),
-            },
-        });
+        const texture_sampler = gctx.createSampler(.{});
 
         const depth_texture = try DepthTexture.init(gctx);
 
@@ -141,12 +131,27 @@ pub const Engine = struct {
             .callbacks = callbacks,
             .gctx = gctx,
             .pipeline = pipeline,
-            .bind_group = bind_group,
+            .bind_group_def = bind_group_def,
             .depth_texture = depth_texture,
-            .models_hash = std.AutoHashMap(LoadedModelId, ModelDescriptor).init(allocator),
+            .texture_sampler = texture_sampler,
+            .models_hash = std.AutoHashMap(LoadedModelId, Model).init(allocator),
         };
         Engine.is_instanced = true;
         return engine;
+    }
+
+    pub fn deinit(engine: *Engine) void {
+        var iterator = engine.models_hash.iterator();
+        while (iterator.next()) |entry| {
+            entry.value_ptr.deinit(engine.gctx);
+        }
+
+        engine.models_hash.deinit();
+
+        engine.bind_group_def.deinit();
+        zstbi.deinit();
+        engine.allocator.destroy(engine);
+        Engine.is_instanced = false;
     }
 
     pub fn update(engine: *Engine) void {
@@ -184,7 +189,6 @@ pub const Engine = struct {
 
             pass: {
                 const pipeline = gctx.lookupResource(engine.pipeline) orelse break :pass;
-                const bind_group = gctx.lookupResource(engine.bind_group) orelse break :pass;
 
                 const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
                     .view = back_buffer_view,
@@ -212,16 +216,14 @@ pub const Engine = struct {
 
                 var iterator = engine.models_hash.iterator();
 
-                while (iterator.next()) |model| {
-                    const position = model.value_ptr.position;
-                    const normal = model.value_ptr.normal;
-                    const texcoord = model.value_ptr.texcoord;
-                    const index = model.value_ptr.index;
+                while (iterator.next()) |element| {
+                    const model = element.value_ptr;
+                    const model_descriptor = model.model_descriptor;
 
-                    position.applyVertexBuffer(pass, 0);
-                    normal.applyVertexBuffer(pass, 1);
-                    texcoord.applyVertexBuffer(pass, 2);
-                    index.applyIndexBuffer(pass);
+                    model_descriptor.position.applyVertexBuffer(pass, 0);
+                    model_descriptor.normal.applyVertexBuffer(pass, 1);
+                    model_descriptor.texcoord.applyVertexBuffer(pass, 2);
+                    model_descriptor.index.applyIndexBuffer(pass);
 
                     const object_to_world = zmath.mul(zmath.rotationY(t), zmath.translation(0.0, 0.0, 0.0));
                     const object_to_clip = zmath.mul(object_to_world, cam_world_to_clip);
@@ -229,8 +231,8 @@ pub const Engine = struct {
                     const mem = gctx.uniformsAllocate(zmath.Mat, 1);
                     mem.slice[0] = zmath.transpose(object_to_clip);
 
-                    pass.setBindGroup(0, bind_group, &.{mem.offset});
-                    pass.drawIndexed(index.elements_count * 3, 1, 0, 0, 0);
+                    pass.setBindGroup(0, model.bind_group_descriptor.bind_group, &.{mem.offset});
+                    pass.drawIndexed(model_descriptor.index.elements_count * 3, 1, 0, 0, 0);
                 }
             }
 
@@ -265,10 +267,22 @@ pub const Engine = struct {
     }
 
     pub fn loadModel(engine: *Engine, model_name: []const u8) !LoadedModelId {
-        const model_descriptor = try ModelDescriptor.init(engine.gctx, engine.allocator, model_name);
+        const gctx = engine.gctx;
+
+        const model_descriptor = try ModelDescriptor.init(gctx, engine.allocator, model_name);
+
+        const bind_group_descriptor = try engine.bind_group_def.createBindGroup(
+            engine.texture_sampler,
+            model_descriptor.color_texture,
+        );
+
+        const model = Model{
+            .model_descriptor = model_descriptor,
+            .bind_group_descriptor = bind_group_descriptor,
+        };
 
         const loaded_model_id: LoadedModelId = @enumFromInt(Engine.next_loaded_model_id);
-        try engine.models_hash.put(loaded_model_id, model_descriptor);
+        try engine.models_hash.put(loaded_model_id, model);
         Engine.next_loaded_model_id += 1;
 
         return loaded_model_id;
@@ -296,16 +310,5 @@ pub const Engine = struct {
                 },
             }
         }
-    }
-
-    pub fn deinit(engine: *Engine) void {
-        var iterator = engine.models_hash.iterator();
-        while (iterator.next()) |entry| {
-            entry.value_ptr.deinit();
-        }
-        engine.models_hash.deinit();
-        zstbi.deinit();
-        engine.allocator.destroy(engine);
-        Engine.is_instanced = false;
     }
 };
