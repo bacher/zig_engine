@@ -159,8 +159,7 @@ pub const Engine = struct {
     }
 
     pub fn createScene(engine: *Engine) !*Scene {
-        // const scene = Scene.init(engine, engine.allocator);
-        const scene = try Scene.init(engine.allocator);
+        const scene = try Scene.init(engine, engine.allocator);
 
         if (engine.active_scene == null) {
             engine.active_scene = scene;

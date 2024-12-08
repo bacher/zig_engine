@@ -6,7 +6,9 @@ const zgui = @import("zgui");
 const content_dir = @import("build_options").content_dir;
 
 const WindowContext = @import("./engine/glue.zig").WindowContext;
-const Engine = @import("./engine/Engine.zig").Engine;
+// BUG: if put "Engine.zig" instead of "engine.zig" imports get broken
+// const Engine = @import("./engine/Engine.zig").Engine;
+const Engine = @import("./engine/engine.zig").Engine;
 
 pub fn main() !void {
     // Change current working directory to where the executable is located.
@@ -45,12 +47,17 @@ pub fn main() !void {
     const scene = try engine.createScene();
     defer scene.deinit();
 
-    _ = man_model_id;
-    // const game_object = try scene.addObject(.{
-    //     // .model_id = man_model_id,
-    //     .position = .{ 0, 0, 0 },
-    // });
-    // _ = game_object;
+    const game_object = try scene.addObject(.{
+        .model_id = man_model_id,
+        .position = .{ -0.5, 0, 0 },
+    });
+    _ = game_object;
+
+    const game_object_2 = try scene.addObject(.{
+        .model_id = man_model_id,
+        .position = .{ 0.5, 0, 0 },
+    });
+    _ = game_object_2;
 
     // const scale_factor = scale_factor: {
     //     const scale = window_context.window.getContentScale();
