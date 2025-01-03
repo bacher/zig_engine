@@ -42,7 +42,7 @@ pub const Engine = struct {
     depth_texture: DepthTexture,
     texture_sampler: zgpu.SamplerHandle,
 
-    models_hash: std.AutoHashMap(LoadedModelId, Model),
+    models_hash: std.AutoHashMap(LoadedModelId, *Model),
 
     active_scene: ?*Scene,
 
@@ -137,7 +137,7 @@ pub const Engine = struct {
             .bind_group_def = bind_group_def,
             .depth_texture = depth_texture,
             .texture_sampler = texture_sampler,
-            .models_hash = std.AutoHashMap(LoadedModelId, Model).init(allocator),
+            .models_hash = std.AutoHashMap(LoadedModelId, *Model).init(allocator),
             .active_scene = null,
         };
         Engine.is_instanced = true;
@@ -147,7 +147,9 @@ pub const Engine = struct {
     pub fn deinit(engine: *Engine) void {
         var iterator = engine.models_hash.iterator();
         while (iterator.next()) |entry| {
-            entry.value_ptr.deinit(engine.gctx);
+            const model_ptr = entry.value_ptr.*;
+            model_ptr.deinit(engine.gctx);
+            engine.allocator.destroy(model_ptr);
         }
 
         engine.models_hash.deinit();
@@ -228,25 +230,33 @@ pub const Engine = struct {
 
                 pass.setPipeline(pipeline);
 
-                var iterator = engine.models_hash.iterator();
+                if (engine.active_scene) |scene| {
+                    for (scene.game_objects.items) |game_object| {
+                        const model = game_object.model;
+                        const model_descriptor = model.model_descriptor;
 
-                while (iterator.next()) |element| {
-                    const model = element.value_ptr;
-                    const model_descriptor = model.model_descriptor;
+                        model_descriptor.position.applyVertexBuffer(pass, 0);
+                        model_descriptor.normal.applyVertexBuffer(pass, 1);
+                        model_descriptor.texcoord.applyVertexBuffer(pass, 2);
+                        model_descriptor.index.applyIndexBuffer(pass);
 
-                    model_descriptor.position.applyVertexBuffer(pass, 0);
-                    model_descriptor.normal.applyVertexBuffer(pass, 1);
-                    model_descriptor.texcoord.applyVertexBuffer(pass, 2);
-                    model_descriptor.index.applyIndexBuffer(pass);
+                        const object_to_world = zmath.mul(
+                            zmath.rotationY(t),
+                            zmath.translation(
+                                game_object.position[0],
+                                game_object.position[1],
+                                game_object.position[2],
+                            ),
+                        );
 
-                    const object_to_world = zmath.mul(zmath.rotationY(t), zmath.translation(0.0, 0.0, 0.0));
-                    const object_to_clip = zmath.mul(object_to_world, cam_world_to_clip);
+                        const object_to_clip = zmath.mul(object_to_world, cam_world_to_clip);
 
-                    const mem = gctx.uniformsAllocate(zmath.Mat, 1);
-                    mem.slice[0] = zmath.transpose(object_to_clip);
+                        const mem = gctx.uniformsAllocate(zmath.Mat, 1);
+                        mem.slice[0] = zmath.transpose(object_to_clip);
 
-                    pass.setBindGroup(0, model.bind_group_descriptor.bind_group, &.{mem.offset});
-                    pass.drawIndexed(model_descriptor.index.elements_count * 3, 1, 0, 0, 0);
+                        pass.setBindGroup(0, model.bind_group_descriptor.bind_group, &.{mem.offset});
+                        pass.drawIndexed(model_descriptor.index.elements_count * 3, 1, 0, 0, 0);
+                    }
                 }
             }
 
@@ -290,7 +300,8 @@ pub const Engine = struct {
             model_descriptor.color_texture,
         );
 
-        const model = Model{
+        const model = try engine.allocator.create(Model);
+        model.* = .{
             .model_descriptor = model_descriptor,
             .bind_group_descriptor = bind_group_descriptor,
         };

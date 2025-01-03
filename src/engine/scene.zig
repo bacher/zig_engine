@@ -32,23 +32,19 @@ pub const Scene = struct {
     }
 
     pub fn addObject(scene: *Scene, params: AddObjectParams) !*GameObject {
-        const model = scene.engine.models_hash.get(params.model_id);
-        // var iterator = scene.engine.models_hash.iterator();
-        // const model = iterator.next().?.value_ptr;
+        if (scene.engine.models_hash.get(params.model_id)) |model| {
+            const game_object = try GameObject.init(scene.allocator, .{
+                .model = model,
+                .position = params.position,
+            });
+            errdefer game_object.deinit();
 
-        if (model == null) {
+            try scene.game_objects.append(game_object);
+
+            return game_object;
+        } else {
             return error.InvalidModelId;
         }
-
-        const game_object = try GameObject.init(scene.allocator, .{
-            .model = &model.?,
-            .position = params.position,
-        });
-        errdefer game_object.deinit();
-
-        try scene.game_objects.append(game_object);
-
-        return game_object;
     }
 };
 
