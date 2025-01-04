@@ -93,15 +93,19 @@ pub const Scene = struct {
                     direction[2] *= std.math.sqrt1_2;
                 }
 
+                // This is correct version, but we can skip inversing by chaning
+                // order of multiplying because in case of only rotation:
+                // mat * vec == vec * inverse(mat)
+                //
+                // const aligned_direction = zmath.mul(
+                //     direction,
+                //     zmath.inverse(scene.camera.camera_to_view),
+                // );
+
                 const aligned_direction = zmath.mul(
-                    // Why not inversed ?
-                    // zmath.inverse(scene.camera.camera_to_view),
                     scene.camera.camera_to_view,
                     direction,
                 );
-
-                std.debug.print("direction         = {}\n", .{direction});
-                std.debug.print("aligned_direction = {}\n", .{aligned_direction});
 
                 scene.camera.updatePosition(zmath.Vec{
                     scene.camera.position[0] + aligned_direction[0],

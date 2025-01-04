@@ -14,14 +14,14 @@ pub const Camera = struct {
     world_to_clip: zmath.Mat,
 
     pub fn init(screen_width: u32, screen_height: u32) Camera {
-        const position = zmath.Vec{ 0, 0, 0, 1 };
+        const position = zmath.Vec{ 3, -4, 0, 1 };
 
         const world_to_camera = zmath.translationV(position);
 
         const camera_to_view = zmath.lookAtLh(
-            zmath.Vec{ -3.0, 3.0, 0.0, 1.0 },
-            zmath.Vec{ 0.0, 0.0, 0.0, 1.0 },
-            zmath.Vec{ 0.0, 0.0, 1.0, 0.0 },
+            zmath.Vec{ 0, 0, 0, 1 },
+            zmath.Vec{ 3, -4, 0, 1 },
+            zmath.Vec{ 0, 0, 1, 0 },
         );
 
         const view_to_clip = createProjectionMatrix(screen_width, screen_height);
