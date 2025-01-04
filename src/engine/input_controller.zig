@@ -9,8 +9,8 @@ pub const InputController = struct {
     pressed_keys: std.AutoHashMap(zglfw.Key, void),
     release_queue: std.AutoHashMap(zglfw.Key, void),
 
-    cursor_position: [2]f64,
-    cursor_position_delta: [2]f64 = .{ 0, 0 },
+    cursor_position: [2]f32,
+    cursor_position_delta: [2]f32 = .{ 0, 0 },
 
     pub fn init(allocator: std.mem.Allocator, window: *zglfw.Window) !*InputController {
         const input_controller = try allocator.create(InputController);
@@ -21,7 +21,7 @@ pub const InputController = struct {
             .pressed_keys = std.AutoHashMap(zglfw.Key, void).init(allocator),
             .release_queue = std.AutoHashMap(zglfw.Key, void).init(allocator),
 
-            .cursor_position = window.getCursorPos(),
+            .cursor_position = getCursorPosition(window),
         };
 
         InputController.instance = input_controller;
@@ -65,7 +65,7 @@ pub const InputController = struct {
     }
 
     pub fn updateMouseState(input_controller: *InputController) void {
-        const new_position = input_controller.window.getCursorPos();
+        const new_position = getCursorPosition(input_controller.window);
 
         input_controller.cursor_position_delta = .{
             new_position[0] - input_controller.cursor_position[0],
@@ -93,3 +93,12 @@ pub const InputController = struct {
         return input_controller.pressed_keys.getKey(key) != null;
     }
 };
+
+fn getCursorPosition(window: *zglfw.Window) [2]f32 {
+    const position = window.getCursorPos();
+
+    return .{
+        @floatCast(position[0]),
+        @floatCast(position[1]),
+    };
+}

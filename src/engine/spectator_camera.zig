@@ -7,6 +7,8 @@ const InputController = @import("input_controller.zig").InputController;
 pub const SpectatorCamera = struct {
     camera: *Camera,
     input_controller: *const InputController,
+    pitch: f32 = 0,
+    yaw: f32 = 0,
 
     pub fn init(camera: *Camera, input_controller: *const InputController) SpectatorCamera {
         return .{
@@ -17,6 +19,7 @@ pub const SpectatorCamera = struct {
 
     pub fn update(spectator_camera: *SpectatorCamera, time_passed: f32) void {
         spectator_camera.handleMovement(time_passed);
+        spectator_camera.handleView(time_passed);
     }
 
     pub fn deinit(_: *SpectatorCamera) void {}
@@ -26,7 +29,7 @@ pub const SpectatorCamera = struct {
         const input_controller = spectator_camera.input_controller;
 
         var direction = zmath.Vec{ 0, 0, 0, 1 };
-        const step = 1 * time_passed;
+        const step = 5 * time_passed;
 
         if (input_controller.isKeyPressed(.w)) {
             direction[2] -= step;
@@ -53,7 +56,7 @@ pub const SpectatorCamera = struct {
             //
             // const aligned_direction = zmath.mul(
             //     direction,
-            //     zmath.inverse(scene.camera.camera_to_view),
+            //     zmath.inverse(camera.camera_to_view),
             // );
 
             const aligned_direction = zmath.mul(
@@ -68,5 +71,27 @@ pub const SpectatorCamera = struct {
                 camera.position[3],
             });
         }
+    }
+
+    fn handleView(spectator_camera: *SpectatorCamera, _: f32) void {
+        const delta = spectator_camera.input_controller.cursor_position_delta;
+
+        spectator_camera.yaw -= delta[0] * 0.005;
+        spectator_camera.pitch -= delta[1] * 0.005;
+
+        // NOTE: matFromRollPitchYaw can't be used because it applies pitch then yaw,
+        //       but it should be yaw then pitch.
+        // const view_mat = zmath.matFromRollPitchYaw(
+        //     spectator_camera.pitch,
+        //     spectator_camera.yaw,
+        //     0,
+        // );
+
+        const view_mat = zmath.mul(
+            zmath.rotationY(spectator_camera.yaw),
+            zmath.rotationX(spectator_camera.pitch),
+        );
+
+        spectator_camera.camera.updateView(view_mat);
     }
 };

@@ -14,13 +14,13 @@ pub const Camera = struct {
     world_to_clip: zmath.Mat,
 
     pub fn init(screen_width: u32, screen_height: u32) Camera {
-        const position = zmath.Vec{ 3, -4, 0, 1 };
+        const position = zmath.Vec{ 0, 0, 0, 1 };
 
         const world_to_camera = zmath.translationV(position);
 
         const camera_to_view = zmath.lookAtLh(
             zmath.Vec{ 0, 0, 0, 1 },
-            zmath.Vec{ 3, -4, 0, 1 },
+            zmath.Vec{ 0, 1, 0, 1 },
             zmath.Vec{ 0, 0, 1, 0 },
         );
 
@@ -70,6 +70,11 @@ pub const Camera = struct {
     pub fn updatePosition(camera: *Camera, position: zmath.Vec) void {
         camera.position = position;
         camera.world_to_camera = zmath.translationV(position);
+        camera.updateWorldToClipMatrix();
+    }
+
+    pub fn updateView(camera: *Camera, view_mat: zmath.Mat) void {
+        camera.camera_to_view = view_mat;
         camera.updateWorldToClipMatrix();
     }
 

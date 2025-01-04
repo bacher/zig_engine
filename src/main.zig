@@ -47,6 +47,8 @@ pub fn main() !void {
     const scene = try engine.createScene();
     defer scene.deinit();
 
+    scene.camera.updatePosition(.{ 0, 0, 10, 0 });
+
     const game_object = try scene.addObject(.{
         .model_id = man_model_id,
         .position = .{ -0.5, 0, 0 },
