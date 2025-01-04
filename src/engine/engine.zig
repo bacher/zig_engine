@@ -19,6 +19,7 @@ const ModelDescriptor = @import("./model_descriptor.zig").ModelDescriptor;
 const Model = @import("./model.zig").Model;
 const Scene = @import("./scene.zig").Scene;
 const Camera = @import("./camera.zig").Camera;
+const InputController = @import("./input_controller.zig").InputController;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 
@@ -46,6 +47,7 @@ pub const Engine = struct {
     models_hash: std.AutoHashMap(LoadedModelId, *Model),
 
     active_scene: ?*Scene,
+    input_controller: *InputController,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -127,6 +129,11 @@ pub const Engine = struct {
         const texture_sampler = gctx.createSampler(.{});
 
         const depth_texture = try DepthTexture.init(gctx);
+        errdefer depth_texture.deinit();
+
+        const input_controller = try InputController.init(allocator);
+        input_controller.listenWindowEvents(window_context.window);
+        errdefer input_controller.deinit();
 
         const engine = try allocator.create(Engine);
         engine.* = .{
@@ -140,6 +147,7 @@ pub const Engine = struct {
             .texture_sampler = texture_sampler,
             .models_hash = std.AutoHashMap(LoadedModelId, *Model).init(allocator),
             .active_scene = null,
+            .input_controller = input_controller,
         };
         Engine.is_instanced = true;
         return engine;
@@ -154,8 +162,9 @@ pub const Engine = struct {
         }
 
         engine.models_hash.deinit();
-
         engine.bind_group_def.deinit();
+        engine.input_controller.deinit();
+
         zstbi.deinit();
         engine.allocator.destroy(engine);
         Engine.is_instanced = false;
@@ -322,8 +331,15 @@ pub const Engine = struct {
     pub fn runLoop(engine: *Engine) !void {
         const window = engine.window_context.window;
 
-        while (!window.shouldClose() and window.getKey(.escape) != .press) {
+        while (true) {
             zglfw.pollEvents();
+
+            if (window.shouldClose() or engine.input_controller.isKeyPressed(.escape)) {
+                break;
+            }
+
+            // slowOperation();
+
             engine.update();
             const gctx_state = engine.draw();
 
@@ -333,6 +349,15 @@ pub const Engine = struct {
                     try engine.recreateDepthTexture();
                 },
             }
+
+            engine.input_controller.flushQueue();
         }
     }
 };
+
+fn slowOperation() void {
+    const end = std.time.milliTimestamp() + 500;
+    while (std.time.milliTimestamp() < end) {
+        // noop
+    }
+}
