@@ -18,6 +18,7 @@ const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ModelDescriptor = @import("./model_descriptor.zig").ModelDescriptor;
 const Model = @import("./model.zig").Model;
 const Scene = @import("./scene.zig").Scene;
+const Camera = @import("./camera.zig").Camera;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 
@@ -161,7 +162,12 @@ pub const Engine = struct {
     }
 
     pub fn createScene(engine: *Engine) !*Scene {
-        const scene = try Scene.init(engine, engine.allocator);
+        const scene = try Scene.init(
+            engine,
+            engine.allocator,
+            engine.gctx.swapchain_descriptor.width,
+            engine.gctx.swapchain_descriptor.height,
+        );
 
         if (engine.active_scene == null) {
             engine.active_scene = scene;
@@ -171,6 +177,14 @@ pub const Engine = struct {
     }
 
     pub fn update(engine: *Engine) void {
+        if (engine.active_scene) |scene| {
+            const swapchain = engine.gctx.swapchain_descriptor;
+            scene.camera.updateTargetScreenSize(
+                swapchain.width,
+                swapchain.height,
+            );
+        }
+
         if (engine.callbacks.onUpdate) |callback| {
             callback(engine);
         }
@@ -179,22 +193,7 @@ pub const Engine = struct {
     pub fn draw(engine: *Engine) GraphicsContextState {
         const gctx = engine.gctx;
 
-        const fb_width = gctx.swapchain_descriptor.width;
-        const fb_height = gctx.swapchain_descriptor.height;
         const t = @as(f32, @floatCast(gctx.stats.time));
-
-        const cam_world_to_view = zmath.lookAtLh(
-            zmath.f32x4(3.0, 3.0, -3.0, 1.0),
-            zmath.f32x4(0.0, 0.0, 0.0, 1.0),
-            zmath.f32x4(0.0, 1.0, 0.0, 0.0),
-        );
-        const cam_view_to_clip = zmath.perspectiveFovLh(
-            0.25 * math.pi,
-            @as(f32, @floatFromInt(fb_width)) / @as(f32, @floatFromInt(fb_height)),
-            0.01,
-            200.0,
-        );
-        const cam_world_to_clip = zmath.mul(cam_world_to_view, cam_view_to_clip);
 
         const back_buffer_view = gctx.swapchain.getCurrentTextureView();
         defer back_buffer_view.release();
@@ -249,7 +248,7 @@ pub const Engine = struct {
                             ),
                         );
 
-                        const object_to_clip = zmath.mul(object_to_world, cam_world_to_clip);
+                        const object_to_clip = zmath.mul(object_to_world, scene.camera.world_to_clip);
 
                         const mem = gctx.uniformsAllocate(zmath.Mat, 1);
                         mem.slice[0] = zmath.transpose(object_to_clip);
