@@ -134,8 +134,8 @@ pub const Engine = struct {
         const depth_texture = try DepthTexture.init(gctx);
         errdefer depth_texture.deinit();
 
-        const input_controller = try InputController.init(allocator);
-        input_controller.listenWindowEvents(window_context.window);
+        const input_controller = try InputController.init(allocator, window_context.window);
+        input_controller.listenWindowEvents();
         errdefer input_controller.deinit();
 
         const engine = try allocator.create(Engine);
@@ -196,6 +196,8 @@ pub const Engine = struct {
             f32,
             @floatFromInt(std.time.microTimestamp() - engine.init_time),
         ) / 1000000;
+
+        engine.input_controller.updateMouseState();
 
         if (engine.active_scene) |scene| {
             const swapchain = engine.gctx.swapchain_descriptor;

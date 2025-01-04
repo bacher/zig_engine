@@ -16,6 +16,12 @@ pub const SpectatorCamera = struct {
     }
 
     pub fn update(spectator_camera: *SpectatorCamera, time_passed: f32) void {
+        spectator_camera.handleMovement(time_passed);
+    }
+
+    pub fn deinit(_: *SpectatorCamera) void {}
+
+    fn handleMovement(spectator_camera: *SpectatorCamera, time_passed: f32) void {
         const camera = spectator_camera.camera;
         const input_controller = spectator_camera.input_controller;
 
@@ -63,6 +69,4 @@ pub const SpectatorCamera = struct {
             });
         }
     }
-
-    pub fn deinit(_: *SpectatorCamera) void {}
 };

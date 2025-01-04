@@ -5,16 +5,23 @@ pub const InputController = struct {
     var instance: ?*InputController = null;
 
     allocator: std.mem.Allocator,
+    window: *zglfw.Window,
     pressed_keys: std.AutoHashMap(zglfw.Key, void),
     release_queue: std.AutoHashMap(zglfw.Key, void),
 
-    pub fn init(allocator: std.mem.Allocator) !*InputController {
+    cursor_position: [2]f64,
+    cursor_position_delta: [2]f64 = .{ 0, 0 },
+
+    pub fn init(allocator: std.mem.Allocator, window: *zglfw.Window) !*InputController {
         const input_controller = try allocator.create(InputController);
 
         input_controller.* = .{
             .allocator = allocator,
+            .window = window,
             .pressed_keys = std.AutoHashMap(zglfw.Key, void).init(allocator),
             .release_queue = std.AutoHashMap(zglfw.Key, void).init(allocator),
+
+            .cursor_position = window.getCursorPos(),
         };
 
         InputController.instance = input_controller;
@@ -28,9 +35,8 @@ pub const InputController = struct {
         input_controller.allocator.destroy(input_controller);
     }
 
-    pub fn listenWindowEvents(input_controller: *InputController, window: *zglfw.Window) void {
-        _ = input_controller;
-        _ = window.setKeyCallback(InputController.onKeyCallback);
+    pub fn listenWindowEvents(input_controller: *InputController) void {
+        _ = input_controller.window.setKeyCallback(InputController.onKeyCallback);
     }
 
     fn onKeyCallback(
@@ -56,6 +62,22 @@ pub const InputController = struct {
         } else {
             std.debug.print("InputController: instance is not found\n", .{});
         }
+    }
+
+    pub fn updateMouseState(input_controller: *InputController) void {
+        const new_position = input_controller.window.getCursorPos();
+
+        input_controller.cursor_position_delta = .{
+            new_position[0] - input_controller.cursor_position[0],
+            new_position[1] - input_controller.cursor_position[1],
+        };
+
+        // std.debug.print("pos: {d: >10.3} {d: >10.3}\n", .{
+        //     input_controller.cursor_position[0],
+        //     input_controller.cursor_position[1],
+        // });
+
+        input_controller.cursor_position = new_position;
     }
 
     pub fn flushQueue(input_controller: *InputController) void {
