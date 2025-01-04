@@ -38,6 +38,7 @@ pub const Engine = struct {
     allocator: std.mem.Allocator,
     window_context: WindowContext,
     callbacks: Callbacks,
+    init_time: i64,
 
     pipeline: zgpu.RenderPipelineHandle,
     bind_group_def: BindGroupDefinition,
@@ -59,6 +60,8 @@ pub const Engine = struct {
         }
 
         zstbi.init(allocator);
+
+        const init_time = std.time.microTimestamp();
 
         const gctx = window_context.gctx;
 
@@ -140,6 +143,7 @@ pub const Engine = struct {
             .allocator = allocator,
             .window_context = window_context,
             .callbacks = callbacks,
+            .init_time = init_time,
             .gctx = gctx,
             .pipeline = pipeline,
             .bind_group_def = bind_group_def,
@@ -186,12 +190,21 @@ pub const Engine = struct {
     }
 
     pub fn update(engine: *Engine) void {
+        // Assuming that `std.time.microTimestamp()` returning monotonic increasing time,
+        // which is not actually correct. Ideally system time should be used.
+        const engine_time = @as(
+            f32,
+            @floatFromInt(std.time.microTimestamp() - engine.init_time),
+        ) / 1000000;
+
         if (engine.active_scene) |scene| {
             const swapchain = engine.gctx.swapchain_descriptor;
             scene.camera.updateTargetScreenSize(
                 swapchain.width,
                 swapchain.height,
             );
+
+            scene.update(engine_time);
         }
 
         if (engine.callbacks.onUpdate) |callback| {

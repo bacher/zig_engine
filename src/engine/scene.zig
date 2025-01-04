@@ -1,4 +1,5 @@
 const std = @import("std");
+const zmath = @import("zmath");
 
 const Engine = @import("./engine.zig").Engine;
 const GameObject = @import("./game_object.zig").GameObject;
@@ -9,6 +10,7 @@ pub const Scene = struct {
     allocator: std.mem.Allocator,
     game_objects: std.ArrayList(*GameObject),
     camera: *Camera,
+    previous_frame_time: f32,
 
     pub fn init(
         engine: *Engine,
@@ -31,6 +33,7 @@ pub const Scene = struct {
             .allocator = allocator,
             .game_objects = game_objects,
             .camera = camera,
+            .previous_frame_time = 0,
         };
         return scene;
     }
@@ -58,6 +61,60 @@ pub const Scene = struct {
         } else {
             return error.InvalidModelId;
         }
+    }
+
+    pub fn update(scene: *Scene, time: f32) void {
+        if (scene.previous_frame_time != 0) {
+            const time_passed = time - scene.previous_frame_time;
+
+            // Time dependant update logic
+
+            const input_controller = scene.engine.input_controller;
+
+            var direction = zmath.Vec{ 0, 0, 0, 1 };
+            const step = 1 * time_passed;
+
+            if (input_controller.isKeyPressed(.w)) {
+                direction[2] -= step;
+            }
+            if (input_controller.isKeyPressed(.s)) {
+                direction[2] += step;
+            }
+            if (input_controller.isKeyPressed(.a)) {
+                direction[0] += step;
+            }
+            if (input_controller.isKeyPressed(.d)) {
+                direction[0] -= step;
+            }
+
+            if (direction[0] != 0 or direction[2] != 0) {
+                if (direction[0] != 0 and direction[2] != 0) {
+                    direction[0] *= std.math.sqrt1_2;
+                    direction[2] *= std.math.sqrt1_2;
+                }
+
+                const aligned_direction = zmath.mul(
+                    // Why not inversed ?
+                    // zmath.inverse(scene.camera.camera_to_view),
+                    scene.camera.camera_to_view,
+                    direction,
+                );
+
+                std.debug.print("direction         = {}\n", .{direction});
+                std.debug.print("aligned_direction = {}\n", .{aligned_direction});
+
+                scene.camera.updatePosition(zmath.Vec{
+                    scene.camera.position[0] + aligned_direction[0],
+                    scene.camera.position[1] + aligned_direction[1],
+                    scene.camera.position[2] + aligned_direction[2],
+                    scene.camera.position[3],
+                });
+            }
+        }
+
+        // Time independant update logic
+
+        scene.previous_frame_time = time;
     }
 };
 
