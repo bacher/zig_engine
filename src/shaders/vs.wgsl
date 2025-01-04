@@ -11,7 +11,16 @@ struct VertexOut {
     @location(2) texcoord: vec2<f32>,
 ) -> VertexOut {
     var output: VertexOut;
+
     output.position_clip = vec4(position, 1.0) * object_to_clip;
+
+    // Applying jitter effect
+    let jitter_level: f32 = 50;
+    output.position_clip = vec4<f32>(
+        round(output.position_clip.xy * jitter_level / output.position_clip.w) / jitter_level * output.position_clip.w,
+        output.position_clip.zw
+    );
+
     output.texcoord = texcoord;
     return output;
 }
