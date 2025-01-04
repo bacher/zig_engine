@@ -6,11 +6,16 @@ pub const InputController = struct {
 
     allocator: std.mem.Allocator,
     window: *zglfw.Window,
+
+    // keyboard
     pressed_keys: std.AutoHashMap(zglfw.Key, void),
     release_queue: std.AutoHashMap(zglfw.Key, void),
 
+    // mouse
     cursor_position: [2]f32,
     cursor_position_delta: [2]f32 = .{ 0, 0 },
+    cursor_left_button_pressed: bool = false,
+    cursor_right_button_pressed: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, window: *zglfw.Window) !*InputController {
         const input_controller = try allocator.create(InputController);
@@ -65,19 +70,19 @@ pub const InputController = struct {
     }
 
     pub fn updateMouseState(input_controller: *InputController) void {
-        const new_position = getCursorPosition(input_controller.window);
+        const window = input_controller.window;
+
+        const new_position = getCursorPosition(window);
 
         input_controller.cursor_position_delta = .{
             new_position[0] - input_controller.cursor_position[0],
             new_position[1] - input_controller.cursor_position[1],
         };
 
-        // std.debug.print("pos: {d: >10.3} {d: >10.3}\n", .{
-        //     input_controller.cursor_position[0],
-        //     input_controller.cursor_position[1],
-        // });
-
         input_controller.cursor_position = new_position;
+
+        input_controller.cursor_left_button_pressed = window.getMouseButton(.left) != .release;
+        input_controller.cursor_right_button_pressed = window.getMouseButton(.right) != .release;
     }
 
     pub fn flushQueue(input_controller: *InputController) void {

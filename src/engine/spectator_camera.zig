@@ -74,6 +74,10 @@ pub const SpectatorCamera = struct {
     }
 
     fn handleView(spectator_camera: *SpectatorCamera, _: f32) void {
+        if (!spectator_camera.input_controller.cursor_left_button_pressed) {
+            return;
+        }
+
         const delta = spectator_camera.input_controller.cursor_position_delta;
 
         spectator_camera.yaw -= delta[0] * 0.005;
