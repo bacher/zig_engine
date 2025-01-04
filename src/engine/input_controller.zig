@@ -67,7 +67,7 @@ pub const InputController = struct {
         input_controller.release_queue.clearRetainingCapacity();
     }
 
-    pub fn isKeyPressed(input_controller: *InputController, key: zglfw.Key) bool {
+    pub fn isKeyPressed(input_controller: *const InputController, key: zglfw.Key) bool {
         return input_controller.pressed_keys.getKey(key) != null;
     }
 };

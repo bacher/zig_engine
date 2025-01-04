@@ -4,12 +4,14 @@ const zmath = @import("zmath");
 const Engine = @import("./engine.zig").Engine;
 const GameObject = @import("./game_object.zig").GameObject;
 const Camera = @import("./camera.zig").Camera;
+const SpectatorCamera = @import("./spectator_camera.zig").SpectatorCamera;
 
 pub const Scene = struct {
     engine: *Engine,
     allocator: std.mem.Allocator,
     game_objects: std.ArrayList(*GameObject),
     camera: *Camera,
+    spectator_camera: *SpectatorCamera,
     previous_frame_time: f32,
 
     pub fn init(
@@ -28,11 +30,16 @@ pub const Scene = struct {
         errdefer allocator.destroy(camera);
         camera.* = Camera.init(screen_width, screen_height);
 
+        const spectator_camera = try allocator.create(SpectatorCamera);
+        errdefer allocator.destroy(spectator_camera);
+        spectator_camera.* = SpectatorCamera.init(camera, engine.input_controller);
+
         scene.* = .{
             .engine = engine,
             .allocator = allocator,
             .game_objects = game_objects,
             .camera = camera,
+            .spectator_camera = spectator_camera,
             .previous_frame_time = 0,
         };
         return scene;
@@ -43,7 +50,10 @@ pub const Scene = struct {
             scene.allocator.destroy(game_object);
         }
         scene.game_objects.deinit();
+        scene.spectator_camera.deinit();
+        scene.camera.deinit();
         scene.allocator.destroy(scene.camera);
+        scene.allocator.destroy(scene.spectator_camera);
         scene.allocator.destroy(scene);
     }
 
@@ -69,51 +79,7 @@ pub const Scene = struct {
 
             // Time dependant update logic
 
-            const input_controller = scene.engine.input_controller;
-
-            var direction = zmath.Vec{ 0, 0, 0, 1 };
-            const step = 1 * time_passed;
-
-            if (input_controller.isKeyPressed(.w)) {
-                direction[2] -= step;
-            }
-            if (input_controller.isKeyPressed(.s)) {
-                direction[2] += step;
-            }
-            if (input_controller.isKeyPressed(.a)) {
-                direction[0] += step;
-            }
-            if (input_controller.isKeyPressed(.d)) {
-                direction[0] -= step;
-            }
-
-            if (direction[0] != 0 or direction[2] != 0) {
-                if (direction[0] != 0 and direction[2] != 0) {
-                    direction[0] *= std.math.sqrt1_2;
-                    direction[2] *= std.math.sqrt1_2;
-                }
-
-                // This is correct version, but we can skip inversing by chaning
-                // order of multiplying because in case of only rotation:
-                // mat * vec == vec * inverse(mat)
-                //
-                // const aligned_direction = zmath.mul(
-                //     direction,
-                //     zmath.inverse(scene.camera.camera_to_view),
-                // );
-
-                const aligned_direction = zmath.mul(
-                    scene.camera.camera_to_view,
-                    direction,
-                );
-
-                scene.camera.updatePosition(zmath.Vec{
-                    scene.camera.position[0] + aligned_direction[0],
-                    scene.camera.position[1] + aligned_direction[1],
-                    scene.camera.position[2] + aligned_direction[2],
-                    scene.camera.position[3],
-                });
-            }
+            scene.spectator_camera.update(time_passed);
         }
 
         // Time independant update logic

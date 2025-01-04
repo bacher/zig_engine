@@ -44,7 +44,7 @@ pub const Camera = struct {
         return camera;
     }
 
-    pub fn deinit() void {}
+    pub fn deinit(_: *Camera) void {}
 
     fn updateWorldToClipMatrix(camera: *Camera) void {
         camera.world_to_clip = zmath.mul(
