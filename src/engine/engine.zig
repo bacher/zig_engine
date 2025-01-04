@@ -38,7 +38,8 @@ pub const Engine = struct {
     allocator: std.mem.Allocator,
     window_context: WindowContext,
     callbacks: Callbacks,
-    init_time: i64,
+    init_time: f64,
+    time: f64,
 
     pipeline: zgpu.RenderPipelineHandle,
     bind_group_def: BindGroupDefinition,
@@ -61,9 +62,8 @@ pub const Engine = struct {
 
         zstbi.init(allocator);
 
-        const init_time = std.time.microTimestamp();
-
         const gctx = window_context.gctx;
+        const init_time = gctx.stats.time;
 
         const bind_group_def = BindGroupDefinition.init(gctx);
 
@@ -144,6 +144,7 @@ pub const Engine = struct {
             .window_context = window_context,
             .callbacks = callbacks,
             .init_time = init_time,
+            .time = 0,
             .gctx = gctx,
             .pipeline = pipeline,
             .bind_group_def = bind_group_def,
@@ -190,12 +191,7 @@ pub const Engine = struct {
     }
 
     pub fn update(engine: *Engine) void {
-        // Assuming that `std.time.microTimestamp()` returning monotonic increasing time,
-        // which is not actually correct. Ideally system time should be used.
-        const engine_time = @as(
-            f32,
-            @floatFromInt(std.time.microTimestamp() - engine.init_time),
-        ) / 1000000;
+        engine.time = engine.gctx.stats.time - engine.init_time;
 
         engine.input_controller.updateMouseState();
 
@@ -206,7 +202,7 @@ pub const Engine = struct {
                 swapchain.height,
             );
 
-            scene.update(engine_time);
+            scene.update(engine.time);
         }
 
         if (engine.callbacks.onUpdate) |callback| {
@@ -216,8 +212,7 @@ pub const Engine = struct {
 
     pub fn draw(engine: *Engine) GraphicsContextState {
         const gctx = engine.gctx;
-
-        const t = @as(f32, @floatCast(gctx.stats.time));
+        const time = engine.time;
 
         const back_buffer_view = gctx.swapchain.getCurrentTextureView();
         defer back_buffer_view.release();
@@ -263,12 +258,17 @@ pub const Engine = struct {
                         model_descriptor.texcoord.applyVertexBuffer(pass, 2);
                         model_descriptor.index.applyIndexBuffer(pass);
 
-                        const object_to_world = zmath.mul(
-                            zmath.rotationY(t),
-                            zmath.translation(
-                                game_object.position[0],
-                                game_object.position[1],
-                                game_object.position[2],
+                        const object_to_world =
+                            zmath.mul(
+                            // NOTE: converting from Y-up to Z-up coordinate system
+                            zmath.rotationX(math.pi * 0.5),
+                            zmath.mul(
+                                zmath.rotationZ(@floatCast(time)),
+                                zmath.translation(
+                                    game_object.position[0],
+                                    game_object.position[1],
+                                    game_object.position[2],
+                                ),
                             ),
                         );
 

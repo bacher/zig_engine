@@ -51,13 +51,13 @@ pub fn main() !void {
 
     const game_object = try scene.addObject(.{
         .model_id = man_model_id,
-        .position = .{ -0.5, 0, 0 },
+        .position = .{ -1, 0, 0 },
     });
     _ = game_object;
 
     const game_object_2 = try scene.addObject(.{
         .model_id = man_model_id,
-        .position = .{ 0.5, 0, 0 },
+        .position = .{ 1, 0, 0 },
     });
     _ = game_object_2;
 

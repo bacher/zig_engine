@@ -12,7 +12,7 @@ pub const Scene = struct {
     game_objects: std.ArrayList(*GameObject),
     camera: *Camera,
     spectator_camera: *SpectatorCamera,
-    previous_frame_time: f32,
+    previous_frame_time: f64,
 
     pub fn init(
         engine: *Engine,
@@ -73,9 +73,9 @@ pub const Scene = struct {
         }
     }
 
-    pub fn update(scene: *Scene, time: f32) void {
+    pub fn update(scene: *Scene, time: f64) void {
         if (scene.previous_frame_time != 0) {
-            const time_passed = time - scene.previous_frame_time;
+            const time_passed: f32 = @floatCast(time - scene.previous_frame_time);
 
             // Time dependant update logic
 
