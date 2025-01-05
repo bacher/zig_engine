@@ -74,15 +74,38 @@ pub const InputController = struct {
 
         const new_position = getCursorPosition(window);
 
-        input_controller.cursor_position_delta = .{
+        const delta: [2]f32 = .{
             new_position[0] - input_controller.cursor_position[0],
             new_position[1] - input_controller.cursor_position[1],
         };
 
+        if (delta[0] < -35 or delta[0] > 35 or delta[1] < -35 or delta[1] > 35) {
+            std.debug.print("resetting of delta, because {d:10.1} {d:10.1}\n", .{ delta[0], delta[1] });
+            input_controller.cursor_position_delta = .{ 0, 0 };
+        } else {
+            input_controller.cursor_position_delta = delta;
+        }
+
         input_controller.cursor_position = new_position;
 
-        input_controller.cursor_left_button_pressed = window.getMouseButton(.left) != .release;
-        input_controller.cursor_right_button_pressed = window.getMouseButton(.right) != .release;
+        const cursor_left_button_pressed = window.getMouseButton(.left) != .release;
+        const cursor_right_button_pressed = window.getMouseButton(.right) != .release;
+
+        if (input_controller.cursor_left_button_pressed != cursor_left_button_pressed) {
+            input_controller.cursor_left_button_pressed = cursor_left_button_pressed;
+
+            if (cursor_left_button_pressed) {
+                window.setInputMode(.cursor, zglfw.Cursor.Mode.disabled);
+            } else {
+                window.setInputMode(.cursor, zglfw.Cursor.Mode.normal);
+            }
+        }
+
+        input_controller.cursor_right_button_pressed = cursor_right_button_pressed;
+
+        // if (input_controller.cursor_left_button_pressed) {
+        //     std.debug.print("new_position x {d:5.0}, y {d:5.0}\n", .{ new_position[0], new_position[1] });
+        // }
     }
 
     pub fn flushQueue(input_controller: *InputController) void {
