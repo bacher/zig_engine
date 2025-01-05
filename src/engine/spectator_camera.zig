@@ -4,7 +4,7 @@ const zmath = @import("zmath");
 const Camera = @import("camera.zig").Camera;
 const InputController = @import("input_controller.zig").InputController;
 
-const sqrt1_2_vec = zmath.Vec{ std.math.sqrt1_2, std.math.sqrt1_2, std.math.sqrt1_2, 1 };
+const zero_vec = zmath.Vec{ 0, 0, 0, 0 };
 
 pub const SpectatorCamera = struct {
     camera: *Camera,
@@ -30,7 +30,7 @@ pub const SpectatorCamera = struct {
         const camera = spectator_camera.camera;
         const input_controller = spectator_camera.input_controller;
 
-        var direction = zmath.Vec{ 0, 0, 0, 1 };
+        var direction = zmath.Vec{ 0, 0, 0, 0 };
         const step = 5 * time_passed;
 
         if (input_controller.isKeyPressed(.w)) {
@@ -45,10 +45,17 @@ pub const SpectatorCamera = struct {
         if (input_controller.isKeyPressed(.d)) {
             direction[0] += step;
         }
+        if (input_controller.isKeyPressed(.space)) {
+            direction[1] += step;
+        }
+        if (input_controller.isKeyPressed(.c)) {
+            direction[1] -= step;
+        }
 
-        if (direction[0] != 0 or direction[2] != 0) {
+        if (!zmath.all(direction == zero_vec, 4)) {
             if (direction[0] != 0 and direction[2] != 0) {
-                direction *= sqrt1_2_vec;
+                direction[0] *= std.math.sqrt1_2;
+                direction[2] *= std.math.sqrt1_2;
             }
 
             // This is correct version, but we can skip inversing by chaning

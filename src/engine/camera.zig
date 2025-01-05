@@ -2,6 +2,8 @@ const std = @import("std");
 const math = std.math;
 const zmath = @import("zmath");
 
+const debug = @import("debug.zig");
+
 pub const Camera = struct {
     screen_width: u32,
     screen_height: u32,
@@ -22,6 +24,8 @@ pub const Camera = struct {
 
         const world_to_camera = zmath.translation(0, 0, 0);
 
+        // NOTE: this matrix is effectively the same as:
+        // const camera_to_normalized_view = zmath.rotationX(-0.5 * math.pi);
         const camera_to_normalized_view = zmath.lookAtLh(
             zmath.Vec{ 0, 0, 0, 1 },
             zmath.Vec{ 0, -1, 0, 1 },

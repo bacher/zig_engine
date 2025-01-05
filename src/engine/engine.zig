@@ -212,7 +212,6 @@ pub const Engine = struct {
 
     pub fn draw(engine: *Engine) GraphicsContextState {
         const gctx = engine.gctx;
-        const time = engine.time;
 
         const back_buffer_view = gctx.swapchain.getCurrentTextureView();
         defer back_buffer_view.release();
@@ -258,19 +257,24 @@ pub const Engine = struct {
                         model_descriptor.texcoord.applyVertexBuffer(pass, 2);
                         model_descriptor.index.applyIndexBuffer(pass);
 
+                        const world_position_mat = zmath.translation(
+                            game_object.position[0],
+                            game_object.position[1],
+                            game_object.position[2],
+                        );
+
                         const object_to_world =
                             zmath.mul(
-                            // NOTE: converting from Y-up to Z-up coordinate system
-                            zmath.rotationX(math.pi * 0.5),
+                            // NOTE: converting from Y-up to Z-up coordinate system.
+                            //       should be the opposite of "camera_to_normalized_view" from camera.zig.
+                            zmath.rotationX(0.5 * math.pi),
                             zmath.mul(
-                                zmath.rotationZ(@floatCast(time)),
-                                zmath.translation(
-                                    game_object.position[0],
-                                    game_object.position[1],
-                                    game_object.position[2],
-                                ),
+                                zmath.rotationZ(@floatCast(engine.time)),
+                                world_position_mat,
                             ),
                         );
+
+                        // const object_to_world = world_position_mat;
 
                         const object_to_clip = zmath.mul(object_to_world, scene.camera.world_to_clip);
 

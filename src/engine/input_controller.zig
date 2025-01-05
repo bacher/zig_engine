@@ -80,7 +80,6 @@ pub const InputController = struct {
         };
 
         if (delta[0] < -35 or delta[0] > 35 or delta[1] < -35 or delta[1] > 35) {
-            std.debug.print("resetting of delta, because {d:10.1} {d:10.1}\n", .{ delta[0], delta[1] });
             input_controller.cursor_position_delta = .{ 0, 0 };
         } else {
             input_controller.cursor_position_delta = delta;
