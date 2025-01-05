@@ -6,7 +6,7 @@ pub const Camera = struct {
     screen_width: u32,
     screen_height: u32,
 
-    position: zmath.Vec,
+    position: [3]f32,
 
     world_to_camera: zmath.Mat,
     camera_to_normalized_view: zmath.Mat,
@@ -18,9 +18,9 @@ pub const Camera = struct {
     world_to_clip: zmath.Mat,
 
     pub fn init(screen_width: u32, screen_height: u32) Camera {
-        const position = zmath.Vec{ 0, 0, 0, 1 };
+        const position: [3]f32 = .{ 0, 0, 0 };
 
-        const world_to_camera = zmath.translationV(position);
+        const world_to_camera = zmath.translation(0, 0, 0);
 
         const camera_to_normalized_view = zmath.lookAtLh(
             zmath.Vec{ 0, 0, 0, 1 },
@@ -79,9 +79,15 @@ pub const Camera = struct {
         camera.updateDerivedMatrices();
     }
 
-    pub fn updatePosition(camera: *Camera, position: zmath.Vec) void {
+    pub fn updatePosition(camera: *Camera, position: [3]f32) void {
         camera.position = position;
-        camera.world_to_camera = zmath.translationV(position);
+        // NOTE: inverting position because moving of camera is effectively moving
+        //       of the world in oposite direction.
+        camera.world_to_camera = zmath.translation(
+            -position[0],
+            -position[1],
+            -position[2],
+        );
         camera.updateDerivedMatrices();
     }
 

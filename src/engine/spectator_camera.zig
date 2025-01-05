@@ -4,6 +4,8 @@ const zmath = @import("zmath");
 const Camera = @import("camera.zig").Camera;
 const InputController = @import("input_controller.zig").InputController;
 
+const sqrt1_2_vec = zmath.Vec{ std.math.sqrt1_2, std.math.sqrt1_2, std.math.sqrt1_2, 1 };
+
 pub const SpectatorCamera = struct {
     camera: *Camera,
     input_controller: *const InputController,
@@ -32,22 +34,21 @@ pub const SpectatorCamera = struct {
         const step = 5 * time_passed;
 
         if (input_controller.isKeyPressed(.w)) {
-            direction[2] -= step;
-        }
-        if (input_controller.isKeyPressed(.s)) {
             direction[2] += step;
         }
+        if (input_controller.isKeyPressed(.s)) {
+            direction[2] -= step;
+        }
         if (input_controller.isKeyPressed(.a)) {
-            direction[0] += step;
+            direction[0] -= step;
         }
         if (input_controller.isKeyPressed(.d)) {
-            direction[0] -= step;
+            direction[0] += step;
         }
 
         if (direction[0] != 0 or direction[2] != 0) {
             if (direction[0] != 0 and direction[2] != 0) {
-                direction[0] *= std.math.sqrt1_2;
-                direction[2] *= std.math.sqrt1_2;
+                direction *= sqrt1_2_vec;
             }
 
             // This is correct version, but we can skip inversing by chaning
@@ -64,11 +65,10 @@ pub const SpectatorCamera = struct {
                 direction,
             );
 
-            camera.updatePosition(zmath.Vec{
+            camera.updatePosition(.{
                 camera.position[0] + aligned_direction[0],
                 camera.position[1] + aligned_direction[1],
                 camera.position[2] + aligned_direction[2],
-                camera.position[3],
             });
         }
     }
@@ -80,8 +80,8 @@ pub const SpectatorCamera = struct {
 
         const delta = spectator_camera.input_controller.cursor_position_delta;
 
-        spectator_camera.yaw -= delta[0] * 0.005;
-        spectator_camera.pitch -= delta[1] * 0.005;
+        spectator_camera.yaw += delta[0] * 0.005;
+        spectator_camera.pitch += delta[1] * 0.005;
 
         // NOTE: matFromRollPitchYaw can't be used because it applies pitch then yaw,
         //       but it should be yaw then pitch.
@@ -91,9 +91,11 @@ pub const SpectatorCamera = struct {
         //     0,
         // );
 
+        // NOTE: inverting position because moving of camera is effectively moving
+        //       of the world in oposite direction.
         const view_mat = zmath.mul(
-            zmath.rotationY(spectator_camera.yaw),
-            zmath.rotationX(spectator_camera.pitch),
+            zmath.rotationY(-spectator_camera.yaw),
+            zmath.rotationX(-spectator_camera.pitch),
         );
 
         spectator_camera.camera.updateView(view_mat);
