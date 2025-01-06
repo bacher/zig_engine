@@ -3,6 +3,7 @@ const zmath = @import("zmath");
 
 const Camera = @import("camera.zig").Camera;
 const InputController = @import("input_controller.zig").InputController;
+const debug = @import("debug.zig");
 
 const zero_vec = zmath.Vec{ 0, 0, 0, 0 };
 
@@ -32,6 +33,7 @@ pub const SpectatorCamera = struct {
 
         var direction = zmath.Vec{ 0, 0, 0, 0 };
         const step = 5 * time_passed;
+        var vertical_shift: f32 = 0;
 
         if (input_controller.isKeyPressed(.w)) {
             direction[2] += step;
@@ -46,32 +48,40 @@ pub const SpectatorCamera = struct {
             direction[0] += step;
         }
         if (input_controller.isKeyPressed(.space)) {
-            direction[1] += step;
+            vertical_shift += step;
         }
         if (input_controller.isKeyPressed(.c)) {
-            direction[1] -= step;
+            vertical_shift -= step;
         }
 
-        if (!zmath.all(direction == zero_vec, 4)) {
+        var aligned_direction: zmath.Vec = zero_vec;
+
+        if (!zmath.all(direction == zero_vec, 3)) {
             if (direction[0] != 0 and direction[2] != 0) {
                 direction[0] *= std.math.sqrt1_2;
                 direction[2] *= std.math.sqrt1_2;
             }
 
-            // This is correct version, but we can skip inversing by chaning
-            // order of multiplying because in case of only rotation:
-            // mat * vec == vec * inverse(mat)
-            //
-            // const aligned_direction = zmath.mul(
-            //     direction,
-            //     zmath.inverse(camera.camera_to_view),
-            // );
+            if (direction[0] != 0 or direction[2] != 0) {
+                // This is correct version, but we can skip inversing by chaning
+                // order of multiplying because in case of only rotation:
+                // mat * vec == vec * inverse(mat)
+                //
+                // aligned_direction = zmath.mul(
+                //     direction,
+                //     zmath.inverse(camera.camera_to_view),
+                // );
 
-            const aligned_direction = zmath.mul(
-                camera.camera_to_view,
-                direction,
-            );
+                aligned_direction = zmath.mul(
+                    camera.camera_to_view,
+                    direction,
+                );
+            }
+        }
 
+        aligned_direction[2] += vertical_shift;
+
+        if (!zmath.all(aligned_direction == zero_vec, 3)) {
             camera.updatePosition(.{
                 camera.position[0] + aligned_direction[0],
                 camera.position[1] + aligned_direction[1],

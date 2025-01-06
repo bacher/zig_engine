@@ -12,9 +12,23 @@ pub fn printMat(mat: zmath.Mat) void {
     }
 }
 
-pub fn printMathLabeled(label: []const u8, mat: zmath.Mat) void {
-    std.debug.print("Mat {s}\n", .{label});
+pub fn printMatLabeled(label: []const u8, mat: zmath.Mat) void {
+    std.debug.print("Mat \"{s}\":\n", .{label});
     printMat(mat);
+}
+
+pub fn printVec(vec: zmath.Vec) void {
+    std.debug.print("  {d:10.3} {d:10.3} {d:10.3} {d:10.3}\n", .{
+        vec[0],
+        vec[1],
+        vec[2],
+        vec[3],
+    });
+}
+
+pub fn printVecLabeled(label: []const u8, vec: zmath.Vec) void {
+    std.debug.print("Vec \"{s}\":\n", .{label});
+    printVec(vec);
 }
 
 pub fn areMatricesEqual(mat1: zmath.Mat, mat2: zmath.Mat) bool {
@@ -22,6 +36,21 @@ pub fn areMatricesEqual(mat1: zmath.Mat, mat2: zmath.Mat) bool {
         const eq = zmath.isNearEqual(mat1[i], mat2[i], zmath.splat(zmath.Vec, 0.001));
 
         if (!@reduce(.And, eq == zmath.boolx4(true, true, true, true))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+pub fn areVectorsEqual(vec1: zmath.Vec, vec2: zmath.Vec) bool {
+    const eq = zmath.isNearEqual(vec1, vec2, zmath.splat(zmath.Vec, 0.001));
+    return @reduce(.And, eq == zmath.boolx4(true, true, true, true));
+}
+
+pub fn areVectorsEqualInFirst(vec1: zmath.Vec, vec2: zmath.Vec, components: u8) bool {
+    const eq = zmath.isNearEqual(vec1, vec2, zmath.splat(zmath.Vec, 0.001));
+    for (0..components) |i| {
+        if (eq[i] == false) {
             return false;
         }
     }
