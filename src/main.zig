@@ -25,24 +25,13 @@ pub fn main() !void {
     var window_context = try WindowContext.init(allocator);
     defer window_context.deinit();
 
-    const engine = try Engine.init(allocator, window_context, .{
+    const engine = try Engine.init(allocator, window_context, content_dir, .{
         .onUpdate = onUpdate,
         .onRender = onRender,
     });
     defer engine.deinit();
 
-    const man_model_id = man_model_id: {
-        const model_filename = try std.fs.path.join(allocator, &.{
-            content_dir,
-            "man/man.gltf",
-        });
-        defer allocator.free(model_filename);
-
-        const model_id = try engine.loadModel(model_filename);
-        std.debug.print("Loaded model ID: {d}\n", .{model_id});
-
-        break :man_model_id model_id;
-    };
+    const man_model_id = try engine.loadModel("man/man.gltf");
 
     const scene = try engine.createScene();
     defer scene.deinit();

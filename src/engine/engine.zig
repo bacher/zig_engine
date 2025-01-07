@@ -38,6 +38,7 @@ pub const Engine = struct {
     allocator: std.mem.Allocator,
     window_context: WindowContext,
     callbacks: Callbacks,
+    content_dir: []const u8,
     init_time: f64,
     time: f64,
 
@@ -54,6 +55,7 @@ pub const Engine = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         window_context: WindowContext,
+        content_dir: []const u8,
         callbacks: Callbacks,
     ) !*Engine {
         if (Engine.is_instanced) {
@@ -138,11 +140,15 @@ pub const Engine = struct {
         input_controller.listenWindowEvents();
         errdefer input_controller.deinit();
 
+        const content_dir_copied = try allocator.dupe(u8, content_dir);
+        errdefer allocator.free(content_dir_copied);
+
         const engine = try allocator.create(Engine);
         engine.* = .{
             .allocator = allocator,
             .window_context = window_context,
             .callbacks = callbacks,
+            .content_dir = content_dir_copied,
             .init_time = init_time,
             .time = 0,
             .gctx = gctx,
@@ -169,6 +175,7 @@ pub const Engine = struct {
         engine.models_hash.deinit();
         engine.bind_group_def.deinit();
         engine.input_controller.deinit();
+        engine.allocator.free(engine.content_dir);
 
         zstbi.deinit();
         engine.allocator.destroy(engine);
@@ -320,7 +327,13 @@ pub const Engine = struct {
     pub fn loadModel(engine: *Engine, model_name: []const u8) !LoadedModelId {
         const gctx = engine.gctx;
 
-        const model_descriptor = try ModelDescriptor.init(gctx, engine.allocator, model_name);
+        const model_filename = try std.fs.path.join(engine.allocator, &.{
+            engine.content_dir,
+            model_name,
+        });
+        defer engine.allocator.free(model_filename);
+
+        const model_descriptor = try ModelDescriptor.init(gctx, engine.allocator, model_filename);
 
         const bind_group_descriptor = try engine.bind_group_def.createBindGroup(
             engine.texture_sampler,
