@@ -13,6 +13,7 @@ const wgsl_fs = @embedFile("../shaders/fs.wgsl");
 const types = @import("./types.zig");
 const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
+const Pipeline = @import("./pipeline.zig").Pipeline;
 const BindGroupDefinition = @import("./bind_group.zig").BindGroupDefinition;
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ModelDescriptor = @import("./model_descriptor.zig").ModelDescriptor;
@@ -42,7 +43,7 @@ pub const Engine = struct {
     init_time: f64,
     time: f64,
 
-    pipeline: zgpu.RenderPipelineHandle,
+    pipeline: Pipeline,
     bind_group_def: BindGroupDefinition,
     depth_texture: DepthTexture,
     texture_sampler: zgpu.SamplerHandle,
@@ -72,7 +73,7 @@ pub const Engine = struct {
         const pipeline_layout = gctx.createPipelineLayout(&.{bind_group_def.bind_group_layout});
         defer gctx.releaseResource(pipeline_layout);
 
-        const pipeline = pipeline: {
+        const pipeline_handle = pipeline: {
             const vs_module = zgpu.createWgslShaderModule(gctx.device, wgsl_vs, "vs");
             defer vs_module.release();
 
@@ -130,6 +131,8 @@ pub const Engine = struct {
             };
             break :pipeline gctx.createRenderPipeline(pipeline_layout, pipeline_descriptor);
         };
+
+        const pipeline = try Pipeline.init(gctx, pipeline_handle);
 
         const texture_sampler = gctx.createSampler(.{});
 
@@ -227,9 +230,7 @@ pub const Engine = struct {
             const encoder = gctx.device.createCommandEncoder(null);
             defer encoder.release();
 
-            pass: {
-                const pipeline = gctx.lookupResource(engine.pipeline) orelse break :pass;
-
+            {
                 const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
                     .view = back_buffer_view,
                     .load_op = .clear,
@@ -252,7 +253,8 @@ pub const Engine = struct {
                     pass.release();
                 }
 
-                pass.setPipeline(pipeline);
+                // TODO: choose pipeline depending on model type
+                pass.setPipeline(engine.pipeline.pipeline_gpu);
 
                 if (engine.active_scene) |scene| {
                     for (scene.game_objects.items) |game_object| {
@@ -341,6 +343,7 @@ pub const Engine = struct {
         );
 
         const model = try engine.allocator.create(Model);
+        errdefer engine.allocator.destroy(model);
         model.* = .{
             .model_descriptor = model_descriptor,
             .bind_group_descriptor = bind_group_descriptor,
