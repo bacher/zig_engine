@@ -1,16 +1,23 @@
 const std = @import("std");
 
-const Model = @import("./model.zig").Model;
+const model_module = @import("./model.zig");
+const Model = model_module.Model;
+const WindowBoxModel = model_module.WindowBoxModel;
+
+const ModelUnion = union(enum) {
+    model: *const Model,
+    window_box_model: *const WindowBoxModel,
+};
 
 pub const GameObjectInitParams = struct {
     position: [3]f32,
-    model: *const Model,
+    model: ModelUnion,
 };
 
 pub const GameObject = struct {
     allocator: std.mem.Allocator,
     position: [3]f32,
-    model: *const Model,
+    model: ModelUnion,
     _gc: ?*GameObject,
 
     pub fn init(allocator: std.mem.Allocator, params: GameObjectInitParams) !*GameObject {
