@@ -7,14 +7,11 @@ const zmath = @import("zmath");
 const zstbi = @import("zstbi");
 const gltf_loader = @import("gltf_loader");
 
-const wgsl_vs = @embedFile("../shaders/vs.wgsl");
-const wgsl_fs = @embedFile("../shaders/fs.wgsl");
-
 const types = @import("./types.zig");
 const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
-const pipeline_module = @import("./pipeline.zig");
-const Pipeline = pipeline_module.Pipeline;
+const Pipeline = @import("./pipeline.zig").Pipeline;
+const basic_pipeline = @import("./pipelines/basic_pipeline.zig");
 const BindGroupDefinition = @import("./bind_group.zig").BindGroupDefinition;
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ModelDescriptor = @import("./model_descriptor.zig").ModelDescriptor;
@@ -71,11 +68,9 @@ pub const Engine = struct {
 
         const bind_group_definition = BindGroupDefinition.init(gctx);
 
-        const pipeline = try pipeline_module.createBasicPipeline(
+        const pipeline = try basic_pipeline.createBasicPipeline(
             gctx,
             bind_group_definition,
-            wgsl_vs,
-            wgsl_fs,
         );
 
         const texture_sampler = gctx.createSampler(.{});
