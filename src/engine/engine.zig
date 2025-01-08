@@ -13,7 +13,8 @@ const wgsl_fs = @embedFile("../shaders/fs.wgsl");
 const types = @import("./types.zig");
 const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
-const Pipeline = @import("./pipeline.zig").Pipeline;
+const pipeline_module = @import("./pipeline.zig");
+const Pipeline = pipeline_module.Pipeline;
 const BindGroupDefinition = @import("./bind_group.zig").BindGroupDefinition;
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ModelDescriptor = @import("./model_descriptor.zig").ModelDescriptor;
@@ -44,7 +45,7 @@ pub const Engine = struct {
     time: f64,
 
     pipeline: Pipeline,
-    bind_group_def: BindGroupDefinition,
+    bind_group_definition: BindGroupDefinition,
     depth_texture: DepthTexture,
     texture_sampler: zgpu.SamplerHandle,
 
@@ -68,71 +69,14 @@ pub const Engine = struct {
         const gctx = window_context.gctx;
         const init_time = gctx.stats.time;
 
-        const bind_group_def = BindGroupDefinition.init(gctx);
+        const bind_group_definition = BindGroupDefinition.init(gctx);
 
-        const pipeline_layout = gctx.createPipelineLayout(&.{bind_group_def.bind_group_layout});
-        defer gctx.releaseResource(pipeline_layout);
-
-        const pipeline_handle = pipeline: {
-            const vs_module = zgpu.createWgslShaderModule(gctx.device, wgsl_vs, "vs");
-            defer vs_module.release();
-
-            const fs_module = zgpu.createWgslShaderModule(gctx.device, wgsl_fs, "fs");
-            defer fs_module.release();
-
-            const color_targets = [_]wgpu.ColorTargetState{.{
-                .format = zgpu.GraphicsContext.swapchain_format,
-            }};
-
-            const vertex_buffers = [_]wgpu.VertexBufferLayout{
-                // position
-                .{
-                    .array_stride = @sizeOf([3]f32),
-                    .attributes = &.{.{ .format = .float32x3, .offset = 0, .shader_location = 0 }},
-                    .attribute_count = 1,
-                },
-                // normal
-                .{
-                    .array_stride = @sizeOf([3]f32),
-                    .attributes = &.{.{ .format = .float32x3, .offset = 0, .shader_location = 1 }},
-                    .attribute_count = 1,
-                },
-                // texcoord
-                .{
-                    .array_stride = @sizeOf([2]f32),
-                    .attributes = &.{.{ .format = .float32x2, .offset = 0, .shader_location = 2 }},
-                    .attribute_count = 1,
-                },
-            };
-
-            const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
-                .primitive = wgpu.PrimitiveState{
-                    .front_face = .cw,
-                    .cull_mode = .back,
-                    .topology = .triangle_list,
-                },
-                .depth_stencil = &wgpu.DepthStencilState{
-                    .format = .depth32_float,
-                    .depth_write_enabled = true,
-                    .depth_compare = .less,
-                },
-                .vertex = wgpu.VertexState{
-                    .module = vs_module,
-                    .entry_point = "main",
-                    .buffers = &vertex_buffers,
-                    .buffer_count = vertex_buffers.len,
-                },
-                .fragment = &wgpu.FragmentState{
-                    .module = fs_module,
-                    .entry_point = "main",
-                    .targets = &color_targets,
-                    .target_count = color_targets.len,
-                },
-            };
-            break :pipeline gctx.createRenderPipeline(pipeline_layout, pipeline_descriptor);
-        };
-
-        const pipeline = try Pipeline.init(gctx, pipeline_handle);
+        const pipeline = try pipeline_module.createBasicPipeline(
+            gctx,
+            bind_group_definition,
+            wgsl_vs,
+            wgsl_fs,
+        );
 
         const texture_sampler = gctx.createSampler(.{});
 
@@ -156,7 +100,7 @@ pub const Engine = struct {
             .time = 0,
             .gctx = gctx,
             .pipeline = pipeline,
-            .bind_group_def = bind_group_def,
+            .bind_group_definition = bind_group_definition,
             .depth_texture = depth_texture,
             .texture_sampler = texture_sampler,
             .models_hash = std.AutoHashMap(LoadedModelId, *Model).init(allocator),
@@ -176,7 +120,7 @@ pub const Engine = struct {
         }
 
         engine.models_hash.deinit();
-        engine.bind_group_def.deinit();
+        engine.bind_group_definition.deinit();
         engine.input_controller.deinit();
         engine.allocator.free(engine.content_dir);
 
@@ -337,7 +281,7 @@ pub const Engine = struct {
 
         const model_descriptor = try ModelDescriptor.init(gctx, engine.allocator, model_filename);
 
-        const bind_group_descriptor = try engine.bind_group_def.createBindGroup(
+        const bind_group_descriptor = try engine.bind_group_definition.createBindGroup(
             engine.texture_sampler,
             model_descriptor.color_texture,
         );

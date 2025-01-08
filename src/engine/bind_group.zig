@@ -6,10 +6,10 @@ const TextureDescriptor = @import("types.zig").TextureDescriptor;
 
 pub const BindGroupDefinition = struct {
     gctx: *zgpu.GraphicsContext,
-    bind_group_layout: zgpu.BindGroupLayoutHandle,
+    bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
     pub fn init(gctx: *zgpu.GraphicsContext) BindGroupDefinition {
-        const bind_group_layout = gctx.createBindGroupLayout(&.{
+        const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
             // Transform matrix
             zgpu.bufferEntry(
                 0,
@@ -36,37 +36,40 @@ pub const BindGroupDefinition = struct {
 
         return .{
             .gctx = gctx,
-            .bind_group_layout = bind_group_layout,
+            .bind_group_layout_handle = bind_group_layout_handle,
         };
     }
 
-    pub fn deinit(bind_group_def: BindGroupDefinition) void {
-        bind_group_def.gctx.releaseResource(bind_group_def.bind_group_layout);
+    pub fn deinit(bind_group_definition: BindGroupDefinition) void {
+        bind_group_definition.gctx.releaseResource(bind_group_definition.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
-        bind_group_def: BindGroupDefinition,
+        bind_group_defenition: BindGroupDefinition,
         sampler: zgpu.SamplerHandle,
         color_texture: TextureDescriptor,
     ) !BindGroupDescriptor {
-        const gctx = bind_group_def.gctx;
+        const gctx = bind_group_defenition.gctx;
 
-        const bind_group_handle = gctx.createBindGroup(bind_group_def.bind_group_layout, &.{
-            .{
-                .binding = 0,
-                .buffer_handle = gctx.uniforms.buffer,
-                .offset = 0,
-                .size = @sizeOf(zmath.Mat),
+        const bind_group_handle = gctx.createBindGroup(
+            bind_group_defenition.bind_group_layout_handle,
+            &.{
+                .{
+                    .binding = 0,
+                    .buffer_handle = gctx.uniforms.buffer,
+                    .offset = 0,
+                    .size = @sizeOf(zmath.Mat),
+                },
+                .{
+                    .binding = 1,
+                    .texture_view_handle = color_texture.view_handle,
+                },
+                .{
+                    .binding = 2,
+                    .sampler_handle = sampler,
+                },
             },
-            .{
-                .binding = 1,
-                .texture_view_handle = color_texture.view_handle,
-            },
-            .{
-                .binding = 2,
-                .sampler_handle = sampler,
-            },
-        });
+        );
 
         const bind_group = gctx.lookupResource(bind_group_handle) orelse return error.BindGroupNotAvailable;
 
