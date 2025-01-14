@@ -18,9 +18,16 @@ pub const BindGroupDefinition = struct {
                 true,
                 0,
             ),
+            zgpu.bufferEntry(
+                1,
+                .{ .vertex = true, .fragment = true },
+                .uniform,
+                true,
+                0,
+            ),
             // Texture
             zgpu.textureEntry(
-                1,
+                2,
                 .{ .fragment = true },
                 .float,
                 .tvdim_2d,
@@ -28,7 +35,7 @@ pub const BindGroupDefinition = struct {
             ),
             // Sampler
             zgpu.samplerEntry(
-                2,
+                3,
                 .{ .fragment = true },
                 .filtering, // TODO: What's the difference between .filtering and .non_filtering
             ),
@@ -62,10 +69,16 @@ pub const BindGroupDefinition = struct {
                 },
                 .{
                     .binding = 1,
-                    .texture_view_handle = color_texture.view_handle,
+                    .buffer_handle = gctx.uniforms.buffer,
+                    .offset = 0,
+                    .size = @sizeOf(zmath.Vec),
                 },
                 .{
                     .binding = 2,
+                    .texture_view_handle = color_texture.view_handle,
+                },
+                .{
+                    .binding = 3,
                     .sampler_handle = sampler,
                 },
             },

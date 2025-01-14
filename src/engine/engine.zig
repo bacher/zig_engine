@@ -254,16 +254,33 @@ pub const Engine = struct {
 
                         const object_to_clip = zmath.mul(object_to_world, scene.camera.world_to_clip);
 
-                        const mem = gctx.uniformsAllocate(zmath.Mat, 1);
-                        mem.slice[0] = zmath.transpose(object_to_clip);
+                        const object_to_clip_uniform = gctx.uniformsAllocate(zmath.Mat, 1);
+                        object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
+
+                        // TODO: camera position does not change through all render pass,
+                        //       maybe there is way of how it can be set only once per render pass.
+                        const camera_position_uniform = gctx.uniformsAllocate(zmath.Vec, 1);
+                        camera_position_uniform.slice[0] = zmath.Vec{
+                            // TODO: how it can be simplified?
+                            scene.camera.position[0],
+                            scene.camera.position[1],
+                            scene.camera.position[2],
+                            0,
+                        };
 
                         switch (game_object.model) {
                             .model => |model| {
-                                pass.setBindGroup(0, model.bind_group_descriptor.bind_group, &.{mem.offset});
+                                pass.setBindGroup(0, model.bind_group_descriptor.bind_group, &.{
+                                    object_to_clip_uniform.offset,
+                                    camera_position_uniform.offset,
+                                });
                                 pass.drawIndexed(model.model_descriptor.index.elements_count * 3, 1, 0, 0, 0);
                             },
                             .window_box_model => |window_box_model| {
-                                pass.setBindGroup(0, window_box_model.bind_group_descriptor.bind_group, &.{mem.offset});
+                                pass.setBindGroup(0, window_box_model.bind_group_descriptor.bind_group, &.{
+                                    object_to_clip_uniform.offset,
+                                    camera_position_uniform.offset,
+                                });
                                 // TODO: remove hardcode
                                 pass.draw(6, 1, 0, 0);
                             },
