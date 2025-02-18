@@ -43,19 +43,19 @@ pub fn main() !void {
     const scene = try engine.createScene();
     defer scene.deinit();
 
-    scene.camera.updatePosition(.{ 0, 10, 0 });
+    scene.camera.updatePosition(.{ 0, -10, 0 });
 
     // _ = man_model_id;
 
     const game_object = try scene.addObject(.{
         .model_id = man_model_id,
-        .position = .{ -1, 0, 0 },
+        .position = .{ -2, 0, 0 },
     });
     _ = game_object;
 
     const game_object_2 = try scene.addObject(.{
         .model_id = man_model_id,
-        .position = .{ 1, 0, 0 },
+        .position = .{ 2, 0, 0 },
     });
     _ = game_object_2;
 

@@ -36,10 +36,10 @@ pub const SpectatorCamera = struct {
         var vertical_shift: f32 = 0;
 
         if (input_controller.isKeyPressed(.w)) {
-            direction[2] += step;
+            direction[2] -= step;
         }
         if (input_controller.isKeyPressed(.s)) {
-            direction[2] -= step;
+            direction[2] += step;
         }
         if (input_controller.isKeyPressed(.a)) {
             direction[0] -= step;
@@ -97,8 +97,8 @@ pub const SpectatorCamera = struct {
 
         const delta = spectator_camera.input_controller.cursor_position_delta;
 
-        spectator_camera.yaw += delta[0] * 0.005;
-        spectator_camera.pitch += delta[1] * 0.005;
+        spectator_camera.yaw -= delta[0] * 0.005;
+        spectator_camera.pitch -= delta[1] * 0.005;
 
         // NOTE: matFromRollPitchYaw can't be used because it applies pitch then yaw,
         //       but it should be yaw then pitch.

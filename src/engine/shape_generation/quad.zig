@@ -12,12 +12,25 @@ pub const QuadData = struct {
 
         const data = std.mem.bytesAsSlice([3]f32, buffer);
 
+        //  (0,1)           (1,1)
+        //     [x]---------[x]
+        //      | (1)    *  |
+        //      |     *     |
+        //      |  *    (2) |
+        //     [x]---------[x]
+        //  (0,0)           (1,0)
+        //
+        // arangement - couter clock wise
+
+        // 1st triangle
         data[0] = .{ 0, 0, 0 };
-        data[1] = .{ 0, 1, 0 };
-        data[2] = .{ 1, 0, 0 };
-        data[3] = .{ 0, 1, 0 };
-        data[4] = .{ 1, 1, 0 };
-        data[5] = .{ 1, 0, 0 };
+        data[1] = .{ 1, 1, 0 };
+        data[2] = .{ 0, 1, 0 };
+
+        // 2nd triangle
+        data[3] = .{ 0, 0, 0 };
+        data[4] = .{ 1, 0, 0 };
+        data[5] = .{ 1, 1, 0 };
 
         return .{
             .data = data,

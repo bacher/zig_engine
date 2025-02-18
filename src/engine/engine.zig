@@ -232,24 +232,27 @@ pub const Engine = struct {
                             game_object.position[2],
                         );
 
-                        var object_mat = zmath.identity();
+                        var object_mat: zmath.Mat = undefined;
 
                         switch (game_object.model) {
                             .model => {
-                                object_mat = zmath.rotationZ(@floatCast(engine.time));
+                                // NOTE: converting from Y-up to Z-up coordinate system,
+                                // should be done only for models which made with Y-up logic.
+                                object_mat = zmath.rotationX(0.5 * math.pi);
+
+                                // adding rotation animation
+                                object_mat = zmath.mul(object_mat, zmath.rotationZ(@floatCast(engine.time)));
                             },
-                            else => {},
+                            .window_box_model => {
+                                // rotation should be moved into modal field
+                                object_mat = zmath.rotationX(0.5 * math.pi);
+                            },
                         }
 
                         const object_to_world =
                             zmath.mul(
-                            // NOTE: converting from Y-up to Z-up coordinate system.
-                            //       should be the opposite of "camera_to_normalized_view" from camera.zig.
-                            zmath.rotationX(0.5 * math.pi),
-                            zmath.mul(
-                                object_mat,
-                                world_position_mat,
-                            ),
+                            object_mat,
+                            world_position_mat,
                         );
 
                         const object_to_clip = zmath.mul(object_to_world, scene.camera.world_to_clip);
