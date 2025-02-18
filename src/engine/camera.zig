@@ -85,6 +85,8 @@ pub const Camera = struct {
 
     pub fn updatePosition(camera: *Camera, position: [3]f32) void {
         camera.position = position;
+        // debug.printVec3Labeled("camera position", position);
+
         // NOTE: inverting position because moving of camera is effectively moving
         //       of the world in oposite direction.
         camera.world_to_camera = zmath.translation(

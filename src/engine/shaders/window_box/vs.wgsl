@@ -3,7 +3,7 @@
 
 struct VertexOut {
     @builtin(position) position_clip: vec4<f32>,
-    @location(0) texcoord: vec2<f32>,
+    @location(0) local_xy: vec2<f32>,
 }
 
 @vertex fn main(
@@ -11,6 +11,6 @@ struct VertexOut {
 ) -> VertexOut {
     var output: VertexOut;
     output.position_clip = vec4(position, 1.0) * object_to_clip;
-    output.texcoord = vec2(position.x, 1 - position.y);
+    output.local_xy = position.xy;
     return output;
 }
