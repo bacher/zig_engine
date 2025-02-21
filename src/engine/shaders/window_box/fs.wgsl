@@ -15,30 +15,33 @@ fn isInBound(uv: vec2<f32>) -> bool {
     let dz = camera_position.z - local_xy.y;
 
     // Calculation of parameters needed for left and right walls
-    let a_1_hor = dy / dx;
-    let b_1_hor = -a_1_hor * local_xy.x;
+    let a_xy_hor = dy / dx;
+    let b_xy_hor = -a_xy_hor * local_xy.x;
 
-    let a_1_ver = dy / dz;
-    let b_1_ver = -a_1_ver * local_xy.y;
+    let a_xy_ver = dy / dz;
+    let b_xy_ver = -a_xy_ver * local_xy.y;
 
-    let u_left = b_1_hor;
-    let p_left = vec2(u_left, (u_left - b_1_ver) / a_1_ver);
+    let u_left = b_xy_hor;
+    let p_left = vec2(u_left, (u_left - b_xy_ver) / a_xy_ver);
 
-    let u_right = a_1_hor + b_1_hor;
-    let p_right = vec2(1 - u_right, (u_right - b_1_ver) / a_1_ver);
+    let u_right = a_xy_hor + b_xy_hor;
+    let p_right = vec2(1 - u_right, (u_right - b_xy_ver) / a_xy_ver);
 
     // Calculation of parameters needed for ceiling and floor
-    let a_2_hor = dy / dz;
-    let b_2_hor = -a_2_hor * local_xy.y;
+    let a_zy_hor = dy / dz;
+    let b_zy_hor = -a_zy_hor * local_xy.y;
 
-    let a_2_ver = dy / dx;
-    let b_2_ver = -a_2_ver * local_xy.x;
+    let a_zy_ver = dy / dx;
+    let b_zy_ver = -a_zy_ver * local_xy.x;
 
-    let u_bottom = b_2_hor;
-    let p_bottom = vec2((u_bottom - b_2_ver) / a_2_ver, u_bottom);
+    let u_bottom = b_zy_hor;
+    let p_bottom = vec2((u_bottom - b_zy_ver) / a_zy_ver, u_bottom);
 
-    let u_top = a_2_hor + b_2_hor;
-    let p_top = vec2((u_top - b_2_ver) / a_2_ver, 1 - u_top);
+    let u_top = a_zy_hor + b_zy_hor;
+    let p_top = vec2((u_top - b_zy_ver) / a_zy_ver, 1 - u_top);
+
+    // Calculation of parameters needed for far wall
+    let p_far = vec2((1 - b_xy_hor) / a_xy_hor, (1 - b_zy_hor) / a_zy_hor);
 
     var p = vec2(0.5, 0.5);
 
@@ -50,6 +53,8 @@ fn isInBound(uv: vec2<f32>) -> bool {
         p = p_bottom;
     } else if (isInBound(p_top)) {
         p = p_top;
+    } else {
+        p = p_far;
     }
 
     // return textureSample(color_texture, texture_sampler, vec2(local_xy.x, 1 - local_xy.y));
