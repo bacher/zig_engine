@@ -33,7 +33,7 @@ pub fn main() !void {
 
     const man_model_id = try engine.loadModel("man/man.gltf");
 
-    var window_block_model = try engine.loadWindowBoxModel("window-block/wb-pattern.png");
+    var window_block_model = try engine.loadWindowBoxModel("window-block/wb-texture.png");
     // TODO: Move cleanup to the engine
     defer {
         window_block_model.deinit(engine.gctx);

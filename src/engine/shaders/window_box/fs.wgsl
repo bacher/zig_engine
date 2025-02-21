@@ -2,6 +2,8 @@
 @group(0) @binding(2) var color_texture: texture_2d<f32>;
 @group(0) @binding(3) var texture_sampler: sampler;
 
+const t3: f32 = 1.0 / 3.0;
+
 fn isInBound(uv: vec2<f32>) -> bool {
     return uv.x >= 0 && uv.x <= 1 && uv.y >= 0 && uv.y <= 1;
 }
@@ -34,29 +36,37 @@ fn isInBound(uv: vec2<f32>) -> bool {
     var p = vec2(0.5, 0.5);
 
     if (isInBound(p_left)) {
-        p = p_left;
+        p = vec2(p_left.x, 1 + p_left.y);
     } else {
         let u_right = a_xy_hor + b_xy_hor;
         let p_right = vec2(1 - u_right, (u_right - b_xy_ver) / a_xy_ver);
         if (isInBound(p_right)) {
-            p = p_right;
+            p = vec2(2 + p_right.x, 1 + p_right.y);
         } else {
             let u_bottom = b_zy_hor;
             let p_bottom = vec2((u_bottom - b_zy_ver) / a_zy_ver, u_bottom);
             if (isInBound(p_bottom)) {
-                p = p_bottom;
+                p = vec2(1 + p_bottom.x, p_bottom.y);
             } else {
                 let u_top = a_zy_hor + b_zy_hor;
                 let p_top = vec2((u_top - b_zy_ver) / a_zy_ver, 1 - u_top);
                 if (isInBound(p_top)) {
-                    p = p_top;
+                    p = vec2(1 + p_top.x, 2 + p_top.y);
                 } else {
-                    p = vec2((1 - b_xy_hor) / a_xy_hor, (1 - b_zy_hor) / a_zy_hor);
+                    let p_far = vec2((1 - b_xy_hor) / a_xy_hor, (1 - b_zy_hor) / a_zy_hor);
+                    p = vec2(1 + p_far.x, 1 + p_far.y);
                 }
             }
         }
     }
 
-    // return textureSample(color_texture, texture_sampler, vec2(local_xy.x, 1 - local_xy.y));
-    return textureSample(color_texture, texture_sampler, vec2(p.x, 1 - p.y));
+    let final_color = textureSample(color_texture, texture_sampler, vec2(t3 * p.x, 1 - t3 * p.y));
+
+    let p_middle = vec2((0.5 - b_xy_hor) / a_xy_hor, (0.5 - b_zy_hor) / a_zy_hor);
+    let middle_color = textureSample(color_texture, texture_sampler, vec2(p_middle.x * t3, 1 - (2 + p_middle.y) * t3));
+    if (isInBound(p_middle)) {
+        return mix(final_color, middle_color, middle_color.a);
+    }
+
+    return final_color;
 }
