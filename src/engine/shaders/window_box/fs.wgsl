@@ -60,13 +60,14 @@ fn isInBound(uv: vec2<f32>) -> bool {
         }
     }
 
-    let final_color = textureSample(color_texture, texture_sampler, vec2(t3 * p.x, 1 - t3 * p.y));
+    var color = textureSample(color_texture, texture_sampler, vec2(t3 * p.x, 1 - t3 * p.y));
 
     let p_middle = vec2((0.5 - b_xy_hor) / a_xy_hor, (0.5 - b_zy_hor) / a_zy_hor);
     let middle_color = textureSample(color_texture, texture_sampler, vec2(p_middle.x * t3, 1 - (2 + p_middle.y) * t3));
     if (isInBound(p_middle)) {
-        return mix(final_color, middle_color, middle_color.a);
+        color = mix(color, middle_color, middle_color.a);
     }
 
-    return final_color;
+    let front_color = textureSample(color_texture, texture_sampler, vec2(t3 * local_xy.x, 1 - t3 * local_xy.y));
+    return mix(color, front_color, front_color.a);
 }
