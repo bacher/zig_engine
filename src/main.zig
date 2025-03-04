@@ -33,22 +33,35 @@ pub fn main() !void {
 
     const man_model_id = try engine.loadModel("man/man.gltf");
 
+    var window_block_model = try engine.loadWindowBoxModel("window-block/wb-texture.png");
+    // TODO: Move cleanup to the engine
+    defer {
+        window_block_model.deinit(engine.gctx);
+        allocator.destroy(window_block_model);
+    }
+
     const scene = try engine.createScene();
     defer scene.deinit();
 
-    scene.camera.updatePosition(.{ 0, 10, 0 });
+    scene.camera.updatePosition(.{ 0.5, -2, 0.5 });
 
     const game_object = try scene.addObject(.{
         .model_id = man_model_id,
-        .position = .{ -1, 0, 0 },
+        .position = .{ -2, 0, 0 },
     });
     _ = game_object;
 
     const game_object_2 = try scene.addObject(.{
         .model_id = man_model_id,
-        .position = .{ 1, 0, 0 },
+        .position = .{ 2, 0, 0 },
     });
     _ = game_object_2;
+
+    const window_block_object = try scene.addWindowBoxObject(.{
+        .model = window_block_model,
+        .position = .{ 0, 0, 0 },
+    });
+    _ = window_block_object;
 
     // const scale_factor = scale_factor: {
     //     const scale = window_context.window.getContentScale();

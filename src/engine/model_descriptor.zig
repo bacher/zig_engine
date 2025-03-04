@@ -5,25 +5,23 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
 const types = @import("./types.zig");
-const BufferDescriptor = types.BufferDescriptor;
 const load_buffer = @import("./load_buffer.zig");
 const load_texture = @import("./load_texture.zig");
 
 pub const ModelDescriptor = struct {
     // model: gltf_loader.GltfLoader,
-    position: BufferDescriptor,
-    normal: BufferDescriptor,
-    texcoord: BufferDescriptor,
-    index: BufferDescriptor,
+    position: types.BufferDescriptor,
+    normal: types.BufferDescriptor,
+    texcoord: types.BufferDescriptor,
+    index: types.BufferDescriptor,
     color_texture: types.TextureDescriptor,
+    mesh_y_up: bool = false,
 
     pub fn init(
         gctx: *zgpu.GraphicsContext,
         allocator: std.mem.Allocator,
         model_name: []const u8,
     ) !ModelDescriptor {
-        std.debug.print("Load model: {s}\n", .{model_name});
-
         const model = try gltf_loader.GltfLoader.init(allocator, model_name);
         defer model.deinit();
 
@@ -56,6 +54,7 @@ pub const ModelDescriptor = struct {
             .texcoord = texcoord_buffer_info,
             .index = index_buffer_info,
             .color_texture = color_texture,
+            .mesh_y_up = true,
         };
     }
 

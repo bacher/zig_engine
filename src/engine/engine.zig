@@ -11,16 +11,21 @@ const types = @import("./types.zig");
 const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
 const Pipeline = @import("./pipeline.zig").Pipeline;
-const basic_pipeline = @import("./pipelines/basic_pipeline.zig");
+const basic_pipeline_module = @import("./pipelines/basic_pipeline.zig");
+const window_box_pipeline_module = @import("./pipelines/window_box_pipeline.zig");
 const BindGroupDefinition = @import("./bind_group.zig").BindGroupDefinition;
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ModelDescriptor = @import("./model_descriptor.zig").ModelDescriptor;
+const WindowBoxDescriptor = @import("./window_box_descriptor.zig").WindowBoxDescriptor;
 const Model = @import("./model.zig").Model;
+const WindowBoxModel = @import("./model.zig").WindowBoxModel;
 const Scene = @import("./scene.zig").Scene;
 const Camera = @import("./camera.zig").Camera;
 const InputController = @import("./input_controller.zig").InputController;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
+
+const xRotate = zmath.rotationX(0.5 * math.pi);
 
 pub const Engine = struct {
     pub const LoadedModelId = enum(u32) { _ };
@@ -41,7 +46,10 @@ pub const Engine = struct {
     init_time: f64,
     time: f64,
 
-    pipeline: Pipeline,
+    pipelines: struct {
+        basic: Pipeline,
+        window_box: Pipeline,
+    },
     bind_group_definition: BindGroupDefinition,
     depth_texture: DepthTexture,
     texture_sampler: zgpu.SamplerHandle,
@@ -68,7 +76,11 @@ pub const Engine = struct {
 
         const bind_group_definition = BindGroupDefinition.init(gctx);
 
-        const pipeline = try basic_pipeline.createBasicPipeline(
+        const basic_pipeline = try basic_pipeline_module.createBasicPipeline(
+            gctx,
+            bind_group_definition,
+        );
+        const window_box_pipeline = try window_box_pipeline_module.createWindowBoxPipeline(
             gctx,
             bind_group_definition,
         );
@@ -94,7 +106,10 @@ pub const Engine = struct {
             .init_time = init_time,
             .time = 0,
             .gctx = gctx,
-            .pipeline = pipeline,
+            .pipelines = .{
+                .basic = basic_pipeline,
+                .window_box = window_box_pipeline,
+            },
             .bind_group_definition = bind_group_definition,
             .depth_texture = depth_texture,
             .texture_sampler = texture_sampler,
@@ -192,45 +207,90 @@ pub const Engine = struct {
                     pass.release();
                 }
 
-                // TODO: choose pipeline depending on model type
-                pass.setPipeline(engine.pipeline.pipeline_gpu);
-
                 if (engine.active_scene) |scene| {
                     for (scene.game_objects.items) |game_object| {
-                        const model = game_object.model;
-                        const model_descriptor = model.model_descriptor;
+                        switch (game_object.model) {
+                            .regular_model => |model| {
+                                pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
 
-                        model_descriptor.position.applyVertexBuffer(pass, 0);
-                        model_descriptor.normal.applyVertexBuffer(pass, 1);
-                        model_descriptor.texcoord.applyVertexBuffer(pass, 2);
-                        model_descriptor.index.applyIndexBuffer(pass);
+                                const model_descriptor = model.model_descriptor;
 
-                        const world_position_mat = zmath.translation(
-                            game_object.position[0],
-                            game_object.position[1],
-                            game_object.position[2],
-                        );
+                                model_descriptor.position.applyVertexBuffer(pass, 0);
+                                model_descriptor.normal.applyVertexBuffer(pass, 1);
+                                model_descriptor.texcoord.applyVertexBuffer(pass, 2);
+                                model_descriptor.index.applyIndexBuffer(pass);
+                            },
+                            .window_box_model => |window_box_model| {
+                                pass.setPipeline(engine.pipelines.window_box.pipeline_gpu);
 
-                        const object_to_world =
+                                const model_descriptor = window_box_model.model_descriptor;
+                                model_descriptor.position.applyVertexBuffer(pass, 0);
+                            },
+                        }
+
+                        var model_to_world = zmath.mul(
                             zmath.mul(
-                            // NOTE: converting from Y-up to Z-up coordinate system.
-                            //       should be the opposite of "camera_to_normalized_view" from camera.zig.
-                            zmath.rotationX(0.5 * math.pi),
-                            zmath.mul(
-                                zmath.rotationZ(@floatCast(engine.time)),
-                                world_position_mat,
+                                zmath.quatToMat(game_object.rotation),
+                                zmath.scaling(game_object.scale, game_object.scale, game_object.scale),
+                            ),
+                            zmath.translation(
+                                game_object.position[0],
+                                game_object.position[1],
+                                game_object.position[2],
                             ),
                         );
 
-                        // const object_to_world = world_position_mat;
+                        var flip_yz = false;
+                        switch (game_object.model) {
+                            .regular_model => |model| {
+                                flip_yz = model.model_descriptor.mesh_y_up;
+                            },
+                            .window_box_model => {
+                                // TODO:
+                                // rotation should be moved into model field
+                                // object_mat = zmath.rotationX(0.5 * math.pi);
+                                flip_yz = true;
+                            },
+                        }
+                        if (flip_yz) {
+                            // NOTE: converting from Y-up to Z-up coordinate system,
+                            // should be done only for models which is made with Y-up logic.
+                            model_to_world = zmath.mul(xRotate, model_to_world);
+                        }
 
-                        const object_to_clip = zmath.mul(object_to_world, scene.camera.world_to_clip);
+                        const object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);
 
-                        const mem = gctx.uniformsAllocate(zmath.Mat, 1);
-                        mem.slice[0] = zmath.transpose(object_to_clip);
+                        const object_to_clip_uniform = gctx.uniformsAllocate(zmath.Mat, 1);
+                        object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
 
-                        pass.setBindGroup(0, model.bind_group_descriptor.bind_group, &.{mem.offset});
-                        pass.drawIndexed(model_descriptor.index.elements_count * 3, 1, 0, 0, 0);
+                        // TODO: camera position does not change through all render pass,
+                        //       maybe there is way of how it can be set only once per render pass.
+                        const camera_position_uniform = gctx.uniformsAllocate(zmath.Vec, 1);
+                        camera_position_uniform.slice[0] = zmath.Vec{
+                            // TODO: how it can be simplified?
+                            scene.camera.position[0],
+                            scene.camera.position[1],
+                            scene.camera.position[2],
+                            0,
+                        };
+
+                        switch (game_object.model) {
+                            .regular_model => |model| {
+                                pass.setBindGroup(0, model.bind_group_descriptor.bind_group, &.{
+                                    object_to_clip_uniform.offset,
+                                    camera_position_uniform.offset,
+                                });
+                                pass.drawIndexed(model.model_descriptor.index.elements_count * 3, 1, 0, 0, 0);
+                            },
+                            .window_box_model => |window_box_model| {
+                                pass.setBindGroup(0, window_box_model.bind_group_descriptor.bind_group, &.{
+                                    object_to_clip_uniform.offset,
+                                    camera_position_uniform.offset,
+                                });
+                                // TODO: remove hardcode
+                                pass.draw(6, 1, 0, 0);
+                            },
+                        }
                     }
                 }
             }
@@ -293,6 +353,34 @@ pub const Engine = struct {
         Engine.next_loaded_model_id += 1;
 
         return loaded_model_id;
+    }
+
+    pub fn loadWindowBoxModel(engine: *Engine, texture_filename: []const u8) !*WindowBoxModel {
+        const texture_full_filename = try std.fs.path.join(engine.allocator, &.{
+            engine.content_dir,
+            texture_filename,
+        });
+        defer engine.allocator.free(texture_full_filename);
+
+        const window_box_descriptor = try WindowBoxDescriptor.init(
+            engine.gctx,
+            engine.allocator,
+            texture_full_filename,
+        );
+
+        const bind_group_descriptor = try engine.bind_group_definition.createBindGroup(
+            engine.texture_sampler,
+            window_box_descriptor.color_texture,
+        );
+
+        const model = try engine.allocator.create(WindowBoxModel);
+        errdefer engine.allocator.destroy(model);
+        model.* = .{
+            .model_descriptor = window_box_descriptor,
+            .bind_group_descriptor = bind_group_descriptor,
+        };
+
+        return model;
     }
 
     fn recreateDepthTexture(engine: *Engine) !void {

@@ -26,9 +26,22 @@ pub fn printVec(vec: zmath.Vec) void {
     });
 }
 
+pub fn printVec3(vec: [3]f32) void {
+    std.debug.print("  {d:10.3} {d:10.3} {d:10.3}\n", .{
+        vec[0],
+        vec[1],
+        vec[2],
+    });
+}
+
 pub fn printVecLabeled(label: []const u8, vec: zmath.Vec) void {
     std.debug.print("Vec \"{s}\":\n", .{label});
     printVec(vec);
+}
+
+pub fn printVec3Labeled(label: []const u8, vec: [3]f32) void {
+    std.debug.print("Vec \"{s}\":\n", .{label});
+    printVec3(vec);
 }
 
 pub fn areMatricesEqual(mat1: zmath.Mat, mat2: zmath.Mat) bool {

@@ -26,9 +26,9 @@ pub const Camera = struct {
 
         // NOTE: this matrix is effectively the same as:
         // const camera_to_normalized_view = zmath.rotationX(-0.5 * math.pi);
-        const camera_to_normalized_view = zmath.lookAtLh(
+        const camera_to_normalized_view = zmath.lookAtRh(
             zmath.Vec{ 0, 0, 0, 1 },
-            zmath.Vec{ 0, -1, 0, 1 },
+            zmath.Vec{ 0, 1, 0, 1 },
             zmath.Vec{ 0, 0, 1, 0 },
         );
 
@@ -85,6 +85,8 @@ pub const Camera = struct {
 
     pub fn updatePosition(camera: *Camera, position: [3]f32) void {
         camera.position = position;
+        // debug.printVec3Labeled("camera position", position);
+
         // NOTE: inverting position because moving of camera is effectively moving
         //       of the world in oposite direction.
         camera.world_to_camera = zmath.translation(
@@ -101,7 +103,7 @@ pub const Camera = struct {
     }
 
     fn createProjectionMatrix(screen_width: u32, screen_height: u32) zmath.Mat {
-        return zmath.perspectiveFovLh(
+        return zmath.perspectiveFovRh(
             0.25 * math.pi,
             @as(f32, @floatFromInt(screen_width)) / @as(f32, @floatFromInt(screen_height)),
             0.01,

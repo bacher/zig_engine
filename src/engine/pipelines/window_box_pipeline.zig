@@ -1,13 +1,13 @@
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-const wgsl_vs = @embedFile("../shaders/basic/vs.wgsl");
-const wgsl_fs = @embedFile("../shaders/basic/fs.wgsl");
+const wgsl_vs = @embedFile("../shaders/window_box/vs.wgsl");
+const wgsl_fs = @embedFile("../shaders/window_box/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
 const BindGroupDefinition = @import("../bind_group.zig").BindGroupDefinition;
 
-pub fn createBasicPipeline(
+pub fn createWindowBoxPipeline(
     gctx: *zgpu.GraphicsContext,
     bind_group_definition: BindGroupDefinition,
 ) !Pipeline {
@@ -31,18 +31,6 @@ pub fn createBasicPipeline(
         .{
             .array_stride = @sizeOf([3]f32),
             .attributes = &.{.{ .format = .float32x3, .offset = 0, .shader_location = 0 }},
-            .attribute_count = 1,
-        },
-        // normal
-        .{
-            .array_stride = @sizeOf([3]f32),
-            .attributes = &.{.{ .format = .float32x3, .offset = 0, .shader_location = 1 }},
-            .attribute_count = 1,
-        },
-        // texcoord
-        .{
-            .array_stride = @sizeOf([2]f32),
-            .attributes = &.{.{ .format = .float32x2, .offset = 0, .shader_location = 2 }},
             .attribute_count = 1,
         },
     };
