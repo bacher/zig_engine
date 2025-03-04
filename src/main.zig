@@ -1,4 +1,5 @@
 const std = @import("std");
+const zmath = @import("zmath");
 const math = std.math;
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
@@ -9,6 +10,11 @@ const WindowContext = @import("./engine/glue.zig").WindowContext;
 // BUG: if put "Engine.zig" instead of "engine.zig" imports get broken
 // const Engine = @import("./engine/Engine.zig").Engine;
 const Engine = @import("./engine/engine.zig").Engine;
+const GameObject = @import("./engine/game_object.zig").GameObject;
+
+const Game = struct {
+    game_objects: std.StringHashMap(*GameObject),
+};
 
 pub fn main() !void {
     // Change current working directory to where the executable is located.
@@ -25,7 +31,17 @@ pub fn main() !void {
     var window_context = try WindowContext.init(allocator);
     defer window_context.deinit();
 
+    const game = try allocator.create(Game);
+    game.* = .{
+        .game_objects = std.StringHashMap(*GameObject).init(allocator),
+    };
+    defer {
+        game.game_objects.deinit();
+        allocator.destroy(game);
+    }
+
     const engine = try Engine.init(allocator, window_context, content_dir, .{
+        .argument = game,
         .onUpdate = onUpdate,
         .onRender = onRender,
     });
@@ -45,23 +61,20 @@ pub fn main() !void {
 
     scene.camera.updatePosition(.{ 0.5, -2, 0.5 });
 
-    const game_object = try scene.addObject(.{
+    try game.game_objects.put("man_1", try scene.addObject(.{
         .model_id = man_model_id,
         .position = .{ -2, 0, 0 },
-    });
-    _ = game_object;
+    }));
 
-    const game_object_2 = try scene.addObject(.{
+    try game.game_objects.put("man_2", try scene.addObject(.{
         .model_id = man_model_id,
         .position = .{ 2, 0, 0 },
-    });
-    _ = game_object_2;
+    }));
 
-    const window_block_object = try scene.addWindowBoxObject(.{
+    try game.game_objects.put("window_block", try scene.addWindowBoxObject(.{
         .model = window_block_model,
         .position = .{ 0, 0, 0 },
-    });
-    _ = window_block_object;
+    }));
 
     // const scale_factor = scale_factor: {
     //     const scale = window_context.window.getContentScale();
@@ -86,8 +99,14 @@ pub fn main() !void {
     try engine.runLoop();
 }
 
-fn onUpdate(engine: *Engine) void {
-    _ = engine;
+fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
+    const game: *Game = @alignCast(@ptrCast(game_opaque));
+
+    const man_1 = game.game_objects.get("man_1").?;
+    man_1.rotation = zmath.quatFromRollPitchYaw(0, 0, @floatCast(engine.time));
+
+    const man_2 = game.game_objects.get("man_2").?;
+    man_2.rotation = zmath.quatFromRollPitchYaw(0, 0, @floatCast(-engine.time));
 
     // zgui.backend.newFrame(
     //     engine.gctx.swapchain_descriptor.width,
@@ -96,9 +115,10 @@ fn onUpdate(engine: *Engine) void {
     // zgui.showDemoWindow(null);
 }
 
-fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder) void {
+fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
     _ = engine;
     _ = pass;
+    _ = game_opaque;
 
     // zgui.backend.draw(pass);
 }

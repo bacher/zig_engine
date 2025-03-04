@@ -97,16 +97,6 @@ pub const Scene = struct {
 
             // Time dependant update logic
 
-            for (scene.game_objects.items) |obj| {
-                switch (obj.model) {
-                    .regular_model => {
-                        // Temp animation
-                        obj.rotation = zmath.quatFromRollPitchYaw(0, 0, @floatCast(time));
-                    },
-                    else => {},
-                }
-            }
-
             scene.spectator_camera.update(time_passed);
         }
 

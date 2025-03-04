@@ -34,8 +34,9 @@ pub const Engine = struct {
     var next_loaded_model_id: u32 = 0;
 
     const Callbacks = struct {
-        onUpdate: ?*const fn (engine: *Engine) void,
-        onRender: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder) void,
+        argument: *anyopaque,
+        onUpdate: ?*const fn (engine: *Engine, argument: *anyopaque) void,
+        onRender: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder, argument: *anyopaque) void,
     };
 
     gctx: *zgpu.GraphicsContext,
@@ -170,7 +171,7 @@ pub const Engine = struct {
         }
 
         if (engine.callbacks.onUpdate) |callback| {
-            callback(engine);
+            callback(engine, engine.callbacks.argument);
         }
     }
 
@@ -311,7 +312,7 @@ pub const Engine = struct {
                     pass.release();
                 }
 
-                onRender(engine, pass);
+                onRender(engine, pass, engine.callbacks.argument);
             }
 
             break :commands encoder.finish(null);
