@@ -10,7 +10,7 @@ pub const BindGroupDefinition = struct {
 
     pub fn init(gctx: *zgpu.GraphicsContext) BindGroupDefinition {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
-            // Transform matrix
+            // transform matrix
             zgpu.bufferEntry(
                 0,
                 .{ .vertex = true },
@@ -18,6 +18,7 @@ pub const BindGroupDefinition = struct {
                 true,
                 0,
             ),
+            // camera position vec4<f32>
             zgpu.bufferEntry(
                 1,
                 .{ .vertex = true, .fragment = true },
@@ -25,7 +26,7 @@ pub const BindGroupDefinition = struct {
                 true,
                 0,
             ),
-            // Texture
+            // texture
             zgpu.textureEntry(
                 2,
                 .{ .fragment = true },
@@ -33,7 +34,7 @@ pub const BindGroupDefinition = struct {
                 .tvdim_2d,
                 false, // TODO: What does `multisampled` mean?
             ),
-            // Sampler
+            // sampler
             zgpu.samplerEntry(
                 3,
                 .{ .fragment = true },
@@ -61,22 +62,29 @@ pub const BindGroupDefinition = struct {
         const bind_group_handle = gctx.createBindGroup(
             bind_group_defenition.bind_group_layout_handle,
             &.{
+                // transform matrix
                 .{
                     .binding = 0,
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
                     .size = @sizeOf(zmath.Mat),
                 },
+
+                // camera position vec4<f32>
                 .{
                     .binding = 1,
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
                     .size = @sizeOf(zmath.Vec),
                 },
+
+                // texture
                 .{
                     .binding = 2,
                     .texture_view_handle = color_texture.view_handle,
                 },
+
+                // sampler
                 .{
                     .binding = 3,
                     .sampler_handle = sampler,

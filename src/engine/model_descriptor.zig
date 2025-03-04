@@ -15,6 +15,7 @@ pub const ModelDescriptor = struct {
     texcoord: types.BufferDescriptor,
     index: types.BufferDescriptor,
     color_texture: types.TextureDescriptor,
+    mesh_y_up: bool = false,
 
     pub fn init(
         gctx: *zgpu.GraphicsContext,
@@ -53,6 +54,7 @@ pub const ModelDescriptor = struct {
             .texcoord = texcoord_buffer_info,
             .index = index_buffer_info,
             .color_texture = color_texture,
+            .mesh_y_up = true,
         };
     }
 

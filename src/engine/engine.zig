@@ -25,6 +25,8 @@ const InputController = @import("./input_controller.zig").InputController;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 
+const xRotate = zmath.rotationX(0.5 * math.pi);
+
 pub const Engine = struct {
     pub const LoadedModelId = enum(u32) { _ };
 
@@ -208,7 +210,7 @@ pub const Engine = struct {
                 if (engine.active_scene) |scene| {
                     for (scene.game_objects.items) |game_object| {
                         switch (game_object.model) {
-                            .model => |model| {
+                            .regular_model => |model| {
                                 pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
 
                                 const model_descriptor = model.model_descriptor;
@@ -226,36 +228,37 @@ pub const Engine = struct {
                             },
                         }
 
-                        const world_position_mat = zmath.translation(
-                            game_object.position[0],
-                            game_object.position[1],
-                            game_object.position[2],
+                        var model_to_world = zmath.mul(
+                            zmath.mul(
+                                zmath.quatToMat(game_object.rotation),
+                                zmath.scaling(game_object.scale, game_object.scale, game_object.scale),
+                            ),
+                            zmath.translation(
+                                game_object.position[0],
+                                game_object.position[1],
+                                game_object.position[2],
+                            ),
                         );
 
-                        var object_mat: zmath.Mat = undefined;
-
+                        var flip_yz = false;
                         switch (game_object.model) {
-                            .model => {
-                                // NOTE: converting from Y-up to Z-up coordinate system,
-                                // should be done only for models which made with Y-up logic.
-                                object_mat = zmath.rotationX(0.5 * math.pi);
-
-                                // adding rotation animation
-                                object_mat = zmath.mul(object_mat, zmath.rotationZ(@floatCast(engine.time)));
+                            .regular_model => |model| {
+                                flip_yz = model.model_descriptor.mesh_y_up;
                             },
                             .window_box_model => {
-                                // rotation should be moved into modal field
-                                object_mat = zmath.rotationX(0.5 * math.pi);
+                                // TODO:
+                                // rotation should be moved into model field
+                                // object_mat = zmath.rotationX(0.5 * math.pi);
+                                flip_yz = true;
                             },
                         }
+                        if (flip_yz) {
+                            // NOTE: converting from Y-up to Z-up coordinate system,
+                            // should be done only for models which is made with Y-up logic.
+                            model_to_world = zmath.mul(xRotate, model_to_world);
+                        }
 
-                        const object_to_world =
-                            zmath.mul(
-                            object_mat,
-                            world_position_mat,
-                        );
-
-                        const object_to_clip = zmath.mul(object_to_world, scene.camera.world_to_clip);
+                        const object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);
 
                         const object_to_clip_uniform = gctx.uniformsAllocate(zmath.Mat, 1);
                         object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
@@ -272,7 +275,7 @@ pub const Engine = struct {
                         };
 
                         switch (game_object.model) {
-                            .model => |model| {
+                            .regular_model => |model| {
                                 pass.setBindGroup(0, model.bind_group_descriptor.bind_group, &.{
                                     object_to_clip_uniform.offset,
                                     camera_position_uniform.offset,

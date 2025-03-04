@@ -45,19 +45,17 @@ pub fn main() !void {
 
     scene.camera.updatePosition(.{ 0.5, -2, 0.5 });
 
-    // _ = man_model_id;
-
     const game_object = try scene.addObject(.{
         .model_id = man_model_id,
         .position = .{ -2, 0, 0 },
     });
     _ = game_object;
 
-    // const game_object_2 = try scene.addObject(.{
-    //     .model_id = man_model_id,
-    //     .position = .{ 2, 0, 0 },
-    // });
-    // _ = game_object_2;
+    const game_object_2 = try scene.addObject(.{
+        .model_id = man_model_id,
+        .position = .{ 2, 0, 0 },
+    });
+    _ = game_object_2;
 
     const window_block_object = try scene.addWindowBoxObject(.{
         .model = window_block_model,

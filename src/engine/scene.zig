@@ -62,7 +62,7 @@ pub const Scene = struct {
         if (scene.engine.models_hash.get(params.model_id)) |model| {
             const game_object = try GameObject.init(scene.allocator, .{
                 .model = .{
-                    .model = model,
+                    .regular_model = model,
                 },
                 .position = params.position,
             });
@@ -96,6 +96,16 @@ pub const Scene = struct {
             const time_passed: f32 = @floatCast(time - scene.previous_frame_time);
 
             // Time dependant update logic
+
+            for (scene.game_objects.items) |obj| {
+                switch (obj.model) {
+                    .regular_model => {
+                        // Temp animation
+                        obj.rotation = zmath.quatFromRollPitchYaw(0, 0, @floatCast(time));
+                    },
+                    else => {},
+                }
+            }
 
             scene.spectator_camera.update(time_passed);
         }
