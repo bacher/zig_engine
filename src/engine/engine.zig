@@ -246,12 +246,7 @@ pub const Engine = struct {
                             .regular_model => |model| {
                                 flip_yz = model.model_descriptor.mesh_y_up;
                             },
-                            .window_box_model => {
-                                // TODO:
-                                // rotation should be moved into model field
-                                // object_mat = zmath.rotationX(0.5 * math.pi);
-                                flip_yz = true;
-                            },
+                            else => {},
                         }
                         if (flip_yz) {
                             // NOTE: converting from Y-up to Z-up coordinate system,
