@@ -21,7 +21,7 @@ pub const WindowBoxDescriptor = struct {
         var color_texture_image = try loadTextureData(allocator, texture_filename);
         defer color_texture_image.deinit();
 
-        var quad = try QuadData.init(allocator);
+        var quad = try QuadData.initCenteredQuad(allocator);
         defer quad.deinit(allocator);
 
         // TODO: Can we omit this case?

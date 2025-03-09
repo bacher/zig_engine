@@ -60,7 +60,7 @@ pub fn main() !void {
     const scene = try engine.createScene();
     defer scene.deinit();
 
-    scene.camera.updatePosition(.{ 0.5, -2, 0.5 });
+    scene.camera.updatePosition(.{ 0, -2, 0 });
 
     try game.saved_game_objects.put("man_1", try scene.addObject(.{
         .model_id = man_model_id,
@@ -86,10 +86,16 @@ pub fn main() !void {
 
     for (0..6) |z| {
         for (0..2) |x| {
+            const size = 3;
             const window_box = try scene.addWindowBoxObject(.{
                 .model = window_block_model,
-                .position = .{ @floatFromInt(2 + x), 6, @floatFromInt(z) },
+                .position = .{
+                    @floatFromInt(2 + x * size),
+                    6,
+                    @floatFromInt(z * size),
+                },
             });
+            window_box.scale = size;
             window_box.rotation = zmath.quatFromRollPitchYaw(0.5 * math.pi, 0, 0);
         }
     }

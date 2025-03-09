@@ -260,7 +260,7 @@ pub const Engine = struct {
                         const object_to_clip_uniform = gctx.uniformsAllocate(zmath.Mat, 1);
                         object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
 
-                        const camera_position_in_modal_space_uniform = gctx.uniformsAllocate(zmath.Vec, 1);
+                        const camera_position_in_model_space_uniform = gctx.uniformsAllocate(zmath.Vec, 1);
                         if (game_object.model == .window_box_model) {
                             const camera_position = zmath.Vec{
                                 // TODO: how it can be simplified?
@@ -280,21 +280,21 @@ pub const Engine = struct {
                                 model_to_world_inversed,
                             );
 
-                            camera_position_in_modal_space_uniform.slice[0] = camera_position_in_model_space;
+                            camera_position_in_model_space_uniform.slice[0] = camera_position_in_model_space;
                         }
 
                         switch (game_object.model) {
                             .regular_model => |model| {
                                 pass.setBindGroup(0, model.bind_group_descriptor.bind_group, &.{
                                     object_to_clip_uniform.offset,
-                                    camera_position_in_modal_space_uniform.offset,
+                                    camera_position_in_model_space_uniform.offset,
                                 });
                                 pass.drawIndexed(model.model_descriptor.index.elements_count * 3, 1, 0, 0, 0);
                             },
                             .window_box_model => |window_box_model| {
                                 pass.setBindGroup(0, window_box_model.bind_group_descriptor.bind_group, &.{
                                     object_to_clip_uniform.offset,
-                                    camera_position_in_modal_space_uniform.offset,
+                                    camera_position_in_model_space_uniform.offset,
                                 });
                                 // TODO: remove hardcode
                                 pass.draw(6, 1, 0, 0);

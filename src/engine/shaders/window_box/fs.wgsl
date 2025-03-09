@@ -1,4 +1,4 @@
-@group(0) @binding(1) var<uniform> camera_position: vec4<f32>;
+@group(0) @binding(1) var<uniform> camera_position_in_model_space: vec4<f32>;
 @group(0) @binding(2) var color_texture: texture_2d<f32>;
 @group(0) @binding(3) var texture_sampler: sampler;
 
@@ -9,8 +9,14 @@ fn isInBound(uv: vec2<f32>) -> bool {
 }
 
 @fragment fn main(
-    @location(0) local_xy: vec2<f32>,
+    @location(0) _local_xy: vec2<f32>,
 ) -> @location(0) vec4<f32> {
+    // all formulas assume that quad starts at point (0,0), but underlying mesh is
+    // quad with coordinates (-0.5, -0.5), (0.5, 0.5), so we have to make
+    // correction by shifting everything by 0.5 in each direction.
+    let local_xy = _local_xy + vec2(0.5, 0.5);
+    let camera_position = camera_position_in_model_space + vec4(0.5, 0.5, 0.5, 0);
+
     let dx = camera_position.x - local_xy.x;
     let dy = camera_position.y - local_xy.y;
     let dz = -camera_position.z; // negated because XZY was changed by XYZ at some point
