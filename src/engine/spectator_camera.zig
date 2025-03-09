@@ -63,18 +63,13 @@ pub const SpectatorCamera = struct {
             }
 
             if (direction[0] != 0 or direction[2] != 0) {
-                // This is correct version, but we can skip inversing by chaning
-                // order of multiplying because in case of only rotation:
-                // mat * vec == vec * inverse(mat)
-                //
-                // aligned_direction = zmath.mul(
-                //     direction,
-                //     zmath.inverse(camera.camera_to_view),
-                // );
-
+                // we are using transpose instead of inverse here, because in case of
+                // matrices containing only rotation information, tranpose operation
+                // gives us the same results as inverse but computationally is much
+                // easier.
                 aligned_direction = zmath.mul(
-                    camera.camera_to_view,
                     direction,
+                    zmath.transpose(camera.camera_to_view),
                 );
             }
         }

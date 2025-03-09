@@ -11,9 +11,10 @@ const WindowContext = @import("./engine/glue.zig").WindowContext;
 // const Engine = @import("./engine/Engine.zig").Engine;
 const Engine = @import("./engine/engine.zig").Engine;
 const GameObject = @import("./engine/game_object.zig").GameObject;
+const debug = @import("./engine/debug.zig");
 
 const Game = struct {
-    game_objects: std.StringHashMap(*GameObject),
+    saved_game_objects: std.StringHashMap(*GameObject),
 };
 
 pub fn main() !void {
@@ -33,10 +34,10 @@ pub fn main() !void {
 
     const game = try allocator.create(Game);
     game.* = .{
-        .game_objects = std.StringHashMap(*GameObject).init(allocator),
+        .saved_game_objects = std.StringHashMap(*GameObject).init(allocator),
     };
     defer {
-        game.game_objects.deinit();
+        game.saved_game_objects.deinit();
         allocator.destroy(game);
     }
 
@@ -61,20 +62,37 @@ pub fn main() !void {
 
     scene.camera.updatePosition(.{ 0.5, -2, 0.5 });
 
-    try game.game_objects.put("man_1", try scene.addObject(.{
+    try game.saved_game_objects.put("man_1", try scene.addObject(.{
         .model_id = man_model_id,
         .position = .{ -2, 0, 0 },
     }));
 
-    try game.game_objects.put("man_2", try scene.addObject(.{
+    try game.saved_game_objects.put("man_2", try scene.addObject(.{
         .model_id = man_model_id,
-        .position = .{ 2, 0, 0 },
+        .position = .{ 4, 0, 0 },
     }));
 
-    try game.game_objects.put("window_block", try scene.addWindowBoxObject(.{
+    const window_box_1 = try scene.addWindowBoxObject(.{
         .model = window_block_model,
         .position = .{ 0, 0, 0 },
-    }));
+    });
+    window_box_1.rotation = zmath.quatFromRollPitchYaw(0.5 * math.pi, 0, 0);
+
+    const window_box_far = try scene.addWindowBoxObject(.{
+        .model = window_block_model,
+        .position = .{ -1, 10, 1 },
+    });
+    window_box_far.rotation = zmath.quatFromRollPitchYaw(0.65 * math.pi, 0, 0);
+
+    for (0..6) |z| {
+        for (0..2) |x| {
+            const window_box = try scene.addWindowBoxObject(.{
+                .model = window_block_model,
+                .position = .{ @floatFromInt(2 + x), 6, @floatFromInt(z) },
+            });
+            window_box.rotation = zmath.quatFromRollPitchYaw(0.5 * math.pi, 0, 0);
+        }
+    }
 
     // const scale_factor = scale_factor: {
     //     const scale = window_context.window.getContentScale();
@@ -102,11 +120,12 @@ pub fn main() !void {
 fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
     const game: *Game = @alignCast(@ptrCast(game_opaque));
 
-    const man_1 = game.game_objects.get("man_1").?;
-    man_1.rotation = zmath.quatFromRollPitchYaw(0, 0, @floatCast(engine.time));
-
-    const man_2 = game.game_objects.get("man_2").?;
-    man_2.rotation = zmath.quatFromRollPitchYaw(0, 0, @floatCast(-engine.time));
+    if (game.saved_game_objects.get("man_1")) |obj| {
+        obj.rotation = zmath.quatFromRollPitchYaw(0, 0, @floatCast(engine.time));
+    }
+    if (game.saved_game_objects.get("man_2")) |obj| {
+        obj.rotation = zmath.quatFromRollPitchYaw(0, 0, @floatCast(-engine.time));
+    }
 
     // zgui.backend.newFrame(
     //     engine.gctx.swapchain_descriptor.width,

@@ -22,6 +22,7 @@ const WindowBoxModel = @import("./model.zig").WindowBoxModel;
 const Scene = @import("./scene.zig").Scene;
 const Camera = @import("./camera.zig").Camera;
 const InputController = @import("./input_controller.zig").InputController;
+const debug = @import("./debug.zig");
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 
@@ -259,29 +260,41 @@ pub const Engine = struct {
                         const object_to_clip_uniform = gctx.uniformsAllocate(zmath.Mat, 1);
                         object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
 
-                        // TODO: camera position does not change through all render pass,
-                        //       maybe there is way of how it can be set only once per render pass.
-                        const camera_position_uniform = gctx.uniformsAllocate(zmath.Vec, 1);
-                        camera_position_uniform.slice[0] = zmath.Vec{
-                            // TODO: how it can be simplified?
-                            scene.camera.position[0],
-                            scene.camera.position[1],
-                            scene.camera.position[2],
-                            0,
-                        };
+                        const camera_position_in_modal_space_uniform = gctx.uniformsAllocate(zmath.Vec, 1);
+                        if (game_object.model == .window_box_model) {
+                            const camera_position = zmath.Vec{
+                                // TODO: how it can be simplified?
+                                scene.camera.position[0],
+                                scene.camera.position[1],
+                                scene.camera.position[2],
+                                1,
+                            };
+
+                            // TODO:
+                            // Instead of inverse it will be better to just apply transposed
+                            // rotation matrix and negative position shift (and scale if needed).
+                            // inverse is much more compute intensive than listed below operations.
+                            const model_to_world_inversed = zmath.inverse(model_to_world);
+                            const camera_position_in_model_space = zmath.mul(
+                                camera_position,
+                                model_to_world_inversed,
+                            );
+
+                            camera_position_in_modal_space_uniform.slice[0] = camera_position_in_model_space;
+                        }
 
                         switch (game_object.model) {
                             .regular_model => |model| {
                                 pass.setBindGroup(0, model.bind_group_descriptor.bind_group, &.{
                                     object_to_clip_uniform.offset,
-                                    camera_position_uniform.offset,
+                                    camera_position_in_modal_space_uniform.offset,
                                 });
                                 pass.drawIndexed(model.model_descriptor.index.elements_count * 3, 1, 0, 0, 0);
                             },
                             .window_box_model => |window_box_model| {
                                 pass.setBindGroup(0, window_box_model.bind_group_descriptor.bind_group, &.{
                                     object_to_clip_uniform.offset,
-                                    camera_position_uniform.offset,
+                                    camera_position_in_modal_space_uniform.offset,
                                 });
                                 // TODO: remove hardcode
                                 pass.draw(6, 1, 0, 0);
