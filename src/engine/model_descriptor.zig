@@ -1,4 +1,5 @@
 const std = @import("std");
+const math = std.math;
 
 const gltf_loader = @import("gltf_loader");
 const zgpu = @import("zgpu");
@@ -15,6 +16,7 @@ pub const ModelDescriptor = struct {
     texcoord: types.BufferDescriptor,
     index: types.BufferDescriptor,
     color_texture: types.TextureDescriptor,
+    geometry_bounds: types.GeometryBounds,
     mesh_y_up: bool = false,
 
     pub fn init(
@@ -54,6 +56,11 @@ pub const ModelDescriptor = struct {
             .texcoord = texcoord_buffer_info,
             .index = index_buffer_info,
             .color_texture = color_texture,
+            .geometry_bounds = .{
+                .min = model.geometry_bounds.min,
+                .max = model.geometry_bounds.max,
+                .radius = calcBoundingRadius(model.geometry_bounds),
+            },
             .mesh_y_up = true,
         };
     }
@@ -63,3 +70,20 @@ pub const ModelDescriptor = struct {
         // model_description.model.deinit();
     }
 };
+
+fn calcBoundingRadius(geometry_bounds: gltf_loader.GeometryBounds) f32 {
+    const min = geometry_bounds.min;
+    const max = geometry_bounds.max;
+
+    const x = @max(@abs(min[0]), @abs(max[0]));
+    const y = @max(@abs(min[1]), @abs(max[1]));
+    const z = @max(@abs(min[2]), @abs(max[2]));
+
+    return len(.{ x, y, z });
+}
+
+fn len(vec: [3]f64) f32 {
+    return @floatCast(
+        math.sqrt(vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2]),
+    );
+}

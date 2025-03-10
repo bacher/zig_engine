@@ -73,3 +73,9 @@ pub const TextureDescriptor = struct {
         gctx.submit(&.{commands});
     }
 };
+
+pub const GeometryBounds = struct {
+    min: [3]f64,
+    max: [3]f64,
+    radius: f32,
+};

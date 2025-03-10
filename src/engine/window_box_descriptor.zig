@@ -12,6 +12,7 @@ const QuadData = @import("./shape_generation/quad.zig").QuadData;
 pub const WindowBoxDescriptor = struct {
     position: types.BufferDescriptor,
     color_texture: types.TextureDescriptor,
+    geometry_bounds: types.GeometryBounds,
 
     pub fn init(
         gctx: *zgpu.GraphicsContext,
@@ -47,6 +48,11 @@ pub const WindowBoxDescriptor = struct {
         return .{
             .position = positions_buffer_info,
             .color_texture = color_texture,
+            .geometry_bounds = .{
+                .min = .{ -0.5, -0.5, 0 },
+                .max = .{ 0.5, 0.5, 0 },
+                .radius = 0.707107,
+            },
         };
     }
 
