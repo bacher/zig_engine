@@ -48,7 +48,7 @@ pub fn SpaceTree(comptime ElementType: type) type {
                     };
 
                     const node = try allocator.create(ThisSpaceNode);
-                    node.* = ThisSpaceNode.init(allocator, 0, center);
+                    node.* = ThisSpaceNode.init(0, center);
                     errdefer allocator.destroy(node);
 
                     space_tree_ptr.grid[index_x][index_y] = node;
@@ -108,13 +108,12 @@ pub fn SpaceTree(comptime ElementType: type) type {
             for (x0..x1) |x| {
                 for (y0..y1) |y| {
                     std.debug.print("sub nodes: {} {}\n", .{ x, y });
-                    try space_tree.grid[x][y].addObject(object, bound_box);
+                    try space_tree.grid[x][y].addObject(space_tree.allocator, object, bound_box);
                 }
             }
         }
 
         fn createChildNodes(space_tree: *const This, node: *ThisSpaceNode) !void {
-            const allocator = space_tree.allocator;
             const c = node.center;
 
             for (0..CHILD_NODE_COUNT) |index| {
@@ -153,7 +152,7 @@ pub fn SpaceTree(comptime ElementType: type) type {
                     }
                 };
 
-                child_node.* = ThisSpaceNode.init(allocator, node.level + 1, center);
+                child_node.* = ThisSpaceNode.init(node.level + 1, center);
                 node.child_nodes[index] = child_node;
 
                 if (child_node.level < MAX_LEVEL) {
@@ -169,7 +168,7 @@ pub fn SpaceTree(comptime ElementType: type) type {
                     space_tree.destroyLevel(child_node);
                 }
 
-                child_node.deinit();
+                child_node.deinit(space_tree.allocator);
                 space_tree.allocator.destroy(child_node);
             }
         }
@@ -183,26 +182,27 @@ fn SpaceNode(comptime ElementType: type) type {
         level: u8,
         center: [3]f32,
         child_nodes: [CHILD_NODE_COUNT]*ThisSpaceNode,
-        contained_objects: std.AutoArrayHashMap(*const ElementType, bool),
-        partially_contained_objects: std.AutoArrayHashMap(*const ElementType, bool),
+        contained_objects: std.AutoArrayHashMapUnmanaged(*const ElementType, bool),
+        partially_contained_objects: std.AutoArrayHashMapUnmanaged(*const ElementType, bool),
 
-        fn init(allocator: std.mem.Allocator, level: u8, center: [3]f32) ThisSpaceNode {
+        fn init(level: u8, center: [3]f32) ThisSpaceNode {
             return .{
                 .level = level,
                 .center = center,
                 .child_nodes = undefined,
-                .contained_objects = .init(allocator),
-                .partially_contained_objects = .init(allocator),
+                .contained_objects = .empty,
+                .partially_contained_objects = .empty,
             };
         }
 
-        fn deinit(space_node: *ThisSpaceNode) void {
-            space_node.contained_objects.deinit();
-            space_node.partially_contained_objects.deinit();
+        fn deinit(space_node: *ThisSpaceNode, allocator: std.mem.Allocator) void {
+            space_node.contained_objects.deinit(allocator);
+            space_node.partially_contained_objects.deinit(allocator);
         }
 
         fn addObject(
             space_node: *ThisSpaceNode,
+            allocator: std.mem.Allocator,
             object: *const ElementType,
             bound_box: BoundBox(f32),
         ) !void {
@@ -231,13 +231,13 @@ fn SpaceNode(comptime ElementType: type) type {
 
             // if cell sphere is fully inside of object sphere
             if (len + radiuses[space_node.level] <= object.radius) {
-                try space_node.contained_objects.put(object, true);
+                try space_node.contained_objects.put(allocator, object, true);
                 // std.debug.print("full contained, skipping subdivision\n", .{});
                 return;
             }
 
             if (space_node.level == MAX_LEVEL) {
-                try space_node.partially_contained_objects.put(object, true);
+                try space_node.partially_contained_objects.put(allocator, object, true);
                 // std.debug.print("partially contained\n", .{});
                 return;
             }
@@ -277,7 +277,7 @@ fn SpaceNode(comptime ElementType: type) type {
                 for (sub_box.y.start..sub_box.y.end) |y_index| {
                     for (sub_box.x.start..sub_box.x.end) |x_index| {
                         const cell_index = z_index * 4 + y_index * 2 + x_index;
-                        try space_node.child_nodes[cell_index].addObject(object, bound_box);
+                        try space_node.child_nodes[cell_index].addObject(allocator, object, bound_box);
                     }
                 }
             }
