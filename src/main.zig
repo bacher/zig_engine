@@ -48,7 +48,21 @@ pub fn main() !void {
     });
     defer engine.deinit();
 
-    const man_model_id = try engine.loadModel("man/man.gltf");
+    const man_model_id = id: {
+        const loader = try engine.initLoader("man/man.gltf");
+        defer loader.deinit();
+
+        const object = loader.findFirstObjectWithMesh().?;
+        break :id try engine.loadModel(&loader, object);
+    };
+
+    const toontown_central_model_id = id: {
+        const loader = try engine.initLoader("toontown-central/scene.gltf");
+        defer loader.deinit();
+
+        const object = loader.findFirstObjectWithMesh().?;
+        break :id try engine.loadModel(&loader, object);
+    };
 
     var window_block_model = try engine.loadWindowBoxModel("window-block/wb-texture.png");
     // TODO: Move cleanup to the engine
@@ -70,6 +84,11 @@ pub fn main() !void {
     try game.saved_game_objects.put("man_2", try scene.addObject(.{
         .model_id = man_model_id,
         .position = .{ 4, 0, 0 },
+    }));
+
+    try game.saved_game_objects.put("toontown_1", try scene.addObject(.{
+        .model_id = toontown_central_model_id,
+        .position = .{ 0, 0, 0 },
     }));
 
     const window_box_1 = try scene.addWindowBoxObject(.{

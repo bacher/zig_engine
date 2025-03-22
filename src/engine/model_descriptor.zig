@@ -22,19 +22,20 @@ pub const ModelDescriptor = struct {
     pub fn init(
         gctx: *zgpu.GraphicsContext,
         allocator: std.mem.Allocator,
-        model_name: []const u8,
+        loader: *const gltf_loader.GltfLoader,
+        object: *const gltf_loader.SceneObject,
     ) !ModelDescriptor {
-        const model = try gltf_loader.GltfLoader.init(allocator, model_name);
-        defer model.deinit();
-
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
         const arena_allocator = arena.allocator();
 
-        const buffers = try model.loadModelBuffers(arena_allocator);
+        const mesh = object.mesh.?;
+
+        const buffers = try loader.loadModelBuffers(arena_allocator, mesh);
         defer buffers.deinit(arena_allocator);
 
-        var color_texture_image = try model.loadTextureData("man.png");
+        // TODO:
+        var color_texture_image = try loader.loadTextureData("../man/man.png");
         defer color_texture_image.deinit();
 
         const positions_buffer_info = try load_buffer.loadBufferIntoGpu([3]f32, gctx, .vertex, buffers.positions);
@@ -57,9 +58,9 @@ pub const ModelDescriptor = struct {
             .index = index_buffer_info,
             .color_texture = color_texture,
             .geometry_bounds = .{
-                .min = model.geometry_bounds.min,
-                .max = model.geometry_bounds.max,
-                .radius = calcBoundingRadius(model.geometry_bounds),
+                .min = mesh.geometry_bounds.min,
+                .max = mesh.geometry_bounds.max,
+                .radius = calcBoundingRadius(mesh.geometry_bounds),
             },
             .mesh_y_up = true,
         };

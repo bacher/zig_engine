@@ -334,16 +334,27 @@ pub const Engine = struct {
         return gctx_state;
     }
 
-    pub fn loadModel(engine: *Engine, model_name: []const u8) !LoadedModelId {
-        const gctx = engine.gctx;
-
+    pub fn initLoader(engine: *Engine, model_name: []const u8) !gltf_loader.GltfLoader {
         const model_filename = try std.fs.path.join(engine.allocator, &.{
             engine.content_dir,
             model_name,
         });
         defer engine.allocator.free(model_filename);
 
-        const model_descriptor = try ModelDescriptor.init(gctx, engine.allocator, model_filename);
+        return try gltf_loader.GltfLoader.init(engine.allocator, model_filename);
+    }
+
+    pub fn loadModel(
+        engine: *Engine,
+        loader: *const gltf_loader.GltfLoader,
+        object: *const gltf_loader.SceneObject,
+    ) !LoadedModelId {
+        const model_descriptor = try ModelDescriptor.init(
+            engine.gctx,
+            engine.allocator,
+            loader,
+            object,
+        );
 
         const bind_group_descriptor = try engine.bind_group_definition.createBindGroup(
             engine.texture_sampler,
