@@ -25,14 +25,16 @@ pub const WindowBoxDescriptor = struct {
         var quad = try QuadData.initCenteredQuad(allocator);
         defer quad.deinit(allocator);
 
-        // TODO: Can we omit this case?
-        const vertex_data = gltf_loader.ModelBuffer([3]f32){
+        // TODO: Can we omit using of gltf_loader.ModelBuffer?
+        const vertex_data = gltf_loader.ModelBuffer{
+            .type = .float,
+            .component_number = 3,
+            .elements_count = @intCast(quad.data.len),
+            .byte_length = @intCast(@sizeOf([3]f32) * quad.data.len),
             .buffer = quad.buffer,
-            .data = quad.data,
         };
 
         const positions_buffer_info = try load_buffer.loadBufferIntoGpu(
-            [3]f32,
             gctx,
             .vertex,
             vertex_data,

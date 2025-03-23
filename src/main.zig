@@ -86,6 +86,7 @@ pub fn main() !void {
         .position = .{ 4, 0, 0 },
     }));
 
+    // _ = toontown_central_model_id;
     try game.saved_game_objects.put("toontown_1", try scene.addObject(.{
         .model_id = toontown_central_model_id,
         .position = .{ 0, 0, 0 },

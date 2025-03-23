@@ -289,7 +289,8 @@ pub const Engine = struct {
                                     object_to_clip_uniform.offset,
                                     camera_position_in_model_space_uniform.offset,
                                 });
-                                pass.drawIndexed(model.model_descriptor.index.elements_count * 3, 1, 0, 0, 0);
+
+                                pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
                             },
                             .window_box_model => |window_box_model| {
                                 pass.setBindGroup(0, window_box_model.bind_group_descriptor.bind_group, &.{

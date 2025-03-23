@@ -38,10 +38,10 @@ pub const ModelDescriptor = struct {
         var color_texture_image = try loader.loadTextureData("../man/man.png");
         defer color_texture_image.deinit();
 
-        const positions_buffer_info = try load_buffer.loadBufferIntoGpu([3]f32, gctx, .vertex, buffers.positions);
-        const normal_buffer_info = try load_buffer.loadBufferIntoGpu([3]f32, gctx, .vertex, buffers.normals);
-        const texcoord_buffer_info = try load_buffer.loadBufferIntoGpu([2]f32, gctx, .vertex, buffers.texcoord);
-        const index_buffer_info = try load_buffer.loadBufferIntoGpu([3]u16, gctx, .index, buffers.indexes);
+        const positions_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, buffers.positions);
+        const normal_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, buffers.normals);
+        const texcoord_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, buffers.texcoord);
+        const index_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .index, buffers.indexes);
 
         const color_texture = try load_texture.loadTextureIntoGpu(
             gctx,

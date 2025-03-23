@@ -1,8 +1,6 @@
 const std = @import("std");
 const gltf_loader = @import("gltf_loader");
 
-const OutputStruct = gltf_loader.ModelBuffer([3]f32);
-
 pub const QuadData = struct {
     data: [][3]f32,
     buffer: []align(4) u8,
