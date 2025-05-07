@@ -69,7 +69,7 @@ pub const InputController = struct {
         }
     }
 
-    pub fn updateMouseState(input_controller: *InputController) void {
+    pub fn updateMouseState(input_controller: *InputController) !void {
         const window = input_controller.window;
 
         const new_position = getCursorPosition(window);
@@ -94,9 +94,9 @@ pub const InputController = struct {
             input_controller.cursor_left_button_pressed = cursor_left_button_pressed;
 
             if (cursor_left_button_pressed) {
-                window.setInputMode(.cursor, zglfw.Cursor.Mode.disabled);
+                try window.setInputMode(.cursor, zglfw.Cursor.Mode.disabled);
             } else {
-                window.setInputMode(.cursor, zglfw.Cursor.Mode.normal);
+                try window.setInputMode(.cursor, zglfw.Cursor.Mode.normal);
             }
         }
 

@@ -56,12 +56,18 @@ pub fn main() !void {
         break :id try engine.loadModel(&loader, object);
     };
 
-    const toontown_central_model_id = id: {
+    const ids = ids: {
         const loader = try engine.initLoader("toontown-central/scene.gltf");
         defer loader.deinit();
 
         const object = loader.findFirstObjectWithMesh().?;
-        break :id try engine.loadModel(&loader, object);
+        const model_id = try engine.loadModel(&loader, object);
+
+        const gazebo = try loader.getObjectByName("ttc_gazebo_11");
+        const gazebo_mesh = loader.findFirstObjectWithMeshNested(gazebo).?;
+        const gazebo_model_id = try engine.loadModel(&loader, gazebo_mesh);
+
+        break :ids .{ .model_id = model_id, .gazebo_model_id = gazebo_model_id };
     };
 
     var window_block_model = try engine.loadWindowBoxModel("window-block/wb-texture.png");
@@ -88,7 +94,12 @@ pub fn main() !void {
 
     // _ = toontown_central_model_id;
     try game.saved_game_objects.put("toontown_1", try scene.addObject(.{
-        .model_id = toontown_central_model_id,
+        .model_id = ids.model_id,
+        .position = .{ 0, 0, 0 },
+    }));
+
+    try game.saved_game_objects.put("gazebo", try scene.addObject(.{
+        .model_id = ids.gazebo_model_id,
         .position = .{ 0, 0, 0 },
     }));
 

@@ -10,7 +10,7 @@ pub const WindowContext = struct {
     pub fn init(allocator: std.mem.Allocator) !WindowContext {
         try zglfw.init();
 
-        zglfw.windowHintTyped(.client_api, .no_api);
+        zglfw.windowHint(.client_api, .no_api);
 
         const window_title = "zig-engine";
         const window = try zglfw.Window.create(800, 600, window_title, null);

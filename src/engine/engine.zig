@@ -156,10 +156,10 @@ pub const Engine = struct {
         return scene;
     }
 
-    pub fn update(engine: *Engine) void {
+    pub fn update(engine: *Engine) !void {
         engine.time = engine.gctx.stats.time - engine.init_time;
 
-        engine.input_controller.updateMouseState();
+        try engine.input_controller.updateMouseState();
 
         if (engine.active_scene) |scene| {
             const swapchain = engine.gctx.swapchain_descriptor;
@@ -423,7 +423,7 @@ pub const Engine = struct {
 
             // slowOperation();
 
-            engine.update();
+            try engine.update();
             const gctx_state = engine.draw();
 
             switch (gctx_state) {

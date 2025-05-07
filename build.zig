@@ -50,7 +50,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
     });
     exe.root_module.addImport("zstbi", zstbi.module("root"));
-    exe.linkLibrary(zstbi.artifact("zstbi"));
 
     const gltf_loader = b.dependency("gltf_loader", .{
         .target = target,
