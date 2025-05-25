@@ -3,6 +3,7 @@ const zmath = @import("zmath");
 
 const Engine = @import("./engine.zig").Engine;
 const GameObject = @import("./game_object.zig").GameObject;
+const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;
 const WindowBoxModel = @import("./model.zig").WindowBoxModel;
 const Camera = @import("./camera.zig").Camera;
 const SpectatorCamera = @import("./spectator_camera.zig").SpectatorCamera;
@@ -11,6 +12,7 @@ pub const Scene = struct {
     engine: *Engine,
     allocator: std.mem.Allocator,
     game_objects: std.ArrayList(*GameObject),
+    root_groups: std.ArrayList(*GameObjectGroup),
     camera: *Camera,
     spectator_camera: *SpectatorCamera,
     previous_frame_time: f64,
@@ -27,6 +29,9 @@ pub const Scene = struct {
         const game_objects = std.ArrayList(*GameObject).init(allocator);
         errdefer game_objects.deinit();
 
+        const root_groups = std.ArrayList(*GameObjectGroup).init(allocator);
+        errdefer root_groups.deinit();
+
         const camera = try allocator.create(Camera);
         errdefer allocator.destroy(camera);
         camera.* = Camera.init(screen_width, screen_height);
@@ -39,6 +44,7 @@ pub const Scene = struct {
             .engine = engine,
             .allocator = allocator,
             .game_objects = game_objects,
+            .root_groups = root_groups,
             .camera = camera,
             .spectator_camera = spectator_camera,
             .previous_frame_time = 0,
@@ -47,15 +53,27 @@ pub const Scene = struct {
     }
 
     pub fn deinit(scene: *Scene) void {
+        for (scene.root_groups.items) |root_group| {
+            root_group.deinit_recursively();
+        }
+        scene.root_groups.deinit();
+
         for (scene.game_objects.items) |game_object| {
             scene.allocator.destroy(game_object);
         }
         scene.game_objects.deinit();
+
         scene.spectator_camera.deinit();
         scene.camera.deinit();
         scene.allocator.destroy(scene.camera);
         scene.allocator.destroy(scene.spectator_camera);
         scene.allocator.destroy(scene);
+    }
+
+    pub fn addGroup(scene: *Scene) !*GameObjectGroup {
+        const new_group = try GameObjectGroup.init(scene.allocator);
+        try scene.root_groups.append(new_group);
+        return new_group;
     }
 
     pub fn addObject(scene: *Scene, params: AddObjectParams) !*GameObject {

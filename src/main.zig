@@ -4,6 +4,7 @@ const math = std.math;
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 const zgui = @import("zgui");
+const gltf_loader = @import("gltf_loader");
 const content_dir = @import("build_options").content_dir;
 
 const WindowContext = @import("./engine/glue.zig").WindowContext;
@@ -11,6 +12,8 @@ const WindowContext = @import("./engine/glue.zig").WindowContext;
 // const Engine = @import("./engine/Engine.zig").Engine;
 const Engine = @import("./engine/engine.zig").Engine;
 const GameObject = @import("./engine/game_object.zig").GameObject;
+const GameObjectGroup = @import("./engine/game_object_group.zig").GameObjectGroup;
+const Scene = @import("./engine/scene.zig").Scene;
 const debug = @import("./engine/debug.zig");
 
 const Game = struct {
@@ -56,7 +59,7 @@ pub fn main() !void {
         break :id try engine.loadModel(&loader, object);
     };
 
-    const ids = ids: {
+    const model_id, const gazebo_model_id = ids: {
         const loader = try engine.initLoader("toontown-central/scene.gltf");
         defer loader.deinit();
 
@@ -67,8 +70,21 @@ pub fn main() !void {
         const gazebo_mesh = loader.findFirstObjectWithMeshNested(gazebo).?;
         const gazebo_model_id = try engine.loadModel(&loader, gazebo_mesh);
 
-        break :ids .{ .model_id = model_id, .gazebo_model_id = gazebo_model_id };
+        break :ids .{ model_id, gazebo_model_id };
     };
+
+    const scene = try engine.createScene();
+    defer scene.deinit();
+
+    scene.camera.updatePosition(.{ 0, -2, 0 });
+
+    {
+        const loader = try engine.initLoader("toontown-central/scene.gltf");
+        defer loader.deinit();
+
+        const group = try scene.addGroup();
+        try traverseGroup(engine, scene, group, loader, loader.root);
+    }
 
     var window_block_model = try engine.loadWindowBoxModel("window-block/wb-texture.png");
     // TODO: Move cleanup to the engine
@@ -76,11 +92,6 @@ pub fn main() !void {
         window_block_model.deinit(engine.gctx);
         allocator.destroy(window_block_model);
     }
-
-    const scene = try engine.createScene();
-    defer scene.deinit();
-
-    scene.camera.updatePosition(.{ 0, -2, 0 });
 
     try game.saved_game_objects.put("man_1", try scene.addObject(.{
         .model_id = man_model_id,
@@ -94,12 +105,12 @@ pub fn main() !void {
 
     // _ = toontown_central_model_id;
     try game.saved_game_objects.put("toontown_1", try scene.addObject(.{
-        .model_id = ids.model_id,
+        .model_id = model_id,
         .position = .{ 0, 0, 0 },
     }));
 
     try game.saved_game_objects.put("gazebo", try scene.addObject(.{
-        .model_id = ids.gazebo_model_id,
+        .model_id = gazebo_model_id,
         .position = .{ 0, 0, 0 },
     }));
 
@@ -177,4 +188,25 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
     _ = game_opaque;
 
     // zgui.backend.draw(pass);
+}
+
+fn traverseGroup(engine: *Engine, scene: *Scene, group: *GameObjectGroup, loader: gltf_loader.GltfLoader, node: gltf_loader.SceneObject) !void {
+    if (node.children != null) {
+        const sub_group = try group.addGroup();
+
+        for (node.children.?) |child| {
+            try traverseGroup(engine, scene, sub_group, loader, child);
+        }
+    } else if (node.mesh != null) {
+        const model_id = try engine.loadModel(&loader, &node);
+
+        std.debug.print("adding model {s}\n", .{node.name orelse "no name"});
+
+        const game_object = try scene.addObject(.{
+            .model_id = model_id,
+            .position = .{ 0, 0, 0 },
+        });
+
+        try group.addObject(game_object);
+    }
 }
