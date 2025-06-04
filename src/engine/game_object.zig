@@ -33,6 +33,7 @@ pub const GameObject = struct {
     position: [3]f32,
     rotation: zmath.Quat,
     scale: f32,
+    aggregated_matrix: zmath.Mat = zmath.identity(),
     bounding_radius: f32,
     model: ModelUnion,
     _gc: ?*GameObject,

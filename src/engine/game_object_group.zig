@@ -13,6 +13,7 @@ pub const GameObjectGroup = struct {
     position: [3]f32,
     rotation: zmath.Quat = zmath.quatFromRollPitchYaw(0, 0, 0),
     scale: f32 = 1,
+    aggregated_mat: zmath.Mat = zmath.identity(),
     // bounding_radius: f32,
     children: std.ArrayList(GroupChild),
     _gc: ?*GameObjectGroup,
@@ -69,5 +70,6 @@ pub const GameObjectGroup = struct {
         added.* = .{
             .game_object = game_object,
         };
+        game_object.aggregated_matrix = group.aggregated_mat;
     }
 };
