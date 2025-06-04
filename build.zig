@@ -57,6 +57,14 @@ pub fn build(b: *std.Build) void {
     gltf_loader.module("root").addImport("zstbi", zstbi.module("root"));
     exe.root_module.addImport("gltf_loader", gltf_loader.module("root"));
 
+    // Local modules
+
+    const debug_module = b.addModule("debug", .{
+        .root_source_file = b.path("src/modules/debug/debug.zig"),
+    });
+    debug_module.addImport("zmath", zmath.module("root"));
+    exe.root_module.addImport("debug", debug_module);
+
     // Deps end
 
     const exe_options = b.addOptions();
@@ -101,6 +109,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    exe_unit_tests.root_module.addImport("zmath", zmath.module("root"));
+
+    const loader_utils_unit_tests = b.addTest(.{
+        .root_source_file = b.path("src/loader_utils/utils.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    loader_utils_unit_tests.root_module.addImport("zmath", zmath.module("root"));
+    loader_utils_unit_tests.root_module.addImport("debug", debug_module);
 
     const space_tree_unit_tests = b.addTest(.{
         .root_source_file = b.path("src/engine/space_tree.zig"),
@@ -110,9 +127,11 @@ pub fn build(b: *std.Build) void {
     space_tree_unit_tests.root_module.addImport("zmath", zmath.module("root"));
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
+    const run_loader_utils_unit_tests = b.addRunArtifact(loader_utils_unit_tests);
     const run_space_tree_unit_tests = b.addRunArtifact(space_tree_unit_tests);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
+    test_step.dependOn(&run_loader_utils_unit_tests.step);
     test_step.dependOn(&run_space_tree_unit_tests.step);
 }

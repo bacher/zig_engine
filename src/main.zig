@@ -7,6 +7,7 @@ const zgui = @import("zgui");
 const gltf_loader = @import("gltf_loader");
 const content_dir = @import("build_options").content_dir;
 
+const debug = @import("debug");
 const WindowContext = @import("./engine/glue.zig").WindowContext;
 // BUG: if put "Engine.zig" instead of "engine.zig" imports get broken
 // const Engine = @import("./engine/Engine.zig").Engine;
@@ -14,7 +15,7 @@ const Engine = @import("./engine/engine.zig").Engine;
 const GameObject = @import("./engine/game_object.zig").GameObject;
 const GameObjectGroup = @import("./engine/game_object_group.zig").GameObjectGroup;
 const Scene = @import("./engine/scene.zig").Scene;
-const debug = @import("./engine/debug.zig");
+const loader_utils = @import("./loader_utils/utils.zig");
 
 const Game = struct {
     saved_game_objects: std.StringHashMap(*GameObject),
@@ -59,18 +60,15 @@ pub fn main() !void {
         break :id try engine.loadModel(&loader, object);
     };
 
-    const model_id, const gazebo_model_id = ids: {
+    const gazebo_model_id = ids: {
         const loader = try engine.initLoader("toontown-central/scene.gltf");
         defer loader.deinit();
-
-        const object = loader.findFirstObjectWithMesh().?;
-        const model_id = try engine.loadModel(&loader, object);
 
         const gazebo = try loader.getObjectByName("ttc_gazebo_11");
         const gazebo_mesh = loader.findFirstObjectWithMeshNested(gazebo).?;
         const gazebo_model_id = try engine.loadModel(&loader, gazebo_mesh);
 
-        break :ids .{ model_id, gazebo_model_id };
+        break :ids .{gazebo_model_id};
     };
 
     const scene = try engine.createScene();
@@ -82,11 +80,8 @@ pub fn main() !void {
         const loader = try engine.initLoader("toontown-central/scene.gltf");
         defer loader.deinit();
 
-        const group = try scene.addGroup();
-        if (loader.root.transform_matrix) |matrix| {
-            group.aggregated_mat = zmath.matFromArr(matrix.*);
-        }
-        try traverseGroup(engine, scene, group, loader, loader.root);
+        const root_group = try scene.addGroup();
+        try traverseGroup(engine, scene, root_group, loader, loader.root, 0);
     }
 
     var window_block_model = try engine.loadWindowBoxModel("window-block/wb-texture.png");
@@ -106,16 +101,11 @@ pub fn main() !void {
         .position = .{ 4, 0, 0 },
     }));
 
-    // _ = toontown_central_model_id;
-    try game.saved_game_objects.put("toontown_1", try scene.addObject(.{
-        .model_id = model_id,
-        .position = .{ 0, 0, 0 },
-    }));
-
-    try game.saved_game_objects.put("gazebo", try scene.addObject(.{
-        .model_id = gazebo_model_id,
-        .position = .{ 0, 0, 0 },
-    }));
+    _ = gazebo_model_id;
+    // try game.saved_game_objects.put("gazebo", try scene.addObject(.{
+    //     .model_id = gazebo_model_id,
+    //     .position = .{ 0, 0, 0 },
+    // }));
 
     const window_box_1 = try scene.addWindowBoxObject(.{
         .model = window_block_model,
@@ -196,37 +186,61 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
 fn traverseGroup(
     engine: *Engine,
     scene: *Scene,
-    group: *GameObjectGroup,
+    parent_group: *GameObjectGroup,
     loader: gltf_loader.GltfLoader,
     node: gltf_loader.SceneObject,
+    nesting_level: u32,
 ) !void {
+    const StaticState = struct {
+        var object_index: u32 = 0;
+        var groups: std.ArrayListUnmanaged(*GameObjectGroup) = .{};
+    };
+
     if (node.children != null) {
-        const sub_group = try group.addGroup();
+        const group = try parent_group.addGroup();
 
         if (node.transform_matrix) |node_matrix| {
-            sub_group.aggregated_mat = zmath.mul(
-                group.aggregated_mat,
-                zmath.matFromArr(node_matrix.*),
+            group.aggregated_mat = zmath.mul(
+                parent_group.aggregated_mat,
+                loader_utils.convertMatFromUpYToZ(zmath.matFromArr(node_matrix.*)),
             );
         } else {
-            sub_group.aggregated_mat = group.aggregated_mat;
+            group.aggregated_mat = parent_group.aggregated_mat;
         }
 
-        for (node.children.?) |child| {
-            try traverseGroup(engine, scene, sub_group, loader, child);
+        try StaticState.groups.append(engine.allocator, group);
+
+        // +DEBUG
+        if (node.name != null and std.mem.eql(u8, node.name.?, "ttc_gazebo_11")) {
+            std.debug.print("Group lvl={d}: {s}\n", .{ nesting_level, node.name orelse "empty" });
+
+            for (StaticState.groups.items, 0..) |iter_group, index| {
+                std.debug.print("{d}:\n", .{index});
+                debug.printMat(iter_group.aggregated_mat);
+            }
         }
+        // -DEBUG
+
+        for (node.children.?) |child| {
+            try traverseGroup(engine, scene, group, loader, child, nesting_level + 1);
+        }
+
+        _ = StaticState.groups.pop();
     } else if (node.mesh != null) {
         const model_id = try engine.loadModel(&loader, &node);
 
         // Assuming that nodes with mesh can't also have transform_matrix
         std.debug.assert(node.transform_matrix == null);
 
-        std.debug.print("adding model {s}\n", .{node.name orelse "no name"});
+        StaticState.object_index += 1;
 
+        // if (StaticState.object_index <= 1 or (StaticState.object_index >= 115 and StaticState.object_index < 122)) {
+        std.debug.print("adding model {s}\n", .{node.name orelse "no name"});
         const game_object = try scene.addObject(.{
             .model_id = model_id,
             .position = .{ 0, 0, 0 },
         });
-        try group.addObject(game_object);
+        try parent_group.addObject(game_object);
+        // }
     }
 }

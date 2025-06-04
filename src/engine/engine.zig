@@ -7,6 +7,7 @@ const zmath = @import("zmath");
 const zstbi = @import("zstbi");
 const gltf_loader = @import("gltf_loader");
 
+const debug = @import("debug");
 const types = @import("./types.zig");
 const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
@@ -22,7 +23,6 @@ const WindowBoxModel = @import("./model.zig").WindowBoxModel;
 const Scene = @import("./scene.zig").Scene;
 const Camera = @import("./camera.zig").Camera;
 const InputController = @import("./input_controller.zig").InputController;
-const debug = @import("./debug.zig");
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 

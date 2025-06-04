@@ -2,7 +2,7 @@ const std = @import("std");
 const math = std.math;
 const zmath = @import("zmath");
 
-const debug = @import("debug.zig");
+const debug = @import("debug");
 
 pub const Camera = struct {
     screen_width: u32,

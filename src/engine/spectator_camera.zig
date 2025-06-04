@@ -1,9 +1,9 @@
 const std = @import("std");
 const zmath = @import("zmath");
 
+const debug = @import("debug");
 const Camera = @import("camera.zig").Camera;
 const InputController = @import("input_controller.zig").InputController;
-const debug = @import("debug.zig");
 
 const zero_vec = zmath.Vec{ 0, 0, 0, 0 };
 
