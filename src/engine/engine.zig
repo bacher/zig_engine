@@ -242,6 +242,12 @@ pub const Engine = struct {
                             ),
                         );
 
+                        // Is it correct order?
+                        model_to_world = zmath.mul(
+                            game_object.aggregated_matrix,
+                            model_to_world,
+                        );
+
                         var flip_yz = false;
                         switch (game_object.model) {
                             .regular_model => |model| {

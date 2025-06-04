@@ -83,6 +83,9 @@ pub fn main() !void {
         defer loader.deinit();
 
         const group = try scene.addGroup();
+        if (loader.root.transform_matrix) |matrix| {
+            group.aggregated_mat = zmath.matFromArr(matrix.*);
+        }
         try traverseGroup(engine, scene, group, loader, loader.root);
     }
 
@@ -190,9 +193,24 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
     // zgui.backend.draw(pass);
 }
 
-fn traverseGroup(engine: *Engine, scene: *Scene, group: *GameObjectGroup, loader: gltf_loader.GltfLoader, node: gltf_loader.SceneObject) !void {
+fn traverseGroup(
+    engine: *Engine,
+    scene: *Scene,
+    group: *GameObjectGroup,
+    loader: gltf_loader.GltfLoader,
+    node: gltf_loader.SceneObject,
+) !void {
     if (node.children != null) {
         const sub_group = try group.addGroup();
+
+        if (node.transform_matrix) |node_matrix| {
+            sub_group.aggregated_mat = zmath.mul(
+                group.aggregated_mat,
+                zmath.matFromArr(node_matrix.*),
+            );
+        } else {
+            sub_group.aggregated_mat = group.aggregated_mat;
+        }
 
         for (node.children.?) |child| {
             try traverseGroup(engine, scene, sub_group, loader, child);
@@ -200,13 +218,15 @@ fn traverseGroup(engine: *Engine, scene: *Scene, group: *GameObjectGroup, loader
     } else if (node.mesh != null) {
         const model_id = try engine.loadModel(&loader, &node);
 
+        // Assuming that nodes with mesh can't also have transform_matrix
+        std.debug.assert(node.transform_matrix == null);
+
         std.debug.print("adding model {s}\n", .{node.name orelse "no name"});
 
         const game_object = try scene.addObject(.{
             .model_id = model_id,
             .position = .{ 0, 0, 0 },
         });
-
         try group.addObject(game_object);
     }
 }
