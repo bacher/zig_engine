@@ -83,7 +83,10 @@
         },
 
         .gltf_loader = .{
-            .path = "../gltf_loader",
+            // For local dev:
+            // .path = "../gltf_loader",
+            .url = "git+https://github.com/bacher/gltf_loader#99a56cdd54cd4e17e61010c597e5ae1c2df328fa",
+            .hash = "gltf_loader-0.0.0-bMyl_DN6AACU5w7w6-C3F_YZw1Zt9U4NFzr1ECMvVZEj",
         },
     },
 
