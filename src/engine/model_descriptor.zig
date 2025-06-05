@@ -35,7 +35,8 @@ pub const ModelDescriptor = struct {
         defer buffers.deinit(arena_allocator);
 
         // TODO:
-        var color_texture_image = try loader.loadTextureData("../man/man.png");
+        // var color_texture_image = try loader.loadTextureData("../man/man.png");
+        var color_texture_image = try loader.loadTextureData("../uv-test.png");
         defer color_texture_image.deinit();
 
         const positions_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, buffers.positions);
