@@ -8,6 +8,10 @@ zig build run
 
 ## Versions
 
+### v0.0.1
+
+![v0.0.1](screenshots/2025-06-05.jpg)
+
 ### v0.0.0
 
 ![v0.0.0](screenshots/2025-06-04.jpg)
