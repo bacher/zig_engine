@@ -13,8 +13,12 @@ pub fn loadTextureIntoGpu(
     gctx: *zgpu.GraphicsContext,
     allocator: std.mem.Allocator,
     image: zstbi.Image,
-    options: ?LoadTextureOptions,
+    options_maybe: ?LoadTextureOptions,
 ) !TextureDescriptor {
+    const options: LoadTextureOptions = options_maybe orelse .{
+        .generate_mipmaps = false,
+    };
+
     const texture_handle = gctx.createTexture(.{
         .usage = .{
             .texture_binding = true,
@@ -31,7 +35,10 @@ pub fn loadTextureIntoGpu(
             image.bytes_per_component,
             image.is_hdr,
         ),
-        .mip_level_count = std.math.log2_int(u32, @max(image.width, image.height)) + 1,
+        .mip_level_count = if (options.generate_mipmaps)
+            std.math.log2_int(u32, @max(image.width, image.height)) + 1
+        else
+            1,
     });
 
     const view_handle = gctx.createTextureView(texture_handle, .{});
@@ -57,10 +64,8 @@ pub fn loadTextureIntoGpu(
         .view = view,
     };
 
-    if (options) |opt| {
-        if (opt.generate_mipmaps) {
-            try texture_descriptor.generateMipmaps(gctx, allocator);
-        }
+    if (options.generate_mipmaps) {
+        try texture_descriptor.generateMipmaps(gctx, allocator);
     }
 
     return texture_descriptor;

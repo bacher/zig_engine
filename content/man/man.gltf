@@ -988,6 +988,9 @@
         "baseColorFactor": [
           0.58684903383255, 0.58684903383255, 0.58684903383255, 1
         ],
+        "baseColorTexture": {
+          "index": 0
+        },
         "metallicFactor": 0,
         "roughnessFactor": 0.5
       }
@@ -1786,6 +1789,25 @@
     {
       "byteLength": 91220,
       "uri": "man.bin"
+    }
+  ],
+  "samplers": [
+    {
+      "magFilter": 9729,
+      "minFilter": 9987,
+      "wrapS": 10497,
+      "wrapT": 10497
+    }
+  ],
+  "textures": [
+    {
+      "sampler": 0,
+      "source": 0
+    }
+  ],
+  "images": [
+    {
+      "uri": "man.png"
     }
   ]
 }
