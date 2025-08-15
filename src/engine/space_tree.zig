@@ -1,12 +1,17 @@
 const std = @import("std");
 const math = std.math;
 
+const DEBUG = false;
+const STRICT = true;
+
 const MAX_LEVEL = 4;
-const GRID_DIMENSTION = 4;
+const GRID_DIMENSTION = 16;
 const GRID_OFFSET: u8 = @divExact(GRID_DIMENSTION, 2);
 const CHILD_NODE_COUNT = 8;
 
-const sizes = [MAX_LEVEL + 1]f32{ 16, 8, 4, 2, 1 };
+// const sizes = [MAX_LEVEL + 1]f32{ 16, 8, 4, 2, 1 };
+const sizes = [MAX_LEVEL + 1]f32{ 32, 16, 8, 4, 2 };
+// const sizes = [MAX_LEVEL + 1]f32{ 64, 32, 16, 8, 4 };
 const radiuses = radiuses: {
     var arr: [MAX_LEVEL + 1]f32 = undefined;
     for (sizes, 0..) |size, index| {
@@ -65,6 +70,8 @@ pub fn SpaceTree(comptime ElementType: type) type {
                 for (0..GRID_DIMENSTION) |index_x| {
                     const child_node = space_tree.grid[index_x][index_y];
                     space_tree.destroyLevel(child_node);
+
+                    child_node.deinit(space_tree.allocator);
                     space_tree.allocator.destroy(child_node);
                 }
             }
@@ -73,41 +80,64 @@ pub fn SpaceTree(comptime ElementType: type) type {
         }
 
         pub fn addObject(space_tree: *const This, object: *const ElementType) !void {
-            std.debug.print("add object at the root level, center=({d},{d},{d}) r={d}\n", .{
-                object.position[0],
-                object.position[1],
-                object.position[2],
-                object.radius,
-            });
+            if (DEBUG) {
+                std.debug.print("add object at the root level, center=({d},{d},{d}) r={d}\n", .{
+                    object.position[0],
+                    object.position[1],
+                    object.position[2],
+                    object.bounding_radius,
+                });
+            }
 
             const bound_box: BoundBox(f32) = .{
                 .x = .{
-                    .start = object.position[0] - object.radius,
-                    .end = object.position[0] + object.radius,
+                    .start = object.position[0] - object.bounding_radius,
+                    .end = object.position[0] + object.bounding_radius,
                 },
                 .y = .{
-                    .start = object.position[1] - object.radius,
-                    .end = object.position[1] + object.radius,
+                    .start = object.position[1] - object.bounding_radius,
+                    .end = object.position[1] + object.bounding_radius,
                 },
                 .z = .{
-                    .start = object.position[2] - object.radius,
-                    .end = object.position[2] + object.radius,
+                    .start = object.position[2] - object.bounding_radius,
+                    .end = object.position[2] + object.bounding_radius,
                 },
             };
 
-            std.debug.print("bounding box, x=({d} {d})\n", .{ bound_box.x.start, bound_box.x.end });
-            std.debug.print("              y=({d} {d})\n", .{ bound_box.y.start, bound_box.y.end });
-            std.debug.print("              z=({d} {d})\n", .{ bound_box.z.start, bound_box.z.end });
+            if (DEBUG) {
+                std.debug.print("bounding box, x=({d} {d})\n", .{ bound_box.x.start, bound_box.x.end });
+                std.debug.print("              y=({d} {d})\n", .{ bound_box.y.start, bound_box.y.end });
+                std.debug.print("              z=({d} {d})\n", .{ bound_box.z.start, bound_box.z.end });
+            }
 
-            const x0: u8 = @intCast(@as(i8, @intFromFloat(@floor(bound_box.x.start * GRID_NODE_SIZE_INV))) + GRID_OFFSET);
-            const x1: u8 = @intCast(@as(i8, @intFromFloat(@ceil(bound_box.x.end * GRID_NODE_SIZE_INV))) + GRID_OFFSET);
+            const x0 = @as(i32, @intFromFloat(@floor(bound_box.x.start * GRID_NODE_SIZE_INV))) + GRID_OFFSET;
+            const x1 = @as(i32, @intFromFloat(@ceil(bound_box.x.end * GRID_NODE_SIZE_INV))) + GRID_OFFSET;
 
-            const y0: u8 = @intCast(@as(i8, @intFromFloat(@floor(bound_box.y.start * GRID_NODE_SIZE_INV))) + GRID_OFFSET);
-            const y1: u8 = @intCast(@as(i8, @intFromFloat(@ceil(bound_box.y.end * GRID_NODE_SIZE_INV))) + GRID_OFFSET);
+            const y0 = @as(i32, @intFromFloat(@floor(bound_box.y.start * GRID_NODE_SIZE_INV))) + GRID_OFFSET;
+            const y1 = @as(i32, @intFromFloat(@ceil(bound_box.y.end * GRID_NODE_SIZE_INV))) + GRID_OFFSET;
 
-            for (x0..x1) |x| {
-                for (y0..y1) |y| {
-                    std.debug.print("sub nodes: {} {}\n", .{ x, y });
+            if (DEBUG) {
+                if (x0 == x1 and y0 == y1) {
+                    std.debug.print("node: {},{}\n", .{ x0, y0 });
+                } else {
+                    std.debug.print("nodes: {},{} to {},{}\n", .{ x0, y0, x1, y1 });
+                }
+            }
+
+            if (STRICT) {
+                if (x0 >= GRID_DIMENSTION or x1 >= GRID_DIMENSTION or y0 >= GRID_DIMENSTION or y1 >= GRID_DIMENSTION or x0 < 0 or x1 < 0 or y0 < 0 or y1 < 0) {
+                    std.debug.print("[STRICT] object bound box is partially out of the grid bounds, center=({d},{d},{d}) r={d}\n", .{
+                        object.position[0],
+                        object.position[1],
+                        object.position[2],
+                        object.bounding_radius,
+                    });
+                    std.debug.print("[STRICT]   nodes: {},{} to {},{}\n", .{ x0, y0, x1, y1 });
+                }
+            }
+
+            for (@intCast(@max(0, x0))..@intCast(@min(GRID_DIMENSTION, x1))) |x| {
+                for (@intCast(@max(0, y0))..@intCast(@min(GRID_DIMENSTION, y1))) |y| {
                     try space_tree.grid[x][y].addObject(space_tree.allocator, object, bound_box);
                 }
             }
@@ -223,14 +253,14 @@ fn SpaceNode(comptime ElementType: type) type {
             );
 
             // if bounding spheres does not intersect then skip object
-            if (len >= radiuses[space_node.level] + object.radius) {
-                // std.debug.print("len={d} Rc={d} Ro={d}\n", .{ len, radiuses[space_node.level], object.radius });
+            if (len >= radiuses[space_node.level] + object.bounding_radius) {
+                // std.debug.print("len={d} Rc={d} Ro={d}\n", .{ len, radiuses[space_node.level], object.bounding_radius });
                 // std.debug.print("spheres are not intersecing, skip\n", .{});
                 return;
             }
 
             // if cell sphere is fully inside of object sphere
-            if (len + radiuses[space_node.level] <= object.radius) {
+            if (len + radiuses[space_node.level] <= object.bounding_radius) {
                 try space_node.contained_objects.put(allocator, object, true);
                 // std.debug.print("full contained, skipping subdivision\n", .{});
                 return;
@@ -296,7 +326,7 @@ fn SpaceNode(comptime ElementType: type) type {
 const TestObject = struct {
     id: u64,
     position: [3]f32,
-    radius: f32,
+    bounding_radius: f32,
 };
 
 fn Range(comptime ElementType: type) type {
@@ -349,7 +379,7 @@ test "init" {
     // const obj_1: TestObject = .{
     //     .id = 42,
     //     .position = .{ 8, 3.4, 3.2 },
-    //     .radius = 0.8,
+    //     .bounding_radius = 0.8,
     // };
     //
     // try space_tree.addObject(&obj_1);
@@ -359,7 +389,7 @@ test "init" {
     const obj_2: TestObject = .{
         .id = 43,
         .position = .{ 8, 3.4, 3.2 },
-        .radius = 5,
+        .bounding_radius = 5,
     };
 
     try space_tree.addObject(&obj_2);

@@ -6,6 +6,7 @@ const GameObject = @import("./game_object.zig").GameObject;
 const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;
 const WindowBoxModel = @import("./model.zig").WindowBoxModel;
 const Camera = @import("./camera.zig").Camera;
+const SpaceTree = @import("./space_tree.zig").SpaceTree;
 const SpectatorCamera = @import("./spectator_camera.zig").SpectatorCamera;
 
 pub const Scene = struct {
@@ -13,6 +14,7 @@ pub const Scene = struct {
     allocator: std.mem.Allocator,
     game_objects: std.ArrayList(*GameObject),
     root_groups: std.ArrayList(*GameObjectGroup),
+    space_tree: *SpaceTree(GameObject),
     camera: *Camera,
     spectator_camera: *SpectatorCamera,
     previous_frame_time: f64,
@@ -32,6 +34,9 @@ pub const Scene = struct {
         const root_groups = std.ArrayList(*GameObjectGroup).init(allocator);
         errdefer root_groups.deinit();
 
+        const space_tree = try SpaceTree(GameObject).init(allocator);
+        errdefer space_tree.deinit();
+
         const camera = try allocator.create(Camera);
         errdefer allocator.destroy(camera);
         camera.* = Camera.init(screen_width, screen_height);
@@ -45,6 +50,7 @@ pub const Scene = struct {
             .allocator = allocator,
             .game_objects = game_objects,
             .root_groups = root_groups,
+            .space_tree = space_tree,
             .camera = camera,
             .spectator_camera = spectator_camera,
             .previous_frame_time = 0,
@@ -53,6 +59,8 @@ pub const Scene = struct {
     }
 
     pub fn deinit(scene: *Scene) void {
+        scene.space_tree.deinit();
+
         for (scene.root_groups.items) |root_group| {
             root_group.deinit_recursively();
         }
@@ -87,6 +95,8 @@ pub const Scene = struct {
             errdefer game_object.deinit();
 
             try scene.game_objects.append(game_object);
+
+            try scene.space_tree.addObject(game_object);
 
             return game_object;
         } else {
