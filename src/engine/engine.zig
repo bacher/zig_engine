@@ -330,7 +330,7 @@ pub const Engine = struct {
                             },
                             .primitive_colorized => |primitive_colorized_model| {
                                 const solid_color_uniform = gctx.uniformsAllocate(zmath.Vec, 1);
-                                solid_color_uniform.slice[0] = .{ 1.0, 0.0, 0.0, 1.0 }; // TODO: red for test
+                                solid_color_uniform.slice[0] = game_object.debug.color;
 
                                 pass.setBindGroup(0, primitive_colorized_model.bind_group_descriptor.bind_group, &.{
                                     object_to_clip_uniform.offset,

@@ -140,10 +140,17 @@ pub fn main() !void {
     defer tube_data.deinit(allocator);
     const tube_model = try engine.loadPrimitive(tube_data);
 
-    _ = try scene.addPrimitiveObject(.{
+    const tube_red = try scene.addPrimitiveObject(.{
         .model = tube_model,
         .position = .{ 0, 0, 0 },
     });
+    tube_red.debug.color = .{ 1.0, 0.0, 0.0, 1.0 };
+
+    const tube_green = try scene.addPrimitiveObject(.{
+        .model = tube_model,
+        .position = .{ 0, 0, 1.0 },
+    });
+    tube_green.debug.color = .{ 0.0, 1.0, 0.0, 1.0 };
 
     // const scale_factor = scale_factor: {
     //     const scale = window_context.window.getContentScale();

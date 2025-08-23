@@ -41,6 +41,9 @@ pub const GameObject = struct {
     aggregated_matrix: zmath.Mat = zmath.identity(),
     bounding_radius: f32,
     model: ModelUnion,
+    debug: struct {
+        color: [4]f32 = .{ 0.0, 0.0, 0.0, 1.0 },
+    } = .{},
     _gc: ?*GameObject,
 
     pub fn init(allocator: std.mem.Allocator, params: GameObjectInitParams) !*GameObject {
