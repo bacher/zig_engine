@@ -16,6 +16,7 @@ const GameObject = @import("./engine/game_object.zig").GameObject;
 const GameObjectGroup = @import("./engine/game_object_group.zig").GameObjectGroup;
 const Scene = @import("./engine/scene.zig").Scene;
 const loader_utils = @import("./loader_utils/utils.zig");
+const tube = @import("./engine/shape_generation/tube.zig");
 
 const Game = struct {
     saved_game_objects: std.StringHashMap(*GameObject),
@@ -134,6 +135,15 @@ pub fn main() !void {
             window_box.rotation = zmath.quatFromRollPitchYaw(0.5 * math.pi, 0, 0);
         }
     }
+
+    var tube_data = try tube.initUnitTube(allocator);
+    defer tube_data.deinit(allocator);
+    const tube_model = try engine.loadPrimitive(tube_data);
+
+    _ = try scene.addPrimitiveObject(.{
+        .model = tube_model,
+        .position = .{ 0, 0, 0 },
+    });
 
     // const scale_factor = scale_factor: {
     //     const scale = window_context.window.getContentScale();

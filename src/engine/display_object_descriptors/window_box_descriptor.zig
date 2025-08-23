@@ -4,10 +4,10 @@ const wgpu = zgpu.wgpu;
 const zstbi = @import("zstbi");
 const gltf_loader = @import("gltf_loader");
 
-const types = @import("./types.zig");
-const load_buffer = @import("./load_buffer.zig");
-const load_texture = @import("./load_texture.zig");
-const QuadData = @import("./shape_generation/quad.zig").QuadData;
+const types = @import("../types.zig");
+const load_buffer = @import("../load_buffer.zig");
+const load_texture = @import("../load_texture.zig");
+const quad = @import("../shape_generation/quad.zig");
 
 pub const WindowBoxDescriptor = struct {
     position: types.BufferDescriptor,
@@ -22,16 +22,16 @@ pub const WindowBoxDescriptor = struct {
         var color_texture_image = try loadTextureData(allocator, texture_filename);
         defer color_texture_image.deinit();
 
-        var quad = try QuadData.initCenteredQuad(allocator);
-        defer quad.deinit(allocator);
+        var quad_data = try quad.initCenteredQuad(allocator);
+        defer quad_data.deinit(allocator);
 
         // TODO: Can we omit using of gltf_loader.ModelBuffer?
         const vertex_data = gltf_loader.ModelBuffer{
             .type = .float,
             .component_number = 3,
-            .elements_count = @intCast(quad.data.len),
-            .byte_length = @intCast(@sizeOf([3]f32) * quad.data.len),
-            .buffer = quad.buffer,
+            .elements_count = @intCast(quad_data.data.len),
+            .byte_length = @intCast(@sizeOf([3]f32) * quad_data.data.len),
+            .buffer = quad_data.buffer,
         };
 
         const positions_buffer_info = try load_buffer.loadBufferIntoGpu(

@@ -5,6 +5,7 @@ const Engine = @import("./engine.zig").Engine;
 const GameObject = @import("./game_object.zig").GameObject;
 const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;
 const WindowBoxModel = @import("./model.zig").WindowBoxModel;
+const PrimitiveModel = @import("./model.zig").PrimitiveModel;
 const Camera = @import("./camera.zig").Camera;
 const SpaceTree = @import("./space_tree.zig").SpaceTree;
 const SpectatorCamera = @import("./spectator_camera.zig").SpectatorCamera;
@@ -119,6 +120,20 @@ pub const Scene = struct {
         return game_object;
     }
 
+    pub fn addPrimitiveObject(scene: *Scene, params: AddPrimitiveObjectParams) !*GameObject {
+        const game_object = try GameObject.init(scene.allocator, .{
+            .model = .{
+                .primitive_colorized = params.model,
+            },
+            .position = params.position,
+        });
+        errdefer game_object.deinit();
+
+        try scene.game_objects.append(game_object);
+
+        return game_object;
+    }
+
     pub fn update(scene: *Scene, time: f64) void {
         if (scene.previous_frame_time != 0) {
             const time_passed: f32 = @floatCast(time - scene.previous_frame_time);
@@ -141,5 +156,10 @@ pub const AddObjectParams = struct {
 
 pub const AddWindowBoxParams = struct {
     model: *WindowBoxModel,
+    position: [3]f32,
+};
+
+pub const AddPrimitiveObjectParams = struct {
+    model: *PrimitiveModel,
     position: [3]f32,
 };

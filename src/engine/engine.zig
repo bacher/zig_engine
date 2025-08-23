@@ -14,12 +14,17 @@ const WindowContext = @import("./glue.zig").WindowContext;
 const Pipeline = @import("./pipeline.zig").Pipeline;
 const basic_pipeline_module = @import("./pipelines/basic_pipeline.zig");
 const window_box_pipeline_module = @import("./pipelines/window_box_pipeline.zig");
+const primitive_colorized_pipeline_module = @import("./pipelines/primitive_colorized_pipeline.zig");
 const BindGroupDefinition = @import("./bind_group.zig").BindGroupDefinition;
+const PrimitiveColorizedBindGroupDefinition = @import("./bind_group_primitive.zig").PrimitiveColorizedBindGroupDefinition;
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
-const ModelDescriptor = @import("./model_descriptor.zig").ModelDescriptor;
-const WindowBoxDescriptor = @import("./window_box_descriptor.zig").WindowBoxDescriptor;
+const ModelDescriptor = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptor;
+const WindowBoxDescriptor = @import("./display_object_descriptors/window_box_descriptor.zig").WindowBoxDescriptor;
 const Model = @import("./model.zig").Model;
 const WindowBoxModel = @import("./model.zig").WindowBoxModel;
+const PrimitiveModel = @import("./model.zig").PrimitiveModel;
+const PrimitiveDescriptor = @import("./display_object_descriptors/primitive_descriptor.zig").PrimitiveDescriptor;
+const GeometryData = @import("./shape_generation/geometry_data.zig").GeometryData;
 const Scene = @import("./scene.zig").Scene;
 const Camera = @import("./camera.zig").Camera;
 const InputController = @import("./input_controller.zig").InputController;
@@ -51,8 +56,10 @@ pub const Engine = struct {
     pipelines: struct {
         basic: Pipeline,
         window_box: Pipeline,
+        primitive_colorized: Pipeline,
     },
     bind_group_definition: BindGroupDefinition,
+    bind_group_primitive_colorized_definition: PrimitiveColorizedBindGroupDefinition,
     depth_texture: DepthTexture,
     texture_sampler: zgpu.SamplerHandle,
 
@@ -77,6 +84,7 @@ pub const Engine = struct {
         const init_time = gctx.stats.time;
 
         const bind_group_definition = BindGroupDefinition.init(gctx);
+        const bind_group_primitive_colorized_definition = PrimitiveColorizedBindGroupDefinition.init(gctx);
 
         const basic_pipeline = try basic_pipeline_module.createBasicPipeline(
             gctx,
@@ -85,6 +93,10 @@ pub const Engine = struct {
         const window_box_pipeline = try window_box_pipeline_module.createWindowBoxPipeline(
             gctx,
             bind_group_definition,
+        );
+        const primitive_colorized_pipeline = try primitive_colorized_pipeline_module.createPrimitiveColorizedPipeline(
+            gctx,
+            bind_group_primitive_colorized_definition,
         );
 
         const texture_sampler = gctx.createSampler(.{});
@@ -111,8 +123,10 @@ pub const Engine = struct {
             .pipelines = .{
                 .basic = basic_pipeline,
                 .window_box = window_box_pipeline,
+                .primitive_colorized = primitive_colorized_pipeline,
             },
             .bind_group_definition = bind_group_definition,
+            .bind_group_primitive_colorized_definition = bind_group_primitive_colorized_definition,
             .depth_texture = depth_texture,
             .texture_sampler = texture_sampler,
             .models_hash = std.AutoHashMap(LoadedModelId, *Model).init(allocator),
@@ -228,6 +242,12 @@ pub const Engine = struct {
                                 const model_descriptor = window_box_model.model_descriptor;
                                 model_descriptor.position.applyVertexBuffer(pass, 0);
                             },
+                            .primitive_colorized => |primitive_colorized_model| {
+                                pass.setPipeline(engine.pipelines.primitive_colorized.pipeline_gpu);
+
+                                const model_descriptor = primitive_colorized_model.model_descriptor;
+                                model_descriptor.position.applyVertexBuffer(pass, 0);
+                            },
                         }
 
                         var model_to_world = zmath.mul(
@@ -305,6 +325,18 @@ pub const Engine = struct {
                                 });
                                 // TODO: remove hardcode
                                 pass.draw(6, 1, 0, 0);
+                            },
+                            .primitive_colorized => |primitive_colorized_model| {
+                                const solid_color_uniform = gctx.uniformsAllocate(zmath.Vec, 1);
+                                solid_color_uniform.slice[0] = .{ 1.0, 0.0, 0.0, 1.0 }; // TOOD: red for test
+
+                                pass.setBindGroup(0, primitive_colorized_model.bind_group_descriptor.bind_group, &.{
+                                    object_to_clip_uniform.offset,
+                                    camera_position_in_model_space_uniform.offset,
+                                    solid_color_uniform.offset,
+                                });
+                                // TODO: remove hardcode
+                                pass.draw(18, 1, 0, 0);
                             },
                         }
                     }
@@ -404,6 +436,21 @@ pub const Engine = struct {
         errdefer engine.allocator.destroy(model);
         model.* = .{
             .model_descriptor = window_box_descriptor,
+            .bind_group_descriptor = bind_group_descriptor,
+        };
+
+        return model;
+    }
+
+    pub fn loadPrimitive(engine: *Engine, positions: GeometryData) !*PrimitiveModel {
+        const primitive_descriptor = try PrimitiveDescriptor.init(engine.gctx, positions);
+
+        const bind_group_descriptor = try engine.bind_group_primitive_colorized_definition.createBindGroup();
+
+        const model = try engine.allocator.create(PrimitiveModel);
+        errdefer engine.allocator.destroy(model);
+        model.* = .{
+            .model_descriptor = primitive_descriptor,
             .bind_group_descriptor = bind_group_descriptor,
         };
 

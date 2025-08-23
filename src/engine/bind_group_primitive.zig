@@ -2,14 +2,13 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 const zmath = @import("zmath");
 
-const TextureDescriptor = @import("types.zig").TextureDescriptor;
 const BindGroupDescriptor = @import("./bind_group_descriptor.zig").BindGroupDescriptor;
 
-pub const BindGroupDefinition = struct {
+pub const PrimitiveColorizedBindGroupDefinition = struct {
     gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
-    pub fn init(gctx: *zgpu.GraphicsContext) BindGroupDefinition {
+    pub fn init(gctx: *zgpu.GraphicsContext) PrimitiveColorizedBindGroupDefinition {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
             // transform matrix
             zgpu.bufferEntry(
@@ -27,19 +26,13 @@ pub const BindGroupDefinition = struct {
                 true,
                 0,
             ),
-            // texture
-            zgpu.textureEntry(
+            // solid color
+            zgpu.bufferEntry(
                 2,
                 .{ .fragment = true },
-                .float,
-                .tvdim_2d,
-                false, // TODO: What does `multisampled` mean?
-            ),
-            // sampler
-            zgpu.samplerEntry(
-                3,
-                .{ .fragment = true },
-                .filtering, // TODO: What's the difference between .filtering and .non_filtering
+                .uniform,
+                true,
+                0,
             ),
         });
 
@@ -49,14 +42,12 @@ pub const BindGroupDefinition = struct {
         };
     }
 
-    pub fn deinit(bind_group_definition: BindGroupDefinition) void {
+    pub fn deinit(bind_group_definition: PrimitiveColorizedBindGroupDefinition) void {
         bind_group_definition.gctx.releaseResource(bind_group_definition.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
-        bind_group_defenition: BindGroupDefinition,
-        sampler: zgpu.SamplerHandle,
-        color_texture: TextureDescriptor,
+        bind_group_defenition: PrimitiveColorizedBindGroupDefinition,
     ) !BindGroupDescriptor {
         const gctx = bind_group_defenition.gctx;
 
@@ -79,16 +70,12 @@ pub const BindGroupDefinition = struct {
                     .size = @sizeOf(zmath.Vec),
                 },
 
-                // texture
+                // solid color
                 .{
                     .binding = 2,
-                    .texture_view_handle = color_texture.view_handle,
-                },
-
-                // sampler
-                .{
-                    .binding = 3,
-                    .sampler_handle = sampler,
+                    .buffer_handle = gctx.uniforms.buffer,
+                    .offset = 0,
+                    .size = @sizeOf(f32) * 4,
                 },
             },
         );

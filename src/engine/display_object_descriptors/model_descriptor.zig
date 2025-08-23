@@ -5,9 +5,9 @@ const gltf_loader = @import("gltf_loader");
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-const types = @import("./types.zig");
-const load_buffer = @import("./load_buffer.zig");
-const load_texture = @import("./load_texture.zig");
+const types = @import("../types.zig");
+const load_buffer = @import("../load_buffer.zig");
+const load_texture = @import("../load_texture.zig");
 
 pub const ModelDescriptor = struct {
     // model: gltf_loader.GltfLoader,
