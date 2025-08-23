@@ -4,6 +4,7 @@ const math = std.math;
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 const zgui = @import("zgui");
+const zglfw = @import("zglfw");
 const gltf_loader = @import("gltf_loader");
 const content_dir = @import("build_options").content_dir;
 
@@ -17,6 +18,7 @@ const GameObjectGroup = @import("./engine/game_object_group.zig").GameObjectGrou
 const Scene = @import("./engine/scene.zig").Scene;
 const loader_utils = @import("./loader_utils/utils.zig");
 const tube = @import("./engine/shape_generation/tube.zig");
+const zgui_utils = @import("./zgui.zig");
 
 const Game = struct {
     saved_game_objects: std.StringHashMap(*GameObject),
@@ -162,25 +164,8 @@ pub fn main() !void {
     tube_z.rotation = zmath.quatFromAxisAngle(.{ 0, 1, 0, 0 }, math.pi / 2.0);
     tube_z.debug.color = .{ 0, 0, 1, 1 };
 
-    // const scale_factor = scale_factor: {
-    //     const scale = window_context.window.getContentScale();
-    //     break :scale_factor @max(scale[0], scale[1]);
-    // };
-
-    // zgui.init(allocator);
-    // defer zgui.deinit();
-
-    // _ = zgui.io.addFontFromFile(content_dir ++ "Roboto-Medium.ttf", math.floor(16.0 * scale_factor));
-
-    // zgui.backend.init(
-    //     window_context.window,
-    //     engine.gctx.device,
-    //     @intFromEnum(zgpu.GraphicsContext.swapchain_format),
-    //     @intFromEnum(wgpu.TextureFormat.undef),
-    // );
-    // defer zgui.backend.deinit();
-
-    // zgui.getStyle().scaleAllSizes(scale_factor);
+    zgui_utils.zguiInit(allocator, window_context.window, engine.gctx.device);
+    defer zgui_utils.zguiDeinit();
 
     try engine.runLoop();
 }
@@ -195,19 +180,28 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
         obj.rotation = zmath.quatFromRollPitchYaw(0, 0, @floatCast(-engine.time));
     }
 
-    // zgui.backend.newFrame(
-    //     engine.gctx.swapchain_descriptor.width,
-    //     engine.gctx.swapchain_descriptor.height,
-    // );
+    zgui.backend.newFrame(
+        engine.gctx.swapchain_descriptor.width,
+        engine.gctx.swapchain_descriptor.height,
+    );
     // zgui.showDemoWindow(null);
+
+    const camera = engine.active_scene.?.camera;
+
+    _ = zgui.begin("Debug", .{});
+    zgui.text("Camera: ({d:2.2}, {d:2.2}, {d:2.2})", .{
+        camera.position[0],
+        camera.position[1],
+        camera.position[2],
+    });
+    zgui.end();
 }
 
 fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
     _ = engine;
-    _ = pass;
     _ = game_opaque;
 
-    // zgui.backend.draw(pass);
+    zgui.backend.draw(pass);
 }
 
 fn traverseGroup(
