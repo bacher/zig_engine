@@ -34,11 +34,7 @@ pub const PrimitiveDescriptor = struct {
 
         return PrimitiveDescriptor{
             .position = positions_buffer_info,
-            .geometry_bounds = .{
-                .min = .{ -0.5, -0.1, -0.1 },
-                .max = .{ 0.5, 0.1, 0.1 },
-                .radius = 0.51,
-            },
+            .geometry_bounds = positions.bounding_box,
         };
     }
 

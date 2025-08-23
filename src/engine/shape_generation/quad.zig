@@ -31,6 +31,11 @@ pub fn initUpRightQuad(allocator: std.mem.Allocator) !GeometryData {
     return .{
         .data = data,
         .buffer = buffer,
+        .bounding_box = .{
+            .min = .{ 0, 0, 0 },
+            .max = .{ 1, 1, 0 },
+            .radius = std.math.sqrt(2),
+        },
     };
 }
 
@@ -62,5 +67,10 @@ pub fn initCenteredQuad(allocator: std.mem.Allocator) !GeometryData {
     return .{
         .data = data,
         .buffer = buffer,
+        .bounding_box = .{
+            .min = .{ -0.5, -0.5, 0 },
+            .max = .{ 0.5, 0.5, 0 },
+            .radius = std.math.sqrt(0.5),
+        },
     };
 }

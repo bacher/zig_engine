@@ -1,4 +1,5 @@
 const std = @import("std");
+const math = std.math;
 const gltf_loader = @import("gltf_loader");
 
 const GeometryData = @import("./geometry_data.zig").GeometryData;
@@ -55,5 +56,10 @@ pub fn initUnitTube(allocator: std.mem.Allocator) !GeometryData {
     return .{
         .data = data,
         .buffer = buffer,
+        .bounding_box = .{
+            .min = .{ -0.5, -M, -M },
+            .max = .{ 0.5, M, M },
+            .radius = comptime math.sqrt(math.pow(f32, 0.5, 2) + math.pow(f32, M, 2)),
+        },
     };
 }
