@@ -323,20 +323,24 @@ pub const Engine = struct {
                                     object_to_clip_uniform.offset,
                                     camera_position_in_model_space_uniform.offset,
                                 });
-                                // TODO: remove hardcode
-                                pass.draw(6, 1, 0, 0);
+
+                                const elements_count = window_box_model.model_descriptor.position.elements_count;
+
+                                pass.draw(elements_count, 1, 0, 0);
                             },
                             .primitive_colorized => |primitive_colorized_model| {
                                 const solid_color_uniform = gctx.uniformsAllocate(zmath.Vec, 1);
-                                solid_color_uniform.slice[0] = .{ 1.0, 0.0, 0.0, 1.0 }; // TOOD: red for test
+                                solid_color_uniform.slice[0] = .{ 1.0, 0.0, 0.0, 1.0 }; // TODO: red for test
 
                                 pass.setBindGroup(0, primitive_colorized_model.bind_group_descriptor.bind_group, &.{
                                     object_to_clip_uniform.offset,
                                     camera_position_in_model_space_uniform.offset,
                                     solid_color_uniform.offset,
                                 });
-                                // TODO: remove hardcode
-                                pass.draw(18, 1, 0, 0);
+
+                                const elements_count = primitive_colorized_model.model_descriptor.position.elements_count;
+
+                                pass.draw(elements_count, 1, 0, 0);
                             },
                         }
                     }
