@@ -55,14 +55,14 @@ pub fn initCenteredQuad(allocator: std.mem.Allocator) !GeometryData {
     // arrangement - couter clock wise
 
     // 1st triangle
-    data[0] = .{ -0.5, -0.5, -0.5 };
-    data[1] = .{ 0.5, 0.5, -0.5 };
-    data[2] = .{ -0.5, 0.5, -0.5 };
+    data[0] = .{ -0.5, -0.5, 0 };
+    data[1] = .{ 0.5, 0.5, 0 };
+    data[2] = .{ -0.5, 0.5, 0 };
 
     // 2nd triangle
-    data[3] = .{ -0.5, -0.5, -0.5 };
-    data[4] = .{ 0.5, -0.5, -0.5 };
-    data[5] = .{ 0.5, 0.5, -0.5 };
+    data[3] = .{ -0.5, -0.5, 0 };
+    data[4] = .{ 0.5, -0.5, 0 };
+    data[5] = .{ 0.5, 0.5, 0 };
 
     return .{
         .data = data,

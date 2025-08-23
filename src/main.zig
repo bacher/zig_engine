@@ -110,7 +110,7 @@ pub fn main() !void {
 
     const window_box_1 = try scene.addWindowBoxObject(.{
         .model = window_block_model,
-        .position = .{ 0, 0, 0 },
+        .position = .{ -2, 2, 0 },
     });
     window_box_1.rotation = zmath.quatFromRollPitchYaw(0.5 * math.pi, 0, 0);
 
@@ -140,17 +140,27 @@ pub fn main() !void {
     defer tube_data.deinit(allocator);
     const tube_model = try engine.loadPrimitive(tube_data);
 
-    const tube_red = try scene.addPrimitiveObject(.{
-        .model = tube_model,
-        .position = .{ 0, 0, 0 },
-    });
-    tube_red.debug.color = .{ 1.0, 0.0, 0.0, 1.0 };
+    // Coordinates
 
-    const tube_green = try scene.addPrimitiveObject(.{
+    const tube_x = try scene.addPrimitiveObject(.{
         .model = tube_model,
-        .position = .{ 0, 0, 1.0 },
+        .position = .{ 0.5 + tube.M, 0, 0 },
     });
-    tube_green.debug.color = .{ 0.0, 1.0, 0.0, 1.0 };
+    tube_x.debug.color = .{ 1, 0, 0, 1 };
+
+    const tube_y = try scene.addPrimitiveObject(.{
+        .model = tube_model,
+        .position = .{ 0, 0.5 + tube.M, 0 },
+    });
+    tube_y.rotation = zmath.quatFromAxisAngle(.{ 0, 0, 1, 0 }, math.pi / 2.0);
+    tube_y.debug.color = .{ 0, 1, 0, 1 };
+
+    const tube_z = try scene.addPrimitiveObject(.{
+        .model = tube_model,
+        .position = .{ 0, 0, 0.5 + tube.M },
+    });
+    tube_z.rotation = zmath.quatFromAxisAngle(.{ 0, 1, 0, 0 }, math.pi / 2.0);
+    tube_z.debug.color = .{ 0, 0, 1, 1 };
 
     // const scale_factor = scale_factor: {
     //     const scale = window_context.window.getContentScale();

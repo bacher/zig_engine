@@ -15,7 +15,7 @@ fn isInBound(uv: vec2<f32>) -> bool {
     // quad with coordinates (-0.5, -0.5), (0.5, 0.5), so we have to make
     // correction by shifting everything by 0.5 in each direction.
     let local_xy = _local_xy + vec2(0.5, 0.5);
-    let camera_position = camera_position_in_model_space + vec4(0.5, 0.5, 0.5, 0);
+    let camera_position = camera_position_in_model_space + vec4(0.5, 0.5, 0, 0);
 
     let dx = camera_position.x - local_xy.x;
     let dy = camera_position.y - local_xy.y;

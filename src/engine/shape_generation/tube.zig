@@ -6,7 +6,7 @@ const GeometryData = @import("./geometry_data.zig").GeometryData;
 
 const R = 0.5;
 const L = -R;
-const M = 0.05;
+pub const M = 0.05;
 
 pub fn initUnitTube(allocator: std.mem.Allocator) !GeometryData {
     const buffer = try allocator.alignedAlloc(u8, @sizeOf(f32), @sizeOf(f32) * 3 * 36);
