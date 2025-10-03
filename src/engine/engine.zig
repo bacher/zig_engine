@@ -13,6 +13,7 @@ const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
 const Pipeline = @import("./pipeline.zig").Pipeline;
 const basic_pipeline_module = @import("./pipelines/basic_pipeline.zig");
+const skybox_pipeline_module = @import("./pipelines/skybox_pipeline.zig");
 const window_box_pipeline_module = @import("./pipelines/window_box_pipeline.zig");
 const primitive_colorized_pipeline_module = @import("./pipelines/primitive_colorized_pipeline.zig");
 const BindGroupDefinition = @import("./bind_group.zig").BindGroupDefinition;
@@ -20,7 +21,9 @@ const PrimitiveColorizedBindGroupDefinition = @import("./bind_group_primitive.zi
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ModelDescriptor = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptor;
 const WindowBoxDescriptor = @import("./display_object_descriptors/window_box_descriptor.zig").WindowBoxDescriptor;
+const SkyBoxDescriptor = @import("./display_object_descriptors/skybox_descriptor.zig").SkyBoxDescriptor;
 const Model = @import("./model.zig").Model;
+const SkyBoxModel = @import("./model.zig").SkyBoxModel;
 const WindowBoxModel = @import("./model.zig").WindowBoxModel;
 const PrimitiveModel = @import("./model.zig").PrimitiveModel;
 const PrimitiveDescriptor = @import("./display_object_descriptors/primitive_descriptor.zig").PrimitiveDescriptor;
@@ -55,6 +58,7 @@ pub const Engine = struct {
 
     pipelines: struct {
         basic: Pipeline,
+        skybox: Pipeline,
         window_box: Pipeline,
         primitive_colorized: Pipeline,
     },
@@ -90,6 +94,10 @@ pub const Engine = struct {
             gctx,
             bind_group_definition,
         );
+        const skybox_pipeline = try skybox_pipeline_module.createSkyboxPipeline(
+            gctx,
+            bind_group_definition,
+        );
         const window_box_pipeline = try window_box_pipeline_module.createWindowBoxPipeline(
             gctx,
             bind_group_definition,
@@ -122,6 +130,7 @@ pub const Engine = struct {
             .gctx = gctx,
             .pipelines = .{
                 .basic = basic_pipeline,
+                .skybox = skybox_pipeline,
                 .window_box = window_box_pipeline,
                 .primitive_colorized = primitive_colorized_pipeline,
             },
@@ -248,6 +257,14 @@ pub const Engine = struct {
                                 const model_descriptor = primitive_colorized_model.model_descriptor;
                                 model_descriptor.position.applyVertexBuffer(pass, 0);
                             },
+                            .sky_box_model => |sky_box_model| {
+                                pass.setPipeline(engine.pipelines.skybox.pipeline_gpu);
+
+                                const model_descriptor = sky_box_model.model_descriptor;
+                                model_descriptor.position.applyVertexBuffer(pass, 0);
+                                model_descriptor.uvs.applyVertexBuffer(pass, 1);
+                                model_descriptor.index.applyIndexBuffer(pass);
+                            },
                         }
 
                         var model_to_world = zmath.mul(
@@ -281,7 +298,13 @@ pub const Engine = struct {
                             model_to_world = zmath.mul(xRotate, model_to_world);
                         }
 
-                        const object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);
+                        var object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);
+                        if (game_object.model == .sky_box_model) {
+                            object_to_clip = zmath.mul(
+                                scene.camera.camera_to_view,
+                                scene.camera.view_to_clip,
+                            );
+                        }
 
                         const object_to_clip_uniform = gctx.uniformsAllocate(zmath.Mat, 1);
                         object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
@@ -327,6 +350,14 @@ pub const Engine = struct {
                                 const elements_count = window_box_model.model_descriptor.position.elements_count;
 
                                 pass.draw(elements_count, 1, 0, 0);
+                            },
+                            .sky_box_model => |sky_box_model| {
+                                pass.setBindGroup(0, sky_box_model.bind_group_descriptor.bind_group, &.{
+                                    object_to_clip_uniform.offset,
+                                    camera_position_in_model_space_uniform.offset,
+                                });
+
+                                pass.drawIndexed(sky_box_model.model_descriptor.index.elements_count, 1, 0, 0, 0);
                             },
                             .primitive_colorized => |primitive_colorized_model| {
                                 const solid_color_uniform = gctx.uniformsAllocate(zmath.Vec, 1);
@@ -416,6 +447,34 @@ pub const Engine = struct {
         Engine.next_loaded_model_id += 1;
 
         return loaded_model_id;
+    }
+
+    pub fn loadSkyBoxModel(engine: *Engine, texture_filename: []const u8) !*SkyBoxModel {
+        const texture_full_filename = try std.fs.path.join(engine.allocator, &.{
+            engine.content_dir,
+            texture_filename,
+        });
+        defer engine.allocator.free(texture_full_filename);
+
+        const skybox_descriptor = try SkyBoxDescriptor.init(
+            engine.gctx,
+            engine.allocator,
+            texture_full_filename,
+        );
+
+        const bind_group_descriptor = try engine.bind_group_definition.createBindGroup(
+            engine.texture_sampler,
+            skybox_descriptor.color_texture,
+        );
+
+        const model = try engine.allocator.create(SkyBoxModel);
+        errdefer engine.allocator.destroy(model);
+        model.* = .{
+            .model_descriptor = skybox_descriptor,
+            .bind_group_descriptor = bind_group_descriptor,
+        };
+
+        return model;
     }
 
     pub fn loadWindowBoxModel(engine: *Engine, texture_filename: []const u8) !*WindowBoxModel {

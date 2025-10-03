@@ -4,12 +4,14 @@ const zmath = @import("zmath");
 const model_module = @import("./model.zig");
 const Model = model_module.Model;
 const WindowBoxModel = model_module.WindowBoxModel;
+const SkyBoxModel = model_module.SkyBoxModel;
 const PrimitiveModel = model_module.PrimitiveModel;
 
 const ModelUnion = union(enum) {
     regular_model: *const Model,
     window_box_model: *const WindowBoxModel,
     primitive_colorized: *const PrimitiveModel,
+    sky_box_model: *const SkyBoxModel,
 
     pub fn getBoundingRadius(model_union: *const ModelUnion) f32 {
         switch (model_union.*) {
@@ -17,6 +19,9 @@ const ModelUnion = union(enum) {
                 return model.model_descriptor.geometry_bounds.radius;
             },
             .window_box_model => |model| {
+                return model.model_descriptor.geometry_bounds.radius;
+            },
+            .sky_box_model => |model| {
                 return model.model_descriptor.geometry_bounds.radius;
             },
             .primitive_colorized => |model| {

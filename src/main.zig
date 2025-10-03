@@ -79,6 +79,16 @@ pub fn main() !void {
 
     scene.camera.updatePosition(.{ 0, -2, 0 });
 
+    // Skybox
+
+    const skybox_model = try engine.loadSkyBoxModel("skybox/cubemaps_skybox.png");
+    defer skybox_model.deinit(engine.gctx);
+    defer allocator.destroy(skybox_model);
+
+    _ = try scene.addSkyBoxObject(.{
+        .model = skybox_model,
+    });
+
     {
         const loader = try engine.initLoader("toontown-central/scene.gltf");
         defer loader.deinit();
