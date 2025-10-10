@@ -14,6 +14,7 @@ const WindowContext = @import("./glue.zig").WindowContext;
 const Pipeline = @import("./pipeline.zig").Pipeline;
 const basic_pipeline_module = @import("./pipelines/basic_pipeline.zig");
 const skybox_pipeline_module = @import("./pipelines/skybox_pipeline.zig");
+const skybox_cubemap_pipeline_module = @import("./pipelines/skybox_cubemap_pipeline.zig");
 const window_box_pipeline_module = @import("./pipelines/window_box_pipeline.zig");
 const primitive_colorized_pipeline_module = @import("./pipelines/primitive_colorized_pipeline.zig");
 const BindGroupDefinition = @import("./bind_group.zig").BindGroupDefinition;
@@ -22,8 +23,10 @@ const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ModelDescriptor = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptor;
 const WindowBoxDescriptor = @import("./display_object_descriptors/window_box_descriptor.zig").WindowBoxDescriptor;
 const SkyBoxDescriptor = @import("./display_object_descriptors/skybox_descriptor.zig").SkyBoxDescriptor;
+const SkyBoxCubemapDescriptor = @import("./display_object_descriptors/skybox_cubemap_descriptor.zig").SkyBoxCubemapDescriptor;
 const Model = @import("./model.zig").Model;
 const SkyBoxModel = @import("./model.zig").SkyBoxModel;
+const SkyBoxCubemapModel = @import("./model.zig").SkyBoxCubemapModel;
 const WindowBoxModel = @import("./model.zig").WindowBoxModel;
 const PrimitiveModel = @import("./model.zig").PrimitiveModel;
 const PrimitiveDescriptor = @import("./display_object_descriptors/primitive_descriptor.zig").PrimitiveDescriptor;
@@ -59,10 +62,12 @@ pub const Engine = struct {
     pipelines: struct {
         basic: Pipeline,
         skybox: Pipeline,
+        skybox_cubemap: Pipeline,
         window_box: Pipeline,
         primitive_colorized: Pipeline,
     },
     bind_group_definition: BindGroupDefinition,
+    bind_group_cubemap_definition: BindGroupDefinition,
     bind_group_primitive_colorized_definition: PrimitiveColorizedBindGroupDefinition,
     depth_texture: DepthTexture,
     texture_sampler: zgpu.SamplerHandle,
@@ -87,7 +92,8 @@ pub const Engine = struct {
         const gctx = window_context.gctx;
         const init_time = gctx.stats.time;
 
-        const bind_group_definition = BindGroupDefinition.init(gctx);
+        const bind_group_definition = BindGroupDefinition.init(gctx, .tvdim_2d);
+        const bind_group_cubemap_definition = BindGroupDefinition.init(gctx, .tvdim_cube);
         const bind_group_primitive_colorized_definition = PrimitiveColorizedBindGroupDefinition.init(gctx);
 
         const basic_pipeline = try basic_pipeline_module.createBasicPipeline(
@@ -97,6 +103,10 @@ pub const Engine = struct {
         const skybox_pipeline = try skybox_pipeline_module.createSkyboxPipeline(
             gctx,
             bind_group_definition,
+        );
+        const skybox_cubemap_pipeline = try skybox_cubemap_pipeline_module.createSkyboxCubemapPipeline(
+            gctx,
+            bind_group_cubemap_definition,
         );
         const window_box_pipeline = try window_box_pipeline_module.createWindowBoxPipeline(
             gctx,
@@ -131,10 +141,12 @@ pub const Engine = struct {
             .pipelines = .{
                 .basic = basic_pipeline,
                 .skybox = skybox_pipeline,
+                .skybox_cubemap = skybox_cubemap_pipeline,
                 .window_box = window_box_pipeline,
                 .primitive_colorized = primitive_colorized_pipeline,
             },
             .bind_group_definition = bind_group_definition,
+            .bind_group_cubemap_definition = bind_group_cubemap_definition,
             .bind_group_primitive_colorized_definition = bind_group_primitive_colorized_definition,
             .depth_texture = depth_texture,
             .texture_sampler = texture_sampler,
@@ -257,12 +269,19 @@ pub const Engine = struct {
                                 const model_descriptor = primitive_colorized_model.model_descriptor;
                                 model_descriptor.position.applyVertexBuffer(pass, 0);
                             },
-                            .sky_box_model => |sky_box_model| {
+                            .skybox_model => |skybox_model| {
                                 pass.setPipeline(engine.pipelines.skybox.pipeline_gpu);
 
-                                const model_descriptor = sky_box_model.model_descriptor;
+                                const model_descriptor = skybox_model.model_descriptor;
                                 model_descriptor.position.applyVertexBuffer(pass, 0);
                                 model_descriptor.uvs.applyVertexBuffer(pass, 1);
+                                model_descriptor.index.applyIndexBuffer(pass);
+                            },
+                            .skybox_cubemap_model => |skybox_cubemap_model| {
+                                pass.setPipeline(engine.pipelines.skybox_cubemap.pipeline_gpu);
+
+                                const model_descriptor = skybox_cubemap_model.model_descriptor;
+                                model_descriptor.position.applyVertexBuffer(pass, 0);
                                 model_descriptor.index.applyIndexBuffer(pass);
                             },
                         }
@@ -299,11 +318,14 @@ pub const Engine = struct {
                         }
 
                         var object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);
-                        if (game_object.model == .sky_box_model) {
+                        if (game_object.model == .skybox_model or game_object.model == .skybox_cubemap_model) {
                             object_to_clip = zmath.mul(
                                 scene.camera.camera_to_view,
                                 scene.camera.view_to_clip,
                             );
+                            if (game_object.model == .skybox_cubemap_model) {
+                                object_to_clip = zmath.mul(xRotate, object_to_clip);
+                            }
                         }
 
                         const object_to_clip_uniform = gctx.uniformsAllocate(zmath.Mat, 1);
@@ -351,13 +373,21 @@ pub const Engine = struct {
 
                                 pass.draw(elements_count, 1, 0, 0);
                             },
-                            .sky_box_model => |sky_box_model| {
-                                pass.setBindGroup(0, sky_box_model.bind_group_descriptor.bind_group, &.{
+                            .skybox_model => |skybox_model| {
+                                pass.setBindGroup(0, skybox_model.bind_group_descriptor.bind_group, &.{
                                     object_to_clip_uniform.offset,
                                     camera_position_in_model_space_uniform.offset,
                                 });
 
-                                pass.drawIndexed(sky_box_model.model_descriptor.index.elements_count, 1, 0, 0, 0);
+                                pass.drawIndexed(skybox_model.model_descriptor.index.elements_count, 1, 0, 0, 0);
+                            },
+                            .skybox_cubemap_model => |skybox_cubemap_model| {
+                                pass.setBindGroup(0, skybox_cubemap_model.bind_group_descriptor.bind_group, &.{
+                                    object_to_clip_uniform.offset,
+                                    camera_position_in_model_space_uniform.offset,
+                                });
+
+                                pass.drawIndexed(skybox_cubemap_model.model_descriptor.index.elements_count, 1, 0, 0, 0);
                             },
                             .primitive_colorized => |primitive_colorized_model| {
                                 const solid_color_uniform = gctx.uniformsAllocate(zmath.Vec, 1);
@@ -471,6 +501,48 @@ pub const Engine = struct {
         errdefer engine.allocator.destroy(model);
         model.* = .{
             .model_descriptor = skybox_descriptor,
+            .bind_group_descriptor = bind_group_descriptor,
+        };
+
+        return model;
+    }
+
+    pub fn loadSkyBoxCubemapModel(engine: *Engine, texture_filenames: [6][]const u8) !*SkyBoxCubemapModel {
+        var texture_full_filenames: [6][]const u8 = undefined;
+
+        for (0..6) |i| {
+            texture_full_filenames[i] = try std.fs.path.join(engine.allocator, &.{
+                engine.content_dir,
+                texture_filenames[i],
+            });
+            errdefer {
+                // free all previously allocated texture full filenames
+                for (0..i - i) |j| {
+                    engine.allocator.free(texture_full_filenames[j]);
+                }
+            }
+        }
+        defer {
+            for (0..6) |i| {
+                engine.allocator.free(texture_full_filenames[i]);
+            }
+        }
+
+        const skybox_cubemap_descriptor = try SkyBoxCubemapDescriptor.init(
+            engine.gctx,
+            engine.allocator,
+            texture_full_filenames,
+        );
+
+        const bind_group_descriptor = try engine.bind_group_cubemap_definition.createBindGroup(
+            engine.texture_sampler,
+            skybox_cubemap_descriptor.color_texture,
+        );
+
+        const model = try engine.allocator.create(SkyBoxCubemapModel);
+        errdefer engine.allocator.destroy(model);
+        model.* = .{
+            .model_descriptor = skybox_cubemap_descriptor,
             .bind_group_descriptor = bind_group_descriptor,
         };
 

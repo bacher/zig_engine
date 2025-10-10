@@ -9,7 +9,7 @@ pub const BindGroupDefinition = struct {
     gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
-    pub fn init(gctx: *zgpu.GraphicsContext) BindGroupDefinition {
+    pub fn init(gctx: *zgpu.GraphicsContext, texture_view_dimension: wgpu.TextureViewDimension) BindGroupDefinition {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
             // transform matrix
             zgpu.bufferEntry(
@@ -32,7 +32,7 @@ pub const BindGroupDefinition = struct {
                 2,
                 .{ .fragment = true },
                 .float,
-                .tvdim_2d,
+                texture_view_dimension,
                 false, // TODO: What does `multisampled` mean?
             ),
             // sampler

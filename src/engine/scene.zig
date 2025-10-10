@@ -6,6 +6,7 @@ const GameObject = @import("./game_object.zig").GameObject;
 const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;
 const WindowBoxModel = @import("./model.zig").WindowBoxModel;
 const SkyBoxModel = @import("./model.zig").SkyBoxModel;
+const SkyBoxCubemapModel = @import("./model.zig").SkyBoxCubemapModel;
 const PrimitiveModel = @import("./model.zig").PrimitiveModel;
 const Camera = @import("./camera.zig").Camera;
 const SpaceTree = @import("./space_tree.zig").SpaceTree;
@@ -124,7 +125,21 @@ pub const Scene = struct {
     pub fn addSkyBoxObject(scene: *Scene, params: AddSkyBoxParams) !*GameObject {
         const game_object = try GameObject.init(scene.allocator, .{
             .model = .{
-                .sky_box_model = params.model,
+                .skybox_model = params.model,
+            },
+            .position = .{ 0, 0, 0 },
+        });
+        errdefer game_object.deinit();
+
+        try scene.game_objects.append(game_object);
+
+        return game_object;
+    }
+
+    pub fn addSkyBoxCubemapObject(scene: *Scene, params: AddSkyBoxCubemapParams) !*GameObject {
+        const game_object = try GameObject.init(scene.allocator, .{
+            .model = .{
+                .skybox_cubemap_model = params.model,
             },
             .position = .{ 0, 0, 0 },
         });
@@ -176,6 +191,10 @@ pub const AddWindowBoxParams = struct {
 
 pub const AddSkyBoxParams = struct {
     model: *SkyBoxModel,
+};
+
+pub const AddSkyBoxCubemapParams = struct {
+    model: *SkyBoxCubemapModel,
 };
 
 pub const AddPrimitiveObjectParams = struct {

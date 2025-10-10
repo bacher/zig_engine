@@ -79,15 +79,34 @@ pub fn main() !void {
 
     scene.camera.updatePosition(.{ 0, -2, 0 });
 
-    // Skybox
+    // Skybox (old)
 
-    const skybox_model = try engine.loadSkyBoxModel("skybox/cubemaps_skybox.png");
-    defer skybox_model.deinit(engine.gctx);
-    defer allocator.destroy(skybox_model);
+    // const skybox_model = try engine.loadSkyBoxModel("skybox/cubemaps_skybox.png");
+    // defer skybox_model.deinit(engine.gctx);
+    // defer allocator.destroy(skybox_model);
 
-    _ = try scene.addSkyBoxObject(.{
-        .model = skybox_model,
+    // _ = try scene.addSkyBoxObject(.{
+    //     .model = skybox_model,
+    // });
+
+    // Skybox (cubemap)
+
+    const skybox_cubemap_model = try engine.loadSkyBoxCubemapModel(.{
+        "skybox/skybox/right.jpg",
+        "skybox/skybox/left.jpg",
+        "skybox/skybox/top.jpg",
+        "skybox/skybox/bottom.jpg",
+        "skybox/skybox/front.jpg",
+        "skybox/skybox/back.jpg",
     });
+    defer skybox_cubemap_model.deinit(engine.gctx);
+    defer allocator.destroy(skybox_cubemap_model);
+
+    _ = try scene.addSkyBoxCubemapObject(.{
+        .model = skybox_cubemap_model,
+    });
+
+    // ---
 
     {
         const loader = try engine.initLoader("toontown-central/scene.gltf");
@@ -174,8 +193,12 @@ pub fn main() !void {
     tube_z.rotation = zmath.quatFromAxisAngle(.{ 0, 1, 0, 0 }, math.pi / 2.0);
     tube_z.debug.color = .{ 0, 0, 1, 1 };
 
+    // ZGui
+
     zgui_utils.zguiInit(allocator, window_context.window, engine.gctx.device);
     defer zgui_utils.zguiDeinit();
+
+    // Game loop
 
     try engine.runLoop();
 }
