@@ -53,13 +53,13 @@
         //},
 
         .zglfw = .{
-            .url = "git+https://github.com/zig-gamedev/zglfw#c337cb3d3f984468ea7a386335937a5d555fc024",
-            .hash = "zglfw-0.10.0-dev-zgVDNMacIQA-k7kNSfwUc9Lfzx-bb_wklVm25K-p8Tr7",
+            .url = "git+https://github.com/zig-gamedev/zglfw#6034a5623312c58bf5e64c1a2b686691c28575f4",
+            .hash = "zglfw-0.10.0-dev-zgVDNPKyIQCBi-wv_vxkvIQq1u0bP4D56Wszx_2mszc7",
         },
 
         .zgpu = .{
-            .url = "git+https://github.com/zig-gamedev/zgpu#d860e2b4a333cacffb168fab49a233c5d2f1bca2",
-            .hash = "zgpu-0.12.0-dev-nqFT5EKgCADkhwAf97_pfSOmPWEguKmljSECs9ihpFS7",
+            .url = "git+https://github.com/zig-gamedev/zgpu#96f3ce2229e4836daec714a3f0b8c3c3218a6b2c",
+            .hash = "zgpu-0.12.0-dev-nqFT5LqgCACR_1wEhi7rveY3ocKJczfRaXQoisCmpohn",
         },
         .dawn_aarch64_macos = .{
             .url = "git+https://github.com/michal-z/webgpu_dawn-aarch64-macos#d2360cdfff0cf4a780cb77aa47c57aca03cc6dfe",
@@ -73,8 +73,8 @@
         },
 
         .zmath = .{
-            .url = "git+https://github.com/zig-gamedev/zmath#ccf7297ef6c01e21b2d51ad81b5b6ce929e86a00",
-            .hash = "zmath-0.11.0-dev-wjwivZY1AwDO7yxNmZ5HWoU03f9mFBet8LN9-oYc3i29",
+            .url = "git+https://github.com/zig-gamedev/zmath#3a5955b2b72cd081563fbb084eff05bffd1e3fbb",
+            .hash = "zmath-0.11.0-dev-wjwivdMsAwD-xaLj76YHUq3t9JDH-X16xuMTmnDzqbu2",
         },
 
         .zstbi = .{
@@ -85,8 +85,8 @@
         .gltf_loader = .{
             // For local dev:
             // .path = "../gltf_loader",
-            .url = "git+https://github.com/bacher/gltf_loader#99a56cdd54cd4e17e61010c597e5ae1c2df328fa",
-            .hash = "gltf_loader-0.0.0-bMyl_DN6AACU5w7w6-C3F_YZw1Zt9U4NFzr1ECMvVZEj",
+            .url = "git+https://github.com/bacher/gltf_loader#2d54ca904fc91fca759403b71f7059c0c9e0f491",
+            .hash = "gltf_loader-0.0.0-bMyl_Cd6AADoqH5jxU5Qbb3YwzVzY9RfcblRmW7XG91G",
         },
     },
 

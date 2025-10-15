@@ -73,9 +73,7 @@ pub const SkyBoxCubemapDescriptor = struct {
             gctx,
             allocator,
             color_texture_images,
-            null,
-            // TODO: Why enabling of mipmaps crushes the program?
-            // .{ .generate_mipmaps = true },
+            .{ .generate_mipmaps = true },
         );
 
         defer {
