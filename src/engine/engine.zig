@@ -34,6 +34,7 @@ const GeometryData = @import("./shape_generation/geometry_data.zig").GeometryDat
 const Scene = @import("./scene.zig").Scene;
 const Camera = @import("./camera.zig").Camera;
 const InputController = @import("./input_controller.zig").InputController;
+const GameObject = @import("./game_object.zig").GameObject;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 
@@ -246,164 +247,7 @@ pub const Engine = struct {
 
                 if (engine.active_scene) |scene| {
                     for (scene.game_objects.items) |game_object| {
-                        switch (game_object.model) {
-                            .regular_model => |model| {
-                                pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
-
-                                const model_descriptor = model.model_descriptor;
-
-                                model_descriptor.position.applyVertexBuffer(pass, 0);
-                                model_descriptor.normal.applyVertexBuffer(pass, 1);
-                                model_descriptor.texcoord.applyVertexBuffer(pass, 2);
-                                model_descriptor.index.applyIndexBuffer(pass);
-                            },
-                            .window_box_model => |window_box_model| {
-                                pass.setPipeline(engine.pipelines.window_box.pipeline_gpu);
-
-                                const model_descriptor = window_box_model.model_descriptor;
-                                model_descriptor.position.applyVertexBuffer(pass, 0);
-                            },
-                            .primitive_colorized => |primitive_colorized_model| {
-                                pass.setPipeline(engine.pipelines.primitive_colorized.pipeline_gpu);
-
-                                const model_descriptor = primitive_colorized_model.model_descriptor;
-                                model_descriptor.position.applyVertexBuffer(pass, 0);
-                            },
-                            .skybox_model => |skybox_model| {
-                                pass.setPipeline(engine.pipelines.skybox.pipeline_gpu);
-
-                                const model_descriptor = skybox_model.model_descriptor;
-                                model_descriptor.position.applyVertexBuffer(pass, 0);
-                                model_descriptor.uvs.applyVertexBuffer(pass, 1);
-                                model_descriptor.index.applyIndexBuffer(pass);
-                            },
-                            .skybox_cubemap_model => |skybox_cubemap_model| {
-                                pass.setPipeline(engine.pipelines.skybox_cubemap.pipeline_gpu);
-
-                                const model_descriptor = skybox_cubemap_model.model_descriptor;
-                                model_descriptor.position.applyVertexBuffer(pass, 0);
-                                model_descriptor.index.applyIndexBuffer(pass);
-                            },
-                        }
-
-                        var model_to_world = zmath.mul(
-                            zmath.mul(
-                                zmath.quatToMat(game_object.rotation),
-                                zmath.scaling(game_object.scale, game_object.scale, game_object.scale),
-                            ),
-                            zmath.translation(
-                                game_object.position[0],
-                                game_object.position[1],
-                                game_object.position[2],
-                            ),
-                        );
-
-                        // Is it correct order?
-                        model_to_world = zmath.mul(
-                            game_object.aggregated_matrix,
-                            model_to_world,
-                        );
-
-                        var flip_yz = false;
-                        switch (game_object.model) {
-                            .regular_model => |model| {
-                                flip_yz = model.model_descriptor.mesh_y_up;
-                            },
-                            else => {},
-                        }
-                        if (flip_yz) {
-                            // NOTE: converting from Y-up to Z-up coordinate system,
-                            // should be done only for models which is made with Y-up logic.
-                            model_to_world = zmath.mul(xRotate, model_to_world);
-                        }
-
-                        var object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);
-                        if (game_object.model == .skybox_model or game_object.model == .skybox_cubemap_model) {
-                            object_to_clip = zmath.mul(
-                                scene.camera.camera_to_view,
-                                scene.camera.view_to_clip,
-                            );
-                            if (game_object.model == .skybox_cubemap_model) {
-                                object_to_clip = zmath.mul(xRotate, object_to_clip);
-                            }
-                        }
-
-                        const object_to_clip_uniform = gctx.uniformsAllocate(zmath.Mat, 1);
-                        object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
-
-                        const camera_position_in_model_space_uniform = gctx.uniformsAllocate(zmath.Vec, 1);
-                        if (game_object.model == .window_box_model) {
-                            const camera_position = zmath.Vec{
-                                // TODO: how it can be simplified?
-                                scene.camera.position[0],
-                                scene.camera.position[1],
-                                scene.camera.position[2],
-                                1,
-                            };
-
-                            // TODO:
-                            // Instead of inverse it will be better to just apply transposed
-                            // rotation matrix and negative position shift (and scale if needed).
-                            // inverse is much more compute intensive than listed below operations.
-                            const model_to_world_inversed = zmath.inverse(model_to_world);
-                            const camera_position_in_model_space = zmath.mul(
-                                camera_position,
-                                model_to_world_inversed,
-                            );
-
-                            camera_position_in_model_space_uniform.slice[0] = camera_position_in_model_space;
-                        }
-
-                        switch (game_object.model) {
-                            .regular_model => |model| {
-                                pass.setBindGroup(0, model.bind_group_descriptor.bind_group, &.{
-                                    object_to_clip_uniform.offset,
-                                    camera_position_in_model_space_uniform.offset,
-                                });
-
-                                pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
-                            },
-                            .window_box_model => |window_box_model| {
-                                pass.setBindGroup(0, window_box_model.bind_group_descriptor.bind_group, &.{
-                                    object_to_clip_uniform.offset,
-                                    camera_position_in_model_space_uniform.offset,
-                                });
-
-                                const elements_count = window_box_model.model_descriptor.position.elements_count;
-
-                                pass.draw(elements_count, 1, 0, 0);
-                            },
-                            .skybox_model => |skybox_model| {
-                                pass.setBindGroup(0, skybox_model.bind_group_descriptor.bind_group, &.{
-                                    object_to_clip_uniform.offset,
-                                    camera_position_in_model_space_uniform.offset,
-                                });
-
-                                pass.drawIndexed(skybox_model.model_descriptor.index.elements_count, 1, 0, 0, 0);
-                            },
-                            .skybox_cubemap_model => |skybox_cubemap_model| {
-                                pass.setBindGroup(0, skybox_cubemap_model.bind_group_descriptor.bind_group, &.{
-                                    object_to_clip_uniform.offset,
-                                    camera_position_in_model_space_uniform.offset,
-                                });
-
-                                pass.drawIndexed(skybox_cubemap_model.model_descriptor.index.elements_count, 1, 0, 0, 0);
-                            },
-                            .primitive_colorized => |primitive_colorized_model| {
-                                const solid_color_uniform = gctx.uniformsAllocate(zmath.Vec, 1);
-                                solid_color_uniform.slice[0] = game_object.debug.color;
-
-                                pass.setBindGroup(0, primitive_colorized_model.bind_group_descriptor.bind_group, &.{
-                                    object_to_clip_uniform.offset,
-                                    camera_position_in_model_space_uniform.offset,
-                                    solid_color_uniform.offset,
-                                });
-
-                                const elements_count = primitive_colorized_model.model_descriptor.position.elements_count;
-
-                                pass.draw(elements_count, 1, 0, 0);
-                            },
-                        }
+                        engine.drawGameObject(pass, scene, game_object);
                     }
                 }
             }
@@ -436,6 +280,167 @@ pub const Engine = struct {
         const gctx_state = gctx.present();
 
         return gctx_state;
+    }
+
+    fn drawGameObject(engine: *Engine, pass: wgpu.RenderPassEncoder, scene: *const Scene, game_object: *const GameObject) void {
+        switch (game_object.model) {
+            .regular_model => |model| {
+                pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
+
+                const model_descriptor = model.model_descriptor;
+
+                model_descriptor.position.applyVertexBuffer(pass, 0);
+                model_descriptor.normal.applyVertexBuffer(pass, 1);
+                model_descriptor.texcoord.applyVertexBuffer(pass, 2);
+                model_descriptor.index.applyIndexBuffer(pass);
+            },
+            .window_box_model => |window_box_model| {
+                pass.setPipeline(engine.pipelines.window_box.pipeline_gpu);
+
+                const model_descriptor = window_box_model.model_descriptor;
+                model_descriptor.position.applyVertexBuffer(pass, 0);
+            },
+            .primitive_colorized => |primitive_colorized_model| {
+                pass.setPipeline(engine.pipelines.primitive_colorized.pipeline_gpu);
+
+                const model_descriptor = primitive_colorized_model.model_descriptor;
+                model_descriptor.position.applyVertexBuffer(pass, 0);
+            },
+            .skybox_model => |skybox_model| {
+                pass.setPipeline(engine.pipelines.skybox.pipeline_gpu);
+
+                const model_descriptor = skybox_model.model_descriptor;
+                model_descriptor.position.applyVertexBuffer(pass, 0);
+                model_descriptor.uvs.applyVertexBuffer(pass, 1);
+                model_descriptor.index.applyIndexBuffer(pass);
+            },
+            .skybox_cubemap_model => |skybox_cubemap_model| {
+                pass.setPipeline(engine.pipelines.skybox_cubemap.pipeline_gpu);
+
+                const model_descriptor = skybox_cubemap_model.model_descriptor;
+                model_descriptor.position.applyVertexBuffer(pass, 0);
+                model_descriptor.index.applyIndexBuffer(pass);
+            },
+        }
+
+        var model_to_world = zmath.mul(
+            zmath.mul(
+                zmath.quatToMat(game_object.rotation),
+                zmath.scaling(game_object.scale, game_object.scale, game_object.scale),
+            ),
+            zmath.translation(
+                game_object.position[0],
+                game_object.position[1],
+                game_object.position[2],
+            ),
+        );
+
+        // Is it correct order?
+        model_to_world = zmath.mul(
+            game_object.aggregated_matrix,
+            model_to_world,
+        );
+
+        var flip_yz = false;
+        switch (game_object.model) {
+            .regular_model => |model| {
+                flip_yz = model.model_descriptor.mesh_y_up;
+            },
+            else => {},
+        }
+        if (flip_yz) {
+            // NOTE: converting from Y-up to Z-up coordinate system,
+            // should be done only for models which is made with Y-up logic.
+            model_to_world = zmath.mul(xRotate, model_to_world);
+        }
+
+        var object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);
+        if (game_object.model == .skybox_model or game_object.model == .skybox_cubemap_model) {
+            object_to_clip = zmath.mul(
+                scene.camera.camera_to_view,
+                scene.camera.view_to_clip,
+            );
+            if (game_object.model == .skybox_cubemap_model) {
+                object_to_clip = zmath.mul(xRotate, object_to_clip);
+            }
+        }
+
+        const object_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+        object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
+
+        const camera_position_in_model_space_uniform = engine.gctx.uniformsAllocate(zmath.Vec, 1);
+        if (game_object.model == .window_box_model) {
+            const camera_position = zmath.Vec{
+                // TODO: how it can be simplified?
+                scene.camera.position[0],
+                scene.camera.position[1],
+                scene.camera.position[2],
+                1,
+            };
+
+            // TODO:
+            // Instead of inverse it will be better to just apply transposed
+            // rotation matrix and negative position shift (and scale if needed).
+            // inverse is much more compute intensive than listed below operations.
+            const model_to_world_inversed = zmath.inverse(model_to_world);
+            const camera_position_in_model_space = zmath.mul(
+                camera_position,
+                model_to_world_inversed,
+            );
+
+            camera_position_in_model_space_uniform.slice[0] = camera_position_in_model_space;
+        }
+
+        switch (game_object.model) {
+            .regular_model => |model| {
+                pass.setBindGroup(0, model.bind_group_descriptor.bind_group, &.{
+                    object_to_clip_uniform.offset,
+                    camera_position_in_model_space_uniform.offset,
+                });
+
+                pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
+            },
+            .window_box_model => |window_box_model| {
+                pass.setBindGroup(0, window_box_model.bind_group_descriptor.bind_group, &.{
+                    object_to_clip_uniform.offset,
+                    camera_position_in_model_space_uniform.offset,
+                });
+
+                const elements_count = window_box_model.model_descriptor.position.elements_count;
+
+                pass.draw(elements_count, 1, 0, 0);
+            },
+            .skybox_model => |skybox_model| {
+                pass.setBindGroup(0, skybox_model.bind_group_descriptor.bind_group, &.{
+                    object_to_clip_uniform.offset,
+                    camera_position_in_model_space_uniform.offset,
+                });
+
+                pass.drawIndexed(skybox_model.model_descriptor.index.elements_count, 1, 0, 0, 0);
+            },
+            .skybox_cubemap_model => |skybox_cubemap_model| {
+                pass.setBindGroup(0, skybox_cubemap_model.bind_group_descriptor.bind_group, &.{
+                    object_to_clip_uniform.offset,
+                    camera_position_in_model_space_uniform.offset,
+                });
+
+                pass.drawIndexed(skybox_cubemap_model.model_descriptor.index.elements_count, 1, 0, 0, 0);
+            },
+            .primitive_colorized => |primitive_colorized_model| {
+                const solid_color_uniform = engine.gctx.uniformsAllocate(zmath.Vec, 1);
+                solid_color_uniform.slice[0] = game_object.debug.color;
+
+                pass.setBindGroup(0, primitive_colorized_model.bind_group_descriptor.bind_group, &.{
+                    object_to_clip_uniform.offset,
+                    camera_position_in_model_space_uniform.offset,
+                    solid_color_uniform.offset,
+                });
+
+                const elements_count = primitive_colorized_model.model_descriptor.position.elements_count;
+
+                pass.draw(elements_count, 1, 0, 0);
+            },
+        }
     }
 
     pub fn initLoader(engine: *Engine, model_name: []const u8) !gltf_loader.GltfLoader {
