@@ -5,5 +5,11 @@
 @fragment fn main(
     @location(0) uv: vec2<f32>,
 ) -> @location(0) vec4<f32> {
-    return textureSample(color_texture, texture_sampler, uv);
+    let color = textureSample(color_texture, texture_sampler, uv);
+
+    if (color.a < 0.5) {
+        discard;
+    }
+
+    return color;
 }
