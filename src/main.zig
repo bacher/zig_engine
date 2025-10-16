@@ -169,7 +169,11 @@ pub fn main() !void {
 
     var tube_data = try tube.initUnitTube(allocator);
     defer tube_data.deinit(allocator);
-    const tube_model = try engine.loadPrimitive(tube_data);
+    var tube_model = try engine.loadPrimitive(tube_data);
+    defer {
+        tube_model.deinit(engine.gctx);
+        allocator.destroy(tube_model);
+    }
 
     // Coordinates
 
@@ -245,11 +249,6 @@ fn traverseGroup(
     node: gltf_loader.SceneObject,
     nesting_level: u32,
 ) !void {
-    const StaticState = struct {
-        var object_index: u32 = 0;
-        var groups: std.ArrayListUnmanaged(*GameObjectGroup) = .{};
-    };
-
     if (node.children != null) {
         const group = try parent_group.addGroup();
 
@@ -262,39 +261,26 @@ fn traverseGroup(
             group.aggregated_mat = parent_group.aggregated_mat;
         }
 
-        try StaticState.groups.append(engine.allocator, group);
-
         // +DEBUG
         if (node.name != null and std.mem.eql(u8, node.name.?, "ttc_gazebo_11")) {
             std.debug.print("Group lvl={d}: {s}\n", .{ nesting_level, node.name orelse "empty" });
-
-            for (StaticState.groups.items, 0..) |iter_group, index| {
-                std.debug.print("{d}:\n", .{index});
-                debug.printMat(iter_group.aggregated_mat);
-            }
         }
         // -DEBUG
 
         for (node.children.?) |child| {
             try traverseGroup(engine, scene, group, loader, child, nesting_level + 1);
         }
-
-        _ = StaticState.groups.pop();
     } else if (node.mesh != null) {
         const model_id = try engine.loadModel(&loader, &node);
 
         // Assuming that nodes with mesh can't also have transform_matrix
         std.debug.assert(node.transform_matrix == null);
 
-        StaticState.object_index += 1;
-
-        // if (StaticState.object_index <= 1 or (StaticState.object_index >= 115 and StaticState.object_index < 122)) {
         std.debug.print("adding model {s}\n", .{node.name orelse "no name"});
         const game_object = try scene.addObject(.{
             .model_id = model_id,
             .position = .{ 0, 0, 0 },
         });
         try parent_group.addObject(game_object);
-        // }
     }
 }

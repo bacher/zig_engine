@@ -62,7 +62,7 @@ pub const PrimitiveModel = struct {
     model_descriptor: PrimitiveDescriptor,
     bind_group_descriptor: BindGroupDescriptor,
 
-    pub fn deinit(model: PrimitiveDescriptor, gctx: *zgpu.GraphicsContext) void {
+    pub fn deinit(model: PrimitiveModel, gctx: *zgpu.GraphicsContext) void {
         model.model_descriptor.deinit();
         model.bind_group_descriptor.deinit(gctx);
     }
