@@ -35,16 +35,17 @@ pub fn SpaceTree(comptime ElementType: type) type {
 
         allocator: std.mem.Allocator,
         grid: [GRID_DIMENSTION][GRID_DIMENSTION]*ThisSpaceNode,
-        // objects: ObjectsHashMap,
+        objects: ObjectsHashMap,
 
         pub fn init(allocator: std.mem.Allocator) !*This {
             const space_tree_ptr = try allocator.create(This);
             space_tree_ptr.* = .{
                 .allocator = allocator,
                 .grid = undefined,
-                // .objects = ObjectsHashMap.init(allocator),
+                .objects = ObjectsHashMap.init(allocator),
             };
-            // errdefer space_tree_ptr.objects.deinit();
+            errdefer space_tree_ptr.objects.deinit();
+            try space_tree_ptr.objects.ensureTotalCapacity(1024);
 
             for (0..GRID_DIMENSTION) |index_y| {
                 const cell_y: i8 = @as(i8, @intCast(index_y)) - GRID_OFFSET;
@@ -79,7 +80,9 @@ pub fn SpaceTree(comptime ElementType: type) type {
             return space_tree_ptr;
         }
 
-        pub fn deinit(space_tree: *const This) void {
+        pub fn deinit(space_tree: *This) void {
+            space_tree.objects.deinit();
+
             for (0..GRID_DIMENSTION) |index_y| {
                 for (0..GRID_DIMENSTION) |index_x| {
                     const child_node = space_tree.grid[index_y][index_x];
@@ -157,10 +160,7 @@ pub fn SpaceTree(comptime ElementType: type) type {
             }
         }
 
-        pub fn getObjectsInBoundBox(space_tree: *const This, bound_box: BoundBox(f32)) !ObjectsHashMap {
-            var objects = ObjectsHashMap.init(space_tree.allocator);
-            errdefer objects.deinit();
-
+        pub fn getObjectsInBoundBox(space_tree: *This, bound_box: BoundBox(f32)) []*const ElementType {
             const x0 = @as(i32, @intFromFloat(bound_box.x.start * GRID_NODE_SIZE_INV));
             const x1 = @as(i32, @intFromFloat(bound_box.x.end * GRID_NODE_SIZE_INV));
             const y0 = @as(i32, @intFromFloat(bound_box.y.start * GRID_NODE_SIZE_INV));
@@ -171,13 +171,17 @@ pub fn SpaceTree(comptime ElementType: type) type {
             const index_y0: u8 = @intCast(@max(0, y0 + GRID_OFFSET));
             const index_y1: u8 = @intCast(@min(GRID_DIMENSTION, y1 + GRID_OFFSET + 1));
 
+            space_tree.objects.clearRetainingCapacity();
+
             for (index_y0..index_y1) |index_y| {
                 for (index_x0..index_x1) |index_x| {
-                    try space_tree.grid[index_y][index_x].findObjectsInBoundBox(space_tree.allocator, bound_box, &objects);
+                    space_tree.grid[index_y][index_x].findObjectsInBoundBox(space_tree.allocator, bound_box, &space_tree.objects) catch |err| {
+                        std.debug.panic("findObjectsInBoundBox failed with error: {!}", .{err});
+                    };
                 }
             }
 
-            return objects;
+            return space_tree.objects.keys();
         }
 
         fn createChildNodes(space_tree: *const This, node: *ThisSpaceNode) !void {

@@ -250,19 +250,11 @@ pub const Engine = struct {
 
                     const camera_view_bound_box = scene.camera.getCameraViewBoundBox();
 
-                    var potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(camera_view_bound_box) catch state: {
-                        // TODO: Can error handler be refactored to omit if statement below without extracting body into function?
-                        std.debug.print("error: failed to get objects in bound box\n", .{});
-                        break :state null;
-                    };
+                    const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(camera_view_bound_box);
 
-                    if (potentially_visible_game_objects) |*game_objects| {
-                        defer game_objects.deinit();
-
-                        for (game_objects.keys()) |game_object| {
-                            engine.drawGameObject(pass, scene, game_object);
-                            count += 1;
-                        }
+                    for (potentially_visible_game_objects) |game_object| {
+                        engine.drawGameObject(pass, scene, game_object);
+                        count += 1;
                     }
 
                     // for (scene.game_objects.items) |game_object| {
