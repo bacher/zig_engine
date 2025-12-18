@@ -78,6 +78,10 @@ pub const Engine = struct {
     active_scene: ?*Scene,
     input_controller: *InputController,
 
+    frame_stats: struct {
+        game_objects_drawn_count: u32 = 0,
+    } = .{},
+
     pub fn init(
         allocator: std.mem.Allocator,
         window_context: WindowContext,
@@ -195,6 +199,9 @@ pub const Engine = struct {
     pub fn update(engine: *Engine) !void {
         engine.time = engine.gctx.stats.time - engine.init_time;
 
+        // resetting frame stats before each frame
+        engine.frame_stats = .{};
+
         try engine.input_controller.updateMouseState();
 
         if (engine.active_scene) |scene| {
@@ -246,23 +253,19 @@ pub const Engine = struct {
                 }
 
                 if (engine.active_scene) |scene| {
-                    var count: u32 = 0;
-
                     const camera_view_bound_box = scene.camera.getCameraViewBoundBox();
 
                     const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(camera_view_bound_box);
 
                     for (potentially_visible_game_objects) |game_object| {
                         engine.drawGameObject(pass, scene, game_object);
-                        count += 1;
+                        engine.frame_stats.game_objects_drawn_count += 1;
                     }
 
                     // for (scene.game_objects.items) |game_object| {
                     //     engine.drawGameObject(pass, scene, game_object);
-                    //     count += 1;
+                    //     engine.frame_stats.game_objects_drawn_count += 1;
                     // }
-
-                    std.debug.print("game objects per frame: {}\n", .{count});
                 }
             }
 

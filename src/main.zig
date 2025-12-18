@@ -216,6 +216,10 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
     if (game.saved_game_objects.get("man_2")) |obj| {
         obj.rotation = zmath.quatFromRollPitchYaw(0, 0, @floatCast(-engine.time));
     }
+}
+
+fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
+    _ = game_opaque;
 
     zgui.backend.newFrame(
         engine.gctx.swapchain_descriptor.width,
@@ -226,17 +230,28 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
     const camera = engine.active_scene.?.camera;
 
     _ = zgui.begin("Debug", .{});
-    zgui.text("Camera: ({d:2.2}, {d:2.2}, {d:2.2})", .{
+    zgui.text("camera: {d:2.2}, {d:2.2}, {d:2.2}", .{
         camera.position[0],
         camera.position[1],
         camera.position[2],
     });
-    zgui.end();
-}
 
-fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
-    _ = engine;
-    _ = game_opaque;
+    const stats = &engine.gctx.stats;
+
+    zgui.beginGroup();
+    zgui.text("Frame stats", .{});
+    zgui.text("time: {d:.1}s", .{stats.time});
+    zgui.text("fps: {d:.1}", .{stats.fps});
+    zgui.text("frame time: {d:.1}ms", .{stats.delta_time * 1000});
+    zgui.text("cpu time (avg): {d:.1}", .{stats.average_cpu_time});
+    // zgui.text("fps_counter: {d}", .{stats.fps_counter});
+    // zgui.text("fps_refresh_time: {d}", .{stats.fps_refresh_time});
+    // zgui.text("cpu_frame_number: {d}", .{stats.cpu_frame_number});
+    // zgui.text("gpu_frame_number: {d}", .{stats.gpu_frame_number});
+    zgui.text("objects drawn: {d}", .{engine.frame_stats.game_objects_drawn_count});
+    zgui.endGroup();
+
+    zgui.end();
 
     zgui.backend.draw(pass);
 }
