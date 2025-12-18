@@ -246,9 +246,31 @@ pub const Engine = struct {
                 }
 
                 if (engine.active_scene) |scene| {
-                    for (scene.game_objects.items) |game_object| {
-                        engine.drawGameObject(pass, scene, game_object);
+                    var count: u32 = 0;
+
+                    const camera_view_bound_box = scene.camera.getCameraViewBoundBox();
+
+                    var potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(camera_view_bound_box) catch state: {
+                        // TODO: Can error handler be refactored to omit if statement below without extracting body into function?
+                        std.debug.print("error: failed to get objects in bound box\n", .{});
+                        break :state null;
+                    };
+
+                    if (potentially_visible_game_objects) |*game_objects| {
+                        defer game_objects.deinit();
+
+                        for (game_objects.keys()) |game_object| {
+                            engine.drawGameObject(pass, scene, game_object);
+                            count += 1;
+                        }
                     }
+
+                    // for (scene.game_objects.items) |game_object| {
+                    //     engine.drawGameObject(pass, scene, game_object);
+                    //     count += 1;
+                    // }
+
+                    std.debug.print("game objects per frame: {}\n", .{count});
                 }
             }
 
@@ -627,6 +649,7 @@ pub const Engine = struct {
             }
 
             engine.input_controller.flushQueue();
+            // return;
         }
     }
 };

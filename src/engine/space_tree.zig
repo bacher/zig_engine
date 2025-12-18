@@ -1,6 +1,8 @@
 const std = @import("std");
 const math = std.math;
 
+const BoundBox = @import("./bound_box.zig").BoundBox;
+
 const DEBUG = false;
 const STRICT = true;
 
@@ -23,22 +25,26 @@ const GRID_NODE_SIZE = sizes[0];
 const GRID_NODE_SIZE_INV: f32 = 1 / GRID_NODE_SIZE;
 const ZERO_Z = GRID_NODE_SIZE * 0.25;
 
+// Node [GRID_OFFSET, GRID_OFFSET] starts at (0, 0) and goes until (GRID_NODE_SIZE, GRID_NODE_SIZE).
+
 pub fn SpaceTree(comptime ElementType: type) type {
     return struct {
         const This = @This();
         const ThisSpaceNode = SpaceNode(ElementType);
+        const ObjectsHashMap = std.AutoArrayHashMap(*const ElementType, bool);
 
         allocator: std.mem.Allocator,
         grid: [GRID_DIMENSTION][GRID_DIMENSTION]*ThisSpaceNode,
+        // objects: ObjectsHashMap,
 
         pub fn init(allocator: std.mem.Allocator) !*This {
-            const step = sizes[0];
-
             const space_tree_ptr = try allocator.create(This);
             space_tree_ptr.* = .{
                 .allocator = allocator,
                 .grid = undefined,
+                // .objects = ObjectsHashMap.init(allocator),
             };
+            // errdefer space_tree_ptr.objects.deinit();
 
             for (0..GRID_DIMENSTION) |index_y| {
                 const cell_y: i8 = @as(i8, @intCast(index_y)) - GRID_OFFSET;
@@ -47,16 +53,24 @@ pub fn SpaceTree(comptime ElementType: type) type {
                     const cell_x: i8 = @as(i8, @intCast(index_x)) - GRID_OFFSET;
 
                     const center: [3]f32 = .{
-                        (@as(f32, @floatFromInt(cell_x)) + 0.5) * step,
-                        (@as(f32, @floatFromInt(cell_y)) + 0.5) * step,
+                        (@as(f32, @floatFromInt(cell_x)) + 0.5) * GRID_NODE_SIZE,
+                        (@as(f32, @floatFromInt(cell_y)) + 0.5) * GRID_NODE_SIZE,
                         ZERO_Z,
                     };
+
+                    std.debug.print("grid node [x={d:2}, y={d:2}] center: {d:8.1},{d:8.1},{d:8.1}\n", .{
+                        cell_x,
+                        cell_y,
+                        center[0],
+                        center[1],
+                        center[2],
+                    });
 
                     const node = try allocator.create(ThisSpaceNode);
                     node.* = ThisSpaceNode.init(0, center);
                     errdefer allocator.destroy(node);
 
-                    space_tree_ptr.grid[index_x][index_y] = node;
+                    space_tree_ptr.grid[index_y][index_x] = node;
 
                     try space_tree_ptr.createChildNodes(node);
                 }
@@ -68,7 +82,7 @@ pub fn SpaceTree(comptime ElementType: type) type {
         pub fn deinit(space_tree: *const This) void {
             for (0..GRID_DIMENSTION) |index_y| {
                 for (0..GRID_DIMENSTION) |index_x| {
-                    const child_node = space_tree.grid[index_x][index_y];
+                    const child_node = space_tree.grid[index_y][index_x];
                     space_tree.destroyLevel(child_node);
 
                     child_node.deinit(space_tree.allocator);
@@ -138,9 +152,32 @@ pub fn SpaceTree(comptime ElementType: type) type {
 
             for (@intCast(@max(0, x0))..@intCast(@min(GRID_DIMENSTION, x1))) |x| {
                 for (@intCast(@max(0, y0))..@intCast(@min(GRID_DIMENSTION, y1))) |y| {
-                    try space_tree.grid[x][y].addObject(space_tree.allocator, object, bound_box);
+                    try space_tree.grid[y][x].addObject(space_tree.allocator, object, bound_box);
                 }
             }
+        }
+
+        pub fn getObjectsInBoundBox(space_tree: *const This, bound_box: BoundBox(f32)) !ObjectsHashMap {
+            var objects = ObjectsHashMap.init(space_tree.allocator);
+            errdefer objects.deinit();
+
+            const x0 = @as(i32, @intFromFloat(bound_box.x.start * GRID_NODE_SIZE_INV));
+            const x1 = @as(i32, @intFromFloat(bound_box.x.end * GRID_NODE_SIZE_INV));
+            const y0 = @as(i32, @intFromFloat(bound_box.y.start * GRID_NODE_SIZE_INV));
+            const y1 = @as(i32, @intFromFloat(bound_box.y.end * GRID_NODE_SIZE_INV));
+
+            const index_x0: u8 = @intCast(@max(0, x0 + GRID_OFFSET));
+            const index_x1: u8 = @intCast(@min(GRID_DIMENSTION, x1 + GRID_OFFSET + 1));
+            const index_y0: u8 = @intCast(@max(0, y0 + GRID_OFFSET));
+            const index_y1: u8 = @intCast(@min(GRID_DIMENSTION, y1 + GRID_OFFSET + 1));
+
+            for (index_y0..index_y1) |index_y| {
+                for (index_x0..index_x1) |index_x| {
+                    try space_tree.grid[index_y][index_x].findObjectsInBoundBox(space_tree.allocator, bound_box, &objects);
+                }
+            }
+
+            return objects;
         }
 
         fn createChildNodes(space_tree: *const This, node: *ThisSpaceNode) !void {
@@ -272,6 +309,48 @@ fn SpaceNode(comptime ElementType: type) type {
                 return;
             }
 
+            const sub_boxes = space_node.getSubBoxesByBoundBox(bound_box);
+            const sub_boxes_indexes = space_node.getChildNodeIndexesBySubBoxes(sub_boxes);
+
+            for (sub_boxes_indexes) |index| {
+                if (index == 255) {
+                    break;
+                }
+                try space_node.child_nodes[index].addObject(allocator, object, bound_box);
+            }
+        }
+
+        fn findObjectsInBoundBox(
+            space_node: *const ThisSpaceNode,
+            allocator: std.mem.Allocator,
+            bound_box: BoundBox(f32),
+            objects: *std.AutoArrayHashMap(*const ElementType, bool),
+        ) !void {
+            for (space_node.contained_objects.keys()) |object| {
+                try objects.put(object, true);
+            }
+
+            // TODO: Should I add partially contained objects?
+            for (space_node.partially_contained_objects.keys()) |object| {
+                try objects.put(object, true);
+            }
+
+            if (space_node.level == MAX_LEVEL) {
+                return;
+            }
+
+            const sub_boxes = space_node.getSubBoxesByBoundBox(bound_box);
+            const sub_boxes_indexes = space_node.getChildNodeIndexesBySubBoxes(sub_boxes);
+
+            for (sub_boxes_indexes) |index| {
+                if (index == 255) {
+                    break;
+                }
+                try space_node.child_nodes[index].findObjectsInBoundBox(allocator, bound_box, objects);
+            }
+        }
+
+        fn getSubBoxesByBoundBox(space_node: *const ThisSpaceNode, bound_box: BoundBox(f32)) BoundBox(u8) {
             var sub_box: BoundBox(u8) = .{
                 .x = .init(0, 2),
                 .y = .init(0, 2),
@@ -294,23 +373,33 @@ fn SpaceNode(comptime ElementType: type) type {
                 sub_box.z.start = 1;
             }
 
-            // std.debug.print("subsecting: x: {d}-{d} y: {d}-{d} z: {d}-{d}\n", .{
-            //     sub_box.x.start,
-            //     sub_box.x.end,
-            //     sub_box.y.start,
-            //     sub_box.y.end,
-            //     sub_box.z.start,
-            //     sub_box.z.end,
-            // });
+            return sub_box;
+        }
 
+        fn getChildNodeIndexesBySubBoxes(
+            _: *const ThisSpaceNode,
+            sub_box: BoundBox(u8),
+        ) [8]u8 {
+            var list: [8]u8 = undefined;
+            // var list = std.ArrayList(u8).init(allocator);
+            // errdefer list.deinit();
+
+            var i: u8 = 0;
             for (sub_box.z.start..sub_box.z.end) |z_index| {
                 for (sub_box.y.start..sub_box.y.end) |y_index| {
                     for (sub_box.x.start..sub_box.x.end) |x_index| {
-                        const cell_index = z_index * 4 + y_index * 2 + x_index;
-                        try space_node.child_nodes[cell_index].addObject(allocator, object, bound_box);
+                        const cell_index = @as(u8, @intCast(z_index * 4 + y_index * 2 + x_index));
+                        // try list.append(cell_index);
+                        list[i] = cell_index;
+                        i += 1;
                     }
                 }
             }
+            if (i != 8) {
+                list[i] = 255;
+            }
+
+            return list;
         }
 
         fn printCenter(space_node: *const ThisSpaceNode) void {
@@ -328,27 +417,6 @@ const TestObject = struct {
     position: [3]f32,
     bounding_radius: f32,
 };
-
-fn Range(comptime ElementType: type) type {
-    return struct {
-        const This = @This();
-
-        start: ElementType,
-        end: ElementType,
-
-        fn init(start: ElementType, end: ElementType) This {
-            return .{ .start = start, .end = end };
-        }
-    };
-}
-
-fn BoundBox(comptime ElementType: type) type {
-    return struct {
-        x: Range(ElementType),
-        y: Range(ElementType),
-        z: Range(ElementType),
-    };
-}
 
 fn printNodeInfo(node: *SpaceNode(TestObject)) void {
     std.debug.print("[node info] level={d} center=({d},{d},{d})\n", .{
