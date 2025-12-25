@@ -80,6 +80,11 @@ pub const Engine = struct {
 
     frame_stats: struct {
         game_objects_drawn_count: u32 = 0,
+        overall_time_taken: f32 = 0,
+
+        // --
+        active_space_nodes_count: u32 = 0,
+        find_objects_sub_invocations_count: u32 = 0,
     } = .{},
 
     pub fn init(
@@ -255,7 +260,14 @@ pub const Engine = struct {
                 if (engine.active_scene) |scene| {
                     const camera_view_bound_box = scene.camera.getCameraViewBoundBox();
 
+                    var timer = std.time.Timer.start() catch @panic("Failed to start timer");
                     const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(camera_view_bound_box);
+
+                    // debug start
+                    const stats = scene.space_tree.getLastGetObjectsInBoundBoxStats();
+                    engine.frame_stats.active_space_nodes_count = stats.active_space_nodes_count;
+                    engine.frame_stats.find_objects_sub_invocations_count = stats.invocations_count;
+                    // debug end
 
                     for (potentially_visible_game_objects) |game_object| {
                         engine.drawGameObject(pass, scene, game_object);
@@ -266,6 +278,8 @@ pub const Engine = struct {
                     //     engine.drawGameObject(pass, scene, game_object);
                     //     engine.frame_stats.game_objects_drawn_count += 1;
                     // }
+
+                    engine.frame_stats.overall_time_taken = @as(f32, @floatFromInt(timer.read())) * 0.000001;
                 }
             }
 

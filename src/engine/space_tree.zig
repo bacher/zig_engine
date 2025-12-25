@@ -6,26 +6,40 @@ const BoundBox = @import("./bound_box.zig").BoundBox;
 const DEBUG = false;
 const STRICT = true;
 
-const MAX_LEVEL = 4;
+const LEVELS_COUNT = 3;
+const MAX_LEVEL = LEVELS_COUNT - 1;
 const GRID_DIMENSTION = 16;
 const GRID_OFFSET: u8 = @divExact(GRID_DIMENSTION, 2);
 const CHILD_NODE_COUNT = 8;
 
-// const sizes = [MAX_LEVEL + 1]f32{ 16, 8, 4, 2, 1 };
-const sizes = [MAX_LEVEL + 1]f32{ 32, 16, 8, 4, 2 };
-// const sizes = [MAX_LEVEL + 1]f32{ 64, 32, 16, 8, 4 };
+// const GRID_NODE_SIZE: f32 = 16;
+const GRID_NODE_SIZE: f32 = 32;
+// const GRID_NODE_SIZE: f32 = 64;
+const GRID_NODE_SIZE_INV: f32 = 1 / GRID_NODE_SIZE;
+const ZERO_Z = GRID_NODE_SIZE * 0.25;
+
+const sizes = sizes: {
+    var arr: [LEVELS_COUNT]f32 = undefined;
+    for (0..LEVELS_COUNT) |index| {
+        arr[index] = GRID_NODE_SIZE / std.math.pow(f32, 2, index);
+    }
+    break :sizes arr;
+};
+
 const radiuses = radiuses: {
-    var arr: [MAX_LEVEL + 1]f32 = undefined;
+    var arr: [LEVELS_COUNT]f32 = undefined;
     for (sizes, 0..) |size, index| {
         arr[index] = size * 0.5 * math.sqrt2;
     }
     break :radiuses arr;
 };
-const GRID_NODE_SIZE = sizes[0];
-const GRID_NODE_SIZE_INV: f32 = 1 / GRID_NODE_SIZE;
-const ZERO_Z = GRID_NODE_SIZE * 0.25;
 
 // Node [GRID_OFFSET, GRID_OFFSET] starts at (0, 0) and goes until (GRID_NODE_SIZE, GRID_NODE_SIZE).
+
+const Debug = struct {
+    var find_invocations_count: u32 = 0;
+    var active_space_nodes_count: u32 = 0;
+};
 
 pub fn SpaceTree(comptime ElementType: type) type {
     return struct {
@@ -155,12 +169,15 @@ pub fn SpaceTree(comptime ElementType: type) type {
 
             for (@intCast(@max(0, x0))..@intCast(@min(GRID_DIMENSTION, x1))) |x| {
                 for (@intCast(@max(0, y0))..@intCast(@min(GRID_DIMENSTION, y1))) |y| {
-                    try space_tree.grid[y][x].addObject(space_tree.allocator, object, bound_box);
+                    _ = try space_tree.grid[y][x].addObject(space_tree.allocator, object, bound_box);
                 }
             }
         }
 
         pub fn getObjectsInBoundBox(space_tree: *This, bound_box: BoundBox(f32)) []*const ElementType {
+            Debug.find_invocations_count = 0;
+            Debug.active_space_nodes_count = 0;
+
             const x0 = @as(i32, @intFromFloat(bound_box.x.start * GRID_NODE_SIZE_INV));
             const x1 = @as(i32, @intFromFloat(bound_box.x.end * GRID_NODE_SIZE_INV));
             const y0 = @as(i32, @intFromFloat(bound_box.y.start * GRID_NODE_SIZE_INV));
@@ -173,15 +190,26 @@ pub fn SpaceTree(comptime ElementType: type) type {
 
             space_tree.objects.clearRetainingCapacity();
 
+            var grid_nodes_count: u32 = 0;
             for (index_y0..index_y1) |index_y| {
                 for (index_x0..index_x1) |index_x| {
                     space_tree.grid[index_y][index_x].findObjectsInBoundBox(space_tree.allocator, bound_box, &space_tree.objects) catch |err| {
                         std.debug.panic("findObjectsInBoundBox failed with error: {!}", .{err});
                     };
+                    grid_nodes_count += 1;
                 }
             }
 
+            Debug.active_space_nodes_count = grid_nodes_count;
+
             return space_tree.objects.keys();
+        }
+
+        pub fn getLastGetObjectsInBoundBoxStats(_: *const This) struct { invocations_count: u32, active_space_nodes_count: u32 } {
+            return .{
+                .invocations_count = Debug.find_invocations_count,
+                .active_space_nodes_count = Debug.active_space_nodes_count,
+            };
         }
 
         fn createChildNodes(space_tree: *const This, node: *ThisSpaceNode) !void {
@@ -254,7 +282,8 @@ fn SpaceNode(comptime ElementType: type) type {
         center: [3]f32,
         child_nodes: [CHILD_NODE_COUNT]*ThisSpaceNode,
         contained_objects: std.AutoArrayHashMapUnmanaged(*const ElementType, bool),
-        partially_contained_objects: std.AutoArrayHashMapUnmanaged(*const ElementType, bool),
+        intersecting_objects: std.AutoArrayHashMapUnmanaged(*const ElementType, bool),
+        nested_objects_count: u32,
 
         fn init(level: u8, center: [3]f32) ThisSpaceNode {
             return .{
@@ -262,13 +291,14 @@ fn SpaceNode(comptime ElementType: type) type {
                 .center = center,
                 .child_nodes = undefined,
                 .contained_objects = .empty,
-                .partially_contained_objects = .empty,
+                .intersecting_objects = .empty,
+                .nested_objects_count = 0,
             };
         }
 
         fn deinit(space_node: *ThisSpaceNode, allocator: std.mem.Allocator) void {
             space_node.contained_objects.deinit(allocator);
-            space_node.partially_contained_objects.deinit(allocator);
+            space_node.intersecting_objects.deinit(allocator);
         }
 
         fn addObject(
@@ -276,7 +306,8 @@ fn SpaceNode(comptime ElementType: type) type {
             allocator: std.mem.Allocator,
             object: *const ElementType,
             bound_box: BoundBox(f32),
-        ) !void {
+        ) !bool { // returns true if object was added to the node
+
             // std.debug.print("addObject to level={}\n", .{space_node.level});
             // space_node.printCenter();
 
@@ -297,30 +328,37 @@ fn SpaceNode(comptime ElementType: type) type {
             if (len >= radiuses[space_node.level] + object.bounding_radius) {
                 // std.debug.print("len={d} Rc={d} Ro={d}\n", .{ len, radiuses[space_node.level], object.bounding_radius });
                 // std.debug.print("spheres are not intersecing, skip\n", .{});
-                return;
+                return false;
             }
 
             // if cell sphere is fully inside of object sphere
             if (len + radiuses[space_node.level] <= object.bounding_radius) {
                 try space_node.contained_objects.put(allocator, object, true);
                 // std.debug.print("full contained, skipping subdivision\n", .{});
-                return;
+                return true;
             }
 
+            // on max level we add object to intersecting objects instead of subdividing
             if (space_node.level == MAX_LEVEL) {
-                try space_node.partially_contained_objects.put(allocator, object, true);
-                // std.debug.print("partially contained\n", .{});
-                return;
-            }
+                try space_node.intersecting_objects.put(allocator, object, true);
+                return true;
+            } else {
+                const sub_boxes = space_node.getSubBoxesByBoundBox(bound_box);
+                const sub_boxes_indexes = space_node.getChildNodeIndexesBySubBoxes(sub_boxes);
 
-            const sub_boxes = space_node.getSubBoxesByBoundBox(bound_box);
-            const sub_boxes_indexes = space_node.getChildNodeIndexesBySubBoxes(sub_boxes);
+                var something_was_added = false;
+                for (sub_boxes_indexes) |index| {
+                    if (index == 255) {
+                        break;
+                    }
+                    const was_added = try space_node.child_nodes[index].addObject(allocator, object, bound_box);
 
-            for (sub_boxes_indexes) |index| {
-                if (index == 255) {
-                    break;
+                    if (was_added) {
+                        something_was_added = true;
+                        space_node.nested_objects_count += 1;
+                    }
                 }
-                try space_node.child_nodes[index].addObject(allocator, object, bound_box);
+                return something_was_added;
             }
         }
 
@@ -330,27 +368,33 @@ fn SpaceNode(comptime ElementType: type) type {
             bound_box: BoundBox(f32),
             objects: *std.AutoArrayHashMap(*const ElementType, bool),
         ) !void {
+            Debug.find_invocations_count += 1;
+
             for (space_node.contained_objects.keys()) |object| {
                 try objects.put(object, true);
             }
 
-            // TODO: Should I add partially contained objects?
-            for (space_node.partially_contained_objects.keys()) |object| {
-                try objects.put(object, true);
-            }
-
             if (space_node.level == MAX_LEVEL) {
+                // TODO: Is it correct to assume that intersecting objects should be taken only from the max level?
+                for (space_node.intersecting_objects.keys()) |object| {
+                    try objects.put(object, true);
+                }
+
+                // the level does not have any children, so we can return early
                 return;
             }
 
-            const sub_boxes = space_node.getSubBoxesByBoundBox(bound_box);
-            const sub_boxes_indexes = space_node.getChildNodeIndexesBySubBoxes(sub_boxes);
+            // descend into the children only if node has nested objects
+            if (space_node.nested_objects_count > 0) {
+                const sub_boxes = space_node.getSubBoxesByBoundBox(bound_box);
+                const sub_boxes_indexes = space_node.getChildNodeIndexesBySubBoxes(sub_boxes);
 
-            for (sub_boxes_indexes) |index| {
-                if (index == 255) {
-                    break;
+                for (sub_boxes_indexes) |index| {
+                    if (index == 255) {
+                        break;
+                    }
+                    try space_node.child_nodes[index].findObjectsInBoundBox(allocator, bound_box, objects);
                 }
-                try space_node.child_nodes[index].findObjectsInBoundBox(allocator, bound_box, objects);
             }
         }
 

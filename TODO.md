@@ -4,3 +4,4 @@
 - [x] Add depth texture struct with explicit init/deinit
 - [ ] Add spectator view to verify cull logic
 - [ ] Do not load the same texture several times.
+- [ ] Check the cemara max distance, is it too big?
