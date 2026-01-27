@@ -15,8 +15,8 @@ const SpectatorCamera = @import("./spectator_camera.zig").SpectatorCamera;
 pub const Scene = struct {
     engine: *Engine,
     allocator: std.mem.Allocator,
-    game_objects: std.ArrayList(*GameObject),
-    root_groups: std.ArrayList(*GameObjectGroup),
+    game_objects: std.ArrayList(*GameObject) = .empty,
+    root_groups: std.ArrayList(*GameObjectGroup) = .empty,
     space_tree: *SpaceTree(GameObject),
     camera: *Camera,
     spectator_camera: *SpectatorCamera,
@@ -30,12 +30,6 @@ pub const Scene = struct {
     ) !*Scene {
         const scene = try allocator.create(Scene);
         errdefer allocator.destroy(scene);
-
-        const game_objects = std.ArrayList(*GameObject).init(allocator);
-        errdefer game_objects.deinit();
-
-        const root_groups = std.ArrayList(*GameObjectGroup).init(allocator);
-        errdefer root_groups.deinit();
 
         const space_tree = try SpaceTree(GameObject).init(allocator);
         errdefer space_tree.deinit();
@@ -51,8 +45,8 @@ pub const Scene = struct {
         scene.* = .{
             .engine = engine,
             .allocator = allocator,
-            .game_objects = game_objects,
-            .root_groups = root_groups,
+            .game_objects = .empty,
+            .root_groups = .empty,
             .space_tree = space_tree,
             .camera = camera,
             .spectator_camera = spectator_camera,
@@ -67,12 +61,12 @@ pub const Scene = struct {
         for (scene.root_groups.items) |root_group| {
             root_group.deinit_recursively();
         }
-        scene.root_groups.deinit();
+        scene.root_groups.deinit(scene.allocator);
 
         for (scene.game_objects.items) |game_object| {
             scene.allocator.destroy(game_object);
         }
-        scene.game_objects.deinit();
+        scene.game_objects.deinit(scene.allocator);
 
         scene.spectator_camera.deinit();
         scene.camera.deinit();
@@ -83,7 +77,7 @@ pub const Scene = struct {
 
     pub fn addGroup(scene: *Scene) !*GameObjectGroup {
         const new_group = try GameObjectGroup.init(scene.allocator);
-        try scene.root_groups.append(new_group);
+        try scene.root_groups.append(scene.allocator, new_group);
         return new_group;
     }
 
@@ -97,7 +91,7 @@ pub const Scene = struct {
             });
             errdefer game_object.deinit();
 
-            try scene.game_objects.append(game_object);
+            try scene.game_objects.append(scene.allocator, game_object);
 
             try scene.space_tree.addObject(game_object);
 
@@ -117,7 +111,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit();
 
-        try scene.game_objects.append(game_object);
+        try scene.game_objects.append(scene.allocator, game_object);
 
         return game_object;
     }
@@ -145,7 +139,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit();
 
-        try scene.game_objects.append(game_object);
+        try scene.game_objects.append(scene.allocator, game_object);
 
         return game_object;
     }
@@ -159,7 +153,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit();
 
-        try scene.game_objects.append(game_object);
+        try scene.game_objects.append(scene.allocator, game_object);
 
         return game_object;
     }

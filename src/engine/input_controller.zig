@@ -50,7 +50,7 @@ pub const InputController = struct {
         _: i32,
         action: zglfw.Action,
         _: zglfw.Mods,
-    ) callconv(.C) void {
+    ) callconv(.c) void {
         if (InputController.instance) |input_controller| {
             if (action == .press or action == .repeat) {
                 input_controller.pressed_keys.put(key, {}) catch |err| {

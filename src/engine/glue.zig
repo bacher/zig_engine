@@ -13,7 +13,7 @@ pub const WindowContext = struct {
         zglfw.windowHint(.client_api, .no_api);
 
         const window_title = "zig-engine";
-        const window = try zglfw.Window.create(800, 600, window_title, null);
+        const window = try zglfw.Window.create(800, 600, window_title, null, null);
         errdefer window.destroy();
         window.setSizeLimits(400, 400, -1, -1);
 

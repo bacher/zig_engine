@@ -15,7 +15,7 @@ pub const GameObjectGroup = struct {
     scale: f32 = 1,
     aggregated_mat: zmath.Mat = zmath.identity(),
     // bounding_radius: f32,
-    children: std.ArrayList(GroupChild),
+    children: std.ArrayList(GroupChild) = .empty,
     _gc: ?*GameObjectGroup,
 
     pub fn init(allocator: std.mem.Allocator) !*GameObjectGroup {
@@ -27,7 +27,7 @@ pub const GameObjectGroup = struct {
             .position = .{ 0, 0, 0 },
             .rotation = zmath.quatFromRollPitchYaw(0, 0, 0),
             .scale = 1,
-            .children = std.ArrayList(GroupChild).init(allocator),
+            .children = .empty,
             ._gc = game_object_group,
         };
 
@@ -35,7 +35,7 @@ pub const GameObjectGroup = struct {
     }
 
     pub fn deinit(game_object_group: *GameObjectGroup) void {
-        game_object_group.children.deinit();
+        game_object_group.children.deinit(game_object_group.allocator);
 
         if (game_object_group._gc) |pointer| {
             game_object_group.allocator.destroy(pointer);
@@ -57,7 +57,7 @@ pub const GameObjectGroup = struct {
     pub fn addGroup(group: *GameObjectGroup) !*GameObjectGroup {
         const new_group = try GameObjectGroup.init(group.allocator);
 
-        const child = try group.children.addOne();
+        const child = try group.children.addOne(group.allocator);
         child.* = .{
             .group = new_group,
         };
@@ -66,7 +66,7 @@ pub const GameObjectGroup = struct {
     }
 
     pub fn addObject(group: *GameObjectGroup, game_object: *GameObject) !void {
-        const added = try group.children.addOne();
+        const added = try group.children.addOne(group.allocator);
         added.* = .{
             .game_object = game_object,
         };

@@ -40,7 +40,7 @@ pub fn initUpRightQuad(allocator: std.mem.Allocator) !GeometryData {
 }
 
 pub fn initCenteredQuad(allocator: std.mem.Allocator) !GeometryData {
-    const buffer = try allocator.alignedAlloc(u8, @sizeOf(f32), @sizeOf(f32) * 18);
+    const buffer = try allocator.alignedAlloc(u8, .of(f32), @sizeOf(f32) * 18);
 
     const data = std.mem.bytesAsSlice([3]f32, buffer);
 

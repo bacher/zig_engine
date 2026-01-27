@@ -208,7 +208,7 @@ pub fn main() !void {
 }
 
 fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
-    const game: *Game = @alignCast(@ptrCast(game_opaque));
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
 
     if (game.saved_game_objects.get("man_1")) |obj| {
         obj.rotation = zmath.quatFromRollPitchYaw(0, 0, @floatCast(engine.time));
@@ -229,7 +229,18 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
 
     const camera = engine.active_scene.?.camera;
 
-    _ = zgui.begin("Debug", .{});
+    _ = zgui.begin("Debug", .{
+        .flags = .{
+            .always_auto_resize = true,
+            .no_saved_settings = true,
+            .no_collapse = true,
+            .no_mouse_inputs = true,
+            .no_focus_on_appearing = true,
+            .no_nav_focus = true,
+            .no_move = true,
+            .no_resize = true,
+        },
+    });
     zgui.text("camera: {d:2.2}, {d:2.2}, {d:2.2}", .{
         camera.position[0],
         camera.position[1],

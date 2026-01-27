@@ -9,7 +9,7 @@ const L = -R;
 pub const M = 0.05;
 
 pub fn initUnitTube(allocator: std.mem.Allocator) !GeometryData {
-    const buffer = try allocator.alignedAlloc(u8, @sizeOf(f32), @sizeOf(f32) * 3 * 36);
+    const buffer = try allocator.alignedAlloc(u8, .of(f32), @sizeOf(f32) * 3 * 36);
 
     const data = std.mem.bytesAsSlice([3]f32, buffer);
 

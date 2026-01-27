@@ -14,9 +14,11 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "zig_engine",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     // Deps start
@@ -105,26 +107,32 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const exe_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = exe.root_module,
     });
     exe_unit_tests.root_module.addImport("zmath", zmath.module("root"));
 
     const loader_utils_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/loader_utils/utils.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/loader_utils/utils.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zmath", .module = zmath.module("root") },
+                .{ .name = "debug", .module = debug_module },
+            },
+        }),
     });
-    loader_utils_unit_tests.root_module.addImport("zmath", zmath.module("root"));
-    loader_utils_unit_tests.root_module.addImport("debug", debug_module);
 
     const space_tree_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/engine/space_tree.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/engine/space_tree.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zmath", .module = zmath.module("root") },
+            },
+        }),
     });
-    space_tree_unit_tests.root_module.addImport("zmath", zmath.module("root"));
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     const run_loader_utils_unit_tests = b.addRunArtifact(loader_utils_unit_tests);

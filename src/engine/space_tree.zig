@@ -194,7 +194,7 @@ pub fn SpaceTree(comptime ElementType: type) type {
             for (index_y0..index_y1) |index_y| {
                 for (index_x0..index_x1) |index_x| {
                     space_tree.grid[index_y][index_x].findObjectsInBoundBox(space_tree.allocator, bound_box, &space_tree.objects) catch |err| {
-                        std.debug.panic("findObjectsInBoundBox failed with error: {!}", .{err});
+                        std.debug.panic("findObjectsInBoundBox failed with error: {}", .{err});
                     };
                     grid_nodes_count += 1;
                 }
