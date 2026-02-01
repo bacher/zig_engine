@@ -17,9 +17,13 @@ const skybox_pipeline_module = @import("./pipelines/skybox_pipeline.zig");
 const skybox_cubemap_pipeline_module = @import("./pipelines/skybox_cubemap_pipeline.zig");
 const window_box_pipeline_module = @import("./pipelines/window_box_pipeline.zig");
 const primitive_colorized_pipeline_module = @import("./pipelines/primitive_colorized_pipeline.zig");
+const shadow_map_pipeline_module = @import("./pipelines/shadow_map_pipeline.zig");
+const BindGroupDescriptor = @import("./bind_group_descriptor.zig").BindGroupDescriptor;
 const BindGroupDefinition = @import("./bind_group.zig").BindGroupDefinition;
 const PrimitiveColorizedBindGroupDefinition = @import("./bind_group_primitive.zig").PrimitiveColorizedBindGroupDefinition;
+const ShadowMapPassBindGroupDefinition = @import("./bind_group_shadow_map_pass.zig").ShadowMapPassBindGroupDefinition;
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
+const ShadowMapTexture = @import("./shadow_map_texture.zig").ShadowMapTexture;
 const ModelDescriptor = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptor;
 const WindowBoxDescriptor = @import("./display_object_descriptors/window_box_descriptor.zig").WindowBoxDescriptor;
 const SkyBoxDescriptor = @import("./display_object_descriptors/skybox_descriptor.zig").SkyBoxDescriptor;
@@ -66,23 +70,31 @@ pub const Engine = struct {
         skybox_cubemap: Pipeline,
         window_box: Pipeline,
         primitive_colorized: Pipeline,
+        // ---
+        shadow_map: Pipeline,
     },
     bind_group_definition: BindGroupDefinition,
     bind_group_cubemap_definition: BindGroupDefinition,
     bind_group_primitive_colorized_definition: PrimitiveColorizedBindGroupDefinition,
+    bind_group_shadow_map_pass_definition: ShadowMapPassBindGroupDefinition,
+    bind_group_shadow_map_pass_descriptor: BindGroupDescriptor,
+
     depth_texture: DepthTexture,
     texture_sampler: zgpu.SamplerHandle,
 
     models_hash: std.AutoHashMap(LoadedModelId, *Model),
+    shadow_map_texture: ShadowMapTexture,
+    shadow_map_depth_texture: DepthTexture,
 
     active_scene: ?*Scene,
     input_controller: *InputController,
 
     frame_stats: struct {
         game_objects_drawn_count: u32 = 0,
-        overall_time_taken: f32 = 0,
+        shadow_map_pass_time_taken: f32 = 0,
+        main_pass_time_taken: f32 = 0,
 
-        // --
+        // ---
         active_space_nodes_count: u32 = 0,
         find_objects_sub_invocations_count: u32 = 0,
     } = .{},
@@ -105,6 +117,9 @@ pub const Engine = struct {
         const bind_group_definition = BindGroupDefinition.init(gctx, .tvdim_2d);
         const bind_group_cubemap_definition = BindGroupDefinition.init(gctx, .tvdim_cube);
         const bind_group_primitive_colorized_definition = PrimitiveColorizedBindGroupDefinition.init(gctx);
+        const bind_group_shadow_map_pass_definition = ShadowMapPassBindGroupDefinition.init(gctx);
+
+        const bind_group_shadow_map_pass_descriptor = try bind_group_shadow_map_pass_definition.createBindGroup();
 
         const basic_pipeline = try basic_pipeline_module.createBasicPipeline(
             gctx,
@@ -126,15 +141,29 @@ pub const Engine = struct {
             gctx,
             bind_group_primitive_colorized_definition,
         );
+        const shadow_map_pipeline = try shadow_map_pipeline_module.createShadowMapPipeline(
+            gctx,
+            bind_group_shadow_map_pass_definition,
+        );
 
         const texture_sampler = gctx.createSampler(.{});
 
-        const depth_texture = try DepthTexture.init(gctx);
+        const depth_texture = try DepthTexture.init(
+            gctx,
+            gctx.swapchain_descriptor.width,
+            gctx.swapchain_descriptor.height,
+        );
         errdefer depth_texture.deinit();
 
         const input_controller = try InputController.init(allocator, window_context.window);
         input_controller.listenWindowEvents();
         errdefer input_controller.deinit();
+
+        const shadow_map_texture = try ShadowMapTexture.init(gctx);
+        errdefer shadow_map_texture.deinit();
+
+        const shadow_map_depth_texture = try DepthTexture.init(gctx, 1024, 1024);
+        errdefer shadow_map_depth_texture.deinit();
 
         const content_dir_copied = try allocator.dupe(u8, content_dir);
         errdefer allocator.free(content_dir_copied);
@@ -154,13 +183,22 @@ pub const Engine = struct {
                 .skybox_cubemap = skybox_cubemap_pipeline,
                 .window_box = window_box_pipeline,
                 .primitive_colorized = primitive_colorized_pipeline,
+                .shadow_map = shadow_map_pipeline,
             },
+            // TODO: group bind groups into struct
             .bind_group_definition = bind_group_definition,
             .bind_group_cubemap_definition = bind_group_cubemap_definition,
             .bind_group_primitive_colorized_definition = bind_group_primitive_colorized_definition,
+            .bind_group_shadow_map_pass_definition = bind_group_shadow_map_pass_definition,
+
+            // shadow map pass uses singleton bind group descriptor for all objects
+            .bind_group_shadow_map_pass_descriptor = bind_group_shadow_map_pass_descriptor,
+
             .depth_texture = depth_texture,
             .texture_sampler = texture_sampler,
             .models_hash = std.AutoHashMap(LoadedModelId, *Model).init(allocator),
+            .shadow_map_texture = shadow_map_texture,
+            .shadow_map_depth_texture = shadow_map_depth_texture,
             .active_scene = null,
             .input_controller = input_controller,
         };
@@ -234,6 +272,50 @@ pub const Engine = struct {
             const encoder = gctx.device.createCommandEncoder(null);
             defer encoder.release();
 
+            // shadow map pass
+            {
+                const shadow_map_attachments = [_]wgpu.RenderPassColorAttachment{.{
+                    .view = engine.shadow_map_texture.view,
+                    .load_op = .clear,
+                    .store_op = .store,
+                }};
+                const depth_attachment = wgpu.RenderPassDepthStencilAttachment{
+                    .view = engine.shadow_map_depth_texture.view,
+                    .depth_load_op = .clear,
+                    .depth_store_op = .store,
+                    .depth_clear_value = 1.0,
+                };
+
+                const shadow_map_render_pass_info = wgpu.RenderPassDescriptor{
+                    .color_attachments = &shadow_map_attachments,
+                    .color_attachment_count = shadow_map_attachments.len,
+                    .depth_stencil_attachment = &depth_attachment,
+                };
+
+                const shadow_map_pass = encoder.beginRenderPass(shadow_map_render_pass_info);
+                defer {
+                    shadow_map_pass.end();
+                    shadow_map_pass.release();
+                }
+
+                shadow_map_pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
+
+                if (engine.active_scene) |scene| {
+                    const camera_view_bound_box = scene.camera.getCameraViewBoundBox();
+
+                    var timer = std.time.Timer.start() catch @panic("Failed to start timer");
+                    // FIX: replace camera_view_bound_box by light view bound box
+                    const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(camera_view_bound_box);
+
+                    for (potentially_visible_game_objects) |game_object| {
+                        engine.drawGameObjectToShadowMap(shadow_map_pass, scene, game_object);
+                    }
+
+                    engine.frame_stats.shadow_map_pass_time_taken = @as(f32, @floatFromInt(timer.read())) * 0.000001;
+                }
+            }
+
+            // main pass
             {
                 const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
                     .view = back_buffer_view,
@@ -279,7 +361,7 @@ pub const Engine = struct {
                     //     engine.frame_stats.game_objects_drawn_count += 1;
                     // }
 
-                    engine.frame_stats.overall_time_taken = @as(f32, @floatFromInt(timer.read())) * 0.000001;
+                    engine.frame_stats.main_pass_time_taken = @as(f32, @floatFromInt(timer.read())) * 0.000001;
                 }
             }
 
@@ -313,7 +395,12 @@ pub const Engine = struct {
         return gctx_state;
     }
 
-    fn drawGameObject(engine: *Engine, pass: wgpu.RenderPassEncoder, scene: *const Scene, game_object: *const GameObject) void {
+    fn drawGameObject(
+        engine: *Engine,
+        pass: wgpu.RenderPassEncoder,
+        scene: *const Scene,
+        game_object: *const GameObject,
+    ) void {
         switch (game_object.model) {
             .regular_model => |model| {
                 pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
@@ -470,6 +557,91 @@ pub const Engine = struct {
                 const elements_count = primitive_colorized_model.model_descriptor.position.elements_count;
 
                 pass.draw(elements_count, 1, 0, 0);
+            },
+        }
+    }
+
+    pub fn drawGameObjectToShadowMap(
+        engine: *Engine,
+        pass: wgpu.RenderPassEncoder,
+        scene: *const Scene,
+        game_object: *const GameObject,
+    ) void {
+        switch (game_object.model) {
+            .regular_model => |model| {
+                const model_descriptor = model.model_descriptor;
+                model_descriptor.position.applyVertexBuffer(pass, 0);
+                model_descriptor.index.applyIndexBuffer(pass);
+            },
+            .window_box_model => |window_box_model| {
+                const model_descriptor = window_box_model.model_descriptor;
+                model_descriptor.position.applyVertexBuffer(pass, 0);
+            },
+            .primitive_colorized => |primitive_colorized_model| {
+                const model_descriptor = primitive_colorized_model.model_descriptor;
+                model_descriptor.position.applyVertexBuffer(pass, 0);
+            },
+            .skybox_model,
+            .skybox_cubemap_model,
+            => {
+                return;
+            },
+        }
+
+        var model_to_world = zmath.mul(
+            zmath.mul(
+                zmath.quatToMat(game_object.rotation),
+                zmath.scaling(game_object.scale, game_object.scale, game_object.scale),
+            ),
+            zmath.translation(
+                game_object.position[0],
+                game_object.position[1],
+                game_object.position[2],
+            ),
+        );
+
+        // Is it correct order?
+        model_to_world = zmath.mul(
+            game_object.aggregated_matrix,
+            model_to_world,
+        );
+
+        var flip_yz = false;
+        switch (game_object.model) {
+            .regular_model => |model| {
+                flip_yz = model.model_descriptor.mesh_y_up;
+            },
+            else => {},
+        }
+        if (flip_yz) {
+            // NOTE: converting from Y-up to Z-up coordinate system,
+            // should be done only for models which is made with Y-up logic.
+            model_to_world = zmath.mul(xRotate, model_to_world);
+        }
+
+        const object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);
+
+        const object_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+        object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
+
+        pass.setBindGroup(0, engine.bind_group_shadow_map_pass_descriptor.bind_group, &.{
+            object_to_clip_uniform.offset,
+        });
+
+        switch (game_object.model) {
+            .regular_model => |model| {
+                pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
+            },
+            .window_box_model => |window_box_model| {
+                pass.draw(window_box_model.model_descriptor.position.elements_count, 1, 0, 0);
+            },
+            .primitive_colorized => |primitive_colorized_model| {
+                pass.draw(primitive_colorized_model.model_descriptor.position.elements_count, 1, 0, 0);
+            },
+            .skybox_model,
+            .skybox_cubemap_model,
+            => {
+                return;
             },
         }
     }
@@ -632,7 +804,11 @@ pub const Engine = struct {
         // Release old depth texture.
         engine.depth_texture.deinit();
         // Create a new depth texture to match the new window size.
-        engine.depth_texture = try DepthTexture.init(engine.gctx);
+        engine.depth_texture = try DepthTexture.init(
+            engine.gctx,
+            engine.gctx.swapchain_descriptor.width,
+            engine.gctx.swapchain_descriptor.height,
+        );
     }
 
     pub fn runLoop(engine: *Engine) !void {

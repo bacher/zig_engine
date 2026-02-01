@@ -197,6 +197,14 @@ pub fn main() !void {
     tube_z.rotation = zmath.quatFromAxisAngle(.{ 0, 1, 0, 0 }, math.pi / 2.0);
     tube_z.debug.color = .{ 0, 0, 1, 1 };
 
+    // Light
+
+    try scene.addDirectionalLight(.{
+        .direction = .{ 0, 0, -1 },
+        .color = .{ 1, 1, 1, 1 },
+        .intensity = 1.0,
+    });
+
     // ZGui
 
     zgui_utils.zguiInit(allocator, window_context.window, engine.gctx.device);
@@ -260,7 +268,8 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
     // zgui.text("cpu_frame_number: {d}", .{stats.cpu_frame_number});
     // zgui.text("gpu_frame_number: {d}", .{stats.gpu_frame_number});
     zgui.text("objects drawn: {d}", .{engine.frame_stats.game_objects_drawn_count});
-    zgui.text("overall time taken: {d:.3}ms", .{engine.frame_stats.overall_time_taken});
+    zgui.text("shadow map pass time taken: {d:.3}ms", .{engine.frame_stats.shadow_map_pass_time_taken});
+    zgui.text("main pass time taken: {d:.3}ms", .{engine.frame_stats.main_pass_time_taken});
     zgui.text("active nodes: {d}", .{engine.frame_stats.active_space_nodes_count});
     zgui.text("find objects sub-invokes: {d}", .{engine.frame_stats.find_objects_sub_invocations_count});
     zgui.endGroup();

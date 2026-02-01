@@ -11,12 +11,15 @@ const PrimitiveModel = @import("./model.zig").PrimitiveModel;
 const Camera = @import("./camera.zig").Camera;
 const SpaceTree = @import("./space_tree.zig").SpaceTree;
 const SpectatorCamera = @import("./spectator_camera.zig").SpectatorCamera;
+const DirectionalLight = @import("./light.zig").DirectionalLight;
 
 pub const Scene = struct {
     engine: *Engine,
     allocator: std.mem.Allocator,
     game_objects: std.ArrayList(*GameObject) = .empty,
     root_groups: std.ArrayList(*GameObjectGroup) = .empty,
+    // TODO: Maybe store light as a value instead of a pointer?
+    lights: std.ArrayList(*DirectionalLight) = .empty,
     space_tree: *SpaceTree(GameObject),
     camera: *Camera,
     spectator_camera: *SpectatorCamera,
@@ -47,6 +50,7 @@ pub const Scene = struct {
             .allocator = allocator,
             .game_objects = .empty,
             .root_groups = .empty,
+            .lights = .empty,
             .space_tree = space_tree,
             .camera = camera,
             .spectator_camera = spectator_camera,
@@ -56,6 +60,11 @@ pub const Scene = struct {
     }
 
     pub fn deinit(scene: *Scene) void {
+        for (scene.lights.items) |light| {
+            scene.allocator.destroy(light);
+        }
+        scene.lights.deinit(scene.allocator);
+
         scene.space_tree.deinit();
 
         for (scene.root_groups.items) |root_group| {
@@ -156,6 +165,14 @@ pub const Scene = struct {
         try scene.game_objects.append(scene.allocator, game_object);
 
         return game_object;
+    }
+
+    pub fn addDirectionalLight(scene: *Scene, params: DirectionalLight) !void {
+        const light = try scene.allocator.create(DirectionalLight);
+        errdefer scene.allocator.destroy(light);
+        light.* = params;
+
+        try scene.lights.append(scene.allocator, light);
     }
 
     pub fn update(scene: *Scene, time: f64) void {

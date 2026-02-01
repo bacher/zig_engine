@@ -1,22 +1,24 @@
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-pub const DepthTexture = struct {
+pub const ShadowMapTexture = struct {
     gctx: *zgpu.GraphicsContext,
     texture: zgpu.TextureHandle,
     view_handle: zgpu.TextureViewHandle,
     view: wgpu.TextureView,
 
-    pub fn init(gctx: *zgpu.GraphicsContext, width: u32, height: u32) !DepthTexture {
+    pub fn init(gctx: *zgpu.GraphicsContext) !ShadowMapTexture {
         const texture = gctx.createTexture(.{
             .usage = .{ .render_attachment = true },
             .dimension = .tdim_2d,
             .size = .{
-                .width = width,
-                .height = height,
+                .width = 1024,
+                .height = 1024,
                 .depth_or_array_layers = 1,
             },
-            .format = .depth32_float,
+            .format = .r32_float,
+            // .format = .depth32_float,
+            // or .depth32_float can be used?
             .mip_level_count = 1,
             .sample_count = 1,
         });
@@ -32,8 +34,8 @@ pub const DepthTexture = struct {
         };
     }
 
-    pub fn deinit(depth_texture: DepthTexture) void {
-        depth_texture.gctx.releaseResource(depth_texture.view_handle);
-        depth_texture.gctx.destroyResource(depth_texture.texture);
+    pub fn deinit(shadow_map_texture: ShadowMapTexture) void {
+        shadow_map_texture.gctx.releaseResource(shadow_map_texture.view_handle);
+        shadow_map_texture.gctx.destroyResource(shadow_map_texture.texture);
     }
 };
