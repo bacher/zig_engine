@@ -5,14 +5,14 @@ const wgsl_vs = @embedFile("../shaders/skybox_cubemap/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/skybox_cubemap/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
-const BindGroupDefinition = @import("../bind_group.zig").BindGroupDefinition;
+const RegularBindGroupDefinition = @import("../bind_group_regular.zig").RegularBindGroupDefinition;
 
 pub fn createSkyboxCubemapPipeline(
     gctx: *zgpu.GraphicsContext,
-    bind_group_definition: BindGroupDefinition,
+    regular_bind_group_definition: RegularBindGroupDefinition,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
-        bind_group_definition.bind_group_layout_handle,
+        regular_bind_group_definition.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 

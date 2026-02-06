@@ -5,11 +5,11 @@ const zmath = @import("zmath");
 const TextureDescriptor = @import("types.zig").TextureDescriptor;
 const BindGroupDescriptor = @import("./bind_group_descriptor.zig").BindGroupDescriptor;
 
-pub const BindGroupDefinition = struct {
+pub const RegularBindGroupDefinition = struct {
     gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
-    pub fn init(gctx: *zgpu.GraphicsContext, texture_view_dimension: wgpu.TextureViewDimension) BindGroupDefinition {
+    pub fn init(gctx: *zgpu.GraphicsContext, texture_view_dimension: wgpu.TextureViewDimension) RegularBindGroupDefinition {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
             // transform matrix
             zgpu.bufferEntry(
@@ -49,12 +49,12 @@ pub const BindGroupDefinition = struct {
         };
     }
 
-    pub fn deinit(bind_group_definition: BindGroupDefinition) void {
+    pub fn deinit(bind_group_definition: RegularBindGroupDefinition) void {
         bind_group_definition.gctx.releaseResource(bind_group_definition.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
-        bind_group_defenition: BindGroupDefinition,
+        bind_group_defenition: RegularBindGroupDefinition,
         sampler: zgpu.SamplerHandle,
         color_texture: TextureDescriptor,
     ) !BindGroupDescriptor {

@@ -20,7 +20,7 @@ const primitive_colorized_pipeline_module = @import("./pipelines/primitive_color
 const shadow_map_pipeline_module = @import("./pipelines/shadow_map_pipeline.zig");
 const debug_texture_pipeline_module = @import("./pipelines/debug_texture_pipeline.zig");
 const BindGroupDescriptor = @import("./bind_group_descriptor.zig").BindGroupDescriptor;
-const BindGroupDefinition = @import("./bind_group.zig").BindGroupDefinition;
+const RegularBindGroupDefinition = @import("./bind_group_regular.zig").RegularBindGroupDefinition;
 const PrimitiveColorizedBindGroupDefinition = @import("./bind_group_primitive.zig").PrimitiveColorizedBindGroupDefinition;
 const ShadowMapPassBindGroupDefinition = @import("./bind_group_shadow_map_pass.zig").ShadowMapPassBindGroupDefinition;
 const DebugTextureBindGroupDefinition = @import("./bind_group_debug_texture.zig").DebugTextureBindGroupDefinition;
@@ -79,8 +79,8 @@ pub const Engine = struct {
         // ---
         debug_texture: Pipeline,
     },
-    bind_group_definition: BindGroupDefinition,
-    bind_group_cubemap_definition: BindGroupDefinition,
+    bind_group_regular_definition: RegularBindGroupDefinition,
+    bind_group_cubemap_definition: RegularBindGroupDefinition,
     bind_group_primitive_colorized_definition: PrimitiveColorizedBindGroupDefinition,
     bind_group_shadow_map_pass_definition: ShadowMapPassBindGroupDefinition,
     bind_group_debug_texture_definition: DebugTextureBindGroupDefinition,
@@ -132,8 +132,8 @@ pub const Engine = struct {
 
         const texture_sampler = gctx.createSampler(.{});
 
-        const bind_group_definition = BindGroupDefinition.init(gctx, .tvdim_2d);
-        const bind_group_cubemap_definition = BindGroupDefinition.init(gctx, .tvdim_cube);
+        const bind_group_regular_definition = RegularBindGroupDefinition.init(gctx, .tvdim_2d);
+        const bind_group_cubemap_definition = RegularBindGroupDefinition.init(gctx, .tvdim_cube);
         const bind_group_primitive_colorized_definition = PrimitiveColorizedBindGroupDefinition.init(gctx);
         const bind_group_shadow_map_pass_definition = ShadowMapPassBindGroupDefinition.init(gctx);
         const bind_group_debug_texture_definition = DebugTextureBindGroupDefinition.init(gctx);
@@ -146,11 +146,11 @@ pub const Engine = struct {
 
         const basic_pipeline = try basic_pipeline_module.createBasicPipeline(
             gctx,
-            bind_group_definition,
+            bind_group_regular_definition,
         );
         const skybox_pipeline = try skybox_pipeline_module.createSkyboxPipeline(
             gctx,
-            bind_group_definition,
+            bind_group_regular_definition,
         );
         const skybox_cubemap_pipeline = try skybox_cubemap_pipeline_module.createSkyboxCubemapPipeline(
             gctx,
@@ -158,7 +158,7 @@ pub const Engine = struct {
         );
         const window_box_pipeline = try window_box_pipeline_module.createWindowBoxPipeline(
             gctx,
-            bind_group_definition,
+            bind_group_regular_definition,
         );
         const primitive_colorized_pipeline = try primitive_colorized_pipeline_module.createPrimitiveColorizedPipeline(
             gctx,
@@ -207,7 +207,7 @@ pub const Engine = struct {
                 .debug_texture = debug_texture_pipeline,
             },
             // TODO: group bind groups into struct
-            .bind_group_definition = bind_group_definition,
+            .bind_group_regular_definition = bind_group_regular_definition,
             .bind_group_cubemap_definition = bind_group_cubemap_definition,
             .bind_group_primitive_colorized_definition = bind_group_primitive_colorized_definition,
             .bind_group_shadow_map_pass_definition = bind_group_shadow_map_pass_definition,
@@ -238,7 +238,7 @@ pub const Engine = struct {
         }
 
         engine.models_hash.deinit();
-        engine.bind_group_definition.deinit();
+        engine.bind_group_regular_definition.deinit();
         engine.input_controller.deinit();
         engine.allocator.free(engine.content_dir);
 
@@ -703,7 +703,7 @@ pub const Engine = struct {
             object,
         );
 
-        const bind_group_descriptor = try engine.bind_group_definition.createBindGroup(
+        const bind_group_descriptor = try engine.bind_group_regular_definition.createBindGroup(
             engine.texture_sampler,
             model_descriptor.color_texture,
         );
@@ -805,7 +805,7 @@ pub const Engine = struct {
             texture_full_filename,
         );
 
-        const bind_group_descriptor = try engine.bind_group_definition.createBindGroup(
+        const bind_group_descriptor = try engine.bind_group_regular_definition.createBindGroup(
             engine.texture_sampler,
             window_box_descriptor.color_texture,
         );

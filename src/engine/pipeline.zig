@@ -1,8 +1,6 @@
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-const BindGroupDefinition = @import("./bind_group.zig").BindGroupDefinition;
-
 pub const Pipeline = struct {
     pipeline_handle: zgpu.RenderPipelineHandle,
     pipeline_gpu: wgpu.RenderPipeline,
