@@ -18,10 +18,12 @@ const skybox_cubemap_pipeline_module = @import("./pipelines/skybox_cubemap_pipel
 const window_box_pipeline_module = @import("./pipelines/window_box_pipeline.zig");
 const primitive_colorized_pipeline_module = @import("./pipelines/primitive_colorized_pipeline.zig");
 const shadow_map_pipeline_module = @import("./pipelines/shadow_map_pipeline.zig");
+const debug_texture_pipeline_module = @import("./pipelines/debug_texture_pipeline.zig");
 const BindGroupDescriptor = @import("./bind_group_descriptor.zig").BindGroupDescriptor;
 const BindGroupDefinition = @import("./bind_group.zig").BindGroupDefinition;
 const PrimitiveColorizedBindGroupDefinition = @import("./bind_group_primitive.zig").PrimitiveColorizedBindGroupDefinition;
 const ShadowMapPassBindGroupDefinition = @import("./bind_group_shadow_map_pass.zig").ShadowMapPassBindGroupDefinition;
+const DebugTextureBindGroupDefinition = @import("./bind_group_debug_texture.zig").DebugTextureBindGroupDefinition;
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ShadowMapTexture = @import("./shadow_map_texture.zig").ShadowMapTexture;
 const ModelDescriptor = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptor;
@@ -39,6 +41,8 @@ const Scene = @import("./scene.zig").Scene;
 const Camera = @import("./camera.zig").Camera;
 const InputController = @import("./input_controller.zig").InputController;
 const GameObject = @import("./game_object.zig").GameObject;
+
+const DEBUG_INTERNAL_TEXTURE = true;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 
@@ -72,12 +76,18 @@ pub const Engine = struct {
         primitive_colorized: Pipeline,
         // ---
         shadow_map: Pipeline,
+        // ---
+        debug_texture: Pipeline,
     },
     bind_group_definition: BindGroupDefinition,
     bind_group_cubemap_definition: BindGroupDefinition,
     bind_group_primitive_colorized_definition: PrimitiveColorizedBindGroupDefinition,
     bind_group_shadow_map_pass_definition: ShadowMapPassBindGroupDefinition,
+    bind_group_debug_texture_definition: DebugTextureBindGroupDefinition,
+
+    // ---
     bind_group_shadow_map_pass_descriptor: BindGroupDescriptor,
+    bind_group_debug_shadow_map_texture_descriptor: BindGroupDescriptor,
 
     depth_texture: DepthTexture,
     texture_sampler: zgpu.SamplerHandle,
@@ -114,12 +124,25 @@ pub const Engine = struct {
         const gctx = window_context.gctx;
         const init_time = gctx.stats.time;
 
+        const shadow_map_texture = try ShadowMapTexture.init(gctx);
+        errdefer shadow_map_texture.deinit();
+
+        const shadow_map_depth_texture = try DepthTexture.init(gctx, 1024, 1024);
+        errdefer shadow_map_depth_texture.deinit();
+
+        const texture_sampler = gctx.createSampler(.{});
+
         const bind_group_definition = BindGroupDefinition.init(gctx, .tvdim_2d);
         const bind_group_cubemap_definition = BindGroupDefinition.init(gctx, .tvdim_cube);
         const bind_group_primitive_colorized_definition = PrimitiveColorizedBindGroupDefinition.init(gctx);
         const bind_group_shadow_map_pass_definition = ShadowMapPassBindGroupDefinition.init(gctx);
+        const bind_group_debug_texture_definition = DebugTextureBindGroupDefinition.init(gctx);
 
         const bind_group_shadow_map_pass_descriptor = try bind_group_shadow_map_pass_definition.createBindGroup();
+        const bind_group_debug_shadow_map_texture_descriptor = try bind_group_debug_texture_definition.createBindGroup(
+            texture_sampler,
+            shadow_map_texture.view_handle,
+        );
 
         const basic_pipeline = try basic_pipeline_module.createBasicPipeline(
             gctx,
@@ -146,7 +169,10 @@ pub const Engine = struct {
             bind_group_shadow_map_pass_definition,
         );
 
-        const texture_sampler = gctx.createSampler(.{});
+        const debug_texture_pipeline = try debug_texture_pipeline_module.createDebugTexturePipeline(
+            gctx,
+            bind_group_debug_texture_definition,
+        );
 
         const depth_texture = try DepthTexture.init(
             gctx,
@@ -158,12 +184,6 @@ pub const Engine = struct {
         const input_controller = try InputController.init(allocator, window_context.window);
         input_controller.listenWindowEvents();
         errdefer input_controller.deinit();
-
-        const shadow_map_texture = try ShadowMapTexture.init(gctx);
-        errdefer shadow_map_texture.deinit();
-
-        const shadow_map_depth_texture = try DepthTexture.init(gctx, 1024, 1024);
-        errdefer shadow_map_depth_texture.deinit();
 
         const content_dir_copied = try allocator.dupe(u8, content_dir);
         errdefer allocator.free(content_dir_copied);
@@ -184,15 +204,18 @@ pub const Engine = struct {
                 .window_box = window_box_pipeline,
                 .primitive_colorized = primitive_colorized_pipeline,
                 .shadow_map = shadow_map_pipeline,
+                .debug_texture = debug_texture_pipeline,
             },
             // TODO: group bind groups into struct
             .bind_group_definition = bind_group_definition,
             .bind_group_cubemap_definition = bind_group_cubemap_definition,
             .bind_group_primitive_colorized_definition = bind_group_primitive_colorized_definition,
             .bind_group_shadow_map_pass_definition = bind_group_shadow_map_pass_definition,
+            .bind_group_debug_texture_definition = bind_group_debug_texture_definition,
 
             // shadow map pass uses singleton bind group descriptor for all objects
             .bind_group_shadow_map_pass_descriptor = bind_group_shadow_map_pass_descriptor,
+            .bind_group_debug_shadow_map_texture_descriptor = bind_group_debug_shadow_map_texture_descriptor,
 
             .depth_texture = depth_texture,
             .texture_sampler = texture_sampler,
@@ -362,6 +385,10 @@ pub const Engine = struct {
                     // }
 
                     engine.frame_stats.main_pass_time_taken = @as(f32, @floatFromInt(timer.read())) * 0.000001;
+
+                    if (DEBUG_INTERNAL_TEXTURE) {
+                        engine.drawTextureDebugScreen(pass);
+                    }
                 }
             }
 
@@ -644,6 +671,14 @@ pub const Engine = struct {
                 return;
             },
         }
+    }
+
+    pub fn drawTextureDebugScreen(engine: *Engine, pass: wgpu.RenderPassEncoder) void {
+        pass.setPipeline(engine.pipelines.debug_texture.pipeline_gpu);
+        pass.setBindGroup(0, engine.bind_group_debug_shadow_map_texture_descriptor.bind_group, null);
+
+        // drawing 6 vertices for fullscreen quad
+        pass.draw(6, 1, 0, 0);
     }
 
     pub fn initLoader(engine: *Engine, model_name: []const u8) !gltf_loader.GltfLoader {

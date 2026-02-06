@@ -9,7 +9,7 @@ pub const ShadowMapTexture = struct {
 
     pub fn init(gctx: *zgpu.GraphicsContext) !ShadowMapTexture {
         const texture = gctx.createTexture(.{
-            .usage = .{ .render_attachment = true },
+            .usage = .{ .render_attachment = true, .texture_binding = true },
             .dimension = .tdim_2d,
             .size = .{
                 .width = 1024,
