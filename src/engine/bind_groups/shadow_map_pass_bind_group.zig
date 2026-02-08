@@ -2,8 +2,8 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 const zmath = @import("zmath");
 
-const TextureDescriptor = @import("types.zig").TextureDescriptor;
-const BindGroupDescriptor = @import("./bind_group_descriptor.zig").BindGroupDescriptor;
+const TextureDescriptor = @import("../types.zig").TextureDescriptor;
+const BindGroupDescriptor = @import("../bind_group_descriptor.zig").BindGroupDescriptor;
 
 pub const ShadowMapPassBindGroupDefinition = struct {
     gctx: *zgpu.GraphicsContext,

@@ -5,7 +5,7 @@ const wgsl_vs = @embedFile("../shaders/basic/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/basic/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
-const RegularBindGroupDefinition = @import("../bind_group_regular.zig").RegularBindGroupDefinition;
+const RegularBindGroupDefinition = @import("../bind_groups/regular_bind_group.zig").RegularBindGroupDefinition;
 
 pub fn createBasicPipeline(
     gctx: *zgpu.GraphicsContext,

@@ -2,13 +2,14 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 const zmath = @import("zmath");
 
-const BindGroupDescriptor = @import("./bind_group_descriptor.zig").BindGroupDescriptor;
+const TextureDescriptor = @import("../types.zig").TextureDescriptor;
+const BindGroupDescriptor = @import("../bind_group_descriptor.zig").BindGroupDescriptor;
 
-pub const PrimitiveColorizedBindGroupDefinition = struct {
+pub const RegularBindGroupDefinition = struct {
     gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
-    pub fn init(gctx: *zgpu.GraphicsContext) PrimitiveColorizedBindGroupDefinition {
+    pub fn init(gctx: *zgpu.GraphicsContext, texture_view_dimension: wgpu.TextureViewDimension) RegularBindGroupDefinition {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
             // transform matrix
             zgpu.bufferEntry(
@@ -26,13 +27,19 @@ pub const PrimitiveColorizedBindGroupDefinition = struct {
                 true,
                 0,
             ),
-            // solid color
-            zgpu.bufferEntry(
+            // texture
+            zgpu.textureEntry(
                 2,
                 .{ .fragment = true },
-                .uniform,
-                true,
-                0,
+                .float,
+                texture_view_dimension,
+                false, // TODO: What does `multisampled` mean?
+            ),
+            // sampler
+            zgpu.samplerEntry(
+                3,
+                .{ .fragment = true },
+                .filtering, // TODO: What's the difference between .filtering and .non_filtering
             ),
         });
 
@@ -42,12 +49,14 @@ pub const PrimitiveColorizedBindGroupDefinition = struct {
         };
     }
 
-    pub fn deinit(bind_group_definition: PrimitiveColorizedBindGroupDefinition) void {
+    pub fn deinit(bind_group_definition: RegularBindGroupDefinition) void {
         bind_group_definition.gctx.releaseResource(bind_group_definition.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
-        bind_group_defenition: PrimitiveColorizedBindGroupDefinition,
+        bind_group_defenition: RegularBindGroupDefinition,
+        sampler: zgpu.SamplerHandle,
+        color_texture: TextureDescriptor,
     ) !BindGroupDescriptor {
         const gctx = bind_group_defenition.gctx;
 
@@ -70,12 +79,16 @@ pub const PrimitiveColorizedBindGroupDefinition = struct {
                     .size = @sizeOf(zmath.Vec),
                 },
 
-                // solid color
+                // texture
                 .{
                     .binding = 2,
-                    .buffer_handle = gctx.uniforms.buffer,
-                    .offset = 0,
-                    .size = @sizeOf(f32) * 4,
+                    .texture_view_handle = color_texture.view_handle,
+                },
+
+                // sampler
+                .{
+                    .binding = 3,
+                    .sampler_handle = sampler,
                 },
             },
         );

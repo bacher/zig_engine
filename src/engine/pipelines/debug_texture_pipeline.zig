@@ -5,7 +5,7 @@ const wgsl_vs = @embedFile("../shaders/debug_texture/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/debug_texture/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
-const DebugTextureBindGroupDefinition = @import("../bind_group_debug_texture.zig").DebugTextureBindGroupDefinition;
+const DebugTextureBindGroupDefinition = @import("../bind_groups/debug_texture_bind_group.zig").DebugTextureBindGroupDefinition;
 
 pub fn createDebugTexturePipeline(
     gctx: *zgpu.GraphicsContext,

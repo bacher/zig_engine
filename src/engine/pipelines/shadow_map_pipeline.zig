@@ -5,7 +5,7 @@ const wgsl_vs = @embedFile("../shaders/shadow_map/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/shadow_map/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
-const ShadowMapPassBindGroupDefinition = @import("../bind_group_shadow_map_pass.zig").ShadowMapPassBindGroupDefinition;
+const ShadowMapPassBindGroupDefinition = @import("../bind_groups/shadow_map_pass_bind_group.zig").ShadowMapPassBindGroupDefinition;
 
 pub fn createShadowMapPipeline(
     gctx: *zgpu.GraphicsContext,
