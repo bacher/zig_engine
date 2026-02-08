@@ -47,12 +47,12 @@ pub const PrimitiveColorizedBindGroupDefinition = struct {
     }
 
     pub fn createBindGroup(
-        bind_group_defenition: PrimitiveColorizedBindGroupDefinition,
+        bind_group_definition: PrimitiveColorizedBindGroupDefinition,
     ) !BindGroupDescriptor {
-        const gctx = bind_group_defenition.gctx;
+        const gctx = bind_group_definition.gctx;
 
         const bind_group_handle = gctx.createBindGroup(
-            bind_group_defenition.bind_group_layout_handle,
+            bind_group_definition.bind_group_layout_handle,
             &.{
                 // transform matrix
                 .{
