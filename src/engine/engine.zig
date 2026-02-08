@@ -19,11 +19,11 @@ const window_box_pipeline_module = @import("./pipelines/window_box_pipeline.zig"
 const primitive_colorized_pipeline_module = @import("./pipelines/primitive_colorized_pipeline.zig");
 const shadow_map_pipeline_module = @import("./pipelines/shadow_map_pipeline.zig");
 const debug_texture_pipeline_module = @import("./pipelines/debug_texture_pipeline.zig");
-const BindGroupDescriptor = @import("./bind_group_descriptor.zig").BindGroupDescriptor;
-const RegularBindGroupDefinition = @import("./bind_groups/regular_bind_group.zig").RegularBindGroupDefinition;
-const PrimitiveColorizedBindGroupDefinition = @import("./bind_groups/primitive_bind_group.zig").PrimitiveColorizedBindGroupDefinition;
-const ShadowMapPassBindGroupDefinition = @import("./bind_groups/shadow_map_pass_bind_group.zig").ShadowMapPassBindGroupDefinition;
-const DebugTextureBindGroupDefinition = @import("./bind_groups/debug_texture_bind_group.zig").DebugTextureBindGroupDefinition;
+const BindGroup = @import("./bind_group.zig").BindGroup;
+const RegularBindGroupDefinition = @import("./bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
+const PrimitiveColorizedBindGroupDefinition = @import("./bind_groups_defs/primitive_bind_group.zig").PrimitiveColorizedBindGroupDefinition;
+const ShadowMapPassBindGroupDefinition = @import("./bind_groups_defs/shadow_map_pass_bind_group.zig").ShadowMapPassBindGroupDefinition;
+const DebugTextureBindGroupDefinition = @import("./bind_groups_defs/debug_texture_bind_group.zig").DebugTextureBindGroupDefinition;
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ShadowMapTexture = @import("./shadow_map_texture.zig").ShadowMapTexture;
 const ModelDescriptor = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptor;
@@ -98,8 +98,8 @@ pub const Engine = struct {
     },
 
     // ---
-    bind_group_shadow_map_pass_descriptor: BindGroupDescriptor,
-    bind_group_debug_shadow_map_texture_descriptor: BindGroupDescriptor,
+    bind_group_shadow_map_pass: BindGroup,
+    bind_group_debug_shadow_map_texture: BindGroup,
 
     depth_texture: DepthTexture,
     texture_sampler: zgpu.SamplerHandle,
@@ -152,8 +152,8 @@ pub const Engine = struct {
             .debug_texture = DebugTextureBindGroupDefinition.init(gctx),
         };
 
-        const bind_group_shadow_map_pass_descriptor = try bind_group_definitions.shadow_map_pass.createBindGroup();
-        const bind_group_debug_shadow_map_texture_descriptor = try bind_group_definitions.debug_texture.createBindGroup(
+        const bind_group_shadow_map_pass = try bind_group_definitions.shadow_map_pass.createBindGroup();
+        const bind_group_debug_shadow_map_texture = try bind_group_definitions.debug_texture.createBindGroup(
             texture_sampler,
             shadow_map_texture.view_handle,
         );
@@ -223,8 +223,8 @@ pub const Engine = struct {
             .bind_group_definitions = bind_group_definitions,
 
             // shadow map pass uses singleton bind group descriptor for all objects
-            .bind_group_shadow_map_pass_descriptor = bind_group_shadow_map_pass_descriptor,
-            .bind_group_debug_shadow_map_texture_descriptor = bind_group_debug_shadow_map_texture_descriptor,
+            .bind_group_shadow_map_pass = bind_group_shadow_map_pass,
+            .bind_group_debug_shadow_map_texture = bind_group_debug_shadow_map_texture,
 
             .depth_texture = depth_texture,
             .texture_sampler = texture_sampler,
@@ -547,7 +547,7 @@ pub const Engine = struct {
 
         switch (game_object.model) {
             .regular_model => |model| {
-                pass.setBindGroup(0, model.bind_group_descriptor.bind_group, &.{
+                pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
                     camera_position_in_model_space_uniform.offset,
                 });
@@ -555,7 +555,7 @@ pub const Engine = struct {
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
             },
             .window_box_model => |window_box_model| {
-                pass.setBindGroup(0, window_box_model.bind_group_descriptor.bind_group, &.{
+                pass.setBindGroup(0, window_box_model.bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
                     camera_position_in_model_space_uniform.offset,
                 });
@@ -565,7 +565,7 @@ pub const Engine = struct {
                 pass.draw(elements_count, 1, 0, 0);
             },
             .skybox_model => |skybox_model| {
-                pass.setBindGroup(0, skybox_model.bind_group_descriptor.bind_group, &.{
+                pass.setBindGroup(0, skybox_model.bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
                     camera_position_in_model_space_uniform.offset,
                 });
@@ -573,7 +573,7 @@ pub const Engine = struct {
                 pass.drawIndexed(skybox_model.model_descriptor.index.elements_count, 1, 0, 0, 0);
             },
             .skybox_cubemap_model => |skybox_cubemap_model| {
-                pass.setBindGroup(0, skybox_cubemap_model.bind_group_descriptor.bind_group, &.{
+                pass.setBindGroup(0, skybox_cubemap_model.bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
                     camera_position_in_model_space_uniform.offset,
                 });
@@ -584,7 +584,7 @@ pub const Engine = struct {
                 const solid_color_uniform = engine.gctx.uniformsAllocate(zmath.Vec, 1);
                 solid_color_uniform.slice[0] = game_object.debug.color;
 
-                pass.setBindGroup(0, primitive_colorized_model.bind_group_descriptor.bind_group, &.{
+                pass.setBindGroup(0, primitive_colorized_model.bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
                     camera_position_in_model_space_uniform.offset,
                     solid_color_uniform.offset,
@@ -660,7 +660,7 @@ pub const Engine = struct {
         const object_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
         object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
 
-        pass.setBindGroup(0, engine.bind_group_shadow_map_pass_descriptor.bind_group, &.{
+        pass.setBindGroup(0, engine.bind_group_shadow_map_pass.wgpu_bind_group, &.{
             object_to_clip_uniform.offset,
         });
 
@@ -684,7 +684,7 @@ pub const Engine = struct {
 
     pub fn drawTextureDebugScreen(engine: *Engine, pass: wgpu.RenderPassEncoder) void {
         pass.setPipeline(engine.pipelines.debug_texture.pipeline_gpu);
-        pass.setBindGroup(0, engine.bind_group_debug_shadow_map_texture_descriptor.bind_group, null);
+        pass.setBindGroup(0, engine.bind_group_debug_shadow_map_texture.wgpu_bind_group, null);
 
         // drawing 6 vertices for fullscreen quad
         pass.draw(6, 1, 0, 0);
@@ -712,7 +712,7 @@ pub const Engine = struct {
             object,
         );
 
-        const bind_group_descriptor = try engine.bind_group_definitions.regular.createBindGroup(
+        const bind_group = try engine.bind_group_definitions.regular.createBindGroup(
             engine.texture_sampler,
             model_descriptor.color_texture,
         );
@@ -721,7 +721,7 @@ pub const Engine = struct {
         errdefer engine.allocator.destroy(model);
         model.* = .{
             .model_descriptor = model_descriptor,
-            .bind_group_descriptor = bind_group_descriptor,
+            .bind_group = bind_group,
         };
 
         const loaded_model_id: LoadedModelId = @enumFromInt(Engine.next_loaded_model_id);
@@ -744,7 +744,7 @@ pub const Engine = struct {
             texture_full_filename,
         );
 
-        const bind_group_descriptor = try engine.bind_group_definition.createBindGroup(
+        const bind_group = try engine.bind_group_definition.createBindGroup(
             engine.texture_sampler,
             skybox_descriptor.color_texture,
         );
@@ -753,7 +753,7 @@ pub const Engine = struct {
         errdefer engine.allocator.destroy(model);
         model.* = .{
             .model_descriptor = skybox_descriptor,
-            .bind_group_descriptor = bind_group_descriptor,
+            .bind_group = bind_group,
         };
 
         return model;
@@ -786,7 +786,7 @@ pub const Engine = struct {
             texture_full_filenames,
         );
 
-        const bind_group_descriptor = try engine.bind_group_definitions.cubemap.createBindGroup(
+        const bind_group = try engine.bind_group_definitions.cubemap.createBindGroup(
             engine.texture_sampler,
             skybox_cubemap_descriptor.color_texture,
         );
@@ -795,7 +795,7 @@ pub const Engine = struct {
         errdefer engine.allocator.destroy(model);
         model.* = .{
             .model_descriptor = skybox_cubemap_descriptor,
-            .bind_group_descriptor = bind_group_descriptor,
+            .bind_group = bind_group,
         };
 
         return model;
@@ -814,7 +814,7 @@ pub const Engine = struct {
             texture_full_filename,
         );
 
-        const bind_group_descriptor = try engine.bind_group_definitions.regular.createBindGroup(
+        const bind_group = try engine.bind_group_definitions.regular.createBindGroup(
             engine.texture_sampler,
             window_box_descriptor.color_texture,
         );
@@ -823,7 +823,7 @@ pub const Engine = struct {
         errdefer engine.allocator.destroy(model);
         model.* = .{
             .model_descriptor = window_box_descriptor,
-            .bind_group_descriptor = bind_group_descriptor,
+            .bind_group = bind_group,
         };
 
         return model;
@@ -832,13 +832,13 @@ pub const Engine = struct {
     pub fn loadPrimitive(engine: *Engine, positions: GeometryData) !*PrimitiveModel {
         const primitive_descriptor = try PrimitiveDescriptor.init(engine.gctx, positions);
 
-        const bind_group_descriptor = try engine.bind_group_definitions.primitive_colorized.createBindGroup();
+        const bind_group = try engine.bind_group_definitions.primitive_colorized.createBindGroup();
 
         const model = try engine.allocator.create(PrimitiveModel);
         errdefer engine.allocator.destroy(model);
         model.* = .{
             .model_descriptor = primitive_descriptor,
-            .bind_group_descriptor = bind_group_descriptor,
+            .bind_group = bind_group,
         };
 
         return model;

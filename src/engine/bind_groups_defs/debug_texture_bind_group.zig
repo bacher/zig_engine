@@ -3,7 +3,7 @@ const wgpu = zgpu.wgpu;
 const zmath = @import("zmath");
 
 const TextureDescriptor = @import("../types.zig").TextureDescriptor;
-const BindGroupDescriptor = @import("../bind_group_descriptor.zig").BindGroupDescriptor;
+const BindGroup = @import("../bind_group.zig").BindGroup;
 
 pub const DebugTextureBindGroupDefinition = struct {
     gctx: *zgpu.GraphicsContext,
@@ -41,7 +41,7 @@ pub const DebugTextureBindGroupDefinition = struct {
         bind_group_definition: DebugTextureBindGroupDefinition,
         sampler: zgpu.SamplerHandle,
         color_texture_view_handle: zgpu.TextureViewHandle,
-    ) !BindGroupDescriptor {
+    ) !BindGroup {
         const gctx = bind_group_definition.gctx;
 
         const bind_group_handle = gctx.createBindGroup(
@@ -61,11 +61,11 @@ pub const DebugTextureBindGroupDefinition = struct {
             },
         );
 
-        const bind_group = gctx.lookupResource(bind_group_handle) orelse return error.BindGroupNotAvailable;
+        const wgpu_bind_group = gctx.lookupResource(bind_group_handle) orelse return error.BindGroupNotAvailable;
 
         return .{
+            .wgpu_bind_group = wgpu_bind_group,
             .bind_group_handle = bind_group_handle,
-            .bind_group = bind_group,
         };
     }
 };

@@ -5,7 +5,7 @@ const wgsl_vs = @embedFile("../shaders/primitive_colorized/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/primitive_colorized/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
-const PrimitiveColorizedBindGroupDefinition = @import("../bind_groups/primitive_bind_group.zig").PrimitiveColorizedBindGroupDefinition;
+const PrimitiveColorizedBindGroupDefinition = @import("../bind_groups_defs/primitive_bind_group.zig").PrimitiveColorizedBindGroupDefinition;
 
 pub fn createPrimitiveColorizedPipeline(
     gctx: *zgpu.GraphicsContext,
