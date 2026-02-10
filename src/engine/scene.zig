@@ -11,7 +11,9 @@ const PrimitiveModel = @import("./model.zig").PrimitiveModel;
 const Camera = @import("./camera.zig").Camera;
 const SpaceTree = @import("./space_tree.zig").SpaceTree;
 const SpectatorCamera = @import("./spectator_camera.zig").SpectatorCamera;
-const DirectionalLight = @import("./light.zig").DirectionalLight;
+const light_module = @import("./light.zig");
+const DirectionalLight = light_module.DirectionalLight;
+const DirectionalLightParams = light_module.DirectionalLightParams;
 
 pub const Scene = struct {
     engine: *Engine,
@@ -28,8 +30,6 @@ pub const Scene = struct {
     pub fn init(
         engine: *Engine,
         allocator: std.mem.Allocator,
-        screen_width: u32,
-        screen_height: u32,
     ) !*Scene {
         const scene = try allocator.create(Scene);
         errdefer allocator.destroy(scene);
@@ -39,7 +39,7 @@ pub const Scene = struct {
 
         const camera = try allocator.create(Camera);
         errdefer allocator.destroy(camera);
-        camera.* = Camera.init(screen_width, screen_height);
+        camera.* = Camera.init(engine.aspect_ratio);
 
         const spectator_camera = try allocator.create(SpectatorCamera);
         errdefer allocator.destroy(spectator_camera);
@@ -167,10 +167,10 @@ pub const Scene = struct {
         return game_object;
     }
 
-    pub fn addDirectionalLight(scene: *Scene, params: DirectionalLight) !void {
+    pub fn addDirectionalLight(scene: *Scene, params: DirectionalLightParams) !void {
         const light = try scene.allocator.create(DirectionalLight);
         errdefer scene.allocator.destroy(light);
-        light.* = params;
+        light.init(params);
 
         try scene.lights.append(scene.allocator, light);
     }

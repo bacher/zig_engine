@@ -19,5 +19,11 @@ pub fn BoundBox(comptime ElementType: type) type {
         x: Range(ElementType),
         y: Range(ElementType),
         z: Range(ElementType),
+
+        pub const empty = @This(){
+            .x = .init(0, 0),
+            .y = .init(0, 0),
+            .z = .init(0, 0),
+        };
     };
 }

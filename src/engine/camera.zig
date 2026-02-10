@@ -2,11 +2,12 @@ const std = @import("std");
 const math = std.math;
 const zmath = @import("zmath");
 const debug = @import("debug");
+
 const BoundBox = @import("./bound_box.zig").BoundBox;
+const FrustumPoints = @import("./frustum.zig").FrustumPoints;
 
 pub const Camera = struct {
-    screen_width: u32,
-    screen_height: u32,
+    aspect_ratio: f32,
 
     position: [3]f32,
 
@@ -20,7 +21,7 @@ pub const Camera = struct {
     world_to_clip: zmath.Mat,
     clip_to_world: zmath.Mat,
 
-    pub fn init(screen_width: u32, screen_height: u32) Camera {
+    pub fn init(aspect_ratio: f32) Camera {
         const position: [3]f32 = .{ 0, 0, 0 };
 
         const world_to_camera = zmath.translation(0, 0, 0);
@@ -33,11 +34,10 @@ pub const Camera = struct {
             zmath.Vec{ 0, 0, 1, 0 },
         );
 
-        const view_to_clip = createProjectionMatrix(screen_width, screen_height);
+        const view_to_clip = createProjectionMatrix(aspect_ratio);
 
         var camera = Camera{
-            .screen_width = screen_width,
-            .screen_height = screen_height,
+            .aspect_ratio = aspect_ratio,
 
             .position = position,
 
@@ -76,14 +76,13 @@ pub const Camera = struct {
         camera.clip_to_world = zmath.inverse(camera.world_to_clip);
     }
 
-    pub fn updateTargetScreenSize(camera: *Camera, screen_width: u32, screen_height: u32) void {
-        if (camera.screen_width == screen_width and camera.screen_height == screen_height) {
+    pub fn updateTargetScreenSize(camera: *Camera, aspect_ratio: f32) void {
+        if (camera.aspect_ratio == aspect_ratio) {
             return;
         }
 
-        camera.screen_width = screen_width;
-        camera.screen_height = screen_height;
-        camera.view_to_clip = createProjectionMatrix(screen_width, screen_height);
+        camera.aspect_ratio = aspect_ratio;
+        camera.view_to_clip = createProjectionMatrix(aspect_ratio);
         camera.updateDerivedMatrices();
     }
 
@@ -106,70 +105,26 @@ pub const Camera = struct {
         camera.updateDerivedMatrices();
     }
 
-    fn createProjectionMatrix(screen_width: u32, screen_height: u32) zmath.Mat {
+    fn createProjectionMatrix(aspect_ratio: f32) zmath.Mat {
         return zmath.perspectiveFovRh(
             0.25 * math.pi,
-            @as(f32, @floatFromInt(screen_width)) / @as(f32, @floatFromInt(screen_height)),
+            aspect_ratio,
             0.01,
             200.0,
         );
     }
 
+    pub fn getFrustumPoints(camera: *const Camera) FrustumPoints {
+        return FrustumPoints.initFromMatrix(camera.clip_to_world, zmath.Vec{
+            camera.position[0],
+            camera.position[1],
+            camera.position[2],
+            1,
+        });
+    }
+
     pub fn getCameraViewBoundBox(camera: *const Camera) BoundBox(f32) {
-        const camera_lb_position = resolvePosition(zmath.mul(
-            zmath.Vec{ -1, -1, 1, 1 },
-            camera.clip_to_world,
-        ));
-        const camera_lt_position = resolvePosition(zmath.mul(
-            zmath.Vec{ -1, 1, 1, 1 },
-            camera.clip_to_world,
-        ));
-        const camera_rb_position = resolvePosition(zmath.mul(
-            zmath.Vec{ 1, -1, 1, 1 },
-            camera.clip_to_world,
-        ));
-        const camera_rt_position = resolvePosition(zmath.mul(
-            zmath.Vec{ 1, 1, 1, 1 },
-            camera.clip_to_world,
-        ));
-
-        const camera_pos = zmath.Vec{ camera.position[0], camera.position[1], camera.position[2], 1 };
-
-        const min = @min(
-            camera_lb_position,
-            camera_lt_position,
-            camera_rb_position,
-            camera_rt_position,
-            camera_pos,
-        );
-        const max = @max(
-            camera_lb_position,
-            camera_lt_position,
-            camera_rb_position,
-            camera_rt_position,
-            camera_pos,
-        );
-
-        // printVec3Labeled("camera view bound box min", min);
-        // printVec3Labeled("camera view bound box max", max);
-
-        return .{
-            .x = .init(min[0], max[0]),
-            .y = .init(min[1], max[1]),
-            .z = .init(min[2], max[2]),
-        };
+        const frustum_points = camera.getFrustumPoints();
+        return frustum_points.getBoundingBox();
     }
 };
-
-fn resolvePosition(position: zmath.Vec) zmath.Vec {
-    return zmath.Vec{
-        position[0] / position[3],
-        position[1] / position[3],
-        position[2] / position[3],
-        1,
-    };
-}
-
-fn printVec3Labeled(label: []const u8, vec: zmath.Vec) void {
-    std.debug.print("{s}: {d:.1}, {d:.1}, {d:.1}\n", .{ label, vec[0], vec[1], vec[2] });
-}

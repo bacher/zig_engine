@@ -39,6 +39,11 @@ pub fn printVecLabeled(label: []const u8, vec: zmath.Vec) void {
     printVec(vec);
 }
 
+pub fn printVecAsVec3Labeled(label: []const u8, vec: zmath.Vec) void {
+    std.debug.print("Vec \"{s}\":\n", .{label});
+    printVec3(.{ vec[0], vec[1], vec[2] });
+}
+
 pub fn printVec3Labeled(label: []const u8, vec: [3]f32) void {
     std.debug.print("Vec \"{s}\":\n", .{label});
     printVec3(vec);

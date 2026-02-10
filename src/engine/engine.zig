@@ -41,6 +41,7 @@ const Scene = @import("./scene.zig").Scene;
 const Camera = @import("./camera.zig").Camera;
 const InputController = @import("./input_controller.zig").InputController;
 const GameObject = @import("./game_object.zig").GameObject;
+const DirectionalLight = @import("./light.zig").DirectionalLight;
 
 const DEBUG_INTERNAL_TEXTURE = true;
 
@@ -62,6 +63,7 @@ pub const Engine = struct {
 
     gctx: *zgpu.GraphicsContext,
     allocator: std.mem.Allocator,
+    aspect_ratio: f32,
     window_context: WindowContext,
     callbacks: Callbacks,
     content_dir: []const u8,
@@ -205,6 +207,7 @@ pub const Engine = struct {
         const engine = try allocator.create(Engine);
         engine.* = .{
             .allocator = allocator,
+            .aspect_ratio = getAspectRatio(gctx),
             .window_context = window_context,
             .callbacks = callbacks,
             .content_dir = content_dir_copied,
@@ -260,8 +263,6 @@ pub const Engine = struct {
         const scene = try Scene.init(
             engine,
             engine.allocator,
-            engine.gctx.swapchain_descriptor.width,
-            engine.gctx.swapchain_descriptor.height,
         );
 
         if (engine.active_scene == null) {
@@ -280,12 +281,7 @@ pub const Engine = struct {
         try engine.input_controller.updateMouseState();
 
         if (engine.active_scene) |scene| {
-            const swapchain = engine.gctx.swapchain_descriptor;
-            scene.camera.updateTargetScreenSize(
-                swapchain.width,
-                swapchain.height,
-            );
-
+            scene.camera.updateTargetScreenSize(engine.aspect_ratio);
             scene.update(engine.time);
         }
 
@@ -333,17 +329,21 @@ pub const Engine = struct {
                 shadow_map_pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
 
                 if (engine.active_scene) |scene| {
-                    const camera_view_bound_box = scene.camera.getCameraViewBoundBox();
-
                     var timer = std.time.Timer.start() catch @panic("Failed to start timer");
-                    // FIX: replace camera_view_bound_box by light view bound box
-                    const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(camera_view_bound_box);
+                    defer engine.frame_stats.shadow_map_pass_time_taken = @as(f32, @floatFromInt(timer.read())) * 0.000001;
 
-                    for (potentially_visible_game_objects) |game_object| {
-                        engine.drawGameObjectToShadowMap(shadow_map_pass, scene, game_object);
+                    for (scene.lights.items) |light| {
+                        light.applyCameraFrustum(scene.camera);
+                        const light_view_bound_box = light.getLightViewBoundBox();
+
+                        const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(
+                            light_view_bound_box,
+                        );
+
+                        for (potentially_visible_game_objects) |game_object| {
+                            engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, game_object);
+                        }
                     }
-
-                    engine.frame_stats.shadow_map_pass_time_taken = @as(f32, @floatFromInt(timer.read())) * 0.000001;
                 }
             }
 
@@ -601,8 +601,11 @@ pub const Engine = struct {
         engine: *Engine,
         pass: wgpu.RenderPassEncoder,
         scene: *const Scene,
+        light: *const DirectionalLight,
         game_object: *const GameObject,
     ) void {
+        _ = scene;
+
         switch (game_object.model) {
             .regular_model => |model| {
                 const model_descriptor = model.model_descriptor;
@@ -655,7 +658,7 @@ pub const Engine = struct {
             model_to_world = zmath.mul(xRotate, model_to_world);
         }
 
-        const object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);
+        const object_to_clip = zmath.mul(model_to_world, light.world_to_clip);
 
         const object_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
         object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
@@ -684,7 +687,14 @@ pub const Engine = struct {
 
     pub fn drawTextureDebugScreen(engine: *Engine, pass: wgpu.RenderPassEncoder) void {
         pass.setPipeline(engine.pipelines.debug_texture.pipeline_gpu);
-        pass.setBindGroup(0, engine.bind_group_debug_shadow_map_texture.wgpu_bind_group, null);
+
+        const aspect_ratio_uniform = engine.gctx.uniformsAllocate(f32, 1);
+
+        aspect_ratio_uniform.slice[0] = engine.aspect_ratio;
+
+        pass.setBindGroup(0, engine.bind_group_debug_shadow_map_texture.wgpu_bind_group, &.{
+            aspect_ratio_uniform.offset,
+        });
 
         // drawing 6 vertices for fullscreen quad
         pass.draw(6, 1, 0, 0);
@@ -873,6 +883,7 @@ pub const Engine = struct {
             switch (gctx_state) {
                 .normal_execution => {},
                 .swap_chain_resized => {
+                    engine.aspect_ratio = getAspectRatio(engine.gctx);
                     try engine.recreateDepthTexture();
                 },
             }
@@ -888,4 +899,9 @@ fn slowOperation() void {
     while (std.time.milliTimestamp() < end) {
         // noop
     }
+}
+
+fn getAspectRatio(gctx: *const zgpu.GraphicsContext) f32 {
+    return @as(f32, @floatFromInt(gctx.swapchain_descriptor.width)) /
+        @as(f32, @floatFromInt(gctx.swapchain_descriptor.height));
 }

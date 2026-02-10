@@ -200,7 +200,7 @@ pub fn main() !void {
     // Light
 
     try scene.addDirectionalLight(.{
-        .direction = .{ 0, 0, -1 },
+        .direction = zmath.normalize3(zmath.Vec{ 0.2, 0.3, -1, 1 }),
         .color = .{ 1, 1, 1, 1 },
         .intensity = 1.0,
     });

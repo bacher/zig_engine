@@ -25,6 +25,14 @@ pub const DebugTextureBindGroupDefinition = struct {
                 .{ .fragment = true },
                 .non_filtering,
             ),
+            // screen aspect ratio
+            zgpu.bufferEntry(
+                2,
+                .{ .vertex = true },
+                .uniform,
+                true,
+                0,
+            ),
         });
 
         return .{
@@ -57,6 +65,14 @@ pub const DebugTextureBindGroupDefinition = struct {
                 .{
                     .binding = 1,
                     .sampler_handle = sampler,
+                },
+
+                // screen aspect ratio
+                .{
+                    .binding = 2,
+                    .buffer_handle = gctx.uniforms.buffer,
+                    .offset = 0,
+                    .size = @sizeOf(f32),
                 },
             },
         );
