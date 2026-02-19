@@ -23,6 +23,7 @@ const BindGroup = @import("./bind_group.zig").BindGroup;
 const RegularBindGroupDefinition = @import("./bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
 const PrimitiveColorizedBindGroupDefinition = @import("./bind_groups_defs/primitive_bind_group.zig").PrimitiveColorizedBindGroupDefinition;
 const ShadowMapPassBindGroupDefinition = @import("./bind_groups_defs/shadow_map_pass_bind_group.zig").ShadowMapPassBindGroupDefinition;
+const ShadowMapBindGroupDefinition = @import("./bind_groups_defs/shadow_map_bind_group.zig").ShadowMapBindGroupDefinition;
 const DebugTextureBindGroupDefinition = @import("./bind_groups_defs/debug_texture_bind_group.zig").DebugTextureBindGroupDefinition;
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ShadowMapTexture = @import("./shadow_map_texture.zig").ShadowMapTexture;
@@ -61,6 +62,23 @@ pub const Engine = struct {
         onRender: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder, argument: *anyopaque) void,
     };
 
+    const BindGroupDefinitions = struct {
+        regular: RegularBindGroupDefinition,
+        cubemap: RegularBindGroupDefinition,
+        primitive_colorized: PrimitiveColorizedBindGroupDefinition,
+        shadow_map_pass: ShadowMapPassBindGroupDefinition,
+        shadow_map: ShadowMapBindGroupDefinition,
+        debug_texture: DebugTextureBindGroupDefinition,
+
+        fn deinit(definitions: *BindGroupDefinitions) void {
+            definitions.regular.deinit();
+            definitions.cubemap.deinit();
+            definitions.primitive_colorized.deinit();
+            definitions.shadow_map_pass.deinit();
+            definitions.debug_texture.deinit();
+        }
+    };
+
     gctx: *zgpu.GraphicsContext,
     allocator: std.mem.Allocator,
     aspect_ratio: f32,
@@ -81,27 +99,12 @@ pub const Engine = struct {
         // ---
         debug_texture: Pipeline,
     },
-    bind_group_definitions: struct {
-        const This = @This();
-
-        regular: RegularBindGroupDefinition,
-        cubemap: RegularBindGroupDefinition,
-        primitive_colorized: PrimitiveColorizedBindGroupDefinition,
-        shadow_map_pass: ShadowMapPassBindGroupDefinition,
-        debug_texture: DebugTextureBindGroupDefinition,
-
-        fn deinit(definitions: *This) void {
-            definitions.regular.deinit();
-            definitions.cubemap.deinit();
-            definitions.primitive_colorized.deinit();
-            definitions.shadow_map_pass.deinit();
-            definitions.debug_texture.deinit();
-        }
-    },
+    bind_group_definitions: BindGroupDefinitions,
 
     // ---
     bind_group_shadow_map_pass: BindGroup,
     bind_group_debug_shadow_map_texture: BindGroup,
+    bind_group_shadow_map: BindGroup,
 
     depth_texture: DepthTexture,
     texture_sampler: zgpu.SamplerHandle,
@@ -146,23 +149,38 @@ pub const Engine = struct {
 
         const texture_sampler = gctx.createSampler(.{});
 
-        const bind_group_definitions: std.meta.fieldInfo(Engine, .bind_group_definitions).type = .{
+        // ---
+        // bind group definitions
+        // ---
+        const bind_group_definitions: BindGroupDefinitions = .{
             .regular = RegularBindGroupDefinition.init(gctx, .tvdim_2d),
             .cubemap = RegularBindGroupDefinition.init(gctx, .tvdim_cube),
             .primitive_colorized = PrimitiveColorizedBindGroupDefinition.init(gctx),
             .shadow_map_pass = ShadowMapPassBindGroupDefinition.init(gctx),
+            .shadow_map = ShadowMapBindGroupDefinition.init(gctx),
             .debug_texture = DebugTextureBindGroupDefinition.init(gctx),
         };
 
+        // ---
+        // bind groups
+        // ---
         const bind_group_shadow_map_pass = try bind_group_definitions.shadow_map_pass.createBindGroup();
         const bind_group_debug_shadow_map_texture = try bind_group_definitions.debug_texture.createBindGroup(
             texture_sampler,
             shadow_map_texture.view_handle,
         );
+        const bind_group_shadow_map = try bind_group_definitions.shadow_map.createBindGroup(
+            texture_sampler,
+            shadow_map_texture.view_handle,
+        );
 
+        // ---
+        // pipelines
+        // ---
         const basic_pipeline = try basic_pipeline_module.createBasicPipeline(
             gctx,
             bind_group_definitions.regular,
+            bind_group_definitions.shadow_map,
         );
         const skybox_pipeline = try skybox_pipeline_module.createSkyboxPipeline(
             gctx,
@@ -184,7 +202,6 @@ pub const Engine = struct {
             gctx,
             bind_group_definitions.shadow_map_pass,
         );
-
         const debug_texture_pipeline = try debug_texture_pipeline_module.createDebugTexturePipeline(
             gctx,
             bind_group_definitions.debug_texture,
@@ -227,6 +244,7 @@ pub const Engine = struct {
 
             // shadow map pass uses singleton bind group descriptor for all objects
             .bind_group_shadow_map_pass = bind_group_shadow_map_pass,
+            .bind_group_shadow_map = bind_group_shadow_map,
             .bind_group_debug_shadow_map_texture = bind_group_debug_shadow_map_texture,
 
             .depth_texture = depth_texture,
@@ -495,13 +513,10 @@ pub const Engine = struct {
             model_to_world,
         );
 
-        var flip_yz = false;
-        switch (game_object.model) {
-            .regular_model => |model| {
-                flip_yz = model.model_descriptor.mesh_y_up;
-            },
-            else => {},
-        }
+        const flip_yz = switch (game_object.model) {
+            .regular_model => |model| model.model_descriptor.mesh_y_up,
+            else => false,
+        };
         if (flip_yz) {
             // NOTE: converting from Y-up to Z-up coordinate system,
             // should be done only for models which is made with Y-up logic.
@@ -519,8 +534,14 @@ pub const Engine = struct {
             }
         }
 
+        // TODO: support multiple lights
+        const object_to_light_clip = zmath.mul(model_to_world, scene.lights.items[0].world_to_clip);
+
         const object_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
         object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
+
+        const object_to_light_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+        object_to_light_clip_uniform.slice[0] = zmath.transpose(object_to_light_clip);
 
         const camera_position_in_model_space_uniform = engine.gctx.uniformsAllocate(zmath.Vec, 1);
         if (game_object.model == .window_box_model) {
@@ -550,6 +571,9 @@ pub const Engine = struct {
                 pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
                     camera_position_in_model_space_uniform.offset,
+                });
+                pass.setBindGroup(1, engine.bind_group_shadow_map.wgpu_bind_group, &.{
+                    object_to_light_clip_uniform.offset,
                 });
 
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
@@ -645,13 +669,10 @@ pub const Engine = struct {
             model_to_world,
         );
 
-        var flip_yz = false;
-        switch (game_object.model) {
-            .regular_model => |model| {
-                flip_yz = model.model_descriptor.mesh_y_up;
-            },
-            else => {},
-        }
+        const flip_yz = switch (game_object.model) {
+            .regular_model => |model| model.model_descriptor.mesh_y_up,
+            else => false,
+        };
         if (flip_yz) {
             // NOTE: converting from Y-up to Z-up coordinate system,
             // should be done only for models which is made with Y-up logic.

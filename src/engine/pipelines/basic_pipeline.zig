@@ -6,13 +6,16 @@ const wgsl_fs = @embedFile("../shaders/basic/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
 const RegularBindGroupDefinition = @import("../bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
+const ShadowMapBindGroupDefinition = @import("../bind_groups_defs/shadow_map_bind_group.zig").ShadowMapBindGroupDefinition;
 
 pub fn createBasicPipeline(
     gctx: *zgpu.GraphicsContext,
     regular_bind_group_definition: RegularBindGroupDefinition,
+    shadow_map_bind_group_definition: ShadowMapBindGroupDefinition,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
         regular_bind_group_definition.bind_group_layout_handle,
+        shadow_map_bind_group_definition.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 
