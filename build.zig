@@ -25,6 +25,7 @@ pub fn build(b: *std.Build) void {
 
     const zglfw = b.dependency("zglfw", .{
         .target = target,
+        .optimize = optimize,
     });
     exe.root_module.addImport("zglfw", zglfw.module("root"));
     exe.linkLibrary(zglfw.artifact("glfw"));
@@ -32,12 +33,14 @@ pub fn build(b: *std.Build) void {
     @import("zgpu").addLibraryPathsTo(exe);
     const zgpu = b.dependency("zgpu", .{
         .target = target,
+        .optimize = optimize,
     });
     exe.root_module.addImport("zgpu", zgpu.module("root"));
     exe.linkLibrary(zgpu.artifact("zdawn"));
 
     const zgui = b.dependency("zgui", .{
         .target = target,
+        .optimize = optimize,
         .backend = .glfw_wgpu,
     });
     exe.root_module.addImport("zgui", zgui.module("root"));
@@ -45,16 +48,19 @@ pub fn build(b: *std.Build) void {
 
     const zmath = b.dependency("zmath", .{
         .target = target,
+        .optimize = optimize,
     });
     exe.root_module.addImport("zmath", zmath.module("root"));
 
     const zstbi = b.dependency("zstbi", .{
         .target = target,
+        .optimize = optimize,
     });
     exe.root_module.addImport("zstbi", zstbi.module("root"));
 
     const gltf_loader = b.dependency("gltf_loader", .{
         .target = target,
+        .optimize = optimize,
     });
     gltf_loader.module("root").addImport("zstbi", zstbi.module("root"));
     exe.root_module.addImport("gltf_loader", gltf_loader.module("root"));

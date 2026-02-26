@@ -53,8 +53,8 @@
         //},
 
         .zglfw = .{
-            .url = "git+https://github.com/zig-gamedev/zglfw#1b008a0224def3e35a6affb1e7d77dbe36643de2",
-            .hash = "zglfw-0.10.0-dev-zgVDNES4IQAAXAcsFiHfmadlpDCHhF2cUqWxBGIViyU6",
+            .url = "git+https://github.com/zig-gamedev/zglfw#b164ba1a4603d98ed3475bf794dd4091041ab4b8",
+            .hash = "zglfw-0.10.0-dev-zgVDNOe4IQATU3HK2VWCKpqichEPjHFbdnOiX8kDB1lX",
         },
 
         .zgpu = .{

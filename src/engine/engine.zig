@@ -351,7 +351,9 @@ pub const Engine = struct {
                     defer engine.frame_stats.shadow_map_pass_time_taken = @as(f32, @floatFromInt(timer.read())) * 0.000001;
 
                     for (scene.lights.items) |light| {
+                        // if (engine.time < 5) {
                         light.applyCameraFrustum(scene.camera);
+                        // }
                         const light_view_bound_box = light.getLightViewBoundBox();
 
                         const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(
