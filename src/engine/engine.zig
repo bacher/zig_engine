@@ -108,6 +108,8 @@ pub const Engine = struct {
 
     depth_texture: DepthTexture,
     texture_sampler: zgpu.SamplerHandle,
+    texture_repeat_sampler: zgpu.SamplerHandle,
+    texture_mirror_sampler: zgpu.SamplerHandle,
 
     models_hash: std.AutoHashMap(LoadedModelId, *Model),
     shadow_map_texture: ShadowMapTexture,
@@ -148,6 +150,14 @@ pub const Engine = struct {
         errdefer shadow_map_depth_texture.deinit();
 
         const texture_sampler = gctx.createSampler(.{});
+        const texture_repeat_sampler = gctx.createSampler(.{
+            .address_mode_u = .repeat,
+            .address_mode_v = .repeat,
+        });
+        const texture_mirror_sampler = gctx.createSampler(.{
+            .address_mode_u = .mirror_repeat,
+            .address_mode_v = .mirror_repeat,
+        });
 
         // ---
         // bind group definitions
@@ -249,6 +259,8 @@ pub const Engine = struct {
 
             .depth_texture = depth_texture,
             .texture_sampler = texture_sampler,
+            .texture_repeat_sampler = texture_repeat_sampler,
+            .texture_mirror_sampler = texture_mirror_sampler,
             .models_hash = std.AutoHashMap(LoadedModelId, *Model).init(allocator),
             .shadow_map_texture = shadow_map_texture,
             .shadow_map_depth_texture = shadow_map_depth_texture,
@@ -746,7 +758,7 @@ pub const Engine = struct {
         );
 
         const bind_group = try engine.bind_group_definitions.regular.createBindGroup(
-            engine.texture_sampler,
+            engine.texture_repeat_sampler,
             model_descriptor.color_texture,
         );
 
