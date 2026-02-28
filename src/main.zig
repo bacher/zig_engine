@@ -279,6 +279,17 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
     zgui.backend.draw(pass);
 }
 
+const GAPS: [8][]const u8 = .{
+    "",
+    "  ",
+    "    ",
+    "      ",
+    "        ",
+    "          ",
+    "            ",
+    "              ",
+};
+
 fn traverseGroup(
     engine: *Engine,
     scene: *Scene,
@@ -300,9 +311,7 @@ fn traverseGroup(
         }
 
         // +DEBUG
-        if (node.name != null and std.mem.eql(u8, node.name.?, "ttc_gazebo_11")) {
-            std.debug.print("Group lvl={d}: {s}\n", .{ nesting_level, node.name orelse "empty" });
-        }
+        std.debug.print("{s}group {s}\n", .{ GAPS[nesting_level], node.name orelse "<no name>" });
         // -DEBUG
 
         for (node.children.?) |child| {
@@ -314,7 +323,7 @@ fn traverseGroup(
         // Assuming that nodes with mesh can't also have transform_matrix
         std.debug.assert(node.transform_matrix == null);
 
-        std.debug.print("adding model {s}\n", .{node.name orelse "no name"});
+        std.debug.print("{s}model {s}\n", .{ GAPS[nesting_level], node.name orelse "<no name>" });
         const game_object = try scene.addObject(.{
             .model_id = model_id,
             .position = .{ 0, 0, 0 },

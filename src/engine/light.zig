@@ -7,6 +7,8 @@ const Camera = @import("./camera.zig").Camera;
 const FrustumPoints = @import("./frustum.zig").FrustumPoints;
 const resolvePosition = @import("./utils.zig").resolvePosition;
 
+const DEBUG_LIGHT = false;
+
 pub const DirectionalLightParams = struct {
     direction: zmath.Vec,
     color: [4]f32,
@@ -28,8 +30,10 @@ pub const DirectionalLight = struct {
     pub fn applyCameraFrustum(light: *DirectionalLight, camera: *const Camera) void {
         const frustum_points = camera.getFrustumPoints();
 
-        debug.printVecAsVec3Labeled("camera view bound box min", frustum_points.getMin());
-        debug.printVecAsVec3Labeled("camera view bound box max", frustum_points.getMax());
+        if (DEBUG_LIGHT) {
+            debug.printVecAsVec3Labeled("camera view bound box min", frustum_points.getMin());
+            debug.printVecAsVec3Labeled("camera view bound box max", frustum_points.getMax());
+        }
 
         const look_to = zmath.lookToRh(
             zmath.Vec{ 0, 0, 0, 1 },
@@ -42,8 +46,10 @@ pub const DirectionalLight = struct {
         const min = projected_frustum_points.getMin();
         const max = projected_frustum_points.getMax();
 
-        debug.printVecAsVec3Labeled("projected camera view bound box min", min);
-        debug.printVecAsVec3Labeled("projected camera view bound box max", max);
+        if (DEBUG_LIGHT) {
+            debug.printVecAsVec3Labeled("projected camera view bound box min", min);
+            debug.printVecAsVec3Labeled("projected camera view bound box max", max);
+        }
 
         const view_to_clip = zmath.orthographicRh(
             max[0] - min[0],
@@ -52,10 +58,12 @@ pub const DirectionalLight = struct {
             LIGHT_HEIGHT,
         );
 
-        std.debug.print("orthographic width: {d}, height: {d}\n", .{
-            max[0] - min[0],
-            max[1] - min[1],
-        });
+        if (DEBUG_LIGHT) {
+            std.debug.print("orthographic width: {d}, height: {d}\n", .{
+                max[0] - min[0],
+                max[1] - min[1],
+            });
+        }
 
         const move_mat = zmath.translation(
             -(max[0] + min[0]) / 2,
@@ -64,20 +72,20 @@ pub const DirectionalLight = struct {
         );
 
         // --
+        if (DEBUG_LIGHT) {
+            const mat = zmath.mul(look_to, move_mat);
 
-        const mat = zmath.mul(look_to, move_mat);
+            const projected_and_moved_frustum_points = frustum_points.applyMatrix(mat);
 
-        const projected_and_moved_frustum_points = frustum_points.applyMatrix(mat);
-
-        debug.printVecAsVec3Labeled(
-            "projected and moved camera view bound box min",
-            projected_and_moved_frustum_points.getMin(),
-        );
-        debug.printVecAsVec3Labeled(
-            "projected and moved camera view bound box max",
-            projected_and_moved_frustum_points.getMax(),
-        );
-
+            debug.printVecAsVec3Labeled(
+                "projected and moved camera view bound box min",
+                projected_and_moved_frustum_points.getMin(),
+            );
+            debug.printVecAsVec3Labeled(
+                "projected and moved camera view bound box max",
+                projected_and_moved_frustum_points.getMax(),
+            );
+        }
         // --
 
         light.world_to_clip = zmath.mul(
@@ -86,18 +94,18 @@ pub const DirectionalLight = struct {
         );
 
         // --
+        if (DEBUG_LIGHT) {
+            const ort_frustum_points = frustum_points.applyMatrix(light.world_to_clip);
 
-        const ort_frustum_points = frustum_points.applyMatrix(light.world_to_clip);
-
-        debug.printVecAsVec3Labeled(
-            "ort camera view bound box min",
-            ort_frustum_points.getMin(),
-        );
-        debug.printVecAsVec3Labeled(
-            "ort camera view bound box max",
-            ort_frustum_points.getMax(),
-        );
-
+            debug.printVecAsVec3Labeled(
+                "ort camera view bound box min",
+                ort_frustum_points.getMin(),
+            );
+            debug.printVecAsVec3Labeled(
+                "ort camera view bound box max",
+                ort_frustum_points.getMax(),
+            );
+        }
         // --
 
         light.clip_to_world = zmath.inverse(light.world_to_clip);
