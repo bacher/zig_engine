@@ -78,4 +78,12 @@ pub const GeometryBounds = struct {
     min: [3]f64,
     max: [3]f64,
     radius: f32,
+
+    pub fn getCenter(self: GeometryBounds) [3]f32 {
+        return .{
+            (self.min[0] + self.max[0]) / 2.0,
+            (self.min[1] + self.max[1]) / 2.0,
+            (self.min[2] + self.max[2]) / 2.0,
+        };
+    }
 };

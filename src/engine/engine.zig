@@ -11,6 +11,7 @@ const debug = @import("debug");
 const types = @import("./types.zig");
 const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
+// -- pipelines --
 const Pipeline = @import("./pipeline.zig").Pipeline;
 const basic_pipeline_module = @import("./pipelines/basic_pipeline.zig");
 const skybox_pipeline_module = @import("./pipelines/skybox_pipeline.zig");
@@ -18,24 +19,32 @@ const skybox_cubemap_pipeline_module = @import("./pipelines/skybox_cubemap_pipel
 const window_box_pipeline_module = @import("./pipelines/window_box_pipeline.zig");
 const primitive_colorized_pipeline_module = @import("./pipelines/primitive_colorized_pipeline.zig");
 const shadow_map_pipeline_module = @import("./pipelines/shadow_map_pipeline.zig");
+const lines_pipeline_module = @import("./pipelines/lines_pipeline.zig");
 const debug_texture_pipeline_module = @import("./pipelines/debug_texture_pipeline.zig");
 const BindGroup = @import("./bind_group.zig").BindGroup;
+// -- bind groups definitions --
 const RegularBindGroupDefinition = @import("./bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
 const PrimitiveColorizedBindGroupDefinition = @import("./bind_groups_defs/primitive_bind_group.zig").PrimitiveColorizedBindGroupDefinition;
 const ShadowMapPassBindGroupDefinition = @import("./bind_groups_defs/shadow_map_pass_bind_group.zig").ShadowMapPassBindGroupDefinition;
 const ShadowMapBindGroupDefinition = @import("./bind_groups_defs/shadow_map_bind_group.zig").ShadowMapBindGroupDefinition;
+const LinesBindGroupDefinition = @import("./bind_groups_defs/lines_bind_group.zig").LinesBindGroupDefinition;
 const DebugTextureBindGroupDefinition = @import("./bind_groups_defs/debug_texture_bind_group.zig").DebugTextureBindGroupDefinition;
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ShadowMapTexture = @import("./shadow_map_texture.zig").ShadowMapTexture;
+// -- display object descriptors --
 const ModelDescriptor = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptor;
 const WindowBoxDescriptor = @import("./display_object_descriptors/window_box_descriptor.zig").WindowBoxDescriptor;
 const SkyBoxDescriptor = @import("./display_object_descriptors/skybox_descriptor.zig").SkyBoxDescriptor;
 const SkyBoxCubemapDescriptor = @import("./display_object_descriptors/skybox_cubemap_descriptor.zig").SkyBoxCubemapDescriptor;
+const CubeWireframeDescriptor = @import("./display_object_descriptors/cube_wireframe_descriptor.zig").CubeWireframeDescriptor;
+// -- models types --
 const Model = @import("./model.zig").Model;
 const SkyBoxModel = @import("./model.zig").SkyBoxModel;
 const SkyBoxCubemapModel = @import("./model.zig").SkyBoxCubemapModel;
 const WindowBoxModel = @import("./model.zig").WindowBoxModel;
 const PrimitiveModel = @import("./model.zig").PrimitiveModel;
+const CubeWireframeModel = @import("./model.zig").CubeWireframeModel;
+// -- other --
 const PrimitiveDescriptor = @import("./display_object_descriptors/primitive_descriptor.zig").PrimitiveDescriptor;
 const GeometryData = @import("./shape_generation/geometry_data.zig").GeometryData;
 const Scene = @import("./scene.zig").Scene;
@@ -68,6 +77,7 @@ pub const Engine = struct {
         primitive_colorized: PrimitiveColorizedBindGroupDefinition,
         shadow_map_pass: ShadowMapPassBindGroupDefinition,
         shadow_map: ShadowMapBindGroupDefinition,
+        lines: LinesBindGroupDefinition,
         debug_texture: DebugTextureBindGroupDefinition,
 
         fn deinit(definitions: *BindGroupDefinitions) void {
@@ -75,6 +85,8 @@ pub const Engine = struct {
             definitions.cubemap.deinit();
             definitions.primitive_colorized.deinit();
             definitions.shadow_map_pass.deinit();
+            definitions.shadow_map.deinit();
+            definitions.lines.deinit();
             definitions.debug_texture.deinit();
         }
     };
@@ -97,6 +109,7 @@ pub const Engine = struct {
         // ---
         shadow_map: Pipeline,
         // ---
+        lines: Pipeline,
         debug_texture: Pipeline,
     },
     bind_group_definitions: BindGroupDefinitions,
@@ -105,6 +118,7 @@ pub const Engine = struct {
     bind_group_shadow_map_pass: BindGroup,
     bind_group_debug_shadow_map_texture: BindGroup,
     bind_group_shadow_map: BindGroup,
+    bind_group_lines: BindGroup,
 
     depth_texture: DepthTexture,
     texture_sampler: zgpu.SamplerHandle,
@@ -127,6 +141,9 @@ pub const Engine = struct {
         active_space_nodes_count: u32 = 0,
         find_objects_sub_invocations_count: u32 = 0,
     } = .{},
+
+    // -- built-in models --
+    cube_wireframe_model: *CubeWireframeModel,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -168,6 +185,7 @@ pub const Engine = struct {
             .primitive_colorized = PrimitiveColorizedBindGroupDefinition.init(gctx),
             .shadow_map_pass = ShadowMapPassBindGroupDefinition.init(gctx),
             .shadow_map = ShadowMapBindGroupDefinition.init(gctx),
+            .lines = LinesBindGroupDefinition.init(gctx),
             .debug_texture = DebugTextureBindGroupDefinition.init(gctx),
         };
 
@@ -183,6 +201,7 @@ pub const Engine = struct {
             texture_sampler,
             shadow_map_texture.view_handle,
         );
+        const bind_group_lines = try bind_group_definitions.lines.createBindGroup();
 
         // ---
         // pipelines
@@ -211,6 +230,10 @@ pub const Engine = struct {
         const shadow_map_pipeline = try shadow_map_pipeline_module.createShadowMapPipeline(
             gctx,
             bind_group_definitions.shadow_map_pass,
+        );
+        const lines_pipeline = try lines_pipeline_module.createLinesPipeline(
+            gctx,
+            bind_group_definitions.lines,
         );
         const debug_texture_pipeline = try debug_texture_pipeline_module.createDebugTexturePipeline(
             gctx,
@@ -248,6 +271,7 @@ pub const Engine = struct {
                 .window_box = window_box_pipeline,
                 .primitive_colorized = primitive_colorized_pipeline,
                 .shadow_map = shadow_map_pipeline,
+                .lines = lines_pipeline,
                 .debug_texture = debug_texture_pipeline,
             },
             .bind_group_definitions = bind_group_definitions,
@@ -256,6 +280,7 @@ pub const Engine = struct {
             .bind_group_shadow_map_pass = bind_group_shadow_map_pass,
             .bind_group_shadow_map = bind_group_shadow_map,
             .bind_group_debug_shadow_map_texture = bind_group_debug_shadow_map_texture,
+            .bind_group_lines = bind_group_lines,
 
             .depth_texture = depth_texture,
             .texture_sampler = texture_sampler,
@@ -266,7 +291,14 @@ pub const Engine = struct {
             .shadow_map_depth_texture = shadow_map_depth_texture,
             .active_scene = null,
             .input_controller = input_controller,
+
+            // built-in models
+            .cube_wireframe_model = undefined,
         };
+
+        engine.cube_wireframe_model = try engine.loadCubeWireframeModel();
+        errdefer engine.cube_wireframe_model.deinit(engine.gctx);
+
         Engine.is_instanced = true;
         return engine;
     }
@@ -283,6 +315,7 @@ pub const Engine = struct {
         engine.bind_group_definitions.deinit();
         engine.input_controller.deinit();
         engine.allocator.free(engine.content_dir);
+        engine.allocator.destroy(engine.cube_wireframe_model);
 
         zstbi.deinit();
         engine.allocator.destroy(engine);
@@ -633,6 +666,58 @@ pub const Engine = struct {
                 pass.draw(elements_count, 1, 0, 0);
             },
         }
+
+        if (switch (game_object.model) {
+            .regular_model => true,
+            .window_box_model => true,
+            .primitive_colorized => true,
+            else => false,
+        }) {
+            engine.drawCubeWireframe(pass, scene, game_object);
+        }
+    }
+
+    fn drawCubeWireframe(engine: *Engine, pass: wgpu.RenderPassEncoder, scene: *const Scene, game_object: *const GameObject) void {
+        pass.setPipeline(engine.pipelines.lines.pipeline_gpu);
+        const model_descriptor = engine.cube_wireframe_model.model_descriptor;
+        model_descriptor.position.applyVertexBuffer(pass, 0);
+
+        const model_to_world = zmath.mul(
+            game_object.aggregated_matrix,
+            zmath.mul(
+                // zmath.mul(
+                //     zmath.quatToMat(game_object.rotation),
+                // ),
+                zmath.scaling(
+                    game_object.bounding_radius,
+                    game_object.bounding_radius,
+                    game_object.bounding_radius,
+                ),
+                zmath.translation(
+                    game_object.position[0],
+                    game_object.position[1],
+                    game_object.position[2],
+                ),
+            ),
+        );
+        // _ = model_to_world;
+        // _ = position;
+        // _ = bounding_radius;
+
+        const object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);
+        // const object_to_clip = scene.camera.world_to_clip;
+        const object_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+        object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
+
+        const color_uniform = engine.gctx.uniformsAllocate(zmath.Vec, 1);
+        color_uniform.slice[0] = .{ 0.0, 1.0, 0.0, 1.0 };
+
+        pass.setBindGroup(0, engine.bind_group_lines.wgpu_bind_group, &.{
+            object_to_clip_uniform.offset,
+            color_uniform.offset,
+        });
+
+        pass.draw(model_descriptor.position.elements_count, 1, 0, 0);
     }
 
     pub fn drawGameObjectToShadowMap(
@@ -841,6 +926,21 @@ pub const Engine = struct {
         model.* = .{
             .model_descriptor = skybox_cubemap_descriptor,
             .bind_group = bind_group,
+        };
+
+        return model;
+    }
+
+    pub fn loadCubeWireframeModel(engine: *Engine) !*CubeWireframeModel {
+        const cube_wireframe_descriptor = try CubeWireframeDescriptor.init(
+            engine.gctx,
+        );
+
+        const model = try engine.allocator.create(CubeWireframeModel);
+        errdefer engine.allocator.destroy(model);
+        model.* = .{
+            .model_descriptor = cube_wireframe_descriptor,
+            .bind_group = engine.bind_group_lines,
         };
 
         return model;

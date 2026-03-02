@@ -6,6 +6,7 @@ const WindowBoxDescriptor = @import("./display_object_descriptors/window_box_des
 const SkyBoxDescriptor = @import("./display_object_descriptors/skybox_descriptor.zig").SkyBoxDescriptor;
 const SkyBoxCubemapDescriptor = @import("./display_object_descriptors/skybox_cubemap_descriptor.zig").SkyBoxCubemapDescriptor;
 const PrimitiveDescriptor = @import("./display_object_descriptors/primitive_descriptor.zig").PrimitiveDescriptor;
+const CubeWireframeDescriptor = @import("./display_object_descriptors/cube_wireframe_descriptor.zig").CubeWireframeDescriptor;
 const BindGroup = @import("./bind_group.zig").BindGroup;
 
 pub const Model = struct {
@@ -63,6 +64,16 @@ pub const PrimitiveModel = struct {
     bind_group: BindGroup,
 
     pub fn deinit(model: PrimitiveModel, gctx: *zgpu.GraphicsContext) void {
+        model.model_descriptor.deinit();
+        model.bind_group.deinit(gctx);
+    }
+};
+
+pub const CubeWireframeModel = struct {
+    model_descriptor: CubeWireframeDescriptor,
+    bind_group: BindGroup,
+
+    pub fn deinit(model: @This(), gctx: *zgpu.GraphicsContext) void {
         model.model_descriptor.deinit();
         model.bind_group.deinit(gctx);
     }
