@@ -2,6 +2,7 @@ const std = @import("std");
 const math = std.math;
 
 const BoundBox = @import("./bound_box.zig").BoundBox;
+const utils = @import("./utils.zig");
 
 const DEBUG = false;
 const STRICT = true;
@@ -111,27 +112,30 @@ pub fn SpaceTree(comptime ElementType: type) type {
         }
 
         pub fn addObject(space_tree: *const This, object: *const ElementType) !void {
+            const matrix_params = utils.parseTransformMatrix(object.aggregated_matrix);
+            const bounding_radius = object.model_bounding_radius * matrix_params.scale;
+
             if (DEBUG) {
                 std.debug.print("add object at the root level, center=({d},{d},{d}) r={d}\n", .{
-                    object.position[0],
-                    object.position[1],
-                    object.position[2],
-                    object.bounding_radius,
+                    matrix_params.position[0],
+                    matrix_params.position[1],
+                    matrix_params.position[2],
+                    bounding_radius,
                 });
             }
 
             const bound_box: BoundBox(f32) = .{
                 .x = .{
-                    .start = object.position[0] - object.bounding_radius,
-                    .end = object.position[0] + object.bounding_radius,
+                    .start = matrix_params.position[0] - bounding_radius,
+                    .end = matrix_params.position[0] + bounding_radius,
                 },
                 .y = .{
-                    .start = object.position[1] - object.bounding_radius,
-                    .end = object.position[1] + object.bounding_radius,
+                    .start = matrix_params.position[1] - bounding_radius,
+                    .end = matrix_params.position[1] + bounding_radius,
                 },
                 .z = .{
-                    .start = object.position[2] - object.bounding_radius,
-                    .end = object.position[2] + object.bounding_radius,
+                    .start = matrix_params.position[2] - bounding_radius,
+                    .end = matrix_params.position[2] + bounding_radius,
                 },
             };
 
@@ -158,10 +162,10 @@ pub fn SpaceTree(comptime ElementType: type) type {
             if (STRICT) {
                 if (x0 >= GRID_DIMENSTION or x1 >= GRID_DIMENSTION or y0 >= GRID_DIMENSTION or y1 >= GRID_DIMENSTION or x0 < 0 or x1 < 0 or y0 < 0 or y1 < 0) {
                     std.debug.print("[STRICT] object bound box is partially out of the grid bounds, center=({d},{d},{d}) r={d}\n", .{
-                        object.position[0],
-                        object.position[1],
-                        object.position[2],
-                        object.bounding_radius,
+                        matrix_params.position[0],
+                        matrix_params.position[1],
+                        matrix_params.position[2],
+                        bounding_radius,
                     });
                     std.debug.print("[STRICT]   nodes: {},{} to {},{}\n", .{ x0, y0, x1, y1 });
                 }
@@ -169,7 +173,12 @@ pub fn SpaceTree(comptime ElementType: type) type {
 
             for (@intCast(@max(0, x0))..@intCast(@min(GRID_DIMENSTION, x1))) |x| {
                 for (@intCast(@max(0, y0))..@intCast(@min(GRID_DIMENSTION, y1))) |y| {
-                    _ = try space_tree.grid[y][x].addObject(space_tree.allocator, object, bound_box);
+                    _ = try space_tree.grid[y][x].addObject(
+                        space_tree.allocator,
+                        object,
+                        matrix_params,
+                        bound_box,
+                    );
                 }
             }
         }
@@ -305,16 +314,18 @@ fn SpaceNode(comptime ElementType: type) type {
             space_node: *ThisSpaceNode,
             allocator: std.mem.Allocator,
             object: *const ElementType,
+            matrix_params: utils.DecodedTransformMatrix,
             bound_box: BoundBox(f32),
         ) !bool { // returns true if object was added to the node
+            const bounding_radius = object.model_bounding_radius * matrix_params.scale;
 
             // std.debug.print("addObject to level={}\n", .{space_node.level});
             // space_node.printCenter();
 
             const delta = .{
-                space_node.center[0] - object.position[0],
-                space_node.center[1] - object.position[1],
-                space_node.center[2] - object.position[2],
+                space_node.center[0] - matrix_params.position[0],
+                space_node.center[1] - matrix_params.position[1],
+                space_node.center[2] - matrix_params.position[2],
             };
 
             // TODO: test replacing sqrt by squaring the second part of the formula
@@ -325,14 +336,14 @@ fn SpaceNode(comptime ElementType: type) type {
             );
 
             // if bounding spheres does not intersect then skip object
-            if (len >= radiuses[space_node.level] + object.bounding_radius) {
-                // std.debug.print("len={d} Rc={d} Ro={d}\n", .{ len, radiuses[space_node.level], object.bounding_radius });
+            if (len >= radiuses[space_node.level] + bounding_radius) {
+                // std.debug.print("len={d} Rc={d} Ro={d}\n", .{ len, radiuses[space_node.level], bounding_radius });
                 // std.debug.print("spheres are not intersecing, skip\n", .{});
                 return false;
             }
 
             // if cell sphere is fully inside of object sphere
-            if (len + radiuses[space_node.level] <= object.bounding_radius) {
+            if (len + radiuses[space_node.level] <= bounding_radius) {
                 try space_node.contained_objects.put(allocator, object, true);
                 // std.debug.print("full contained, skipping subdivision\n", .{});
                 return true;
@@ -351,7 +362,14 @@ fn SpaceNode(comptime ElementType: type) type {
                     if (index == 255) {
                         break;
                     }
-                    const was_added = try space_node.child_nodes[index].addObject(allocator, object, bound_box);
+
+                    // recursive addObject call
+                    const was_added = try space_node.child_nodes[index].addObject(
+                        allocator,
+                        object,
+                        matrix_params,
+                        bound_box,
+                    );
 
                     if (was_added) {
                         something_was_added = true;

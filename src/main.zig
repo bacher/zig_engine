@@ -19,6 +19,7 @@ const Scene = @import("./engine/scene.zig").Scene;
 const loader_utils = @import("./loader_utils/utils.zig");
 const tube = @import("./engine/shape_generation/tube.zig");
 const zgui_utils = @import("./zgui.zig");
+const utils = @import("./engine/utils.zig");
 
 const Game = struct {
     saved_game_objects: std.StringHashMap(*GameObject),
@@ -219,10 +220,10 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
 
     if (game.saved_game_objects.get("man_1")) |obj| {
-        obj.rotation = zmath.quatFromRollPitchYaw(0, 0, @floatCast(engine.time));
+        obj.setRotation(zmath.quatFromRollPitchYaw(0, 0, @floatCast(engine.time)));
     }
     if (game.saved_game_objects.get("man_2")) |obj| {
-        obj.rotation = zmath.quatFromRollPitchYaw(0, 0, @floatCast(-engine.time));
+        obj.setRotation(zmath.quatFromRollPitchYaw(0, 0, @floatCast(-engine.time)));
     }
 }
 
@@ -298,13 +299,23 @@ fn traverseGroup(
     node: gltf_loader.SceneObject,
     nesting_level: u32,
 ) !void {
-    if (node.children != null) {
+    if (node.children) |children| {
         const group = try parent_group.addGroup();
 
         if (node.transform_matrix) |node_matrix| {
+            const normalized = loader_utils.convertMatFromUpYToZ(zmath.matFromArr(node_matrix.*));
+
+            const matrix_params = utils.parseTransformMatrix(normalized);
+
+            group.position = matrix_params.position;
+            group.rotation = matrix_params.rotation;
+            // TODO: Maybe it makes sense to store scale for each axis?
+            group.scale = matrix_params.scale;
+
+            // TODO: Mayeb also keep node transform matrix separately from aggregated?
             group.aggregated_mat = zmath.mul(
                 parent_group.aggregated_mat,
-                loader_utils.convertMatFromUpYToZ(zmath.matFromArr(node_matrix.*)),
+                normalized,
             );
         } else {
             group.aggregated_mat = parent_group.aggregated_mat;
@@ -314,10 +325,10 @@ fn traverseGroup(
         std.debug.print("{s}group {s}\n", .{ GAPS[nesting_level], node.name orelse "<no name>" });
         // -DEBUG
 
-        for (node.children.?) |child| {
+        for (children) |child| {
             try traverseGroup(engine, scene, group, loader, child, nesting_level + 1);
         }
-    } else if (node.mesh != null) {
+    } else if (node.mesh) |_| {
         const model_id = try engine.loadModel(&loader, &node);
 
         // Assuming that nodes with mesh can't also have transform_matrix

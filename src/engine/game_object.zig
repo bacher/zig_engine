@@ -49,8 +49,8 @@ pub const GameObject = struct {
     rotation: zmath.Quat,
     scale: f32,
     aggregated_matrix: zmath.Mat = zmath.identity(),
-    bounding_radius: f32,
     model: ModelUnion,
+    model_bounding_radius: f32,
     debug: struct {
         color: [4]f32 = .{ 0.0, 0.0, 0.0, 1.0 },
     } = .{},
@@ -60,29 +60,45 @@ pub const GameObject = struct {
         const game_object = try allocator.create(GameObject);
         errdefer allocator.destroy(game_object);
 
-        const bounding_radius = params.model.getBoundingRadius();
-
         game_object.* = GameObject{
             .allocator = allocator,
             .position = params.position,
             .rotation = params.rotation,
             .scale = params.scale,
-            .bounding_radius = params.scale * @as(f32, @floatCast(bounding_radius)),
+            .aggregated_matrix = undefined,
             .model = params.model,
+            .model_bounding_radius = params.model.getBoundingRadius(),
             ._gc = game_object,
         };
+
+        game_object.updateAggregatedMatrix();
 
         return game_object;
     }
 
     pub fn setScale(game_object: *GameObject, scale: f32) void {
         game_object.scale = scale;
-        game_object.bounding_radius = scale * game_object.model.getBoundingRadius();
+        game_object.updateAggregatedMatrix();
+    }
+
+    pub fn setRotation(game_object: *GameObject, rotation: zmath.Quat) void {
+        game_object.rotation = rotation;
+        game_object.updateAggregatedMatrix();
     }
 
     pub fn deinit(game_object: *GameObject) void {
         if (game_object._gc) |pointer| {
             game_object.allocator.destroy(pointer);
         }
+    }
+
+    fn updateAggregatedMatrix(game_object: *GameObject) void {
+        game_object.aggregated_matrix = zmath.mul(
+            zmath.matFromQuat(game_object.rotation),
+            zmath.mul(
+                zmath.scaling(game_object.scale, game_object.scale, game_object.scale),
+                zmath.translation(game_object.position[0], game_object.position[1], game_object.position[2]),
+            ),
+        );
     }
 };

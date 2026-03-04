@@ -11,6 +11,7 @@ const debug = @import("debug");
 const types = @import("./types.zig");
 const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
+const utils = @import("./utils.zig");
 // -- pipelines --
 const Pipeline = @import("./pipeline.zig").Pipeline;
 const basic_pipeline_module = @import("./pipelines/basic_pipeline.zig");
@@ -542,23 +543,7 @@ pub const Engine = struct {
             },
         }
 
-        var model_to_world = zmath.mul(
-            zmath.mul(
-                zmath.quatToMat(game_object.rotation),
-                zmath.scaling(game_object.scale, game_object.scale, game_object.scale),
-            ),
-            zmath.translation(
-                game_object.position[0],
-                game_object.position[1],
-                game_object.position[2],
-            ),
-        );
-
-        // Is it correct order?
-        model_to_world = zmath.mul(
-            game_object.aggregated_matrix,
-            model_to_world,
-        );
+        var model_to_world = game_object.aggregated_matrix;
 
         const flip_yz = switch (game_object.model) {
             .regular_model => |model| model.model_descriptor.mesh_y_up,
@@ -682,24 +667,26 @@ pub const Engine = struct {
         const model_descriptor = engine.cube_wireframe_model.model_descriptor;
         model_descriptor.position.applyVertexBuffer(pass, 0);
 
-        const model_to_world = zmath.mul(
-            game_object.aggregated_matrix,
+        const matrix_params = utils.parseTransformMatrix(game_object.aggregated_matrix);
+
+        const model_to_world =
             zmath.mul(
+                // Ignoring rotation since box should be always axis-aligned.
                 // zmath.mul(
                 //     zmath.quatToMat(game_object.rotation),
                 // ),
                 zmath.scaling(
-                    game_object.bounding_radius,
-                    game_object.bounding_radius,
-                    game_object.bounding_radius,
+                    matrix_params.scale * game_object.model_bounding_radius,
+                    matrix_params.scale * game_object.model_bounding_radius,
+                    matrix_params.scale * game_object.model_bounding_radius,
                 ),
+                // zmath.identity(),
                 zmath.translation(
-                    game_object.position[0],
-                    game_object.position[1],
-                    game_object.position[2],
+                    matrix_params.position[0],
+                    matrix_params.position[1],
+                    matrix_params.position[2],
                 ),
-            ),
-        );
+            );
         // _ = model_to_world;
         // _ = position;
         // _ = bounding_radius;
@@ -750,23 +737,7 @@ pub const Engine = struct {
             },
         }
 
-        var model_to_world = zmath.mul(
-            zmath.mul(
-                zmath.quatToMat(game_object.rotation),
-                zmath.scaling(game_object.scale, game_object.scale, game_object.scale),
-            ),
-            zmath.translation(
-                game_object.position[0],
-                game_object.position[1],
-                game_object.position[2],
-            ),
-        );
-
-        // Is it correct order?
-        model_to_world = zmath.mul(
-            game_object.aggregated_matrix,
-            model_to_world,
-        );
+        var model_to_world = game_object.aggregated_matrix;
 
         const flip_yz = switch (game_object.model) {
             .regular_model => |model| model.model_descriptor.mesh_y_up,
