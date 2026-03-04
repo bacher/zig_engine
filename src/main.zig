@@ -64,23 +64,23 @@ pub fn main() !void {
         break :id try engine.loadModel(&loader, object);
     };
 
-    const gazebo_model_id = ids: {
-        const loader = try engine.initLoader("toontown-central/scene.gltf");
-        defer loader.deinit();
+    // const gazebo_model_id = ids: {
+    //     const loader = try engine.initLoader("toontown-central/scene.gltf");
+    //     defer loader.deinit();
 
-        const gazebo = try loader.getObjectByName("ttc_gazebo_11");
-        const gazebo_mesh = loader.findFirstObjectWithMeshNested(gazebo).?;
-        const gazebo_model_id = try engine.loadModel(&loader, gazebo_mesh);
+    //     const gazebo = try loader.getObjectByName("ttc_gazebo_11");
+    //     const gazebo_mesh = loader.findFirstObjectWithMeshNested(gazebo).?;
+    //     const gazebo_model_id = try engine.loadModel(&loader, gazebo_mesh);
 
-        break :ids .{gazebo_model_id};
-    };
+    //     break :ids .{gazebo_model_id};
+    // };
 
     const scene = try engine.createScene();
     defer scene.deinit();
 
-    scene.camera.updatePosition(.{ 0, -2, 0 });
+    scene.camera.updatePosition(.{ -8.94, -30.05, 9.44 });
 
-    // Skybox (old)
+    // -- Skybox (old) --
 
     // const skybox_model = try engine.loadSkyBoxModel("skybox/cubemaps_skybox.png");
     // defer skybox_model.deinit(engine.gctx);
@@ -90,22 +90,22 @@ pub fn main() !void {
     //     .model = skybox_model,
     // });
 
-    // Skybox (cubemap)
+    // -- Skybox (cubemap) --
 
-    const skybox_cubemap_model = try engine.loadSkyBoxCubemapModel(.{
-        "skybox/skybox/right.jpg",
-        "skybox/skybox/left.jpg",
-        "skybox/skybox/top.jpg",
-        "skybox/skybox/bottom.jpg",
-        "skybox/skybox/front.jpg",
-        "skybox/skybox/back.jpg",
-    });
-    defer skybox_cubemap_model.deinit(engine.gctx);
-    defer allocator.destroy(skybox_cubemap_model);
+    // const skybox_cubemap_model = try engine.loadSkyBoxCubemapModel(.{
+    //     "skybox/skybox/right.jpg",
+    //     "skybox/skybox/left.jpg",
+    //     "skybox/skybox/top.jpg",
+    //     "skybox/skybox/bottom.jpg",
+    //     "skybox/skybox/front.jpg",
+    //     "skybox/skybox/back.jpg",
+    // });
+    // defer skybox_cubemap_model.deinit(engine.gctx);
+    // defer allocator.destroy(skybox_cubemap_model);
 
-    _ = try scene.addSkyBoxCubemapObject(.{
-        .model = skybox_cubemap_model,
-    });
+    // _ = try scene.addSkyBoxCubemapObject(.{
+    //     .model = skybox_cubemap_model,
+    // });
 
     // ---
 
@@ -124,81 +124,86 @@ pub fn main() !void {
         allocator.destroy(window_block_model);
     }
 
-    try game.saved_game_objects.put("man_1", try scene.addObject(.{
-        .model_id = man_model_id,
-        .position = .{ -2, 0, 0 },
-    }));
+    _ = man_model_id;
+    // try game.saved_game_objects.put("man_1", try scene.addObject(.{
+    //     .model_id = man_model_id,
+    //     .position = .{ -2, 0, 0 },
+    // }));
 
-    try game.saved_game_objects.put("man_2", try scene.addObject(.{
-        .model_id = man_model_id,
-        .position = .{ 4, 0, 0 },
-    }));
+    // try game.saved_game_objects.put("man_2", try scene.addObject(.{
+    //     .model_id = man_model_id,
+    //     .position = .{ 4, 0, 0 },
+    // }));
 
-    _ = gazebo_model_id;
+    // _ = gazebo_model_id;
     // try game.saved_game_objects.put("gazebo", try scene.addObject(.{
     //     .model_id = gazebo_model_id,
     //     .position = .{ 0, 0, 0 },
     // }));
 
-    const window_box_1 = try scene.addWindowBoxObject(.{
-        .model = window_block_model,
-        .position = .{ -2, 2, 0 },
-    });
-    window_box_1.rotation = zmath.quatFromRollPitchYaw(0.5 * math.pi, 0, 0);
+    // -- Window boxes --
 
-    const window_box_far = try scene.addWindowBoxObject(.{
-        .model = window_block_model,
-        .position = .{ -1, 10, 1 },
-    });
-    window_box_far.rotation = zmath.quatFromRollPitchYaw(0.65 * math.pi, 0, 0);
+    // const window_box_1 = try scene.addWindowBoxObject(.{
+    //     .model = window_block_model,
+    //     .position = .{ -2, 2, 0 },
+    // });
+    // window_box_1.rotation = zmath.quatFromRollPitchYaw(0.5 * math.pi, 0, 0);
 
-    for (0..6) |z| {
-        for (0..2) |x| {
-            const size = 3;
-            const window_box = try scene.addWindowBoxObject(.{
-                .model = window_block_model,
-                .position = .{
-                    @floatFromInt(2 + x * size),
-                    6,
-                    @floatFromInt(z * size),
-                },
-            });
-            window_box.scale = size;
-            window_box.rotation = zmath.quatFromRollPitchYaw(0.5 * math.pi, 0, 0);
-        }
-    }
+    // const window_box_far = try scene.addWindowBoxObject(.{
+    //     .model = window_block_model,
+    //     .position = .{ -1, 10, 1 },
+    // });
+    // window_box_far.rotation = zmath.quatFromRollPitchYaw(0.65 * math.pi, 0, 0);
 
-    var tube_data = try tube.initUnitTube(allocator);
-    defer tube_data.deinit(allocator);
-    var tube_model = try engine.loadPrimitive(tube_data);
-    defer {
-        tube_model.deinit(engine.gctx);
-        allocator.destroy(tube_model);
-    }
+    // for (0..6) |z| {
+    //     for (0..2) |x| {
+    //         const size = 3;
+    //         const window_box = try scene.addWindowBoxObject(.{
+    //             .model = window_block_model,
+    //             .position = .{
+    //                 @floatFromInt(2 + x * size),
+    //                 6,
+    //                 @floatFromInt(z * size),
+    //             },
+    //         });
+    //         window_box.scale = size;
+    //         window_box.rotation = zmath.quatFromRollPitchYaw(0.5 * math.pi, 0, 0);
+    //     }
+    // }
 
-    // Coordinates
+    // -- Tube data for coordinates --
 
-    const tube_x = try scene.addPrimitiveObject(.{
-        .model = tube_model,
-        .position = .{ 0.5 + tube.M, 0, 0 },
-    });
-    tube_x.debug.color = .{ 1, 0, 0, 1 };
+    // var tube_data = try tube.initUnitTube(allocator);
+    // defer tube_data.deinit(allocator);
+    // var tube_model = try engine.loadPrimitive(tube_data);
+    // defer {
+    //     tube_model.deinit(engine.gctx);
+    //     allocator.destroy(tube_model);
+    // }
 
-    const tube_y = try scene.addPrimitiveObject(.{
-        .model = tube_model,
-        .position = .{ 0, 0.5 + tube.M, 0 },
-    });
-    tube_y.rotation = zmath.quatFromAxisAngle(.{ 0, 0, 1, 0 }, math.pi / 2.0);
-    tube_y.debug.color = .{ 0, 1, 0, 1 };
+    // -- Coordinates --
 
-    const tube_z = try scene.addPrimitiveObject(.{
-        .model = tube_model,
-        .position = .{ 0, 0, 0.5 + tube.M },
-    });
-    tube_z.rotation = zmath.quatFromAxisAngle(.{ 0, 1, 0, 0 }, math.pi / 2.0);
-    tube_z.debug.color = .{ 0, 0, 1, 1 };
+    // const tube_x = try scene.addPrimitiveObject(.{
+    //     .model = tube_model,
+    //     .position = .{ 0.5 + tube.M, 0, 0 },
+    // });
+    // tube_x.debug.color = .{ 1, 0, 0, 1 };
 
-    // Light
+    // const tube_y = try scene.addPrimitiveObject(.{
+    //     .model = tube_model,
+    //     .position = .{ 0, 0.5 + tube.M, 0 },
+    // });
+    // tube_y.rotation = zmath.quatFromAxisAngle(.{ 0, 0, 1, 0 }, math.pi / 2.0);
+    // tube_y.debug.color = .{ 0, 1, 0, 1 };
+
+    // const tube_z = try scene.addPrimitiveObject(.{
+    //     .model = tube_model,
+    //     .position = .{ 0, 0, 0.5 + tube.M },
+    // });
+    // tube_z.rotation = zmath.quatFromAxisAngle(.{ 0, 1, 0, 0 }, math.pi / 2.0);
+    // tube_z.debug.color = .{ 0, 0, 1, 1 };
+
+    // -- Light --
 
     try scene.addDirectionalLight(.{
         .direction = zmath.normalize3(zmath.Vec{ 0.2, 0.3, -1, 1 }),
@@ -206,12 +211,12 @@ pub fn main() !void {
         .intensity = 1.0,
     });
 
-    // ZGui
+    // -- ZGui --
 
     zgui_utils.zguiInit(allocator, window_context.window, engine.gctx.device);
     defer zgui_utils.zguiDeinit();
 
-    // Game loop
+    // -- Game loop --
 
     try engine.runLoop();
 }
@@ -291,6 +296,17 @@ const GAPS: [8][]const u8 = .{
     "              ",
 };
 
+const DEBUG_TRAVERSE_GROUP = false;
+// ttc_trashcan.002_19
+// ttc_planter_36
+// ttc_hydrant_17
+// ttc_hydrant.001_20
+// ttc_hydrant.002_21
+// ttc_hydrant.003_24
+// ttc_trashcan.003_22
+// ttc_mailbox.002_23
+const DRAW_ONLY = null;
+
 fn traverseGroup(
     engine: *Engine,
     scene: *Scene,
@@ -299,6 +315,14 @@ fn traverseGroup(
     node: gltf_loader.SceneObject,
     nesting_level: u32,
 ) !void {
+    if (DRAW_ONLY != null and nesting_level == 4) {
+        if (node.name) |name| {
+            if (!std.mem.eql(u8, name, DRAW_ONLY)) {
+                return;
+            }
+        }
+    }
+
     if (node.children) |children| {
         const group = try parent_group.addGroup();
 
@@ -312,7 +336,7 @@ fn traverseGroup(
             // TODO: Maybe it makes sense to store scale for each axis?
             group.scale = matrix_params.scale;
 
-            // TODO: Mayeb also keep node transform matrix separately from aggregated?
+            // TODO: Maybe also keep node transform matrix separately from aggregated?
             group.aggregated_mat = zmath.mul(
                 parent_group.aggregated_mat,
                 normalized,
@@ -321,9 +345,9 @@ fn traverseGroup(
             group.aggregated_mat = parent_group.aggregated_mat;
         }
 
-        // +DEBUG
-        std.debug.print("{s}group {s}\n", .{ GAPS[nesting_level], node.name orelse "<no name>" });
-        // -DEBUG
+        if (DEBUG_TRAVERSE_GROUP) {
+            std.debug.print("{s}group {s}\n", .{ GAPS[nesting_level], node.name orelse "<no name>" });
+        }
 
         for (children) |child| {
             try traverseGroup(engine, scene, group, loader, child, nesting_level + 1);
@@ -334,11 +358,13 @@ fn traverseGroup(
         // Assuming that nodes with mesh can't also have transform_matrix
         std.debug.assert(node.transform_matrix == null);
 
-        std.debug.print("{s}model {s}\n", .{ GAPS[nesting_level], node.name orelse "<no name>" });
-        const game_object = try scene.addObject(.{
+        if (DEBUG_TRAVERSE_GROUP) {
+            std.debug.print("{s}model {s}\n", .{ GAPS[nesting_level], node.name orelse "<no name>" });
+        }
+        _ = try scene.addObject(.{
             .model_id = model_id,
             .position = .{ 0, 0, 0 },
+            .parent = parent_group,
         });
-        try parent_group.addObject(game_object);
     }
 }

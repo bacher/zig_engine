@@ -74,13 +74,15 @@ pub fn SpaceTree(comptime ElementType: type) type {
                         ZERO_Z,
                     };
 
-                    std.debug.print("grid node [x={d:2}, y={d:2}] center: {d:8.1},{d:8.1},{d:8.1}\n", .{
-                        cell_x,
-                        cell_y,
-                        center[0],
-                        center[1],
-                        center[2],
-                    });
+                    if (DEBUG) {
+                        std.debug.print("grid node [x={d:2}, y={d:2}] center: {d:8.1},{d:8.1},{d:8.1}\n", .{
+                            cell_x,
+                            cell_y,
+                            center[0],
+                            center[1],
+                            center[2],
+                        });
+                    }
 
                     const node = try allocator.create(ThisSpaceNode);
                     node.* = ThisSpaceNode.init(0, center);

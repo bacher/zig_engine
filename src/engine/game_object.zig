@@ -7,6 +7,7 @@ const WindowBoxModel = model_module.WindowBoxModel;
 const SkyBoxModel = model_module.SkyBoxModel;
 const SkyBoxCubemapModel = model_module.SkyBoxCubemapModel;
 const PrimitiveModel = model_module.PrimitiveModel;
+const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;
 
 const ModelUnion = union(enum) {
     regular_model: *const Model,
@@ -41,6 +42,7 @@ pub const GameObjectInitParams = struct {
     rotation: zmath.Quat = zmath.quatFromRollPitchYaw(0, 0, 0),
     scale: f32 = 1.0,
     model: ModelUnion,
+    parent: ?*GameObjectGroup,
 };
 
 pub const GameObject = struct {
@@ -54,6 +56,7 @@ pub const GameObject = struct {
     debug: struct {
         color: [4]f32 = .{ 0.0, 0.0, 0.0, 1.0 },
     } = .{},
+    parent: ?*GameObjectGroup,
     _gc: ?*GameObject,
 
     pub fn init(allocator: std.mem.Allocator, params: GameObjectInitParams) !*GameObject {
@@ -68,6 +71,7 @@ pub const GameObject = struct {
             .aggregated_matrix = undefined,
             .model = params.model,
             .model_bounding_radius = params.model.getBoundingRadius(),
+            .parent = params.parent,
             ._gc = game_object,
         };
 
@@ -96,9 +100,26 @@ pub const GameObject = struct {
         game_object.aggregated_matrix = zmath.mul(
             zmath.matFromQuat(game_object.rotation),
             zmath.mul(
-                zmath.scaling(game_object.scale, game_object.scale, game_object.scale),
-                zmath.translation(game_object.position[0], game_object.position[1], game_object.position[2]),
+                zmath.scaling(
+                    game_object.scale,
+                    game_object.scale,
+                    game_object.scale,
+                ),
+                zmath.translation(
+                    game_object.position[0],
+                    game_object.position[1],
+                    game_object.position[2],
+                ),
             ),
         );
+
+        // if game object has parent, multiply its aggregated matrix by parent's
+        // aggregated matrix on each update
+        if (game_object.parent) |parent| {
+            game_object.aggregated_matrix = zmath.mul(
+                game_object.aggregated_matrix,
+                parent.aggregated_mat,
+            );
+        }
     }
 };

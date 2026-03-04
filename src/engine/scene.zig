@@ -97,6 +97,7 @@ pub const Scene = struct {
                     .regular_model = model,
                 },
                 .position = params.position,
+                .parent = params.parent,
             });
             errdefer game_object.deinit();
 
@@ -193,6 +194,7 @@ pub const Scene = struct {
 pub const AddObjectParams = struct {
     model_id: Engine.LoadedModelId,
     position: [3]f32,
+    parent: ?*GameObjectGroup,
 };
 
 pub const AddWindowBoxParams = struct {

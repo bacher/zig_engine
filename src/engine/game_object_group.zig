@@ -70,6 +70,5 @@ pub const GameObjectGroup = struct {
         added.* = .{
             .game_object = game_object,
         };
-        game_object.aggregated_matrix = group.aggregated_mat;
     }
 };

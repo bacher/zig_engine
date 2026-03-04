@@ -49,10 +49,6 @@ pub const CubeWireframeDescriptor = struct {
 
         const buffer = std.mem.asBytes(&positions);
 
-        std.debug.print("positions len: {}\n", .{positions.len});
-        std.debug.print("buffer len: {}\n", .{buffer.len});
-        std.debug.print("buffer len 2: {}\n", .{@sizeOf([3]f32) * positions.len});
-
         const vertex_data = gltf_loader.ModelBuffer{
             .type = .float,
             .component_number = 3,
