@@ -5,6 +5,8 @@ const debug = @import("debug");
 const Camera = @import("camera.zig").Camera;
 const InputController = @import("input_controller.zig").InputController;
 
+const DEBUG = false;
+
 const zero_vec = zmath.Vec{ 0, 0, 0, 0 };
 
 pub const SpectatorCamera = struct {
@@ -95,6 +97,17 @@ pub const SpectatorCamera = struct {
         spectator_camera.yaw -= delta[0] * 0.005;
         spectator_camera.pitch -= delta[1] * 0.005;
 
+        if (DEBUG) {
+            std.debug.print("yaw: {d:2.2}, pitch: {d:2.2}\n", .{
+                spectator_camera.yaw,
+                spectator_camera.pitch,
+            });
+        }
+
+        spectator_camera.updateCameraView();
+    }
+
+    pub fn updateCameraView(spectator_camera: *SpectatorCamera) void {
         // NOTE: matFromRollPitchYaw can't be used because it applies pitch then yaw,
         //       but it should be yaw then pitch.
         // const view_mat = zmath.matFromRollPitchYaw(

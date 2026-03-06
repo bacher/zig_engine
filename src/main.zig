@@ -305,7 +305,8 @@ const DEBUG_TRAVERSE_GROUP = false;
 // ttc_hydrant.003_24
 // ttc_trashcan.003_22
 // ttc_mailbox.002_23
-const DRAW_ONLY = null;
+// ttc_gazebo_11
+const DRAW_ONLY = "";
 
 fn traverseGroup(
     engine: *Engine,
@@ -315,7 +316,7 @@ fn traverseGroup(
     node: gltf_loader.SceneObject,
     nesting_level: u32,
 ) !void {
-    if (DRAW_ONLY != null and nesting_level == 4) {
+    if (DRAW_ONLY.len > 0 and nesting_level == 4) {
         if (node.name) |name| {
             if (!std.mem.eql(u8, name, DRAW_ONLY)) {
                 return;

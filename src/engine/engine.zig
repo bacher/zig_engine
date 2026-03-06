@@ -441,7 +441,9 @@ pub const Engine = struct {
                     const camera_view_bound_box = scene.camera.getCameraViewBoundBox();
 
                     var timer = std.time.Timer.start() catch @panic("Failed to start timer");
-                    const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(camera_view_bound_box);
+                    const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(
+                        camera_view_bound_box,
+                    );
 
                     // debug start
                     const stats = scene.space_tree.getLastGetObjectsInBoundBoxStats();

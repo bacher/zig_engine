@@ -1,3 +1,4 @@
+const std = @import("std");
 const zmath = @import("zmath");
 
 const BoundBox = @import("./bound_box.zig").BoundBox;
@@ -59,5 +60,15 @@ pub const FrustumPoints = struct {
             .y = .init(min[1], max[1]),
             .z = .init(min[2], max[2]),
         };
+    }
+
+    pub fn debugPrint(self: *const FrustumPoints) void {
+        std.debug.print("frustum points:\n  left bottom far:  {any}\n  left top far:     {any}\n  right bottom far: {any}\n  right top far:    {any}\n  point of view:    {any}\n", .{
+            self.left_bottom_far,
+            self.left_top_far,
+            self.right_bottom_far,
+            self.right_top_far,
+            self.point_of_view,
+        });
     }
 };

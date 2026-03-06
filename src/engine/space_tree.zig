@@ -148,33 +148,42 @@ pub fn SpaceTree(comptime ElementType: type) type {
             }
 
             const x0 = @as(i32, @intFromFloat(@floor(bound_box.x.start * GRID_NODE_SIZE_INV))) + GRID_OFFSET;
-            const x1 = @as(i32, @intFromFloat(@ceil(bound_box.x.end * GRID_NODE_SIZE_INV))) + GRID_OFFSET;
+            const x1 = @as(i32, @intFromFloat(@ceil(bound_box.x.end * GRID_NODE_SIZE_INV))) + GRID_OFFSET - 1;
 
             const y0 = @as(i32, @intFromFloat(@floor(bound_box.y.start * GRID_NODE_SIZE_INV))) + GRID_OFFSET;
-            const y1 = @as(i32, @intFromFloat(@ceil(bound_box.y.end * GRID_NODE_SIZE_INV))) + GRID_OFFSET;
+            const y1 = @as(i32, @intFromFloat(@ceil(bound_box.y.end * GRID_NODE_SIZE_INV))) + GRID_OFFSET - 1;
 
             if (DEBUG) {
                 if (x0 == x1 and y0 == y1) {
-                    std.debug.print("node: {},{}\n", .{ x0, y0 });
+                    std.debug.print("node: [{},{}]\n", .{
+                        x0 - GRID_OFFSET,
+                        y0 - GRID_OFFSET,
+                    });
                 } else {
-                    std.debug.print("nodes: {},{} to {},{}\n", .{ x0, y0, x1, y1 });
+                    std.debug.print("nodes: [{},{}] <-> [{},{}]\n", .{
+                        x0 - GRID_OFFSET,
+                        y0 - GRID_OFFSET,
+                        x1 - GRID_OFFSET,
+                        y1 - GRID_OFFSET,
+                    });
                 }
             }
 
             if (STRICT) {
-                if (x0 >= GRID_DIMENSTION or x1 >= GRID_DIMENSTION or y0 >= GRID_DIMENSTION or y1 >= GRID_DIMENSTION or x0 < 0 or x1 < 0 or y0 < 0 or y1 < 0) {
+                if (x0 >= GRID_DIMENSTION or x1 >= GRID_DIMENSTION or y0 >= GRID_DIMENSTION or y1 >= GRID_DIMENSTION //
+                or x0 < 0 or x1 < 0 or y0 < 0 or y1 < 0) {
                     std.debug.print("[STRICT] object bound box is partially out of the grid bounds, center=({d},{d},{d}) r={d}\n", .{
                         matrix_params.position[0],
                         matrix_params.position[1],
                         matrix_params.position[2],
                         bounding_radius,
                     });
-                    std.debug.print("[STRICT]   nodes: {},{} to {},{}\n", .{ x0, y0, x1, y1 });
+                    std.debug.print("[STRICT]   nodes: [{},{}] <-> [{},{}]\n", .{ x0, y0, x1, y1 });
                 }
             }
 
-            for (@intCast(@max(0, x0))..@intCast(@min(GRID_DIMENSTION, x1))) |x| {
-                for (@intCast(@max(0, y0))..@intCast(@min(GRID_DIMENSTION, y1))) |y| {
+            for (@intCast(@max(0, x0))..@intCast(@min(GRID_DIMENSTION, x1 + 1))) |x| {
+                for (@intCast(@max(0, y0))..@intCast(@min(GRID_DIMENSTION, y1 + 1))) |y| {
                     _ = try space_tree.grid[y][x].addObject(
                         space_tree.allocator,
                         object,
@@ -189,10 +198,10 @@ pub fn SpaceTree(comptime ElementType: type) type {
             Debug.find_invocations_count = 0;
             Debug.active_space_nodes_count = 0;
 
-            const x0 = @as(i32, @intFromFloat(bound_box.x.start * GRID_NODE_SIZE_INV));
-            const x1 = @as(i32, @intFromFloat(bound_box.x.end * GRID_NODE_SIZE_INV));
-            const y0 = @as(i32, @intFromFloat(bound_box.y.start * GRID_NODE_SIZE_INV));
-            const y1 = @as(i32, @intFromFloat(bound_box.y.end * GRID_NODE_SIZE_INV));
+            const x0 = @as(i32, @intFromFloat(@floor(bound_box.x.start * GRID_NODE_SIZE_INV)));
+            const x1 = @as(i32, @intFromFloat(@ceil(bound_box.x.end * GRID_NODE_SIZE_INV))) - 1;
+            const y0 = @as(i32, @intFromFloat(@floor(bound_box.y.start * GRID_NODE_SIZE_INV)));
+            const y1 = @as(i32, @intFromFloat(@ceil(bound_box.y.end * GRID_NODE_SIZE_INV))) - 1;
 
             const index_x0: u8 = @intCast(@max(0, x0 + GRID_OFFSET));
             const index_x1: u8 = @intCast(@min(GRID_DIMENSTION, x1 + GRID_OFFSET + 1));
