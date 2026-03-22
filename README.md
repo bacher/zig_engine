@@ -8,6 +8,12 @@ zig build run
 
 ## Versions
 
+### v0.0.2
+
+* Cascade shadow maps added
+
+![v0.0.2](screenshots/2026-03-22.png)
+
 ### v0.0.1
 
 ![v0.0.1](screenshots/2025-06-05.jpg)

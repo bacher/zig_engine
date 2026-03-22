@@ -6,6 +6,3 @@ tmp/
 .vscode/
 *.DS_Store
 .idea/
-*.png
-!content/**/*.png
-

@@ -55,7 +55,7 @@ pub const DirectionalLight = struct {
         const frustum_points = camera.getFrustumPoints(.{
             .depth = switch (cascade.layer) {
                 .layer_0 => 1.0,
-                .layer_1 => 0.9998,
+                .layer_1 => 0.99985,
                 .layer_2 => 0.9991,
             },
         });
