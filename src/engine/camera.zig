@@ -114,17 +114,21 @@ pub const Camera = struct {
         );
     }
 
-    pub fn getFrustumPoints(camera: *const Camera) FrustumPoints {
-        return FrustumPoints.initFromMatrix(camera.clip_to_world, zmath.Vec{
-            camera.position[0],
-            camera.position[1],
-            camera.position[2],
-            1,
-        });
+    pub fn getFrustumPoints(camera: *const Camera, options: struct { depth: f32 = 1.0 }) FrustumPoints {
+        return FrustumPoints.initFromMatrix(
+            camera.clip_to_world,
+            zmath.Vec{
+                camera.position[0],
+                camera.position[1],
+                camera.position[2],
+                1,
+            },
+            options.depth,
+        );
     }
 
     pub fn getCameraViewBoundBox(camera: *const Camera) BoundBox(f32) {
-        const frustum_points = camera.getFrustumPoints();
+        const frustum_points = camera.getFrustumPoints(.{});
         return frustum_points.getBoundingBox();
     }
 };

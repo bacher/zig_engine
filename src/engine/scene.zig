@@ -171,7 +171,7 @@ pub const Scene = struct {
     pub fn addDirectionalLight(scene: *Scene, params: DirectionalLightParams) !void {
         const light = try scene.allocator.create(DirectionalLight);
         errdefer scene.allocator.destroy(light);
-        light.init(params);
+        light.* = .init(params);
 
         try scene.lights.append(scene.allocator, light);
     }

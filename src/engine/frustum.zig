@@ -11,12 +11,12 @@ pub const FrustumPoints = struct {
     right_top_far: zmath.Vec,
     point_of_view: zmath.Vec,
 
-    pub fn initFromMatrix(matrix: zmath.Mat, point_of_view: zmath.Vec) FrustumPoints {
+    pub fn initFromMatrix(matrix: zmath.Mat, point_of_view: zmath.Vec, depth: f32) FrustumPoints {
         return .{
-            .left_bottom_far = resolvePosition(zmath.mul(zmath.Vec{ -1, -1, 1, 1 }, matrix)),
-            .left_top_far = resolvePosition(zmath.mul(zmath.Vec{ -1, 1, 1, 1 }, matrix)),
-            .right_bottom_far = resolvePosition(zmath.mul(zmath.Vec{ 1, -1, 1, 1 }, matrix)),
-            .right_top_far = resolvePosition(zmath.mul(zmath.Vec{ 1, 1, 1, 1 }, matrix)),
+            .left_bottom_far = resolvePosition(zmath.mul(zmath.Vec{ -1, -1, depth, 1 }, matrix)),
+            .left_top_far = resolvePosition(zmath.mul(zmath.Vec{ -1, 1, depth, 1 }, matrix)),
+            .right_bottom_far = resolvePosition(zmath.mul(zmath.Vec{ 1, -1, depth, 1 }, matrix)),
+            .right_top_far = resolvePosition(zmath.mul(zmath.Vec{ 1, 1, depth, 1 }, matrix)),
             .point_of_view = point_of_view,
         };
     }

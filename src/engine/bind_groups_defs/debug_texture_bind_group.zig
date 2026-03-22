@@ -16,7 +16,7 @@ pub const DebugTextureBindGroupDefinition = struct {
                 0,
                 .{ .fragment = true },
                 .unfilterable_float,
-                .tvdim_2d,
+                .tvdim_2d_array,
                 false,
             ),
             // sampler

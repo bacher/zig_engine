@@ -53,6 +53,7 @@ const Camera = @import("./camera.zig").Camera;
 const InputController = @import("./input_controller.zig").InputController;
 const GameObject = @import("./game_object.zig").GameObject;
 const DirectionalLight = @import("./light.zig").DirectionalLight;
+const DirectionalLightCascade = @import("./light.zig").DirectionalLightCascade;
 
 const DEBUG_INTERNAL_TEXTURE = true;
 
@@ -113,6 +114,7 @@ pub const Engine = struct {
         lines: Pipeline,
         debug_texture: Pipeline,
     },
+
     bind_group_definitions: BindGroupDefinitions,
 
     // ---
@@ -161,7 +163,7 @@ pub const Engine = struct {
         const gctx = window_context.gctx;
         const init_time = gctx.stats.time;
 
-        const shadow_map_texture = try ShadowMapTexture.init(gctx);
+        const shadow_map_texture = try ShadowMapTexture.init(gctx, .{ .layers_count = 3 });
         errdefer shadow_map_texture.deinit();
 
         const shadow_map_depth_texture = try DepthTexture.init(gctx, 1024, 1024);
@@ -196,11 +198,11 @@ pub const Engine = struct {
         const bind_group_shadow_map_pass = try bind_group_definitions.shadow_map_pass.createBindGroup();
         const bind_group_debug_shadow_map_texture = try bind_group_definitions.debug_texture.createBindGroup(
             texture_sampler,
-            shadow_map_texture.view_handle,
+            shadow_map_texture.array_view.view_handle,
         );
         const bind_group_shadow_map = try bind_group_definitions.shadow_map.createBindGroup(
             texture_sampler,
-            shadow_map_texture.view_handle,
+            shadow_map_texture.array_view.view_handle,
         );
         const bind_group_lines = try bind_group_definitions.lines.createBindGroup();
 
@@ -366,48 +368,52 @@ pub const Engine = struct {
 
             // shadow map pass
             {
-                const shadow_map_attachments = [_]wgpu.RenderPassColorAttachment{.{
-                    .view = engine.shadow_map_texture.view,
-                    .load_op = .clear,
-                    .store_op = .store,
-                }};
-                const depth_attachment = wgpu.RenderPassDepthStencilAttachment{
-                    .view = engine.shadow_map_depth_texture.view,
-                    .depth_load_op = .clear,
-                    .depth_store_op = .store,
-                    .depth_clear_value = 1.0,
-                };
-
-                const shadow_map_render_pass_info = wgpu.RenderPassDescriptor{
-                    .color_attachments = &shadow_map_attachments,
-                    .color_attachment_count = shadow_map_attachments.len,
-                    .depth_stencil_attachment = &depth_attachment,
-                };
-
-                const shadow_map_pass = encoder.beginRenderPass(shadow_map_render_pass_info);
-                defer {
-                    shadow_map_pass.end();
-                    shadow_map_pass.release();
-                }
-
-                shadow_map_pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
-
                 if (engine.active_scene) |scene| {
+                    const depth_attachment = wgpu.RenderPassDepthStencilAttachment{
+                        .view = engine.shadow_map_depth_texture.view,
+                        .depth_load_op = .clear,
+                        .depth_store_op = .store,
+                        .depth_clear_value = 1.0,
+                    };
+
                     var timer = std.time.Timer.start() catch @panic("Failed to start timer");
                     defer engine.frame_stats.shadow_map_pass_time_taken = @as(f32, @floatFromInt(timer.read())) * 0.000001;
 
                     for (scene.lights.items) |light| {
-                        // if (engine.time < 5) {
-                        light.applyCameraFrustum(scene.camera);
-                        // }
-                        const light_view_bound_box = light.getLightViewBoundBox();
+                        for (&light.cascades) |*cascade| {
+                            const shadow_map_view = engine.shadow_map_texture.layers_views[@intFromEnum(cascade.layer)].view;
 
-                        const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(
-                            light_view_bound_box,
-                        );
+                            const shadow_map_attachments = [_]wgpu.RenderPassColorAttachment{.{
+                                .view = shadow_map_view,
+                                .load_op = .clear,
+                                .store_op = .store,
+                                .clear_value = .{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0 },
+                            }};
 
-                        for (potentially_visible_game_objects) |game_object| {
-                            engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, game_object);
+                            const shadow_map_render_pass_info = wgpu.RenderPassDescriptor{
+                                .color_attachments = &shadow_map_attachments,
+                                .color_attachment_count = shadow_map_attachments.len,
+                                .depth_stencil_attachment = &depth_attachment,
+                            };
+
+                            const shadow_map_pass = encoder.beginRenderPass(shadow_map_render_pass_info);
+                            defer {
+                                shadow_map_pass.end();
+                                shadow_map_pass.release();
+                            }
+
+                            shadow_map_pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
+
+                            // if (engine.time < 5) {
+                            light.applyCameraFrustum(cascade, scene.camera);
+                            // }
+                            const cascade_view_bound_box = cascade.getLightViewBoundBox();
+                            const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(
+                                cascade_view_bound_box,
+                            );
+                            for (potentially_visible_game_objects) |game_object| {
+                                engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, cascade, game_object);
+                            }
                         }
                     }
                 }
@@ -568,14 +574,15 @@ pub const Engine = struct {
             }
         }
 
-        // TODO: support multiple lights
-        const object_to_light_clip = zmath.mul(model_to_world, scene.lights.items[0].world_to_clip);
-
         const object_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
         object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
 
-        const object_to_light_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
-        object_to_light_clip_uniform.slice[0] = zmath.transpose(object_to_light_clip);
+        // TODO: support multiple lights
+        const object_to_light_clip_array_uniform = getLightClipMatrixArray(
+            engine.gctx,
+            scene.lights.items[0],
+            model_to_world,
+        );
 
         const camera_position_in_model_space_uniform = engine.gctx.uniformsAllocate(zmath.Vec, 1);
         if (game_object.model == .window_box_model) {
@@ -607,7 +614,7 @@ pub const Engine = struct {
                     camera_position_in_model_space_uniform.offset,
                 });
                 pass.setBindGroup(1, engine.bind_group_shadow_map.wgpu_bind_group, &.{
-                    object_to_light_clip_uniform.offset,
+                    object_to_light_clip_array_uniform.offset,
                 });
 
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
@@ -714,9 +721,12 @@ pub const Engine = struct {
         pass: wgpu.RenderPassEncoder,
         scene: *const Scene,
         light: *const DirectionalLight,
+        cascade: *const DirectionalLightCascade,
         game_object: *const GameObject,
     ) void {
         _ = scene;
+        // TODO:
+        _ = light;
 
         switch (game_object.model) {
             .regular_model => |model| {
@@ -751,7 +761,7 @@ pub const Engine = struct {
             model_to_world = zmath.mul(xRotate, model_to_world);
         }
 
-        const object_to_clip = zmath.mul(model_to_world, light.world_to_clip);
+        const object_to_clip = zmath.mul(model_to_world, cascade.world_to_clip);
 
         const object_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
         object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
@@ -1012,4 +1022,21 @@ fn slowOperation() void {
 fn getAspectRatio(gctx: *const zgpu.GraphicsContext) f32 {
     return @as(f32, @floatFromInt(gctx.swapchain_descriptor.width)) /
         @as(f32, @floatFromInt(gctx.swapchain_descriptor.height));
+}
+
+fn getLightClipMatrixArray(gctx: *zgpu.GraphicsContext, light: *const DirectionalLight, model_to_world: zmath.Mat) struct { slice: []zmath.Mat, offset: u32 } {
+    const uniform = gctx.uniformsAllocate(zmath.Mat, 3);
+
+    for (&light.cascades, 0..) |*cascade, i| {
+        const object_to_light_clip = zmath.mul(
+            model_to_world,
+            cascade.world_to_clip,
+        );
+        uniform.slice[i] = zmath.transpose(object_to_light_clip);
+    }
+
+    // Have to recreated the struct even though uniform and resulting struct
+    // have the same underlaying types.
+    // Zig can't understand that they are the same and will complain about it.
+    return .{ .slice = uniform.slice, .offset = uniform.offset };
 }

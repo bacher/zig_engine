@@ -15,20 +15,50 @@ pub const DirectionalLightParams = struct {
     intensity: f32,
 };
 
+const DirectLightLayer = enum(u8) {
+    layer_0 = 0,
+    layer_1 = 1,
+    layer_2 = 2,
+};
+
+pub const DirectionalLightCascade = struct {
+    layer: DirectLightLayer,
+    world_to_clip: zmath.Mat = undefined,
+    clip_to_world: zmath.Mat = undefined,
+
+    // TODO:
+    // Current approach with single bounding box is not optimal, the light view
+    // can be very toll, so a lot of unused space in bound box.
+    pub fn getLightViewBoundBox(cascade: *const DirectionalLightCascade) BoundBox(f32) {
+        const cube_points = CubePoints.initFromMatrix(cascade.clip_to_world);
+        return cube_points.getBoundingBox();
+    }
+};
+
 pub const DirectionalLight = struct {
     const LIGHT_HEIGHT = 300.0;
 
     params: DirectionalLightParams,
-    world_to_clip: zmath.Mat = undefined,
-    clip_to_world: zmath.Mat = undefined,
-    bound_box: BoundBox(f32) = undefined,
+    cascades: [3]DirectionalLightCascade = .{
+        .{ .layer = .layer_0 },
+        .{ .layer = .layer_1 },
+        .{ .layer = .layer_2 },
+    },
 
-    pub fn init(light: *DirectionalLight, params: DirectionalLightParams) void {
-        light.params = params;
+    pub fn init(params: DirectionalLightParams) DirectionalLight {
+        return .{
+            .params = params,
+        };
     }
 
-    pub fn applyCameraFrustum(light: *DirectionalLight, camera: *const Camera) void {
-        const frustum_points = camera.getFrustumPoints();
+    pub fn applyCameraFrustum(light: *DirectionalLight, cascade: *DirectionalLightCascade, camera: *const Camera) void {
+        const frustum_points = camera.getFrustumPoints(.{
+            .depth = switch (cascade.layer) {
+                .layer_0 => 1.0,
+                .layer_1 => 0.9998,
+                .layer_2 => 0.9991,
+            },
+        });
 
         if (DEBUG_LIGHT) {
             debug.printVecAsVec3Labeled("camera view bound box min", frustum_points.getMin());
@@ -88,14 +118,14 @@ pub const DirectionalLight = struct {
         }
         // --
 
-        light.world_to_clip = zmath.mul(
+        cascade.world_to_clip = zmath.mul(
             look_to,
             zmath.mul(move_mat, view_to_clip),
         );
 
         // --
         if (DEBUG_LIGHT) {
-            const ort_frustum_points = frustum_points.applyMatrix(light.world_to_clip);
+            const ort_frustum_points = frustum_points.applyMatrix(cascade.world_to_clip);
 
             debug.printVecAsVec3Labeled(
                 "ort camera view bound box min",
@@ -108,15 +138,7 @@ pub const DirectionalLight = struct {
         }
         // --
 
-        light.clip_to_world = zmath.inverse(light.world_to_clip);
-    }
-
-    // TODO:
-    // Current approach with single bounding box is not optimal, the light view
-    // can be very toll, so a lot of unused space in bound box.
-    pub fn getLightViewBoundBox(light: *const DirectionalLight) BoundBox(f32) {
-        const cube_points = CubePoints.initFromMatrix(light.clip_to_world);
-        return cube_points.getBoundingBox();
+        cascade.clip_to_world = zmath.inverse(cascade.world_to_clip);
     }
 };
 

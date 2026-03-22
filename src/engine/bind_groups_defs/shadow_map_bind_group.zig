@@ -11,7 +11,7 @@ pub const ShadowMapBindGroupDefinition = struct {
 
     pub fn init(gctx: *zgpu.GraphicsContext) ShadowMapBindGroupDefinition {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
-            // object to light clip transformation matrix
+            // object to light clip transformation matrix array
             zgpu.bufferEntry(
                 0,
                 .{ .vertex = true },
@@ -24,7 +24,7 @@ pub const ShadowMapBindGroupDefinition = struct {
                 1,
                 .{ .fragment = true },
                 .unfilterable_float,
-                .tvdim_2d,
+                .tvdim_2d_array,
                 false,
             ),
             // shadow map texture sampler
@@ -60,7 +60,7 @@ pub const ShadowMapBindGroupDefinition = struct {
                     .binding = 0,
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
-                    .size = @sizeOf(zmath.Mat),
+                    .size = @sizeOf([3]zmath.Mat),
                 },
 
                 // texture

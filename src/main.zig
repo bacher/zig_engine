@@ -78,7 +78,8 @@ pub fn main() !void {
     const scene = try engine.createScene();
     defer scene.deinit();
 
-    scene.camera.updatePosition(.{ -8.94, -30.05, 9.44 });
+    // -- look at gazebo closely --
+    // scene.camera.updatePosition(.{ -8.94, -30.05, 9.44 });
 
     // -- Skybox (old) --
 
