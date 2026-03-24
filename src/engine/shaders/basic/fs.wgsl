@@ -41,9 +41,9 @@
         discard;
     }
 
-    // if (shadow_map_depth + 0.01 < position_light_clip.z / position_light_clip.w) {
+    // if (shadow_map_depth + 0.002 < position_light_clip.z / position_light_clip.w) {
     // vs
-    // if (shadow_map_depth - 0.01 < position_light_clip.z) {
+    // if (shadow_map_depth - 0.002 < position_light_clip.z) {
 
     if (
         position_light_clip_2.x >= -1 && position_light_clip_2.x <= 1 &&
@@ -51,7 +51,7 @@
         position_light_clip_2.z >= 0 && position_light_clip_2.z <= 1
     ) {
         var modifier = 1.0;
-        if (shadow_map_layer_2_depth + 0.01 < position_light_clip_2.z / position_light_clip_2.w) {
+        if (shadow_map_layer_2_depth + 0.002 < position_light_clip_2.z / position_light_clip_2.w) {
             modifier = 0.5;
         }
         return vec4f(color.rgb * modifier, color.a);
@@ -63,7 +63,7 @@
         position_light_clip_1.z >= 0 && position_light_clip_1.z <= 1
     ) {
         var modifier = 1.0;
-        if (shadow_map_layer_1_depth + 0.01 < position_light_clip_1.z / position_light_clip_1.w) {
+        if (shadow_map_layer_1_depth + 0.008 < position_light_clip_1.z / position_light_clip_1.w) {
             modifier = 0.5;
         }
         return vec4f(color.rgb * modifier, color.a);
@@ -79,7 +79,7 @@
     //     // position_light_clip_0.z >= 0 && position_light_clip_0.z <= 1
     // ) {
         var modifier = 1.0;
-        if (shadow_map_layer_0_depth + 0.01 < position_light_clip_0.z / position_light_clip_0.w) {
+        if (shadow_map_layer_0_depth + 0.02 < position_light_clip_0.z / position_light_clip_0.w) {
             modifier = 0.5;
         }
         return vec4f(color.rgb * modifier, color.a);

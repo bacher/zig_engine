@@ -411,6 +411,7 @@ pub const Engine = struct {
                             const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(
                                 cascade_view_bound_box,
                             );
+                            // for (scene.game_objects.items) |game_object| {
                             for (potentially_visible_game_objects) |game_object| {
                                 engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, cascade, game_object);
                             }
