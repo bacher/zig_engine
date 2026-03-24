@@ -24,14 +24,16 @@ const sizes = sizes: {
     for (0..LEVELS_COUNT) |index| {
         arr[index] = GRID_NODE_SIZE / std.math.pow(f32, 2, index);
     }
+    // @compileLog("sizes:", arr);
     break :sizes arr;
 };
 
 const radiuses = radiuses: {
     var arr: [LEVELS_COUNT]f32 = undefined;
     for (sizes, 0..) |size, index| {
-        arr[index] = size * 0.5 * math.sqrt2;
+        arr[index] = size * 0.5 * @sqrt(3.0);
     }
+    // @compileLog("radiuses:", arr);
     break :radiuses arr;
 };
 
@@ -118,10 +120,11 @@ pub fn SpaceTree(comptime ElementType: type) type {
             const bounding_radius = object.model_bounding_radius * matrix_params.scale;
 
             if (DEBUG) {
-                std.debug.print("add object at the root level, center=({d},{d},{d}) r={d}\n", .{
+                std.debug.print("add object at the root level, center=({d},{d},{d}) scale={d} r={d}\n", .{
                     matrix_params.position[0],
                     matrix_params.position[1],
                     matrix_params.position[2],
+                    matrix_params.scale,
                     bounding_radius,
                 });
             }
@@ -149,7 +152,6 @@ pub fn SpaceTree(comptime ElementType: type) type {
 
             const x0 = @as(i32, @intFromFloat(@floor(bound_box.x.start * GRID_NODE_SIZE_INV))) + GRID_OFFSET;
             const x1 = @as(i32, @intFromFloat(@ceil(bound_box.x.end * GRID_NODE_SIZE_INV))) + GRID_OFFSET - 1;
-
             const y0 = @as(i32, @intFromFloat(@floor(bound_box.y.start * GRID_NODE_SIZE_INV))) + GRID_OFFSET;
             const y1 = @as(i32, @intFromFloat(@ceil(bound_box.y.end * GRID_NODE_SIZE_INV))) + GRID_OFFSET - 1;
 
@@ -182,8 +184,8 @@ pub fn SpaceTree(comptime ElementType: type) type {
                 }
             }
 
-            for (@intCast(@max(0, x0))..@intCast(@min(GRID_DIMENSTION, x1 + 1))) |x| {
-                for (@intCast(@max(0, y0))..@intCast(@min(GRID_DIMENSTION, y1 + 1))) |y| {
+            for (@intCast(@max(0, y0))..@intCast(@min(GRID_DIMENSTION, y1 + 1))) |y| {
+                for (@intCast(@max(0, x0))..@intCast(@min(GRID_DIMENSTION, x1 + 1))) |x| {
                     _ = try space_tree.grid[y][x].addObject(
                         space_tree.allocator,
                         object,
@@ -340,15 +342,15 @@ fn SpaceNode(comptime ElementType: type) type {
             };
 
             // TODO: test replacing sqrt by squaring the second part of the formula
-            const len = math.pow(
-                f32,
+            const len = @sqrt(
                 delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2],
-                0.5,
             );
 
+            // TODO: does it make sense to check? If we came to this node by bisecting the space???
             // if bounding spheres does not intersect then skip object
             if (len >= radiuses[space_node.level] + bounding_radius) {
                 // std.debug.print("len={d} Rc={d} Ro={d}\n", .{ len, radiuses[space_node.level], bounding_radius });
+                // TODO: check when it's happening
                 // std.debug.print("spheres are not intersecing, skip\n", .{});
                 return false;
             }

@@ -462,6 +462,7 @@ pub const Engine = struct {
                         engine.frame_stats.game_objects_drawn_count += 1;
                     }
 
+                    // _ = potentially_visible_game_objects;
                     // for (scene.game_objects.items) |game_object| {
                     //     engine.drawGameObject(pass, scene, game_object);
                     //     engine.frame_stats.game_objects_drawn_count += 1;

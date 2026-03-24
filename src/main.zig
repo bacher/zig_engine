@@ -78,6 +78,7 @@ pub fn main() !void {
     const scene = try engine.createScene();
     defer scene.deinit();
 
+    scene.camera.updatePosition(.{ 1.06, -2.96, 8.45 });
     // -- look at gazebo closely --
     // scene.camera.updatePosition(.{ -8.94, -30.05, 9.44 });
 
@@ -174,35 +175,35 @@ pub fn main() !void {
 
     // -- Tube data for coordinates --
 
-    // var tube_data = try tube.initUnitTube(allocator);
-    // defer tube_data.deinit(allocator);
-    // var tube_model = try engine.loadPrimitive(tube_data);
-    // defer {
-    //     tube_model.deinit(engine.gctx);
-    //     allocator.destroy(tube_model);
-    // }
+    var tube_data = try tube.initUnitTube(allocator);
+    defer tube_data.deinit(allocator);
+    var tube_model = try engine.loadPrimitive(tube_data);
+    defer {
+        tube_model.deinit(engine.gctx);
+        allocator.destroy(tube_model);
+    }
 
     // -- Coordinates --
 
-    // const tube_x = try scene.addPrimitiveObject(.{
-    //     .model = tube_model,
-    //     .position = .{ 0.5 + tube.M, 0, 0 },
-    // });
-    // tube_x.debug.color = .{ 1, 0, 0, 1 };
+    const tube_x = try scene.addPrimitiveObject(.{
+        .model = tube_model,
+        .position = .{ 0.5 + tube.M, 0, 0 },
+    });
+    tube_x.debug.color = .{ 1, 0, 0, 1 };
 
-    // const tube_y = try scene.addPrimitiveObject(.{
-    //     .model = tube_model,
-    //     .position = .{ 0, 0.5 + tube.M, 0 },
-    // });
-    // tube_y.rotation = zmath.quatFromAxisAngle(.{ 0, 0, 1, 0 }, math.pi / 2.0);
-    // tube_y.debug.color = .{ 0, 1, 0, 1 };
+    const tube_y = try scene.addPrimitiveObject(.{
+        .model = tube_model,
+        .position = .{ 0, 0.5 + tube.M, 0 },
+    });
+    tube_y.setRotation(zmath.quatFromAxisAngle(.{ 0, 0, 1, 0 }, math.pi / 2.0));
+    tube_y.debug.color = .{ 0, 1, 0, 1 };
 
-    // const tube_z = try scene.addPrimitiveObject(.{
-    //     .model = tube_model,
-    //     .position = .{ 0, 0, 0.5 + tube.M },
-    // });
-    // tube_z.rotation = zmath.quatFromAxisAngle(.{ 0, 1, 0, 0 }, math.pi / 2.0);
-    // tube_z.debug.color = .{ 0, 0, 1, 1 };
+    const tube_z = try scene.addPrimitiveObject(.{
+        .model = tube_model,
+        .position = .{ 0, 0, 0.5 + tube.M },
+    });
+    tube_z.setRotation(zmath.quatFromAxisAngle(.{ 0, 1, 0, 0 }, math.pi / 2.0));
+    tube_z.debug.color = .{ 0, 0, 1, 1 };
 
     // -- Light --
 

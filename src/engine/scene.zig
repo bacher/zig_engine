@@ -160,10 +160,12 @@ pub const Scene = struct {
                 .primitive_colorized = params.model,
             },
             .position = params.position,
+            .parent = null,
         });
         errdefer game_object.deinit();
 
         try scene.game_objects.append(scene.allocator, game_object);
+        try scene.space_tree.addObject(game_object);
 
         return game_object;
     }
