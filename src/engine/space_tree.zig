@@ -119,21 +119,16 @@ pub fn SpaceTree(comptime ElementType: type) type {
         pub fn addObject(space_tree: *const This, object: *const ElementType) !void {
             const matrix_params = utils.parseTransformMatrix(object.aggregated_matrix);
             const bounds = object.model.getBounds();
-            const radius = bounds.radius * matrix_params.scale;
+            const radius = bounds.radius * matrix_params.scale_scalar;
 
-            const offset = zmath.Vec{
-                bounds.offset[0] * matrix_params.scale,
-                bounds.offset[1] * matrix_params.scale,
-                bounds.offset[2] * matrix_params.scale,
-                1.0,
-            };
+            const offset = bounds.offset * matrix_params.scale;
 
             const rotated_offset = zmath.rotate(
                 matrix_params.rotation,
                 offset,
             );
 
-            const bound_center = zmath.loadArr3(matrix_params.position) + rotated_offset;
+            const bound_center = matrix_params.position + rotated_offset;
 
             if (DEBUG) {
                 std.debug.print("add object at the root level, center=({d},{d},{d}) scale={d} r={d}\n", .{
@@ -346,7 +341,7 @@ fn SpaceNode(comptime ElementType: type) type {
             matrix_params: utils.DecodedTransformMatrix,
             bound_box: BoundBox(f32),
         ) !bool { // returns true if object was added to the node
-            const bounding_radius = object.model.getBounds().origin_radius * matrix_params.scale;
+            const bounding_radius = object.model.getBounds().origin_radius * matrix_params.scale_scalar;
 
             // std.debug.print("addObject to level={}\n", .{space_node.level});
             // space_node.printCenter();

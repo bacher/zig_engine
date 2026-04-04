@@ -349,7 +349,7 @@ fn traverseGroup(
             group.position = matrix_params.position;
             group.rotation = matrix_params.rotation;
             // TODO: Maybe it makes sense to store scale for each axis?
-            group.scale = matrix_params.scale;
+            group.scale = matrix_params.scale_scalar;
 
             // TODO: Maybe also keep node transform matrix separately from aggregated?
             group.aggregated_mat = zmath.mul(

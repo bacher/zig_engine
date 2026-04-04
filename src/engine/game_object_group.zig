@@ -10,7 +10,7 @@ pub const GroupChild = union(enum) {
 
 pub const GameObjectGroup = struct {
     allocator: std.mem.Allocator,
-    position: [3]f32,
+    position: zmath.Vec,
     rotation: zmath.Quat = zmath.quatFromRollPitchYaw(0, 0, 0),
     scale: f32 = 1,
     aggregated_mat: zmath.Mat = zmath.identity(),
@@ -24,7 +24,7 @@ pub const GameObjectGroup = struct {
 
         game_object_group.* = GameObjectGroup{
             .allocator = allocator,
-            .position = .{ 0, 0, 0 },
+            .position = .{ 0, 0, 0, 0 },
             .rotation = zmath.quatFromRollPitchYaw(0, 0, 0),
             .scale = 1,
             .children = .empty,

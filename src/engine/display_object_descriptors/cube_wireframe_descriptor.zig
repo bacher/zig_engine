@@ -66,9 +66,9 @@ pub const CubeWireframeDescriptor = struct {
         const geometry_bounds: types.GeometryBounds = .{
             .min = .{ -1.0, -1.0, -1.0 },
             .max = .{ 1.0, 1.0, 1.0 },
-            .origin_radius = math.sqrt(3.0),
-            .offset = .{ 0, 0, 0 },
+            .offset = .{ 0, 0, 0, 0 },
             .radius = math.sqrt(3.0),
+            .origin_radius = math.sqrt(3.0),
         };
 
         return .{

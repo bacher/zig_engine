@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const zmath = @import("zmath");
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
@@ -74,18 +75,16 @@ pub const TextureDescriptor = struct {
     }
 };
 
-pub const GeometryBounds = struct {
-    min: [3]f64,
-    max: [3]f64,
-    origin_radius: f32,
-    offset: [3]f32,
-    radius: f32,
+const F32x3 = @Vector(3, f32);
 
-    pub fn getCenter(self: GeometryBounds) [3]f32 {
-        return .{
-            (self.min[0] + self.max[0]) / 2.0,
-            (self.min[1] + self.max[1]) / 2.0,
-            (self.min[2] + self.max[2]) / 2.0,
-        };
+pub const GeometryBounds = struct {
+    min: F32x3,
+    max: F32x3,
+    offset: zmath.Vec,
+    radius: f32,
+    origin_radius: f32,
+
+    pub fn getCenter(self: GeometryBounds) F32x3 {
+        return (self.min + self.max) * @as(F32x3, @splat(0.5));
     }
 };

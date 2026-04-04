@@ -682,27 +682,20 @@ pub const Engine = struct {
         const matrix_params = utils.parseTransformMatrix(game_object.aggregated_matrix);
         const bounds = game_object.model.getBounds();
 
-        const offset = zmath.Vec{
-            bounds.offset[0] * matrix_params.scale,
-            bounds.offset[1] * matrix_params.scale,
-            bounds.offset[2] * matrix_params.scale,
-            1.0,
-        };
+        const offset = bounds.offset * matrix_params.scale;
 
         const rotated_offset = zmath.rotate(
             matrix_params.rotation,
             offset,
         );
 
-        const radius = bounds.radius * matrix_params.scale;
+        const radius = bounds.radius * matrix_params.scale_scalar;
 
         const model_to_world =
             zmath.mul(
                 // Ignoring rotation since box should be always axis-aligned.
                 zmath.scaling(radius, radius, radius),
-                zmath.translationV(
-                    zmath.loadArr3(matrix_params.position) + rotated_offset,
-                ),
+                zmath.translationV(matrix_params.position + rotated_offset),
             );
 
         const object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);

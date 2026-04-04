@@ -70,9 +70,9 @@ pub fn initCenteredQuad(allocator: std.mem.Allocator) !GeometryData {
         .bounding_box = .{
             .min = .{ -0.5, -0.5, 0 },
             .max = .{ 0.5, 0.5, 0 },
-            .origin_radius = std.math.sqrt(0.5),
-            .offset = .{ 0, 0, 0 },
+            .offset = .{ 0, 0, 0, 0 },
             .radius = std.math.sqrt(0.5),
+            .origin_radius = std.math.sqrt(0.5),
         },
     };
 }

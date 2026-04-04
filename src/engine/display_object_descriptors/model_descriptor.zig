@@ -2,6 +2,7 @@ const std = @import("std");
 const math = std.math;
 
 const gltf_loader = @import("gltf_loader");
+const zmath = @import("zmath");
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
@@ -61,8 +62,8 @@ pub const ModelDescriptor = struct {
             .index = index_buffer_info,
             .color_texture = color_texture,
             .geometry_bounds = .{
-                .min = mesh.geometry_bounds.min,
-                .max = mesh.geometry_bounds.max,
+                .min = arrayF64to32(mesh.geometry_bounds.min),
+                .max = arrayF64to32(mesh.geometry_bounds.max),
                 .origin_radius = calcBoundingRadius(mesh.geometry_bounds),
                 .offset = offset_bounds.offset,
                 .radius = offset_bounds.radius,
@@ -77,6 +78,10 @@ pub const ModelDescriptor = struct {
     }
 };
 
+fn arrayF64to32(input: [3]f64) @Vector(3, f32) {
+    return .{@floatCast(input[0]), @floatCast(input[1]), @floatCast(input[2]),};
+}
+
 fn calcBoundingRadius(geometry_bounds: gltf_loader.GeometryBounds) f32 {
     const min = geometry_bounds.min;
     const max = geometry_bounds.max;
@@ -88,16 +93,17 @@ fn calcBoundingRadius(geometry_bounds: gltf_loader.GeometryBounds) f32 {
     return len(.{ x, y, z });
 }
 
-fn convertToZUp(offset: [3]f32) [3]f32 {
+fn convertToZUp(offset: zmath.Vec) zmath.Vec {
     return .{
         offset[0],
         -offset[2],
         offset[1],
+        offset[3],
     };
 }
 
 fn getGeometryBoundsOffset(bounds: gltf_loader.GeometryBounds) struct {
-    offset: [3]f32,
+    offset: zmath.Vec,
     radius: f32,
 } {
     const x_radius = (bounds.max[0] - bounds.min[0]) / 2;
@@ -109,6 +115,7 @@ fn getGeometryBoundsOffset(bounds: gltf_loader.GeometryBounds) struct {
             @floatCast(bounds.min[0] + x_radius),
             @floatCast(bounds.min[1] + y_radius),
             @floatCast(bounds.min[2] + z_radius),
+            0,
         }),
         .radius = len(.{
             x_radius,

@@ -28,10 +28,10 @@ pub fn resolvePosition(position: zmath.Vec) zmath.Vec {
 }
 
 pub const DecodedTransformMatrix = struct {
-    // TODO: use zmath.Vec instead of [3]f32
-    position: [3]f32,
+    position: zmath.Vec,
     rotation: zmath.Quat,
-    scale: f32,
+    scale: zmath.Vec,
+    scale_scalar: f32,
 };
 
 pub fn parseTransformMatrix(matrix: zmath.Mat) DecodedTransformMatrix {
@@ -61,8 +61,10 @@ pub fn parseTransformMatrix(matrix: zmath.Mat) DecodedTransformMatrix {
     ));
 
     return .{
-        .position = .{ position[0], position[1], position[2] },
+        // TODO: should position have 0.0 or 1.0 as the last element by default?
+        .position = position,
         .rotation = rotation,
-        .scale = scale_vec[0],
+        .scale = scale_vec,
+        .scale_scalar = scale_vec[0],
     };
 }
