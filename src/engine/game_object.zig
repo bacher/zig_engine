@@ -53,7 +53,6 @@ pub const GameObject = struct {
     scale: f32,
     aggregated_matrix: zmath.Mat = zmath.identity(),
     model: ModelUnion,
-    model_origin_bounding_radius: f32,
     debug: struct {
         color: [4]f32 = .{ 0.0, 0.0, 0.0, 1.0 },
     } = .{},
@@ -71,7 +70,6 @@ pub const GameObject = struct {
             .scale = params.scale,
             .aggregated_matrix = undefined,
             .model = params.model,
-            .model_origin_bounding_radius = params.model.getBounds().origin_radius,
             .parent = params.parent,
             ._gc = game_object,
         };
