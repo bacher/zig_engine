@@ -16,22 +16,22 @@ const ModelUnion = union(enum) {
     skybox_model: *const SkyBoxModel,
     skybox_cubemap_model: *const SkyBoxCubemapModel,
 
-    pub fn getBoundingRadius(model_union: *const ModelUnion) f32 {
+    pub fn getOriginBoundingRadius(model_union: *const ModelUnion) f32 {
         switch (model_union.*) {
             .regular_model => |model| {
-                return model.model_descriptor.geometry_bounds.radius;
+                return model.model_descriptor.geometry_bounds.origin_radius;
             },
             .window_box_model => |model| {
-                return model.model_descriptor.geometry_bounds.radius;
+                return model.model_descriptor.geometry_bounds.origin_radius;
             },
             .skybox_model => |model| {
-                return model.model_descriptor.geometry_bounds.radius;
+                return model.model_descriptor.geometry_bounds.origin_radius;
             },
             .skybox_cubemap_model => |model| {
-                return model.model_descriptor.geometry_bounds.radius;
+                return model.model_descriptor.geometry_bounds.origin_radius;
             },
             .primitive_colorized => |model| {
-                return model.model_descriptor.geometry_bounds.radius;
+                return model.model_descriptor.geometry_bounds.origin_radius;
             },
         }
     }
@@ -88,7 +88,7 @@ pub const GameObject = struct {
     scale: f32,
     aggregated_matrix: zmath.Mat = zmath.identity(),
     model: ModelUnion,
-    model_bounding_radius: f32,
+    model_origin_bounding_radius: f32,
     debug: struct {
         color: [4]f32 = .{ 0.0, 0.0, 0.0, 1.0 },
     } = .{},
@@ -106,7 +106,7 @@ pub const GameObject = struct {
             .scale = params.scale,
             .aggregated_matrix = undefined,
             .model = params.model,
-            .model_bounding_radius = params.model.getBoundingRadius(),
+            .model_origin_bounding_radius = params.model.getOriginBoundingRadius(),
             .parent = params.parent,
             ._gc = game_object,
         };

@@ -63,7 +63,7 @@ pub const ModelDescriptor = struct {
             .geometry_bounds = .{
                 .min = mesh.geometry_bounds.min,
                 .max = mesh.geometry_bounds.max,
-                .radius = calcBoundingRadius(mesh.geometry_bounds),
+                .origin_radius = calcBoundingRadius(mesh.geometry_bounds),
                 .offset = offset_bounds.offset,
                 .radius2 = offset_bounds.radius,
             },

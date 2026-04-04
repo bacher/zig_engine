@@ -84,7 +84,7 @@ pub fn initUnitTube(allocator: std.mem.Allocator) !GeometryData {
         .bounding_box = .{
             .min = .{ L, -M, -M },
             .max = .{ R, M, M },
-            .radius = radius,
+            .origin_radius = radius,
             .offset = .{ 0, 0, 0 },
             .radius2 = radius,
         },

@@ -117,7 +117,7 @@ pub fn SpaceTree(comptime ElementType: type) type {
 
         pub fn addObject(space_tree: *const This, object: *const ElementType) !void {
             const matrix_params = utils.parseTransformMatrix(object.aggregated_matrix);
-            const bounding_radius = object.model_bounding_radius * matrix_params.scale;
+            const bounding_radius = object.model_origin_bounding_radius * matrix_params.scale;
 
             if (DEBUG) {
                 std.debug.print("add object at the root level, center=({d},{d},{d}) scale={d} r={d}\n", .{
@@ -330,7 +330,7 @@ fn SpaceNode(comptime ElementType: type) type {
             matrix_params: utils.DecodedTransformMatrix,
             bound_box: BoundBox(f32),
         ) !bool { // returns true if object was added to the node
-            const bounding_radius = object.model_bounding_radius * matrix_params.scale;
+            const bounding_radius = object.model_origin_bounding_radius * matrix_params.scale;
 
             // std.debug.print("addObject to level={}\n", .{space_node.level});
             // space_node.printCenter();
