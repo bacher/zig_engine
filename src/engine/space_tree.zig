@@ -1,5 +1,6 @@
 const std = @import("std");
 const math = std.math;
+const zmath = @import("zmath");
 
 const BoundBox = @import("./bound_box.zig").BoundBox;
 const utils = @import("./utils.zig");
@@ -117,30 +118,45 @@ pub fn SpaceTree(comptime ElementType: type) type {
 
         pub fn addObject(space_tree: *const This, object: *const ElementType) !void {
             const matrix_params = utils.parseTransformMatrix(object.aggregated_matrix);
-            const bounding_radius = object.model.getBounds().origin_radius * matrix_params.scale;
+            const bounds = object.model.getBounds();
+            const radius = bounds.radius * matrix_params.scale;
+
+            const offset = zmath.Vec{
+                bounds.offset[0] * matrix_params.scale,
+                bounds.offset[1] * matrix_params.scale,
+                bounds.offset[2] * matrix_params.scale,
+                1.0,
+            };
+
+            const rotated_offset = zmath.rotate(
+                matrix_params.rotation,
+                offset,
+            );
+
+            const bound_center = zmath.loadArr3(matrix_params.position) + rotated_offset;
 
             if (DEBUG) {
                 std.debug.print("add object at the root level, center=({d},{d},{d}) scale={d} r={d}\n", .{
-                    matrix_params.position[0],
-                    matrix_params.position[1],
-                    matrix_params.position[2],
+                    bound_center[0],
+                    bound_center[1],
+                    bound_center[2],
                     matrix_params.scale,
-                    bounding_radius,
+                    radius,
                 });
             }
 
             const bound_box: BoundBox(f32) = .{
                 .x = .{
-                    .start = matrix_params.position[0] - bounding_radius,
-                    .end = matrix_params.position[0] + bounding_radius,
+                    .start = bound_center[0] - radius,
+                    .end = bound_center[0] + radius,
                 },
                 .y = .{
-                    .start = matrix_params.position[1] - bounding_radius,
-                    .end = matrix_params.position[1] + bounding_radius,
+                    .start = bound_center[1] - radius,
+                    .end = bound_center[1] + radius,
                 },
                 .z = .{
-                    .start = matrix_params.position[2] - bounding_radius,
-                    .end = matrix_params.position[2] + bounding_radius,
+                    .start = bound_center[2] - radius,
+                    .end = bound_center[2] + radius,
                 },
             };
 
@@ -178,7 +194,7 @@ pub fn SpaceTree(comptime ElementType: type) type {
                         matrix_params.position[0],
                         matrix_params.position[1],
                         matrix_params.position[2],
-                        bounding_radius,
+                        radius,
                     });
                     std.debug.print("[STRICT]   nodes: [{},{}] <-> [{},{}]\n", .{ x0, y0, x1, y1 });
                 }
