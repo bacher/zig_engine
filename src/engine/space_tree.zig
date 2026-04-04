@@ -71,10 +71,11 @@ pub fn SpaceTree(comptime ElementType: type) type {
                 for (0..GRID_DIMENSTION) |index_x| {
                     const cell_x: i8 = @as(i8, @intCast(index_x)) - GRID_OFFSET;
 
-                    const center: [3]f32 = .{
+                    const center: zmath.Vec = .{
                         (@as(f32, @floatFromInt(cell_x)) + 0.5) * GRID_NODE_SIZE,
                         (@as(f32, @floatFromInt(cell_y)) + 0.5) * GRID_NODE_SIZE,
                         ZERO_Z,
+                        0,
                     };
 
                     if (DEBUG) {
@@ -117,25 +118,19 @@ pub fn SpaceTree(comptime ElementType: type) type {
         }
 
         pub fn addObject(space_tree: *const This, object: *const ElementType) !void {
-            const matrix_params = utils.parseTransformMatrix(object.aggregated_matrix);
             const bounds = object.model.getBounds();
-            const radius = bounds.radius * matrix_params.scale_scalar;
-
-            const offset = bounds.offset * matrix_params.scale;
-
-            const rotated_offset = zmath.rotate(
-                matrix_params.rotation,
-                offset,
-            );
-
-            const bound_center = matrix_params.position + rotated_offset;
+            const bound_center = utils.applyMat(bounds.offset, object.aggregated_matrix);
+            const scale = zmath.util.getScaleVec(object.aggregated_matrix);
+            // TODO: Maybe work with AABB instead of bounding spheres?
+            // Or get more presice bounding spheres to reduce empty space inside of sphere.
+            const radius = bounds.radius * scale[0];
 
             if (DEBUG) {
                 std.debug.print("add object at the root level, center=({d},{d},{d}) scale={d} r={d}\n", .{
                     bound_center[0],
                     bound_center[1],
                     bound_center[2],
-                    matrix_params.scale,
+                    scale[0],
                     radius,
                 });
             }
@@ -186,9 +181,9 @@ pub fn SpaceTree(comptime ElementType: type) type {
                 if (x0 >= GRID_DIMENSTION or x1 >= GRID_DIMENSTION or y0 >= GRID_DIMENSTION or y1 >= GRID_DIMENSTION //
                 or x0 < 0 or x1 < 0 or y0 < 0 or y1 < 0) {
                     std.debug.print("[STRICT] object bound box is partially out of the grid bounds, center=({d},{d},{d}) r={d}\n", .{
-                        matrix_params.position[0],
-                        matrix_params.position[1],
-                        matrix_params.position[2],
+                        bound_center[0],
+                        bound_center[1],
+                        bound_center[2],
                         radius,
                     });
                     std.debug.print("[STRICT]   nodes: [{},{}] <-> [{},{}]\n", .{ x0, y0, x1, y1 });
@@ -200,7 +195,8 @@ pub fn SpaceTree(comptime ElementType: type) type {
                     _ = try space_tree.grid[y][x].addObject(
                         space_tree.allocator,
                         object,
-                        matrix_params,
+                        bound_center,
+                        radius,
                         bound_box,
                     );
                 }
@@ -252,31 +248,31 @@ pub fn SpaceTree(comptime ElementType: type) type {
                 const child_node = try space_tree.allocator.create(ThisSpaceNode);
                 const step = sizes[node.level] * 0.25;
 
-                const center: [3]f32 = center: {
+                const center: zmath.Vec = center: {
                     switch (index) {
                         0 => {
-                            break :center .{ c[0] - step, c[1] - step, c[2] - step };
+                            break :center .{ c[0] - step, c[1] - step, c[2] - step, 0 };
                         },
                         1 => {
-                            break :center .{ c[0] + step, c[1] - step, c[2] - step };
+                            break :center .{ c[0] + step, c[1] - step, c[2] - step, 0 };
                         },
                         2 => {
-                            break :center .{ c[0] - step, c[1] + step, c[2] - step };
+                            break :center .{ c[0] - step, c[1] + step, c[2] - step, 0 };
                         },
                         3 => {
-                            break :center .{ c[0] + step, c[1] + step, c[2] - step };
+                            break :center .{ c[0] + step, c[1] + step, c[2] - step, 0 };
                         },
                         4 => {
-                            break :center .{ c[0] - step, c[1] - step, c[2] + step };
+                            break :center .{ c[0] - step, c[1] - step, c[2] + step, 0 };
                         },
                         5 => {
-                            break :center .{ c[0] + step, c[1] - step, c[2] + step };
+                            break :center .{ c[0] + step, c[1] - step, c[2] + step, 0 };
                         },
                         6 => {
-                            break :center .{ c[0] - step, c[1] + step, c[2] + step };
+                            break :center .{ c[0] - step, c[1] + step, c[2] + step, 0 };
                         },
                         7 => {
-                            break :center .{ c[0] + step, c[1] + step, c[2] + step };
+                            break :center .{ c[0] + step, c[1] + step, c[2] + step, 0 };
                         },
                         else => {
                             unreachable;
@@ -312,13 +308,13 @@ fn SpaceNode(comptime ElementType: type) type {
         const ThisSpaceNode = @This();
 
         level: u8,
-        center: [3]f32,
+        center: zmath.Vec,
         child_nodes: [CHILD_NODE_COUNT]*ThisSpaceNode,
         contained_objects: std.AutoArrayHashMapUnmanaged(*const ElementType, bool),
         intersecting_objects: std.AutoArrayHashMapUnmanaged(*const ElementType, bool),
         nested_objects_count: u32,
 
-        fn init(level: u8, center: [3]f32) ThisSpaceNode {
+        fn init(level: u8, center: zmath.Vec) ThisSpaceNode {
             return .{
                 .level = level,
                 .center = center,
@@ -338,36 +334,32 @@ fn SpaceNode(comptime ElementType: type) type {
             space_node: *ThisSpaceNode,
             allocator: std.mem.Allocator,
             object: *const ElementType,
-            matrix_params: utils.DecodedTransformMatrix,
+            bound_center: zmath.Vec,
+            bound_radius: f32,
             bound_box: BoundBox(f32),
         ) !bool { // returns true if object was added to the node
-            const bounding_radius = object.model.getBounds().origin_radius * matrix_params.scale_scalar;
-
             // std.debug.print("addObject to level={}\n", .{space_node.level});
             // space_node.printCenter();
 
-            const delta = .{
-                space_node.center[0] - matrix_params.position[0],
-                space_node.center[1] - matrix_params.position[1],
-                space_node.center[2] - matrix_params.position[2],
-            };
+            const delta = space_node.center - bound_center;
 
             // TODO: test replacing sqrt by squaring the second part of the formula
-            const len = @sqrt(
-                delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2],
-            );
+            // const len = @sqrt(
+            //     delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2],
+            // );
+            const distance = utils.length3(delta);
 
             // TODO: does it make sense to check? If we came to this node by bisecting the space???
             // if bounding spheres does not intersect then skip object
-            if (len >= radiuses[space_node.level] + bounding_radius) {
-                // std.debug.print("len={d} Rc={d} Ro={d}\n", .{ len, radiuses[space_node.level], bounding_radius });
+            if (distance >= radiuses[space_node.level] + bound_radius) {
+                // std.debug.print("distance={d} Rc={d} Ro={d}\n", .{ distance, radiuses[space_node.level], bound_radius });
                 // TODO: check when it's happening
                 // std.debug.print("spheres are not intersecing, skip\n", .{});
                 return false;
             }
 
             // if cell sphere is fully inside of object sphere
-            if (len + radiuses[space_node.level] <= bounding_radius) {
+            if (distance + radiuses[space_node.level] <= bound_radius) {
                 try space_node.contained_objects.put(allocator, object, true);
                 // std.debug.print("full contained, skipping subdivision\n", .{});
                 return true;
@@ -391,7 +383,8 @@ fn SpaceNode(comptime ElementType: type) type {
                     const was_added = try space_node.child_nodes[index].addObject(
                         allocator,
                         object,
-                        matrix_params,
+                        bound_center,
+                        bound_radius,
                         bound_box,
                     );
 

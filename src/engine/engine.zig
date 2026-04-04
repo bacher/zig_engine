@@ -679,23 +679,16 @@ pub const Engine = struct {
         const model_descriptor = engine.cube_wireframe_model.model_descriptor;
         model_descriptor.position.applyVertexBuffer(pass, 0);
 
-        const matrix_params = utils.parseTransformMatrix(game_object.aggregated_matrix);
         const bounds = game_object.model.getBounds();
-
-        const offset = bounds.offset * matrix_params.scale;
-
-        const rotated_offset = zmath.rotate(
-            matrix_params.rotation,
-            offset,
-        );
-
-        const radius = bounds.radius * matrix_params.scale_scalar;
+        const bound_center = utils.applyMat(bounds.offset, game_object.aggregated_matrix);
+        const scale = zmath.util.getScaleVec(game_object.aggregated_matrix);
+        const radius = bounds.radius * scale[0];
 
         const model_to_world =
             zmath.mul(
                 // Ignoring rotation since box should be always axis-aligned.
                 zmath.scaling(radius, radius, radius),
-                zmath.translationV(matrix_params.position + rotated_offset),
+                zmath.translationV(bound_center),
             );
 
         const object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);

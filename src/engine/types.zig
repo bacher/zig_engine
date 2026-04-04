@@ -82,6 +82,7 @@ pub const GeometryBounds = struct {
     max: F32x3,
     offset: zmath.Vec,
     radius: f32,
+    // TODO: @deprecated, not sure where it can be actually used.
     origin_radius: f32,
 
     pub fn getCenter(self: GeometryBounds) F32x3 {

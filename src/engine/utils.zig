@@ -68,3 +68,31 @@ pub fn parseTransformMatrix(matrix: zmath.Mat) DecodedTransformMatrix {
         .scale_scalar = scale_vec[0],
     };
 }
+
+pub fn pos1(pos: zmath.Vec) zmath.Vec {
+    var tmp = pos;
+    tmp[3] = 1;
+    return tmp;
+}
+
+pub fn pos0(pos: zmath.Vec) zmath.Vec {
+    var tmp = pos;
+    tmp[3] = 0;
+    return tmp;
+}
+
+pub fn applyMat(vec: zmath.Vec, mat: zmath.Mat) zmath.Vec {
+  // adding 1 to 4th position of position vector, and forcing it to 0 after
+  // the transformation.
+  return pos0(zmath.mul(pos1(vec), mat));
+}
+
+pub inline fn lengthSq3(vec: zmath.Vec) f32 {
+    const dot = vec * vec;
+    return dot[0] + dot[1] + dot[2];
+}
+
+pub inline fn length3(vec: zmath.Vec) f32 {
+    const dot = vec * vec;
+    return @sqrt(dot[0] + dot[1] + dot[2]);
+}
