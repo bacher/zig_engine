@@ -79,7 +79,11 @@ pub const ModelDescriptor = struct {
 };
 
 fn arrayF64to32(input: [3]f64) @Vector(3, f32) {
-    return .{@floatCast(input[0]), @floatCast(input[1]), @floatCast(input[2]),};
+    return .{
+        @floatCast(input[0]),
+        @floatCast(input[1]),
+        @floatCast(input[2]),
+    };
 }
 
 fn calcBoundingRadius(geometry_bounds: gltf_loader.GeometryBounds) f32 {

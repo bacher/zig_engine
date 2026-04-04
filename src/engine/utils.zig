@@ -82,9 +82,9 @@ pub fn pos0(pos: zmath.Vec) zmath.Vec {
 }
 
 pub fn applyMat(vec: zmath.Vec, mat: zmath.Mat) zmath.Vec {
-  // adding 1 to 4th position of position vector, and forcing it to 0 after
-  // the transformation.
-  return pos0(zmath.mul(pos1(vec), mat));
+    // adding 1 to 4th position of position vector, and forcing it to 0 after
+    // the transformation.
+    return pos0(zmath.mul(pos1(vec), mat));
 }
 
 pub inline fn lengthSq3(vec: zmath.Vec) f32 {
