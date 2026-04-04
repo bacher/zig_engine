@@ -1,6 +1,7 @@
 const std = @import("std");
 const zmath = @import("zmath");
 
+const GeometryBounds = @import("./types.zig").GeometryBounds;
 const model_module = @import("./model.zig");
 const Model = model_module.Model;
 const WindowBoxModel = model_module.WindowBoxModel;
@@ -16,58 +17,22 @@ const ModelUnion = union(enum) {
     skybox_model: *const SkyBoxModel,
     skybox_cubemap_model: *const SkyBoxCubemapModel,
 
-    pub fn getOriginBoundingRadius(model_union: *const ModelUnion) f32 {
+    pub fn getBounds(model_union: *const ModelUnion) *const GeometryBounds {
         switch (model_union.*) {
             .regular_model => |model| {
-                return model.model_descriptor.geometry_bounds.origin_radius;
+                return &model.model_descriptor.geometry_bounds;
             },
             .window_box_model => |model| {
-                return model.model_descriptor.geometry_bounds.origin_radius;
+                return &model.model_descriptor.geometry_bounds;
             },
             .skybox_model => |model| {
-                return model.model_descriptor.geometry_bounds.origin_radius;
+                return &model.model_descriptor.geometry_bounds;
             },
             .skybox_cubemap_model => |model| {
-                return model.model_descriptor.geometry_bounds.origin_radius;
+                return &model.model_descriptor.geometry_bounds;
             },
             .primitive_colorized => |model| {
-                return model.model_descriptor.geometry_bounds.origin_radius;
-            },
-        }
-    }
-
-    pub fn getBoundingOffsetRadius(model_union: *const ModelUnion) struct { offset: [3]f32, radius: f32 } {
-        // TODO: Can we avoid repeating the code?
-        switch (model_union.*) {
-            .regular_model => |model| {
-                return .{
-                    .offset = model.model_descriptor.geometry_bounds.offset,
-                    .radius = model.model_descriptor.geometry_bounds.radius2,
-                };
-            },
-            .window_box_model => |model| {
-                return .{
-                    .offset = model.model_descriptor.geometry_bounds.offset,
-                    .radius = model.model_descriptor.geometry_bounds.radius2,
-                };
-            },
-            .skybox_model => |model| {
-                return .{
-                    .offset = model.model_descriptor.geometry_bounds.offset,
-                    .radius = model.model_descriptor.geometry_bounds.radius2,
-                };
-            },
-            .skybox_cubemap_model => |model| {
-                return .{
-                    .offset = model.model_descriptor.geometry_bounds.offset,
-                    .radius = model.model_descriptor.geometry_bounds.radius2,
-                };
-            },
-            .primitive_colorized => |model| {
-                return .{
-                    .offset = model.model_descriptor.geometry_bounds.offset,
-                    .radius = model.model_descriptor.geometry_bounds.radius2,
-                };
+                return &model.model_descriptor.geometry_bounds;
             },
         }
     }
@@ -106,7 +71,7 @@ pub const GameObject = struct {
             .scale = params.scale,
             .aggregated_matrix = undefined,
             .model = params.model,
-            .model_origin_bounding_radius = params.model.getOriginBoundingRadius(),
+            .model_origin_bounding_radius = params.model.getBounds().origin_radius,
             .parent = params.parent,
             ._gc = game_object,
         };

@@ -68,7 +68,7 @@ pub const CubeWireframeDescriptor = struct {
             .max = .{ 1.0, 1.0, 1.0 },
             .origin_radius = math.sqrt(3.0),
             .offset = .{ 0, 0, 0 },
-            .radius2 = math.sqrt(3.0),
+            .radius = math.sqrt(3.0),
         };
 
         return .{

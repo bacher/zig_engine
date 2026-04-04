@@ -65,7 +65,7 @@ pub const ModelDescriptor = struct {
                 .max = mesh.geometry_bounds.max,
                 .origin_radius = calcBoundingRadius(mesh.geometry_bounds),
                 .offset = offset_bounds.offset,
-                .radius2 = offset_bounds.radius,
+                .radius = offset_bounds.radius,
             },
             .mesh_y_up = true,
         };

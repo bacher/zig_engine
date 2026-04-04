@@ -72,7 +72,7 @@ pub fn initCenteredQuad(allocator: std.mem.Allocator) !GeometryData {
             .max = .{ 0.5, 0.5, 0 },
             .origin_radius = std.math.sqrt(0.5),
             .offset = .{ 0, 0, 0 },
-            .radius2 = std.math.sqrt(0.5),
+            .radius = std.math.sqrt(0.5),
         },
     };
 }

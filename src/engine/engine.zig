@@ -680,12 +680,12 @@ pub const Engine = struct {
         model_descriptor.position.applyVertexBuffer(pass, 0);
 
         const matrix_params = utils.parseTransformMatrix(game_object.aggregated_matrix);
-        const bounding_offset_radius = game_object.model.getBoundingOffsetRadius();
+        const bounds = game_object.model.getBounds();
 
         const offset_vector = zmath.Vec{
-            bounding_offset_radius.offset[0] * matrix_params.scale,
-            -bounding_offset_radius.offset[2] * matrix_params.scale,
-            bounding_offset_radius.offset[1] * matrix_params.scale,
+            bounds.offset[0] * matrix_params.scale,
+            -bounds.offset[2] * matrix_params.scale,
+            bounds.offset[1] * matrix_params.scale,
             1.0,
         };
 
@@ -698,9 +698,9 @@ pub const Engine = struct {
             zmath.mul(
                 // Ignoring rotation since box should be always axis-aligned.
                 zmath.scaling(
-                    matrix_params.scale * bounding_offset_radius.radius,
-                    matrix_params.scale * bounding_offset_radius.radius,
-                    matrix_params.scale * bounding_offset_radius.radius,
+                    matrix_params.scale * bounds.radius,
+                    matrix_params.scale * bounds.radius,
+                    matrix_params.scale * bounds.radius,
                 ),
                 zmath.translationV(
                     zmath.loadArr3(matrix_params.position) + rotated_offset,

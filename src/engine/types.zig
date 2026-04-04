@@ -79,7 +79,7 @@ pub const GeometryBounds = struct {
     max: [3]f64,
     origin_radius: f32,
     offset: [3]f32,
-    radius2: f32,
+    radius: f32,
 
     pub fn getCenter(self: GeometryBounds) [3]f32 {
         return .{
