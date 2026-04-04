@@ -77,7 +77,10 @@ pub const TextureDescriptor = struct {
 pub const GeometryBounds = struct {
     min: [3]f64,
     max: [3]f64,
+    // TODO: remove radius (outdated)
     radius: f32,
+    offset: [3]f32,
+    radius2: f32,
 
     pub fn getCenter(self: GeometryBounds) [3]f32 {
         return .{

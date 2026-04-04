@@ -51,6 +51,8 @@ pub const ModelDescriptor = struct {
             .{ .generate_mipmaps = color_texture_image.width == color_texture_image.height },
         );
 
+        const offset_bounds = getGeometryBoundsOffset(mesh.geometry_bounds);
+
         return ModelDescriptor{
             // .model = model,
             .position = positions_buffer_info,
@@ -62,6 +64,8 @@ pub const ModelDescriptor = struct {
                 .min = mesh.geometry_bounds.min,
                 .max = mesh.geometry_bounds.max,
                 .radius = calcBoundingRadius(mesh.geometry_bounds),
+                .offset = offset_bounds.offset,
+                .radius2 = offset_bounds.radius,
             },
             .mesh_y_up = true,
         };
@@ -82,6 +86,36 @@ fn calcBoundingRadius(geometry_bounds: gltf_loader.GeometryBounds) f32 {
     const z = @max(@abs(min[2]), @abs(max[2]));
 
     return len(.{ x, y, z });
+}
+
+fn convertToZUp(offset: [3]f32) [3]f32 {
+    return .{
+        offset[0],
+        -offset[2],
+        offset[1],
+    };
+}
+
+fn getGeometryBoundsOffset(bounds: gltf_loader.GeometryBounds) struct {
+    offset: [3]f32,
+    radius: f32,
+} {
+    const x_radius = (bounds.max[0] - bounds.min[0]) / 2;
+    const y_radius = (bounds.max[1] - bounds.min[1]) / 2;
+    const z_radius = (bounds.max[2] - bounds.min[2]) / 2;
+
+    return .{
+        .offset = .{
+            @floatCast(bounds.min[0] + x_radius),
+            @floatCast(bounds.min[1] + y_radius),
+            @floatCast(bounds.min[2] + z_radius),
+        },
+        .radius = len(.{
+            x_radius,
+            y_radius,
+            z_radius,
+        }),
+    };
 }
 
 fn len(vec: [3]f64) f32 {

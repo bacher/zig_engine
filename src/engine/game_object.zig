@@ -35,6 +35,42 @@ const ModelUnion = union(enum) {
             },
         }
     }
+
+    pub fn getBoundingOffsetRadius(model_union: *const ModelUnion) struct { offset: [3]f32, radius: f32 } {
+        // TODO: Can we avoid repeating the code?
+        switch (model_union.*) {
+            .regular_model => |model| {
+                return .{
+                    .offset = model.model_descriptor.geometry_bounds.offset,
+                    .radius = model.model_descriptor.geometry_bounds.radius2,
+                };
+            },
+            .window_box_model => |model| {
+                return .{
+                    .offset = model.model_descriptor.geometry_bounds.offset,
+                    .radius = model.model_descriptor.geometry_bounds.radius2,
+                };
+            },
+            .skybox_model => |model| {
+                return .{
+                    .offset = model.model_descriptor.geometry_bounds.offset,
+                    .radius = model.model_descriptor.geometry_bounds.radius2,
+                };
+            },
+            .skybox_cubemap_model => |model| {
+                return .{
+                    .offset = model.model_descriptor.geometry_bounds.offset,
+                    .radius = model.model_descriptor.geometry_bounds.radius2,
+                };
+            },
+            .primitive_colorized => |model| {
+                return .{
+                    .offset = model.model_descriptor.geometry_bounds.offset,
+                    .radius = model.model_descriptor.geometry_bounds.radius2,
+                };
+            },
+        }
+    }
 };
 
 pub const GameObjectInitParams = struct {

@@ -79,6 +79,8 @@ pub fn main() !void {
     defer scene.deinit();
 
     scene.camera.updatePosition(.{ 1.06, -2.96, 8.45 });
+    // -- look at hydrant closely --
+    // scene.camera.updatePosition(.{ -34.92, -8.55, 3.12 });
     // -- look at gazebo closely --
     // scene.camera.updatePosition(.{ -8.94, -30.05, 9.44 });
 
@@ -185,22 +187,26 @@ pub fn main() !void {
 
     // -- Coordinates --
 
+    const x = 0;
+    const y = 0;
+    const z = 0;
+
     const tube_x = try scene.addPrimitiveObject(.{
         .model = tube_model,
-        .position = .{ 0.5 + tube.M, 0, 0 },
+        .position = .{ x + 0.5 + tube.M, y + 0, z + 0 },
     });
     tube_x.debug.color = .{ 1, 0, 0, 1 };
 
     const tube_y = try scene.addPrimitiveObject(.{
         .model = tube_model,
-        .position = .{ 0, 0.5 + tube.M, 0 },
+        .position = .{ x + 0, y + 0.5 + tube.M, z + 0 },
     });
     tube_y.setRotation(zmath.quatFromAxisAngle(.{ 0, 0, 1, 0 }, math.pi / 2.0));
     tube_y.debug.color = .{ 0, 1, 0, 1 };
 
     const tube_z = try scene.addPrimitiveObject(.{
         .model = tube_model,
-        .position = .{ 0, 0, 0.5 + tube.M },
+        .position = .{ x + 0, y + 0, z + 0.5 + tube.M },
     });
     tube_z.setRotation(zmath.quatFromAxisAngle(.{ 0, 1, 0, 0 }, math.pi / 2.0));
     tube_z.debug.color = .{ 0, 0, 1, 1 };
@@ -308,6 +314,12 @@ const DEBUG_TRAVERSE_GROUP = false;
 // ttc_trashcan.003_22
 // ttc_mailbox.002_23
 // ttc_gazebo_11
+// tunnel_sign_minnies_melodyland_26
+// tunnel_sign_minnies_melodyland.001_27
+// tunnel_sign_donalds_dock_28
+// tunnel_sign_donalds_dock.001_29
+// tunnel_sign_daisy_gardens.001_30
+// tunnel_sign_daisy_gardens_31
 const DRAW_ONLY = "";
 
 fn traverseGroup(
@@ -364,10 +376,16 @@ fn traverseGroup(
         if (DEBUG_TRAVERSE_GROUP) {
             std.debug.print("{s}model {s}\n", .{ GAPS[nesting_level], node.name orelse "<no name>" });
         }
+        // model Object_225
+        // model Object_226
+        // model Object_227
+        // model Object_228
+        // if (std.mem.eql(u8, node.name orelse "", "Object_226")) {
         _ = try scene.addObject(.{
             .model_id = model_id,
             .position = .{ 0, 0, 0 },
             .parent = parent_group,
         });
+        // }
     }
 }

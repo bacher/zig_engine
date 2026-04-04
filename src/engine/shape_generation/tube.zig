@@ -76,13 +76,17 @@ pub fn initUnitTube(allocator: std.mem.Allocator) !GeometryData {
     data[34] = .{ R, N, N };
     data[35] = .{ R, M, M };
 
+    const radius = comptime math.sqrt(math.pow(f32, R, 2) + math.pow(f32, M, 2));
+
     return .{
         .data = data,
         .buffer = buffer,
         .bounding_box = .{
             .min = .{ L, -M, -M },
             .max = .{ R, M, M },
-            .radius = comptime math.sqrt(math.pow(f32, R, 2) + math.pow(f32, M, 2)),
+            .radius = radius,
+            .offset = .{ 0, 0, 0 },
+            .radius2 = radius,
         },
     };
 }

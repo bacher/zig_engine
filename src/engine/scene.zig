@@ -102,7 +102,6 @@ pub const Scene = struct {
             errdefer game_object.deinit();
 
             try scene.game_objects.append(scene.allocator, game_object);
-
             try scene.space_tree.addObject(game_object);
 
             return game_object;

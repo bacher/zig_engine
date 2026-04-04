@@ -55,7 +55,7 @@ const GameObject = @import("./game_object.zig").GameObject;
 const DirectionalLight = @import("./light.zig").DirectionalLight;
 const DirectionalLightCascade = @import("./light.zig").DirectionalLightCascade;
 
-const DEBUG_INTERNAL_TEXTURE = true;
+const DEBUG_INTERNAL_TEXTURE = false;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 
@@ -666,7 +666,8 @@ pub const Engine = struct {
         if (switch (game_object.model) {
             .regular_model => true,
             .window_box_model => true,
-            .primitive_colorized => true,
+            // Don't show bounding box for coordinates (they uses colorized primitives)
+            // .primitive_colorized => true,
             else => false,
         }) {
             engine.drawCubeWireframe(pass, scene, game_object);
@@ -679,28 +680,32 @@ pub const Engine = struct {
         model_descriptor.position.applyVertexBuffer(pass, 0);
 
         const matrix_params = utils.parseTransformMatrix(game_object.aggregated_matrix);
+        const bounding_offset_radius = game_object.model.getBoundingOffsetRadius();
+
+        const offset_vector = zmath.Vec{
+            bounding_offset_radius.offset[0] * matrix_params.scale,
+            -bounding_offset_radius.offset[2] * matrix_params.scale,
+            bounding_offset_radius.offset[1] * matrix_params.scale,
+            1.0,
+        };
+
+        const rotated_offset = zmath.rotate(
+            matrix_params.rotation,
+            offset_vector,
+        );
 
         const model_to_world =
             zmath.mul(
                 // Ignoring rotation since box should be always axis-aligned.
-                // zmath.mul(
-                //     zmath.quatToMat(game_object.rotation),
-                // ),
                 zmath.scaling(
-                    matrix_params.scale * game_object.model_bounding_radius,
-                    matrix_params.scale * game_object.model_bounding_radius,
-                    matrix_params.scale * game_object.model_bounding_radius,
+                    matrix_params.scale * bounding_offset_radius.radius,
+                    matrix_params.scale * bounding_offset_radius.radius,
+                    matrix_params.scale * bounding_offset_radius.radius,
                 ),
-                // zmath.identity(),
-                zmath.translation(
-                    matrix_params.position[0],
-                    matrix_params.position[1],
-                    matrix_params.position[2],
+                zmath.translationV(
+                    zmath.loadArr3(matrix_params.position) + rotated_offset,
                 ),
             );
-        // _ = model_to_world;
-        // _ = position;
-        // _ = bounding_radius;
 
         const object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);
         // const object_to_clip = scene.camera.world_to_clip;

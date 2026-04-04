@@ -5,31 +5,29 @@ const zmath = @import("zmath");
 const debug = @import("debug");
 
 pub fn convertMatFromUpYToZ(mat: zmath.Mat) zmath.Mat {
-    const S = struct {
-        var identity_mat = zmath.identity();
-    };
+    var new_mat: zmath.Mat = undefined;
 
-    S.identity_mat[0][0] = mat[0][0];
-    S.identity_mat[0][1] = -mat[0][2];
-    S.identity_mat[0][2] = mat[0][1];
-    S.identity_mat[0][3] = mat[0][3];
+    new_mat[0][0] = mat[0][0];
+    new_mat[0][1] = -mat[0][2];
+    new_mat[0][2] = mat[0][1];
+    new_mat[0][3] = mat[0][3];
 
-    S.identity_mat[1][0] = -mat[2][0];
-    S.identity_mat[1][1] = mat[2][2];
-    S.identity_mat[1][2] = -mat[2][1];
-    S.identity_mat[1][3] = -mat[2][3];
+    new_mat[1][0] = -mat[2][0];
+    new_mat[1][1] = mat[2][2];
+    new_mat[1][2] = -mat[2][1];
+    new_mat[1][3] = -mat[2][3];
 
-    S.identity_mat[2][0] = mat[1][0];
-    S.identity_mat[2][1] = -mat[1][2];
-    S.identity_mat[2][2] = mat[1][1];
-    S.identity_mat[2][3] = mat[1][3];
+    new_mat[2][0] = mat[1][0];
+    new_mat[2][1] = -mat[1][2];
+    new_mat[2][2] = mat[1][1];
+    new_mat[2][3] = mat[1][3];
 
-    S.identity_mat[3][0] = mat[3][0];
-    S.identity_mat[3][1] = -mat[3][2];
-    S.identity_mat[3][2] = mat[3][1];
-    S.identity_mat[3][3] = mat[3][3];
+    new_mat[3][0] = mat[3][0];
+    new_mat[3][1] = -mat[3][2];
+    new_mat[3][2] = mat[3][1];
+    new_mat[3][3] = mat[3][3];
 
-    return S.identity_mat;
+    return new_mat;
 }
 
 test "matrices" {
