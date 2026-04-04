@@ -105,11 +105,11 @@ fn getGeometryBoundsOffset(bounds: gltf_loader.GeometryBounds) struct {
     const z_radius = (bounds.max[2] - bounds.min[2]) / 2;
 
     return .{
-        .offset = .{
+        .offset = convertToZUp(.{
             @floatCast(bounds.min[0] + x_radius),
             @floatCast(bounds.min[1] + y_radius),
             @floatCast(bounds.min[2] + z_radius),
-        },
+        }),
         .radius = len(.{
             x_radius,
             y_radius,

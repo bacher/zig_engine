@@ -684,8 +684,8 @@ pub const Engine = struct {
 
         const offset_vector = zmath.Vec{
             bounds.offset[0] * matrix_params.scale,
-            -bounds.offset[2] * matrix_params.scale,
             bounds.offset[1] * matrix_params.scale,
+            bounds.offset[2] * matrix_params.scale,
             1.0,
         };
 
@@ -694,14 +694,12 @@ pub const Engine = struct {
             offset_vector,
         );
 
+        const scale = matrix_params.scale * bounds.radius;
+
         const model_to_world =
             zmath.mul(
                 // Ignoring rotation since box should be always axis-aligned.
-                zmath.scaling(
-                    matrix_params.scale * bounds.radius,
-                    matrix_params.scale * bounds.radius,
-                    matrix_params.scale * bounds.radius,
-                ),
+                zmath.scaling(scale, scale, scale),
                 zmath.translationV(
                     zmath.loadArr3(matrix_params.position) + rotated_offset,
                 ),
