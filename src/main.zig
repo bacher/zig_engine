@@ -379,7 +379,7 @@ fn traverseGroup(
         if (node.transform_matrix) |node_matrix| {
             const normalized = loader_utils.convertMatFromUpYToZ(zmath.matFromArr(node_matrix.*));
 
-            const matrix_params = utils.parseTransformMatrix(normalized);
+            const matrix_params = utils.parseTransformMatrix(&normalized);
 
             group.setSRT(
                 matrix_params.position,

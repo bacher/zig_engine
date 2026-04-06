@@ -34,15 +34,15 @@ pub const DecodedTransformMatrix = struct {
     scale_scalar: f32,
 };
 
-pub fn parseTransformMatrix(matrix: zmath.Mat) DecodedTransformMatrix {
-    const position = zmath.mul(zmath.Vec{ 0, 0, 0, 1 }, matrix);
+pub fn parseTransformMatrix(matrix: *const zmath.Mat) DecodedTransformMatrix {
+    const position = zmath.mul(zmath.Vec{ 0, 0, 0, 1 }, matrix.*);
 
     // NOTE: alternative way to get scale (manually)
     // const scaled = zmath.mul(zmath.Vec{ 1, 0, 0, 0 }, matrix);
     // const product = scaled * scaled;
     // const scale = @sqrt(product[0] + product[1] + product[2]);
 
-    const scale_vec = zmath.util.getScaleVec(matrix);
+    const scale_vec = zmath.util.getScaleVec(matrix.*);
 
     if (STRICT) {
         if (@abs(scale_vec[0] - scale_vec[1]) > 0.0001 or @abs(scale_vec[0] - scale_vec[2]) > 0.0001) {
@@ -52,7 +52,7 @@ pub fn parseTransformMatrix(matrix: zmath.Mat) DecodedTransformMatrix {
 
     // NOTE: quatFromMat works only with matrices without scaling, so we need to undo scaling
     const rotation = zmath.quatFromMat(zmath.mul(
-        matrix,
+        matrix.*,
         zmath.scaling(
             1 / scale_vec[0],
             1 / scale_vec[1],
@@ -113,6 +113,17 @@ pub fn updateAggregatedMatrix_abstract(T: anytype, game_object: *T) void {
             ),
         ),
     );
+}
+
+pub fn debugMatrixDetailed(mat: *const zmath.Mat) void {
+    std.debug.print("Matrix:\n", .{});
+    debugPrintMatrix(mat);
+    const params = parseTransformMatrix(mat);
+    std.debug.print("  position: {any}\n", .{params.position});
+    std.debug.print("  rotation: {any}\n", .{params.rotation});
+    std.debug.print("  scale: {any}\n", .{params.scale});
+    std.debug.print("  scale Scalar: {any}\n", .{params.scale_scalar});
+    std.debug.print("---\n", .{});
 }
 
 pub fn debugPrintMatrix(mat: *const zmath.Mat) void {

@@ -555,16 +555,61 @@ pub const Engine = struct {
         }
 
         var model_to_world = game_object.aggregated_matrix;
+        // mat[3] - contains transition vector
+        const object_position = model_to_world[3];
 
-        const flip_yz = switch (game_object.model) {
-            .regular_model => |model| model.model_descriptor.options.mesh_y_up,
-            else => false,
+        // var pre_rotation_matrix = zmath.identity();
+
+        // const flip_yz = switch (game_object.model) {
+        //     .regular_model => |model| model.model_descriptor.options.mesh_y_up,
+        //     else => false,
+        // };
+        // if (flip_yz) {
+        //     // NOTE: converting from Y-up to Z-up coordinate system,
+        //     // should be done only for models which is made with Y-up logic.
+        //     model_to_world = zmath.mul(xRotate, model_to_world);
+        // }
+
+        const S = struct {
+            var is_once: bool = false;
         };
-        if (flip_yz) {
-            // NOTE: converting from Y-up to Z-up coordinate system,
-            // should be done only for models which is made with Y-up logic.
-            model_to_world = zmath.mul(xRotate, model_to_world);
+        if (!S.is_once) {
+            S.is_once = true;
+            utils.debugMatrixDetailed(&model_to_world);
         }
+
+        var billboard_rotation_matrix = zmath.lookAtRh(
+            .{ 0, 0, 0, 1 },
+            zmath.loadArr3(scene.camera.position) - object_position,
+            .{ 0, 0, 1, 0 },
+        );
+
+        billboard_rotation_matrix = billboard_rotation_matrix;
+        billboard_rotation_matrix = zmath.inverse(billboard_rotation_matrix);
+
+        billboard_rotation_matrix = zmath.mul(
+            zmath.matFromQuat(
+                zmath.quatFromNormAxisAngle(.{ 0, 0, 1, 1 }, 1 * math.pi),
+            ),
+            billboard_rotation_matrix,
+        );
+
+        billboard_rotation_matrix = zmath.mul(
+            zmath.matFromQuat(
+                zmath.quatFromNormAxisAngle(.{ 1, 0, 0, 1 }, 0.5 * math.pi),
+            ),
+            billboard_rotation_matrix,
+        );
+
+        model_to_world = zmath.mul(
+            zmath.mul(
+                xRotate,
+                billboard_rotation_matrix,
+            ),
+            model_to_world,
+        );
+
+        // model_to_world = zmath.mul(billboard_rotation_matrix, model_to_world);
 
         var object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);
         if (game_object.model == .skybox_model or game_object.model == .skybox_cubemap_model) {
