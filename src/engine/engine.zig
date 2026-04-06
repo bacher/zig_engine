@@ -34,6 +34,7 @@ const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ShadowMapTexture = @import("./shadow_map_texture.zig").ShadowMapTexture;
 // -- display object descriptors --
 const ModelDescriptor = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptor;
+const ModelDescriptorOptions = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptorOptions;
 const WindowBoxDescriptor = @import("./display_object_descriptors/window_box_descriptor.zig").WindowBoxDescriptor;
 const SkyBoxDescriptor = @import("./display_object_descriptors/skybox_descriptor.zig").SkyBoxDescriptor;
 const SkyBoxCubemapDescriptor = @import("./display_object_descriptors/skybox_cubemap_descriptor.zig").SkyBoxCubemapDescriptor;
@@ -556,7 +557,7 @@ pub const Engine = struct {
         var model_to_world = game_object.aggregated_matrix;
 
         const flip_yz = switch (game_object.model) {
-            .regular_model => |model| model.model_descriptor.mesh_y_up,
+            .regular_model => |model| model.model_descriptor.options.mesh_y_up,
             else => false,
         };
         if (flip_yz) {
@@ -743,7 +744,7 @@ pub const Engine = struct {
         var model_to_world = game_object.aggregated_matrix;
 
         const flip_yz = switch (game_object.model) {
-            .regular_model => |model| model.model_descriptor.mesh_y_up,
+            .regular_model => |model| model.model_descriptor.options.mesh_y_up,
             else => false,
         };
         if (flip_yz) {
@@ -808,12 +809,14 @@ pub const Engine = struct {
         engine: *Engine,
         loader: *const gltf_loader.GltfLoader,
         object: *const gltf_loader.SceneObject,
+        options: ModelDescriptorOptions,
     ) !LoadedModelId {
         const model_descriptor = try ModelDescriptor.init(
             engine.gctx,
             engine.allocator,
             loader,
             object,
+            options,
         );
 
         const bind_group = try engine.bind_group_definitions.regular.createBindGroup(

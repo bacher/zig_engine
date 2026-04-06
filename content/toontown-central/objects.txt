@@ -1,0 +1,156 @@
+group <no name>
+  group Sketchfab_model
+    group root
+      group GLTF_SceneRootNode
+        group ttc_base_map_0
+          model Object_4 - Object_26 (23)
+        group ttc_walls_1
+          model Object_28
+        group ttc_bank_2
+          model Object_30 - Object_36 (7)
+        group ttc_clothing_shop_3
+          model Object_38 - Object_49 (12)
+        group ttc_hq_4
+          model Object_51 - Object_63
+        group ttc_library_5
+          model Object_65 - Object_72
+        group ttc_toon_hall_6
+          model Object_74 - Object_83
+        group ttc_school_house_7
+          model Object_85 - Object_92
+        group ttc_party_gate_8
+          model Object_94 - Object_99
+        group ttc_goofy_gag_shop_9
+          model Object_101 - Object_121
+        group ttc_pet_shop_10
+          model Object_123 - Object_129
+        group ttc_gazebo_11
+          model Object_131 - Object_135
+        group ttc_trolley_station_12
+          model Object_137 - Object_144
+        group ttc_trolley_13
+          model Object_146
+        group ttc_trashcan_14
+          model Object_148 - Object_149
+        group ttc_mailbox_15
+          model Object_151 - Object_154
+        group ttc_trashcan.001_16
+          model Object_156 - Object_157
+        group ttc_hydrant_17
+          model Object_159 - Object_162
+        group ttc_mailbox.001_18
+          model Object_164 - Object_167
+        group ttc_trashcan.002_19
+          model Object_169 - Object_170
+        group ttc_hydrant.001_20
+          model Object_172 - Object_175
+        group ttc_hydrant.002_21
+          model Object_177 - Object_180
+        group ttc_trashcan.003_22
+          model Object_182 - Object_183
+        group ttc_mailbox.002_23
+          model Object_185 - Object_188
+        group ttc_hydrant.003_24
+          model Object_190 - Object_193
+        group ttc_mailbox.003_25
+          model Object_195 - Object_198
+        group tunnel_sign_minnies_melodyland_26
+          model Object_200 - Object_203
+        group tunnel_sign_minnies_melodyland.001_27
+          model Object_205 - Object_208
+        group tunnel_sign_donalds_dock_28
+          model Object_210 - Object_213
+        group tunnel_sign_donalds_dock.001_29
+          model Object_215 - Object_218
+        group tunnel_sign_daisy_gardens.001_30
+          model Object_220 - Object_223
+        group tunnel_sign_daisy_gardens_31
+          model Object_225 - Object_228
+        group ttc_fishing_dock_32
+          model Object_230 - Object_231
+        group ttc_fishing_dock.001_33
+          model Object_233 - Object_234
+        group ttc_fishing_dock.002_34
+          model Object_236 - Object_237
+        group ttc_fishing_dock.003_35
+          model Object_239 - Object_240
+        group ttc_planter_36
+          model Object_242 - Object_244
+        group ttc_planter.001_37
+          model Object_246 - Object_248
+        group statue_fountain_38
+          model Object_250 - Object_253
+        group statue_mickey_on_horse_39
+          model Object_255 - Object_258
+        group ttc_streetlight_lantern.001_40
+          model Object_260 - Object_262
+        group ttc_streetlight_lantern_41
+          model Object_264 - Object_266
+        group ttc_streetlight_3bulb.001_42
+          model Object_268 - Object_270
+        group ttc_streetlight_3bulb_43
+          model Object_272 - Object_274
+        group ttc_streetlight_lantern.002_44
+          model Object_276 - Object_278
+        group ttc_streetlight_lantern.003_45
+          model Object_280 - Object_282
+        group ttc_streetlight_lantern.004_46
+          model Object_284 - Object_286
+        group ttc_streetlight_lantern.005_47
+          model Object_288 - Object_290 (3)
+        group ttc_streetlight_3bulb.002_48
+          model Object_292 - Object_294 (3)
+        group ttc_streetlight_3bulb.003_49
+          model Object_296 - Object_298 (3)
+        group ttc_streetlight_3bulb.004_50
+          model Object_300 - Object_302 (3)
+        group ttc_streetlight_3bulb.005_51
+          model Object_304 - Object_306 (3)
+        group ttc_streetlight_3bulb.006_52
+          model Object_308 - Object_310 (3)
+        group ttc_streetlight_3bulb.007_53
+          model Object_312 - Object_314 (3)
+        group ttc_streetlight_3bulb.008_54
+          model Object_316 - Object_318 (3)
+        group ttc_streetlight_3bulb.009_55
+          model Object_320 - Object_322 (3)
+        group fat_tree.001_56
+          model Object_324 - Object_325 (2)
+        group fat_tree.002_57
+          model Object_327 - Object_328 (2)
+        group fat_tree.003_58
+          model Object_330 - Object_331 (2)
+        group fat_tree.005_59
+          model Object_333 - Object_334 (2)
+        group fat_tree.004_60
+          model Object_336 - Object_337
+        group fat_tree_61
+          model Object_339 - Object_340
+        group skinny_tree1_62
+          model Object_342 - Object_343
+        group skinny_tree1.004_63
+          model Object_345 - Object_346
+        group skinny_tree1.003_64
+          model Object_348 - Object_349
+        group skinny_tree1.002_65
+          model Object_351 - Object_352
+        group skinny_tree1.001_66
+          model Object_354 - Object_355
+        group skinny_tree2.004_67
+          model Object_357 - Object_358
+        group skinny_tree2.003_68
+          model Object_360 - Object_361
+        group skinny_tree2_69
+          model Object_363 - Object_364
+        group skinny_tree2.002_70
+          model Object_366 - Object_367
+        group skinny_tree2.001_71
+          model Object_369 - Object_370
+        group ttc_tunnel_goofy_speedway_72
+          model Object_372 - Object_380
+        group ttc_tunnel_loopy_lane_73
+          model Object_382 - Object_392
+        group ttc_tunnel_silly_street_74
+          model Object_394 - Object_404
+        group ttc_tunnel_punchline_place_75
+          model Object_406 - Object_416

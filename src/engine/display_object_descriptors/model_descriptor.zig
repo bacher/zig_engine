@@ -10,6 +10,11 @@ const types = @import("../types.zig");
 const load_buffer = @import("../load_buffer.zig");
 const load_texture = @import("../load_texture.zig");
 
+pub const ModelDescriptorOptions = struct {
+    mesh_y_up: bool = false,
+    is_billboard: bool = false,
+};
+
 pub const ModelDescriptor = struct {
     // model: gltf_loader.GltfLoader,
     position: types.BufferDescriptor,
@@ -18,13 +23,14 @@ pub const ModelDescriptor = struct {
     index: types.BufferDescriptor,
     color_texture: types.TextureDescriptor,
     geometry_bounds: types.GeometryBounds,
-    mesh_y_up: bool = false,
+    options: ModelDescriptorOptions,
 
     pub fn init(
         gctx: *zgpu.GraphicsContext,
         allocator: std.mem.Allocator,
         loader: *const gltf_loader.GltfLoader,
         object: *const gltf_loader.SceneObject,
+        options: ModelDescriptorOptions,
     ) !ModelDescriptor {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
@@ -68,7 +74,7 @@ pub const ModelDescriptor = struct {
                 .offset = offset_bounds.offset,
                 .radius = offset_bounds.radius,
             },
-            .mesh_y_up = true,
+            .options = options,
         };
     }
 

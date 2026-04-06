@@ -71,7 +71,9 @@ pub fn main() !void {
         defer loader.deinit();
 
         const object = loader.findFirstObjectWithMesh().?;
-        break :id try engine.loadModel(&loader, object);
+        break :id try engine.loadModel(&loader, object, .{
+            .mesh_y_up = true,
+        });
     };
 
     // const gazebo_model_id = ids: {
@@ -80,7 +82,9 @@ pub fn main() !void {
 
     //     const gazebo = try loader.getObjectByName("ttc_gazebo_11");
     //     const gazebo_mesh = loader.findFirstObjectWithMeshNested(gazebo).?;
-    //     const gazebo_model_id = try engine.loadModel(&loader, gazebo_mesh);
+    //     const gazebo_model_id = try engine.loadModel(&loader, gazebo_mesh, .{
+    //         .mesh_y_up = true,
+    //     });
 
     //     break :ids .{gazebo_model_id};
     // };
@@ -88,7 +92,8 @@ pub fn main() !void {
     const scene = try engine.createScene();
     defer scene.deinit();
 
-    scene.camera.updatePosition(.{ 1.06, -2.96, 8.45 });
+    // scene.camera.updatePosition(.{ 1.06, -2.96, 8.45 });
+    scene.camera.updatePosition(.{ -47.69, -13.09, 9.12 });
     // -- look at hydrant closely --
     // scene.camera.updatePosition(.{ -34.92, -8.55, 3.12 });
     // -- look at gazebo closely --
@@ -128,7 +133,7 @@ pub fn main() !void {
         defer loader.deinit();
 
         const root_group = try scene.addGroup();
-        try traverseGroup(engine, scene, root_group, loader, loader.root, 0);
+        try traverseGroup(engine, scene, root_group, loader, loader.root, 0, .{});
     }
 
     var window_block_model = try engine.loadWindowBoxModel("window-block/wb-texture.png");
@@ -342,7 +347,7 @@ const DEBUG_TRAVERSE_GROUP = false;
 // tunnel_sign_donalds_dock.001_29
 // tunnel_sign_daisy_gardens.001_30
 // tunnel_sign_daisy_gardens_31
-const DRAW_ONLY = "";
+const DRAW_ONLY = "fat_tree.001_56";
 
 fn traverseGroup(
     engine: *Engine,
@@ -351,6 +356,9 @@ fn traverseGroup(
     loader: gltf_loader.GltfLoader,
     node: gltf_loader.SceneObject,
     nesting_level: u32,
+    options: struct {
+        is_billboard: bool = false,
+    },
 ) !void {
     if (DRAW_ONLY.len > 0 and nesting_level == 4) {
         if (node.name) |name| {
@@ -359,6 +367,11 @@ fn traverseGroup(
             }
         }
     }
+
+    const is_billboard = options.is_billboard or if (nesting_level == 4 and node.name != null)
+        std.mem.indexOf(u8, node.name.?, "fat_tree") != null
+    else
+        false;
 
     if (node.children) |children| {
         const group = try parent_group.addGroup();
@@ -390,10 +403,15 @@ fn traverseGroup(
         }
 
         for (children) |child| {
-            try traverseGroup(engine, scene, group, loader, child, nesting_level + 1);
+            try traverseGroup(engine, scene, group, loader, child, nesting_level + 1, .{
+                .is_billboard = is_billboard,
+            });
         }
     } else if (node.mesh) |_| {
-        const model_id = try engine.loadModel(&loader, &node);
+        const model_id = try engine.loadModel(&loader, &node, .{
+            .mesh_y_up = true,
+            .is_billboard = is_billboard,
+        });
 
         // Assuming that nodes with mesh can't also have transform_matrix
         std.debug.assert(node.transform_matrix == null);
@@ -405,7 +423,7 @@ fn traverseGroup(
         // model Object_226
         // model Object_227
         // model Object_228
-        // if (std.mem.eql(u8, node.name orelse "", "Object_226")) {
+        // if (std.mem.eql(u8, node.name orelse "", "Object_324")) {
         _ = try scene.addObject(.{
             .model_id = model_id,
             .position = .{ 0, 0, 0 },
