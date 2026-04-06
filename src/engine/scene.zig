@@ -98,11 +98,11 @@ pub const Scene = struct {
                 },
                 .position = params.position,
                 .parent = params.parent,
+                .space_tree = scene.space_tree,
             });
             errdefer game_object.deinit();
 
             try scene.game_objects.append(scene.allocator, game_object);
-            try scene.space_tree.addObject(game_object);
 
             return game_object;
         } else {
@@ -159,12 +159,12 @@ pub const Scene = struct {
                 .primitive_colorized = params.model,
             },
             .position = params.position,
+            .space_tree = scene.space_tree,
             .parent = null,
         });
         errdefer game_object.deinit();
 
         try scene.game_objects.append(scene.allocator, game_object);
-        try scene.space_tree.addObject(game_object);
 
         return game_object;
     }

@@ -1,10 +1,11 @@
 const std = @import("std");
 const zmath = @import("zmath");
 
+const utils = @import("./utils.zig");
 const GameObject = @import("./game_object.zig").GameObject;
 
 pub const GroupChild = union(enum) {
-    game_object: *const GameObject,
+    game_object: *GameObject,
     group: *GameObjectGroup,
 };
 
@@ -12,9 +13,12 @@ pub const GameObjectGroup = struct {
     allocator: std.mem.Allocator,
     position: zmath.Vec,
     rotation: zmath.Quat = zmath.quatFromRollPitchYaw(0, 0, 0),
+    // // TODO: Maybe it makes sense to store scale for each axis?
     scale: f32 = 1,
-    aggregated_mat: zmath.Mat = zmath.identity(),
+    // TODO: Maybe also keep node transform matrix separately from aggregated?
+    aggregated_matrix: zmath.Mat = zmath.identity(),
     // bounding_radius: f32,
+    parent: ?*GameObjectGroup,
     children: std.ArrayList(GroupChild) = .empty,
     _gc: ?*GameObjectGroup,
 
@@ -27,6 +31,7 @@ pub const GameObjectGroup = struct {
             .position = .{ 0, 0, 0, 0 },
             .rotation = zmath.quatFromRollPitchYaw(0, 0, 0),
             .scale = 1,
+            .parent = null,
             .children = .empty,
             ._gc = game_object_group,
         };
@@ -70,5 +75,65 @@ pub const GameObjectGroup = struct {
         added.* = .{
             .game_object = game_object,
         };
+
+        game_object.setParent(group);
+    }
+
+    pub fn setSRT(
+        group: *GameObjectGroup,
+        position: zmath.Vec,
+        rotation: zmath.Quat,
+        scale: f32,
+        parent: ?*GameObjectGroup,
+    ) void {
+        group.position = utils.pos0(position);
+        group.rotation = rotation;
+        group.scale = scale;
+        group.parent = parent;
+        group.updateAggregatedMatrix();
+    }
+
+    pub fn setScale(group: *GameObjectGroup, scale: f32) void {
+        group.scale = scale;
+        group.updateAggregatedMatrix();
+    }
+
+    pub fn setRotation(group: *GameObjectGroup, rotation: zmath.Quat) void {
+        group.rotation = rotation;
+        group.updateAggregatedMatrix();
+    }
+
+    pub fn setPosition(group: *GameObjectGroup, position: zmath.Vec) void {
+        group.position = utils.pos0(position);
+        group.updateAggregatedMatrix();
+    }
+
+    pub fn setParent(group: *GameObjectGroup, parent: ?*GameObjectGroup) void {
+        group.parent = parent;
+        group.updateAggregatedMatrix();
+    }
+
+    fn updateAggregatedMatrix(group: *GameObjectGroup) void {
+        utils.updateAggregatedMatrix_abstract(GameObjectGroup, group);
+
+        // if group has parent, multiply its aggregated matrix by parent's
+        // aggregated matrix on each update
+        if (group.parent) |parent| {
+            group.aggregated_matrix = zmath.mul(
+                group.aggregated_matrix,
+                parent.aggregated_matrix,
+            );
+        }
+
+        for (group.children.items) |child| {
+            switch (child) {
+                .group => |child_group| {
+                    child_group.updateAggregatedMatrix();
+                },
+                .game_object => |game_object| {
+                    game_object.onParentUpdated();
+                },
+            }
+        }
     }
 };

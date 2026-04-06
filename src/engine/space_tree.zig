@@ -117,7 +117,15 @@ pub fn SpaceTree(comptime ElementType: type) type {
             space_tree.allocator.destroy(space_tree);
         }
 
-        pub fn addObject(space_tree: *const This, object: *const ElementType) !void {
+        pub fn addObject(space_tree: *This, object: *const ElementType) !void {
+            try space_tree.toggleObject(object, true);
+        }
+
+        pub fn removeObject(space_tree: *This, object: *const ElementType) !void {
+            try space_tree.toggleObject(object, false);
+        }
+
+        fn toggleObject(space_tree: *This, object: *const ElementType, is_adding: bool) !void {
             const bounds = object.model.getBounds();
             const bound_center = utils.applyMat(bounds.offset, object.aggregated_matrix);
             const scale = zmath.util.getScaleVec(object.aggregated_matrix);
@@ -192,12 +200,13 @@ pub fn SpaceTree(comptime ElementType: type) type {
 
             for (@intCast(@max(0, y0))..@intCast(@min(GRID_DIMENSTION, y1 + 1))) |y| {
                 for (@intCast(@max(0, x0))..@intCast(@min(GRID_DIMENSTION, x1 + 1))) |x| {
-                    _ = try space_tree.grid[y][x].addObject(
+                    _ = try space_tree.grid[y][x].toggleObject(
                         space_tree.allocator,
                         object,
                         bound_center,
                         radius,
                         bound_box,
+                        is_adding,
                     );
                 }
             }
@@ -330,14 +339,15 @@ fn SpaceNode(comptime ElementType: type) type {
             space_node.intersecting_objects.deinit(allocator);
         }
 
-        fn addObject(
+        fn toggleObject(
             space_node: *ThisSpaceNode,
             allocator: std.mem.Allocator,
             object: *const ElementType,
             bound_center: zmath.Vec,
             bound_radius: f32,
             bound_box: BoundBox(f32),
-        ) !bool { // returns true if object was added to the node
+            is_adding: bool,
+        ) !bool { // returns true if object was added to or removed from the node
             // std.debug.print("addObject to level={}\n", .{space_node.level});
             // space_node.printCenter();
 
@@ -360,40 +370,58 @@ fn SpaceNode(comptime ElementType: type) type {
 
             // if cell sphere is fully inside of object sphere
             if (distance + radiuses[space_node.level] <= bound_radius) {
-                try space_node.contained_objects.put(allocator, object, true);
+                const collection = &space_node.contained_objects;
+                if (is_adding) {
+                    try collection.put(allocator, object, true);
+                } else {
+                    const is_removed = collection.swapRemove(object);
+                    if (STRICT and !is_removed) {
+                        std.debug.print("failed to remove object from contained objects\n", .{});
+                    }
+                }
+
                 // std.debug.print("full contained, skipping subdivision\n", .{});
                 return true;
             }
 
             // on max level we add object to intersecting objects instead of subdividing
             if (space_node.level == MAX_LEVEL) {
-                try space_node.intersecting_objects.put(allocator, object, true);
+                const collection = &space_node.intersecting_objects;
+                if (is_adding) {
+                    try collection.put(allocator, object, true);
+                } else {
+                    const is_removed = collection.swapRemove(object);
+                    if (STRICT and !is_removed) {
+                        std.debug.print("failed to remove object from intersecting objects\n", .{});
+                    }
+                }
                 return true;
             } else {
                 const sub_boxes = space_node.getSubBoxesByBoundBox(bound_box);
                 const sub_boxes_indexes = space_node.getChildNodeIndexesBySubBoxes(sub_boxes);
 
-                var something_was_added = false;
+                var something_changed = false;
                 for (sub_boxes_indexes) |index| {
                     if (index == 255) {
                         break;
                     }
 
                     // recursive addObject call
-                    const was_added = try space_node.child_nodes[index].addObject(
+                    const was_changed = try space_node.child_nodes[index].toggleObject(
                         allocator,
                         object,
                         bound_center,
                         bound_radius,
                         bound_box,
+                        is_adding,
                     );
 
-                    if (was_added) {
-                        something_was_added = true;
+                    if (was_changed and is_adding) {
+                        something_changed = true;
                         space_node.nested_objects_count += 1;
                     }
                 }
-                return something_was_added;
+                return something_changed;
             }
         }
 
@@ -533,7 +561,7 @@ test "init" {
     //     .bounding_radius = 0.8,
     // };
     //
-    // try space_tree.addObject(&obj_1);
+    // try space_tree.toggleObject(&obj_1, true);
 
     std.debug.print("\n=== obj_2 ===\n", .{});
 
@@ -543,5 +571,5 @@ test "init" {
         .bounding_radius = 5,
     };
 
-    try space_tree.addObject(&obj_2);
+    try space_tree.toggleObject(&obj_2, true);
 }

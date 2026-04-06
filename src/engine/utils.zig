@@ -96,3 +96,45 @@ pub inline fn length3(vec: zmath.Vec) f32 {
     const dot = vec * vec;
     return @sqrt(dot[0] + dot[1] + dot[2]);
 }
+
+pub fn updateAggregatedMatrix_abstract(T: anytype, game_object: *T) void {
+    game_object.aggregated_matrix = zmath.mul(
+        zmath.matFromQuat(game_object.rotation),
+        zmath.mul(
+            zmath.scaling(
+                game_object.scale,
+                game_object.scale,
+                game_object.scale,
+            ),
+            zmath.translation(
+                game_object.position[0],
+                game_object.position[1],
+                game_object.position[2],
+            ),
+        ),
+    );
+}
+
+pub fn debugPrintMatrix(mat: *const zmath.Mat) void {
+    for (0..4) |i| {
+        std.debug.print("  {d:10.3} {d:10.3} {d:10.3} {d:10.3}\n", .{
+            mat[i][0],
+            mat[i][1],
+            mat[i][2],
+            mat[i][3],
+        });
+    }
+}
+
+pub fn assertMatricesEqual(mat1: *const zmath.Mat, mat2: *const zmath.Mat) void {
+    for (0..4) |i| {
+        const eq = zmath.isNearEqual(mat1[i], mat2[i], zmath.splat(zmath.Vec, 0.001));
+        if (!@reduce(.And, eq == zmath.boolx4(true, true, true, true))) {
+            std.debug.print("!!! Matrices are not equal:\n1:\n", .{});
+            debugPrintMatrix(mat1);
+            std.debug.print("2:\n", .{});
+            debugPrintMatrix(mat2);
+            std.debug.assert(false);
+        }
+    }
+}

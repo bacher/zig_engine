@@ -22,7 +22,23 @@ const zgui_utils = @import("./zgui.zig");
 const utils = @import("./engine/utils.zig");
 
 const Game = struct {
-    saved_game_objects: std.StringHashMap(*GameObject),
+    allocator: std.mem.Allocator,
+    saved_game_objects: std.StringHashMapUnmanaged(*GameObject) = .empty,
+    saved_game_object_groups: std.StringHashMapUnmanaged(*GameObjectGroup) = .empty,
+
+    pub fn init(allocator: std.mem.Allocator) !*Game {
+        const game = try allocator.create(Game);
+        game.* = .{
+            .allocator = allocator,
+        };
+        return game;
+    }
+
+    pub fn deinit(game: *Game) void {
+        game.saved_game_objects.deinit(game.allocator);
+        game.saved_game_object_groups.deinit(game.allocator);
+        game.allocator.destroy(game);
+    }
 };
 
 pub fn main() !void {
@@ -40,14 +56,8 @@ pub fn main() !void {
     var window_context = try WindowContext.init(allocator);
     defer window_context.deinit();
 
-    const game = try allocator.create(Game);
-    game.* = .{
-        .saved_game_objects = std.StringHashMap(*GameObject).init(allocator),
-    };
-    defer {
-        game.saved_game_objects.deinit();
-        allocator.destroy(game);
-    }
+    const game: *Game = try .init(allocator);
+    defer game.deinit();
 
     const engine = try Engine.init(allocator, window_context, content_dir, .{
         .argument = game,
@@ -187,29 +197,38 @@ pub fn main() !void {
 
     // -- Coordinates --
 
-    const x = 0;
-    const y = 0;
-    const z = 0;
+    {
+        const group = try scene.addGroup();
+        errdefer group.deinit();
 
-    const tube_x = try scene.addPrimitiveObject(.{
-        .model = tube_model,
-        .position = .{ x + 0.5 + tube.M, y + 0, z + 0 },
-    });
-    tube_x.debug.color = .{ 1, 0, 0, 1 };
+        try game.saved_game_object_groups.put(allocator, "coordinates", group);
 
-    const tube_y = try scene.addPrimitiveObject(.{
-        .model = tube_model,
-        .position = .{ x + 0, y + 0.5 + tube.M, z + 0 },
-    });
-    tube_y.setRotation(zmath.quatFromAxisAngle(.{ 0, 0, 1, 0 }, math.pi / 2.0));
-    tube_y.debug.color = .{ 0, 1, 0, 1 };
+        group.setPosition(.{ 0, 0, 0, 0 });
 
-    const tube_z = try scene.addPrimitiveObject(.{
-        .model = tube_model,
-        .position = .{ x + 0, y + 0, z + 0.5 + tube.M },
-    });
-    tube_z.setRotation(zmath.quatFromAxisAngle(.{ 0, 1, 0, 0 }, math.pi / 2.0));
-    tube_z.debug.color = .{ 0, 0, 1, 1 };
+        const tube_x = try scene.addPrimitiveObject(.{
+            .model = tube_model,
+            .position = .{ 0.5 + tube.M, 0, 0 },
+        });
+        tube_x.debug.color = .{ 1, 0, 0, 1 };
+
+        const tube_y = try scene.addPrimitiveObject(.{
+            .model = tube_model,
+            .position = .{ 0, 0.5 + tube.M, 0 },
+        });
+        tube_y.setRotation(zmath.quatFromAxisAngle(.{ 0, 0, 1, 0 }, math.pi / 2.0));
+        tube_y.debug.color = .{ 0, 1, 0, 1 };
+
+        const tube_z = try scene.addPrimitiveObject(.{
+            .model = tube_model,
+            .position = .{ 0, 0, 0.5 + tube.M },
+        });
+        tube_z.setRotation(zmath.quatFromAxisAngle(.{ 0, 1, 0, 0 }, math.pi / 2.0));
+        tube_z.debug.color = .{ 0, 0, 1, 1 };
+
+        try group.addObject(tube_x);
+        try group.addObject(tube_y);
+        try group.addObject(tube_z);
+    }
 
     // -- Light --
 
@@ -237,6 +256,9 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
     }
     if (game.saved_game_objects.get("man_2")) |obj| {
         obj.setRotation(zmath.quatFromRollPitchYaw(0, 0, @floatCast(-engine.time)));
+    }
+    if (game.saved_game_object_groups.get("coordinates")) |group| {
+        group.setPosition(.{ 0, 0, @floatCast(math.sin(engine.time) * 10), 0 });
     }
 }
 
@@ -346,18 +368,21 @@ fn traverseGroup(
 
             const matrix_params = utils.parseTransformMatrix(normalized);
 
-            group.position = matrix_params.position;
-            group.rotation = matrix_params.rotation;
-            // TODO: Maybe it makes sense to store scale for each axis?
-            group.scale = matrix_params.scale_scalar;
+            group.setSRT(
+                matrix_params.position,
+                matrix_params.rotation,
+                matrix_params.scale_scalar,
+                parent_group,
+            );
 
-            // TODO: Maybe also keep node transform matrix separately from aggregated?
-            group.aggregated_mat = zmath.mul(
-                parent_group.aggregated_mat,
+            const aggregated_matrix = zmath.mul(
+                parent_group.aggregated_matrix,
                 normalized,
             );
+
+            utils.assertMatricesEqual(&aggregated_matrix, &group.aggregated_matrix);
         } else {
-            group.aggregated_mat = parent_group.aggregated_mat;
+            group.setParent(parent_group);
         }
 
         if (DEBUG_TRAVERSE_GROUP) {
