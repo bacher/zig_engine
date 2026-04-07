@@ -37,7 +37,7 @@
         2,
     ).r;
 
-    if (color.a < 0.5) {
+    if (color.a < 0.25) {
         discard;
     }
 

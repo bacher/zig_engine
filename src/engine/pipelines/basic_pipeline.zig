@@ -54,6 +54,7 @@ pub fn createBasicPipeline(
         .primitive = wgpu.PrimitiveState{
             .front_face = .ccw,
             .cull_mode = .back,
+            // .cull_mode = .none,
             .topology = .triangle_list,
         },
         .depth_stencil = &wgpu.DepthStencilState{

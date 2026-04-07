@@ -347,7 +347,8 @@ const DEBUG_TRAVERSE_GROUP = false;
 // tunnel_sign_donalds_dock.001_29
 // tunnel_sign_daisy_gardens.001_30
 // tunnel_sign_daisy_gardens_31
-const DRAW_ONLY = "fat_tree.001_56";
+// fat_tree.001_56
+const DRAW_ONLY = "";
 
 fn traverseGroup(
     engine: *Engine,
@@ -369,7 +370,17 @@ fn traverseGroup(
     }
 
     const is_billboard = options.is_billboard or if (nesting_level == 4 and node.name != null)
-        std.mem.indexOf(u8, node.name.?, "fat_tree") != null
+        std.mem.indexOf(u8, node.name.?, "fat_tree") != null or std.mem.indexOf(u8, node.name.?, "skinny_tree") != null
+    else
+        false;
+
+    const is_lantern = if (nesting_level == 4 and node.name != null)
+        std.mem.indexOf(u8, node.name.?, "ttc_streetlight_lantern") != null
+    else
+        false;
+
+    const is_lantern_3b = if (nesting_level == 4 and node.name != null)
+        std.mem.indexOf(u8, node.name.?, "ttc_streetlight_3bulb") != null
     else
         false;
 
@@ -402,9 +413,9 @@ fn traverseGroup(
             std.debug.print("{s}group {s}\n", .{ GAPS[nesting_level], node.name orelse "<no name>" });
         }
 
-        for (children) |child| {
+        for (children, 0..) |child, index| {
             try traverseGroup(engine, scene, group, loader, child, nesting_level + 1, .{
-                .is_billboard = is_billboard,
+                .is_billboard = is_billboard or ((is_lantern or is_lantern_3b) and index == 0),
             });
         }
     } else if (node.mesh) |_| {

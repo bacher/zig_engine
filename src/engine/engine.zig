@@ -558,54 +558,57 @@ pub const Engine = struct {
         // mat[3] - contains transition vector
         const object_position = model_to_world[3];
 
-        // var pre_rotation_matrix = zmath.identity();
+        var pre_rotation_matrix = zmath.identity();
 
-        // const flip_yz = switch (game_object.model) {
-        //     .regular_model => |model| model.model_descriptor.options.mesh_y_up,
-        //     else => false,
-        // };
-        // if (flip_yz) {
-        //     // NOTE: converting from Y-up to Z-up coordinate system,
-        //     // should be done only for models which is made with Y-up logic.
-        //     model_to_world = zmath.mul(xRotate, model_to_world);
-        // }
-
-        const S = struct {
-            var is_once: bool = false;
+        const flip_yz = switch (game_object.model) {
+            .regular_model => |model| model.model_descriptor.options.mesh_y_up,
+            else => false,
         };
-        if (!S.is_once) {
-            S.is_once = true;
-            utils.debugMatrixDetailed(&model_to_world);
+        if (flip_yz) {
+            // NOTE: converting from Y-up to Z-up coordinate system,
+            // should be done only for models which is made with Y-up logic.
+            pre_rotation_matrix = xRotate;
         }
 
-        var billboard_rotation_matrix = zmath.lookAtRh(
-            .{ 0, 0, 0, 1 },
-            zmath.loadArr3(scene.camera.position) - object_position,
-            .{ 0, 0, 1, 0 },
-        );
+        switch (game_object.model) {
+            .regular_model => |model| {
+                if (model.model_descriptor.options.is_billboard) {
+                    var billboard_rotation_matrix = zmath.lookAtRh(
+                        .{ 0, 0, 0, 1 },
+                        zmath.loadArr3(scene.camera.position) - object_position,
+                        .{ 0, 0, 1, 0 },
+                    );
 
-        billboard_rotation_matrix = billboard_rotation_matrix;
-        billboard_rotation_matrix = zmath.inverse(billboard_rotation_matrix);
+                    billboard_rotation_matrix = zmath.inverse(billboard_rotation_matrix);
 
-        billboard_rotation_matrix = zmath.mul(
-            zmath.matFromQuat(
-                zmath.quatFromNormAxisAngle(.{ 0, 0, 1, 1 }, 1 * math.pi),
-            ),
-            billboard_rotation_matrix,
-        );
+                    billboard_rotation_matrix = zmath.mul(
+                        zmath.matFromQuat(
+                            zmath.quatFromNormAxisAngle(.{ 0, 0, 1, 1 }, 1 * math.pi),
+                        ),
+                        billboard_rotation_matrix,
+                    );
 
-        billboard_rotation_matrix = zmath.mul(
-            zmath.matFromQuat(
-                zmath.quatFromNormAxisAngle(.{ 1, 0, 0, 1 }, 0.5 * math.pi),
-            ),
-            billboard_rotation_matrix,
-        );
+                    billboard_rotation_matrix = zmath.mul(
+                        zmath.matFromQuat(
+                            zmath.quatFromNormAxisAngle(.{ 1, 0, 0, 1 }, 0.5 * math.pi),
+                        ),
+                        billboard_rotation_matrix,
+                    );
+
+                    pre_rotation_matrix = zmath.mul(
+                        pre_rotation_matrix,
+                        billboard_rotation_matrix,
+                    );
+                }
+            },
+            else => {},
+        }
+
+        // if (game_object.model.regular_model.model_descriptor.options.is_billboard) {
+        // }
 
         model_to_world = zmath.mul(
-            zmath.mul(
-                xRotate,
-                billboard_rotation_matrix,
-            ),
+            pre_rotation_matrix,
             model_to_world,
         );
 
