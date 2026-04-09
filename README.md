@@ -8,6 +8,12 @@ zig build run
 
 ## Versions
 
+### v0.0.3
+
+* Billboard render mode added
+
+![v0.0.3](screenshots/2026-04-09.png)
+
 ### v0.0.2
 
 * Cascade shadow maps added
