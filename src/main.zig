@@ -421,7 +421,7 @@ fn traverseGroup(
     } else if (node.mesh) |_| {
         const model_id = try engine.loadModel(&loader, &node, .{
             .mesh_y_up = true,
-            .is_billboard = is_billboard,
+            .billboard_mode = if (is_billboard) .cylindrical else .none,
         });
 
         // Assuming that nodes with mesh can't also have transform_matrix

@@ -563,36 +563,45 @@ pub const Engine = struct {
             },
         }
 
-        const is_billboard = switch (game_object.model) {
-            .regular_model => |model| model.model_descriptor.options.is_billboard,
-            else => false,
+        const billboard_mode = switch (game_object.model) {
+            .regular_model => |model| model.model_descriptor.options.billboard_mode,
+            else => .none,
         };
 
         var model_to_world = game_object.aggregated_matrix;
 
-        if (is_billboard) {
-            const params = utils.parseTransformMatrix(&game_object.aggregated_matrix);
+        if (billboard_mode != .none) {
+            const scale_vec = zmath.util.getScaleVec(game_object.aggregated_matrix);
+            const position = game_object.aggregated_matrix[3];
 
-            const billboard_rotation_matrix = zmath.mul(
+            const billboard_rotation_matrix = if (billboard_mode == .spherical) zmath.mul(
                 billboard_normalization_matrix,
                 // inverse is needed because lookAtRh returns matrix which rotates world to camera,
                 // but we need to rotate the object in the world space.
                 zmath.inverse(
                     zmath.lookAtRh(
                         .{ 0, 0, 0, 1 },
-                        zmath.loadArr3(scene.camera.position) - params.position,
+                        zmath.loadArr3(scene.camera.position) - position,
                         .{ 0, 0, 1, 0 },
                     ),
                 ),
-            );
+            ) else cylindric_rotation_matrix: {
+                const direction = zmath.loadArr3(scene.camera.position) - position;
+                const angle = math.atan2(direction[1], direction[0]);
+
+                break :cylindric_rotation_matrix zmath.matFromNormAxisAngle(
+                    .{ 0, 0, 1, 1 },
+                    angle + 0.5 * math.pi,
+                );
+            };
 
             model_to_world = zmath.mul(
                 zmath.mul(
-                    zmath.scaling(params.scale[0], params.scale[1], params.scale[2]),
+                    zmath.scalingV(scale_vec),
                     // instead of inner rotate, we apply billboard rotation matrix
                     billboard_rotation_matrix,
                 ),
-                zmath.translationV(params.position),
+                zmath.translationV(position),
             );
         }
 
