@@ -62,6 +62,15 @@ const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"
 
 const xRotate = zmath.rotationX(0.5 * math.pi);
 
+const billboard_normalization_matrix = zmath.mul(
+    zmath.matFromQuat(
+        zmath.quatFromNormAxisAngle(.{ 1, 0, 0, 1 }, 0.5 * math.pi),
+    ),
+    zmath.matFromQuat(
+        zmath.quatFromNormAxisAngle(.{ 0, 0, 1, 1 }, 1 * math.pi),
+    ),
+);
+
 pub const Engine = struct {
     pub const LoadedModelId = enum(u32) { _ };
 
@@ -554,11 +563,38 @@ pub const Engine = struct {
             },
         }
 
-        var model_to_world = game_object.aggregated_matrix;
-        // mat[3] - contains transition vector
-        const object_position = model_to_world[3];
+        const is_billboard = switch (game_object.model) {
+            .regular_model => |model| model.model_descriptor.options.is_billboard,
+            else => false,
+        };
 
-        var pre_rotation_matrix = zmath.identity();
+        var model_to_world = game_object.aggregated_matrix;
+
+        if (is_billboard) {
+            const params = utils.parseTransformMatrix(&game_object.aggregated_matrix);
+
+            const billboard_rotation_matrix = zmath.mul(
+                billboard_normalization_matrix,
+                // inverse is needed because lookAtRh returns matrix which rotates world to camera,
+                // but we need to rotate the object in the world space.
+                zmath.inverse(
+                    zmath.lookAtRh(
+                        .{ 0, 0, 0, 1 },
+                        zmath.loadArr3(scene.camera.position) - params.position,
+                        .{ 0, 0, 1, 0 },
+                    ),
+                ),
+            );
+
+            model_to_world = zmath.mul(
+                zmath.mul(
+                    zmath.scaling(params.scale[0], params.scale[1], params.scale[2]),
+                    // instead of inner rotate, we apply billboard rotation matrix
+                    billboard_rotation_matrix,
+                ),
+                zmath.translationV(params.position),
+            );
+        }
 
         const flip_yz = switch (game_object.model) {
             .regular_model => |model| model.model_descriptor.options.mesh_y_up,
@@ -567,52 +603,8 @@ pub const Engine = struct {
         if (flip_yz) {
             // NOTE: converting from Y-up to Z-up coordinate system,
             // should be done only for models which is made with Y-up logic.
-            pre_rotation_matrix = xRotate;
+            model_to_world = zmath.mul(xRotate, model_to_world);
         }
-
-        switch (game_object.model) {
-            .regular_model => |model| {
-                if (model.model_descriptor.options.is_billboard) {
-                    var billboard_rotation_matrix = zmath.lookAtRh(
-                        .{ 0, 0, 0, 1 },
-                        zmath.loadArr3(scene.camera.position) - object_position,
-                        .{ 0, 0, 1, 0 },
-                    );
-
-                    billboard_rotation_matrix = zmath.inverse(billboard_rotation_matrix);
-
-                    billboard_rotation_matrix = zmath.mul(
-                        zmath.matFromQuat(
-                            zmath.quatFromNormAxisAngle(.{ 0, 0, 1, 1 }, 1 * math.pi),
-                        ),
-                        billboard_rotation_matrix,
-                    );
-
-                    billboard_rotation_matrix = zmath.mul(
-                        zmath.matFromQuat(
-                            zmath.quatFromNormAxisAngle(.{ 1, 0, 0, 1 }, 0.5 * math.pi),
-                        ),
-                        billboard_rotation_matrix,
-                    );
-
-                    pre_rotation_matrix = zmath.mul(
-                        pre_rotation_matrix,
-                        billboard_rotation_matrix,
-                    );
-                }
-            },
-            else => {},
-        }
-
-        // if (game_object.model.regular_model.model_descriptor.options.is_billboard) {
-        // }
-
-        model_to_world = zmath.mul(
-            pre_rotation_matrix,
-            model_to_world,
-        );
-
-        // model_to_world = zmath.mul(billboard_rotation_matrix, model_to_world);
 
         var object_to_clip = zmath.mul(model_to_world, scene.camera.world_to_clip);
         if (game_object.model == .skybox_model or game_object.model == .skybox_cubemap_model) {
