@@ -78,6 +78,14 @@ pub const TextureDescriptor = struct {
 const F32x3 = @Vector(3, f32);
 
 pub const GeometryBounds = struct {
+    pub const unit_geometry_bounds = GeometryBounds{
+        .min = .{ -1.0, -1.0, -1.0 },
+        .max = .{ 1.0, 1.0, 1.0 },
+        .offset = .{ 0, 0, 0, 0 },
+        .radius = std.math.sqrt(3.0),
+        .origin_radius = std.math.sqrt(3.0),
+    };
+
     min: F32x3,
     max: F32x3,
     offset: zmath.Vec,

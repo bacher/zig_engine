@@ -9,6 +9,7 @@ const WindowBoxModel = model_module.WindowBoxModel;
 const SkyBoxModel = model_module.SkyBoxModel;
 const SkyBoxCubemapModel = model_module.SkyBoxCubemapModel;
 const PrimitiveModel = model_module.PrimitiveModel;
+const TerrainHeightMapModel = model_module.TerrainHeightMapModel;
 const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;
 const SpaceTree = @import("./space_tree.zig").SpaceTree;
 
@@ -18,6 +19,7 @@ const ModelUnion = union(enum) {
     primitive_colorized: *const PrimitiveModel,
     skybox_model: *const SkyBoxModel,
     skybox_cubemap_model: *const SkyBoxCubemapModel,
+    terrain_height_map_model: *const TerrainHeightMapModel,
 
     pub fn getBounds(model_union: *const ModelUnion) *const GeometryBounds {
         switch (model_union.*) {
@@ -35,6 +37,9 @@ const ModelUnion = union(enum) {
             },
             .primitive_colorized => |model| {
                 return &model.model_descriptor.geometry_bounds;
+            },
+            .terrain_height_map_model => {
+                return &.unit_geometry_bounds;
             },
         }
     }
@@ -87,6 +92,14 @@ pub const GameObject = struct {
     }
 
     pub fn deinit(game_object: *GameObject) void {
+        switch (game_object.model) {
+            .terrain_height_map_model => |model| {
+                // model.deinit(game_object.gctx);
+                game_object.allocator.destroy(model);
+            },
+            else => {},
+        }
+
         if (game_object._gc) |pointer| {
             game_object.allocator.destroy(pointer);
         }

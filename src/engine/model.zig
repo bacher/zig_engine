@@ -78,3 +78,17 @@ pub const CubeWireframeModel = struct {
         model.bind_group.deinit(gctx);
     }
 };
+
+pub const TerrainHeightMapModel = struct {
+    // model_descriptor: ModelDescriptor,
+    bind_group: BindGroup,
+
+    pub fn deinit(model: TerrainHeightMapModel, gctx: *zgpu.GraphicsContext) void {
+        _ = model;
+        _ = gctx;
+        // model.model_descriptor.deinit();
+
+        // NOTE: bind group is currently deinitialized in engine.deinit()
+        // model.bind_group.deinit(gctx);
+    }
+};

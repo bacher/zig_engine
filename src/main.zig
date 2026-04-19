@@ -92,12 +92,19 @@ pub fn main() !void {
     const scene = try engine.createScene();
     defer scene.deinit();
 
-    // scene.camera.updatePosition(.{ 1.06, -2.96, 8.45 });
-    scene.camera.updatePosition(.{ -47.69, -13.09, 9.12 });
+    scene.camera.updatePosition(.{ 1.06, -2.96, 8.45 });
+    // scene.camera.updatePosition(.{ -47.69, -13.09, 9.12 });
     // -- look at hydrant closely --
     // scene.camera.updatePosition(.{ -34.92, -8.55, 3.12 });
     // -- look at gazebo closely --
     // scene.camera.updatePosition(.{ -8.94, -30.05, 9.44 });
+
+    // -- Terrain height map --
+
+    const terrain = try scene.addTerrainHeightMapObject(.{
+        .position = .{ 0, 0, 0 },
+    });
+    _ = terrain;
 
     // -- Skybox (old) --
 
@@ -262,9 +269,9 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
     if (game.saved_game_objects.get("man_2")) |obj| {
         obj.setRotation(zmath.quatFromRollPitchYaw(0, 0, @floatCast(-engine.time)));
     }
-    if (game.saved_game_object_groups.get("coordinates")) |group| {
-        group.setPosition(.{ 0, 0, @floatCast(math.sin(engine.time) * 10), 0 });
-    }
+    // if (game.saved_game_object_groups.get("coordinates")) |group| {
+    //     group.setPosition(.{ 0, 0, @floatCast(math.sin(engine.time) * 10), 0 });
+    // }
 }
 
 fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {

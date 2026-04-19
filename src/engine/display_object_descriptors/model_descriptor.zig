@@ -17,6 +17,7 @@ pub const ModelDescriptorOptions = struct {
         spherical = 1,
         cylindrical = 2,
     } = .none,
+    color_texture_fallback: ?*const types.TextureDescriptor = null,
 };
 
 pub const ModelDescriptor = struct {
@@ -45,22 +46,28 @@ pub const ModelDescriptor = struct {
         const buffers = try loader.loadModelBuffers(arena_allocator, mesh);
         defer buffers.deinit(arena_allocator);
 
-        const material = loader.getObjectMaterial(object);
-        // TODO: Do not load the same texture several times. Add cache?
-        var color_texture_image = try loader.loadMaterialTextureData(material) orelse try loader.loadTextureData("../uv-test.png");
-        defer color_texture_image.deinit();
-
         const positions_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, buffers.positions);
         const normal_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, buffers.normals);
         const texcoord_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, buffers.texcoord);
         const index_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .index, buffers.indexes);
 
-        const color_texture = try load_texture.loadTextureIntoGpu(
-            gctx,
-            allocator,
-            color_texture_image,
-            .{ .generate_mipmaps = color_texture_image.width == color_texture_image.height },
-        );
+        const material = loader.getObjectMaterial(object);
+        var color_texture: types.TextureDescriptor = undefined;
+
+        if (try loader.loadMaterialTextureData(material)) |image| {
+            defer @constCast(&image).deinit();
+            // TODO: Do not load the same texture several times. Add cache?
+            color_texture = try load_texture.loadTextureIntoGpu(
+                gctx,
+                allocator,
+                image,
+                .{ .generate_mipmaps = image.width == image.height },
+            );
+        } else if (options.color_texture_fallback) |fallback| {
+            color_texture = fallback.*;
+        } else {
+            return error.NoColorTexture;
+        }
 
         const offset_bounds = getGeometryBoundsOffset(mesh.geometry_bounds);
 

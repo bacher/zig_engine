@@ -14,9 +14,9 @@ struct VertexOut {
     @location(1) normal: vec3<f32>,
     @location(2) texcoord: vec2<f32>,
 ) -> VertexOut {
-    var output: VertexOut;
     let position4 = vec4(position, 1.0);
 
+    var output: VertexOut;
     output.position_clip = position4 * object_to_clip;
     output.position_light_clip_0 = position4 * object_to_light_clip_array[0];
     output.position_light_clip_1 = position4 * object_to_light_clip_array[1];

@@ -85,8 +85,8 @@
         .gltf_loader = .{
             // For local dev:
             // .path = "../gltf_loader",
-            .url = "git+https://github.com/bacher/gltf_loader#4f6445ae2c9a71fbd46a1317f581105765039f0c",
-            .hash = "gltf_loader-0.1.0-bMyl_Ml6AACTgoI3BpkzpIjAg0eF2JbfDrTDNfawmrVx",
+            .url = "git+https://github.com/bacher/gltf_loader#bc8826cf70bc8d42881103e0901b37787007bc0f",
+            .hash = "gltf_loader-0.1.1-bMyl_Pt7AACy6mb57KHZTAjiDy5BWOGmY24n9owOINnV",
         },
     },
 

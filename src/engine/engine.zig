@@ -9,6 +9,7 @@ const gltf_loader = @import("gltf_loader");
 
 const debug = @import("debug");
 const types = @import("./types.zig");
+const load_texture = @import("./load_texture.zig");
 const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
 const utils = @import("./utils.zig");
@@ -19,6 +20,7 @@ const skybox_pipeline_module = @import("./pipelines/skybox_pipeline.zig");
 const skybox_cubemap_pipeline_module = @import("./pipelines/skybox_cubemap_pipeline.zig");
 const window_box_pipeline_module = @import("./pipelines/window_box_pipeline.zig");
 const primitive_colorized_pipeline_module = @import("./pipelines/primitive_colorized_pipeline.zig");
+const terrain_height_map_pipeline_module = @import("./pipelines/terrain_height_map_pipeline.zig");
 const shadow_map_pipeline_module = @import("./pipelines/shadow_map_pipeline.zig");
 const lines_pipeline_module = @import("./pipelines/lines_pipeline.zig");
 const debug_texture_pipeline_module = @import("./pipelines/debug_texture_pipeline.zig");
@@ -118,6 +120,7 @@ pub const Engine = struct {
         skybox_cubemap: Pipeline,
         window_box: Pipeline,
         primitive_colorized: Pipeline,
+        terrain_height_map: Pipeline,
         // ---
         shadow_map: Pipeline,
         // ---
@@ -141,6 +144,9 @@ pub const Engine = struct {
     models_hash: std.AutoHashMap(LoadedModelId, *Model),
     shadow_map_texture: ShadowMapTexture,
     shadow_map_depth_texture: DepthTexture,
+
+    uv_test_texture: types.TextureDescriptor,
+    regular_bind_group_for_uv_test: BindGroup,
 
     active_scene: ?*Scene,
     input_controller: *InputController,
@@ -240,6 +246,12 @@ pub const Engine = struct {
             gctx,
             bind_group_definitions.primitive_colorized,
         );
+        const terrain_height_map_pipeline = try terrain_height_map_pipeline_module.createTerrainHeightMapPipeline(
+            gctx,
+            // TODO: ???
+            bind_group_definitions.regular,
+            bind_group_definitions.shadow_map,
+        );
         const shadow_map_pipeline = try shadow_map_pipeline_module.createShadowMapPipeline(
             gctx,
             bind_group_definitions.shadow_map_pass,
@@ -267,6 +279,24 @@ pub const Engine = struct {
         const content_dir_copied = try allocator.dupe(u8, content_dir);
         errdefer allocator.free(content_dir_copied);
 
+        var uv_test_image = try gltf_loader.StbiWrapper.loadTextureData(
+            allocator,
+            "content/uv-test.png",
+        );
+        defer uv_test_image.deinit();
+
+        const uv_test_texture = try load_texture.loadTextureIntoGpu(
+            gctx,
+            allocator,
+            uv_test_image,
+            .{ .generate_mipmaps = uv_test_image.width == uv_test_image.height },
+        );
+
+        const regular_bind_group_for_uv_test = try bind_group_definitions.regular.createBindGroup(
+            texture_repeat_sampler,
+            uv_test_texture,
+        );
+
         const engine = try allocator.create(Engine);
         engine.* = .{
             .allocator = allocator,
@@ -283,6 +313,7 @@ pub const Engine = struct {
                 .skybox_cubemap = skybox_cubemap_pipeline,
                 .window_box = window_box_pipeline,
                 .primitive_colorized = primitive_colorized_pipeline,
+                .terrain_height_map = terrain_height_map_pipeline,
                 .shadow_map = shadow_map_pipeline,
                 .lines = lines_pipeline,
                 .debug_texture = debug_texture_pipeline,
@@ -302,6 +333,10 @@ pub const Engine = struct {
             .models_hash = std.AutoHashMap(LoadedModelId, *Model).init(allocator),
             .shadow_map_texture = shadow_map_texture,
             .shadow_map_depth_texture = shadow_map_depth_texture,
+
+            .uv_test_texture = uv_test_texture,
+            .regular_bind_group_for_uv_test = regular_bind_group_for_uv_test,
+
             .active_scene = null,
             .input_controller = input_controller,
 
@@ -325,6 +360,7 @@ pub const Engine = struct {
         }
 
         engine.models_hash.deinit();
+        engine.regular_bind_group_for_uv_test.deinit(engine.gctx);
         engine.bind_group_definitions.deinit();
         engine.input_controller.deinit();
         engine.allocator.free(engine.content_dir);
@@ -534,6 +570,9 @@ pub const Engine = struct {
                 model_descriptor.texcoord.applyVertexBuffer(pass, 2);
                 model_descriptor.index.applyIndexBuffer(pass);
             },
+            .terrain_height_map_model => {
+                pass.setPipeline(engine.pipelines.terrain_height_map.pipeline_gpu);
+            },
             .window_box_model => |window_box_model| {
                 pass.setPipeline(engine.pipelines.window_box.pipeline_gpu);
 
@@ -671,6 +710,18 @@ pub const Engine = struct {
 
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
             },
+            .terrain_height_map_model => |model| {
+                pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{
+                    object_to_clip_uniform.offset,
+                    camera_position_in_model_space_uniform.offset,
+                });
+                pass.setBindGroup(1, engine.bind_group_shadow_map.wgpu_bind_group, &.{
+                    object_to_light_clip_array_uniform.offset,
+                });
+
+                // TODO: make customizable (44)
+                pass.draw(44, 1, 0, 0);
+            },
             .window_box_model => |window_box_model| {
                 pass.setBindGroup(0, window_box_model.bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
@@ -775,6 +826,11 @@ pub const Engine = struct {
                 model_descriptor.position.applyVertexBuffer(pass, 0);
                 model_descriptor.index.applyIndexBuffer(pass);
             },
+            .terrain_height_map_model => {
+                // nothing to do
+                // TODO: can't be rendered because shadow map relies on vertex data
+                return;
+            },
             .window_box_model => |window_box_model| {
                 const model_descriptor = window_box_model.model_descriptor;
                 model_descriptor.position.applyVertexBuffer(pass, 0);
@@ -814,6 +870,10 @@ pub const Engine = struct {
         switch (game_object.model) {
             .regular_model => |model| {
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
+            },
+            .terrain_height_map_model => {
+                // TODO: make customizable (44)
+                pass.draw(44, 1, 0, 0);
             },
             .window_box_model => |window_box_model| {
                 pass.draw(window_box_model.model_descriptor.position.elements_count, 1, 0, 0);
@@ -865,7 +925,11 @@ pub const Engine = struct {
             engine.allocator,
             loader,
             object,
-            options,
+            .{
+                .billboard_mode = options.billboard_mode,
+                .mesh_y_up = options.mesh_y_up,
+                .color_texture_fallback = options.color_texture_fallback orelse &engine.uv_test_texture,
+            },
         );
 
         const bind_group = try engine.bind_group_definitions.regular.createBindGroup(

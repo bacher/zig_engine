@@ -5,6 +5,7 @@ const Engine = @import("./engine.zig").Engine;
 const GameObject = @import("./game_object.zig").GameObject;
 const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;
 const WindowBoxModel = @import("./model.zig").WindowBoxModel;
+const TerrainHeightMapModel = @import("./model.zig").TerrainHeightMapModel;
 const SkyBoxModel = @import("./model.zig").SkyBoxModel;
 const SkyBoxCubemapModel = @import("./model.zig").SkyBoxCubemapModel;
 const PrimitiveModel = @import("./model.zig").PrimitiveModel;
@@ -110,6 +111,28 @@ pub const Scene = struct {
         }
     }
 
+    pub fn addTerrainHeightMapObject(scene: *Scene, params: AddTerrainHeightMapObjectParams) !*GameObject {
+        const terrain_height_map_model = try scene.allocator.create(TerrainHeightMapModel);
+        errdefer scene.allocator.destroy(terrain_height_map_model);
+        terrain_height_map_model.* = .{
+            .bind_group = scene.engine.regular_bind_group_for_uv_test,
+        };
+
+        const game_object = try GameObject.init(scene.allocator, .{
+            .model = .{
+                .terrain_height_map_model = terrain_height_map_model,
+            },
+            .position = params.position,
+            .parent = params.parent,
+            .space_tree = scene.space_tree,
+        });
+        errdefer game_object.deinit();
+
+        try scene.game_objects.append(scene.allocator, game_object);
+
+        return game_object;
+    }
+
     // TODO: deduplicate with addObject
     pub fn addWindowBoxObject(scene: *Scene, params: AddWindowBoxParams) !*GameObject {
         const game_object = try GameObject.init(scene.allocator, .{
@@ -196,6 +219,11 @@ pub const AddObjectParams = struct {
     model_id: Engine.LoadedModelId,
     position: [3]f32,
     parent: ?*GameObjectGroup,
+};
+
+pub const AddTerrainHeightMapObjectParams = struct {
+    position: [3]f32,
+    parent: ?*GameObjectGroup = null,
 };
 
 pub const AddWindowBoxParams = struct {
