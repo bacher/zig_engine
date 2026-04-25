@@ -27,6 +27,7 @@ const debug_texture_pipeline_module = @import("./pipelines/debug_texture_pipelin
 const BindGroup = @import("./bind_group.zig").BindGroup;
 // -- bind groups definitions --
 const RegularBindGroupDefinition = @import("./bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
+const TerrainHeightMapBindGroupDefinition = @import("./bind_groups_defs/terrain_height_map_bind_group.zig").TerrainHeightMapBindGroupDefinition;
 const PrimitiveColorizedBindGroupDefinition = @import("./bind_groups_defs/primitive_bind_group.zig").PrimitiveColorizedBindGroupDefinition;
 const ShadowMapPassBindGroupDefinition = @import("./bind_groups_defs/shadow_map_pass_bind_group.zig").ShadowMapPassBindGroupDefinition;
 const ShadowMapBindGroupDefinition = @import("./bind_groups_defs/shadow_map_bind_group.zig").ShadowMapBindGroupDefinition;
@@ -88,6 +89,7 @@ pub const Engine = struct {
     const BindGroupDefinitions = struct {
         regular: RegularBindGroupDefinition,
         cubemap: RegularBindGroupDefinition,
+        terrain_height_map: TerrainHeightMapBindGroupDefinition,
         primitive_colorized: PrimitiveColorizedBindGroupDefinition,
         shadow_map_pass: ShadowMapPassBindGroupDefinition,
         shadow_map: ShadowMapBindGroupDefinition,
@@ -97,6 +99,7 @@ pub const Engine = struct {
         fn deinit(definitions: *BindGroupDefinitions) void {
             definitions.regular.deinit();
             definitions.cubemap.deinit();
+            definitions.terrain_height_map.deinit();
             definitions.primitive_colorized.deinit();
             definitions.shadow_map_pass.deinit();
             definitions.shadow_map.deinit();
@@ -201,6 +204,7 @@ pub const Engine = struct {
         const bind_group_definitions: BindGroupDefinitions = .{
             .regular = RegularBindGroupDefinition.init(gctx, .tvdim_2d),
             .cubemap = RegularBindGroupDefinition.init(gctx, .tvdim_cube),
+            .terrain_height_map = TerrainHeightMapBindGroupDefinition.init(gctx, .tvdim_2d),
             .primitive_colorized = PrimitiveColorizedBindGroupDefinition.init(gctx),
             .shadow_map_pass = ShadowMapPassBindGroupDefinition.init(gctx),
             .shadow_map = ShadowMapBindGroupDefinition.init(gctx),
@@ -248,8 +252,7 @@ pub const Engine = struct {
         );
         const terrain_height_map_pipeline = try terrain_height_map_pipeline_module.createTerrainHeightMapPipeline(
             gctx,
-            // TODO: ???
-            bind_group_definitions.regular,
+            bind_group_definitions.terrain_height_map,
             bind_group_definitions.shadow_map,
         );
         const shadow_map_pipeline = try shadow_map_pipeline_module.createShadowMapPipeline(
@@ -281,6 +284,7 @@ pub const Engine = struct {
 
         var uv_test_image = try gltf_loader.StbiWrapper.loadTextureData(
             allocator,
+            // "content/terrain/mountain-range/diffuse_1-2.png",
             "content/uv-test.png",
         );
         defer uv_test_image.deinit();
@@ -289,12 +293,26 @@ pub const Engine = struct {
             gctx,
             allocator,
             uv_test_image,
-            .{ .generate_mipmaps = uv_test_image.width == uv_test_image.height },
+            .{ .generate_mipmaps = false },
         );
 
-        const regular_bind_group_for_uv_test = try bind_group_definitions.regular.createBindGroup(
+        var terrain_depth_map_image = try gltf_loader.StbiWrapper.loadTextureData(
+            allocator,
+            "content/terrain/mountain-range/height-map-8bit_1-2.png",
+        );
+        defer terrain_depth_map_image.deinit();
+
+        const terrain_depth_map_texture = try load_texture.loadTextureIntoGpu(
+            gctx,
+            allocator,
+            terrain_depth_map_image,
+            .{ .generate_mipmaps = false },
+        );
+
+        const regular_bind_group_for_uv_test = try bind_group_definitions.terrain_height_map.createBindGroup(
             texture_repeat_sampler,
             uv_test_texture,
+            terrain_depth_map_texture,
         );
 
         const engine = try allocator.create(Engine);
@@ -720,7 +738,7 @@ pub const Engine = struct {
                 });
 
                 // TODO: make customizable (44)
-                pass.draw(44, 1, 0, 0);
+                pass.draw(48, 1, 0, 0);
             },
             .window_box_model => |window_box_model| {
                 pass.setBindGroup(0, window_box_model.bind_group.wgpu_bind_group, &.{
@@ -873,7 +891,7 @@ pub const Engine = struct {
             },
             .terrain_height_map_model => {
                 // TODO: make customizable (44)
-                pass.draw(44, 1, 0, 0);
+                pass.draw(48, 1, 0, 0);
             },
             .window_box_model => |window_box_model| {
                 pass.draw(window_box_model.model_descriptor.position.elements_count, 1, 0, 0);

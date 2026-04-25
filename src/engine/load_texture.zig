@@ -19,6 +19,14 @@ pub fn loadTextureIntoGpu(
         .generate_mipmaps = false,
     };
 
+    // std.debug.print("image info: {}\nimage.height: {}\nimage.num_components: {}\nimage.bytes_per_component: {}\nimage.is_hdr: {}\n", .{
+    //     image.width,
+    //     image.height,
+    //     image.num_components,
+    //     image.bytes_per_component,
+    //     image.is_hdr,
+    // });
+
     const texture_handle = gctx.createTexture(.{
         .usage = .{
             .texture_binding = true,
