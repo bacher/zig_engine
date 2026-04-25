@@ -737,8 +737,8 @@ pub const Engine = struct {
                     object_to_light_clip_array_uniform.offset,
                 });
 
-                // TODO: make customizable (44)
-                pass.draw(160, 1, 0, 0);
+                // TODO: make customizable
+                pass.draw(getTerrainHeightMapElementsCountForSide(64), 1, 0, 0);
             },
             .window_box_model => |window_box_model| {
                 pass.setBindGroup(0, window_box_model.bind_group.wgpu_bind_group, &.{
@@ -890,8 +890,8 @@ pub const Engine = struct {
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
             },
             .terrain_height_map_model => {
-                // TODO: make customizable (44)
-                pass.draw(160, 1, 0, 0);
+                // TODO: make customizable
+                pass.draw(getTerrainHeightMapElementsCountForSide(64), 1, 0, 0);
             },
             .window_box_model => |window_box_model| {
                 pass.draw(window_box_model.model_descriptor.position.elements_count, 1, 0, 0);
@@ -1164,4 +1164,8 @@ fn getLightClipMatrixArray(gctx: *zgpu.GraphicsContext, light: *const Directiona
     // have the same underlaying types.
     // Zig can't understand that they are the same and will complain about it.
     return .{ .slice = uniform.slice, .offset = uniform.offset };
+}
+
+fn getTerrainHeightMapElementsCountForSide(side: u32) u32 {
+    return (side * 2 + 4) * side;
 }

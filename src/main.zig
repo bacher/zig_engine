@@ -102,9 +102,10 @@ pub fn main() !void {
     // -- Terrain height map --
 
     const terrain = try scene.addTerrainHeightMapObject(.{
-        .position = .{ 0, 0, 0 },
+        .position = .{ 0, 0, 2.0 },
     });
-    _ = terrain;
+    terrain.setScale(4);
+    // _ = terrain;
 
     // -- Skybox (old) --
 

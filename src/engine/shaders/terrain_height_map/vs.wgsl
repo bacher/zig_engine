@@ -73,7 +73,7 @@ const positions = array(
 @vertex fn main(
     @builtin(vertex_index) vertex_index: u32,
 ) -> VertexOut {
-    let side: u32 = 8;
+    let side: u32 = 64;
     let side_inv: f32 = 1.0 / f32(side);
     let count: u32 = (side * 2 + 4) * 2;
     let count_2 = count / 2;
@@ -82,7 +82,7 @@ const positions = array(
     let b: u32 = vertex_index % count;
     let c = b % count_2;
     let d = b / count_2;
-    
+
     let middle = f32(count_2 - 1) / 2.0;
     let near_end_1 = f32(count_2) - 1.5;
     let near_end_2 = f32(count_2 - 2);
