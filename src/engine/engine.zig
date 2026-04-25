@@ -738,7 +738,7 @@ pub const Engine = struct {
                 });
 
                 // TODO: make customizable (44)
-                pass.draw(48, 1, 0, 0);
+                pass.draw(160, 1, 0, 0);
             },
             .window_box_model => |window_box_model| {
                 pass.setBindGroup(0, window_box_model.bind_group.wgpu_bind_group, &.{
@@ -891,7 +891,7 @@ pub const Engine = struct {
             },
             .terrain_height_map_model => {
                 // TODO: make customizable (44)
-                pass.draw(48, 1, 0, 0);
+                pass.draw(160, 1, 0, 0);
             },
             .window_box_model => |window_box_model| {
                 pass.draw(window_box_model.model_descriptor.position.elements_count, 1, 0, 0);

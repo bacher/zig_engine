@@ -73,16 +73,25 @@ const positions = array(
 @vertex fn main(
     @builtin(vertex_index) vertex_index: u32,
 ) -> VertexOut {
-    let a: u32 = vertex_index / 24;
-    let b: u32 = vertex_index % 24;
-    let c = b % 12;
-    let d = b / 12;
+    let side: u32 = 8;
+    let side_inv: f32 = 1.0 / f32(side);
+    let count: u32 = (side * 2 + 4) * 2;
+    let count_2 = count / 2;
+
+    let a: u32 = vertex_index / count;
+    let b: u32 = vertex_index % count;
+    let c = b % count_2;
+    let d = b / count_2;
+    
+    let middle = f32(count_2 - 1) / 2.0;
+    let near_end_1 = f32(count_2) - 1.5;
+    let near_end_2 = f32(count_2 - 2);
 
     // let center = abs(f32(b) - 9.5);
     // let x = max(4 - floor(center * 0.5), 0);
     // let y = min(floor(center) % 2 + floor(f32(b) * 0.1), 2) + f32(a * 2);
 
-    let x = max(0, min(4, floor(5.25 - abs((f32(b) - 10.5) / 2))));
+    let x = max(0, min(f32(side), floor(middle - abs((f32(b) - near_end_1) / 2))));
     
     // There're two ways:
     // 1. to do all math in f32
@@ -91,18 +100,18 @@ const positions = array(
     // which one is more performant?
 
     // let y = min(f32(d + 1), f32((b + d + 1) % 2) + step(10.0, f32(c)) + f32(d)) + f32(a * 2);
-    let y = f32(min(d + 1, (b + d + 1) % 2 + u32(step(10.0, f32(c))) + d) + a * 2);
+    let y = f32(min(d + 1, (b + d + 1) % 2 + u32(step(near_end_2, f32(c))) + d) + a * 2);
 
     // let x = positions[b].x;
     // let y = positions[b].y + f32(a * 2);
 
     // -- z --
-    let uv = vec2f(x * 0.25, 1 - y * 0.25);
+    let uv = vec2f(x * side_inv, 1 - y * side_inv);
     let depth = textureSampleLevel(depth_texture, depth_texture_sampler, uv, 0).r;
 
     let position4 = vec4(
-        x * 0.5 - 1,
-        y * 0.5 - 1,
+        x * side_inv * 2 - 1,
+        y * side_inv * 2 - 1,
         depth,
         1.0,
     );
@@ -112,6 +121,6 @@ const positions = array(
     output.position_light_clip_0 = position4 * object_to_light_clip_array[0];
     output.position_light_clip_1 = position4 * object_to_light_clip_array[1];
     output.position_light_clip_2 = position4 * object_to_light_clip_array[2];
-    output.texcoord = vec2f(x * 0.25, 1 - y * 0.25);
+    output.texcoord = uv;
     return output;
 }
