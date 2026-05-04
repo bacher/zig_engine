@@ -313,6 +313,7 @@ pub const Engine = struct {
         var gradient_rough_image = try gltf_loader.StbiWrapper.loadTextureData(
             allocator,
             "content/masks/gradient-rough.jpg",
+            // "content/masks/radial.jpg",
             .{},
         );
         defer gradient_rough_image.deinit();
@@ -764,9 +765,13 @@ pub const Engine = struct {
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
             },
             .terrain_height_map_model => |model| {
+                const time_uniform = engine.gctx.uniformsAllocate(u32, 1);
+                time_uniform.slice[0] = @intFromFloat(engine.time * 1000);
+
                 pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
                     camera_position_in_model_space_uniform.offset,
+                    time_uniform.offset,
                 });
                 pass.setBindGroup(1, engine.bind_group_shadow_map.wgpu_bind_group, &.{
                     object_to_light_clip_array_uniform.offset,

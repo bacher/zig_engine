@@ -4,24 +4,45 @@
 
 @group(0) @binding(5) var mixing_texture: texture_2d<f32>;
 @group(0) @binding(6) var color_texture_2: texture_2d<f32>;
+@group(0) @binding(7) var<uniform> time_ms: u32;
 
 // shadow map bind group
 @group(1) @binding(1) var shadow_map_texture: texture_2d_array<f32>;
 @group(1) @binding(2) var shadow_map_texture_sampler: sampler;
+
+// const bayer_pattern = array(
+//     array(0.0, 8.0, 2.0, 10.0),
+//     array(12.0, 4.0, 14.0, 6.0),
+//     array(3.0, 11.0, 1.0, 9.0),
+//     array(15.0, 7.0, 13.0, 5.0),
+// ) + 1 / 17.0; => 
+const bayer_pattern = array(
+    array(0.058823529411764705, 0.5294117647058824, 0.17647058823529413, 0.6470588235294118),
+    array(0.7647058823529411, 0.29411764705882354, 0.8823529411764706, 0.4117647058823529),
+    array(0.23529411764705882, 0.7058823529411765, 0.11764705882352941, 0.5882352941176471),
+    array(0.9411764705882353, 0.47058823529411764, 0.8235294117647058, 0.35294117647058826),
+);
+
+const bayer_size = vec2(4, 4);
 
 @fragment fn main(
     @location(0) uv: vec2<f32>,
     @location(1) position_light_clip_0: vec4<f32>,
     @location(2) position_light_clip_1: vec4<f32>,
     @location(3) position_light_clip_2: vec4<f32>,
+    @builtin(position) frag_coord: vec4<f32>,
 ) -> @location(0) vec4<f32> {
+    let pixel = vec2u(floor(frag_coord.xy)); // integer pixel index
+    let bayer = pixel % bayer_size;
+    let bayer_value = bayer_pattern[bayer.x][bayer.y];
+    
     var mask = textureSample(mixing_texture, texture_sampler, uv);
 
     let dx = dpdx(uv);
     let dy = dpdy(uv);
 
     var color: vec4<f32>;
-    if (mask.r > 0.5) {
+    if (mask.r > bayer_value) {
         color = textureSampleGrad(color_texture_2, texture_sampler, uv, dx, dy);
     } else {
         color = textureSampleGrad(color_texture, texture_sampler, uv, dx, dy);

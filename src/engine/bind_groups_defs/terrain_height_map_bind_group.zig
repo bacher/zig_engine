@@ -69,6 +69,14 @@ pub const TerrainHeightMapBindGroupDefinition = struct {
                 .tvdim_2d,
                 false,
             ),
+            // time (ms)
+            zgpu.bufferEntry(
+                7,
+                .{ .fragment = true },
+                .uniform,
+                true,
+                0,
+            ),
         });
 
         return .{
@@ -138,6 +146,14 @@ pub const TerrainHeightMapBindGroupDefinition = struct {
                 .{
                     .binding = 6,
                     .texture_view_handle = texture_2.view_handle,
+                },
+
+                // time (ms)
+                .{
+                    .binding = 7,
+                    .buffer_handle = gctx.uniforms.buffer,
+                    .offset = 0,
+                    .size = @sizeOf(u32),
                 },
             },
         );
