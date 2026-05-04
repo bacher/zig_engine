@@ -2,7 +2,7 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
 const wgsl_vs = @embedFile("../shaders/terrain_height_map/vs.wgsl");
-const wgsl_fs = @embedFile("../shaders/basic/fs.wgsl");
+const wgsl_fs = @embedFile("../shaders/terrain_height_map/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
 const TerrainHeightMapBindGroupDefinition = @import("../bind_groups_defs/terrain_height_map_bind_group.zig").TerrainHeightMapBindGroupDefinition;

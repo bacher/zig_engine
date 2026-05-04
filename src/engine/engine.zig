@@ -204,7 +204,7 @@ pub const Engine = struct {
         const bind_group_definitions: BindGroupDefinitions = .{
             .regular = RegularBindGroupDefinition.init(gctx, .tvdim_2d),
             .cubemap = RegularBindGroupDefinition.init(gctx, .tvdim_cube),
-            .terrain_height_map = TerrainHeightMapBindGroupDefinition.init(gctx, .tvdim_2d),
+            .terrain_height_map = TerrainHeightMapBindGroupDefinition.init(gctx),
             .primitive_colorized = PrimitiveColorizedBindGroupDefinition.init(gctx),
             .shadow_map_pass = ShadowMapPassBindGroupDefinition.init(gctx),
             .shadow_map = ShadowMapBindGroupDefinition.init(gctx),
@@ -284,7 +284,6 @@ pub const Engine = struct {
 
         var uv_test_image = try gltf_loader.StbiWrapper.loadTextureData(
             allocator,
-            // "content/terrain/mountain-range/diffuse_1-2.png",
             "content/uv-test.png",
             .{},
         );
@@ -294,7 +293,35 @@ pub const Engine = struct {
             gctx,
             allocator,
             uv_test_image,
-            .{ .generate_mipmaps = false },
+            .{ .generate_mipmaps = false }, // TODO: set true, maybe???
+        );
+
+        var mountains_image = try gltf_loader.StbiWrapper.loadTextureData(
+            allocator,
+            "content/terrain/mountain-range/diffuse_1-2.png",
+            .{},
+        );
+        defer mountains_image.deinit();
+
+        const mountains_texture = try load_texture.loadTextureIntoGpu(
+            gctx,
+            allocator,
+            mountains_image,
+            .{ .generate_mipmaps = false }, // TODO: why mipmaps fails?
+        );
+
+        var gradient_rough_image = try gltf_loader.StbiWrapper.loadTextureData(
+            allocator,
+            "content/masks/gradient-rough.jpg",
+            .{},
+        );
+        defer gradient_rough_image.deinit();
+
+        const gradient_rough_texture = try load_texture.loadTextureIntoGpu(
+            gctx,
+            allocator,
+            gradient_rough_image,
+            .{ .generate_mipmaps = true },
         );
 
         var terrain_depth_map_image = try gltf_loader.StbiWrapper.loadTextureData(
@@ -317,8 +344,10 @@ pub const Engine = struct {
 
         const regular_bind_group_for_uv_test = try bind_group_definitions.terrain_height_map.createBindGroup(
             texture_repeat_sampler,
-            uv_test_texture,
+            mountains_texture,
             terrain_depth_map_texture,
+            gradient_rough_texture,
+            uv_test_texture,
         );
 
         const engine = try allocator.create(Engine);

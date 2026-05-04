@@ -13,7 +13,6 @@ pub const TerrainHeightMapBindGroupDefinition = struct {
 
     pub fn init(
         gctx: *zgpu.GraphicsContext,
-        texture_view_dimension: wgpu.TextureViewDimension,
     ) TerrainHeightMapBindGroupDefinition {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
             // transform matrix
@@ -37,7 +36,7 @@ pub const TerrainHeightMapBindGroupDefinition = struct {
                 2,
                 .{ .fragment = true },
                 .float,
-                texture_view_dimension,
+                .tvdim_2d,
                 false, // TODO: What does `multisampled` mean?
             ),
             // sampler
@@ -49,9 +48,25 @@ pub const TerrainHeightMapBindGroupDefinition = struct {
             // height map texture
             zgpu.textureEntry(
                 4,
-                .{ .fragment = true, .vertex = true },
+                .{ .vertex = true },
                 .uint,
-                texture_view_dimension,
+                .tvdim_2d,
+                false,
+            ),
+            // mixing texture
+            zgpu.textureEntry(
+                5,
+                .{ .fragment = true },
+                .float,
+                .tvdim_2d,
+                false,
+            ),
+            // texture 2
+            zgpu.textureEntry(
+                6,
+                .{ .fragment = true },
+                .float,
+                .tvdim_2d,
                 false,
             ),
         });
@@ -71,6 +86,8 @@ pub const TerrainHeightMapBindGroupDefinition = struct {
         sampler: zgpu.SamplerHandle,
         color_texture: TextureDescriptor,
         depth_map_texture: TextureDescriptor,
+        mixing_texture: TextureDescriptor,
+        texture_2: TextureDescriptor,
     ) !BindGroup {
         const gctx = bind_group_definition.gctx;
 
@@ -109,6 +126,18 @@ pub const TerrainHeightMapBindGroupDefinition = struct {
                 .{
                     .binding = 4,
                     .texture_view_handle = depth_map_texture.view_handle,
+                },
+
+                // mixing texture
+                .{
+                    .binding = 5,
+                    .texture_view_handle = mixing_texture.view_handle,
+                },
+
+                // texture 2
+                .{
+                    .binding = 6,
+                    .texture_view_handle = texture_2.view_handle,
                 },
             },
         );
