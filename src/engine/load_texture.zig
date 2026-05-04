@@ -1,12 +1,14 @@
 const std = @import("std");
 
 const zgpu = @import("zgpu");
+const wgpu = zgpu.wgpu;
 const zstbi = @import("zstbi");
 
 const TextureDescriptor = @import("./types.zig").TextureDescriptor;
 
 pub const LoadTextureOptions = struct {
     generate_mipmaps: bool = false,
+    format: ?wgpu.TextureFormat = null,
 };
 
 pub fn loadTextureIntoGpu(
@@ -15,17 +17,7 @@ pub fn loadTextureIntoGpu(
     image: zstbi.Image,
     options_maybe: ?LoadTextureOptions,
 ) !TextureDescriptor {
-    const options: LoadTextureOptions = options_maybe orelse .{
-        .generate_mipmaps = false,
-    };
-
-    // std.debug.print("image info: {}\nimage.height: {}\nimage.num_components: {}\nimage.bytes_per_component: {}\nimage.is_hdr: {}\n", .{
-    //     image.width,
-    //     image.height,
-    //     image.num_components,
-    //     image.bytes_per_component,
-    //     image.is_hdr,
-    // });
+    const options: LoadTextureOptions = options_maybe orelse .{};
 
     const texture_handle = gctx.createTexture(.{
         .usage = .{
@@ -38,7 +30,7 @@ pub fn loadTextureIntoGpu(
             .height = image.height,
             .depth_or_array_layers = 1,
         },
-        .format = zgpu.imageInfoToTextureFormat(
+        .format = options.format orelse zgpu.imageInfoToTextureFormat(
             image.num_components,
             image.bytes_per_component,
             image.is_hdr,

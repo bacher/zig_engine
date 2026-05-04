@@ -50,15 +50,9 @@ pub const TerrainHeightMapBindGroupDefinition = struct {
             zgpu.textureEntry(
                 4,
                 .{ .fragment = true, .vertex = true },
-                .float,
+                .uint,
                 texture_view_dimension,
                 false,
-            ),
-            // height map texture sampler
-            zgpu.samplerEntry(
-                5,
-                .{ .fragment = true, .vertex = true },
-                .filtering,
             ),
         });
 
@@ -115,12 +109,6 @@ pub const TerrainHeightMapBindGroupDefinition = struct {
                 .{
                     .binding = 4,
                     .texture_view_handle = depth_map_texture.view_handle,
-                },
-
-                // height map texture sampler
-                .{
-                    .binding = 5,
-                    .sampler_handle = sampler,
                 },
             },
         );

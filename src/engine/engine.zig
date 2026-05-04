@@ -286,6 +286,7 @@ pub const Engine = struct {
             allocator,
             // "content/terrain/mountain-range/diffuse_1-2.png",
             "content/uv-test.png",
+            .{},
         );
         defer uv_test_image.deinit();
 
@@ -298,7 +299,8 @@ pub const Engine = struct {
 
         var terrain_depth_map_image = try gltf_loader.StbiWrapper.loadTextureData(
             allocator,
-            "content/terrain/mountain-range/height-map-8bit_1-2.png",
+            "content/terrain/rocky-land-and-rivers/height-map.png",
+            .{ .forced_num_components = 1 },
         );
         defer terrain_depth_map_image.deinit();
 
@@ -306,7 +308,11 @@ pub const Engine = struct {
             gctx,
             allocator,
             terrain_depth_map_image,
-            .{ .generate_mipmaps = false },
+            .{
+                .generate_mipmaps = false,
+                // https://github.com/zig-gamedev/zgpu/blob/main/src/wgpu.zig#L480
+                .format = .r16_uint,
+            },
         );
 
         const regular_bind_group_for_uv_test = try bind_group_definitions.terrain_height_map.createBindGroup(

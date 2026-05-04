@@ -1,6 +1,6 @@
 @group(0) @binding(0) var<uniform> object_to_clip: mat4x4<f32>;
-@group(0) @binding(4) var depth_texture: texture_2d<f32>;
-@group(0) @binding(5) var depth_texture_sampler: sampler;
+// @group(0) @binding(4) var depth_texture: texture_2d<f32>;
+@group(0) @binding(4) var depth_texture: texture_2d<u32>;
 
 @group(1) @binding(0) var<uniform> object_to_light_clip_array: array<mat4x4<f32>, 3>;
 
@@ -107,7 +107,10 @@ const positions = array(
 
     // -- z --
     let uv = vec2f(x * side_inv, 1 - y * side_inv);
-    let depth = textureSampleLevel(depth_texture, depth_texture_sampler, uv, 0).r;
+    // let depth = textureSampleLevel(depth_texture, depth_texture_sampler, uv, 0).r;
+    let texture_size = textureDimensions(depth_texture);
+    let depth_coord = vec2u(min(vec2f(texture_size - vec2u(1)), uv * vec2f(texture_size)));
+    let depth = f32(textureLoad(depth_texture, depth_coord, 0).r) / 65535.0;
 
     let position4 = vec4(
         x * side_inv * 2 - 1,
