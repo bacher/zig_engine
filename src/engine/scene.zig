@@ -112,15 +112,9 @@ pub const Scene = struct {
     }
 
     pub fn addTerrainHeightMapObject(scene: *Scene, params: AddTerrainHeightMapObjectParams) !*GameObject {
-        const terrain_height_map_model = try scene.allocator.create(TerrainHeightMapModel);
-        errdefer scene.allocator.destroy(terrain_height_map_model);
-        terrain_height_map_model.* = .{
-            .bind_group = scene.engine.regular_bind_group_for_uv_test,
-        };
-
         const game_object = try GameObject.init(scene.allocator, .{
             .model = .{
-                .terrain_height_map_model = terrain_height_map_model,
+                .terrain_height_map_model = params.model,
             },
             .position = params.position,
             .parent = params.parent,
@@ -222,6 +216,7 @@ pub const AddObjectParams = struct {
 };
 
 pub const AddTerrainHeightMapObjectParams = struct {
+    model: *TerrainHeightMapModel,
     position: [3]f32,
     parent: ?*GameObjectGroup = null,
 };

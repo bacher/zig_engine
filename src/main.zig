@@ -105,7 +105,13 @@ pub fn main(init: std.process.Init) !void {
 
     // -- Terrain height map --
 
+    const terrain_height_map_model = try engine.createTerrainHeightMapModel(.{
+        .bind_group = engine.regular_bind_group_for_uv_test,
+    });
+    defer allocator.destroy(terrain_height_map_model);
+
     const terrain = try scene.addTerrainHeightMapObject(.{
+        .model = terrain_height_map_model,
         .position = .{ 0, 0, 2.0 },
     });
     terrain.setScale(4);

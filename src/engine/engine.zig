@@ -49,6 +49,7 @@ const SkyBoxCubemapModel = @import("./model.zig").SkyBoxCubemapModel;
 const WindowBoxModel = @import("./model.zig").WindowBoxModel;
 const PrimitiveModel = @import("./model.zig").PrimitiveModel;
 const CubeWireframeModel = @import("./model.zig").CubeWireframeModel;
+const TerrainHeightMapModel = @import("./model.zig").TerrainHeightMapModel;
 // -- other --
 const PrimitiveDescriptor = @import("./display_object_descriptors/primitive_descriptor.zig").PrimitiveDescriptor;
 const GeometryData = @import("./shape_generation/geometry_data.zig").GeometryData;
@@ -1017,6 +1018,20 @@ pub const Engine = struct {
         Engine.next_loaded_model_id += 1;
 
         return loaded_model_id;
+    }
+
+    pub const CreateTerrainHeightMapDescriptorParams = struct { bind_group: BindGroup };
+
+    pub fn createTerrainHeightMapModel(
+        engine: *const Engine,
+        options: CreateTerrainHeightMapDescriptorParams,
+    ) !*TerrainHeightMapModel {
+        const terrain_height_map_model = try engine.allocator.create(TerrainHeightMapModel);
+        errdefer engine.allocator.destroy(terrain_height_map_model);
+        terrain_height_map_model.* = .{
+            .bind_group = options.bind_group,
+        };
+        return terrain_height_map_model;
     }
 
     pub fn loadSkyBoxModel(engine: *Engine, texture_filename: []const u8) !*SkyBoxModel {
