@@ -10,6 +10,41 @@
 @group(1) @binding(1) var shadow_map_texture: texture_2d_array<f32>;
 @group(1) @binding(2) var shadow_map_texture_sampler: sampler;
 
+fn hash1(p: u32, seed: u32) -> u32 {
+    var h = p * 374761393u + seed * 1442695041u;
+    h = (h ^ (h >> 13u)) * 1274126177u;
+    return h ^ (h >> 16u);
+}
+
+fn hash2(p: vec2u, seed: u32) -> u32 {
+    var h = p.x * 374761393u + p.y * 668265263u + seed * 1442695041u;
+    h = (h ^ (h >> 13u)) * 1274126177u;
+    return h ^ (h >> 16u);
+}
+
+fn rand01(p: vec2u, seed: u32) -> f32 {
+    return f32(hash2(p, seed) & 0x00ffffffu) / f32(0x01000000u);
+}
+
+fn rand01_hash1(p: u32, seed: u32) -> f32 {
+    return f32(hash1(p, seed) & 0x00ffffffu) / f32(0x01000000u);
+}
+
+// example of complex use: hash_u32(pixel.x ^ hash_u32(pixel.y) ^ hash_u32(time_ms));
+fn hash_u32(x: u32) -> u32 {
+    var h = x;
+    h ^= h >> 16u;
+    h *= 0x7feb352du;
+    h ^= h >> 15u;
+    h *= 0x846ca68bu;
+    h ^= h >> 16u;
+    return h;
+}
+
+fn rand01_hash_u32(p: u32) -> f32 {
+    return f32(hash_u32(p) & 0x00ffffffu) / f32(0x01000000u);
+}
+
 // const bayer_pattern = array(
 //     array(0.0, 8.0, 2.0, 10.0),
 //     array(12.0, 4.0, 14.0, 6.0),
@@ -32,9 +67,37 @@ const bayer_size = vec2(4, 4);
     @location(3) position_light_clip_2: vec4<f32>,
     @builtin(position) frag_coord: vec4<f32>,
 ) -> @location(0) vec4<f32> {
+    let seed: u32 = time_ms / 256;
+    // let seed: u32 = 0u;
     let pixel = vec2u(floor(frag_coord.xy)); // integer pixel index
-    let bayer = pixel % bayer_size;
+
+    // Variant 1: Static bayer pattern (dithering)
+    // let bayer = pixel % bayer_size;
+    // let bayer_value = bayer_pattern[bayer.x][bayer.y];
+
+    // Variant 2: Dynamic (shifting) bayer pattern (dithering)
+    let bayer = (pixel + vec2u(seed, seed)) % bayer_size;
     let bayer_value = bayer_pattern[bayer.x][bayer.y];
+
+    // Variant 3: Dynamic bayer pattern (dithering)
+    // let bayer = (pixel + (vec2u(hash1(pixel.x, seed), hash1(pixel.y, seed)) % bayer_size)) % bayer_size;
+    // let h = hash2(pixel, seed);
+    // let x = h & 3u;
+    // let y = (h >> 2u) & 3u;
+    // leds to grid pattern:
+    // So every pixel in the same vertical column gets the same x, and every pixel in the same
+    // horizontal row gets the same y. The final lookup combines one column-random value with one
+    // row-random value, which creates grid-like vertical/horizontal correlation instead of
+    // independent per-pixel randomness.
+    // let x = u32(floor(rand01_hash_u32(pixel.x) * 4.0) % 4);
+    // let y = u32(floor(rand01_hash_u32(pixel.y) * 4.0) % 4);
+    // let bayer_value = bayer_pattern[x][y];
+
+    // Variant 4: Static noise pattern
+    // let bayer_value = rand01(pixel, 893632u);
+
+    // Variant 5: Dynamic noise pattern
+    // let bayer_value = rand01(pixel, time_ms);
     
     var mask = textureSample(mixing_texture, texture_sampler, uv);
 
