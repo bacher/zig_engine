@@ -49,7 +49,7 @@ pub fn SpaceTree(comptime ElementType: type) type {
     return struct {
         const This = @This();
         const ThisSpaceNode = SpaceNode(ElementType);
-        const ObjectsHashMap = std.AutoArrayHashMap(*const ElementType, bool);
+        const ObjectsHashMap = std.array_hash_map.Auto(*const ElementType, bool);
 
         allocator: std.mem.Allocator,
         grid: [GRID_DIMENSTION][GRID_DIMENSTION]*ThisSpaceNode,
@@ -60,10 +60,10 @@ pub fn SpaceTree(comptime ElementType: type) type {
             space_tree_ptr.* = .{
                 .allocator = allocator,
                 .grid = undefined,
-                .objects = ObjectsHashMap.init(allocator),
+                .objects = .empty,
             };
-            errdefer space_tree_ptr.objects.deinit();
-            try space_tree_ptr.objects.ensureTotalCapacity(1024);
+            errdefer space_tree_ptr.objects.deinit(allocator);
+            try space_tree_ptr.objects.ensureTotalCapacity(allocator, 1024);
 
             for (0..GRID_DIMENSTION) |index_y| {
                 const cell_y: i8 = @as(i8, @intCast(index_y)) - GRID_OFFSET;
@@ -102,7 +102,7 @@ pub fn SpaceTree(comptime ElementType: type) type {
         }
 
         pub fn deinit(space_tree: *This) void {
-            space_tree.objects.deinit();
+            space_tree.objects.deinit(space_tree.allocator);
 
             for (0..GRID_DIMENSTION) |index_y| {
                 for (0..GRID_DIMENSTION) |index_x| {
@@ -429,18 +429,18 @@ fn SpaceNode(comptime ElementType: type) type {
             space_node: *const ThisSpaceNode,
             allocator: std.mem.Allocator,
             bound_box: BoundBox(f32),
-            objects: *std.AutoArrayHashMap(*const ElementType, bool),
+            objects: *std.array_hash_map.Auto(*const ElementType, bool),
         ) !void {
             Debug.find_invocations_count += 1;
 
             for (space_node.contained_objects.keys()) |object| {
-                try objects.put(object, true);
+                try objects.put(allocator, object, true);
             }
 
             if (space_node.level == MAX_LEVEL) {
                 // TODO: Is it correct to assume that intersecting objects should be taken only from the max level?
                 for (space_node.intersecting_objects.keys()) |object| {
-                    try objects.put(object, true);
+                    try objects.put(allocator, object, true);
                 }
 
                 // the level does not have any children, so we can return early

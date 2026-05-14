@@ -109,6 +109,7 @@ pub const Engine = struct {
     };
 
     gctx: *zgpu.GraphicsContext,
+    io: std.Io,
     allocator: std.mem.Allocator,
     aspect_ratio: f32,
     window_context: WindowContext,
@@ -168,6 +169,7 @@ pub const Engine = struct {
     cube_wireframe_model: *CubeWireframeModel,
 
     pub fn init(
+        io: std.Io,
         allocator: std.mem.Allocator,
         window_context: WindowContext,
         content_dir: []const u8,
@@ -177,7 +179,7 @@ pub const Engine = struct {
             return error.EngineCanHaveOnlyOneInstance;
         }
 
-        zstbi.init(allocator);
+        zstbi.init(io, allocator);
 
         const gctx = window_context.gctx;
         const init_time = gctx.stats.time;
@@ -354,6 +356,7 @@ pub const Engine = struct {
         const engine = try allocator.create(Engine);
         engine.* = .{
             .allocator = allocator,
+            .io = io,
             .aspect_ratio = getAspectRatio(gctx),
             .window_context = window_context,
             .callbacks = callbacks,
@@ -476,8 +479,13 @@ pub const Engine = struct {
                         .depth_clear_value = 1.0,
                     };
 
-                    var timer = std.time.Timer.start() catch @panic("Failed to start timer");
-                    defer engine.frame_stats.shadow_map_pass_time_taken = @as(f32, @floatFromInt(timer.read())) * 0.000001;
+                    // var timer = std.time.Timer.start() catch @panic("Failed to start timer");
+                    // defer engine.frame_stats.shadow_map_pass_time_taken = @as(f32, @floatFromInt(timer.read())) * 0.000001;
+                    const timer = std.Io.Timestamp.now(engine.io, .awake);
+                    defer {
+                        const duration = timer.untilNow(engine.io, .awake);
+                        engine.frame_stats.shadow_map_pass_time_taken = @as(f32, @floatFromInt(duration.nanoseconds)) * 0.000001;
+                    }
 
                     for (scene.lights.items) |light| {
                         for (&light.cascades) |*cascade| {
@@ -547,7 +555,8 @@ pub const Engine = struct {
                 if (engine.active_scene) |scene| {
                     const camera_view_bound_box = scene.camera.getCameraViewBoundBox();
 
-                    var timer = std.time.Timer.start() catch @panic("Failed to start timer");
+                    const timer = std.Io.Timestamp.now(engine.io, .awake);
+
                     const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(
                         camera_view_bound_box,
                     );
@@ -569,7 +578,8 @@ pub const Engine = struct {
                     //     engine.frame_stats.game_objects_drawn_count += 1;
                     // }
 
-                    engine.frame_stats.main_pass_time_taken = @as(f32, @floatFromInt(timer.read())) * 0.000001;
+                    const duration = timer.untilNow(engine.io, .awake);
+                    engine.frame_stats.main_pass_time_taken = @as(f32, @floatFromInt(duration.nanoseconds)) * 0.000001;
 
                     if (DEBUG_INTERNAL_TEXTURE) {
                         engine.drawTextureDebugScreen(pass);
@@ -969,7 +979,7 @@ pub const Engine = struct {
         });
         defer engine.allocator.free(model_filename);
 
-        return try gltf_loader.GltfLoader.init(engine.allocator, model_filename);
+        return try gltf_loader.GltfLoader.init(engine.io, engine.allocator, model_filename);
     }
 
     pub fn loadModel(

@@ -41,17 +41,21 @@ const Game = struct {
     }
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+
     // Change current working directory to where the executable is located.
     {
-        var buffer: [1024]u8 = undefined;
-        const path = std.fs.selfExeDirPath(buffer[0..]) catch ".";
-        std.posix.chdir(path) catch {};
+        const path = std.process.executableDirPathAlloc(init.io, allocator) catch ".";
+        defer allocator.free(path);
+        const pathz = try allocator.dupeZ(u8, path);
+        defer allocator.free(pathz);
+        const result = std.posix.system.chdir(pathz);
+        if (result != 0) {
+            std.debug.print("Failed to change directory to {s}: {}\n", .{ pathz, result });
+            // ignoring error and trying to continue work in the current directory
+        }
     }
-
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
 
     var window_context = try WindowContext.init(allocator);
     defer window_context.deinit();
@@ -59,7 +63,7 @@ pub fn main() !void {
     const game: *Game = try .init(allocator);
     defer game.deinit();
 
-    const engine = try Engine.init(allocator, window_context, content_dir, .{
+    const engine = try Engine.init(init.io, allocator, window_context, content_dir, .{
         .argument = game,
         .onUpdate = onUpdate,
         .onRender = onRender,

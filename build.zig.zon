@@ -15,7 +15,7 @@
     // This field is optional.
     // This is currently advisory only; Zig does not yet do anything
     // with this value.
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
 
     // This field is optional.
     // Each dependency must either provide a `url` and `hash`, or a `path`.
@@ -53,40 +53,42 @@
         //},
 
         .zglfw = .{
-            .url = "git+https://github.com/zig-gamedev/zglfw#b164ba1a4603d98ed3475bf794dd4091041ab4b8",
-            .hash = "zglfw-0.10.0-dev-zgVDNOe4IQATU3HK2VWCKpqichEPjHFbdnOiX8kDB1lX",
+            .url = "git+https://github.com/zig-gamedev/zglfw#51003c105d23db378bb59ce415a387b22f1b0892",
+            .hash = "zglfw-0.10.0-dev-zgVDNIy4IQDJNRy4jrP1As-SZxfJpuWhU1iJ-wBab_VD",
         },
 
         .zgpu = .{
-            .url = "git+https://github.com/zig-gamedev/zgpu#b582a62c13af1a8228f72c47ea2eaa21259760eb",
-            .hash = "zgpu-0.12.0-dev-nqFT5IChCACWEis11EjrBQGaA0QXEqXfsi1e6cF3_AL3",
+            .url = "git+https://github.com/zig-gamedev/zgpu#e6d8103b3c34ce1d6aab4db86dedf9ac889b4e67",
+            .hash = "zgpu-0.12.0-dev-nqFT5DSoCACIu3-Gnwlg3Gv1if5vU5RBhpk8o6r6-vqk",
         },
         .dawn_aarch64_macos = .{
-            .url = "git+https://github.com/michal-z/webgpu_dawn-aarch64-macos#d2360cdfff0cf4a780cb77aa47c57aca03cc6dfe",
+            .url = "https://github.com/michal-z/webgpu_dawn-aarch64-macos/archive/d2360cdfff0cf4a780cb77aa47c57aca03cc6dfe.tar.gz",
             .hash = "N-V-__8AALVIRAIf5nfpx8-4mEo2RGsynVryPQPcHk95qFM5",
             .lazy = true,
         },
 
         .zgui = .{
-            .url = "git+https://github.com/zig-gamedev/zgui#ea5ef54ffa2487cccbaa4d84b89cf56bbeaf58ab",
-            .hash = "zgui-0.6.0-dev--L6sZAD7bQD9cbuCtZ_eZU0HEaAaCDN3Cc2Mv6IGBeyD",
+            .url = "git+https://github.com/zig-gamedev/zgui#bfbebed372723d1f585f86fc0a550232b3427f4d",
+            .hash = "zgui-0.6.0-dev--L6sZJhIbgAjWdK5h6xuVUrsOcD-RdqEOEPf03Zgi4mF",
         },
 
         .zmath = .{
-            .url = "git+https://github.com/zig-gamedev/zmath#3a5955b2b72cd081563fbb084eff05bffd1e3fbb",
-            .hash = "zmath-0.11.0-dev-wjwivdMsAwD-xaLj76YHUq3t9JDH-X16xuMTmnDzqbu2",
+            .url = "git+https://github.com/zig-gamedev/zmath#9e42b04a24c970a297b365f3d3022f92dbf3219d",
+            .hash = "zmath-0.11.0-dev-wjwivTwtAwDOjG2_KGP-HLtHrONfsFfHttalmxFAGVAK",
         },
 
         .zstbi = .{
-            .url = "git+https://github.com/zig-gamedev/zstbi#664305dd52640be15cbebd7cd73d1199679933e1",
-            .hash = "zstbi-0.11.0-dev-L0Ea_2yVBwA4uh-tHfgdhZcQaWRoZVYlNGs4Dl_WTeuR",
+            .url = "git+https://github.com/zig-gamedev/zstbi#3813f5f113b26f644cfa01a30155cc76b3526e91",
+            .hash = "zstbi-0.11.0-dev-L0Ea_3GWBwAh7m54XX055vwLKPTPij5hyqyeq92MXPE2",
         },
 
         .gltf_loader = .{
             // For local dev:
             // .path = "../gltf_loader",
-            .url = "git+https://github.com/bacher/gltf_loader#4d760a2206992905c17474d20dfeec3f6d3f9fca",
-            .hash = "gltf_loader-0.1.2-bMyl_Et8AAAa6uYAAZkPkyFb_yzDK4JWHoCrsYM3GKG6",
+            // or use the new --fork=<path> flag:
+            // `zig build --fork=../gltf_loader run`
+            .url = "git+https://github.com/bacher/gltf_loader#8cde5922370f6e6931de26afa30a039e496895fd",
+            .hash = "gltf_loader-0.1.3-bMyl_KyAAAC7wJ9mDHYkUr3qEWf74obI6o3F1bLLw9uV",
         },
     },
 
