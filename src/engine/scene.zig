@@ -151,7 +151,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit();
 
-        try scene.game_objects.append(game_object);
+        try scene.game_objects.append(scene.allocator, game_object);
 
         return game_object;
     }

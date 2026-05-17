@@ -151,7 +151,6 @@ pub const Engine = struct {
     shadow_map_depth_texture: DepthTexture,
 
     uv_test_texture: types.TextureDescriptor,
-    regular_bind_group_for_uv_test: BindGroup,
 
     active_scene: ?*Scene,
     input_controller: *InputController,
@@ -299,61 +298,6 @@ pub const Engine = struct {
             .{ .generate_mipmaps = false }, // TODO: set true, maybe???
         );
 
-        var mountains_image = try gltf_loader.StbiWrapper.loadTextureData(
-            allocator,
-            "content/terrain/mountain-range/diffuse_1-2.png",
-            .{},
-        );
-        defer mountains_image.deinit();
-
-        const mountains_texture = try load_texture.loadTextureIntoGpu(
-            gctx,
-            allocator,
-            mountains_image,
-            .{ .generate_mipmaps = false }, // TODO: why mipmaps fails?
-        );
-
-        var gradient_rough_image = try gltf_loader.StbiWrapper.loadTextureData(
-            allocator,
-            "content/masks/gradient-rough.jpg",
-            // "content/masks/radial.jpg",
-            .{},
-        );
-        defer gradient_rough_image.deinit();
-
-        const gradient_rough_texture = try load_texture.loadTextureIntoGpu(
-            gctx,
-            allocator,
-            gradient_rough_image,
-            .{ .generate_mipmaps = true },
-        );
-
-        var terrain_depth_map_image = try gltf_loader.StbiWrapper.loadTextureData(
-            allocator,
-            "content/terrain/rocky-land-and-rivers/height-map.png",
-            .{ .forced_num_components = 1 },
-        );
-        defer terrain_depth_map_image.deinit();
-
-        const terrain_depth_map_texture = try load_texture.loadTextureIntoGpu(
-            gctx,
-            allocator,
-            terrain_depth_map_image,
-            .{
-                .generate_mipmaps = false,
-                // https://github.com/zig-gamedev/zgpu/blob/main/src/wgpu.zig#L480
-                .format = .r16_uint,
-            },
-        );
-
-        const regular_bind_group_for_uv_test = try bind_group_definitions.terrain_height_map.createBindGroup(
-            texture_repeat_sampler,
-            mountains_texture,
-            terrain_depth_map_texture,
-            gradient_rough_texture,
-            uv_test_texture,
-        );
-
         const engine = try allocator.create(Engine);
         engine.* = .{
             .allocator = allocator,
@@ -393,7 +337,6 @@ pub const Engine = struct {
             .shadow_map_depth_texture = shadow_map_depth_texture,
 
             .uv_test_texture = uv_test_texture,
-            .regular_bind_group_for_uv_test = regular_bind_group_for_uv_test,
 
             .active_scene = null,
             .input_controller = input_controller,
@@ -418,7 +361,6 @@ pub const Engine = struct {
         }
 
         engine.models_hash.deinit();
-        engine.regular_bind_group_for_uv_test.deinit(engine.gctx);
         engine.bind_group_definitions.deinit();
         engine.input_controller.deinit();
         engine.allocator.free(engine.content_dir);
@@ -1020,7 +962,36 @@ pub const Engine = struct {
         return loaded_model_id;
     }
 
-    pub const CreateTerrainHeightMapDescriptorParams = struct { bind_group: BindGroup };
+    pub const LoadTextureOptions = struct {
+        forced_num_components: u32 = 4,
+        generate_mipmaps: bool = false,
+        format: ?wgpu.TextureFormat = null,
+    };
+
+    pub fn loadTexture(engine: *Engine, filename: []const u8, options: LoadTextureOptions) !types.TextureDescriptor {
+        var imageData = try gltf_loader.StbiWrapper.loadTextureData(
+            engine.allocator,
+            filename,
+            .{ .forced_num_components = options.forced_num_components },
+        );
+        defer imageData.deinit();
+
+        return try load_texture.loadTextureIntoGpu(
+            engine.gctx,
+            engine.allocator,
+            imageData,
+            .{
+                .generate_mipmaps = options.generate_mipmaps,
+                .format = options.format,
+            },
+        );
+    }
+
+    pub const CreateTerrainHeightMapDescriptorParams = struct {
+        layers: [2]types.TextureDescriptor,
+        mixing_texture: types.TextureDescriptor,
+        depth_map_texture: types.TextureDescriptor,
+    };
 
     pub fn createTerrainHeightMapModel(
         engine: *const Engine,
@@ -1028,8 +999,17 @@ pub const Engine = struct {
     ) !*TerrainHeightMapModel {
         const terrain_height_map_model = try engine.allocator.create(TerrainHeightMapModel);
         errdefer engine.allocator.destroy(terrain_height_map_model);
+
+        const terrain_height_map_bind_group = try engine.bind_group_definitions.terrain_height_map.createBindGroup(
+            engine.texture_repeat_sampler,
+            options.layers[0],
+            options.depth_map_texture,
+            options.mixing_texture,
+            options.layers[1],
+        );
+
         terrain_height_map_model.* = .{
-            .bind_group = options.bind_group,
+            .bind_group = terrain_height_map_bind_group,
         };
         return terrain_height_map_model;
     }

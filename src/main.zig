@@ -105,10 +105,31 @@ pub fn main(init: std.process.Init) !void {
 
     // -- Terrain height map --
 
-    const terrain_height_map_model = try engine.createTerrainHeightMapModel(.{
-        .bind_group = engine.regular_bind_group_for_uv_test,
+    const mountains_texture = try engine.loadTexture("content/terrain/mountain-range/diffuse_1-2.png", .{
+        // TODO: why mipmaps fails?
+        .generate_mipmaps = false,
     });
-    defer allocator.destroy(terrain_height_map_model);
+
+    const terrain_height_map_model = try engine.createTerrainHeightMapModel(.{
+        .layers = .{
+            mountains_texture,
+            engine.uv_test_texture,
+        },
+        .mixing_texture = try engine.loadTexture("content/masks/gradient-rough.jpg", .{
+            .generate_mipmaps = true,
+        }),
+        .depth_map_texture = try engine.loadTexture("content/terrain/rocky-land-and-rivers/height-map.png", .{
+            .forced_num_components = 1,
+            .generate_mipmaps = false,
+            // https://github.com/zig-gamedev/zgpu/blob/main/src/wgpu.zig#L480
+            .format = .r16_uint,
+        }),
+    });
+
+    defer {
+        terrain_height_map_model.deinit(engine.gctx);
+        allocator.destroy(terrain_height_map_model);
+    }
 
     const terrain = try scene.addTerrainHeightMapObject(.{
         .model = terrain_height_map_model,
