@@ -84,11 +84,11 @@
 
         .gltf_loader = .{
             // For local dev:
-            // .path = "../gltf_loader",
+            .path = "./gltf_loader",
             // or use the new --fork=<path> flag:
             // `zig build --fork=../gltf_loader run`
-            .url = "git+https://github.com/bacher/gltf_loader#8cde5922370f6e6931de26afa30a039e496895fd",
-            .hash = "gltf_loader-0.1.3-bMyl_KyAAAC7wJ9mDHYkUr3qEWf74obI6o3F1bLLw9uV",
+            // .url = "git+https://github.com/bacher/gltf_loader#8cde5922370f6e6931de26afa30a039e496895fd",
+            // .hash = "gltf_loader-0.1.3-bMyl_KyAAAC7wJ9mDHYkUr3qEWf74obI6o3F1bLLw9uV",
         },
     },
 
