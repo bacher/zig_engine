@@ -182,16 +182,18 @@ pub fn main(init: std.process.Init) !void {
         allocator.destroy(window_block_model);
     }
 
-    _ = man_model_id;
-    // try game.saved_game_objects.put("man_1", try scene.addObject(.{
-    //     .model_id = man_model_id,
-    //     .position = .{ -2, 0, 0 },
-    // }));
+    // _ = man_model_id;
+    try game.saved_game_objects.put(allocator, "man_1", try scene.addObject(.{
+        .model_id = man_model_id,
+        .position = .{ -2, 0, 6 },
+        .parent = null,
+    }));
 
-    // try game.saved_game_objects.put("man_2", try scene.addObject(.{
-    //     .model_id = man_model_id,
-    //     .position = .{ 4, 0, 0 },
-    // }));
+    try game.saved_game_objects.put(allocator, "man_2", try scene.addObject(.{
+        .model_id = man_model_id,
+        .position = .{ 4, 0, 8 },
+        .parent = null,
+    }));
 
     // _ = gazebo_model_id;
     // try game.saved_game_objects.put("gazebo", try scene.addObject(.{
