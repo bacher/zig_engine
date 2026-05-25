@@ -1,21 +1,18 @@
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-const wgsl_vs = @embedFile("../shaders/basic/vs.wgsl");
-const wgsl_fs = @embedFile("../shaders/basic/fs.wgsl");
+const wgsl_vs = @embedFile("../shaders/shadow_map/skinned_vs.wgsl");
+const wgsl_fs = @embedFile("../shaders/shadow_map/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
 const RegularBindGroupDefinition = @import("../bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
-const ShadowMapBindGroupDefinition = @import("../bind_groups_defs/shadow_map_bind_group.zig").ShadowMapBindGroupDefinition;
 
-pub fn createBasicPipeline(
+pub fn createShadowMapSkinnedPipeline(
     gctx: *zgpu.GraphicsContext,
-    regular_bind_group_definition: RegularBindGroupDefinition,
-    shadow_map_bind_group_definition: ShadowMapBindGroupDefinition,
+    bind_group_definition: RegularBindGroupDefinition,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
-        regular_bind_group_definition.bind_group_layout_handle,
-        shadow_map_bind_group_definition.bind_group_layout_handle,
+        bind_group_definition.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 
@@ -26,7 +23,7 @@ pub fn createBasicPipeline(
     defer fs_module.release();
 
     const color_targets = [_]wgpu.ColorTargetState{.{
-        .format = zgpu.GraphicsContext.swapchain_format,
+        .format = .r32_float,
     }};
 
     const vertex_buffers = [_]wgpu.VertexBufferLayout{
@@ -34,18 +31,6 @@ pub fn createBasicPipeline(
         .{
             .array_stride = @sizeOf([3]f32),
             .attributes = &.{.{ .format = .float32x3, .offset = 0, .shader_location = 0 }},
-            .attribute_count = 1,
-        },
-        // normal
-        .{
-            .array_stride = @sizeOf([3]f32),
-            .attributes = &.{.{ .format = .float32x3, .offset = 0, .shader_location = 1 }},
-            .attribute_count = 1,
-        },
-        // texcoord
-        .{
-            .array_stride = @sizeOf([2]f32),
-            .attributes = &.{.{ .format = .float32x2, .offset = 0, .shader_location = 2 }},
             .attribute_count = 1,
         },
         // joints
@@ -66,7 +51,6 @@ pub fn createBasicPipeline(
         .primitive = wgpu.PrimitiveState{
             .front_face = .ccw,
             .cull_mode = .back,
-            // .cull_mode = .none,
             .topology = .triangle_list,
         },
         .depth_stencil = &wgpu.DepthStencilState{

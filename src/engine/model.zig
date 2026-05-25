@@ -19,13 +19,13 @@ pub const Model = struct {
         model.model_descriptor.deinit();
         model.bind_group.deinit(gctx);
         if (model.skeletal_animation) |animation| {
-            animation.deinit();
+            animation.deinit(gctx);
         }
     }
 
     pub fn update(model: *Model, gctx: *zgpu.GraphicsContext, time: f32) void {
         if (model.skeletal_animation) |*animation| {
-            animation.update(gctx, &model.model_descriptor, time);
+            animation.update(gctx, time);
         }
     }
 };

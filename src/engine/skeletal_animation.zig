@@ -1,22 +1,28 @@
 const std = @import("std");
 const zgpu = @import("zgpu");
+const wgpu = zgpu.wgpu;
 const zmath = @import("zmath");
 const gltf_loader = @import("gltf_loader");
-
-const ModelDescriptor = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptor;
+const types = @import("./types.zig");
 
 const gltf_types = gltf_loader.types;
 
 const Self = @This();
 
+pub const JointMatrixUniform = [types.max_skin_joints]zmath.Mat;
+
+pub const JointMatrixBuffer = struct {
+    handle: zgpu.BufferHandle,
+    gpu_buffer: wgpu.Buffer,
+
+    pub fn deinit(self: JointMatrixBuffer, gctx: *zgpu.GraphicsContext) void {
+        gctx.releaseResource(self.handle);
+    }
+};
+
 allocator: std.mem.Allocator,
 mesh_node_index: usize,
-base_positions: [][3]f32,
-base_normals: [][3]f32,
-skinned_positions: [][3]f32,
-skinned_normals: [][3]f32,
-joints: [][4]u16,
-weights: [][4]f32,
+joint_matrix_buffer: JointMatrixBuffer,
 inverse_bind_matrices: []zmath.Mat,
 joint_matrices: []zmath.Mat,
 joint_node_indices: []usize,
@@ -109,12 +115,12 @@ const AnimationChannel = struct {
 
 pub fn init(
     allocator: std.mem.Allocator,
+    gctx: *zgpu.GraphicsContext,
     loader: *const gltf_loader.GltfLoader,
     object: *const gltf_loader.SceneObject,
     animation_name: ?[]const u8,
 ) !?Self {
     const skin_index = object.skin orelse return null;
-    const mesh = object.mesh orelse return null;
     const mesh_node = object.node_index orelse return error.MissingMeshNodeIndex;
     const mesh_node_index: usize = @intFromEnum(mesh_node);
     const animation = if (animation_name) |name|
@@ -125,12 +131,7 @@ pub fn init(
     var player = Self{
         .allocator = allocator,
         .mesh_node_index = mesh_node_index,
-        .base_positions = &.{},
-        .base_normals = &.{},
-        .skinned_positions = &.{},
-        .skinned_normals = &.{},
-        .joints = &.{},
-        .weights = &.{},
+        .joint_matrix_buffer = try createIdentityJointMatrixBuffer(gctx),
         .inverse_bind_matrices = &.{},
         .joint_matrices = &.{},
         .joint_node_indices = &.{},
@@ -143,12 +144,11 @@ pub fn init(
         .start_time = std.math.floatMax(f32),
         .end_time = 0,
     };
-    errdefer player.deinit();
+    errdefer player.deinit(gctx);
 
     const nodes = loader.getNodes();
     try player.loadNodeData(nodes);
     try player.loadSkinData(loader, skin_index);
-    try player.loadVertexData(loader, mesh);
     try player.loadAnimationData(loader, animation);
 
     if (player.channels.len == 0) {
@@ -158,13 +158,8 @@ pub fn init(
     return player;
 }
 
-pub fn deinit(self: Self) void {
-    self.allocator.free(self.base_positions);
-    self.allocator.free(self.base_normals);
-    self.allocator.free(self.skinned_positions);
-    self.allocator.free(self.skinned_normals);
-    self.allocator.free(self.joints);
-    self.allocator.free(self.weights);
+pub fn deinit(self: Self, gctx: *zgpu.GraphicsContext) void {
+    self.joint_matrix_buffer.deinit(gctx);
     self.allocator.free(self.inverse_bind_matrices);
     self.allocator.free(self.joint_matrices);
     self.allocator.free(self.joint_node_indices);
@@ -182,7 +177,6 @@ pub fn deinit(self: Self) void {
 pub fn update(
     self: *Self,
     gctx: *zgpu.GraphicsContext,
-    model_descriptor: *const ModelDescriptor,
     time: f32,
 ) void {
     if (self.channels.len == 0) {
@@ -208,10 +202,50 @@ pub fn update(
         );
     }
 
-    self.skinVertices();
+    var uniform: JointMatrixUniform = undefined;
+    self.writeJointMatrixUniform(&uniform);
+    gctx.queue.writeBuffer(self.joint_matrix_buffer.gpu_buffer, 0, zmath.Mat, uniform[0..]);
+}
 
-    gctx.queue.writeBuffer(model_descriptor.position.gpu_buffer, 0, [3]f32, self.skinned_positions);
-    gctx.queue.writeBuffer(model_descriptor.normal.gpu_buffer, 0, [3]f32, self.skinned_normals);
+fn writeJointMatrixUniform(self: *const Self, target: *JointMatrixUniform) void {
+    for (target) |*matrix| {
+        matrix.* = zmath.identity();
+    }
+
+    const joint_count = @min(self.joint_matrices.len, target.len);
+    for (self.joint_matrices[0..joint_count], 0..) |matrix, index| {
+        target[index] = zmath.transpose(matrix);
+    }
+}
+
+pub fn createIdentityJointMatrixBuffer(gctx: *zgpu.GraphicsContext) !JointMatrixBuffer {
+    var uniform: JointMatrixUniform = undefined;
+    for (&uniform) |*matrix| {
+        matrix.* = zmath.identity();
+    }
+
+    return try createJointMatrixBuffer(gctx, &uniform);
+}
+
+fn createJointMatrixBuffer(
+    gctx: *zgpu.GraphicsContext,
+    initial_data: *const JointMatrixUniform,
+) !JointMatrixBuffer {
+    const handle = gctx.createBuffer(.{
+        .usage = .{
+            .copy_dst = true,
+            .uniform = true,
+        },
+        .size = @sizeOf(JointMatrixUniform),
+    });
+
+    const gpu_buffer = gctx.lookupResource(handle) orelse return error.BufferIsNotReady;
+    gctx.queue.writeBuffer(gpu_buffer, 0, zmath.Mat, initial_data[0..]);
+
+    return .{
+        .handle = handle,
+        .gpu_buffer = gpu_buffer,
+    };
 }
 
 fn loadNodeData(self: *Self, nodes: []const gltf_types.Node) !void {
@@ -263,62 +297,6 @@ fn loadSkinData(
         self.inverse_bind_matrices[index] = zmath.matFromArr(matrix);
         self.joint_matrices[index] = zmath.identity();
     }
-}
-
-fn loadVertexData(
-    self: *Self,
-    loader: *const gltf_loader.GltfLoader,
-    mesh: *const gltf_loader.Mesh,
-) !void {
-    const buffers = try loader.loadModelBuffers(self.allocator, mesh);
-    defer buffers.deinit(self.allocator);
-
-    const positions = try buffers.positions.asTypedSlice([3]f32);
-    const normals = try buffers.normals.asTypedSlice([3]f32);
-    const joint_buffer = buffers.joints orelse return error.MissingJointBuffer;
-    const weight_buffer = buffers.weights orelse return error.MissingWeightBuffer;
-
-    self.base_positions = try self.allocator.dupe([3]f32, positions);
-    self.base_normals = try self.allocator.dupe([3]f32, normals);
-    self.skinned_positions = try self.allocator.dupe([3]f32, positions);
-    self.skinned_normals = try self.allocator.dupe([3]f32, normals);
-    self.joints = try self.loadJointIndices(joint_buffer);
-
-    const weights = try weight_buffer.asTypedSlice([4]f32);
-    self.weights = try self.allocator.dupe([4]f32, weights);
-
-    if (self.base_positions.len != self.base_normals.len or
-        self.base_positions.len != self.joints.len or
-        self.base_positions.len != self.weights.len)
-    {
-        return error.InvalidSkinVertexBufferLengths;
-    }
-}
-
-fn loadJointIndices(self: *Self, joint_buffer: gltf_loader.ModelBuffer) ![][4]u16 {
-    const joint_indices = try self.allocator.alloc([4]u16, joint_buffer.elements_count);
-    errdefer self.allocator.free(joint_indices);
-
-    switch (joint_buffer.type) {
-        .u8 => {
-            const source = try joint_buffer.asTypedSlice([4]u8);
-            for (source, 0..) |joints, index| {
-                joint_indices[index] = .{
-                    @intCast(joints[0]),
-                    @intCast(joints[1]),
-                    @intCast(joints[2]),
-                    @intCast(joints[3]),
-                };
-            }
-        },
-        .u16 => {
-            const source = try joint_buffer.asTypedSlice([4]u16);
-            std.mem.copyForwards([4]u16, joint_indices, source);
-        },
-        else => return error.UnsupportedJointIndexType,
-    }
-
-    return joint_indices;
 }
 
 fn loadAnimationData(
@@ -495,37 +473,6 @@ fn computeGlobalNodeMatrix(self: *Self, node_index: usize) zmath.Mat {
     return global_matrix;
 }
 
-fn skinVertices(self: *Self) void {
-    for (self.base_positions, 0..) |position, vertex_index| {
-        const normal = self.base_normals[vertex_index];
-        const position_vec = vecFrom3(position, 1);
-        const normal_vec = vecFrom3(normal, 0);
-
-        var skinned_position = zmath.Vec{ 0, 0, 0, 0 };
-        var skinned_normal = zmath.Vec{ 0, 0, 0, 0 };
-
-        for (0..4) |influence_index| {
-            const weight = self.weights[vertex_index][influence_index];
-            if (weight == 0) {
-                continue;
-            }
-
-            const joint_index: usize = @intCast(self.joints[vertex_index][influence_index]);
-            if (joint_index >= self.joint_matrices.len) {
-                continue;
-            }
-
-            const weight_vec: zmath.Vec = @splat(weight);
-            const joint_matrix = self.joint_matrices[joint_index];
-            skinned_position += zmath.mul(position_vec, joint_matrix) * weight_vec;
-            skinned_normal += zmath.mul(normal_vec, joint_matrix) * weight_vec;
-        }
-
-        self.skinned_positions[vertex_index] = arrayFromVec3(skinned_position);
-        self.skinned_normals[vertex_index] = normalizeVec3(skinned_normal, normal);
-    }
-}
-
 fn interpolateVec3(from: [3]f32, to: [3]f32, factor: f32, interpolation: gltf_types.AnimationInterpolation) [3]f32 {
     if (interpolation == .STEP) {
         return from;
@@ -566,23 +513,10 @@ fn normalizeQuat(quat: [4]f32) [4]f32 {
     return .{ quat[0] / length, quat[1] / length, quat[2] / length, quat[3] / length };
 }
 
-fn normalizeVec3(vec: zmath.Vec, fallback: [3]f32) [3]f32 {
-    const length = @sqrt(vec[0] * vec[0] + vec[1] * vec[1] + vec[2] * vec[2]);
-    if (length <= 0.000001) {
-        return fallback;
-    }
-
-    return .{ vec[0] / length, vec[1] / length, vec[2] / length };
-}
-
 fn vecFrom3(value: [3]f32, w: f32) zmath.Vec {
     return .{ value[0], value[1], value[2], w };
 }
 
 fn quatFromArray(value: [4]f32) zmath.Quat {
     return .{ value[0], value[1], value[2], value[3] };
-}
-
-fn arrayFromVec3(value: zmath.Vec) [3]f32 {
-    return .{ value[0], value[1], value[2] };
 }

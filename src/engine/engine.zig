@@ -22,6 +22,7 @@ const window_box_pipeline_module = @import("./pipelines/window_box_pipeline.zig"
 const primitive_colorized_pipeline_module = @import("./pipelines/primitive_colorized_pipeline.zig");
 const terrain_height_map_pipeline_module = @import("./pipelines/terrain_height_map_pipeline.zig");
 const shadow_map_pipeline_module = @import("./pipelines/shadow_map_pipeline.zig");
+const shadow_map_skinned_pipeline_module = @import("./pipelines/shadow_map_skinned_pipeline.zig");
 const lines_pipeline_module = @import("./pipelines/lines_pipeline.zig");
 const debug_texture_pipeline_module = @import("./pipelines/debug_texture_pipeline.zig");
 const BindGroup = @import("./bind_group.zig").BindGroup;
@@ -129,6 +130,7 @@ pub const Engine = struct {
         terrain_height_map: Pipeline,
         // ---
         shadow_map: Pipeline,
+        shadow_map_skinned: Pipeline,
         // ---
         lines: Pipeline,
         debug_texture: Pipeline,
@@ -152,6 +154,7 @@ pub const Engine = struct {
     shadow_map_depth_texture: DepthTexture,
 
     uv_test_texture: types.TextureDescriptor,
+    identity_joint_matrix_buffer: SkeletalAnimationPlayer.JointMatrixBuffer,
 
     active_scene: ?*Scene,
     input_controller: *InputController,
@@ -262,6 +265,10 @@ pub const Engine = struct {
             gctx,
             bind_group_definitions.shadow_map_pass,
         );
+        const shadow_map_skinned_pipeline = try shadow_map_skinned_pipeline_module.createShadowMapSkinnedPipeline(
+            gctx,
+            bind_group_definitions.regular,
+        );
         const lines_pipeline = try lines_pipeline_module.createLinesPipeline(
             gctx,
             bind_group_definitions.lines,
@@ -299,6 +306,8 @@ pub const Engine = struct {
             .{ .generate_mipmaps = false }, // TODO: set true, maybe???
         );
 
+        const identity_joint_matrix_buffer = try SkeletalAnimationPlayer.createIdentityJointMatrixBuffer(gctx);
+
         const engine = try allocator.create(Engine);
         engine.* = .{
             .allocator = allocator,
@@ -318,6 +327,7 @@ pub const Engine = struct {
                 .primitive_colorized = primitive_colorized_pipeline,
                 .terrain_height_map = terrain_height_map_pipeline,
                 .shadow_map = shadow_map_pipeline,
+                .shadow_map_skinned = shadow_map_skinned_pipeline,
                 .lines = lines_pipeline,
                 .debug_texture = debug_texture_pipeline,
             },
@@ -338,6 +348,7 @@ pub const Engine = struct {
             .shadow_map_depth_texture = shadow_map_depth_texture,
 
             .uv_test_texture = uv_test_texture,
+            .identity_joint_matrix_buffer = identity_joint_matrix_buffer,
 
             .active_scene = null,
             .input_controller = input_controller,
@@ -362,6 +373,7 @@ pub const Engine = struct {
         }
 
         engine.models_hash.deinit();
+        engine.identity_joint_matrix_buffer.deinit(engine.gctx);
         engine.bind_group_definitions.deinit();
         engine.input_controller.deinit();
         engine.allocator.free(engine.content_dir);
@@ -581,6 +593,8 @@ pub const Engine = struct {
                 model_descriptor.position.applyVertexBuffer(pass, 0);
                 model_descriptor.normal.applyVertexBuffer(pass, 1);
                 model_descriptor.texcoord.applyVertexBuffer(pass, 2);
+                model_descriptor.joints.applyVertexBuffer(pass, 3);
+                model_descriptor.weights.applyVertexBuffer(pass, 4);
                 model_descriptor.index.applyIndexBuffer(pass);
             },
             .terrain_height_map_model => {
@@ -839,8 +853,11 @@ pub const Engine = struct {
 
         switch (game_object.model) {
             .regular_model => |model| {
+                pass.setPipeline(engine.pipelines.shadow_map_skinned.pipeline_gpu);
                 const model_descriptor = model.model_descriptor;
                 model_descriptor.position.applyVertexBuffer(pass, 0);
+                model_descriptor.joints.applyVertexBuffer(pass, 1);
+                model_descriptor.weights.applyVertexBuffer(pass, 2);
                 model_descriptor.index.applyIndexBuffer(pass);
             },
             .terrain_height_map_model => {
@@ -849,10 +866,12 @@ pub const Engine = struct {
                 return;
             },
             .window_box_model => |window_box_model| {
+                pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
                 const model_descriptor = window_box_model.model_descriptor;
                 model_descriptor.position.applyVertexBuffer(pass, 0);
             },
             .primitive_colorized => |primitive_colorized_model| {
+                pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
                 const model_descriptor = primitive_colorized_model.model_descriptor;
                 model_descriptor.position.applyVertexBuffer(pass, 0);
             },
@@ -880,9 +899,19 @@ pub const Engine = struct {
         const object_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
         object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
 
-        pass.setBindGroup(0, engine.bind_group_shadow_map_pass.wgpu_bind_group, &.{
-            object_to_clip_uniform.offset,
-        });
+        switch (game_object.model) {
+            .regular_model => |model| {
+                pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{
+                    object_to_clip_uniform.offset,
+                    0,
+                });
+            },
+            else => {
+                pass.setBindGroup(0, engine.bind_group_shadow_map_pass.wgpu_bind_group, &.{
+                    object_to_clip_uniform.offset,
+                });
+            },
+        }
 
         switch (game_object.model) {
             .regular_model => |model| {
@@ -950,9 +979,26 @@ pub const Engine = struct {
             },
         );
 
+        const skeletal_animation = try SkeletalAnimationPlayer.init(
+            engine.allocator,
+            engine.gctx,
+            loader,
+            object,
+            options.animation_name,
+        );
+        errdefer if (skeletal_animation) |animation| {
+            animation.deinit(engine.gctx);
+        };
+
+        const joint_matrix_buffer = if (skeletal_animation) |animation|
+            animation.joint_matrix_buffer
+        else
+            engine.identity_joint_matrix_buffer;
+
         const bind_group = try engine.bind_group_definitions.regular.createBindGroup(
             engine.texture_repeat_sampler,
             model_descriptor.color_texture,
+            joint_matrix_buffer.handle,
         );
 
         const model = try engine.allocator.create(Model);
@@ -960,12 +1006,7 @@ pub const Engine = struct {
         model.* = .{
             .model_descriptor = model_descriptor,
             .bind_group = bind_group,
-            .skeletal_animation = try SkeletalAnimationPlayer.init(
-                engine.allocator,
-                loader,
-                object,
-                options.animation_name,
-            ),
+            .skeletal_animation = skeletal_animation,
         };
 
         const loaded_model_id: LoadedModelId = @enumFromInt(Engine.next_loaded_model_id);
@@ -1040,9 +1081,10 @@ pub const Engine = struct {
             texture_full_filename,
         );
 
-        const bind_group = try engine.bind_group_definition.createBindGroup(
+        const bind_group = try engine.bind_group_definitions.regular.createBindGroup(
             engine.texture_sampler,
             skybox_descriptor.color_texture,
+            engine.identity_joint_matrix_buffer.handle,
         );
 
         const model = try engine.allocator.create(SkyBoxModel);
@@ -1085,6 +1127,7 @@ pub const Engine = struct {
         const bind_group = try engine.bind_group_definitions.cubemap.createBindGroup(
             engine.texture_sampler,
             skybox_cubemap_descriptor.color_texture,
+            engine.identity_joint_matrix_buffer.handle,
         );
 
         const model = try engine.allocator.create(SkyBoxCubemapModel);
@@ -1128,6 +1171,7 @@ pub const Engine = struct {
         const bind_group = try engine.bind_group_definitions.regular.createBindGroup(
             engine.texture_sampler,
             window_box_descriptor.color_texture,
+            engine.identity_joint_matrix_buffer.handle,
         );
 
         const model = try engine.allocator.create(WindowBoxModel);
