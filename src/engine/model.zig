@@ -8,14 +8,25 @@ const SkyBoxCubemapDescriptor = @import("./display_object_descriptors/skybox_cub
 const PrimitiveDescriptor = @import("./display_object_descriptors/primitive_descriptor.zig").PrimitiveDescriptor;
 const CubeWireframeDescriptor = @import("./display_object_descriptors/cube_wireframe_descriptor.zig").CubeWireframeDescriptor;
 const BindGroup = @import("./bind_group.zig").BindGroup;
+const SkeletalAnimationPlayer = @import("./skeletal_animation.zig");
 
 pub const Model = struct {
     model_descriptor: ModelDescriptor,
     bind_group: BindGroup,
+    skeletal_animation: ?SkeletalAnimationPlayer = null,
 
     pub fn deinit(model: Model, gctx: *zgpu.GraphicsContext) void {
         model.model_descriptor.deinit();
         model.bind_group.deinit(gctx);
+        if (model.skeletal_animation) |animation| {
+            animation.deinit();
+        }
+    }
+
+    pub fn update(model: *Model, gctx: *zgpu.GraphicsContext, time: f32) void {
+        if (model.skeletal_animation) |*animation| {
+            animation.update(gctx, &model.model_descriptor, time);
+        }
     }
 };
 

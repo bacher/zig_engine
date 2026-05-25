@@ -12,6 +12,7 @@ const load_texture = @import("../load_texture.zig");
 
 pub const ModelDescriptorOptions = struct {
     mesh_y_up: bool = false,
+    animation_name: ?[]const u8 = null,
     billboard_mode: enum(u8) {
         none = 0,
         spherical = 1,

@@ -50,6 +50,7 @@ const WindowBoxModel = @import("./model.zig").WindowBoxModel;
 const PrimitiveModel = @import("./model.zig").PrimitiveModel;
 const CubeWireframeModel = @import("./model.zig").CubeWireframeModel;
 const TerrainHeightMapModel = @import("./model.zig").TerrainHeightMapModel;
+const SkeletalAnimationPlayer = @import("./skeletal_animation.zig");
 // -- other --
 const PrimitiveDescriptor = @import("./display_object_descriptors/primitive_descriptor.zig").PrimitiveDescriptor;
 const GeometryData = @import("./shape_generation/geometry_data.zig").GeometryData;
@@ -391,6 +392,11 @@ pub const Engine = struct {
         engine.frame_stats = .{};
 
         try engine.input_controller.updateMouseState();
+
+        var model_iterator = engine.models_hash.iterator();
+        while (model_iterator.next()) |entry| {
+            entry.value_ptr.*.update(engine.gctx, @floatCast(engine.time));
+        }
 
         if (engine.active_scene) |scene| {
             scene.camera.updateTargetScreenSize(engine.aspect_ratio);
@@ -939,6 +945,7 @@ pub const Engine = struct {
             .{
                 .billboard_mode = options.billboard_mode,
                 .mesh_y_up = options.mesh_y_up,
+                .animation_name = options.animation_name,
                 .color_texture_fallback = options.color_texture_fallback orelse &engine.uv_test_texture,
             },
         );
@@ -953,6 +960,12 @@ pub const Engine = struct {
         model.* = .{
             .model_descriptor = model_descriptor,
             .bind_group = bind_group,
+            .skeletal_animation = try SkeletalAnimationPlayer.init(
+                engine.allocator,
+                loader,
+                object,
+                options.animation_name,
+            ),
         };
 
         const loaded_model_id: LoadedModelId = @enumFromInt(Engine.next_loaded_model_id);

@@ -77,6 +77,7 @@ pub fn main(init: std.process.Init) !void {
         const object = loader.findFirstObjectWithMesh().?;
         break :id try engine.loadModel(&loader, object, .{
             .mesh_y_up = true,
+            .animation_name = "walkLikeMan",
         });
     };
 

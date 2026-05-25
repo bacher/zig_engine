@@ -4,9 +4,12 @@ pub const GltfRoot = struct {
     asset: struct {
         version: f32,
     },
+    scene: ?SceneIndex = null,
     scenes: []Scene,
     nodes: []Node,
     meshes: []Mesh,
+    skins: []Skin = &.{},
+    animations: []Animation = &.{},
     accessors: []Accessor,
     bufferViews: []BufferView,
     buffers: []Buffer,
@@ -32,7 +35,7 @@ pub const Node = struct {
     translation: ?[3]f64 = null,
     matrix: ?*TransformMatrix = null,
     mesh: ?MeshIndex = null,
-    skin: ?u32 = null,
+    skin: ?SkinIndex = null,
 };
 
 pub const MeshIndex = enum(u32) { _ };
@@ -52,6 +55,47 @@ pub const Primitive = struct {
     },
     indices: AccessorIndex,
     material: MaterialIndex,
+};
+
+pub const SkinIndex = enum(u32) { _ };
+
+pub const Skin = struct {
+    name: ?conststring = null,
+    inverseBindMatrices: AccessorIndex,
+    joints: []NodeIndex,
+};
+
+pub const Animation = struct {
+    name: ?conststring = null,
+    channels: []AnimationChannel,
+    samplers: []AnimationSampler,
+};
+
+pub const AnimationChannel = struct {
+    sampler: u32,
+    target: struct {
+        node: NodeIndex,
+        path: AnimationTargetPath,
+    },
+};
+
+pub const AnimationTargetPath = enum {
+    translation,
+    rotation,
+    scale,
+    weights,
+};
+
+pub const AnimationSampler = struct {
+    input: AccessorIndex,
+    interpolation: AnimationInterpolation = .LINEAR,
+    output: AccessorIndex,
+};
+
+pub const AnimationInterpolation = enum {
+    LINEAR,
+    STEP,
+    CUBICSPLINE,
 };
 
 pub const ComponentType = enum(u32) {
