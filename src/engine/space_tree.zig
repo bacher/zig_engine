@@ -4,6 +4,7 @@ const zmath = @import("zmath");
 
 const BoundBox = @import("./bound_box.zig").BoundBox;
 const utils = @import("./utils.zig");
+const types = @import("./types.zig");
 
 const DEBUG = false;
 const STRICT = true;
@@ -523,10 +524,19 @@ fn SpaceNode(comptime ElementType: type) type {
     };
 }
 
+const TestModel = struct {
+    bounds: types.GeometryBounds,
+
+    pub fn getBounds(this: *const @This()) types.GeometryBounds {
+        return this.bounds;
+    }
+};
+
 const TestObject = struct {
     id: u64,
     position: [3]f32,
-    bounding_radius: f32,
+    aggregated_matrix: zmath.Mat,
+    model: *const TestModel,
 };
 
 fn printNodeInfo(node: *SpaceNode(TestObject)) void {
@@ -558,7 +568,6 @@ test "init" {
     // const obj_1: TestObject = .{
     //     .id = 42,
     //     .position = .{ 8, 3.4, 3.2 },
-    //     .bounding_radius = 0.8,
     // };
     //
     // try space_tree.toggleObject(&obj_1, true);
@@ -568,7 +577,11 @@ test "init" {
     const obj_2: TestObject = .{
         .id = 43,
         .position = .{ 8, 3.4, 3.2 },
-        .bounding_radius = 5,
+        .aggregated_matrix = zmath.identity(),
+        .model = &.{
+            // TODO: fix this, unit_geometry_bounds is not correct to use here.
+            .bounds = .unit_geometry_bounds,
+        },
     };
 
     try space_tree.toggleObject(&obj_2, true);
