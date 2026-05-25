@@ -105,7 +105,7 @@ pub fn main(init: std.process.Init) !void {
 
     // -- Terrain height map --
 
-    const mountains_texture = try engine.loadTexture("content/terrain/mountain-range/diffuse_1-2.png", .{
+    const mountains_texture = try engine.loadTexture("content/terrain/rocky-land-and-rivers/diffuse.png", .{
         // TODO: why mipmaps fails?
         .generate_mipmaps = false,
     });
