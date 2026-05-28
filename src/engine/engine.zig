@@ -16,6 +16,7 @@ const utils = @import("./utils.zig");
 // -- pipelines --
 const Pipeline = @import("./pipeline.zig").Pipeline;
 const basic_pipeline_module = @import("./pipelines/basic_pipeline.zig");
+const basic_skinned_pipeline_module = @import("./pipelines/basic_skinned_pipeline.zig");
 const skybox_pipeline_module = @import("./pipelines/skybox_pipeline.zig");
 const skybox_cubemap_pipeline_module = @import("./pipelines/skybox_cubemap_pipeline.zig");
 const window_box_pipeline_module = @import("./pipelines/window_box_pipeline.zig");
@@ -123,6 +124,7 @@ pub const Engine = struct {
 
     pipelines: struct {
         basic: Pipeline,
+        basic_skinned: Pipeline,
         skybox: Pipeline,
         skybox_cubemap: Pipeline,
         window_box: Pipeline,
@@ -240,6 +242,11 @@ pub const Engine = struct {
             bind_group_definitions.regular,
             bind_group_definitions.shadow_map,
         );
+        const basic_skinned_pipeline = try basic_skinned_pipeline_module.createBasicSkinnedPipeline(
+            gctx,
+            bind_group_definitions.regular,
+            bind_group_definitions.shadow_map,
+        );
         const skybox_pipeline = try skybox_pipeline_module.createSkyboxPipeline(
             gctx,
             bind_group_definitions.regular,
@@ -321,6 +328,7 @@ pub const Engine = struct {
             .gctx = gctx,
             .pipelines = .{
                 .basic = basic_pipeline,
+                .basic_skinned = basic_skinned_pipeline,
                 .skybox = skybox_pipeline,
                 .skybox_cubemap = skybox_cubemap_pipeline,
                 .window_box = window_box_pipeline,
@@ -586,15 +594,20 @@ pub const Engine = struct {
     ) void {
         switch (game_object.model) {
             .regular_model => |model| {
-                pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
-
                 const model_descriptor = model.model_descriptor;
+                if (model_descriptor.has_skin) {
+                    pass.setPipeline(engine.pipelines.basic_skinned.pipeline_gpu);
+                } else {
+                    pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
+                }
 
                 model_descriptor.position.applyVertexBuffer(pass, 0);
                 model_descriptor.normal.applyVertexBuffer(pass, 1);
                 model_descriptor.texcoord.applyVertexBuffer(pass, 2);
-                model_descriptor.joints.applyVertexBuffer(pass, 3);
-                model_descriptor.weights.applyVertexBuffer(pass, 4);
+                if (model_descriptor.has_skin) {
+                    model_descriptor.joints.applyVertexBuffer(pass, 3);
+                    model_descriptor.weights.applyVertexBuffer(pass, 4);
+                }
                 model_descriptor.index.applyIndexBuffer(pass);
             },
             .terrain_height_map_model => {
@@ -853,11 +866,18 @@ pub const Engine = struct {
 
         switch (game_object.model) {
             .regular_model => |model| {
-                pass.setPipeline(engine.pipelines.shadow_map_skinned.pipeline_gpu);
                 const model_descriptor = model.model_descriptor;
+                if (model_descriptor.has_skin) {
+                    pass.setPipeline(engine.pipelines.shadow_map_skinned.pipeline_gpu);
+                } else {
+                    pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
+                }
+
                 model_descriptor.position.applyVertexBuffer(pass, 0);
-                model_descriptor.joints.applyVertexBuffer(pass, 1);
-                model_descriptor.weights.applyVertexBuffer(pass, 2);
+                if (model_descriptor.has_skin) {
+                    model_descriptor.joints.applyVertexBuffer(pass, 1);
+                    model_descriptor.weights.applyVertexBuffer(pass, 2);
+                }
                 model_descriptor.index.applyIndexBuffer(pass);
             },
             .terrain_height_map_model => {
@@ -901,10 +921,16 @@ pub const Engine = struct {
 
         switch (game_object.model) {
             .regular_model => |model| {
-                pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{
-                    object_to_clip_uniform.offset,
-                    0,
-                });
+                if (model.model_descriptor.has_skin) {
+                    pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{
+                        object_to_clip_uniform.offset,
+                        0,
+                    });
+                } else {
+                    pass.setBindGroup(0, engine.bind_group_shadow_map_pass.wgpu_bind_group, &.{
+                        object_to_clip_uniform.offset,
+                    });
+                }
             },
             else => {
                 pass.setBindGroup(0, engine.bind_group_shadow_map_pass.wgpu_bind_group, &.{

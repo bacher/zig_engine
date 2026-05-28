@@ -31,6 +31,7 @@ pub const ModelDescriptor = struct {
     index: types.BufferDescriptor,
     color_texture: types.TextureDescriptor,
     geometry_bounds: types.GeometryBounds,
+    has_skin: bool,
     options: ModelDescriptorOptions,
 
     pub fn init(
@@ -92,6 +93,7 @@ pub const ModelDescriptor = struct {
                 .offset = offset_bounds.offset,
                 .radius = offset_bounds.radius,
             },
+            .has_skin = object.skin != null,
             .options = options,
         };
     }

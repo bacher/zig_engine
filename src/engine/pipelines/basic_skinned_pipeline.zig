@@ -1,14 +1,14 @@
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-const wgsl_vs = @embedFile("../shaders/basic/vs.wgsl");
+const wgsl_vs = @embedFile("../shaders/basic/skinned_vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/basic/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
 const RegularBindGroupDefinition = @import("../bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
 const ShadowMapBindGroupDefinition = @import("../bind_groups_defs/shadow_map_bind_group.zig").ShadowMapBindGroupDefinition;
 
-pub fn createBasicPipeline(
+pub fn createBasicSkinnedPipeline(
     gctx: *zgpu.GraphicsContext,
     regular_bind_group_definition: RegularBindGroupDefinition,
     shadow_map_bind_group_definition: ShadowMapBindGroupDefinition,
@@ -46,6 +46,18 @@ pub fn createBasicPipeline(
         .{
             .array_stride = @sizeOf([2]f32),
             .attributes = &.{.{ .format = .float32x2, .offset = 0, .shader_location = 2 }},
+            .attribute_count = 1,
+        },
+        // joints
+        .{
+            .array_stride = @sizeOf([4]u32),
+            .attributes = &.{.{ .format = .uint32x4, .offset = 0, .shader_location = 3 }},
+            .attribute_count = 1,
+        },
+        // weights
+        .{
+            .array_stride = @sizeOf([4]f32),
+            .attributes = &.{.{ .format = .float32x4, .offset = 0, .shader_location = 4 }},
             .attribute_count = 1,
         },
     };
