@@ -4,6 +4,7 @@ const zmath = @import("zmath");
 
 const TextureDescriptor = @import("../types.zig").TextureDescriptor;
 const BindGroup = @import("../bind_group.zig").BindGroup;
+const SkeletalAnimation = @import("../skeletal_animation.zig");
 
 pub const RegularBindGroupDefinition = struct {
     gctx: *zgpu.GraphicsContext,
@@ -41,6 +42,14 @@ pub const RegularBindGroupDefinition = struct {
                 .{ .fragment = true },
                 .filtering, // TODO: What's the difference between .filtering and .non_filtering
             ),
+            // joint matrix palette
+            zgpu.bufferEntry(
+                4,
+                .{ .vertex = true },
+                .uniform,
+                false,
+                @sizeOf(SkeletalAnimation.JointMatrixUniform),
+            ),
         });
 
         return .{
@@ -57,6 +66,7 @@ pub const RegularBindGroupDefinition = struct {
         bind_group_definition: RegularBindGroupDefinition,
         sampler: zgpu.SamplerHandle,
         color_texture: TextureDescriptor,
+        joint_matrix_buffer: zgpu.BufferHandle,
     ) !BindGroup {
         const gctx = bind_group_definition.gctx;
 
@@ -89,6 +99,14 @@ pub const RegularBindGroupDefinition = struct {
                 .{
                     .binding = 3,
                     .sampler_handle = sampler,
+                },
+
+                // joint matrix palette
+                .{
+                    .binding = 4,
+                    .buffer_handle = joint_matrix_buffer,
+                    .offset = 0,
+                    .size = @sizeOf(SkeletalAnimation.JointMatrixUniform),
                 },
             },
         );

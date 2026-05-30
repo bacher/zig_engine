@@ -16,17 +16,20 @@ const utils = @import("./utils.zig");
 // -- pipelines --
 const Pipeline = @import("./pipeline.zig").Pipeline;
 const basic_pipeline_module = @import("./pipelines/basic_pipeline.zig");
+const basic_skinned_pipeline_module = @import("./pipelines/basic_skinned_pipeline.zig");
 const skybox_pipeline_module = @import("./pipelines/skybox_pipeline.zig");
 const skybox_cubemap_pipeline_module = @import("./pipelines/skybox_cubemap_pipeline.zig");
 const window_box_pipeline_module = @import("./pipelines/window_box_pipeline.zig");
 const primitive_colorized_pipeline_module = @import("./pipelines/primitive_colorized_pipeline.zig");
 const terrain_height_map_pipeline_module = @import("./pipelines/terrain_height_map_pipeline.zig");
 const shadow_map_pipeline_module = @import("./pipelines/shadow_map_pipeline.zig");
+const shadow_map_skinned_pipeline_module = @import("./pipelines/shadow_map_skinned_pipeline.zig");
 const lines_pipeline_module = @import("./pipelines/lines_pipeline.zig");
 const debug_texture_pipeline_module = @import("./pipelines/debug_texture_pipeline.zig");
 const BindGroup = @import("./bind_group.zig").BindGroup;
 // -- bind groups definitions --
 const RegularBindGroupDefinition = @import("./bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
+const JointsBindGroupDefinition = @import("./bind_groups_defs/joints_bind_group.zig").JointsBindGroupDefinition;
 const TerrainHeightMapBindGroupDefinition = @import("./bind_groups_defs/terrain_height_map_bind_group.zig").TerrainHeightMapBindGroupDefinition;
 const PrimitiveColorizedBindGroupDefinition = @import("./bind_groups_defs/primitive_bind_group.zig").PrimitiveColorizedBindGroupDefinition;
 const ShadowMapPassBindGroupDefinition = @import("./bind_groups_defs/shadow_map_pass_bind_group.zig").ShadowMapPassBindGroupDefinition;
@@ -37,7 +40,7 @@ const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ShadowMapTexture = @import("./shadow_map_texture.zig").ShadowMapTexture;
 // -- display object descriptors --
 const ModelDescriptor = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptor;
-const ModelDescriptorOptions = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptorOptions;
+const BillboardMode = @import("./display_object_descriptors/model_descriptor.zig").BillboardMode;
 const WindowBoxDescriptor = @import("./display_object_descriptors/window_box_descriptor.zig").WindowBoxDescriptor;
 const SkyBoxDescriptor = @import("./display_object_descriptors/skybox_descriptor.zig").SkyBoxDescriptor;
 const SkyBoxCubemapDescriptor = @import("./display_object_descriptors/skybox_cubemap_descriptor.zig").SkyBoxCubemapDescriptor;
@@ -50,6 +53,7 @@ const WindowBoxModel = @import("./model.zig").WindowBoxModel;
 const PrimitiveModel = @import("./model.zig").PrimitiveModel;
 const CubeWireframeModel = @import("./model.zig").CubeWireframeModel;
 const TerrainHeightMapModel = @import("./model.zig").TerrainHeightMapModel;
+const SkeletalAnimation = @import("./skeletal_animation.zig");
 // -- other --
 const PrimitiveDescriptor = @import("./display_object_descriptors/primitive_descriptor.zig").PrimitiveDescriptor;
 const GeometryData = @import("./shape_generation/geometry_data.zig").GeometryData;
@@ -89,6 +93,7 @@ pub const Engine = struct {
 
     const BindGroupDefinitions = struct {
         regular: RegularBindGroupDefinition,
+        joints: JointsBindGroupDefinition,
         cubemap: RegularBindGroupDefinition,
         terrain_height_map: TerrainHeightMapBindGroupDefinition,
         primitive_colorized: PrimitiveColorizedBindGroupDefinition,
@@ -99,6 +104,7 @@ pub const Engine = struct {
 
         fn deinit(definitions: *BindGroupDefinitions) void {
             definitions.regular.deinit();
+            definitions.joints.deinit();
             definitions.cubemap.deinit();
             definitions.terrain_height_map.deinit();
             definitions.primitive_colorized.deinit();
@@ -121,6 +127,7 @@ pub const Engine = struct {
 
     pipelines: struct {
         basic: Pipeline,
+        basic_skinned: Pipeline,
         skybox: Pipeline,
         skybox_cubemap: Pipeline,
         window_box: Pipeline,
@@ -128,6 +135,7 @@ pub const Engine = struct {
         terrain_height_map: Pipeline,
         // ---
         shadow_map: Pipeline,
+        shadow_map_skinned: Pipeline,
         // ---
         lines: Pipeline,
         debug_texture: Pipeline,
@@ -151,6 +159,7 @@ pub const Engine = struct {
     shadow_map_depth_texture: DepthTexture,
 
     uv_test_texture: types.TextureDescriptor,
+    identity_joint_matrix_buffer: SkeletalAnimation.JointMatrixBuffer,
 
     active_scene: ?*Scene,
     input_controller: *InputController,
@@ -205,6 +214,7 @@ pub const Engine = struct {
         // ---
         const bind_group_definitions: BindGroupDefinitions = .{
             .regular = RegularBindGroupDefinition.init(gctx, .tvdim_2d),
+            .joints = JointsBindGroupDefinition.init(gctx),
             .cubemap = RegularBindGroupDefinition.init(gctx, .tvdim_cube),
             .terrain_height_map = TerrainHeightMapBindGroupDefinition.init(gctx),
             .primitive_colorized = PrimitiveColorizedBindGroupDefinition.init(gctx),
@@ -236,6 +246,12 @@ pub const Engine = struct {
             bind_group_definitions.regular,
             bind_group_definitions.shadow_map,
         );
+        const basic_skinned_pipeline = try basic_skinned_pipeline_module.createBasicSkinnedPipeline(
+            gctx,
+            bind_group_definitions.regular,
+            bind_group_definitions.shadow_map,
+            bind_group_definitions.joints,
+        );
         const skybox_pipeline = try skybox_pipeline_module.createSkyboxPipeline(
             gctx,
             bind_group_definitions.regular,
@@ -260,6 +276,11 @@ pub const Engine = struct {
         const shadow_map_pipeline = try shadow_map_pipeline_module.createShadowMapPipeline(
             gctx,
             bind_group_definitions.shadow_map_pass,
+        );
+        const shadow_map_skinned_pipeline = try shadow_map_skinned_pipeline_module.createShadowMapSkinnedPipeline(
+            gctx,
+            bind_group_definitions.shadow_map_pass,
+            bind_group_definitions.joints,
         );
         const lines_pipeline = try lines_pipeline_module.createLinesPipeline(
             gctx,
@@ -298,6 +319,8 @@ pub const Engine = struct {
             .{ .generate_mipmaps = false }, // TODO: set true, maybe???
         );
 
+        const identity_joint_matrix_buffer = try SkeletalAnimation.createIdentityJointMatrixBuffer(gctx);
+
         const engine = try allocator.create(Engine);
         engine.* = .{
             .allocator = allocator,
@@ -311,12 +334,14 @@ pub const Engine = struct {
             .gctx = gctx,
             .pipelines = .{
                 .basic = basic_pipeline,
+                .basic_skinned = basic_skinned_pipeline,
                 .skybox = skybox_pipeline,
                 .skybox_cubemap = skybox_cubemap_pipeline,
                 .window_box = window_box_pipeline,
                 .primitive_colorized = primitive_colorized_pipeline,
                 .terrain_height_map = terrain_height_map_pipeline,
                 .shadow_map = shadow_map_pipeline,
+                .shadow_map_skinned = shadow_map_skinned_pipeline,
                 .lines = lines_pipeline,
                 .debug_texture = debug_texture_pipeline,
             },
@@ -337,6 +362,7 @@ pub const Engine = struct {
             .shadow_map_depth_texture = shadow_map_depth_texture,
 
             .uv_test_texture = uv_test_texture,
+            .identity_joint_matrix_buffer = identity_joint_matrix_buffer,
 
             .active_scene = null,
             .input_controller = input_controller,
@@ -361,6 +387,7 @@ pub const Engine = struct {
         }
 
         engine.models_hash.deinit();
+        engine.identity_joint_matrix_buffer.deinit(engine.gctx);
         engine.bind_group_definitions.deinit();
         engine.input_controller.deinit();
         engine.allocator.free(engine.content_dir);
@@ -455,9 +482,8 @@ pub const Engine = struct {
 
                             shadow_map_pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
 
-                            // if (engine.time < 5) {
                             light.applyCameraFrustum(cascade, scene.camera);
-                            // }
+
                             const cascade_view_bound_box = cascade.getLightViewBoundBox();
                             const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(
                                 cascade_view_bound_box,
@@ -564,17 +590,26 @@ pub const Engine = struct {
         engine: *Engine,
         pass: wgpu.RenderPassEncoder,
         scene: *const Scene,
-        game_object: *const GameObject,
+        game_object: *GameObject,
     ) void {
         switch (game_object.model) {
             .regular_model => |model| {
-                pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
-
                 const model_descriptor = model.model_descriptor;
+                if (model_descriptor.has_skin) {
+                    pass.setPipeline(engine.pipelines.basic_skinned.pipeline_gpu);
+                } else {
+                    pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
+                }
 
                 model_descriptor.position.applyVertexBuffer(pass, 0);
                 model_descriptor.normal.applyVertexBuffer(pass, 1);
                 model_descriptor.texcoord.applyVertexBuffer(pass, 2);
+                if (model_descriptor.has_skin) {
+                    model_descriptor.joints.applyVertexBuffer(pass, 3);
+                    model_descriptor.weights.applyVertexBuffer(pass, 4);
+
+                    game_object.updateAnimation(engine.gctx, @floatCast(engine.time));
+                }
                 model_descriptor.index.applyIndexBuffer(pass);
             },
             .terrain_height_map_model => {
@@ -714,6 +749,9 @@ pub const Engine = struct {
                 pass.setBindGroup(1, engine.bind_group_shadow_map.wgpu_bind_group, &.{
                     object_to_light_clip_array_uniform.offset,
                 });
+                if (game_object.joints_bind_group) |joints_bind_group| {
+                    pass.setBindGroup(2, joints_bind_group.wgpu_bind_group, &.{});
+                }
 
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
             },
@@ -825,7 +863,7 @@ pub const Engine = struct {
         scene: *const Scene,
         light: *const DirectionalLight,
         cascade: *const DirectionalLightCascade,
-        game_object: *const GameObject,
+        game_object: *GameObject,
     ) void {
         _ = scene;
         // TODO:
@@ -834,7 +872,20 @@ pub const Engine = struct {
         switch (game_object.model) {
             .regular_model => |model| {
                 const model_descriptor = model.model_descriptor;
+                // if (model_descriptor.has_skin) {
+                if (game_object.joints_bind_group != null) {
+                    pass.setPipeline(engine.pipelines.shadow_map_skinned.pipeline_gpu);
+                } else {
+                    pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
+                }
+
                 model_descriptor.position.applyVertexBuffer(pass, 0);
+                if (model_descriptor.has_skin) {
+                    model_descriptor.joints.applyVertexBuffer(pass, 1);
+                    model_descriptor.weights.applyVertexBuffer(pass, 2);
+
+                    game_object.updateAnimation(engine.gctx, @floatCast(engine.time));
+                }
                 model_descriptor.index.applyIndexBuffer(pass);
             },
             .terrain_height_map_model => {
@@ -843,10 +894,12 @@ pub const Engine = struct {
                 return;
             },
             .window_box_model => |window_box_model| {
+                pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
                 const model_descriptor = window_box_model.model_descriptor;
                 model_descriptor.position.applyVertexBuffer(pass, 0);
             },
             .primitive_colorized => |primitive_colorized_model| {
+                pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
                 const model_descriptor = primitive_colorized_model.model_descriptor;
                 model_descriptor.position.applyVertexBuffer(pass, 0);
             },
@@ -877,6 +930,9 @@ pub const Engine = struct {
         pass.setBindGroup(0, engine.bind_group_shadow_map_pass.wgpu_bind_group, &.{
             object_to_clip_uniform.offset,
         });
+        if (game_object.joints_bind_group) |joints_bind_group| {
+            pass.setBindGroup(1, joints_bind_group.wgpu_bind_group, &.{});
+        }
 
         switch (game_object.model) {
             .regular_model => |model| {
@@ -925,11 +981,18 @@ pub const Engine = struct {
         return try gltf_loader.GltfLoader.init(engine.io, engine.allocator, model_filename);
     }
 
+    pub const LoadModelOptions = struct {
+        mesh_y_up: bool = false,
+        animations: []const []const u8 = &.{},
+        billboard_mode: BillboardMode = .none,
+        color_texture_fallback: ?*const types.TextureDescriptor = null,
+    };
+
     pub fn loadModel(
         engine: *Engine,
         loader: *const gltf_loader.GltfLoader,
         object: *const gltf_loader.SceneObject,
-        options: ModelDescriptorOptions,
+        options: LoadModelOptions,
     ) !LoadedModelId {
         const model_descriptor = try ModelDescriptor.init(
             engine.gctx,
@@ -943,9 +1006,20 @@ pub const Engine = struct {
             },
         );
 
+        const skeletal_animation_data = try SkeletalAnimation.SkeletalAnimationData.init(
+            engine.allocator,
+            loader,
+            object,
+            options.animations,
+        );
+        errdefer if (skeletal_animation_data) |data| {
+            data.deinit();
+        };
+
         const bind_group = try engine.bind_group_definitions.regular.createBindGroup(
             engine.texture_repeat_sampler,
             model_descriptor.color_texture,
+            engine.identity_joint_matrix_buffer.handle,
         );
 
         const model = try engine.allocator.create(Model);
@@ -953,6 +1027,7 @@ pub const Engine = struct {
         model.* = .{
             .model_descriptor = model_descriptor,
             .bind_group = bind_group,
+            .skeletal_animation_data = skeletal_animation_data,
         };
 
         const loaded_model_id: LoadedModelId = @enumFromInt(Engine.next_loaded_model_id);
@@ -1027,9 +1102,10 @@ pub const Engine = struct {
             texture_full_filename,
         );
 
-        const bind_group = try engine.bind_group_definition.createBindGroup(
+        const bind_group = try engine.bind_group_definitions.regular.createBindGroup(
             engine.texture_sampler,
             skybox_descriptor.color_texture,
+            engine.identity_joint_matrix_buffer.handle,
         );
 
         const model = try engine.allocator.create(SkyBoxModel);
@@ -1072,6 +1148,7 @@ pub const Engine = struct {
         const bind_group = try engine.bind_group_definitions.cubemap.createBindGroup(
             engine.texture_sampler,
             skybox_cubemap_descriptor.color_texture,
+            engine.identity_joint_matrix_buffer.handle,
         );
 
         const model = try engine.allocator.create(SkyBoxCubemapModel);
@@ -1115,6 +1192,7 @@ pub const Engine = struct {
         const bind_group = try engine.bind_group_definitions.regular.createBindGroup(
             engine.texture_sampler,
             window_box_descriptor.color_texture,
+            engine.identity_joint_matrix_buffer.handle,
         );
 
         const model = try engine.allocator.create(WindowBoxModel);

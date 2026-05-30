@@ -50,7 +50,7 @@ pub fn SpaceTree(comptime ElementType: type) type {
     return struct {
         const This = @This();
         const ThisSpaceNode = SpaceNode(ElementType);
-        const ObjectsHashMap = std.array_hash_map.Auto(*const ElementType, bool);
+        const ObjectsHashMap = std.array_hash_map.Auto(*ElementType, bool);
 
         allocator: std.mem.Allocator,
         grid: [GRID_DIMENSTION][GRID_DIMENSTION]*ThisSpaceNode,
@@ -118,15 +118,15 @@ pub fn SpaceTree(comptime ElementType: type) type {
             space_tree.allocator.destroy(space_tree);
         }
 
-        pub fn addObject(space_tree: *This, object: *const ElementType) !void {
+        pub fn addObject(space_tree: *This, object: *ElementType) !void {
             try space_tree.toggleObject(object, true);
         }
 
-        pub fn removeObject(space_tree: *This, object: *const ElementType) !void {
+        pub fn removeObject(space_tree: *This, object: *ElementType) !void {
             try space_tree.toggleObject(object, false);
         }
 
-        fn toggleObject(space_tree: *This, object: *const ElementType, is_adding: bool) !void {
+        fn toggleObject(space_tree: *This, object: *ElementType, is_adding: bool) !void {
             const bounds = object.model.getBounds();
             const bound_center = utils.applyMat(bounds.offset, object.aggregated_matrix);
             const scale = zmath.util.getScaleVec(object.aggregated_matrix);
@@ -213,7 +213,7 @@ pub fn SpaceTree(comptime ElementType: type) type {
             }
         }
 
-        pub fn getObjectsInBoundBox(space_tree: *This, bound_box: BoundBox(f32)) []*const ElementType {
+        pub fn getObjectsInBoundBox(space_tree: *This, bound_box: BoundBox(f32)) []*ElementType {
             Debug.find_invocations_count = 0;
             Debug.active_space_nodes_count = 0;
 
@@ -320,8 +320,8 @@ fn SpaceNode(comptime ElementType: type) type {
         level: u8,
         center: zmath.Vec,
         child_nodes: [CHILD_NODE_COUNT]*ThisSpaceNode,
-        contained_objects: std.AutoArrayHashMapUnmanaged(*const ElementType, bool),
-        intersecting_objects: std.AutoArrayHashMapUnmanaged(*const ElementType, bool),
+        contained_objects: std.AutoArrayHashMapUnmanaged(*ElementType, bool),
+        intersecting_objects: std.AutoArrayHashMapUnmanaged(*ElementType, bool),
         nested_objects_count: u32,
 
         fn init(level: u8, center: zmath.Vec) ThisSpaceNode {
@@ -343,7 +343,7 @@ fn SpaceNode(comptime ElementType: type) type {
         fn toggleObject(
             space_node: *ThisSpaceNode,
             allocator: std.mem.Allocator,
-            object: *const ElementType,
+            object: *ElementType,
             bound_center: zmath.Vec,
             bound_radius: f32,
             bound_box: BoundBox(f32),
@@ -430,7 +430,7 @@ fn SpaceNode(comptime ElementType: type) type {
             space_node: *const ThisSpaceNode,
             allocator: std.mem.Allocator,
             bound_box: BoundBox(f32),
-            objects: *std.array_hash_map.Auto(*const ElementType, bool),
+            objects: *std.array_hash_map.Auto(*ElementType, bool),
         ) !void {
             Debug.find_invocations_count += 1;
 

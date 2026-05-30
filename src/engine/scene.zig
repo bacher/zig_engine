@@ -74,6 +74,7 @@ pub const Scene = struct {
         scene.root_groups.deinit(scene.allocator);
 
         for (scene.game_objects.items) |game_object| {
+            game_object.stopAnimation(scene.engine.gctx);
             scene.allocator.destroy(game_object);
         }
         scene.game_objects.deinit(scene.allocator);
@@ -101,7 +102,11 @@ pub const Scene = struct {
                 .parent = params.parent,
                 .space_tree = scene.space_tree,
             });
-            errdefer game_object.deinit();
+            errdefer game_object.deinit(scene.engine.gctx);
+
+            if (params.animation_name) |animation_name| {
+                try game_object.playAnimation(scene.animationContext(), animation_name);
+            }
 
             try scene.game_objects.append(scene.allocator, game_object);
 
@@ -120,7 +125,7 @@ pub const Scene = struct {
             .parent = params.parent,
             .space_tree = scene.space_tree,
         });
-        errdefer game_object.deinit();
+        errdefer game_object.deinit(scene.engine.gctx);
 
         try scene.game_objects.append(scene.allocator, game_object);
 
@@ -135,7 +140,7 @@ pub const Scene = struct {
             },
             .position = params.position,
         });
-        errdefer game_object.deinit();
+        errdefer game_object.deinit(scene.engine.gctx);
 
         try scene.game_objects.append(scene.allocator, game_object);
 
@@ -149,7 +154,7 @@ pub const Scene = struct {
             },
             .position = .{ 0, 0, 0 },
         });
-        errdefer game_object.deinit();
+        errdefer game_object.deinit(scene.engine.gctx);
 
         try scene.game_objects.append(scene.allocator, game_object);
 
@@ -163,7 +168,7 @@ pub const Scene = struct {
             },
             .position = .{ 0, 0, 0 },
         });
-        errdefer game_object.deinit();
+        errdefer game_object.deinit(scene.engine.gctx);
 
         try scene.game_objects.append(scene.allocator, game_object);
 
@@ -179,7 +184,7 @@ pub const Scene = struct {
             .space_tree = scene.space_tree,
             .parent = null,
         });
-        errdefer game_object.deinit();
+        errdefer game_object.deinit(scene.engine.gctx);
 
         try scene.game_objects.append(scene.allocator, game_object);
 
@@ -192,6 +197,18 @@ pub const Scene = struct {
         light.* = .init(params);
 
         try scene.lights.append(scene.allocator, light);
+    }
+
+    pub fn playObjectAnimation(scene: *Scene, game_object: *GameObject, animation_name: []const u8) !void {
+        try game_object.playAnimation(scene.animationContext(), animation_name);
+    }
+
+    pub fn switchObjectAnimation(scene: *Scene, game_object: *GameObject, animation_name: []const u8) !void {
+        try scene.playObjectAnimation(game_object, animation_name);
+    }
+
+    pub fn stopObjectAnimation(scene: *Scene, game_object: *GameObject) void {
+        game_object.stopAnimation(scene.engine.gctx);
     }
 
     pub fn update(scene: *Scene, time: f64) void {
@@ -207,12 +224,21 @@ pub const Scene = struct {
 
         scene.previous_frame_time = time;
     }
+
+    fn animationContext(scene: *Scene) GameObject.AnimationContext {
+        return .{
+            .gctx = scene.engine.gctx,
+            .bind_group_definition = scene.engine.bind_group_definitions.joints,
+            .current_time = @floatCast(scene.engine.time),
+        };
+    }
 };
 
 pub const AddObjectParams = struct {
     model_id: Engine.LoadedModelId,
     position: [3]f32,
     parent: ?*GameObjectGroup,
+    animation_name: ?[]const u8 = null,
 };
 
 pub const AddTerrainHeightMapObjectParams = struct {
