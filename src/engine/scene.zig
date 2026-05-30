@@ -212,6 +212,7 @@ pub const Scene = struct {
     }
 
     pub fn update(scene: *Scene, time: f64) void {
+        // TODO: Add separate list for animated game objects and update only them
         for (scene.game_objects.items) |game_object| {
             game_object.updateAnimation(scene.engine.gctx, @floatCast(time));
         }
@@ -232,8 +233,7 @@ pub const Scene = struct {
     fn animationContext(scene: *Scene) GameObject.AnimationContext {
         return .{
             .gctx = scene.engine.gctx,
-            .bind_group_definition = scene.engine.bind_group_definitions.regular,
-            .texture_sampler = scene.engine.texture_repeat_sampler,
+            .bind_group_definition = scene.engine.bind_group_definitions.joints,
             .current_time = @floatCast(scene.engine.time),
         };
     }

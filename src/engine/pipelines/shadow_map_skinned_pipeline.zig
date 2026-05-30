@@ -5,14 +5,17 @@ const wgsl_vs = @embedFile("../shaders/shadow_map/skinned_vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/shadow_map/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
-const RegularBindGroupDefinition = @import("../bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
+const ShadowMapPassBindGroupDefinition = @import("../bind_groups_defs/shadow_map_pass_bind_group.zig").ShadowMapPassBindGroupDefinition;
+const JointsBindGroupDefinition = @import("../bind_groups_defs/joints_bind_group.zig").JointsBindGroupDefinition;
 
 pub fn createShadowMapSkinnedPipeline(
     gctx: *zgpu.GraphicsContext,
-    bind_group_definition: RegularBindGroupDefinition,
+    shadow_map_pass_bind_group_definition: ShadowMapPassBindGroupDefinition,
+    joints_bind_group_definition: JointsBindGroupDefinition,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
-        bind_group_definition.bind_group_layout_handle,
+        shadow_map_pass_bind_group_definition.bind_group_layout_handle,
+        joints_bind_group_definition.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 

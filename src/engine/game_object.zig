@@ -15,6 +15,7 @@ const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;
 const SpaceTree = @import("./space_tree.zig").SpaceTree;
 const BindGroup = @import("./bind_group.zig").BindGroup;
 const RegularBindGroupDefinition = @import("./bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
+const JointsBindGroupDefinition = @import("./bind_groups_defs/joints_bind_group.zig").JointsBindGroupDefinition;
 const SkeletalAnimation = @import("./skeletal_animation.zig");
 
 const ModelUnion = union(enum) {
@@ -66,7 +67,7 @@ pub const GameObject = struct {
     aggregated_matrix: zmath.Mat = zmath.identity(),
     model: ModelUnion,
     animation: ?SkeletalAnimation = null,
-    animation_bind_group: ?BindGroup = null,
+    joints_bind_group: ?BindGroup = null,
     debug: struct {
         color: [4]f32 = .{ 0.0, 0.0, 0.0, 1.0 },
     } = .{},
@@ -76,8 +77,7 @@ pub const GameObject = struct {
 
     pub const AnimationContext = struct {
         gctx: *zgpu.GraphicsContext,
-        bind_group_definition: RegularBindGroupDefinition,
-        texture_sampler: zgpu.SamplerHandle,
+        bind_group_definition: JointsBindGroupDefinition,
         current_time: f32,
     };
 
@@ -145,21 +145,19 @@ pub const GameObject = struct {
         );
         errdefer animation.deinit(context.gctx);
 
-        const bind_group = try context.bind_group_definition.createBindGroup(
-            context.texture_sampler,
-            model.model_descriptor.color_texture,
+        const joints_bind_group = try context.bind_group_definition.createBindGroup(
             animation.joint_matrix_buffer.handle,
         );
-        errdefer bind_group.deinit(context.gctx);
+        errdefer joints_bind_group.deinit(context.gctx);
 
         game_object.animation = animation;
-        game_object.animation_bind_group = bind_group;
+        game_object.joints_bind_group = joints_bind_group;
     }
 
     pub fn stopAnimation(game_object: *GameObject, gctx: *zgpu.GraphicsContext) void {
-        if (game_object.animation_bind_group) |bind_group| {
+        if (game_object.joints_bind_group) |bind_group| {
             bind_group.deinit(gctx);
-            game_object.animation_bind_group = null;
+            game_object.joints_bind_group = null;
         }
 
         if (game_object.animation) |animation| {
@@ -172,10 +170,6 @@ pub const GameObject = struct {
         if (game_object.animation) |*animation| {
             animation.update(gctx, time);
         }
-    }
-
-    pub fn getRegularBindGroup(game_object: *const GameObject, model: *const Model) BindGroup {
-        return game_object.animation_bind_group orelse model.bind_group;
     }
 
     pub fn setScale(game_object: *GameObject, scale: f32) void {

@@ -29,6 +29,7 @@ const debug_texture_pipeline_module = @import("./pipelines/debug_texture_pipelin
 const BindGroup = @import("./bind_group.zig").BindGroup;
 // -- bind groups definitions --
 const RegularBindGroupDefinition = @import("./bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
+const JointsBindGroupDefinition = @import("./bind_groups_defs/joints_bind_group.zig").JointsBindGroupDefinition;
 const TerrainHeightMapBindGroupDefinition = @import("./bind_groups_defs/terrain_height_map_bind_group.zig").TerrainHeightMapBindGroupDefinition;
 const PrimitiveColorizedBindGroupDefinition = @import("./bind_groups_defs/primitive_bind_group.zig").PrimitiveColorizedBindGroupDefinition;
 const ShadowMapPassBindGroupDefinition = @import("./bind_groups_defs/shadow_map_pass_bind_group.zig").ShadowMapPassBindGroupDefinition;
@@ -92,6 +93,7 @@ pub const Engine = struct {
 
     const BindGroupDefinitions = struct {
         regular: RegularBindGroupDefinition,
+        joints: JointsBindGroupDefinition,
         cubemap: RegularBindGroupDefinition,
         terrain_height_map: TerrainHeightMapBindGroupDefinition,
         primitive_colorized: PrimitiveColorizedBindGroupDefinition,
@@ -102,6 +104,7 @@ pub const Engine = struct {
 
         fn deinit(definitions: *BindGroupDefinitions) void {
             definitions.regular.deinit();
+            definitions.joints.deinit();
             definitions.cubemap.deinit();
             definitions.terrain_height_map.deinit();
             definitions.primitive_colorized.deinit();
@@ -211,6 +214,7 @@ pub const Engine = struct {
         // ---
         const bind_group_definitions: BindGroupDefinitions = .{
             .regular = RegularBindGroupDefinition.init(gctx, .tvdim_2d),
+            .joints = JointsBindGroupDefinition.init(gctx),
             .cubemap = RegularBindGroupDefinition.init(gctx, .tvdim_cube),
             .terrain_height_map = TerrainHeightMapBindGroupDefinition.init(gctx),
             .primitive_colorized = PrimitiveColorizedBindGroupDefinition.init(gctx),
@@ -246,6 +250,7 @@ pub const Engine = struct {
             gctx,
             bind_group_definitions.regular,
             bind_group_definitions.shadow_map,
+            bind_group_definitions.joints,
         );
         const skybox_pipeline = try skybox_pipeline_module.createSkyboxPipeline(
             gctx,
@@ -274,7 +279,8 @@ pub const Engine = struct {
         );
         const shadow_map_skinned_pipeline = try shadow_map_skinned_pipeline_module.createShadowMapSkinnedPipeline(
             gctx,
-            bind_group_definitions.regular,
+            bind_group_definitions.shadow_map_pass,
+            bind_group_definitions.joints,
         );
         const lines_pipeline = try lines_pipeline_module.createLinesPipeline(
             gctx,
@@ -735,14 +741,16 @@ pub const Engine = struct {
 
         switch (game_object.model) {
             .regular_model => |model| {
-                const bind_group = game_object.getRegularBindGroup(model);
-                pass.setBindGroup(0, bind_group.wgpu_bind_group, &.{
+                pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
                     camera_position_in_model_space_uniform.offset,
                 });
                 pass.setBindGroup(1, engine.bind_group_shadow_map.wgpu_bind_group, &.{
                     object_to_light_clip_array_uniform.offset,
                 });
+                if (game_object.joints_bind_group) |joints_bind_group| {
+                    pass.setBindGroup(2, joints_bind_group.wgpu_bind_group, &.{});
+                }
 
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
             },
@@ -863,7 +871,8 @@ pub const Engine = struct {
         switch (game_object.model) {
             .regular_model => |model| {
                 const model_descriptor = model.model_descriptor;
-                if (model_descriptor.has_skin) {
+                // if (model_descriptor.has_skin) {
+                if (game_object.joints_bind_group != null) {
                     pass.setPipeline(engine.pipelines.shadow_map_skinned.pipeline_gpu);
                 } else {
                     pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
@@ -915,25 +924,11 @@ pub const Engine = struct {
         const object_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
         object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
 
-        switch (game_object.model) {
-            .regular_model => |model| {
-                if (model.model_descriptor.has_skin) {
-                    const bind_group = game_object.getRegularBindGroup(model);
-                    pass.setBindGroup(0, bind_group.wgpu_bind_group, &.{
-                        object_to_clip_uniform.offset,
-                        0,
-                    });
-                } else {
-                    pass.setBindGroup(0, engine.bind_group_shadow_map_pass.wgpu_bind_group, &.{
-                        object_to_clip_uniform.offset,
-                    });
-                }
-            },
-            else => {
-                pass.setBindGroup(0, engine.bind_group_shadow_map_pass.wgpu_bind_group, &.{
-                    object_to_clip_uniform.offset,
-                });
-            },
+        pass.setBindGroup(0, engine.bind_group_shadow_map_pass.wgpu_bind_group, &.{
+            object_to_clip_uniform.offset,
+        });
+        if (game_object.joints_bind_group) |joints_bind_group| {
+            pass.setBindGroup(1, joints_bind_group.wgpu_bind_group, &.{});
         }
 
         switch (game_object.model) {
