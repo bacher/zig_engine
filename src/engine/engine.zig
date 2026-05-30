@@ -482,9 +482,8 @@ pub const Engine = struct {
 
                             shadow_map_pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
 
-                            // if (engine.time < 5) {
                             light.applyCameraFrustum(cascade, scene.camera);
-                            // }
+
                             const cascade_view_bound_box = cascade.getLightViewBoundBox();
                             const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(
                                 cascade_view_bound_box,
@@ -591,7 +590,7 @@ pub const Engine = struct {
         engine: *Engine,
         pass: wgpu.RenderPassEncoder,
         scene: *const Scene,
-        game_object: *const GameObject,
+        game_object: *GameObject,
     ) void {
         switch (game_object.model) {
             .regular_model => |model| {
@@ -608,6 +607,8 @@ pub const Engine = struct {
                 if (model_descriptor.has_skin) {
                     model_descriptor.joints.applyVertexBuffer(pass, 3);
                     model_descriptor.weights.applyVertexBuffer(pass, 4);
+
+                    game_object.updateAnimation(engine.gctx, @floatCast(engine.time));
                 }
                 model_descriptor.index.applyIndexBuffer(pass);
             },
@@ -862,7 +863,7 @@ pub const Engine = struct {
         scene: *const Scene,
         light: *const DirectionalLight,
         cascade: *const DirectionalLightCascade,
-        game_object: *const GameObject,
+        game_object: *GameObject,
     ) void {
         _ = scene;
         // TODO:
@@ -882,6 +883,8 @@ pub const Engine = struct {
                 if (model_descriptor.has_skin) {
                     model_descriptor.joints.applyVertexBuffer(pass, 1);
                     model_descriptor.weights.applyVertexBuffer(pass, 2);
+
+                    game_object.updateAnimation(engine.gctx, @floatCast(engine.time));
                 }
                 model_descriptor.index.applyIndexBuffer(pass);
             },

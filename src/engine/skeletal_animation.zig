@@ -29,6 +29,7 @@ node_global_matrices: []zmath.Mat,
 node_global_computed: []bool,
 active_animation: ?*const Animation,
 animation_start_time: f32,
+time: f32 = -1.0,
 
 const NodeTransform = struct {
     translation: zmath.Vec,
@@ -440,6 +441,13 @@ pub fn update(
     gctx: *zgpu.GraphicsContext,
     time: f32,
 ) void {
+    // if the time is the same, we should skip updating.
+    // update can be called several times per frame, update should be performed only once per frame.
+    if (self.time == time) {
+        return;
+    }
+    self.time = time;
+
     const animation = self.active_animation orelse return;
 
     std.mem.copyForwards(NodeTransform, self.current_node_transforms, self.data.base_node_transforms);

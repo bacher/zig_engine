@@ -212,11 +212,6 @@ pub const Scene = struct {
     }
 
     pub fn update(scene: *Scene, time: f64) void {
-        // TODO: Add separate list for animated game objects and update only them
-        for (scene.game_objects.items) |game_object| {
-            game_object.updateAnimation(scene.engine.gctx, @floatCast(time));
-        }
-
         if (scene.previous_frame_time != 0) {
             const time_passed: f32 = @floatCast(time - scene.previous_frame_time);
 
