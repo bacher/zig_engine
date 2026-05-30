@@ -10,14 +10,15 @@ const types = @import("../types.zig");
 const load_buffer = @import("../load_buffer.zig");
 const load_texture = @import("../load_texture.zig");
 
+pub const BillboardMode = enum(u8) {
+    none = 0,
+    spherical = 1,
+    cylindrical = 2,
+};
+
 pub const ModelDescriptorOptions = struct {
     mesh_y_up: bool = false,
-    animation_name: ?[]const u8 = null,
-    billboard_mode: enum(u8) {
-        none = 0,
-        spherical = 1,
-        cylindrical = 2,
-    } = .none,
+    billboard_mode: BillboardMode = .none,
     color_texture_fallback: ?*const types.TextureDescriptor = null,
 };
 

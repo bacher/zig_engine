@@ -4,7 +4,7 @@ const zmath = @import("zmath");
 
 const TextureDescriptor = @import("../types.zig").TextureDescriptor;
 const BindGroup = @import("../bind_group.zig").BindGroup;
-const SkeletalAnimationPlayer = @import("../skeletal_animation.zig");
+const SkeletalAnimation = @import("../skeletal_animation.zig");
 
 pub const RegularBindGroupDefinition = struct {
     gctx: *zgpu.GraphicsContext,
@@ -48,7 +48,7 @@ pub const RegularBindGroupDefinition = struct {
                 .{ .vertex = true },
                 .uniform,
                 false,
-                @sizeOf(SkeletalAnimationPlayer.JointMatrixUniform),
+                @sizeOf(SkeletalAnimation.JointMatrixUniform),
             ),
         });
 
@@ -106,7 +106,7 @@ pub const RegularBindGroupDefinition = struct {
                     .binding = 4,
                     .buffer_handle = joint_matrix_buffer,
                     .offset = 0,
-                    .size = @sizeOf(SkeletalAnimationPlayer.JointMatrixUniform),
+                    .size = @sizeOf(SkeletalAnimation.JointMatrixUniform),
                 },
             },
         );

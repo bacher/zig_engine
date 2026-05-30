@@ -39,7 +39,7 @@ const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ShadowMapTexture = @import("./shadow_map_texture.zig").ShadowMapTexture;
 // -- display object descriptors --
 const ModelDescriptor = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptor;
-const ModelDescriptorOptions = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptorOptions;
+const BillboardMode = @import("./display_object_descriptors/model_descriptor.zig").BillboardMode;
 const WindowBoxDescriptor = @import("./display_object_descriptors/window_box_descriptor.zig").WindowBoxDescriptor;
 const SkyBoxDescriptor = @import("./display_object_descriptors/skybox_descriptor.zig").SkyBoxDescriptor;
 const SkyBoxCubemapDescriptor = @import("./display_object_descriptors/skybox_cubemap_descriptor.zig").SkyBoxCubemapDescriptor;
@@ -52,7 +52,7 @@ const WindowBoxModel = @import("./model.zig").WindowBoxModel;
 const PrimitiveModel = @import("./model.zig").PrimitiveModel;
 const CubeWireframeModel = @import("./model.zig").CubeWireframeModel;
 const TerrainHeightMapModel = @import("./model.zig").TerrainHeightMapModel;
-const SkeletalAnimationPlayer = @import("./skeletal_animation.zig");
+const SkeletalAnimation = @import("./skeletal_animation.zig");
 // -- other --
 const PrimitiveDescriptor = @import("./display_object_descriptors/primitive_descriptor.zig").PrimitiveDescriptor;
 const GeometryData = @import("./shape_generation/geometry_data.zig").GeometryData;
@@ -156,7 +156,7 @@ pub const Engine = struct {
     shadow_map_depth_texture: DepthTexture,
 
     uv_test_texture: types.TextureDescriptor,
-    identity_joint_matrix_buffer: SkeletalAnimationPlayer.JointMatrixBuffer,
+    identity_joint_matrix_buffer: SkeletalAnimation.JointMatrixBuffer,
 
     active_scene: ?*Scene,
     input_controller: *InputController,
@@ -313,7 +313,7 @@ pub const Engine = struct {
             .{ .generate_mipmaps = false }, // TODO: set true, maybe???
         );
 
-        const identity_joint_matrix_buffer = try SkeletalAnimationPlayer.createIdentityJointMatrixBuffer(gctx);
+        const identity_joint_matrix_buffer = try SkeletalAnimation.createIdentityJointMatrixBuffer(gctx);
 
         const engine = try allocator.create(Engine);
         engine.* = .{
@@ -412,11 +412,6 @@ pub const Engine = struct {
         engine.frame_stats = .{};
 
         try engine.input_controller.updateMouseState();
-
-        var model_iterator = engine.models_hash.iterator();
-        while (model_iterator.next()) |entry| {
-            entry.value_ptr.*.update(engine.gctx, @floatCast(engine.time));
-        }
 
         if (engine.active_scene) |scene| {
             scene.camera.updateTargetScreenSize(engine.aspect_ratio);
@@ -740,7 +735,8 @@ pub const Engine = struct {
 
         switch (game_object.model) {
             .regular_model => |model| {
-                pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{
+                const bind_group = game_object.getRegularBindGroup(model);
+                pass.setBindGroup(0, bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
                     camera_position_in_model_space_uniform.offset,
                 });
@@ -922,7 +918,8 @@ pub const Engine = struct {
         switch (game_object.model) {
             .regular_model => |model| {
                 if (model.model_descriptor.has_skin) {
-                    pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{
+                    const bind_group = game_object.getRegularBindGroup(model);
+                    pass.setBindGroup(0, bind_group.wgpu_bind_group, &.{
                         object_to_clip_uniform.offset,
                         0,
                     });
@@ -986,11 +983,18 @@ pub const Engine = struct {
         return try gltf_loader.GltfLoader.init(engine.io, engine.allocator, model_filename);
     }
 
+    pub const LoadModelOptions = struct {
+        mesh_y_up: bool = false,
+        animations: []const []const u8 = &.{},
+        billboard_mode: BillboardMode = .none,
+        color_texture_fallback: ?*const types.TextureDescriptor = null,
+    };
+
     pub fn loadModel(
         engine: *Engine,
         loader: *const gltf_loader.GltfLoader,
         object: *const gltf_loader.SceneObject,
-        options: ModelDescriptorOptions,
+        options: LoadModelOptions,
     ) !LoadedModelId {
         const model_descriptor = try ModelDescriptor.init(
             engine.gctx,
@@ -1000,31 +1004,24 @@ pub const Engine = struct {
             .{
                 .billboard_mode = options.billboard_mode,
                 .mesh_y_up = options.mesh_y_up,
-                .animation_name = options.animation_name,
                 .color_texture_fallback = options.color_texture_fallback orelse &engine.uv_test_texture,
             },
         );
 
-        const skeletal_animation = try SkeletalAnimationPlayer.init(
+        const skeletal_animation_data = try SkeletalAnimation.SkeletalAnimationData.init(
             engine.allocator,
-            engine.gctx,
             loader,
             object,
-            options.animation_name,
+            options.animations,
         );
-        errdefer if (skeletal_animation) |animation| {
-            animation.deinit(engine.gctx);
+        errdefer if (skeletal_animation_data) |data| {
+            data.deinit();
         };
-
-        const joint_matrix_buffer = if (skeletal_animation) |animation|
-            animation.joint_matrix_buffer
-        else
-            engine.identity_joint_matrix_buffer;
 
         const bind_group = try engine.bind_group_definitions.regular.createBindGroup(
             engine.texture_repeat_sampler,
             model_descriptor.color_texture,
-            joint_matrix_buffer.handle,
+            engine.identity_joint_matrix_buffer.handle,
         );
 
         const model = try engine.allocator.create(Model);
@@ -1032,7 +1029,7 @@ pub const Engine = struct {
         model.* = .{
             .model_descriptor = model_descriptor,
             .bind_group = bind_group,
-            .skeletal_animation = skeletal_animation,
+            .skeletal_animation_data = skeletal_animation_data,
         };
 
         const loaded_model_id: LoadedModelId = @enumFromInt(Engine.next_loaded_model_id);
