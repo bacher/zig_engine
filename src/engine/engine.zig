@@ -197,7 +197,7 @@ pub const Engine = struct {
         errdefer shadow_map_texture.deinit();
 
         const shadow_map_depth_texture = try DepthTexture.init(gctx, 1024, 1024);
-        errdefer shadow_map_depth_texture.deinit();
+        errdefer shadow_map_depth_texture.deinit(gctx);
 
         const texture_sampler = gctx.createSampler(.{});
         const texture_repeat_sampler = gctx.createSampler(.{
@@ -296,7 +296,7 @@ pub const Engine = struct {
             gctx.swapchain_descriptor.width,
             gctx.swapchain_descriptor.height,
         );
-        errdefer depth_texture.deinit();
+        errdefer depth_texture.deinit(gctx);
 
         const input_controller = try InputController.init(allocator, window_context.window);
         input_controller.listenWindowEvents();
@@ -1222,7 +1222,7 @@ pub const Engine = struct {
 
     fn recreateDepthTexture(engine: *Engine) !void {
         // Release old depth texture.
-        engine.depth_texture.deinit();
+        engine.depth_texture.deinit(engine.gctx);
         // Create a new depth texture to match the new window size.
         engine.depth_texture = try DepthTexture.init(
             engine.gctx,

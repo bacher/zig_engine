@@ -2,7 +2,6 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
 pub const DepthTexture = struct {
-    gctx: *zgpu.GraphicsContext,
     texture: zgpu.TextureHandle,
     view_handle: zgpu.TextureViewHandle,
     view: wgpu.TextureView,
@@ -25,15 +24,14 @@ pub const DepthTexture = struct {
         const view = gctx.lookupResource(view_handle) orelse return error.TextureIsNoAvailable;
 
         return .{
-            .gctx = gctx,
             .texture = texture,
             .view_handle = view_handle,
             .view = view,
         };
     }
 
-    pub fn deinit(depth_texture: DepthTexture) void {
-        depth_texture.gctx.releaseResource(depth_texture.view_handle);
-        depth_texture.gctx.destroyResource(depth_texture.texture);
+    pub fn deinit(depth_texture: *const DepthTexture, gctx: *zgpu.GraphicsContext) void {
+        gctx.releaseResource(depth_texture.view_handle);
+        gctx.destroyResource(depth_texture.texture);
     }
 };
