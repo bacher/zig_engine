@@ -10,13 +10,15 @@ const types = @import("../types.zig");
 const load_buffer = @import("../load_buffer.zig");
 const load_texture = @import("../load_texture.zig");
 
+pub const BillboardMode = enum(u8) {
+    none = 0,
+    spherical = 1,
+    cylindrical = 2,
+};
+
 pub const ModelDescriptorOptions = struct {
     mesh_y_up: bool = false,
-    billboard_mode: enum(u8) {
-        none = 0,
-        spherical = 1,
-        cylindrical = 2,
-    } = .none,
+    billboard_mode: BillboardMode = .none,
     color_texture_fallback: ?*const types.TextureDescriptor = null,
 };
 
@@ -25,9 +27,12 @@ pub const ModelDescriptor = struct {
     position: types.BufferDescriptor,
     normal: types.BufferDescriptor,
     texcoord: types.BufferDescriptor,
+    joints: types.BufferDescriptor,
+    weights: types.BufferDescriptor,
     index: types.BufferDescriptor,
     color_texture: types.TextureDescriptor,
     geometry_bounds: types.GeometryBounds,
+    has_skin: bool,
     options: ModelDescriptorOptions,
 
     pub fn init(
@@ -49,6 +54,8 @@ pub const ModelDescriptor = struct {
         const positions_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, buffers.positions);
         const normal_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, buffers.normals);
         const texcoord_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, buffers.texcoord);
+        const joints_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, try getJointBuffer(arena_allocator, buffers));
+        const weights_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, try getWeightBuffer(arena_allocator, buffers));
         const index_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .index, buffers.indexes);
 
         const material = loader.getObjectMaterial(object);
@@ -76,6 +83,8 @@ pub const ModelDescriptor = struct {
             .position = positions_buffer_info,
             .normal = normal_buffer_info,
             .texcoord = texcoord_buffer_info,
+            .joints = joints_buffer_info,
+            .weights = weights_buffer_info,
             .index = index_buffer_info,
             .color_texture = color_texture,
             .geometry_bounds = .{
@@ -85,6 +94,7 @@ pub const ModelDescriptor = struct {
                 .offset = offset_bounds.offset,
                 .radius = offset_bounds.radius,
             },
+            .has_skin = object.skin != null,
             .options = options,
         };
     }
@@ -94,6 +104,92 @@ pub const ModelDescriptor = struct {
         // model_description.model.deinit();
     }
 };
+
+fn getJointBuffer(
+    allocator: std.mem.Allocator,
+    buffers: gltf_loader.ModelBuffers,
+) !gltf_loader.ModelBuffer {
+    const vertex_count = buffers.positions.elements_count;
+    const joints = try allocator.alloc([4]u32, vertex_count);
+
+    if (buffers.joints) |joint_buffer| {
+        if (joint_buffer.elements_count != vertex_count) {
+            return error.InvalidJointBufferLength;
+        }
+
+        switch (joint_buffer.type) {
+            .u8 => {
+                const source = try joint_buffer.asTypedSlice([4]u8);
+                for (source, 0..) |joint, index| {
+                    joints[index] = .{
+                        @intCast(joint[0]),
+                        @intCast(joint[1]),
+                        @intCast(joint[2]),
+                        @intCast(joint[3]),
+                    };
+                }
+            },
+            .u16 => {
+                const source = try joint_buffer.asTypedSlice([4]u16);
+                for (source, 0..) |joint, index| {
+                    joints[index] = .{
+                        @intCast(joint[0]),
+                        @intCast(joint[1]),
+                        @intCast(joint[2]),
+                        @intCast(joint[3]),
+                    };
+                }
+            },
+            .u32 => {
+                const source = try joint_buffer.asTypedSlice([4]u32);
+                std.mem.copyForwards([4]u32, joints, source);
+            },
+            else => return error.UnsupportedJointBufferType,
+        }
+    } else {
+        for (joints) |*joint| {
+            joint.* = .{ 0, 0, 0, 0 };
+        }
+    }
+
+    const bytes = std.mem.sliceAsBytes(joints);
+    return .{
+        .type = .u32,
+        .component_number = 4,
+        .elements_count = vertex_count,
+        .byte_length = @intCast(bytes.len),
+        .buffer = bytes,
+    };
+}
+
+fn getWeightBuffer(
+    allocator: std.mem.Allocator,
+    buffers: gltf_loader.ModelBuffers,
+) !gltf_loader.ModelBuffer {
+    const vertex_count = buffers.positions.elements_count;
+
+    if (buffers.weights) |weight_buffer| {
+        if (weight_buffer.elements_count != vertex_count) {
+            return error.InvalidWeightBufferLength;
+        }
+
+        return weight_buffer;
+    }
+
+    const weights = try allocator.alloc([4]f32, vertex_count);
+    for (weights) |*weight| {
+        weight.* = .{ 1, 0, 0, 0 };
+    }
+
+    const bytes = std.mem.sliceAsBytes(weights);
+    return .{
+        .type = .float,
+        .component_number = 4,
+        .elements_count = vertex_count,
+        .byte_length = @intCast(bytes.len),
+        .buffer = bytes,
+    };
+}
 
 fn arrayF64to32(input: [3]f64) @Vector(3, f32) {
     return .{

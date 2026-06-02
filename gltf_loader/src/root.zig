@@ -7,15 +7,18 @@ const expect = std.testing.expect;
 // usingnamespace @import("./types.zig");
 // const t = @This();
 const t = @import("./types.zig");
+pub const types = t;
 
 const DEBUG = false;
 const DEBUG_SHOW_NODE_NAMES = false;
 
 pub const SceneObject = struct {
+    node_index: ?t.NodeIndex,
     name: ?[]const u8,
     transform_matrix: ?*const t.TransformMatrix,
     children: ?[]const SceneObject,
     mesh: ?*const Mesh,
+    skin: ?t.SkinIndex,
 
     fn printDebugInfo(self: *const SceneObject) void {
         const children_number = children_number: {
@@ -118,27 +121,28 @@ pub const GltfLoader = struct {
 
     fn processSceneRoot(self: *const GltfLoader, scene: t.Scene) !SceneObject {
         const allocator = self.allocator;
-        const gltf_wrapper = self.gltf_wrapper;
 
         const children = try allocator.alloc(SceneObject, scene.nodes.len);
         errdefer allocator.free(children);
 
         for (scene.nodes, 0..) |node_index, index| {
-            const node = gltf_wrapper.getNodeByIndex(node_index);
-            children[index] = try self.processSceneObject(node);
+            children[index] = try self.processSceneObject(node_index);
         }
 
         return .{
+            .node_index = null,
             .name = null,
             .transform_matrix = null,
             .children = children,
             .mesh = null,
+            .skin = null,
         };
     }
 
-    fn processSceneObject(self: *const GltfLoader, node: t.Node) !SceneObject {
+    fn processSceneObject(self: *const GltfLoader, node_index: t.NodeIndex) !SceneObject {
         const allocator = self.allocator;
         const gltf_wrapper = self.gltf_wrapper;
+        const node = gltf_wrapper.getNodeByIndex(node_index);
 
         var transform_matrix: ?*const t.TransformMatrix = null;
         if (node.matrix) |matrix| {
@@ -172,8 +176,7 @@ pub const GltfLoader = struct {
             errdefer allocator.free(children_ptr);
 
             for (node_children, 0..) |child_node_index, index| {
-                const child_node = gltf_wrapper.getNodeByIndex(child_node_index);
-                children_ptr[index] = try self.processSceneObject(child_node);
+                children_ptr[index] = try self.processSceneObject(child_node_index);
             }
             children = children_ptr;
         }
@@ -185,10 +188,12 @@ pub const GltfLoader = struct {
         }
 
         return .{
+            .node_index = node_index,
             .name = node.name,
             .transform_matrix = transform_matrix,
             .children = children,
             .mesh = mesh,
+            .skin = node.skin,
         };
     }
 
@@ -292,6 +297,15 @@ pub const GltfLoader = struct {
             mesh.mesh_primitive.attributes.TEXCOORD_0,
         );
 
+        const joints_accessor = if (mesh.mesh_primitive.attributes.JOINTS_0) |accessor_index|
+            self.gltf_wrapper.getAccessorByIndex(accessor_index)
+        else
+            null;
+        const weights_accessor = if (mesh.mesh_primitive.attributes.WEIGHTS_0) |accessor_index|
+            self.gltf_wrapper.getAccessorByIndex(accessor_index)
+        else
+            null;
+
         const buffer_file_path = try std.fs.path.join(self.gpa_allocator, &.{
             self.gltf_file_root,
             binary_file_path,
@@ -306,7 +320,31 @@ pub const GltfLoader = struct {
             .positions = try self.loadModelBuffer(file, allocator, positions_accessor),
             .normals = try self.loadModelBuffer(file, allocator, normals_accessor),
             .texcoord = try self.loadModelBuffer(file, allocator, texcoord_accessor),
+            .joints = if (joints_accessor) |accessor| try self.loadModelBuffer(file, allocator, accessor) else null,
+            .weights = if (weights_accessor) |accessor| try self.loadModelBuffer(file, allocator, accessor) else null,
         };
+    }
+
+    pub fn loadAccessorBuffer(
+        self: *const GltfLoader,
+        allocator: std.mem.Allocator,
+        accessor_index: t.AccessorIndex,
+    ) !ModelBuffer {
+        // Supports only glTF files with one binary
+        std.debug.assert(self.gltf_wrapper.gltf_root.buffers.len == 1);
+        const binary_file_path = self.gltf_wrapper.gltf_root.buffers[0].uri;
+        const accessor = self.gltf_wrapper.getAccessorByIndex(accessor_index);
+
+        const buffer_file_path = try std.fs.path.join(self.gpa_allocator, &.{
+            self.gltf_file_root,
+            binary_file_path,
+        });
+        defer self.gpa_allocator.free(buffer_file_path);
+
+        const file = try std.Io.Dir.cwd().openFile(self.io, buffer_file_path, .{});
+        defer file.close(self.io);
+
+        return try self.loadModelBuffer(file, allocator, accessor);
     }
 
     fn loadModelBuffer(
@@ -347,6 +385,10 @@ pub const GltfLoader = struct {
             component_number = 3;
         } else if (std.mem.eql(u8, accessor.type, "VEC4")) {
             component_number = 4;
+        } else if (std.mem.eql(u8, accessor.type, "MAT4")) {
+            component_number = 16;
+        } else {
+            return error.UnsupportedAccessorType;
         }
 
         const byte_offset = buffer_view.byteOffset + accessor.byteOffset;
@@ -406,6 +448,34 @@ pub const GltfLoader = struct {
         return try zstbi.Image.loadFromFile(buffer_file_path, 4);
     }
 
+    pub fn getNodes(self: *const GltfLoader) []const t.Node {
+        return self.gltf_wrapper.gltf_root.nodes;
+    }
+
+    pub fn getSkin(self: *const GltfLoader, skin_index: t.SkinIndex) t.Skin {
+        return self.gltf_wrapper.getSkinByIndex(skin_index);
+    }
+
+    pub fn findAnimationByName(self: *const GltfLoader, name: []const u8) ?*const t.Animation {
+        for (self.gltf_wrapper.gltf_root.animations) |*animation| {
+            if (animation.name) |animation_name| {
+                if (std.mem.eql(u8, animation_name, name)) {
+                    return animation;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    pub fn findFirstAnimation(self: *const GltfLoader) ?*const t.Animation {
+        if (self.gltf_wrapper.gltf_root.animations.len == 0) {
+            return null;
+        }
+
+        return &self.gltf_wrapper.gltf_root.animations[0];
+    }
+
     pub fn deinit(self: *const GltfLoader) void {
         self.arena.deinit();
     }
@@ -433,6 +503,10 @@ const GltfWrapper = struct {
 
     fn getMeshByIndex(self: *const GltfWrapper, mesh_index: t.MeshIndex) t.Mesh {
         return self.gltf_root.meshes[@intFromEnum(mesh_index)];
+    }
+
+    fn getSkinByIndex(self: *const GltfWrapper, skin_index: t.SkinIndex) t.Skin {
+        return self.gltf_root.skins[@intFromEnum(skin_index)];
     }
 
     fn getAccessorByIndex(self: *const GltfWrapper, accessor_index: t.AccessorIndex) t.Accessor {
@@ -501,7 +575,7 @@ pub const ModelBuffer = struct {
     pub fn asTypedSlice(model_buffer: *const ModelBuffer, comptime SliceType: type) ![]const SliceType {
         const ElementElementType = std.meta.Elem(SliceType);
 
-        if (!((ElementElementType == u8 and model_buffer.type == .u8) or (ElementElementType == u16 and model_buffer.type == .u16) or (ElementElementType == u16 and model_buffer.type == .u16) or (ElementElementType == f32 and model_buffer.type == .float))) {
+        if (!((ElementElementType == u8 and model_buffer.type == .u8) or (ElementElementType == u16 and model_buffer.type == .u16) or (ElementElementType == u32 and model_buffer.type == .u32) or (ElementElementType == f32 and model_buffer.type == .float))) {
             return error.TypeMismatch;
         }
 
@@ -520,12 +594,20 @@ pub const ModelBuffers = struct {
     positions: ModelBuffer,
     normals: ModelBuffer,
     texcoord: ModelBuffer,
+    joints: ?ModelBuffer,
+    weights: ?ModelBuffer,
 
     pub fn printDebugStats(self: *const ModelBuffers) void {
         std.debug.print("indexes   buffer len = {}\n", .{self.indexes.elements_count});
         std.debug.print("positions buffer len = {}\n", .{self.positions.elements_count});
         std.debug.print("normals   buffer len = {}\n", .{self.normals.elements_count});
         std.debug.print("texcoord  buffer len = {}\n", .{self.texcoord.elements_count});
+        if (self.joints) |joints| {
+            std.debug.print("joints    buffer len = {}\n", .{joints.elements_count});
+        }
+        if (self.weights) |weights| {
+            std.debug.print("weights   buffer len = {}\n", .{weights.elements_count});
+        }
     }
 
     pub fn deinit(self: *const ModelBuffers, allocator: std.mem.Allocator) void {
@@ -533,6 +615,12 @@ pub const ModelBuffers = struct {
         allocator.free(self.positions.buffer);
         allocator.free(self.normals.buffer);
         allocator.free(self.texcoord.buffer);
+        if (self.joints) |joints| {
+            allocator.free(joints.buffer);
+        }
+        if (self.weights) |weights| {
+            allocator.free(weights.buffer);
+        }
     }
 };
 
@@ -561,6 +649,41 @@ test "GltfLoader can load model" {
     defer {
         buffers.deinit(test_allocator);
     }
+}
+
+test "GltfLoader can load skeletal animation data" {
+    const test_allocator = std.testing.allocator;
+    const test_io = std.testing.io;
+
+    zstbi.init(test_io, test_allocator);
+    defer zstbi.deinit();
+
+    const loader = try GltfLoader.init(
+        test_io,
+        test_allocator,
+        "assets/man/man.gltf",
+    );
+    defer loader.deinit();
+
+    const object = loader.findFirstObjectWithMesh().?;
+    try expect(object.skin != null);
+
+    const animation = loader.findAnimationByName("walkLikeMan") orelse return error.AnimationNotFound;
+    try expect(animation.channels.len > 0);
+    try expect(animation.samplers.len > 0);
+
+    const skin = loader.getSkin(object.skin.?);
+    try expect(skin.joints.len == 20);
+
+    const inverse_bind_matrices = try loader.loadAccessorBuffer(test_allocator, skin.inverseBindMatrices);
+    defer test_allocator.free(inverse_bind_matrices.buffer);
+    try expect(inverse_bind_matrices.elements_count == skin.joints.len);
+    try expect(inverse_bind_matrices.component_number == 16);
+
+    const buffers = try loader.loadModelBuffers(test_allocator, object.mesh.?);
+    defer buffers.deinit(test_allocator);
+    try expect(buffers.joints != null);
+    try expect(buffers.weights != null);
 }
 
 test "GltfLoader can load scene" {

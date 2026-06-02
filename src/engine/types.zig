@@ -4,6 +4,8 @@ const zmath = @import("zmath");
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
+pub const max_skin_joints = 64;
+
 pub const BufferType = enum(u8) {
     index,
     vertex,

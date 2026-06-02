@@ -77,6 +77,7 @@ pub fn main(init: std.process.Init) !void {
         const object = loader.findFirstObjectWithMesh().?;
         break :id try engine.loadModel(&loader, object, .{
             .mesh_y_up = true,
+            .animations = &.{"walkLikeMan"},
         });
     };
 
@@ -187,12 +188,14 @@ pub fn main(init: std.process.Init) !void {
         .model_id = man_model_id,
         .position = .{ -2, 0, 6 },
         .parent = null,
+        .animation_name = "walkLikeMan",
     }));
 
     try game.saved_game_objects.put(allocator, "man_2", try scene.addObject(.{
         .model_id = man_model_id,
         .position = .{ 4, 0, 8 },
         .parent = null,
+        .animation_name = "walkLikeMan",
     }));
 
     // _ = gazebo_model_id;
