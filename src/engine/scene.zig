@@ -93,27 +93,29 @@ pub const Scene = struct {
     }
 
     pub fn addObject(scene: *Scene, params: AddObjectParams) !*GameObject {
-        if (scene.engine.models_hash.get(params.model_id)) |model| {
-            const game_object = try GameObject.init(scene.allocator, .{
-                .model = .{
-                    .regular_model = model,
-                },
-                .position = params.position,
-                .parent = params.parent,
-                .space_tree = scene.space_tree,
-            });
-            errdefer game_object.deinit(scene.engine.gctx);
-
-            if (params.animation_name) |animation_name| {
-                try game_object.playAnimation(scene.animationContext(), animation_name);
-            }
-
-            try scene.game_objects.append(scene.allocator, game_object);
-
-            return game_object;
-        } else {
-            return error.InvalidModelId;
+        const model_optional = scene.engine.models_hash.get(params.model_id);
+        if (model_optional == null) {
+            @panic("Invalid model id");
         }
+
+        const model = model_optional.?;
+        const game_object = try GameObject.init(scene.allocator, .{
+            .model = .{
+                .regular_model = model,
+            },
+            .position = params.position,
+            .parent = params.parent,
+            .space_tree = scene.space_tree,
+        });
+        errdefer game_object.deinit(scene.engine.gctx);
+
+        if (params.animation_name) |animation_name| {
+            try game_object.playAnimation(scene.animationContext(), animation_name);
+        }
+
+        try scene.game_objects.append(scene.allocator, game_object);
+
+        return game_object;
     }
 
     pub fn addTerrainHeightMapObject(scene: *Scene, params: AddTerrainHeightMapObjectParams) !*GameObject {
