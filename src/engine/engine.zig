@@ -68,6 +68,7 @@ const DirectionalLight = @import("./light.zig").DirectionalLight;
 const DirectionalLightCascade = @import("./light.zig").DirectionalLightCascade;
 
 const DEBUG_INTERNAL_TEXTURE = false;
+const DEBUG_SHOW_WIREFRAME_OBJECTS = true;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 
@@ -179,6 +180,37 @@ pub const Engine = struct {
 
     // -- built-in models --
     cube_wireframe_model: *CubeWireframeModel,
+
+    // -- temporary buffers --
+    temp_buffers: struct {
+        regular_objects: std.ArrayList(*GameObject) = undefined,
+        skinned_objects: std.ArrayList(*GameObject) = undefined,
+        wireframe_objects: std.ArrayList(*GameObject) = undefined,
+        rest_objects: std.ArrayList(*GameObject) = undefined,
+
+        fn init(allocator: std.mem.Allocator) @This() {
+            return @This(){
+                .regular_objects = std.ArrayList(*GameObject).initCapacity(allocator, 1024) catch @panic("Failed to initialize regular objects buffer"),
+                .skinned_objects = std.ArrayList(*GameObject).initCapacity(allocator, 1024) catch @panic("Failed to initialize skinned objects buffer"),
+                .wireframe_objects = std.ArrayList(*GameObject).initCapacity(allocator, 1024) catch @panic("Failed to initialize wireframe objects buffer"),
+                .rest_objects = std.ArrayList(*GameObject).initCapacity(allocator, 1024) catch @panic("Failed to initialize rest objects buffer"),
+            };
+        }
+
+        fn deinit(buffers: *@This(), allocator: std.mem.Allocator) void {
+            buffers.regular_objects.deinit(allocator);
+            buffers.skinned_objects.deinit(allocator);
+            buffers.wireframe_objects.deinit(allocator);
+            buffers.rest_objects.deinit(allocator);
+        }
+
+        fn reset(buffers: *@This()) void {
+            buffers.regular_objects.clearRetainingCapacity();
+            buffers.skinned_objects.clearRetainingCapacity();
+            buffers.wireframe_objects.clearRetainingCapacity();
+            buffers.rest_objects.clearRetainingCapacity();
+        }
+    },
 
     pub fn init(
         io: std.Io,
@@ -374,7 +406,10 @@ pub const Engine = struct {
 
             // built-in models
             .cube_wireframe_model = undefined,
+
+            .temp_buffers = .init(allocator),
         };
+        errdefer engine.temp_buffers.deinit(allocator);
 
         engine.cube_wireframe_model = try engine.loadCubeWireframeModel();
         errdefer engine.cube_wireframe_model.deinit(engine.gctx);
@@ -384,6 +419,8 @@ pub const Engine = struct {
     }
 
     pub fn deinit(engine: *Engine) void {
+        engine.temp_buffers.deinit(engine.allocator);
+
         var iterator = engine.models_hash.iterator();
         while (iterator.next()) |entry| {
             const model_ptr = entry.value_ptr.*;
@@ -436,6 +473,7 @@ pub const Engine = struct {
 
     pub fn draw(engine: *Engine) GraphicsContextState {
         const gctx = engine.gctx;
+        const allocator = engine.allocator;
 
         const back_buffer_view = gctx.swapchain.getCurrentTextureView();
         defer back_buffer_view.release();
@@ -541,16 +579,57 @@ pub const Engine = struct {
                     engine.frame_stats.find_objects_sub_invocations_count = stats.invocations_count;
                     // debug end
 
-                    for (potentially_visible_game_objects) |game_object| {
-                        engine.drawGameObject(pass, scene, game_object);
-                        engine.frame_stats.game_objects_drawn_count += 1;
-                    }
-
                     // _ = potentially_visible_game_objects;
                     // for (scene.game_objects.items) |game_object| {
-                    //     engine.drawGameObject(pass, scene, game_object);
-                    //     engine.frame_stats.game_objects_drawn_count += 1;
-                    // }
+                    for (potentially_visible_game_objects) |game_object| {
+                        const target_buffer = switch (game_object.model) {
+                            .regular_model => |model| if (model.model_descriptor.has_skin)
+                                &engine.temp_buffers.skinned_objects
+                            else
+                                &engine.temp_buffers.regular_objects,
+                            else => &engine.temp_buffers.rest_objects,
+                        };
+                        target_buffer.append(allocator, game_object) catch @panic("Failed to grow draw buffer");
+
+                        if (DEBUG_SHOW_WIREFRAME_OBJECTS) {
+                            if (switch (game_object.model) {
+                                .regular_model => true,
+                                .window_box_model => true,
+                                // Don't show bounding box for coordinates (they uses colorized primitives)
+                                // .primitive_colorized => true,
+                                else => false,
+                            }) {
+                                engine.temp_buffers.wireframe_objects.append(allocator, game_object) catch @panic("Failed to grow draw buffer");
+                            }
+                        }
+                    }
+
+                    pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
+                    for (engine.temp_buffers.regular_objects.items) |game_object| {
+                        engine.drawGameObject(pass, scene, game_object);
+                    }
+
+                    if (engine.temp_buffers.skinned_objects.items.len > 0) {
+                        pass.setPipeline(engine.pipelines.basic_skinned.pipeline_gpu);
+                        for (engine.temp_buffers.skinned_objects.items) |game_object| {
+                            engine.drawGameObject(pass, scene, game_object);
+                        }
+                    }
+
+                    for (engine.temp_buffers.rest_objects.items) |game_object| {
+                        engine.drawGameObject(pass, scene, game_object);
+                    }
+
+                    if (DEBUG_SHOW_WIREFRAME_OBJECTS) {
+                        pass.setPipeline(engine.pipelines.lines.pipeline_gpu);
+                        for (engine.temp_buffers.wireframe_objects.items) |game_object| {
+                            engine.drawCubeWireframe(pass, scene, game_object);
+                        }
+                    }
+
+                    engine.temp_buffers.reset();
+
+                    engine.frame_stats.game_objects_drawn_count += @intCast(potentially_visible_game_objects.len);
 
                     const duration = timer.untilNow(engine.io, .awake);
                     engine.frame_stats.main_pass_time_taken = @as(f32, @floatFromInt(duration.nanoseconds)) * 0.000001;
@@ -600,11 +679,11 @@ pub const Engine = struct {
         switch (game_object.model) {
             .regular_model => |model| {
                 const model_descriptor = model.model_descriptor;
-                if (model_descriptor.has_skin) {
-                    pass.setPipeline(engine.pipelines.basic_skinned.pipeline_gpu);
-                } else {
-                    pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
-                }
+                // if (model_descriptor.has_skin) {
+                //     pass.setPipeline(engine.pipelines.basic_skinned.pipeline_gpu);
+                // } else {
+                //     pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
+                // }
 
                 model_descriptor.position.applyVertexBuffer(pass, 0);
                 model_descriptor.normal.applyVertexBuffer(pass, 1);
@@ -826,20 +905,9 @@ pub const Engine = struct {
                 pass.draw(elements_count, 1, 0, 0);
             },
         }
-
-        if (switch (game_object.model) {
-            .regular_model => true,
-            .window_box_model => true,
-            // Don't show bounding box for coordinates (they uses colorized primitives)
-            // .primitive_colorized => true,
-            else => false,
-        }) {
-            engine.drawCubeWireframe(pass, scene, game_object);
-        }
     }
 
     fn drawCubeWireframe(engine: *Engine, pass: wgpu.RenderPassEncoder, scene: *const Scene, game_object: *const GameObject) void {
-        pass.setPipeline(engine.pipelines.lines.pipeline_gpu);
         const model_descriptor = engine.cube_wireframe_model.model_descriptor;
         model_descriptor.position.applyVertexBuffer(pass, 0);
 
