@@ -36,6 +36,8 @@ const ShadowMapPassBindGroupDefinition = @import("./bind_groups_defs/shadow_map_
 const ShadowMapBindGroupDefinition = @import("./bind_groups_defs/shadow_map_bind_group.zig").ShadowMapBindGroupDefinition;
 const LinesBindGroupDefinition = @import("./bind_groups_defs/lines_bind_group.zig").LinesBindGroupDefinition;
 const DebugTextureBindGroupDefinition = @import("./bind_groups_defs/debug_texture_bind_group.zig").DebugTextureBindGroupDefinition;
+const InstancesBufferBindGroupDefinition = @import("./bind_groups_defs/instances_buffer_bind_group.zig").InstancesBufferBindGroupDefinition;
+// --
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ShadowMapTexture = @import("./shadow_map_texture.zig").ShadowMapTexture;
 // -- display object descriptors --
@@ -61,14 +63,13 @@ const Scene = @import("./scene.zig").Scene;
 const Camera = @import("./camera.zig").Camera;
 const InputController = @import("./input_controller.zig").InputController;
 const GameObject = @import("./game_object.zig").GameObject;
+const xRotate = @import("./game_object.zig").xRotate;
 const DirectionalLight = @import("./light.zig").DirectionalLight;
 const DirectionalLightCascade = @import("./light.zig").DirectionalLightCascade;
 
 const DEBUG_INTERNAL_TEXTURE = false;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
-
-const xRotate = zmath.rotationX(0.5 * math.pi);
 
 const billboard_normalization_matrix = zmath.mul(
     zmath.matFromQuat(
@@ -101,6 +102,7 @@ pub const Engine = struct {
         shadow_map: ShadowMapBindGroupDefinition,
         lines: LinesBindGroupDefinition,
         debug_texture: DebugTextureBindGroupDefinition,
+        instances_buffer: InstancesBufferBindGroupDefinition,
 
         fn deinit(definitions: *BindGroupDefinitions) void {
             definitions.regular.deinit();
@@ -112,6 +114,7 @@ pub const Engine = struct {
             definitions.shadow_map.deinit();
             definitions.lines.deinit();
             definitions.debug_texture.deinit();
+            definitions.instances_buffer.deinit();
         }
     };
 
@@ -222,6 +225,7 @@ pub const Engine = struct {
             .shadow_map = ShadowMapBindGroupDefinition.init(gctx),
             .lines = LinesBindGroupDefinition.init(gctx),
             .debug_texture = DebugTextureBindGroupDefinition.init(gctx),
+            .instances_buffer = InstancesBufferBindGroupDefinition.init(gctx),
         };
 
         // ---
@@ -245,6 +249,7 @@ pub const Engine = struct {
             gctx,
             bind_group_definitions.regular,
             bind_group_definitions.shadow_map,
+            bind_group_definitions.instances_buffer,
         );
         const basic_skinned_pipeline = try basic_skinned_pipeline_module.createBasicSkinnedPipeline(
             gctx,
@@ -707,6 +712,9 @@ pub const Engine = struct {
             }
         }
 
+        const world_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+        world_to_clip_uniform.slice[0] = zmath.transpose(scene.camera.world_to_clip);
+
         const object_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
         object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
 
@@ -743,7 +751,7 @@ pub const Engine = struct {
         switch (game_object.model) {
             .regular_model => |model| {
                 pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{
-                    object_to_clip_uniform.offset,
+                    if (model.model_descriptor.has_skin) object_to_clip_uniform.offset else world_to_clip_uniform.offset,
                     camera_position_in_model_space_uniform.offset,
                 });
                 pass.setBindGroup(1, engine.bind_group_shadow_map.wgpu_bind_group, &.{
@@ -751,9 +759,15 @@ pub const Engine = struct {
                 });
                 if (game_object.joints_bind_group) |joints_bind_group| {
                     pass.setBindGroup(2, joints_bind_group.wgpu_bind_group, &.{});
+                } else {
+                    pass.setBindGroup(2, scene.instance_buffer.bind_group.wgpu_bind_group, &.{});
                 }
 
-                pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
+                if (model.model_descriptor.has_skin) {
+                    pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
+                } else {
+                    pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index);
+                }
             },
             .terrain_height_map_model => |model| {
                 const time_uniform = engine.gctx.uniformsAllocate(u32, 1);
@@ -1232,6 +1246,10 @@ pub const Engine = struct {
     }
 
     pub fn runLoop(engine: *Engine) !void {
+        if (engine.active_scene) |scene| {
+            try scene.prepareForRendering();
+        }
+
         const window = engine.window_context.window;
 
         while (true) {
