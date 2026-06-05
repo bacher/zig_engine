@@ -241,5 +241,7 @@ pub const GameObject = struct {
         space_tree.addObject(game_object) catch {
             std.debug.print("failed to add object to space tree\n", .{});
         };
+
+        game_object.scene.updateInstanceBuffer(game_object);
     }
 };

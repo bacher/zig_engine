@@ -21,7 +21,7 @@ const DirectionalLightParams = light_module.DirectionalLightParams;
 
 const INSTANCE_BUFFER_ENTRY_SIZE = 1024;
 
-const InstanceBufferEntry = struct {
+const InstanceBufferEntry = extern struct {
     model_matrix: zmath.Mat,
 };
 
@@ -45,6 +45,7 @@ pub const Scene = struct {
         next_index: u32 = 0,
         handle: zgpu.BufferHandle,
         gpu_buffer: wgpu.Buffer,
+        // outdated_indices: std.ArrayList(u32) = .empty,
     },
 
     pub fn init(
@@ -148,6 +149,21 @@ pub const Scene = struct {
             0,
             InstanceBufferEntry,
             scene.instance_buffer.buffer[0..scene.instance_buffer.next_index],
+        );
+    }
+
+    pub fn updateInstanceBuffer(scene: *Scene, game_object: *const GameObject) void {
+        // scene.instance_buffer.outdated_indices.append(scene.allocator, game_object.instance_index) catch @panic("failed to append instance index to outdated indices");
+
+        scene.instance_buffer.buffer[game_object.instance_index] = .{
+            .model_matrix = zmath.transpose(game_object.getModelMatrix()),
+        };
+
+        scene.engine.gctx.queue.writeBuffer(
+            scene.instance_buffer.gpu_buffer,
+            game_object.instance_index * @sizeOf(InstanceBufferEntry),
+            InstanceBufferEntry,
+            scene.instance_buffer.buffer[game_object.instance_index .. game_object.instance_index + 1],
         );
     }
 
