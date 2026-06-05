@@ -1,6 +1,6 @@
-@group(1) @binding(0) var<uniform> object_to_light_clip_array: array<mat4x4<f32>, 3>;
-@group(2) @binding(0) var<storage, read> instances: array<mat4x4<f32>>;
-@group(3) @binding(0) var<uniform> world_to_clip: mat4x4<f32>;
+@group(0) @binding(0) var<uniform> world_to_clip: mat4x4<f32>;
+@group(0) @binding(1) var<storage, read> instances: array<mat4x4<f32>>;
+@group(2) @binding(0) var<uniform> object_to_light_clip_array: array<mat4x4<f32>, 3>;
 
 struct VertexOut {
     @builtin(position) position_clip: vec4<f32>,

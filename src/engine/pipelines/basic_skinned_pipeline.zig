@@ -9,11 +9,13 @@ const bind_group_layouts = @import("../bind_group_layouts.zig");
 
 pub fn createBasicSkinnedPipeline(
     gctx: *zgpu.GraphicsContext,
+    scene_bind_group_layout: bind_group_layouts.SceneBindGroupLayout,
     regular_bind_group_layout: bind_group_layouts.RegularBindGroupLayout,
     shadow_map_bind_group_layout: bind_group_layouts.ShadowMapBindGroupLayout,
     joints_bind_group_layout: bind_group_layouts.JointsBindGroupLayout,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
+        scene_bind_group_layout.bind_group_layout_handle,
         regular_bind_group_layout.bind_group_layout_handle,
         shadow_map_bind_group_layout.bind_group_layout_handle,
         joints_bind_group_layout.bind_group_layout_handle,

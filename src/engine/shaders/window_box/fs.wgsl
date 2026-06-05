@@ -1,6 +1,6 @@
-@group(0) @binding(1) var<uniform> camera_position_in_model_space: vec4<f32>;
-@group(0) @binding(2) var color_texture: texture_2d<f32>;
-@group(0) @binding(3) var texture_sampler: sampler;
+@group(0) @binding(0) var<uniform> camera_position_in_model_space: vec4<f32>;
+@group(0) @binding(1) var color_texture: texture_2d<f32>;
+@group(0) @binding(2) var texture_sampler: sampler;
 
 const t3: f32 = 1.0 / 3.0;
 

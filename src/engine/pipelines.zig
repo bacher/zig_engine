@@ -37,11 +37,11 @@ pub const Pipelines = struct {
             bind_group_layouts.scene,
             bind_group_layouts.regular,
             bind_group_layouts.shadow_map,
-            bind_group_layouts.instances_buffer,
         ) catch @panic("Pipeline initialization failure");
 
         const basic_skinned_pipeline = basic_skinned_pipeline_module.createBasicSkinnedPipeline(
             gctx,
+            bind_group_layouts.scene,
             bind_group_layouts.regular,
             bind_group_layouts.shadow_map,
             bind_group_layouts.joints,
@@ -76,12 +76,11 @@ pub const Pipelines = struct {
         const shadow_map_pipeline = shadow_map_pipeline_module.createShadowMapPipeline(
             gctx,
             bind_group_layouts.scene,
-            bind_group_layouts.instances_buffer,
         ) catch @panic("Pipeline initialization failure");
 
         const shadow_map_skinned_pipeline = shadow_map_skinned_pipeline_module.createShadowMapSkinnedPipeline(
             gctx,
-            bind_group_layouts.shadow_map_pass,
+            bind_group_layouts.scene,
             bind_group_layouts.joints,
         ) catch @panic("Pipeline initialization failure");
 

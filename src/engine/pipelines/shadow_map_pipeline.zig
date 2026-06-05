@@ -10,11 +10,9 @@ const bind_group_layouts = @import("../bind_group_layouts.zig");
 pub fn createShadowMapPipeline(
     gctx: *zgpu.GraphicsContext,
     scene_bind_group_layout: bind_group_layouts.SceneBindGroupLayout,
-    instances_buffer_bind_group_layout: bind_group_layouts.InstancesBufferBindGroupLayout,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
         scene_bind_group_layout.bind_group_layout_handle,
-        instances_buffer_bind_group_layout.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 

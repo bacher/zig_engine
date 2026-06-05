@@ -1,4 +1,5 @@
-@group(0) @binding(0) var<uniform> object_to_clip: mat4x4<f32>;
+@group(0) @binding(0) var<uniform> world_to_clip: mat4x4<f32>;
+@group(0) @binding(1) var<storage, read> instances: array<mat4x4<f32>>;
 @group(1) @binding(0) var<uniform> joint_matrices: array<mat4x4<f32>, 64>;
 
 struct VertexOut {
@@ -16,11 +17,12 @@ fn skinPosition(position: vec3<f32>, joints: vec4<u32>, weights: vec4<f32>) -> v
 }
 
 @vertex fn main(
+    @builtin(instance_index) instance_index: u32,
     @location(0) position: vec3<f32>,
     @location(3) joints: vec4<u32>,
     @location(4) weights: vec4<f32>,
 ) -> VertexOut {
     var output: VertexOut;
-    output.position_clip = skinPosition(position, joints, weights) * object_to_clip;
+    output.position_clip = skinPosition(position, joints, weights) * instances[instance_index] * world_to_clip;
     return output;
 }

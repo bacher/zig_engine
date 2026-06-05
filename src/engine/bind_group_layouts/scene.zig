@@ -17,6 +17,14 @@ pub const SceneBindGroupLayout = struct {
                 true,
                 0,
             ),
+            // Instances buffer
+            zgpu.bufferEntry(
+                1,
+                .{ .vertex = true },
+                .read_only_storage,
+                false,
+                0, // min_binding_size, is it okay to be zero for storage buffers?
+            ),
         });
 
         return .{
@@ -31,16 +39,25 @@ pub const SceneBindGroupLayout = struct {
     pub fn createBindGroup(
         bind_group_layout: SceneBindGroupLayout,
         gctx: *zgpu.GraphicsContext,
+        instances_buffer: zgpu.BufferHandle,
+        size: usize,
     ) BindGroup {
         const bind_group_handle = gctx.createBindGroup(
             bind_group_layout.bind_group_layout_handle,
             &.{
-                // transform matrix
+                // world to clip matrix
                 .{
                     .binding = 0,
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
                     .size = @sizeOf(zmath.Mat),
+                },
+                // Instances buffer
+                .{
+                    .binding = 1,
+                    .buffer_handle = instances_buffer,
+                    .offset = 0,
+                    .size = size,
                 },
             },
         );

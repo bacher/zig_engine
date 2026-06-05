@@ -11,17 +11,9 @@ pub const RegularBindGroupLayout = struct {
 
     pub fn init(gctx: *zgpu.GraphicsContext, texture_view_dimension: wgpu.TextureViewDimension) RegularBindGroupLayout {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
-            // transform matrix
-            zgpu.bufferEntry(
-                0,
-                .{ .vertex = true },
-                .uniform,
-                true,
-                0,
-            ),
             // camera position vec4<f32>
             zgpu.bufferEntry(
-                1,
+                0,
                 .{ .vertex = true, .fragment = true },
                 .uniform,
                 true,
@@ -29,7 +21,7 @@ pub const RegularBindGroupLayout = struct {
             ),
             // texture
             zgpu.textureEntry(
-                2,
+                1,
                 .{ .fragment = true },
                 .float,
                 texture_view_dimension,
@@ -37,13 +29,13 @@ pub const RegularBindGroupLayout = struct {
             ),
             // sampler
             zgpu.samplerEntry(
-                3,
+                2,
                 .{ .fragment = true },
                 .filtering, // TODO: What's the difference between .filtering and .non_filtering
             ),
             // joint matrix palette
             zgpu.bufferEntry(
-                4,
+                3,
                 .{ .vertex = true },
                 .uniform,
                 false,
@@ -70,17 +62,9 @@ pub const RegularBindGroupLayout = struct {
         const bind_group_handle = gctx.createBindGroup(
             bind_group_layout.bind_group_layout_handle,
             &.{
-                // transform matrix
-                .{
-                    .binding = 0,
-                    .buffer_handle = gctx.uniforms.buffer,
-                    .offset = 0,
-                    .size = @sizeOf(zmath.Mat),
-                },
-
                 // camera position vec4<f32>
                 .{
-                    .binding = 1,
+                    .binding = 0,
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
                     .size = @sizeOf(zmath.Vec),
@@ -88,19 +72,19 @@ pub const RegularBindGroupLayout = struct {
 
                 // texture
                 .{
-                    .binding = 2,
+                    .binding = 1,
                     .texture_view_handle = color_texture.view_handle,
                 },
 
                 // sampler
                 .{
-                    .binding = 3,
+                    .binding = 2,
                     .sampler_handle = sampler,
                 },
 
                 // joint matrix palette
                 .{
-                    .binding = 4,
+                    .binding = 3,
                     .buffer_handle = joint_matrix_buffer,
                     .offset = 0,
                     .size = @sizeOf(SkeletalAnimation.JointMatrixUniform),

@@ -45,7 +45,6 @@ pub const Scene = struct {
         next_index: u32 = 0,
         handle: zgpu.BufferHandle,
         gpu_buffer: wgpu.Buffer,
-        bind_group: BindGroup,
     },
 
     pub fn init(
@@ -81,14 +80,11 @@ pub const Scene = struct {
 
         const instance_buffer = try allocator.alloc(InstanceBufferEntry, INSTANCE_BUFFER_ENTRY_SIZE);
 
-        const instances_buffer_bind_group = engine.bind_group_layouts.instances_buffer.createBindGroup(
+        const scene_bind_group = engine.bind_group_layouts.scene.createBindGroup(
             engine.gctx,
             instance_buffer_handle,
             INSTANCE_BUFFER_ENTRY_SIZE * @sizeOf(InstanceBufferEntry),
         );
-        errdefer instances_buffer_bind_group.deinit(engine.gctx);
-
-        const scene_bind_group = engine.bind_group_layouts.scene.createBindGroup(engine.gctx);
         errdefer scene_bind_group.deinit(engine.gctx);
 
         scene.* = .{
@@ -106,7 +102,6 @@ pub const Scene = struct {
                 .buffer = instance_buffer,
                 .handle = instance_buffer_handle,
                 .gpu_buffer = instance_buffer_gpu_buffer,
-                .bind_group = instances_buffer_bind_group,
             },
         };
         return scene;
@@ -115,7 +110,7 @@ pub const Scene = struct {
     pub fn deinit(scene: *Scene) void {
         const gctx = scene.engine.gctx;
 
-        errdefer scene.scene_bind_group.deinit(gctx);
+        scene.scene_bind_group.deinit(gctx);
 
         for (scene.lights.items) |light| {
             scene.allocator.destroy(light);
@@ -137,7 +132,6 @@ pub const Scene = struct {
 
         scene.allocator.free(scene.instance_buffer.buffer);
         gctx.destroyResource(scene.instance_buffer.handle);
-        scene.instance_buffer.bind_group.deinit(gctx);
 
         scene.spectator_camera.deinit();
         scene.camera.deinit();

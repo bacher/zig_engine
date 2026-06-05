@@ -102,7 +102,6 @@ pub const Engine = struct {
     bind_group_layouts: BindGroupLayouts,
 
     // ---
-    bind_group_shadow_map_pass: BindGroup,
     bind_group_debug_shadow_map_texture: BindGroup,
     bind_group_shadow_map: BindGroup,
     bind_group_lines: BindGroup,
@@ -206,7 +205,6 @@ pub const Engine = struct {
         // ---
         // bind groups
         // ---
-        const bind_group_shadow_map_pass = bind_group_layouts.shadow_map_pass.createBindGroup(gctx);
         const bind_group_debug_shadow_map_texture = bind_group_layouts.debug_texture.createBindGroup(
             gctx,
             texture_sampler,
@@ -270,8 +268,6 @@ pub const Engine = struct {
             .pipelines = pipelines,
             .bind_group_layouts = bind_group_layouts,
 
-            // shadow map pass uses singleton bind group descriptor for all objects
-            .bind_group_shadow_map_pass = bind_group_shadow_map_pass,
             .bind_group_shadow_map = bind_group_shadow_map,
             .bind_group_debug_shadow_map_texture = bind_group_debug_shadow_map_texture,
             .bind_group_lines = bind_group_lines,
@@ -440,7 +436,6 @@ pub const Engine = struct {
                             }
 
                             shadow_map_pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
-                            shadow_map_pass.setBindGroup(1, scene.instance_buffer.bind_group.wgpu_bind_group, &.{});
 
                             for (engine.temp_buffers.regular_objects.items) |game_object| {
                                 engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, cascade, game_object);
@@ -505,7 +500,7 @@ pub const Engine = struct {
                     const world_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                     world_to_clip_uniform.slice[0] = zmath.transpose(scene.camera.world_to_clip);
 
-                    pass.setBindGroup(3, scene.scene_bind_group.wgpu_bind_group, &.{
+                    pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
                         world_to_clip_uniform.offset,
                     });
 
@@ -751,25 +746,19 @@ pub const Engine = struct {
 
         switch (game_object.model) {
             .regular_model => |model| {
-                pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{
-                    object_to_clip_uniform.offset, // TODO: is not used in basic (non-skinned) pipeline
+                pass.setBindGroup(1, model.bind_group.wgpu_bind_group, &.{
                     camera_position_in_model_space_uniform.offset, // TODO: is not used in basic pipeline
                 });
 
-                pass.setBindGroup(1, engine.bind_group_shadow_map.wgpu_bind_group, &.{
+                pass.setBindGroup(2, engine.bind_group_shadow_map.wgpu_bind_group, &.{
                     object_to_light_clip_array_uniform.offset,
                 });
+
                 if (game_object.joints_bind_group) |joints_bind_group| {
-                    pass.setBindGroup(2, joints_bind_group.wgpu_bind_group, &.{});
-                } else {
-                    pass.setBindGroup(2, scene.instance_buffer.bind_group.wgpu_bind_group, &.{});
+                    pass.setBindGroup(3, joints_bind_group.wgpu_bind_group, &.{});
                 }
 
-                if (model.model_descriptor.has_skin) {
-                    pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
-                } else {
-                    pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index);
-                }
+                pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index);
             },
             .terrain_height_map_model => |model| {
                 const time_uniform = engine.gctx.uniformsAllocate(u32, 1);
@@ -927,15 +916,9 @@ pub const Engine = struct {
         switch (game_object.model) {
             .regular_model => |model| {
                 if (game_object.joints_bind_group) |joints_bind_group| {
-                    pass.setBindGroup(0, engine.bind_group_shadow_map_pass.wgpu_bind_group, &.{
-                        object_to_clip_uniform.offset,
-                    });
                     pass.setBindGroup(1, joints_bind_group.wgpu_bind_group, &.{});
-
-                    pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
-                } else {
-                    pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index);
                 }
+                pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index);
             },
             .terrain_height_map_model => {
                 // TODO: make customizable

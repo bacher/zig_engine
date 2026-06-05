@@ -13,13 +13,11 @@ pub fn createBasicPipeline(
     scene_bind_group_layout: bind_group_layouts.SceneBindGroupLayout,
     regular_bind_group_layout: bind_group_layouts.RegularBindGroupLayout,
     shadow_map_bind_group_layout: bind_group_layouts.ShadowMapBindGroupLayout,
-    instances_buffer_bind_group_layout: bind_group_layouts.InstancesBufferBindGroupLayout,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
+        scene_bind_group_layout.bind_group_layout_handle,
         regular_bind_group_layout.bind_group_layout_handle,
         shadow_map_bind_group_layout.bind_group_layout_handle,
-        instances_buffer_bind_group_layout.bind_group_layout_handle,
-        scene_bind_group_layout.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 
