@@ -4,22 +4,21 @@ const zmath = @import("zmath");
 
 const TextureDescriptor = @import("../types.zig").TextureDescriptor;
 const BindGroup = @import("../bind_group.zig").BindGroup;
+const SkeletalAnimation = @import("../skeletal_animation.zig");
 
-// TODO: Delete?
-
-pub const ShadowMapPassBindGroupDefinition = struct {
+pub const JointsBindGroupLayout = struct {
     gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
-    pub fn init(gctx: *zgpu.GraphicsContext) ShadowMapPassBindGroupDefinition {
+    pub fn init(gctx: *zgpu.GraphicsContext) JointsBindGroupLayout {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
-            // transform matrix
+            // joint matrix palette
             zgpu.bufferEntry(
                 0,
                 .{ .vertex = true },
                 .uniform,
-                true,
-                0,
+                false,
+                @sizeOf(SkeletalAnimation.JointMatrixUniform),
             ),
         });
 
@@ -29,24 +28,25 @@ pub const ShadowMapPassBindGroupDefinition = struct {
         };
     }
 
-    pub fn deinit(bind_group_definition: ShadowMapPassBindGroupDefinition) void {
-        bind_group_definition.gctx.releaseResource(bind_group_definition.bind_group_layout_handle);
+    pub fn deinit(bind_group_layout: JointsBindGroupLayout) void {
+        bind_group_layout.gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
-        bind_group_definition: ShadowMapPassBindGroupDefinition,
+        bind_group_layout: JointsBindGroupLayout,
+        joint_matrix_buffer: zgpu.BufferHandle,
     ) !BindGroup {
-        const gctx = bind_group_definition.gctx;
+        const gctx = bind_group_layout.gctx;
 
         const bind_group_handle = gctx.createBindGroup(
-            bind_group_definition.bind_group_layout_handle,
+            bind_group_layout.bind_group_layout_handle,
             &.{
-                // transform matrix
+                // joint matrix palette
                 .{
                     .binding = 0,
-                    .buffer_handle = gctx.uniforms.buffer,
+                    .buffer_handle = joint_matrix_buffer,
                     .offset = 0,
-                    .size = @sizeOf(zmath.Mat),
+                    .size = @sizeOf(SkeletalAnimation.JointMatrixUniform),
                 },
             },
         );

@@ -2,13 +2,15 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 const zmath = @import("zmath");
 
+const TextureDescriptor = @import("../types.zig").TextureDescriptor;
 const BindGroup = @import("../bind_group.zig").BindGroup;
+const SkeletalAnimation = @import("../skeletal_animation.zig");
 
-pub const PrimitiveColorizedBindGroupDefinition = struct {
+pub const RegularBindGroupLayout = struct {
     gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
-    pub fn init(gctx: *zgpu.GraphicsContext) PrimitiveColorizedBindGroupDefinition {
+    pub fn init(gctx: *zgpu.GraphicsContext, texture_view_dimension: wgpu.TextureViewDimension) RegularBindGroupLayout {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
             // transform matrix
             zgpu.bufferEntry(
@@ -26,13 +28,27 @@ pub const PrimitiveColorizedBindGroupDefinition = struct {
                 true,
                 0,
             ),
-            // solid color
-            zgpu.bufferEntry(
+            // texture
+            zgpu.textureEntry(
                 2,
                 .{ .fragment = true },
+                .float,
+                texture_view_dimension,
+                false, // TODO: What does `multisampled` mean?
+            ),
+            // sampler
+            zgpu.samplerEntry(
+                3,
+                .{ .fragment = true },
+                .filtering, // TODO: What's the difference between .filtering and .non_filtering
+            ),
+            // joint matrix palette
+            zgpu.bufferEntry(
+                4,
+                .{ .vertex = true },
                 .uniform,
-                true,
-                0,
+                false,
+                @sizeOf(SkeletalAnimation.JointMatrixUniform),
             ),
         });
 
@@ -42,17 +58,20 @@ pub const PrimitiveColorizedBindGroupDefinition = struct {
         };
     }
 
-    pub fn deinit(bind_group_definition: PrimitiveColorizedBindGroupDefinition) void {
-        bind_group_definition.gctx.releaseResource(bind_group_definition.bind_group_layout_handle);
+    pub fn deinit(bind_group_layout: RegularBindGroupLayout) void {
+        bind_group_layout.gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
-        bind_group_definition: PrimitiveColorizedBindGroupDefinition,
+        bind_group_layout: RegularBindGroupLayout,
+        sampler: zgpu.SamplerHandle,
+        color_texture: TextureDescriptor,
+        joint_matrix_buffer: zgpu.BufferHandle,
     ) !BindGroup {
-        const gctx = bind_group_definition.gctx;
+        const gctx = bind_group_layout.gctx;
 
         const bind_group_handle = gctx.createBindGroup(
-            bind_group_definition.bind_group_layout_handle,
+            bind_group_layout.bind_group_layout_handle,
             &.{
                 // transform matrix
                 .{
@@ -70,12 +89,24 @@ pub const PrimitiveColorizedBindGroupDefinition = struct {
                     .size = @sizeOf(zmath.Vec),
                 },
 
-                // solid color
+                // texture
                 .{
                     .binding = 2,
-                    .buffer_handle = gctx.uniforms.buffer,
+                    .texture_view_handle = color_texture.view_handle,
+                },
+
+                // sampler
+                .{
+                    .binding = 3,
+                    .sampler_handle = sampler,
+                },
+
+                // joint matrix palette
+                .{
+                    .binding = 4,
+                    .buffer_handle = joint_matrix_buffer,
                     .offset = 0,
-                    .size = @sizeOf(f32) * 4,
+                    .size = @sizeOf(SkeletalAnimation.JointMatrixUniform),
                 },
             },
         );

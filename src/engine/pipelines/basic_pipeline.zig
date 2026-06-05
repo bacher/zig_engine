@@ -6,23 +6,20 @@ const wgsl_fs = @embedFile("../shaders/basic/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
 
-const SceneBindGroupDefinition = @import("../bind_groups_defs/scene_bind_group.zig").SceneBindGroupDefinition;
-const RegularBindGroupDefinition = @import("../bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
-const ShadowMapBindGroupDefinition = @import("../bind_groups_defs/shadow_map_bind_group.zig").ShadowMapBindGroupDefinition;
-const InstancesBufferBindGroupDefinition = @import("../bind_groups_defs/instances_buffer_bind_group.zig").InstancesBufferBindGroupDefinition;
+const bind_group_layouts = @import("../bind_group_layouts.zig");
 
 pub fn createBasicPipeline(
     gctx: *zgpu.GraphicsContext,
-    scene_bind_group_definition: SceneBindGroupDefinition,
-    regular_bind_group_definition: RegularBindGroupDefinition,
-    shadow_map_bind_group_definition: ShadowMapBindGroupDefinition,
-    instances_buffer_bind_group_definition: InstancesBufferBindGroupDefinition,
+    scene_bind_group_layout: bind_group_layouts.SceneBindGroupLayout,
+    regular_bind_group_layout: bind_group_layouts.RegularBindGroupLayout,
+    shadow_map_bind_group_layout: bind_group_layouts.ShadowMapBindGroupLayout,
+    instances_buffer_bind_group_layout: bind_group_layouts.InstancesBufferBindGroupLayout,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
-        regular_bind_group_definition.bind_group_layout_handle,
-        shadow_map_bind_group_definition.bind_group_layout_handle,
-        instances_buffer_bind_group_definition.bind_group_layout_handle,
-        scene_bind_group_definition.bind_group_layout_handle,
+        regular_bind_group_layout.bind_group_layout_handle,
+        shadow_map_bind_group_layout.bind_group_layout_handle,
+        instances_buffer_bind_group_layout.bind_group_layout_handle,
+        scene_bind_group_layout.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 

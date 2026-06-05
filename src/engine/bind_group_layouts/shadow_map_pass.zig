@@ -4,23 +4,22 @@ const zmath = @import("zmath");
 
 const TextureDescriptor = @import("../types.zig").TextureDescriptor;
 const BindGroup = @import("../bind_group.zig").BindGroup;
-const SkeletalAnimation = @import("../skeletal_animation.zig");
 
-// TODO: Move struct fields definitions to top level?
+// TODO: Delete?
 
-pub const InstancesBufferBindGroupDefinition = struct {
+pub const ShadowMapPassBindGroupLayout = struct {
     gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
-    pub fn init(gctx: *zgpu.GraphicsContext) InstancesBufferBindGroupDefinition {
+    pub fn init(gctx: *zgpu.GraphicsContext) ShadowMapPassBindGroupLayout {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
-            // Instances buffer
+            // transform matrix
             zgpu.bufferEntry(
                 0,
                 .{ .vertex = true },
-                .read_only_storage,
-                false,
-                0, // min_binding_size, is it okay to be zero for storage buffers?
+                .uniform,
+                true,
+                0,
             ),
         });
 
@@ -30,26 +29,24 @@ pub const InstancesBufferBindGroupDefinition = struct {
         };
     }
 
-    pub fn deinit(bind_group_definition: InstancesBufferBindGroupDefinition) void {
-        bind_group_definition.gctx.releaseResource(bind_group_definition.bind_group_layout_handle);
+    pub fn deinit(bind_group_layout: ShadowMapPassBindGroupLayout) void {
+        bind_group_layout.gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
-        bind_group_definition: InstancesBufferBindGroupDefinition,
-        instances_buffer: zgpu.BufferHandle,
-        size: usize,
+        bind_group_layout: ShadowMapPassBindGroupLayout,
     ) !BindGroup {
-        const gctx = bind_group_definition.gctx;
+        const gctx = bind_group_layout.gctx;
 
         const bind_group_handle = gctx.createBindGroup(
-            bind_group_definition.bind_group_layout_handle,
+            bind_group_layout.bind_group_layout_handle,
             &.{
-                // Instances buffer
+                // transform matrix
                 .{
                     .binding = 0,
-                    .buffer_handle = instances_buffer,
+                    .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
-                    .size = size,
+                    .size = @sizeOf(zmath.Mat),
                 },
             },
         );

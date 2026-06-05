@@ -15,8 +15,7 @@ const TerrainHeightMapModel = model_module.TerrainHeightMapModel;
 const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;
 const SpaceTree = @import("./space_tree.zig").SpaceTree;
 const BindGroup = @import("./bind_group.zig").BindGroup;
-const RegularBindGroupDefinition = @import("./bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
-const JointsBindGroupDefinition = @import("./bind_groups_defs/joints_bind_group.zig").JointsBindGroupDefinition;
+const bind_group_layouts = @import("./bind_group_layouts.zig");
 const SkeletalAnimation = @import("./skeletal_animation.zig");
 
 pub const xRotate = zmath.rotationX(0.5 * math.pi);
@@ -82,7 +81,7 @@ pub const GameObject = struct {
 
     pub const AnimationContext = struct {
         gctx: *zgpu.GraphicsContext,
-        bind_group_definition: JointsBindGroupDefinition,
+        bind_group_layout: bind_group_layouts.JointsBindGroupLayout,
         current_time: f32,
     };
 
@@ -164,7 +163,7 @@ pub const GameObject = struct {
         );
         errdefer animation.deinit(context.gctx);
 
-        const joints_bind_group = try context.bind_group_definition.createBindGroup(
+        const joints_bind_group = try context.bind_group_layout.createBindGroup(
             animation.joint_matrix_buffer.handle,
         );
         errdefer joints_bind_group.deinit(context.gctx);

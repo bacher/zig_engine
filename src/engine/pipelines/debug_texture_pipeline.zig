@@ -5,14 +5,14 @@ const wgsl_vs = @embedFile("../shaders/debug_texture/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/debug_texture/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
-const DebugTextureBindGroupDefinition = @import("../bind_groups_defs/debug_texture_bind_group.zig").DebugTextureBindGroupDefinition;
+const bind_group_layouts = @import("../bind_group_layouts.zig");
 
 pub fn createDebugTexturePipeline(
     gctx: *zgpu.GraphicsContext,
-    bind_group_definition: DebugTextureBindGroupDefinition,
+    debug_texture_bind_group_layout: bind_group_layouts.DebugTextureBindGroupLayout,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
-        bind_group_definition.bind_group_layout_handle,
+        debug_texture_bind_group_layout.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 

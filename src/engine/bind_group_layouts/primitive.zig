@@ -2,33 +2,34 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 const zmath = @import("zmath");
 
-const TextureDescriptor = @import("../types.zig").TextureDescriptor;
 const BindGroup = @import("../bind_group.zig").BindGroup;
 
-pub const DebugTextureBindGroupDefinition = struct {
+pub const PrimitiveColorizedBindGroupLayout = struct {
     gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
-    pub fn init(gctx: *zgpu.GraphicsContext) DebugTextureBindGroupDefinition {
+    pub fn init(gctx: *zgpu.GraphicsContext) PrimitiveColorizedBindGroupLayout {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
-            // texture
-            zgpu.textureEntry(
+            // transform matrix
+            zgpu.bufferEntry(
                 0,
-                .{ .fragment = true },
-                .unfilterable_float,
-                .tvdim_2d_array,
-                false,
+                .{ .vertex = true },
+                .uniform,
+                true,
+                0,
             ),
-            // sampler
-            zgpu.samplerEntry(
+            // camera position vec4<f32>
+            zgpu.bufferEntry(
                 1,
-                .{ .fragment = true },
-                .non_filtering,
+                .{ .vertex = true, .fragment = true },
+                .uniform,
+                true,
+                0,
             ),
-            // screen aspect ratio
+            // solid color
             zgpu.bufferEntry(
                 2,
-                .{ .vertex = true },
+                .{ .fragment = true },
                 .uniform,
                 true,
                 0,
@@ -41,38 +42,40 @@ pub const DebugTextureBindGroupDefinition = struct {
         };
     }
 
-    pub fn deinit(bind_group_definition: DebugTextureBindGroupDefinition) void {
-        bind_group_definition.gctx.releaseResource(bind_group_definition.bind_group_layout_handle);
+    pub fn deinit(bind_group_layout: PrimitiveColorizedBindGroupLayout) void {
+        bind_group_layout.gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
-        bind_group_definition: DebugTextureBindGroupDefinition,
-        sampler: zgpu.SamplerHandle,
-        color_texture_view_handle: zgpu.TextureViewHandle,
+        bind_group_layout: PrimitiveColorizedBindGroupLayout,
     ) !BindGroup {
-        const gctx = bind_group_definition.gctx;
+        const gctx = bind_group_layout.gctx;
 
         const bind_group_handle = gctx.createBindGroup(
-            bind_group_definition.bind_group_layout_handle,
+            bind_group_layout.bind_group_layout_handle,
             &.{
-                // texture
+                // transform matrix
                 .{
                     .binding = 0,
-                    .texture_view_handle = color_texture_view_handle,
+                    .buffer_handle = gctx.uniforms.buffer,
+                    .offset = 0,
+                    .size = @sizeOf(zmath.Mat),
                 },
 
-                // sampler
+                // camera position vec4<f32>
                 .{
                     .binding = 1,
-                    .sampler_handle = sampler,
+                    .buffer_handle = gctx.uniforms.buffer,
+                    .offset = 0,
+                    .size = @sizeOf(zmath.Vec),
                 },
 
-                // screen aspect ratio
+                // solid color
                 .{
                     .binding = 2,
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
-                    .size = @sizeOf(f32),
+                    .size = @sizeOf(f32) * 4,
                 },
             },
         );

@@ -81,13 +81,13 @@ pub const Scene = struct {
 
         const instance_buffer = try allocator.alloc(InstanceBufferEntry, INSTANCE_BUFFER_ENTRY_SIZE);
 
-        const instances_buffer_bind_group = try engine.bind_group_definitions.instances_buffer.createBindGroup(
+        const instances_buffer_bind_group = try engine.bind_group_layouts.instances_buffer.createBindGroup(
             instance_buffer_handle,
             INSTANCE_BUFFER_ENTRY_SIZE * @sizeOf(InstanceBufferEntry),
         );
         errdefer instances_buffer_bind_group.deinit(engine.gctx);
 
-        const scene_bind_group = engine.bind_group_definitions.scene.createBindGroup();
+        const scene_bind_group = engine.bind_group_layouts.scene.createBindGroup();
         errdefer scene_bind_group.deinit(engine.gctx);
 
         scene.* = .{
@@ -308,7 +308,7 @@ pub const Scene = struct {
     fn animationContext(scene: *Scene) GameObject.AnimationContext {
         return .{
             .gctx = scene.engine.gctx,
-            .bind_group_definition = scene.engine.bind_group_definitions.joints,
+            .bind_group_layout = scene.engine.bind_group_layouts.joints,
             .current_time = @floatCast(scene.engine.time),
         };
     }

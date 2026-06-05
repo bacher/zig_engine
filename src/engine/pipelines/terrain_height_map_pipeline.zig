@@ -5,17 +5,16 @@ const wgsl_vs = @embedFile("../shaders/terrain_height_map/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/terrain_height_map/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
-const TerrainHeightMapBindGroupDefinition = @import("../bind_groups_defs/terrain_height_map_bind_group.zig").TerrainHeightMapBindGroupDefinition;
-const ShadowMapBindGroupDefinition = @import("../bind_groups_defs/shadow_map_bind_group.zig").ShadowMapBindGroupDefinition;
+const bind_group_layouts = @import("../bind_group_layouts.zig");
 
 pub fn createTerrainHeightMapPipeline(
     gctx: *zgpu.GraphicsContext,
-    terrain_height_map_bind_group_definition: TerrainHeightMapBindGroupDefinition,
-    shadow_map_bind_group_definition: ShadowMapBindGroupDefinition,
+    terrain_height_map_bind_group_layout: bind_group_layouts.TerrainHeightMapBindGroupLayout,
+    shadow_map_bind_group_layout: bind_group_layouts.ShadowMapBindGroupLayout,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
-        terrain_height_map_bind_group_definition.bind_group_layout_handle,
-        shadow_map_bind_group_definition.bind_group_layout_handle,
+        terrain_height_map_bind_group_layout.bind_group_layout_handle,
+        shadow_map_bind_group_layout.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 

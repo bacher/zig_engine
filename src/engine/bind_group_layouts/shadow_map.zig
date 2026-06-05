@@ -5,11 +5,11 @@ const zmath = @import("zmath");
 const BindGroup = @import("../bind_group.zig").BindGroup;
 const TextureDescriptor = @import("../types.zig").TextureDescriptor;
 
-pub const ShadowMapBindGroupDefinition = struct {
+pub const ShadowMapBindGroupLayout = struct {
     gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
-    pub fn init(gctx: *zgpu.GraphicsContext) ShadowMapBindGroupDefinition {
+    pub fn init(gctx: *zgpu.GraphicsContext) ShadowMapBindGroupLayout {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
             // object to light clip transformation matrix array
             zgpu.bufferEntry(
@@ -41,19 +41,19 @@ pub const ShadowMapBindGroupDefinition = struct {
         };
     }
 
-    pub fn deinit(bind_group_definition: ShadowMapBindGroupDefinition) void {
-        bind_group_definition.gctx.releaseResource(bind_group_definition.bind_group_layout_handle);
+    pub fn deinit(bind_group_layout: ShadowMapBindGroupLayout) void {
+        bind_group_layout.gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
-        bind_group_definition: ShadowMapBindGroupDefinition,
+        bind_group_layout: ShadowMapBindGroupLayout,
         sampler: zgpu.SamplerHandle,
         shadow_map_texture_view_handle: zgpu.TextureViewHandle,
     ) !BindGroup {
-        const gctx = bind_group_definition.gctx;
+        const gctx = bind_group_layout.gctx;
 
         const bind_group_handle = gctx.createBindGroup(
-            bind_group_definition.bind_group_layout_handle,
+            bind_group_layout.bind_group_layout_handle,
             &.{
                 // transformation matrix
                 .{

@@ -4,13 +4,16 @@ const zmath = @import("zmath");
 
 const TextureDescriptor = @import("../types.zig").TextureDescriptor;
 const BindGroup = @import("../bind_group.zig").BindGroup;
-const SkeletalAnimation = @import("../skeletal_animation.zig");
 
-pub const RegularBindGroupDefinition = struct {
+// NOTE: Most of the code is duplicated from RegularBindGroupDefinition,
+//       can it be refactored to remove duplication?
+pub const TerrainHeightMapBindGroupLayout = struct {
     gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
-    pub fn init(gctx: *zgpu.GraphicsContext, texture_view_dimension: wgpu.TextureViewDimension) RegularBindGroupDefinition {
+    pub fn init(
+        gctx: *zgpu.GraphicsContext,
+    ) TerrainHeightMapBindGroupLayout {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
             // transform matrix
             zgpu.bufferEntry(
@@ -33,7 +36,7 @@ pub const RegularBindGroupDefinition = struct {
                 2,
                 .{ .fragment = true },
                 .float,
-                texture_view_dimension,
+                .tvdim_2d,
                 false, // TODO: What does `multisampled` mean?
             ),
             // sampler
@@ -42,13 +45,37 @@ pub const RegularBindGroupDefinition = struct {
                 .{ .fragment = true },
                 .filtering, // TODO: What's the difference between .filtering and .non_filtering
             ),
-            // joint matrix palette
-            zgpu.bufferEntry(
+            // height map texture
+            zgpu.textureEntry(
                 4,
                 .{ .vertex = true },
-                .uniform,
+                .uint,
+                .tvdim_2d,
                 false,
-                @sizeOf(SkeletalAnimation.JointMatrixUniform),
+            ),
+            // mixing texture
+            zgpu.textureEntry(
+                5,
+                .{ .fragment = true },
+                .float,
+                .tvdim_2d,
+                false,
+            ),
+            // texture 2
+            zgpu.textureEntry(
+                6,
+                .{ .fragment = true },
+                .float,
+                .tvdim_2d,
+                false,
+            ),
+            // time (ms)
+            zgpu.bufferEntry(
+                7,
+                .{ .fragment = true },
+                .uniform,
+                true,
+                0,
             ),
         });
 
@@ -58,20 +85,22 @@ pub const RegularBindGroupDefinition = struct {
         };
     }
 
-    pub fn deinit(bind_group_definition: RegularBindGroupDefinition) void {
-        bind_group_definition.gctx.releaseResource(bind_group_definition.bind_group_layout_handle);
+    pub fn deinit(bind_group_layout: TerrainHeightMapBindGroupLayout) void {
+        bind_group_layout.gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
-        bind_group_definition: RegularBindGroupDefinition,
+        bind_group_layout: TerrainHeightMapBindGroupLayout,
         sampler: zgpu.SamplerHandle,
         color_texture: TextureDescriptor,
-        joint_matrix_buffer: zgpu.BufferHandle,
+        depth_map_texture: TextureDescriptor,
+        mixing_texture: TextureDescriptor,
+        texture_2: TextureDescriptor,
     ) !BindGroup {
-        const gctx = bind_group_definition.gctx;
+        const gctx = bind_group_layout.gctx;
 
         const bind_group_handle = gctx.createBindGroup(
-            bind_group_definition.bind_group_layout_handle,
+            bind_group_layout.bind_group_layout_handle,
             &.{
                 // transform matrix
                 .{
@@ -101,12 +130,30 @@ pub const RegularBindGroupDefinition = struct {
                     .sampler_handle = sampler,
                 },
 
-                // joint matrix palette
+                // height map texture
                 .{
                     .binding = 4,
-                    .buffer_handle = joint_matrix_buffer,
+                    .texture_view_handle = depth_map_texture.view_handle,
+                },
+
+                // mixing texture
+                .{
+                    .binding = 5,
+                    .texture_view_handle = mixing_texture.view_handle,
+                },
+
+                // texture 2
+                .{
+                    .binding = 6,
+                    .texture_view_handle = texture_2.view_handle,
+                },
+
+                // time (ms)
+                .{
+                    .binding = 7,
+                    .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
-                    .size = @sizeOf(SkeletalAnimation.JointMatrixUniform),
+                    .size = @sizeOf(u32),
                 },
             },
         );
