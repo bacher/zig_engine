@@ -2,18 +2,15 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 const zmath = @import("zmath");
 
-const TextureDescriptor = @import("../types.zig").TextureDescriptor;
 const BindGroup = @import("../bind_group.zig").BindGroup;
 
-// TODO: Delete?
-
-pub const ShadowMapPassBindGroupDefinition = struct {
+pub const SceneBindGroupDefinition = struct {
     gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
-    pub fn init(gctx: *zgpu.GraphicsContext) ShadowMapPassBindGroupDefinition {
+    pub fn init(gctx: *zgpu.GraphicsContext) SceneBindGroupDefinition {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
-            // transform matrix
+            // world to clip matrix
             zgpu.bufferEntry(
                 0,
                 .{ .vertex = true },
@@ -29,13 +26,13 @@ pub const ShadowMapPassBindGroupDefinition = struct {
         };
     }
 
-    pub fn deinit(bind_group_definition: ShadowMapPassBindGroupDefinition) void {
+    pub fn deinit(bind_group_definition: SceneBindGroupDefinition) void {
         bind_group_definition.gctx.releaseResource(bind_group_definition.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
-        bind_group_definition: ShadowMapPassBindGroupDefinition,
-    ) !BindGroup {
+        bind_group_definition: SceneBindGroupDefinition,
+    ) BindGroup {
         const gctx = bind_group_definition.gctx;
 
         const bind_group_handle = gctx.createBindGroup(
@@ -51,10 +48,8 @@ pub const ShadowMapPassBindGroupDefinition = struct {
             },
         );
 
-        const wgpu_bind_group = gctx.lookupResource(bind_group_handle) orelse return error.BindGroupNotAvailable;
-
         return .{
-            .wgpu_bind_group = wgpu_bind_group,
+            .wgpu_bind_group = gctx.lookupResource(bind_group_handle).?,
             .bind_group_handle = bind_group_handle,
         };
     }

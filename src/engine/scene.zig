@@ -38,6 +38,8 @@ pub const Scene = struct {
     previous_frame_time: f64,
 
     // gpu related
+    scene_bind_group: BindGroup,
+
     instance_buffer: struct {
         buffer: []InstanceBufferEntry,
         next_index: u32 = 0,
@@ -85,7 +87,8 @@ pub const Scene = struct {
         );
         errdefer instances_buffer_bind_group.deinit(engine.gctx);
 
-        scene.instance_buffer.bind_group = instances_buffer_bind_group;
+        const scene_bind_group = engine.bind_group_definitions.scene.createBindGroup();
+        errdefer scene_bind_group.deinit(engine.gctx);
 
         scene.* = .{
             .engine = engine,
@@ -97,6 +100,7 @@ pub const Scene = struct {
             .camera = camera,
             .spectator_camera = spectator_camera,
             .previous_frame_time = 0,
+            .scene_bind_group = scene_bind_group,
             .instance_buffer = .{
                 .buffer = instance_buffer,
                 .handle = instance_buffer_handle,
@@ -108,6 +112,10 @@ pub const Scene = struct {
     }
 
     pub fn deinit(scene: *Scene) void {
+        const gctx = scene.engine.gctx;
+
+        errdefer scene.scene_bind_group.deinit(gctx);
+
         for (scene.lights.items) |light| {
             scene.allocator.destroy(light);
         }
@@ -121,14 +129,14 @@ pub const Scene = struct {
         scene.root_groups.deinit(scene.allocator);
 
         for (scene.game_objects.items) |game_object| {
-            game_object.stopAnimation(scene.engine.gctx);
+            game_object.stopAnimation(gctx);
             scene.allocator.destroy(game_object);
         }
         scene.game_objects.deinit(scene.allocator);
 
         scene.allocator.free(scene.instance_buffer.buffer);
-        scene.engine.gctx.destroyResource(scene.instance_buffer.handle);
-        scene.instance_buffer.bind_group.deinit(scene.engine.gctx);
+        gctx.destroyResource(scene.instance_buffer.handle);
+        scene.instance_buffer.bind_group.deinit(gctx);
 
         scene.spectator_camera.deinit();
         scene.camera.deinit();
