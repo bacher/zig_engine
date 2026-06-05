@@ -26,6 +26,8 @@ const shadow_map_pipeline_module = @import("./pipelines/shadow_map_pipeline.zig"
 const shadow_map_skinned_pipeline_module = @import("./pipelines/shadow_map_skinned_pipeline.zig");
 const lines_pipeline_module = @import("./pipelines/lines_pipeline.zig");
 const debug_texture_pipeline_module = @import("./pipelines/debug_texture_pipeline.zig");
+// -- pipelines --
+const Pipelines = @import("./pipelines.zig").Pipelines;
 // -- bind groups --
 const BindGroupLayouts = @import("./bind_group_layouts.zig").BindGroupLayouts;
 const BindGroup = @import("./bind_group.zig").BindGroup;
@@ -95,21 +97,7 @@ pub const Engine = struct {
     init_time: f64,
     time: f64,
 
-    pipelines: struct {
-        basic: Pipeline,
-        basic_skinned: Pipeline,
-        skybox: Pipeline,
-        skybox_cubemap: Pipeline,
-        window_box: Pipeline,
-        primitive_colorized: Pipeline,
-        terrain_height_map: Pipeline,
-        // ---
-        shadow_map: Pipeline,
-        shadow_map_skinned: Pipeline,
-        // ---
-        lines: Pipeline,
-        debug_texture: Pipeline,
-    },
+    pipelines: Pipelines,
 
     bind_group_layouts: BindGroupLayouts,
 
@@ -211,7 +199,7 @@ pub const Engine = struct {
         });
 
         // ---
-        // bind group definitions
+        // bind group layouts
         // ---
         const bind_group_layouts = BindGroupLayouts.init(gctx);
 
@@ -234,58 +222,7 @@ pub const Engine = struct {
         // ---
         // pipelines
         // ---
-        const basic_pipeline = try basic_pipeline_module.createBasicPipeline(
-            gctx,
-            bind_group_layouts.scene,
-            bind_group_layouts.regular,
-            bind_group_layouts.shadow_map,
-            bind_group_layouts.instances_buffer,
-        );
-        const basic_skinned_pipeline = try basic_skinned_pipeline_module.createBasicSkinnedPipeline(
-            gctx,
-            bind_group_layouts.regular,
-            bind_group_layouts.shadow_map,
-            bind_group_layouts.joints,
-        );
-        const skybox_pipeline = try skybox_pipeline_module.createSkyboxPipeline(
-            gctx,
-            bind_group_layouts.regular,
-        );
-        const skybox_cubemap_pipeline = try skybox_cubemap_pipeline_module.createSkyboxCubemapPipeline(
-            gctx,
-            bind_group_layouts.cubemap,
-        );
-        const window_box_pipeline = try window_box_pipeline_module.createWindowBoxPipeline(
-            gctx,
-            bind_group_layouts.regular,
-        );
-        const primitive_colorized_pipeline = try primitive_colorized_pipeline_module.createPrimitiveColorizedPipeline(
-            gctx,
-            bind_group_layouts.primitive_colorized,
-        );
-        const terrain_height_map_pipeline = try terrain_height_map_pipeline_module.createTerrainHeightMapPipeline(
-            gctx,
-            bind_group_layouts.terrain_height_map,
-            bind_group_layouts.shadow_map,
-        );
-        const shadow_map_pipeline = try shadow_map_pipeline_module.createShadowMapPipeline(
-            gctx,
-            bind_group_layouts.scene,
-            bind_group_layouts.instances_buffer,
-        );
-        const shadow_map_skinned_pipeline = try shadow_map_skinned_pipeline_module.createShadowMapSkinnedPipeline(
-            gctx,
-            bind_group_layouts.shadow_map_pass,
-            bind_group_layouts.joints,
-        );
-        const lines_pipeline = try lines_pipeline_module.createLinesPipeline(
-            gctx,
-            bind_group_layouts.lines,
-        );
-        const debug_texture_pipeline = try debug_texture_pipeline_module.createDebugTexturePipeline(
-            gctx,
-            bind_group_layouts.debug_texture,
-        );
+        const pipelines = Pipelines.init(gctx, &bind_group_layouts);
 
         const depth_texture = try DepthTexture.init(
             gctx,
@@ -317,7 +254,9 @@ pub const Engine = struct {
 
         const identity_joint_matrix_buffer = try SkeletalAnimation.createIdentityJointMatrixBuffer(gctx);
 
-        const engine = try allocator.create(Engine);
+        const engine = allocator.create(Engine) catch @panic("Failed to create engine");
+        errdefer allocator.destroy(engine);
+
         engine.* = .{
             .allocator = allocator,
             .io = io,
@@ -328,19 +267,7 @@ pub const Engine = struct {
             .init_time = init_time,
             .time = 0,
             .gctx = gctx,
-            .pipelines = .{
-                .basic = basic_pipeline,
-                .basic_skinned = basic_skinned_pipeline,
-                .skybox = skybox_pipeline,
-                .skybox_cubemap = skybox_cubemap_pipeline,
-                .window_box = window_box_pipeline,
-                .primitive_colorized = primitive_colorized_pipeline,
-                .terrain_height_map = terrain_height_map_pipeline,
-                .shadow_map = shadow_map_pipeline,
-                .shadow_map_skinned = shadow_map_skinned_pipeline,
-                .lines = lines_pipeline,
-                .debug_texture = debug_texture_pipeline,
-            },
+            .pipelines = pipelines,
             .bind_group_layouts = bind_group_layouts,
 
             // shadow map pass uses singleton bind group descriptor for all objects
@@ -393,6 +320,7 @@ pub const Engine = struct {
         engine.input_controller.deinit();
         engine.allocator.free(engine.content_dir);
         engine.allocator.destroy(engine.cube_wireframe_model);
+        engine.pipelines.deinit(engine.gctx);
 
         zstbi.deinit();
         engine.allocator.destroy(engine);
