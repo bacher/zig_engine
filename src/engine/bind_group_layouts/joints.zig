@@ -7,7 +7,6 @@ const BindGroup = @import("../bind_group.zig").BindGroup;
 const SkeletalAnimation = @import("../skeletal_animation.zig");
 
 pub const JointsBindGroupLayout = struct {
-    gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
     pub fn init(gctx: *zgpu.GraphicsContext) JointsBindGroupLayout {
@@ -23,21 +22,19 @@ pub const JointsBindGroupLayout = struct {
         });
 
         return .{
-            .gctx = gctx,
             .bind_group_layout_handle = bind_group_layout_handle,
         };
     }
 
-    pub fn deinit(bind_group_layout: JointsBindGroupLayout) void {
-        bind_group_layout.gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
+    pub fn deinit(bind_group_layout: JointsBindGroupLayout, gctx: *zgpu.GraphicsContext) void {
+        gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
         bind_group_layout: JointsBindGroupLayout,
+        gctx: *zgpu.GraphicsContext,
         joint_matrix_buffer: zgpu.BufferHandle,
-    ) !BindGroup {
-        const gctx = bind_group_layout.gctx;
-
+    ) BindGroup {
         const bind_group_handle = gctx.createBindGroup(
             bind_group_layout.bind_group_layout_handle,
             &.{
@@ -51,10 +48,8 @@ pub const JointsBindGroupLayout = struct {
             },
         );
 
-        const wgpu_bind_group = gctx.lookupResource(bind_group_handle) orelse return error.BindGroupNotAvailable;
-
         return .{
-            .wgpu_bind_group = wgpu_bind_group,
+            .wgpu_bind_group = gctx.lookupResource(bind_group_handle).?,
             .bind_group_handle = bind_group_handle,
         };
     }

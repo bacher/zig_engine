@@ -218,16 +218,18 @@ pub const Engine = struct {
         // ---
         // bind groups
         // ---
-        const bind_group_shadow_map_pass = try bind_group_layouts.shadow_map_pass.createBindGroup();
-        const bind_group_debug_shadow_map_texture = try bind_group_layouts.debug_texture.createBindGroup(
+        const bind_group_shadow_map_pass = bind_group_layouts.shadow_map_pass.createBindGroup(gctx);
+        const bind_group_debug_shadow_map_texture = bind_group_layouts.debug_texture.createBindGroup(
+            gctx,
             texture_sampler,
             shadow_map_texture.array_view.view_handle,
         );
-        const bind_group_shadow_map = try bind_group_layouts.shadow_map.createBindGroup(
+        const bind_group_shadow_map = bind_group_layouts.shadow_map.createBindGroup(
+            gctx,
             texture_sampler,
             shadow_map_texture.array_view.view_handle,
         );
-        const bind_group_lines = try bind_group_layouts.lines.createBindGroup();
+        const bind_group_lines = bind_group_layouts.lines.createBindGroup(gctx);
 
         // ---
         // pipelines
@@ -387,7 +389,7 @@ pub const Engine = struct {
 
         engine.models_hash.deinit();
         engine.identity_joint_matrix_buffer.deinit(engine.gctx);
-        engine.bind_group_layouts.deinit();
+        engine.bind_group_layouts.deinit(engine.gctx);
         engine.input_controller.deinit();
         engine.allocator.free(engine.content_dir);
         engine.allocator.destroy(engine.cube_wireframe_model);
@@ -1085,7 +1087,8 @@ pub const Engine = struct {
             data.deinit();
         };
 
-        const bind_group = try engine.bind_group_layouts.regular.createBindGroup(
+        const bind_group = engine.bind_group_layouts.regular.createBindGroup(
+            engine.gctx,
             engine.texture_repeat_sampler,
             model_descriptor.color_texture,
             engine.identity_joint_matrix_buffer.handle,
@@ -1144,7 +1147,8 @@ pub const Engine = struct {
         const terrain_height_map_model = try engine.allocator.create(TerrainHeightMapModel);
         errdefer engine.allocator.destroy(terrain_height_map_model);
 
-        const terrain_height_map_bind_group = try engine.bind_group_layouts.terrain_height_map.createBindGroup(
+        const terrain_height_map_bind_group = engine.bind_group_layouts.terrain_height_map.createBindGroup(
+            engine.gctx,
             engine.texture_repeat_sampler,
             options.layers[0],
             options.depth_map_texture,
@@ -1258,7 +1262,8 @@ pub const Engine = struct {
             texture_full_filename,
         );
 
-        const bind_group = try engine.bind_group_layouts.regular.createBindGroup(
+        const bind_group = engine.bind_group_layouts.regular.createBindGroup(
+            engine.gctx,
             engine.texture_sampler,
             window_box_descriptor.color_texture,
             engine.identity_joint_matrix_buffer.handle,
@@ -1277,7 +1282,7 @@ pub const Engine = struct {
     pub fn loadPrimitive(engine: *Engine, positions: GeometryData) !*PrimitiveModel {
         const primitive_descriptor = try PrimitiveDescriptor.init(engine.gctx, positions);
 
-        const bind_group = try engine.bind_group_layouts.primitive_colorized.createBindGroup();
+        const bind_group = engine.bind_group_layouts.primitive_colorized.createBindGroup(engine.gctx);
 
         const model = try engine.allocator.create(PrimitiveModel);
         errdefer engine.allocator.destroy(model);

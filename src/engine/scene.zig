@@ -81,13 +81,14 @@ pub const Scene = struct {
 
         const instance_buffer = try allocator.alloc(InstanceBufferEntry, INSTANCE_BUFFER_ENTRY_SIZE);
 
-        const instances_buffer_bind_group = try engine.bind_group_layouts.instances_buffer.createBindGroup(
+        const instances_buffer_bind_group = engine.bind_group_layouts.instances_buffer.createBindGroup(
+            engine.gctx,
             instance_buffer_handle,
             INSTANCE_BUFFER_ENTRY_SIZE * @sizeOf(InstanceBufferEntry),
         );
         errdefer instances_buffer_bind_group.deinit(engine.gctx);
 
-        const scene_bind_group = engine.bind_group_layouts.scene.createBindGroup();
+        const scene_bind_group = engine.bind_group_layouts.scene.createBindGroup(engine.gctx);
         errdefer scene_bind_group.deinit(engine.gctx);
 
         scene.* = .{

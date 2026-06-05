@@ -9,7 +9,6 @@ const SkeletalAnimation = @import("../skeletal_animation.zig");
 // TODO: Move struct fields definitions to top level?
 
 pub const InstancesBufferBindGroupLayout = struct {
-    gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
     pub fn init(gctx: *zgpu.GraphicsContext) InstancesBufferBindGroupLayout {
@@ -25,22 +24,20 @@ pub const InstancesBufferBindGroupLayout = struct {
         });
 
         return .{
-            .gctx = gctx,
             .bind_group_layout_handle = bind_group_layout_handle,
         };
     }
 
-    pub fn deinit(bind_group_layout: InstancesBufferBindGroupLayout) void {
-        bind_group_layout.gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
+    pub fn deinit(bind_group_layout: InstancesBufferBindGroupLayout, gctx: *zgpu.GraphicsContext) void {
+        gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
         bind_group_layout: InstancesBufferBindGroupLayout,
+        gctx: *zgpu.GraphicsContext,
         instances_buffer: zgpu.BufferHandle,
         size: usize,
-    ) !BindGroup {
-        const gctx = bind_group_layout.gctx;
-
+    ) BindGroup {
         const bind_group_handle = gctx.createBindGroup(
             bind_group_layout.bind_group_layout_handle,
             &.{
@@ -54,10 +51,8 @@ pub const InstancesBufferBindGroupLayout = struct {
             },
         );
 
-        const wgpu_bind_group = gctx.lookupResource(bind_group_handle) orelse return error.BindGroupNotAvailable;
-
         return .{
-            .wgpu_bind_group = wgpu_bind_group,
+            .wgpu_bind_group = gctx.lookupResource(bind_group_handle).?,
             .bind_group_handle = bind_group_handle,
         };
     }

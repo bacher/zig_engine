@@ -163,7 +163,8 @@ pub const GameObject = struct {
         );
         errdefer animation.deinit(context.gctx);
 
-        const joints_bind_group = try context.bind_group_layout.createBindGroup(
+        const joints_bind_group = context.bind_group_layout.createBindGroup(
+            context.gctx,
             animation.joint_matrix_buffer.handle,
         );
         errdefer joints_bind_group.deinit(context.gctx);

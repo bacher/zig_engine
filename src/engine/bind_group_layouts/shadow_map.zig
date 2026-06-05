@@ -6,7 +6,6 @@ const BindGroup = @import("../bind_group.zig").BindGroup;
 const TextureDescriptor = @import("../types.zig").TextureDescriptor;
 
 pub const ShadowMapBindGroupLayout = struct {
-    gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
     pub fn init(gctx: *zgpu.GraphicsContext) ShadowMapBindGroupLayout {
@@ -36,22 +35,20 @@ pub const ShadowMapBindGroupLayout = struct {
         });
 
         return .{
-            .gctx = gctx,
             .bind_group_layout_handle = bind_group_layout_handle,
         };
     }
 
-    pub fn deinit(bind_group_layout: ShadowMapBindGroupLayout) void {
-        bind_group_layout.gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
+    pub fn deinit(bind_group_layout: ShadowMapBindGroupLayout, gctx: *zgpu.GraphicsContext) void {
+        gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
         bind_group_layout: ShadowMapBindGroupLayout,
+        gctx: *zgpu.GraphicsContext,
         sampler: zgpu.SamplerHandle,
         shadow_map_texture_view_handle: zgpu.TextureViewHandle,
-    ) !BindGroup {
-        const gctx = bind_group_layout.gctx;
-
+    ) BindGroup {
         const bind_group_handle = gctx.createBindGroup(
             bind_group_layout.bind_group_layout_handle,
             &.{
@@ -77,10 +74,8 @@ pub const ShadowMapBindGroupLayout = struct {
             },
         );
 
-        const wgpu_bind_group = gctx.lookupResource(bind_group_handle) orelse return error.BindGroupNotAvailable;
-
         return .{
-            .wgpu_bind_group = wgpu_bind_group,
+            .wgpu_bind_group = gctx.lookupResource(bind_group_handle).?,
             .bind_group_handle = bind_group_handle,
         };
     }

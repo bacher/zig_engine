@@ -5,7 +5,6 @@ const zmath = @import("zmath");
 const BindGroup = @import("../bind_group.zig").BindGroup;
 
 pub const SceneBindGroupLayout = struct {
-    gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
     pub fn init(gctx: *zgpu.GraphicsContext) SceneBindGroupLayout {
@@ -21,20 +20,18 @@ pub const SceneBindGroupLayout = struct {
         });
 
         return .{
-            .gctx = gctx,
             .bind_group_layout_handle = bind_group_layout_handle,
         };
     }
 
-    pub fn deinit(bind_group_layout: SceneBindGroupLayout) void {
-        bind_group_layout.gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
+    pub fn deinit(bind_group_layout: SceneBindGroupLayout, gctx: *zgpu.GraphicsContext) void {
+        gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
         bind_group_layout: SceneBindGroupLayout,
+        gctx: *zgpu.GraphicsContext,
     ) BindGroup {
-        const gctx = bind_group_layout.gctx;
-
         const bind_group_handle = gctx.createBindGroup(
             bind_group_layout.bind_group_layout_handle,
             &.{

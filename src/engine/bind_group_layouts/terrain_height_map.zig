@@ -8,7 +8,6 @@ const BindGroup = @import("../bind_group.zig").BindGroup;
 // NOTE: Most of the code is duplicated from RegularBindGroupDefinition,
 //       can it be refactored to remove duplication?
 pub const TerrainHeightMapBindGroupLayout = struct {
-    gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
     pub fn init(
@@ -80,25 +79,23 @@ pub const TerrainHeightMapBindGroupLayout = struct {
         });
 
         return .{
-            .gctx = gctx,
             .bind_group_layout_handle = bind_group_layout_handle,
         };
     }
 
-    pub fn deinit(bind_group_layout: TerrainHeightMapBindGroupLayout) void {
-        bind_group_layout.gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
+    pub fn deinit(bind_group_layout: TerrainHeightMapBindGroupLayout, gctx: *zgpu.GraphicsContext) void {
+        gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
         bind_group_layout: TerrainHeightMapBindGroupLayout,
+        gctx: *zgpu.GraphicsContext,
         sampler: zgpu.SamplerHandle,
         color_texture: TextureDescriptor,
         depth_map_texture: TextureDescriptor,
         mixing_texture: TextureDescriptor,
         texture_2: TextureDescriptor,
-    ) !BindGroup {
-        const gctx = bind_group_layout.gctx;
-
+    ) BindGroup {
         const bind_group_handle = gctx.createBindGroup(
             bind_group_layout.bind_group_layout_handle,
             &.{
@@ -158,10 +155,8 @@ pub const TerrainHeightMapBindGroupLayout = struct {
             },
         );
 
-        const wgpu_bind_group = gctx.lookupResource(bind_group_handle) orelse return error.BindGroupNotAvailable;
-
         return .{
-            .wgpu_bind_group = wgpu_bind_group,
+            .wgpu_bind_group = gctx.lookupResource(bind_group_handle).?,
             .bind_group_handle = bind_group_handle,
         };
     }

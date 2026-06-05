@@ -5,7 +5,6 @@ const zmath = @import("zmath");
 const BindGroup = @import("../bind_group.zig").BindGroup;
 
 pub const PrimitiveColorizedBindGroupLayout = struct {
-    gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
     pub fn init(gctx: *zgpu.GraphicsContext) PrimitiveColorizedBindGroupLayout {
@@ -37,20 +36,18 @@ pub const PrimitiveColorizedBindGroupLayout = struct {
         });
 
         return .{
-            .gctx = gctx,
             .bind_group_layout_handle = bind_group_layout_handle,
         };
     }
 
-    pub fn deinit(bind_group_layout: PrimitiveColorizedBindGroupLayout) void {
-        bind_group_layout.gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
+    pub fn deinit(bind_group_layout: PrimitiveColorizedBindGroupLayout, gctx: *zgpu.GraphicsContext) void {
+        gctx.releaseResource(bind_group_layout.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
         bind_group_layout: PrimitiveColorizedBindGroupLayout,
-    ) !BindGroup {
-        const gctx = bind_group_layout.gctx;
-
+        gctx: *zgpu.GraphicsContext,
+    ) BindGroup {
         const bind_group_handle = gctx.createBindGroup(
             bind_group_layout.bind_group_layout_handle,
             &.{
@@ -80,10 +77,8 @@ pub const PrimitiveColorizedBindGroupLayout = struct {
             },
         );
 
-        const wgpu_bind_group = gctx.lookupResource(bind_group_handle) orelse return error.BindGroupNotAvailable;
-
         return .{
-            .wgpu_bind_group = wgpu_bind_group,
+            .wgpu_bind_group = gctx.lookupResource(bind_group_handle).?,
             .bind_group_handle = bind_group_handle,
         };
     }

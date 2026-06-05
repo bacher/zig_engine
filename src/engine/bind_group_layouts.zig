@@ -40,17 +40,17 @@ pub const BindGroupLayouts = struct {
         };
     }
 
-    pub fn deinit(layouts: *BindGroupLayouts) void {
-        layouts.scene.deinit();
-        layouts.regular.deinit();
-        layouts.joints.deinit();
-        layouts.cubemap.deinit();
-        layouts.terrain_height_map.deinit();
-        layouts.primitive_colorized.deinit();
-        layouts.shadow_map_pass.deinit();
-        layouts.shadow_map.deinit();
-        layouts.lines.deinit();
-        layouts.debug_texture.deinit();
-        layouts.instances_buffer.deinit();
+    pub fn deinit(layouts: *BindGroupLayouts, gctx: *zgpu.GraphicsContext) void {
+        layouts.scene.deinit(gctx);
+        layouts.regular.deinit(gctx);
+        layouts.joints.deinit(gctx);
+        layouts.cubemap.deinit(gctx);
+        layouts.terrain_height_map.deinit(gctx);
+        layouts.primitive_colorized.deinit(gctx);
+        layouts.shadow_map_pass.deinit(gctx);
+        layouts.shadow_map.deinit(gctx);
+        layouts.lines.deinit(gctx);
+        layouts.debug_texture.deinit(gctx);
+        layouts.instances_buffer.deinit(gctx);
     }
 };
