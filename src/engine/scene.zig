@@ -165,12 +165,12 @@ pub const Scene = struct {
 
         const model = model_optional.?;
         const game_object = try GameObject.init(scene.allocator, .{
+            .scene = scene,
             .model = .{
                 .regular_model = model,
             },
             .position = params.position,
             .parent = params.parent,
-            .space_tree = scene.space_tree,
             .instance_index = scene.instance_buffer.next_index,
         });
         errdefer game_object.deinit(scene.engine.gctx);
@@ -191,12 +191,12 @@ pub const Scene = struct {
 
     pub fn addTerrainHeightMapObject(scene: *Scene, params: AddTerrainHeightMapObjectParams) !*GameObject {
         const game_object = try GameObject.init(scene.allocator, .{
+            .scene = scene,
             .model = .{
                 .terrain_height_map_model = params.model,
             },
             .position = params.position,
             .parent = params.parent,
-            .space_tree = scene.space_tree,
             .instance_index = 0, // TODO: actually is not used for terrain height map
         });
         errdefer game_object.deinit(scene.engine.gctx);
@@ -251,11 +251,11 @@ pub const Scene = struct {
 
     pub fn addPrimitiveObject(scene: *Scene, params: AddPrimitiveObjectParams) !*GameObject {
         const game_object = try GameObject.init(scene.allocator, .{
+            .scene = scene,
             .model = .{
                 .primitive_colorized = params.model,
             },
             .position = params.position,
-            .space_tree = scene.space_tree,
             .parent = null,
             .instance_index = 0, // TODO: actually is not used for primitive object
         });

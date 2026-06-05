@@ -5,6 +5,7 @@ const zgpu = @import("zgpu");
 
 const GeometryBounds = @import("./types.zig").GeometryBounds;
 const utils = @import("./utils.zig");
+const Scene = @import("./scene.zig").Scene;
 const model_module = @import("./model.zig");
 const Model = model_module.Model;
 const WindowBoxModel = model_module.WindowBoxModel;
@@ -53,16 +54,17 @@ const ModelUnion = union(enum) {
 };
 
 pub const GameObjectInitParams = struct {
+    scene: *Scene,
     position: [3]f32,
     rotation: zmath.Quat = zmath.quatFromRollPitchYaw(0, 0, 0),
     scale: f32 = 1.0,
     model: ModelUnion,
-    space_tree: ?*SpaceTree(GameObject),
     parent: ?*GameObjectGroup,
     instance_index: u32,
 };
 
 pub const GameObject = struct {
+    scene: *Scene,
     allocator: std.mem.Allocator,
     position: [3]f32,
     rotation: zmath.Quat,
@@ -75,7 +77,6 @@ pub const GameObject = struct {
         color: [4]f32 = .{ 0.0, 0.0, 0.0, 1.0 },
     } = .{},
     parent: ?*GameObjectGroup,
-    space_tree: ?*SpaceTree(GameObject),
     instance_index: u32,
     _gc: ?*GameObject,
 
@@ -90,6 +91,7 @@ pub const GameObject = struct {
         errdefer allocator.destroy(game_object);
 
         game_object.* = GameObject{
+            .scene = params.scene,
             .allocator = allocator,
             .position = params.position,
             .rotation = params.rotation,
@@ -97,7 +99,6 @@ pub const GameObject = struct {
             .aggregated_matrix = undefined,
             .model = params.model,
             .parent = params.parent,
-            .space_tree = params.space_tree,
             .instance_index = params.instance_index,
             ._gc = game_object,
         };
@@ -218,12 +219,12 @@ pub const GameObject = struct {
     fn updateAggregatedMatrix(game_object: *GameObject, options: struct {
         is_initial: bool = false,
     }) void {
+        const space_tree = game_object.scene.space_tree;
+
         if (!options.is_initial) {
-            if (game_object.space_tree) |space_tree| {
-                space_tree.removeObject(game_object) catch {
-                    std.debug.print("failed to remove object from space tree\n", .{});
-                };
-            }
+            space_tree.removeObject(game_object) catch {
+                std.debug.print("failed to remove object from space tree\n", .{});
+            };
         }
 
         utils.updateAggregatedMatrix_abstract(GameObject, game_object);
@@ -237,10 +238,8 @@ pub const GameObject = struct {
             );
         }
 
-        if (game_object.space_tree) |space_tree| {
-            space_tree.addObject(game_object) catch {
-                std.debug.print("failed to add object to space tree\n", .{});
-            };
-        }
+        space_tree.addObject(game_object) catch {
+            std.debug.print("failed to add object to space tree\n", .{});
+        };
     }
 };
