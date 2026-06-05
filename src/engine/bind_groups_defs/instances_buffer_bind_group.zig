@@ -4,22 +4,23 @@ const zmath = @import("zmath");
 
 const TextureDescriptor = @import("../types.zig").TextureDescriptor;
 const BindGroup = @import("../bind_group.zig").BindGroup;
+const SkeletalAnimation = @import("../skeletal_animation.zig");
 
-// TODO: Delete?
+// TODO: Move struct fields definitions to top level?
 
-pub const ShadowMapPassBindGroupDefinition = struct {
+pub const InstancesBufferBindGroupDefinition = struct {
     gctx: *zgpu.GraphicsContext,
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
-    pub fn init(gctx: *zgpu.GraphicsContext) ShadowMapPassBindGroupDefinition {
+    pub fn init(gctx: *zgpu.GraphicsContext) InstancesBufferBindGroupDefinition {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
-            // transform matrix
+            // Instances buffer
             zgpu.bufferEntry(
                 0,
                 .{ .vertex = true },
-                .uniform,
-                true,
-                0,
+                .read_only_storage,
+                false,
+                0, // min_binding_size, is it okay to be zero for storage buffers?
             ),
         });
 
@@ -29,24 +30,26 @@ pub const ShadowMapPassBindGroupDefinition = struct {
         };
     }
 
-    pub fn deinit(bind_group_definition: ShadowMapPassBindGroupDefinition) void {
+    pub fn deinit(bind_group_definition: InstancesBufferBindGroupDefinition) void {
         bind_group_definition.gctx.releaseResource(bind_group_definition.bind_group_layout_handle);
     }
 
     pub fn createBindGroup(
-        bind_group_definition: ShadowMapPassBindGroupDefinition,
+        bind_group_definition: InstancesBufferBindGroupDefinition,
+        instances_buffer: zgpu.BufferHandle,
+        size: usize,
     ) !BindGroup {
         const gctx = bind_group_definition.gctx;
 
         const bind_group_handle = gctx.createBindGroup(
             bind_group_definition.bind_group_layout_handle,
             &.{
-                // transform matrix
+                // Instances buffer
                 .{
                     .binding = 0,
-                    .buffer_handle = gctx.uniforms.buffer,
+                    .buffer_handle = instances_buffer,
                     .offset = 0,
-                    .size = @sizeOf(zmath.Mat),
+                    .size = size,
                 },
             },
         );

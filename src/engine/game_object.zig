@@ -1,4 +1,5 @@
 const std = @import("std");
+const math = std.math;
 const zmath = @import("zmath");
 const zgpu = @import("zgpu");
 
@@ -17,6 +18,8 @@ const BindGroup = @import("./bind_group.zig").BindGroup;
 const RegularBindGroupDefinition = @import("./bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
 const JointsBindGroupDefinition = @import("./bind_groups_defs/joints_bind_group.zig").JointsBindGroupDefinition;
 const SkeletalAnimation = @import("./skeletal_animation.zig");
+
+pub const xRotate = zmath.rotationX(0.5 * math.pi);
 
 const ModelUnion = union(enum) {
     regular_model: *const Model,
@@ -57,6 +60,7 @@ pub const GameObjectInitParams = struct {
     model: ModelUnion,
     space_tree: ?*SpaceTree(GameObject),
     parent: ?*GameObjectGroup,
+    instance_index: u32,
 };
 
 pub const GameObject = struct {
@@ -73,6 +77,7 @@ pub const GameObject = struct {
     } = .{},
     parent: ?*GameObjectGroup,
     space_tree: ?*SpaceTree(GameObject),
+    instance_index: u32,
     _gc: ?*GameObject,
 
     pub const AnimationContext = struct {
@@ -94,6 +99,7 @@ pub const GameObject = struct {
             .model = params.model,
             .parent = params.parent,
             .space_tree = params.space_tree,
+            .instance_index = params.instance_index,
             ._gc = game_object,
         };
 
@@ -118,6 +124,19 @@ pub const GameObject = struct {
         if (game_object._gc) |pointer| {
             game_object.allocator.destroy(pointer);
         }
+    }
+
+    pub fn getModelMatrix(game_object: *const GameObject) zmath.Mat {
+        const flip_yz = switch (game_object.model) {
+            .regular_model => |model| model.model_descriptor.options.mesh_y_up,
+            else => false,
+        };
+        if (flip_yz) {
+            // NOTE: converting from Y-up to Z-up coordinate system,
+            // should be done only for models which is made with Y-up logic.
+            return zmath.mul(xRotate, game_object.aggregated_matrix);
+        }
+        return game_object.aggregated_matrix;
     }
 
     pub fn playAnimation(

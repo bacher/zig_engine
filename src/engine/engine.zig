@@ -28,6 +28,7 @@ const lines_pipeline_module = @import("./pipelines/lines_pipeline.zig");
 const debug_texture_pipeline_module = @import("./pipelines/debug_texture_pipeline.zig");
 const BindGroup = @import("./bind_group.zig").BindGroup;
 // -- bind groups definitions --
+const SceneBindGroupDefinition = @import("./bind_groups_defs/scene_bind_group.zig").SceneBindGroupDefinition;
 const RegularBindGroupDefinition = @import("./bind_groups_defs/regular_bind_group.zig").RegularBindGroupDefinition;
 const JointsBindGroupDefinition = @import("./bind_groups_defs/joints_bind_group.zig").JointsBindGroupDefinition;
 const TerrainHeightMapBindGroupDefinition = @import("./bind_groups_defs/terrain_height_map_bind_group.zig").TerrainHeightMapBindGroupDefinition;
@@ -36,6 +37,8 @@ const ShadowMapPassBindGroupDefinition = @import("./bind_groups_defs/shadow_map_
 const ShadowMapBindGroupDefinition = @import("./bind_groups_defs/shadow_map_bind_group.zig").ShadowMapBindGroupDefinition;
 const LinesBindGroupDefinition = @import("./bind_groups_defs/lines_bind_group.zig").LinesBindGroupDefinition;
 const DebugTextureBindGroupDefinition = @import("./bind_groups_defs/debug_texture_bind_group.zig").DebugTextureBindGroupDefinition;
+const InstancesBufferBindGroupDefinition = @import("./bind_groups_defs/instances_buffer_bind_group.zig").InstancesBufferBindGroupDefinition;
+// --
 const DepthTexture = @import("./depth_texture.zig").DepthTexture;
 const ShadowMapTexture = @import("./shadow_map_texture.zig").ShadowMapTexture;
 // -- display object descriptors --
@@ -61,14 +64,14 @@ const Scene = @import("./scene.zig").Scene;
 const Camera = @import("./camera.zig").Camera;
 const InputController = @import("./input_controller.zig").InputController;
 const GameObject = @import("./game_object.zig").GameObject;
+const xRotate = @import("./game_object.zig").xRotate;
 const DirectionalLight = @import("./light.zig").DirectionalLight;
 const DirectionalLightCascade = @import("./light.zig").DirectionalLightCascade;
 
 const DEBUG_INTERNAL_TEXTURE = false;
+const DEBUG_SHOW_WIREFRAME_OBJECTS = true;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
-
-const xRotate = zmath.rotationX(0.5 * math.pi);
 
 const billboard_normalization_matrix = zmath.mul(
     zmath.matFromQuat(
@@ -92,6 +95,7 @@ pub const Engine = struct {
     };
 
     const BindGroupDefinitions = struct {
+        scene: SceneBindGroupDefinition,
         regular: RegularBindGroupDefinition,
         joints: JointsBindGroupDefinition,
         cubemap: RegularBindGroupDefinition,
@@ -101,8 +105,10 @@ pub const Engine = struct {
         shadow_map: ShadowMapBindGroupDefinition,
         lines: LinesBindGroupDefinition,
         debug_texture: DebugTextureBindGroupDefinition,
+        instances_buffer: InstancesBufferBindGroupDefinition,
 
         fn deinit(definitions: *BindGroupDefinitions) void {
+            definitions.scene.deinit();
             definitions.regular.deinit();
             definitions.joints.deinit();
             definitions.cubemap.deinit();
@@ -112,6 +118,7 @@ pub const Engine = struct {
             definitions.shadow_map.deinit();
             definitions.lines.deinit();
             definitions.debug_texture.deinit();
+            definitions.instances_buffer.deinit();
         }
     };
 
@@ -177,6 +184,37 @@ pub const Engine = struct {
     // -- built-in models --
     cube_wireframe_model: *CubeWireframeModel,
 
+    // -- temporary buffers --
+    temp_buffers: struct {
+        regular_objects: std.ArrayList(*GameObject) = undefined,
+        skinned_objects: std.ArrayList(*GameObject) = undefined,
+        wireframe_objects: std.ArrayList(*GameObject) = undefined,
+        rest_objects: std.ArrayList(*GameObject) = undefined,
+
+        fn init(allocator: std.mem.Allocator) @This() {
+            return @This(){
+                .regular_objects = std.ArrayList(*GameObject).initCapacity(allocator, 1024) catch @panic("Failed to initialize regular objects buffer"),
+                .skinned_objects = std.ArrayList(*GameObject).initCapacity(allocator, 1024) catch @panic("Failed to initialize skinned objects buffer"),
+                .wireframe_objects = std.ArrayList(*GameObject).initCapacity(allocator, 1024) catch @panic("Failed to initialize wireframe objects buffer"),
+                .rest_objects = std.ArrayList(*GameObject).initCapacity(allocator, 1024) catch @panic("Failed to initialize rest objects buffer"),
+            };
+        }
+
+        fn deinit(buffers: *@This(), allocator: std.mem.Allocator) void {
+            buffers.regular_objects.deinit(allocator);
+            buffers.skinned_objects.deinit(allocator);
+            buffers.wireframe_objects.deinit(allocator);
+            buffers.rest_objects.deinit(allocator);
+        }
+
+        fn reset(buffers: *@This()) void {
+            buffers.regular_objects.clearRetainingCapacity();
+            buffers.skinned_objects.clearRetainingCapacity();
+            buffers.wireframe_objects.clearRetainingCapacity();
+            buffers.rest_objects.clearRetainingCapacity();
+        }
+    },
+
     pub fn init(
         io: std.Io,
         allocator: std.mem.Allocator,
@@ -213,6 +251,7 @@ pub const Engine = struct {
         // bind group definitions
         // ---
         const bind_group_definitions: BindGroupDefinitions = .{
+            .scene = SceneBindGroupDefinition.init(gctx),
             .regular = RegularBindGroupDefinition.init(gctx, .tvdim_2d),
             .joints = JointsBindGroupDefinition.init(gctx),
             .cubemap = RegularBindGroupDefinition.init(gctx, .tvdim_cube),
@@ -222,6 +261,7 @@ pub const Engine = struct {
             .shadow_map = ShadowMapBindGroupDefinition.init(gctx),
             .lines = LinesBindGroupDefinition.init(gctx),
             .debug_texture = DebugTextureBindGroupDefinition.init(gctx),
+            .instances_buffer = InstancesBufferBindGroupDefinition.init(gctx),
         };
 
         // ---
@@ -243,8 +283,10 @@ pub const Engine = struct {
         // ---
         const basic_pipeline = try basic_pipeline_module.createBasicPipeline(
             gctx,
+            bind_group_definitions.scene,
             bind_group_definitions.regular,
             bind_group_definitions.shadow_map,
+            bind_group_definitions.instances_buffer,
         );
         const basic_skinned_pipeline = try basic_skinned_pipeline_module.createBasicSkinnedPipeline(
             gctx,
@@ -275,7 +317,8 @@ pub const Engine = struct {
         );
         const shadow_map_pipeline = try shadow_map_pipeline_module.createShadowMapPipeline(
             gctx,
-            bind_group_definitions.shadow_map_pass,
+            bind_group_definitions.scene,
+            bind_group_definitions.instances_buffer,
         );
         const shadow_map_skinned_pipeline = try shadow_map_skinned_pipeline_module.createShadowMapSkinnedPipeline(
             gctx,
@@ -369,7 +412,10 @@ pub const Engine = struct {
 
             // built-in models
             .cube_wireframe_model = undefined,
+
+            .temp_buffers = .init(allocator),
         };
+        errdefer engine.temp_buffers.deinit(allocator);
 
         engine.cube_wireframe_model = try engine.loadCubeWireframeModel();
         errdefer engine.cube_wireframe_model.deinit(engine.gctx);
@@ -379,6 +425,8 @@ pub const Engine = struct {
     }
 
     pub fn deinit(engine: *Engine) void {
+        engine.temp_buffers.deinit(engine.allocator);
+
         var iterator = engine.models_hash.iterator();
         while (iterator.next()) |entry| {
             const model_ptr = entry.value_ptr.*;
@@ -431,6 +479,7 @@ pub const Engine = struct {
 
     pub fn draw(engine: *Engine) GraphicsContextState {
         const gctx = engine.gctx;
+        const allocator = engine.allocator;
 
         const back_buffer_view = gctx.swapchain.getCurrentTextureView();
         defer back_buffer_view.release();
@@ -488,10 +537,46 @@ pub const Engine = struct {
                             const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(
                                 cascade_view_bound_box,
                             );
-                            // for (scene.game_objects.items) |game_object| {
+
+                            const world_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+                            world_to_clip_uniform.slice[0] = zmath.transpose(cascade.world_to_clip);
+                            shadow_map_pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
+                                world_to_clip_uniform.offset,
+                            });
+
                             for (potentially_visible_game_objects) |game_object| {
+                                const target_buffer = switch (game_object.model) {
+                                    // if (game_object.joints_bind_group != null) { ???
+                                    .regular_model => |model| if (model.model_descriptor.has_skin)
+                                        &engine.temp_buffers.skinned_objects
+                                    else
+                                        &engine.temp_buffers.regular_objects,
+                                    .primitive_colorized => &engine.temp_buffers.regular_objects,
+                                    .window_box_model => &engine.temp_buffers.regular_objects,
+                                    else => &engine.temp_buffers.rest_objects,
+                                };
+                                target_buffer.append(allocator, game_object) catch @panic("Failed to grow draw buffer");
+                            }
+
+                            shadow_map_pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
+                            shadow_map_pass.setBindGroup(1, scene.instance_buffer.bind_group.wgpu_bind_group, &.{});
+
+                            for (engine.temp_buffers.regular_objects.items) |game_object| {
                                 engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, cascade, game_object);
                             }
+
+                            if (engine.temp_buffers.skinned_objects.items.len > 0) {
+                                shadow_map_pass.setPipeline(engine.pipelines.shadow_map_skinned.pipeline_gpu);
+                                for (engine.temp_buffers.skinned_objects.items) |game_object| {
+                                    engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, cascade, game_object);
+                                }
+                            }
+
+                            for (engine.temp_buffers.rest_objects.items) |game_object| {
+                                engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, cascade, game_object);
+                            }
+
+                            engine.temp_buffers.reset();
                         }
                     }
                 }
@@ -536,16 +621,64 @@ pub const Engine = struct {
                     engine.frame_stats.find_objects_sub_invocations_count = stats.invocations_count;
                     // debug end
 
-                    for (potentially_visible_game_objects) |game_object| {
-                        engine.drawGameObject(pass, scene, game_object);
-                        engine.frame_stats.game_objects_drawn_count += 1;
-                    }
+                    const world_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+                    world_to_clip_uniform.slice[0] = zmath.transpose(scene.camera.world_to_clip);
+
+                    pass.setBindGroup(3, scene.scene_bind_group.wgpu_bind_group, &.{
+                        world_to_clip_uniform.offset,
+                    });
 
                     // _ = potentially_visible_game_objects;
                     // for (scene.game_objects.items) |game_object| {
-                    //     engine.drawGameObject(pass, scene, game_object);
-                    //     engine.frame_stats.game_objects_drawn_count += 1;
-                    // }
+                    for (potentially_visible_game_objects) |game_object| {
+                        const target_buffer = switch (game_object.model) {
+                            .regular_model => |model| if (model.model_descriptor.has_skin)
+                                &engine.temp_buffers.skinned_objects
+                            else
+                                &engine.temp_buffers.regular_objects,
+                            else => &engine.temp_buffers.rest_objects,
+                        };
+                        target_buffer.append(allocator, game_object) catch @panic("Failed to grow draw buffer");
+
+                        if (DEBUG_SHOW_WIREFRAME_OBJECTS) {
+                            if (switch (game_object.model) {
+                                .regular_model => true,
+                                .window_box_model => true,
+                                // Don't show bounding box for coordinates (they uses colorized primitives)
+                                // .primitive_colorized => true,
+                                else => false,
+                            }) {
+                                engine.temp_buffers.wireframe_objects.append(allocator, game_object) catch @panic("Failed to grow draw buffer");
+                            }
+                        }
+                    }
+
+                    pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
+                    for (engine.temp_buffers.regular_objects.items) |game_object| {
+                        engine.drawGameObject(pass, scene, game_object);
+                    }
+
+                    if (engine.temp_buffers.skinned_objects.items.len > 0) {
+                        pass.setPipeline(engine.pipelines.basic_skinned.pipeline_gpu);
+                        for (engine.temp_buffers.skinned_objects.items) |game_object| {
+                            engine.drawGameObject(pass, scene, game_object);
+                        }
+                    }
+
+                    for (engine.temp_buffers.rest_objects.items) |game_object| {
+                        engine.drawGameObject(pass, scene, game_object);
+                    }
+
+                    if (DEBUG_SHOW_WIREFRAME_OBJECTS) {
+                        pass.setPipeline(engine.pipelines.lines.pipeline_gpu);
+                        for (engine.temp_buffers.wireframe_objects.items) |game_object| {
+                            engine.drawCubeWireframe(pass, scene, game_object);
+                        }
+                    }
+
+                    engine.temp_buffers.reset();
+
+                    engine.frame_stats.game_objects_drawn_count += @intCast(potentially_visible_game_objects.len);
 
                     const duration = timer.untilNow(engine.io, .awake);
                     engine.frame_stats.main_pass_time_taken = @as(f32, @floatFromInt(duration.nanoseconds)) * 0.000001;
@@ -595,11 +728,6 @@ pub const Engine = struct {
         switch (game_object.model) {
             .regular_model => |model| {
                 const model_descriptor = model.model_descriptor;
-                if (model_descriptor.has_skin) {
-                    pass.setPipeline(engine.pipelines.basic_skinned.pipeline_gpu);
-                } else {
-                    pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
-                }
 
                 model_descriptor.position.applyVertexBuffer(pass, 0);
                 model_descriptor.normal.applyVertexBuffer(pass, 1);
@@ -743,17 +871,24 @@ pub const Engine = struct {
         switch (game_object.model) {
             .regular_model => |model| {
                 pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{
-                    object_to_clip_uniform.offset,
-                    camera_position_in_model_space_uniform.offset,
+                    object_to_clip_uniform.offset, // TODO: is not used in basic (non-skinned) pipeline
+                    camera_position_in_model_space_uniform.offset, // TODO: is not used in basic pipeline
                 });
+
                 pass.setBindGroup(1, engine.bind_group_shadow_map.wgpu_bind_group, &.{
                     object_to_light_clip_array_uniform.offset,
                 });
                 if (game_object.joints_bind_group) |joints_bind_group| {
                     pass.setBindGroup(2, joints_bind_group.wgpu_bind_group, &.{});
+                } else {
+                    pass.setBindGroup(2, scene.instance_buffer.bind_group.wgpu_bind_group, &.{});
                 }
 
-                pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
+                if (model.model_descriptor.has_skin) {
+                    pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
+                } else {
+                    pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index);
+                }
             },
             .terrain_height_map_model => |model| {
                 const time_uniform = engine.gctx.uniformsAllocate(u32, 1);
@@ -812,20 +947,9 @@ pub const Engine = struct {
                 pass.draw(elements_count, 1, 0, 0);
             },
         }
-
-        if (switch (game_object.model) {
-            .regular_model => true,
-            .window_box_model => true,
-            // Don't show bounding box for coordinates (they uses colorized primitives)
-            // .primitive_colorized => true,
-            else => false,
-        }) {
-            engine.drawCubeWireframe(pass, scene, game_object);
-        }
     }
 
     fn drawCubeWireframe(engine: *Engine, pass: wgpu.RenderPassEncoder, scene: *const Scene, game_object: *const GameObject) void {
-        pass.setPipeline(engine.pipelines.lines.pipeline_gpu);
         const model_descriptor = engine.cube_wireframe_model.model_descriptor;
         model_descriptor.position.applyVertexBuffer(pass, 0);
 
@@ -872,12 +996,6 @@ pub const Engine = struct {
         switch (game_object.model) {
             .regular_model => |model| {
                 const model_descriptor = model.model_descriptor;
-                // if (model_descriptor.has_skin) {
-                if (game_object.joints_bind_group != null) {
-                    pass.setPipeline(engine.pipelines.shadow_map_skinned.pipeline_gpu);
-                } else {
-                    pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
-                }
 
                 model_descriptor.position.applyVertexBuffer(pass, 0);
                 if (model_descriptor.has_skin) {
@@ -894,12 +1012,10 @@ pub const Engine = struct {
                 return;
             },
             .window_box_model => |window_box_model| {
-                pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
                 const model_descriptor = window_box_model.model_descriptor;
                 model_descriptor.position.applyVertexBuffer(pass, 0);
             },
             .primitive_colorized => |primitive_colorized_model| {
-                pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
                 const model_descriptor = primitive_colorized_model.model_descriptor;
                 model_descriptor.position.applyVertexBuffer(pass, 0);
             },
@@ -927,26 +1043,28 @@ pub const Engine = struct {
         const object_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
         object_to_clip_uniform.slice[0] = zmath.transpose(object_to_clip);
 
-        pass.setBindGroup(0, engine.bind_group_shadow_map_pass.wgpu_bind_group, &.{
-            object_to_clip_uniform.offset,
-        });
-        if (game_object.joints_bind_group) |joints_bind_group| {
-            pass.setBindGroup(1, joints_bind_group.wgpu_bind_group, &.{});
-        }
-
         switch (game_object.model) {
             .regular_model => |model| {
-                pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
+                if (game_object.joints_bind_group) |joints_bind_group| {
+                    pass.setBindGroup(0, engine.bind_group_shadow_map_pass.wgpu_bind_group, &.{
+                        object_to_clip_uniform.offset,
+                    });
+                    pass.setBindGroup(1, joints_bind_group.wgpu_bind_group, &.{});
+
+                    pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, 0);
+                } else {
+                    pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index);
+                }
             },
             .terrain_height_map_model => {
                 // TODO: make customizable
                 pass.draw(getTerrainHeightMapElementsCountForSide(64), 1, 0, 0);
             },
             .window_box_model => |window_box_model| {
-                pass.draw(window_box_model.model_descriptor.position.elements_count, 1, 0, 0);
+                pass.draw(window_box_model.model_descriptor.position.elements_count, 1, 0, game_object.instance_index);
             },
             .primitive_colorized => |primitive_colorized_model| {
-                pass.draw(primitive_colorized_model.model_descriptor.position.elements_count, 1, 0, 0);
+                pass.draw(primitive_colorized_model.model_descriptor.position.elements_count, 1, 0, game_object.instance_index);
             },
             .skybox_model,
             .skybox_cubemap_model,
@@ -1232,6 +1350,10 @@ pub const Engine = struct {
     }
 
     pub fn runLoop(engine: *Engine) !void {
+        if (engine.active_scene) |scene| {
+            try scene.prepareForRendering();
+        }
+
         const window = engine.window_context.window;
 
         while (true) {

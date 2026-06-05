@@ -1,5 +1,7 @@
 const std = @import("std");
 const zmath = @import("zmath");
+const zgpu = @import("zgpu");
+const wgpu = zgpu.wgpu;
 
 const Engine = @import("./engine.zig").Engine;
 const GameObject = @import("./game_object.zig").GameObject;
@@ -13,8 +15,15 @@ const Camera = @import("./camera.zig").Camera;
 const SpaceTree = @import("./space_tree.zig").SpaceTree;
 const SpectatorCamera = @import("./spectator_camera.zig").SpectatorCamera;
 const light_module = @import("./light.zig");
+const BindGroup = @import("./bind_group.zig").BindGroup;
 const DirectionalLight = light_module.DirectionalLight;
 const DirectionalLightParams = light_module.DirectionalLightParams;
+
+const INSTANCE_BUFFER_ENTRY_SIZE = 1024;
+
+const InstanceBufferEntry = struct {
+    model_matrix: zmath.Mat,
+};
 
 pub const Scene = struct {
     engine: *Engine,
@@ -27,6 +36,17 @@ pub const Scene = struct {
     camera: *Camera,
     spectator_camera: *SpectatorCamera,
     previous_frame_time: f64,
+
+    // gpu related
+    scene_bind_group: BindGroup,
+
+    instance_buffer: struct {
+        buffer: []InstanceBufferEntry,
+        next_index: u32 = 0,
+        handle: zgpu.BufferHandle,
+        gpu_buffer: wgpu.Buffer,
+        bind_group: BindGroup,
+    },
 
     pub fn init(
         engine: *Engine,
@@ -46,6 +66,30 @@ pub const Scene = struct {
         errdefer allocator.destroy(spectator_camera);
         spectator_camera.* = SpectatorCamera.init(camera, engine.input_controller);
 
+        const instance_buffer_handle = engine.gctx.createBuffer(.{
+            .usage = .{
+                .copy_dst = true,
+                .storage = true,
+            },
+            .size = INSTANCE_BUFFER_ENTRY_SIZE * @sizeOf(InstanceBufferEntry),
+            // .mapped_at_creation = .true,
+        });
+        errdefer engine.gctx.destroyResource(instance_buffer_handle);
+
+        const instance_buffer_gpu_buffer = engine.gctx.lookupResource(instance_buffer_handle) orelse return error.BufferIsNotReady;
+        // const instance_buffer_gpu_buffer_mapped = instance_buffer_gpu_buffer.getMappedRange(InstanceBufferEntry, 0, INSTANCE_BUFFER_ENTRY_SIZE);
+
+        const instance_buffer = try allocator.alloc(InstanceBufferEntry, INSTANCE_BUFFER_ENTRY_SIZE);
+
+        const instances_buffer_bind_group = try engine.bind_group_definitions.instances_buffer.createBindGroup(
+            instance_buffer_handle,
+            INSTANCE_BUFFER_ENTRY_SIZE * @sizeOf(InstanceBufferEntry),
+        );
+        errdefer instances_buffer_bind_group.deinit(engine.gctx);
+
+        const scene_bind_group = engine.bind_group_definitions.scene.createBindGroup();
+        errdefer scene_bind_group.deinit(engine.gctx);
+
         scene.* = .{
             .engine = engine,
             .allocator = allocator,
@@ -56,11 +100,22 @@ pub const Scene = struct {
             .camera = camera,
             .spectator_camera = spectator_camera,
             .previous_frame_time = 0,
+            .scene_bind_group = scene_bind_group,
+            .instance_buffer = .{
+                .buffer = instance_buffer,
+                .handle = instance_buffer_handle,
+                .gpu_buffer = instance_buffer_gpu_buffer,
+                .bind_group = instances_buffer_bind_group,
+            },
         };
         return scene;
     }
 
     pub fn deinit(scene: *Scene) void {
+        const gctx = scene.engine.gctx;
+
+        errdefer scene.scene_bind_group.deinit(gctx);
+
         for (scene.lights.items) |light| {
             scene.allocator.destroy(light);
         }
@@ -74,16 +129,31 @@ pub const Scene = struct {
         scene.root_groups.deinit(scene.allocator);
 
         for (scene.game_objects.items) |game_object| {
-            game_object.stopAnimation(scene.engine.gctx);
+            game_object.stopAnimation(gctx);
             scene.allocator.destroy(game_object);
         }
         scene.game_objects.deinit(scene.allocator);
+
+        scene.allocator.free(scene.instance_buffer.buffer);
+        gctx.destroyResource(scene.instance_buffer.handle);
+        scene.instance_buffer.bind_group.deinit(gctx);
 
         scene.spectator_camera.deinit();
         scene.camera.deinit();
         scene.allocator.destroy(scene.camera);
         scene.allocator.destroy(scene.spectator_camera);
         scene.allocator.destroy(scene);
+    }
+
+    pub fn prepareForRendering(scene: *Scene) !void {
+        // _ = scene;
+        // Before first rendering upload all instances data to the GPU.
+        scene.engine.gctx.queue.writeBuffer(
+            scene.instance_buffer.gpu_buffer,
+            0,
+            InstanceBufferEntry,
+            scene.instance_buffer.buffer[0..scene.instance_buffer.next_index],
+        );
     }
 
     pub fn addGroup(scene: *Scene) !*GameObjectGroup {
@@ -106,14 +176,20 @@ pub const Scene = struct {
             .position = params.position,
             .parent = params.parent,
             .space_tree = scene.space_tree,
+            .instance_index = scene.instance_buffer.next_index,
         });
         errdefer game_object.deinit(scene.engine.gctx);
+
+        scene.instance_buffer.buffer[game_object.instance_index] = .{
+            .model_matrix = zmath.transpose(game_object.getModelMatrix()),
+        };
 
         if (params.animation_name) |animation_name| {
             try game_object.playAnimation(scene.animationContext(), animation_name);
         }
 
         try scene.game_objects.append(scene.allocator, game_object);
+        scene.instance_buffer.next_index += 1;
 
         return game_object;
     }
@@ -126,6 +202,7 @@ pub const Scene = struct {
             .position = params.position,
             .parent = params.parent,
             .space_tree = scene.space_tree,
+            .instance_index = 0, // TODO: actually is not used for terrain height map
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
@@ -185,6 +262,7 @@ pub const Scene = struct {
             .position = params.position,
             .space_tree = scene.space_tree,
             .parent = null,
+            .instance_index = 0, // TODO: actually is not used for primitive object
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
