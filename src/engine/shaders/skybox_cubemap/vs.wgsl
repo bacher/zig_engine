@@ -1,4 +1,4 @@
-@group(0) @binding(0) var<uniform> object_to_clip: mat4x4<f32>;
+@group(1) @binding(0) var<uniform> object_to_clip: mat4x4<f32>;
 
 struct VertexOut {
     @builtin(position) position_clip: vec4<f32>,

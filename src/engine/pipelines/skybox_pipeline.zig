@@ -12,6 +12,7 @@ pub fn createSkyboxPipeline(
     bind_group_layouts: *const BindGroupLayouts,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
+        bind_group_layouts.scene.bind_group_layout_handle,
         bind_group_layouts.regular_old.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);

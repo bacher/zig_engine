@@ -865,7 +865,7 @@ pub const Engine = struct {
                 pass.draw(elements_count, 1, 0, 0);
             },
             .skybox_model => |skybox_model| {
-                pass.setBindGroup(0, skybox_model.bind_group.wgpu_bind_group, &.{
+                pass.setBindGroup(1, skybox_model.bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
                     camera_position_in_model_space_uniform.offset,
                 });
@@ -873,7 +873,7 @@ pub const Engine = struct {
                 pass.drawIndexed(skybox_model.model_descriptor.index.elements_count, 1, 0, 0, 0);
             },
             .skybox_cubemap_model => |skybox_cubemap_model| {
-                pass.setBindGroup(0, skybox_cubemap_model.bind_group.wgpu_bind_group, &.{
+                pass.setBindGroup(1, skybox_cubemap_model.bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
                     camera_position_in_model_space_uniform.offset,
                 });

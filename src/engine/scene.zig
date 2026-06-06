@@ -146,6 +146,7 @@ pub const Scene = struct {
 
         scene.spectator_camera.deinit();
         scene.camera.deinit();
+        if (scene.skybox_object) |skybox_object| skybox_object.deinit(gctx);
         scene.allocator.destroy(scene.camera);
         scene.allocator.destroy(scene.spectator_camera);
         scene.allocator.destroy(scene);
