@@ -14,19 +14,6 @@ const BufferDescriptor = types.BufferDescriptor;
 const WindowContext = @import("./glue.zig").WindowContext;
 const utils = @import("./utils.zig");
 // -- pipelines --
-const Pipeline = @import("./pipeline.zig").Pipeline;
-const basic_pipeline_module = @import("./pipelines/basic_pipeline.zig");
-const basic_skinned_pipeline_module = @import("./pipelines/basic_skinned_pipeline.zig");
-const skybox_pipeline_module = @import("./pipelines/skybox_pipeline.zig");
-const skybox_cubemap_pipeline_module = @import("./pipelines/skybox_cubemap_pipeline.zig");
-const window_box_pipeline_module = @import("./pipelines/window_box_pipeline.zig");
-const primitive_colorized_pipeline_module = @import("./pipelines/primitive_colorized_pipeline.zig");
-const terrain_height_map_pipeline_module = @import("./pipelines/terrain_height_map_pipeline.zig");
-const shadow_map_pipeline_module = @import("./pipelines/shadow_map_pipeline.zig");
-const shadow_map_skinned_pipeline_module = @import("./pipelines/shadow_map_skinned_pipeline.zig");
-const lines_pipeline_module = @import("./pipelines/lines_pipeline.zig");
-const debug_texture_pipeline_module = @import("./pipelines/debug_texture_pipeline.zig");
-// -- pipelines --
 const Pipelines = @import("./pipelines.zig").Pipelines;
 // -- bind groups --
 const BindGroupLayouts = @import("./bind_group_layouts.zig").BindGroupLayouts;
