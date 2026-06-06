@@ -357,6 +357,7 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
     zgui.text("main pass time taken: {d:.3}ms", .{engine.frame_stats.main_pass_time_taken});
     zgui.text("active nodes: {d}", .{engine.frame_stats.active_space_nodes_count});
     zgui.text("find objects sub-invokes: {d}", .{engine.frame_stats.find_objects_sub_invocations_count});
+    zgui.text("instances written: {d}", .{engine.frame_stats.instances_written_count});
     zgui.endGroup();
 
     zgui.end();

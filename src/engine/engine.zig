@@ -54,6 +54,7 @@ const SkeletalAnimation = @import("./skeletal_animation.zig");
 const PrimitiveDescriptor = @import("./display_object_descriptors/primitive_descriptor.zig").PrimitiveDescriptor;
 const GeometryData = @import("./shape_generation/geometry_data.zig").GeometryData;
 const Scene = @import("./scene.zig").Scene;
+const InstanceBufferEntry = @import("./scene.zig").InstanceBufferEntry;
 const Camera = @import("./camera.zig").Camera;
 const InputController = @import("./input_controller.zig").InputController;
 const GameObject = @import("./game_object.zig").GameObject;
@@ -129,6 +130,7 @@ pub const Engine = struct {
         // ---
         active_space_nodes_count: u32 = 0,
         find_objects_sub_invocations_count: u32 = 0,
+        instances_written_count: u32 = 0,
     } = .{},
 
     // -- built-in models --
@@ -355,6 +357,85 @@ pub const Engine = struct {
     }
 
     pub fn draw(engine: *Engine) GraphicsContextState {
+        var potentially_visible_game_objects_arrays: [3][]const *GameObject = .{
+            &.{},
+            &.{},
+            &.{},
+        };
+        defer {
+            for (potentially_visible_game_objects_arrays) |array| {
+                engine.allocator.free(array);
+            }
+        }
+
+        var potentially_visible_game_objects_for_camera: []const *GameObject = &.{};
+        defer engine.allocator.free(potentially_visible_game_objects_for_camera);
+
+        var outdate_instances_range: struct {
+            min: u32 = std.math.maxInt(u32),
+            max: u32 = 0,
+
+            fn update(self: *@This(), scene: *Scene, game_object: *const GameObject) void {
+                if (scene.instance_buffer.outdated_indices.isSet(game_object.instance_index)) {
+                    scene.instance_buffer.outdated_indices.unset(game_object.instance_index);
+
+                    self.min = @min(self.min, game_object.instance_index);
+                    self.max = @max(self.max, game_object.instance_index);
+
+                    scene.instance_buffer.buffer[game_object.instance_index] = .{
+                        .model_matrix = zmath.transpose(game_object.getModelMatrix()),
+                    };
+                }
+            }
+        } = .{};
+
+        if (engine.active_scene) |scene| {
+            for (scene.lights.items) |light| {
+                for (&light.cascades, 0..) |*cascade, i| {
+                    light.applyCameraFrustum(cascade, scene.camera);
+
+                    const cascade_view_bound_box = cascade.getLightViewBoundBox();
+                    const visible_objects = scene.space_tree.getObjectsInBoundBox(
+                        cascade_view_bound_box,
+                    );
+
+                    for (visible_objects) |game_object| {
+                        outdate_instances_range.update(scene, game_object);
+                    }
+
+                    potentially_visible_game_objects_arrays[i] = engine.allocator.dupe(
+                        *GameObject,
+                        visible_objects,
+                    ) catch @panic("Failed to dupe potentially visible game objects");
+                }
+            }
+
+            const camera_view_bound_box = scene.camera.getCameraViewBoundBox();
+            const visible_objects = scene.space_tree.getObjectsInBoundBox(
+                camera_view_bound_box,
+            );
+
+            for (visible_objects) |game_object| {
+                outdate_instances_range.update(scene, game_object);
+            }
+
+            potentially_visible_game_objects_for_camera = engine.allocator.dupe(
+                *GameObject,
+                visible_objects,
+            ) catch @panic("Failed to dupe potentially visible game objects");
+
+            if (outdate_instances_range.min <= outdate_instances_range.max) {
+                scene.engine.gctx.queue.writeBuffer(
+                    scene.instance_buffer.gpu_buffer,
+                    outdate_instances_range.min * @sizeOf(InstanceBufferEntry),
+                    InstanceBufferEntry,
+                    scene.instance_buffer.buffer[outdate_instances_range.min .. outdate_instances_range.max + 1],
+                );
+
+                engine.frame_stats.instances_written_count = outdate_instances_range.max - outdate_instances_range.min + 1;
+            }
+        }
+
         const gctx = engine.gctx;
         const allocator = engine.allocator;
 
@@ -384,7 +465,7 @@ pub const Engine = struct {
                     }
 
                     for (scene.lights.items) |light| {
-                        for (&light.cascades) |*cascade| {
+                        for (&light.cascades, 0..) |*cascade, i| {
                             const shadow_map_view = engine.shadow_map_texture.layers_views[@intFromEnum(cascade.layer)].view;
 
                             const shadow_map_attachments = [_]wgpu.RenderPassColorAttachment{.{
@@ -408,12 +489,13 @@ pub const Engine = struct {
 
                             shadow_map_pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
 
-                            light.applyCameraFrustum(cascade, scene.camera);
+                            // light.applyCameraFrustum(cascade, scene.camera);
 
-                            const cascade_view_bound_box = cascade.getLightViewBoundBox();
-                            const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(
-                                cascade_view_bound_box,
-                            );
+                            // const cascade_view_bound_box = cascade.getLightViewBoundBox();
+                            // const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(
+                            //     cascade_view_bound_box,
+                            // );
+                            const potentially_visible_game_objects = potentially_visible_game_objects_arrays[i];
 
                             const world_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                             world_to_clip_uniform.slice[0] = zmath.transpose(cascade.world_to_clip);
@@ -483,13 +565,7 @@ pub const Engine = struct {
                 }
 
                 if (engine.active_scene) |scene| {
-                    const camera_view_bound_box = scene.camera.getCameraViewBoundBox();
-
                     const timer = std.Io.Timestamp.now(engine.io, .awake);
-
-                    const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(
-                        camera_view_bound_box,
-                    );
 
                     // debug start
                     const stats = scene.space_tree.getLastGetObjectsInBoundBoxStats();
@@ -504,9 +580,9 @@ pub const Engine = struct {
                         world_to_clip_uniform.offset,
                     });
 
-                    // _ = potentially_visible_game_objects;
+                    // _ = potentially_visible_game_objects_for_camera;
                     // for (scene.game_objects.items) |game_object| {
-                    for (potentially_visible_game_objects) |game_object| {
+                    for (potentially_visible_game_objects_for_camera) |game_object| {
                         const target_buffer = switch (game_object.model) {
                             .regular_model => |model| if (model.model_descriptor.has_skin)
                                 &engine.temp_buffers.skinned_objects
@@ -554,7 +630,7 @@ pub const Engine = struct {
 
                     engine.temp_buffers.reset();
 
-                    engine.frame_stats.game_objects_drawn_count += @intCast(potentially_visible_game_objects.len);
+                    engine.frame_stats.game_objects_drawn_count += @intCast(potentially_visible_game_objects_for_camera.len);
 
                     const duration = timer.untilNow(engine.io, .awake);
                     engine.frame_stats.main_pass_time_taken = @as(f32, @floatFromInt(duration.nanoseconds)) * 0.000001;

@@ -20,15 +20,16 @@ const DirectionalLight = light_module.DirectionalLight;
 const DirectionalLightParams = light_module.DirectionalLightParams;
 
 const INSTANCE_BUFFER_ENTRY_SIZE = 1024;
+const MAX_OBJECTS_COUNT = 4096;
 
-const InstanceBufferEntry = extern struct {
+pub const InstanceBufferEntry = extern struct {
     model_matrix: zmath.Mat,
 };
 
 pub const Scene = struct {
     engine: *Engine,
     allocator: std.mem.Allocator,
-    game_objects: std.ArrayList(*GameObject) = .empty,
+    game_objects: std.ArrayList(*GameObject) = undefined,
     root_groups: std.ArrayList(*GameObjectGroup) = .empty,
     // TODO: Maybe store light as a value instead of a pointer?
     lights: std.ArrayList(*DirectionalLight) = .empty,
@@ -46,6 +47,7 @@ pub const Scene = struct {
         handle: zgpu.BufferHandle,
         gpu_buffer: wgpu.Buffer,
         // outdated_indices: std.ArrayList(u32) = .empty,
+        outdated_indices: std.DynamicBitSetUnmanaged = undefined,
     },
 
     pub fn init(
@@ -79,7 +81,11 @@ pub const Scene = struct {
         const instance_buffer_gpu_buffer = engine.gctx.lookupResource(instance_buffer_handle) orelse return error.BufferIsNotReady;
         // const instance_buffer_gpu_buffer_mapped = instance_buffer_gpu_buffer.getMappedRange(InstanceBufferEntry, 0, INSTANCE_BUFFER_ENTRY_SIZE);
 
-        const instance_buffer = try allocator.alloc(InstanceBufferEntry, INSTANCE_BUFFER_ENTRY_SIZE);
+        const buffer = try allocator.alloc(InstanceBufferEntry, INSTANCE_BUFFER_ENTRY_SIZE);
+        errdefer allocator.free(buffer);
+
+        const outdated_indices = try std.DynamicBitSetUnmanaged.initEmpty(allocator, MAX_OBJECTS_COUNT);
+        errdefer outdated_indices.deinit(allocator);
 
         const scene_bind_group = engine.bind_group_layouts.scene.createBindGroup(
             engine.gctx,
@@ -91,7 +97,7 @@ pub const Scene = struct {
         scene.* = .{
             .engine = engine,
             .allocator = allocator,
-            .game_objects = .empty,
+            .game_objects = std.ArrayList(*GameObject).initCapacity(allocator, MAX_OBJECTS_COUNT) catch @panic("Failed to initialize game objects buffer"),
             .root_groups = .empty,
             .lights = .empty,
             .space_tree = space_tree,
@@ -100,9 +106,10 @@ pub const Scene = struct {
             .previous_frame_time = 0,
             .scene_bind_group = scene_bind_group,
             .instance_buffer = .{
-                .buffer = instance_buffer,
+                .buffer = buffer,
                 .handle = instance_buffer_handle,
                 .gpu_buffer = instance_buffer_gpu_buffer,
+                .outdated_indices = outdated_indices,
             },
         };
         return scene;
@@ -131,6 +138,7 @@ pub const Scene = struct {
         }
         scene.game_objects.deinit(scene.allocator);
 
+        scene.instance_buffer.outdated_indices.deinit(scene.allocator);
         scene.allocator.free(scene.instance_buffer.buffer);
         gctx.destroyResource(scene.instance_buffer.handle);
 
@@ -153,18 +161,7 @@ pub const Scene = struct {
     }
 
     pub fn updateInstanceBuffer(scene: *Scene, game_object: *const GameObject) void {
-        // scene.instance_buffer.outdated_indices.append(scene.allocator, game_object.instance_index) catch @panic("failed to append instance index to outdated indices");
-
-        scene.instance_buffer.buffer[game_object.instance_index] = .{
-            .model_matrix = zmath.transpose(game_object.getModelMatrix()),
-        };
-
-        scene.engine.gctx.queue.writeBuffer(
-            scene.instance_buffer.gpu_buffer,
-            game_object.instance_index * @sizeOf(InstanceBufferEntry),
-            InstanceBufferEntry,
-            scene.instance_buffer.buffer[game_object.instance_index .. game_object.instance_index + 1],
-        );
+        scene.instance_buffer.outdated_indices.set(game_object.instance_index);
     }
 
     pub fn addGroup(scene: *Scene) !*GameObjectGroup {
@@ -174,6 +171,8 @@ pub const Scene = struct {
     }
 
     pub fn addObject(scene: *Scene, params: AddObjectParams) !*GameObject {
+        try scene.checkMaxObjectsCount();
+
         const model_optional = scene.engine.models_hash.get(params.model_id);
         if (model_optional == null) {
             @panic("Invalid model id");
@@ -199,13 +198,21 @@ pub const Scene = struct {
             try game_object.playAnimation(scene.animationContext(), animation_name);
         }
 
-        try scene.game_objects.append(scene.allocator, game_object);
+        scene.game_objects.appendAssumeCapacity(game_object);
         scene.instance_buffer.next_index += 1;
 
         return game_object;
     }
 
+    pub fn checkMaxObjectsCount(scene: *Scene) !void {
+        if (scene.game_objects.items.len >= MAX_OBJECTS_COUNT) {
+            return error.MaxObjectsCountReached;
+        }
+    }
+
     pub fn addTerrainHeightMapObject(scene: *Scene, params: AddTerrainHeightMapObjectParams) !*GameObject {
+        try scene.checkMaxObjectsCount();
+
         const game_object = try GameObject.init(scene.allocator, .{
             .scene = scene,
             .model = .{
@@ -217,13 +224,15 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        try scene.game_objects.append(scene.allocator, game_object);
+        scene.game_objects.appendAssumeCapacity(game_object);
 
         return game_object;
     }
 
     // TODO: deduplicate with addObject
     pub fn addWindowBoxObject(scene: *Scene, params: AddWindowBoxParams) !*GameObject {
+        try scene.checkMaxObjectsCount();
+
         const game_object = try GameObject.init(scene.allocator, .{
             .model = .{
                 .window_box_model = params.model,
@@ -232,12 +241,14 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        try scene.game_objects.append(scene.allocator, game_object);
+        scene.game_objects.appendAssumeCapacity(game_object);
 
         return game_object;
     }
 
     pub fn addSkyBoxObject(scene: *Scene, params: AddSkyBoxParams) !*GameObject {
+        try scene.checkMaxObjectsCount();
+
         const game_object = try GameObject.init(scene.allocator, .{
             .model = .{
                 .skybox_model = params.model,
@@ -246,12 +257,14 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        try scene.game_objects.append(scene.allocator, game_object);
+        scene.game_objects.appendAssumeCapacity(game_object);
 
         return game_object;
     }
 
     pub fn addSkyBoxCubemapObject(scene: *Scene, params: AddSkyBoxCubemapParams) !*GameObject {
+        try scene.checkMaxObjectsCount();
+
         const game_object = try GameObject.init(scene.allocator, .{
             .model = .{
                 .skybox_cubemap_model = params.model,
@@ -260,12 +273,14 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        try scene.game_objects.append(scene.allocator, game_object);
+        scene.game_objects.appendAssumeCapacity(game_object);
 
         return game_object;
     }
 
     pub fn addPrimitiveObject(scene: *Scene, params: AddPrimitiveObjectParams) !*GameObject {
+        try scene.checkMaxObjectsCount();
+
         const game_object = try GameObject.init(scene.allocator, .{
             .scene = scene,
             .model = .{
@@ -277,7 +292,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        try scene.game_objects.append(scene.allocator, game_object);
+        scene.game_objects.appendAssumeCapacity(game_object);
 
         return game_object;
     }
