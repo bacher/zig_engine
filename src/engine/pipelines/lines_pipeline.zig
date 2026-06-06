@@ -5,14 +5,14 @@ const wgsl_vs = @embedFile("../shaders/lines/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/lines/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
-const bind_group_layouts = @import("../bind_group_layouts.zig");
+const BindGroupLayouts = @import("../bind_group_layouts.zig").BindGroupLayouts;
 
 pub fn createLinesPipeline(
     gctx: *zgpu.GraphicsContext,
-    lines_bind_group_layout: bind_group_layouts.LinesBindGroupLayout,
+    bind_group_layouts: *const BindGroupLayouts,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
-        lines_bind_group_layout.bind_group_layout_handle,
+        bind_group_layouts.lines.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 

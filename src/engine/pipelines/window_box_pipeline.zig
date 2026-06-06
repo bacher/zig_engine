@@ -5,14 +5,14 @@ const wgsl_vs = @embedFile("../shaders/window_box/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/window_box/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
-const bind_group_layouts = @import("../bind_group_layouts.zig");
+const BindGroupLayouts = @import("../bind_group_layouts.zig").BindGroupLayouts;
 
 pub fn createWindowBoxPipeline(
     gctx: *zgpu.GraphicsContext,
-    regular_old_bind_group_layout: bind_group_layouts.RegularOldBindGroupLayout,
+    bind_group_layouts: *const BindGroupLayouts,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
-        regular_old_bind_group_layout.bind_group_layout_handle,
+        bind_group_layouts.regular_old.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 

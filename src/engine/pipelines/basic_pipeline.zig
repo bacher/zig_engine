@@ -5,19 +5,16 @@ const wgsl_vs = @embedFile("../shaders/basic/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/basic/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
-
-const bind_group_layouts = @import("../bind_group_layouts.zig");
+const BindGroupLayouts = @import("../bind_group_layouts.zig").BindGroupLayouts;
 
 pub fn createBasicPipeline(
     gctx: *zgpu.GraphicsContext,
-    scene_bind_group_layout: bind_group_layouts.SceneBindGroupLayout,
-    regular_bind_group_layout: bind_group_layouts.RegularBindGroupLayout,
-    shadow_map_bind_group_layout: bind_group_layouts.ShadowMapBindGroupLayout,
+    bind_group_layouts: *const BindGroupLayouts,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
-        scene_bind_group_layout.bind_group_layout_handle,
-        regular_bind_group_layout.bind_group_layout_handle,
-        shadow_map_bind_group_layout.bind_group_layout_handle,
+        bind_group_layouts.scene.bind_group_layout_handle,
+        bind_group_layouts.regular.bind_group_layout_handle,
+        bind_group_layouts.shadow_map.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 

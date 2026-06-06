@@ -34,64 +34,57 @@ pub const Pipelines = struct {
     pub fn init(gctx: *zgpu.GraphicsContext, bind_group_layouts: *const BindGroupLayouts) Pipelines {
         const basic_pipeline = basic_pipeline_module.createBasicPipeline(
             gctx,
-            bind_group_layouts.scene,
-            bind_group_layouts.regular,
-            bind_group_layouts.shadow_map,
+            bind_group_layouts,
         ) catch @panic("Pipeline initialization failure");
 
         const basic_skinned_pipeline = basic_skinned_pipeline_module.createBasicSkinnedPipeline(
             gctx,
-            bind_group_layouts.scene,
-            bind_group_layouts.regular,
-            bind_group_layouts.shadow_map,
-            bind_group_layouts.joints,
+            bind_group_layouts,
         ) catch @panic("Pipeline initialization failure");
 
         const skybox_pipeline = skybox_pipeline_module.createSkyboxPipeline(
             gctx,
-            bind_group_layouts.regular_old,
+            bind_group_layouts,
         ) catch @panic("Pipeline initialization failure");
 
         const skybox_cubemap_pipeline = skybox_cubemap_pipeline_module.createSkyboxCubemapPipeline(
             gctx,
-            bind_group_layouts.cubemap,
+            bind_group_layouts,
         ) catch @panic("Pipeline initialization failure");
 
         const window_box_pipeline = window_box_pipeline_module.createWindowBoxPipeline(
             gctx,
-            bind_group_layouts.regular_old,
+            bind_group_layouts,
         ) catch @panic("Pipeline initialization failure");
 
         const primitive_colorized_pipeline = primitive_colorized_pipeline_module.createPrimitiveColorizedPipeline(
             gctx,
-            bind_group_layouts.primitive_colorized,
+            bind_group_layouts,
         ) catch @panic("Pipeline initialization failure");
 
         const terrain_height_map_pipeline = terrain_height_map_pipeline_module.createTerrainHeightMapPipeline(
             gctx,
-            bind_group_layouts.terrain_height_map,
-            bind_group_layouts.shadow_map,
+            bind_group_layouts,
         ) catch @panic("Pipeline initialization failure");
 
         const shadow_map_pipeline = shadow_map_pipeline_module.createShadowMapPipeline(
             gctx,
-            bind_group_layouts.scene,
+            bind_group_layouts,
         ) catch @panic("Pipeline initialization failure");
 
         const shadow_map_skinned_pipeline = shadow_map_skinned_pipeline_module.createShadowMapSkinnedPipeline(
             gctx,
-            bind_group_layouts.scene,
-            bind_group_layouts.joints,
+            bind_group_layouts,
         ) catch @panic("Pipeline initialization failure");
 
         const lines_pipeline = lines_pipeline_module.createLinesPipeline(
             gctx,
-            bind_group_layouts.lines,
+            bind_group_layouts,
         ) catch @panic("Pipeline initialization failure");
 
         const debug_texture_pipeline = debug_texture_pipeline_module.createDebugTexturePipeline(
             gctx,
-            bind_group_layouts.debug_texture,
+            bind_group_layouts,
         ) catch @panic("Pipeline initialization failure");
 
         return .{

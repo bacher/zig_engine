@@ -5,14 +5,14 @@ const wgsl_vs = @embedFile("../shaders/primitive_colorized/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/primitive_colorized/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
-const bind_group_layouts = @import("../bind_group_layouts.zig");
+const BindGroupLayouts = @import("../bind_group_layouts.zig").BindGroupLayouts;
 
 pub fn createPrimitiveColorizedPipeline(
     gctx: *zgpu.GraphicsContext,
-    primitive_colorized_bind_group_layout: bind_group_layouts.PrimitiveColorizedBindGroupLayout,
+    bind_group_layouts: *const BindGroupLayouts,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
-        primitive_colorized_bind_group_layout.bind_group_layout_handle,
+        bind_group_layouts.primitive_colorized.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 
