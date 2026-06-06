@@ -1,10 +1,10 @@
 // TODO: Should be texture f32 or u8 is also okay?
-@group(0) @binding(2) var color_texture: texture_2d<f32>;
-@group(0) @binding(3) var texture_sampler: sampler;
+@group(0) @binding(1) var color_texture: texture_2d<f32>;
+@group(0) @binding(2) var texture_sampler: sampler;
 
-@group(0) @binding(5) var mixing_texture: texture_2d<f32>;
-@group(0) @binding(6) var color_texture_2: texture_2d<f32>;
-@group(0) @binding(7) var<uniform> time_ms: u32;
+@group(0) @binding(4) var mixing_texture: texture_2d<f32>;
+@group(0) @binding(5) var color_texture_2: texture_2d<f32>;
+@group(0) @binding(6) var<uniform> time_ms: u32;
 
 // shadow map bind group
 @group(1) @binding(1) var shadow_map_texture: texture_2d_array<f32>;

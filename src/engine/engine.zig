@@ -810,33 +810,10 @@ pub const Engine = struct {
         );
 
         const camera_position_in_model_space_uniform = engine.gctx.uniformsAllocate(zmath.Vec, 1);
-        if (game_object.model == .window_box_model) {
-            const camera_position = zmath.Vec{
-                // TODO: how it can be simplified?
-                scene.camera.position[0],
-                scene.camera.position[1],
-                scene.camera.position[2],
-                1,
-            };
-
-            // TODO:
-            // Instead of inverse it will be better to just apply transposed
-            // rotation matrix and negative position shift (and scale if needed).
-            // inverse is much more compute intensive than listed below operations.
-            const model_to_world_inversed = zmath.inverse(model_to_world);
-            const camera_position_in_model_space = zmath.mul(
-                camera_position,
-                model_to_world_inversed,
-            );
-
-            camera_position_in_model_space_uniform.slice[0] = camera_position_in_model_space;
-        }
 
         switch (game_object.model) {
             .regular_model => |model| {
-                pass.setBindGroup(1, model.bind_group.wgpu_bind_group, &.{
-                    camera_position_in_model_space_uniform.offset, // TODO: is not used in basic pipeline
-                });
+                pass.setBindGroup(1, model.bind_group.wgpu_bind_group, &.{});
 
                 pass.setBindGroup(2, engine.bind_group_shadow_map.wgpu_bind_group, &.{
                     object_to_light_clip_array_uniform.offset,
@@ -854,7 +831,6 @@ pub const Engine = struct {
 
                 pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
-                    camera_position_in_model_space_uniform.offset,
                     time_uniform.offset,
                 });
                 pass.setBindGroup(1, engine.bind_group_shadow_map.wgpu_bind_group, &.{
@@ -865,6 +841,26 @@ pub const Engine = struct {
                 pass.draw(getTerrainHeightMapElementsCountForSide(64), 1, 0, 0);
             },
             .window_box_model => |window_box_model| {
+                const camera_position = zmath.Vec{
+                    // TODO: how it can be simplified?
+                    scene.camera.position[0],
+                    scene.camera.position[1],
+                    scene.camera.position[2],
+                    1,
+                };
+
+                // TODO:
+                // Instead of inverse it will be better to just apply transposed
+                // rotation matrix and negative position shift (and scale if needed).
+                // inverse is much more compute intensive than listed below operations.
+                const model_to_world_inversed = zmath.inverse(model_to_world);
+                const camera_position_in_model_space = zmath.mul(
+                    camera_position,
+                    model_to_world_inversed,
+                );
+
+                camera_position_in_model_space_uniform.slice[0] = camera_position_in_model_space;
+
                 pass.setBindGroup(0, window_box_model.bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
                     camera_position_in_model_space_uniform.offset,
@@ -896,7 +892,6 @@ pub const Engine = struct {
 
                 pass.setBindGroup(0, primitive_colorized_model.bind_group.wgpu_bind_group, &.{
                     object_to_clip_uniform.offset,
-                    camera_position_in_model_space_uniform.offset,
                     solid_color_uniform.offset,
                 });
 

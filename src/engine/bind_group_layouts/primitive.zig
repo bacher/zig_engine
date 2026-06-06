@@ -17,17 +17,9 @@ pub const PrimitiveColorizedBindGroupLayout = struct {
                 true,
                 0,
             ),
-            // camera position vec4<f32>
-            zgpu.bufferEntry(
-                1,
-                .{ .vertex = true, .fragment = true },
-                .uniform,
-                true,
-                0,
-            ),
             // solid color
             zgpu.bufferEntry(
-                2,
+                1,
                 .{ .fragment = true },
                 .uniform,
                 true,
@@ -59,17 +51,9 @@ pub const PrimitiveColorizedBindGroupLayout = struct {
                     .size = @sizeOf(zmath.Mat),
                 },
 
-                // camera position vec4<f32>
-                .{
-                    .binding = 1,
-                    .buffer_handle = gctx.uniforms.buffer,
-                    .offset = 0,
-                    .size = @sizeOf(zmath.Vec),
-                },
-
                 // solid color
                 .{
-                    .binding = 2,
+                    .binding = 1,
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
                     .size = @sizeOf(f32) * 4,

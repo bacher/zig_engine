@@ -1,6 +1,6 @@
 @group(0) @binding(0) var<uniform> object_to_clip: mat4x4<f32>;
 // @group(0) @binding(4) var depth_texture: texture_2d<f32>;
-@group(0) @binding(4) var depth_texture: texture_2d<u32>;
+@group(0) @binding(3) var depth_texture: texture_2d<u32>;
 
 @group(1) @binding(0) var<uniform> object_to_light_clip_array: array<mat4x4<f32>, 3>;
 

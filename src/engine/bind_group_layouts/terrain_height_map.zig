@@ -22,17 +22,9 @@ pub const TerrainHeightMapBindGroupLayout = struct {
                 true,
                 0,
             ),
-            // camera position vec4<f32>
-            zgpu.bufferEntry(
-                1,
-                .{ .vertex = true, .fragment = true },
-                .uniform,
-                true,
-                0,
-            ),
             // texture
             zgpu.textureEntry(
-                2,
+                1,
                 .{ .fragment = true },
                 .float,
                 .tvdim_2d,
@@ -40,13 +32,13 @@ pub const TerrainHeightMapBindGroupLayout = struct {
             ),
             // sampler
             zgpu.samplerEntry(
-                3,
+                2,
                 .{ .fragment = true },
                 .filtering, // TODO: What's the difference between .filtering and .non_filtering
             ),
             // height map texture
             zgpu.textureEntry(
-                4,
+                3,
                 .{ .vertex = true },
                 .uint,
                 .tvdim_2d,
@@ -54,7 +46,7 @@ pub const TerrainHeightMapBindGroupLayout = struct {
             ),
             // mixing texture
             zgpu.textureEntry(
-                5,
+                4,
                 .{ .fragment = true },
                 .float,
                 .tvdim_2d,
@@ -62,7 +54,7 @@ pub const TerrainHeightMapBindGroupLayout = struct {
             ),
             // texture 2
             zgpu.textureEntry(
-                6,
+                5,
                 .{ .fragment = true },
                 .float,
                 .tvdim_2d,
@@ -70,7 +62,7 @@ pub const TerrainHeightMapBindGroupLayout = struct {
             ),
             // time (ms)
             zgpu.bufferEntry(
-                7,
+                6,
                 .{ .fragment = true },
                 .uniform,
                 true,
@@ -107,47 +99,39 @@ pub const TerrainHeightMapBindGroupLayout = struct {
                     .size = @sizeOf(zmath.Mat),
                 },
 
-                // camera position vec4<f32>
-                .{
-                    .binding = 1,
-                    .buffer_handle = gctx.uniforms.buffer,
-                    .offset = 0,
-                    .size = @sizeOf(zmath.Vec),
-                },
-
                 // texture
                 .{
-                    .binding = 2,
+                    .binding = 1,
                     .texture_view_handle = color_texture.view_handle,
                 },
 
                 // sampler
                 .{
-                    .binding = 3,
+                    .binding = 2,
                     .sampler_handle = sampler,
                 },
 
                 // height map texture
                 .{
-                    .binding = 4,
+                    .binding = 3,
                     .texture_view_handle = depth_map_texture.view_handle,
                 },
 
                 // mixing texture
                 .{
-                    .binding = 5,
+                    .binding = 4,
                     .texture_view_handle = mixing_texture.view_handle,
                 },
 
                 // texture 2
                 .{
-                    .binding = 6,
+                    .binding = 5,
                     .texture_view_handle = texture_2.view_handle,
                 },
 
                 // time (ms)
                 .{
-                    .binding = 7,
+                    .binding = 6,
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
                     .size = @sizeOf(u32),

@@ -9,10 +9,10 @@ const bind_group_layouts = @import("../bind_group_layouts.zig");
 
 pub fn createSkyboxCubemapPipeline(
     gctx: *zgpu.GraphicsContext,
-    regular_bind_group_layout: bind_group_layouts.RegularBindGroupLayout,
+    regular_old_bind_group_layout: bind_group_layouts.RegularOldBindGroupLayout,
 ) !Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
-        regular_bind_group_layout.bind_group_layout_handle,
+        regular_old_bind_group_layout.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 

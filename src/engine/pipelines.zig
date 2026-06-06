@@ -49,7 +49,7 @@ pub const Pipelines = struct {
 
         const skybox_pipeline = skybox_pipeline_module.createSkyboxPipeline(
             gctx,
-            bind_group_layouts.regular,
+            bind_group_layouts.regular_old,
         ) catch @panic("Pipeline initialization failure");
 
         const skybox_cubemap_pipeline = skybox_cubemap_pipeline_module.createSkyboxCubemapPipeline(
@@ -59,7 +59,7 @@ pub const Pipelines = struct {
 
         const window_box_pipeline = window_box_pipeline_module.createWindowBoxPipeline(
             gctx,
-            bind_group_layouts.regular,
+            bind_group_layouts.regular_old,
         ) catch @panic("Pipeline initialization failure");
 
         const primitive_colorized_pipeline = primitive_colorized_pipeline_module.createPrimitiveColorizedPipeline(
