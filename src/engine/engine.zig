@@ -138,6 +138,11 @@ pub const Engine = struct {
 
     // -- temporary buffers --
     temp_buffers: struct {
+        visible_objects_lists: std.ArrayList(*GameObject) = undefined,
+        visible_objects_lists_chunks: std.ArrayList(u16) = undefined,
+        visible_objects_current_chunk_index: u16 = 0,
+        visible_objects_current_offset: usize = 0,
+
         regular_objects: std.ArrayList(*GameObject) = undefined,
         skinned_objects: std.ArrayList(*GameObject) = undefined,
         wireframe_objects: std.ArrayList(*GameObject) = undefined,
@@ -145,6 +150,9 @@ pub const Engine = struct {
 
         fn init(allocator: std.mem.Allocator) @This() {
             return @This(){
+                .visible_objects_lists = std.ArrayList(*GameObject).initCapacity(allocator, 4096) catch @panic("Failed to initialize visible objects lists buffer"),
+                .visible_objects_lists_chunks = std.ArrayList(u16).initCapacity(allocator, 128) catch @panic("Failed to initialize visible objects lists chunks buffer"),
+
                 .regular_objects = std.ArrayList(*GameObject).initCapacity(allocator, 1024) catch @panic("Failed to initialize regular objects buffer"),
                 .skinned_objects = std.ArrayList(*GameObject).initCapacity(allocator, 1024) catch @panic("Failed to initialize skinned objects buffer"),
                 .wireframe_objects = std.ArrayList(*GameObject).initCapacity(allocator, 1024) catch @panic("Failed to initialize wireframe objects buffer"),
@@ -153,17 +161,41 @@ pub const Engine = struct {
         }
 
         fn deinit(buffers: *@This(), allocator: std.mem.Allocator) void {
+            buffers.visible_objects_lists.deinit(allocator);
+            buffers.visible_objects_lists_chunks.deinit(allocator);
+
             buffers.regular_objects.deinit(allocator);
             buffers.skinned_objects.deinit(allocator);
             buffers.wireframe_objects.deinit(allocator);
             buffers.rest_objects.deinit(allocator);
         }
 
-        fn reset(buffers: *@This()) void {
+        fn resetVisibleObjectsLists(buffers: *@This()) void {
+            buffers.visible_objects_lists.clearRetainingCapacity();
+            buffers.visible_objects_lists_chunks.clearRetainingCapacity();
+            buffers.visible_objects_current_chunk_index = 0;
+            buffers.visible_objects_current_offset = 0;
+        }
+
+        fn resetDrawingLists(buffers: *@This()) void {
             buffers.regular_objects.clearRetainingCapacity();
             buffers.skinned_objects.clearRetainingCapacity();
             buffers.wireframe_objects.clearRetainingCapacity();
             buffers.rest_objects.clearRetainingCapacity();
+        }
+
+        fn writeVisibleObjectsList(buffers: *@This(), visible_objects: []const *GameObject) void {
+            buffers.visible_objects_lists_chunks.appendAssumeCapacity(@intCast(visible_objects.len));
+            const slice = buffers.visible_objects_lists.addManyAsSliceAssumeCapacity(visible_objects.len);
+            @memcpy(slice, visible_objects);
+        }
+
+        fn getNextVisibleObjectsChunk(buffers: *@This()) []const *GameObject {
+            const size = buffers.visible_objects_lists_chunks.items[buffers.visible_objects_current_chunk_index];
+            const items = buffers.visible_objects_lists.items[buffers.visible_objects_current_offset .. buffers.visible_objects_current_offset + size];
+            buffers.visible_objects_current_chunk_index += 1;
+            buffers.visible_objects_current_offset += size;
+            return items;
         }
     },
 
@@ -357,20 +389,6 @@ pub const Engine = struct {
     }
 
     pub fn draw(engine: *Engine) GraphicsContextState {
-        var potentially_visible_game_objects_arrays: [3][]const *GameObject = .{
-            &.{},
-            &.{},
-            &.{},
-        };
-        defer {
-            for (potentially_visible_game_objects_arrays) |array| {
-                engine.allocator.free(array);
-            }
-        }
-
-        var potentially_visible_game_objects_for_camera: []const *GameObject = &.{};
-        defer engine.allocator.free(potentially_visible_game_objects_for_camera);
-
         var outdate_instances_range: struct {
             min: u32 = std.math.maxInt(u32),
             max: u32 = 0,
@@ -389,9 +407,11 @@ pub const Engine = struct {
             }
         } = .{};
 
+        engine.temp_buffers.resetVisibleObjectsLists();
+
         if (engine.active_scene) |scene| {
             for (scene.lights.items) |light| {
-                for (&light.cascades, 0..) |*cascade, i| {
+                for (&light.cascades) |*cascade| {
                     light.applyCameraFrustum(cascade, scene.camera);
 
                     const cascade_view_bound_box = cascade.getLightViewBoundBox();
@@ -403,10 +423,7 @@ pub const Engine = struct {
                         outdate_instances_range.update(scene, game_object);
                     }
 
-                    potentially_visible_game_objects_arrays[i] = engine.allocator.dupe(
-                        *GameObject,
-                        visible_objects,
-                    ) catch @panic("Failed to dupe potentially visible game objects");
+                    engine.temp_buffers.writeVisibleObjectsList(visible_objects);
                 }
             }
 
@@ -419,10 +436,9 @@ pub const Engine = struct {
                 outdate_instances_range.update(scene, game_object);
             }
 
-            potentially_visible_game_objects_for_camera = engine.allocator.dupe(
-                *GameObject,
-                visible_objects,
-            ) catch @panic("Failed to dupe potentially visible game objects");
+            engine.temp_buffers.writeVisibleObjectsList(visible_objects);
+
+            // Instance buffer update (if needed)
 
             if (outdate_instances_range.min <= outdate_instances_range.max) {
                 scene.engine.gctx.queue.writeBuffer(
@@ -465,7 +481,7 @@ pub const Engine = struct {
                     }
 
                     for (scene.lights.items) |light| {
-                        for (&light.cascades, 0..) |*cascade, i| {
+                        for (&light.cascades) |*cascade| {
                             const shadow_map_view = engine.shadow_map_texture.layers_views[@intFromEnum(cascade.layer)].view;
 
                             const shadow_map_attachments = [_]wgpu.RenderPassColorAttachment{.{
@@ -489,13 +505,7 @@ pub const Engine = struct {
 
                             shadow_map_pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
 
-                            // light.applyCameraFrustum(cascade, scene.camera);
-
-                            // const cascade_view_bound_box = cascade.getLightViewBoundBox();
-                            // const potentially_visible_game_objects = scene.space_tree.getObjectsInBoundBox(
-                            //     cascade_view_bound_box,
-                            // );
-                            const potentially_visible_game_objects = potentially_visible_game_objects_arrays[i];
+                            const potentially_visible_game_objects = engine.temp_buffers.getNextVisibleObjectsChunk();
 
                             const world_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                             world_to_clip_uniform.slice[0] = zmath.transpose(cascade.world_to_clip);
@@ -534,7 +544,7 @@ pub const Engine = struct {
                                 engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, cascade, game_object);
                             }
 
-                            engine.temp_buffers.reset();
+                            engine.temp_buffers.resetDrawingLists();
                         }
                     }
                 }
@@ -579,6 +589,8 @@ pub const Engine = struct {
                     pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
                         world_to_clip_uniform.offset,
                     });
+
+                    const potentially_visible_game_objects_for_camera = engine.temp_buffers.getNextVisibleObjectsChunk();
 
                     // _ = potentially_visible_game_objects_for_camera;
                     // for (scene.game_objects.items) |game_object| {
@@ -628,7 +640,7 @@ pub const Engine = struct {
                         }
                     }
 
-                    engine.temp_buffers.reset();
+                    engine.temp_buffers.resetDrawingLists();
 
                     engine.frame_stats.game_objects_drawn_count += @intCast(potentially_visible_game_objects_for_camera.len);
 
