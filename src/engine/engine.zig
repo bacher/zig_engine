@@ -381,15 +381,17 @@ pub const Engine = struct {
             max: u32 = 0,
 
             fn update(self: *@This(), scene: *Scene, game_object: *const GameObject) void {
-                if (scene.instance_buffer.outdated_indices.isSet(game_object.instance_index)) {
-                    scene.instance_buffer.outdated_indices.unset(game_object.instance_index);
+                if (game_object.instance_index) |instance_index| {
+                    if (scene.instance_buffer.outdated_indices.isSet(instance_index)) {
+                        scene.instance_buffer.outdated_indices.unset(instance_index);
 
-                    self.min = @min(self.min, game_object.instance_index);
-                    self.max = @max(self.max, game_object.instance_index);
+                        self.min = @min(self.min, instance_index);
+                        self.max = @max(self.max, instance_index);
 
-                    scene.instance_buffer.buffer[game_object.instance_index] = .{
-                        .model_matrix = zmath.transpose(game_object.getModelMatrix()),
-                    };
+                        scene.instance_buffer.buffer[instance_index] = .{
+                            .model_matrix = zmath.transpose(game_object.getModelMatrix()),
+                        };
+                    }
                 }
             }
         } = .{};
@@ -576,6 +578,11 @@ pub const Engine = struct {
                     pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
                         world_to_clip_uniform.offset,
                     });
+
+                    // TODO: WHY IT DOES NOT WORK HERE, BUT WORKS IF IN SPACE TREE?
+                    if (scene.skybox_object) |skybox_object| {
+                        engine.drawGameObject(pass, scene, skybox_object);
+                    }
 
                     const potentially_visible_game_objects_for_camera = engine.temp_buffers.getNextVisibleObjectsChunk();
 
@@ -810,7 +817,7 @@ pub const Engine = struct {
                     pass.setBindGroup(3, joints_bind_group.wgpu_bind_group, &.{});
                 }
 
-                pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index);
+                pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index orelse 0);
             },
             .terrain_height_map_model => |model| {
                 const time_uniform = engine.gctx.uniformsAllocate(u32, 1);
@@ -988,17 +995,17 @@ pub const Engine = struct {
                 if (game_object.joints_bind_group) |joints_bind_group| {
                     pass.setBindGroup(1, joints_bind_group.wgpu_bind_group, &.{});
                 }
-                pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index);
+                pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index orelse 0);
             },
             .terrain_height_map_model => {
                 // TODO: make customizable
                 pass.draw(getTerrainHeightMapElementsCountForSide(64), 1, 0, 0);
             },
             .window_box_model => |window_box_model| {
-                pass.draw(window_box_model.model_descriptor.position.elements_count, 1, 0, game_object.instance_index);
+                pass.draw(window_box_model.model_descriptor.position.elements_count, 1, 0, game_object.instance_index orelse 0);
             },
             .primitive_colorized => |primitive_colorized_model| {
-                pass.draw(primitive_colorized_model.model_descriptor.position.elements_count, 1, 0, game_object.instance_index);
+                pass.draw(primitive_colorized_model.model_descriptor.position.elements_count, 1, 0, game_object.instance_index orelse 0);
             },
             .skybox_model,
             .skybox_cubemap_model,
@@ -1072,7 +1079,6 @@ pub const Engine = struct {
             engine.gctx,
             engine.texture_repeat_sampler,
             model_descriptor.color_texture,
-            engine.identity_joint_matrix_buffer.handle,
         );
 
         const model = try engine.allocator.create(Model);
@@ -1199,10 +1205,10 @@ pub const Engine = struct {
             texture_full_filenames,
         );
 
-        const bind_group = try engine.bind_group_layouts.cubemap.createBindGroup(
+        const bind_group = engine.bind_group_layouts.cubemap.createBindGroup(
+            engine.gctx,
             engine.texture_sampler,
             skybox_cubemap_descriptor.color_texture,
-            engine.identity_joint_matrix_buffer.handle,
         );
 
         const model = try engine.allocator.create(SkyBoxCubemapModel);
@@ -1247,7 +1253,6 @@ pub const Engine = struct {
             engine.gctx,
             engine.texture_sampler,
             window_box_descriptor.color_texture,
-            engine.identity_joint_matrix_buffer.handle,
         );
 
         const model = try engine.allocator.create(WindowBoxModel);

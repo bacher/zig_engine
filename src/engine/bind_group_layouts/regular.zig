@@ -25,14 +25,6 @@ pub const RegularBindGroupLayout = struct {
                 .{ .fragment = true },
                 .filtering, // TODO: What's the difference between .filtering and .non_filtering
             ),
-            // joint matrix palette
-            zgpu.bufferEntry(
-                2,
-                .{ .vertex = true },
-                .uniform,
-                false,
-                @sizeOf(SkeletalAnimation.JointMatrixUniform),
-            ),
         });
 
         return .{
@@ -49,7 +41,6 @@ pub const RegularBindGroupLayout = struct {
         gctx: *zgpu.GraphicsContext,
         sampler: zgpu.SamplerHandle,
         color_texture: TextureDescriptor,
-        joint_matrix_buffer: zgpu.BufferHandle,
     ) BindGroup {
         const bind_group_handle = gctx.createBindGroup(
             bind_group_layout.bind_group_layout_handle,
@@ -64,14 +55,6 @@ pub const RegularBindGroupLayout = struct {
                 .{
                     .binding = 1,
                     .sampler_handle = sampler,
-                },
-
-                // joint matrix palette
-                .{
-                    .binding = 2,
-                    .buffer_handle = joint_matrix_buffer,
-                    .offset = 0,
-                    .size = @sizeOf(SkeletalAnimation.JointMatrixUniform),
                 },
             },
         );

@@ -90,7 +90,9 @@ pub fn generateSkyBoxVertexData(allocator: std.mem.Allocator) !SkyBoxVertexData 
         .bounding_box = .{
             .min = .{ -1, -1, -1 },
             .max = .{ 1, 1, 1 },
+            .offset = .{ 0, 0, 0, 0 },
             .radius = std.math.sqrt(3),
+            .origin_radius = std.math.sqrt(3),
         },
     };
 }

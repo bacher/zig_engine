@@ -60,7 +60,8 @@ pub const GameObjectInitParams = struct {
     scale: f32 = 1.0,
     model: ModelUnion,
     parent: ?*GameObjectGroup,
-    instance_index: u32,
+    instance_index: ?u32,
+    skip_space_tree: bool = false,
 };
 
 pub const GameObject = struct {
@@ -77,7 +78,7 @@ pub const GameObject = struct {
         color: [4]f32 = .{ 0.0, 0.0, 0.0, 1.0 },
     } = .{},
     parent: ?*GameObjectGroup,
-    instance_index: u32,
+    instance_index: ?u32,
     _gc: ?*GameObject,
 
     pub const AnimationContext = struct {
@@ -105,6 +106,7 @@ pub const GameObject = struct {
 
         game_object.updateAggregatedMatrix(.{
             .is_initial = true,
+            .skip_space_tree = params.skip_space_tree,
         });
 
         return game_object;
@@ -218,10 +220,11 @@ pub const GameObject = struct {
 
     fn updateAggregatedMatrix(game_object: *GameObject, options: struct {
         is_initial: bool = false,
+        skip_space_tree: bool = false,
     }) void {
         const space_tree = game_object.scene.space_tree;
 
-        if (!options.is_initial) {
+        if (!options.is_initial and !options.skip_space_tree) {
             space_tree.removeObject(game_object) catch {
                 std.debug.print("failed to remove object from space tree\n", .{});
             };
@@ -238,10 +241,14 @@ pub const GameObject = struct {
             );
         }
 
-        space_tree.addObject(game_object) catch {
-            std.debug.print("failed to add object to space tree\n", .{});
-        };
+        if (!options.skip_space_tree) {
+            space_tree.addObject(game_object) catch {
+                std.debug.print("failed to add object to space tree\n", .{});
+            };
+        }
 
-        game_object.scene.updateInstanceBuffer(game_object);
+        if (game_object.instance_index) |instance_index| {
+            game_object.scene.updateInstanceBuffer(instance_index);
+        }
     }
 };

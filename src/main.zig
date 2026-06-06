@@ -151,20 +151,20 @@ pub fn main(init: std.process.Init) !void {
 
     // -- Skybox (cubemap) --
 
-    // const skybox_cubemap_model = try engine.loadSkyBoxCubemapModel(.{
-    //     "skybox/skybox/right.jpg",
-    //     "skybox/skybox/left.jpg",
-    //     "skybox/skybox/top.jpg",
-    //     "skybox/skybox/bottom.jpg",
-    //     "skybox/skybox/front.jpg",
-    //     "skybox/skybox/back.jpg",
-    // });
-    // defer skybox_cubemap_model.deinit(engine.gctx);
-    // defer allocator.destroy(skybox_cubemap_model);
+    const skybox_cubemap_model = try engine.loadSkyBoxCubemapModel(.{
+        "skybox/skybox/right.jpg",
+        "skybox/skybox/left.jpg",
+        "skybox/skybox/top.jpg",
+        "skybox/skybox/bottom.jpg",
+        "skybox/skybox/front.jpg",
+        "skybox/skybox/back.jpg",
+    });
+    defer skybox_cubemap_model.deinit(engine.gctx);
+    defer allocator.destroy(skybox_cubemap_model);
 
-    // _ = try scene.addSkyBoxCubemapObject(.{
-    //     .model = skybox_cubemap_model,
-    // });
+    _ = try scene.setSkyBoxCubemapObject(.{
+        .model = skybox_cubemap_model,
+    });
 
     // ---
 

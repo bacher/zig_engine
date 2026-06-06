@@ -33,6 +33,7 @@ pub const Scene = struct {
     root_groups: std.ArrayList(*GameObjectGroup) = .empty,
     // TODO: Maybe store light as a value instead of a pointer?
     lights: std.ArrayList(*DirectionalLight) = .empty,
+    skybox_object: ?*GameObject,
     space_tree: *SpaceTree(GameObject),
     camera: *Camera,
     spectator_camera: *SpectatorCamera,
@@ -100,6 +101,7 @@ pub const Scene = struct {
             .game_objects = std.ArrayList(*GameObject).initCapacity(allocator, MAX_OBJECTS_COUNT) catch @panic("Failed to initialize game objects buffer"),
             .root_groups = .empty,
             .lights = .empty,
+            .skybox_object = null,
             .space_tree = space_tree,
             .camera = camera,
             .spectator_camera = spectator_camera,
@@ -160,8 +162,8 @@ pub const Scene = struct {
         );
     }
 
-    pub fn updateInstanceBuffer(scene: *Scene, game_object: *const GameObject) void {
-        scene.instance_buffer.outdated_indices.set(game_object.instance_index);
+    pub fn updateInstanceBuffer(scene: *Scene, instance_index: u32) void {
+        scene.instance_buffer.outdated_indices.set(instance_index);
     }
 
     pub fn addGroup(scene: *Scene) !*GameObjectGroup {
@@ -179,6 +181,7 @@ pub const Scene = struct {
         }
 
         const model = model_optional.?;
+        const instance_index = scene.instance_buffer.next_index;
         const game_object = try GameObject.init(scene.allocator, .{
             .scene = scene,
             .model = .{
@@ -186,11 +189,11 @@ pub const Scene = struct {
             },
             .position = params.position,
             .parent = params.parent,
-            .instance_index = scene.instance_buffer.next_index,
+            .instance_index = instance_index,
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        scene.instance_buffer.buffer[game_object.instance_index] = .{
+        scene.instance_buffer.buffer[instance_index] = .{
             .model_matrix = zmath.transpose(game_object.getModelMatrix()),
         };
 
@@ -220,7 +223,7 @@ pub const Scene = struct {
             },
             .position = params.position,
             .parent = params.parent,
-            .instance_index = 0, // TODO: actually is not used for terrain height map
+            .instance_index = null,
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
@@ -262,18 +265,24 @@ pub const Scene = struct {
         return game_object;
     }
 
-    pub fn addSkyBoxCubemapObject(scene: *Scene, params: AddSkyBoxCubemapParams) !*GameObject {
-        try scene.checkMaxObjectsCount();
-
+    pub fn setSkyBoxCubemapObject(scene: *Scene, params: AddSkyBoxCubemapParams) !*GameObject {
         const game_object = try GameObject.init(scene.allocator, .{
+            .scene = scene,
             .model = .{
                 .skybox_cubemap_model = params.model,
             },
             .position = .{ 0, 0, 0 },
+            .parent = null,
+            .instance_index = null,
+            .skip_space_tree = true,
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        scene.game_objects.appendAssumeCapacity(game_object);
+        if (scene.skybox_object) |current_skybox_object| {
+            current_skybox_object.deinit(scene.engine.gctx);
+        }
+
+        scene.skybox_object = game_object;
 
         return game_object;
     }
@@ -288,7 +297,7 @@ pub const Scene = struct {
             },
             .position = params.position,
             .parent = null,
-            .instance_index = 0, // TODO: actually is not used for primitive object
+            .instance_index = null,
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
