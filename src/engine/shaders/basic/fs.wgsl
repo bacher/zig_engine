@@ -6,12 +6,17 @@
 @group(2) @binding(1) var shadow_map_texture: texture_2d_array<f32>;
 @group(2) @binding(2) var shadow_map_texture_sampler: sampler;
 
+struct FragmentOut {
+    @location(0) color: vec4<f32>,
+    @location(1) normal: vec4<f32>,
+}
+
 @fragment fn main(
     @location(0) uv: vec2<f32>,
     @location(1) position_light_clip_0: vec4<f32>,
     @location(2) position_light_clip_1: vec4<f32>,
     @location(3) position_light_clip_2: vec4<f32>,
-) -> @location(0) vec4<f32> {
+) -> FragmentOut {
     var color = textureSample(color_texture, texture_sampler, uv);
 
     let shadow_map_uv_0 = clipToUv(position_light_clip_0);
@@ -54,7 +59,10 @@
         if (shadow_map_layer_2_depth + 0.002 < position_light_clip_2.z / position_light_clip_2.w) {
             modifier = 0.5;
         }
-        return vec4f(color.rgb * modifier, color.a);
+        return FragmentOut(
+            vec4f(color.rgb * modifier, color.a),
+            vec4f(0.5, 0, 0, 0),
+        );
     }
 
     if (
@@ -66,7 +74,10 @@
         if (shadow_map_layer_1_depth + 0.008 < position_light_clip_1.z / position_light_clip_1.w) {
             modifier = 0.5;
         }
-        return vec4f(color.rgb * modifier, color.a);
+        return FragmentOut(
+            vec4f(color.rgb * modifier, color.a),
+            vec4f(0.5, 0, 0, 0),
+        );
     }
 
     // TODO: This condition is redundant, because the last layer of shadow map is always
@@ -82,7 +93,10 @@
         if (shadow_map_layer_0_depth + 0.02 < position_light_clip_0.z / position_light_clip_0.w) {
             modifier = 0.5;
         }
-        return vec4f(color.rgb * modifier, color.a);
+        return FragmentOut(
+            vec4f(color.rgb * modifier, color.a),
+            vec4f(0.5, 0, 0, 0),
+        );
     // }
 
     // return vec4f(color.rgb * 0.05, color.a);

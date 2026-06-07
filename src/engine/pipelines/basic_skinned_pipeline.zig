@@ -6,6 +6,7 @@ const wgsl_fs = @embedFile("../shaders/basic/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
 const BindGroupLayouts = @import("../bind_group_layouts.zig").BindGroupLayouts;
+const first_pass_color_targets = @import("./_first_pass_color_targets.zig").first_pass_color_targets;
 
 pub fn createBasicSkinnedPipeline(
     gctx: *zgpu.GraphicsContext,
@@ -24,10 +25,6 @@ pub fn createBasicSkinnedPipeline(
 
     const fs_module = zgpu.createWgslShaderModule(gctx.device, wgsl_fs, "fs");
     defer fs_module.release();
-
-    const color_targets = [_]wgpu.ColorTargetState{.{
-        .format = .rgba8_unorm,
-    }};
 
     const vertex_buffers = [_]wgpu.VertexBufferLayout{
         // position
@@ -84,8 +81,8 @@ pub fn createBasicSkinnedPipeline(
         .fragment = &wgpu.FragmentState{
             .module = fs_module,
             .entry_point = "main",
-            .targets = &color_targets,
-            .target_count = color_targets.len,
+            .targets = &first_pass_color_targets,
+            .target_count = first_pass_color_targets.len,
         },
     };
 

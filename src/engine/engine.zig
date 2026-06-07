@@ -15,13 +15,15 @@ const WindowContext = @import("./glue.zig").WindowContext;
 const utils = @import("./utils.zig");
 // -- pipelines --
 const Pipelines = @import("./pipelines.zig").Pipelines;
+const COLOR_OUTPUT_FORMAT = @import("./pipelines/_first_pass_color_targets.zig").COLOR_OUTPUT_FORMAT;
+const NORMAL_OUTPUT_FORMAT = @import("./pipelines/_first_pass_color_targets.zig").NORMAL_OUTPUT_FORMAT;
 // -- bind groups --
 const BindGroupLayouts = @import("./bind_group_layouts.zig").BindGroupLayouts;
 const BindGroup = @import("./bind_group.zig").BindGroup;
 // -- textures --
 const DepthTexture = @import("./textures/depth_texture.zig").DepthTexture;
 const ShadowMapTexture = @import("./textures/shadow_map_texture.zig").ShadowMapTexture;
-const ScreenColorTexture = @import("./textures/screen_color_texture.zig").ScreenColorTexture;
+const ScreenTexture = @import("./textures/screen_texture.zig").ScreenTexture;
 // -- display object descriptors --
 const ModelDescriptor = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptor;
 const BillboardMode = @import("./display_object_descriptors/model_descriptor.zig").BillboardMode;
@@ -102,7 +104,8 @@ pub const Engine = struct {
     depth_texture: DepthTexture,
     shadow_map_texture: ShadowMapTexture,
     shadow_map_depth_texture: DepthTexture,
-    first_pass_output_texture: ScreenColorTexture,
+    first_pass_color_output_texture: ScreenTexture,
+    first_pass_normal_output_texture: ScreenTexture,
 
     // -- special textures (mostly for debug purposes) --
     uv_test_texture: types.TextureDescriptor,
@@ -211,17 +214,12 @@ pub const Engine = struct {
         const init_time = gctx.stats.time;
 
         // -- textures --
-        const depth_texture = DepthTexture.init(
-            gctx,
-            gctx.swapchain_descriptor.width,
-            gctx.swapchain_descriptor.height,
-        );
+        const w = gctx.swapchain_descriptor.width;
+        const h = gctx.swapchain_descriptor.height;
 
-        const first_pass_output_texture = ScreenColorTexture.init(
-            gctx,
-            gctx.swapchain_descriptor.width,
-            gctx.swapchain_descriptor.height,
-        );
+        const depth_texture = DepthTexture.init(gctx, w, h);
+        const first_pass_color_output_texture = ScreenTexture.init(gctx, w, h, COLOR_OUTPUT_FORMAT);
+        const first_pass_normal_output_texture = ScreenTexture.init(gctx, w, h, NORMAL_OUTPUT_FORMAT);
         const shadow_map_texture = ShadowMapTexture.init(gctx, .{ .layers_count = 3 });
         const shadow_map_depth_texture = DepthTexture.init(gctx, 1024, 1024);
 
@@ -259,7 +257,7 @@ pub const Engine = struct {
         const bind_group_final_pass = bind_group_layouts.final_pass.createBindGroup(
             gctx,
             texture_sampler,
-            first_pass_output_texture.view_handle,
+            first_pass_color_output_texture.view_handle,
         );
 
         // ---
@@ -310,7 +308,8 @@ pub const Engine = struct {
 
             // -- textures --
             .depth_texture = depth_texture,
-            .first_pass_output_texture = first_pass_output_texture,
+            .first_pass_color_output_texture = first_pass_color_output_texture,
+            .first_pass_normal_output_texture = first_pass_normal_output_texture,
             .shadow_map_texture = shadow_map_texture,
             .shadow_map_depth_texture = shadow_map_depth_texture,
             .uv_test_texture = uv_test_texture,
@@ -560,11 +559,18 @@ pub const Engine = struct {
 
             // first pass
             {
-                const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
-                    .view = engine.first_pass_output_texture.view,
-                    .load_op = .clear,
-                    .store_op = .store,
-                }};
+                const color_attachments = [_]wgpu.RenderPassColorAttachment{
+                    .{
+                        .view = engine.first_pass_color_output_texture.view,
+                        .load_op = .clear,
+                        .store_op = .store,
+                    },
+                    .{
+                        .view = engine.first_pass_normal_output_texture.view,
+                        .load_op = .clear,
+                        .store_op = .store,
+                    },
+                };
                 const depth_attachment = wgpu.RenderPassDepthStencilAttachment{
                     .view = engine.depth_texture.view,
                     .depth_load_op = .clear,
@@ -1333,21 +1339,17 @@ pub const Engine = struct {
         const gctx = engine.gctx;
 
         // Cleanup old textures
-        engine.first_pass_output_texture.deinit(gctx);
         engine.depth_texture.deinit(gctx);
+        engine.first_pass_color_output_texture.deinit(gctx);
+        engine.first_pass_normal_output_texture.deinit(gctx);
 
         // Re-create textures
-        engine.first_pass_output_texture = .init(
-            gctx,
-            gctx.swapchain_descriptor.width,
-            gctx.swapchain_descriptor.height,
-        );
+        const w = gctx.swapchain_descriptor.width;
+        const h = gctx.swapchain_descriptor.height;
 
-        engine.depth_texture = .init(
-            gctx,
-            gctx.swapchain_descriptor.width,
-            gctx.swapchain_descriptor.height,
-        );
+        engine.depth_texture = .init(gctx, w, h);
+        engine.first_pass_color_output_texture = .init(gctx, w, h, COLOR_OUTPUT_FORMAT);
+        engine.first_pass_normal_output_texture = .init(gctx, w, h, NORMAL_OUTPUT_FORMAT);
     }
 
     pub fn runLoop(engine: *Engine) !void {
