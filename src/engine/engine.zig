@@ -258,6 +258,7 @@ pub const Engine = struct {
             gctx,
             texture_sampler,
             first_pass_color_output_texture.view_handle,
+            first_pass_normal_output_texture.view_handle,
         );
 
         // ---
