@@ -10,7 +10,7 @@ const BindGroupLayouts = @import("../bind_group_layouts.zig").BindGroupLayouts;
 pub fn createTerrainHeightMapPipeline(
     gctx: *zgpu.GraphicsContext,
     bind_group_layouts: *const BindGroupLayouts,
-) !Pipeline {
+) Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
         bind_group_layouts.terrain_height_map.bind_group_layout_handle,
         bind_group_layouts.shadow_map.bind_group_layout_handle,
@@ -24,7 +24,7 @@ pub fn createTerrainHeightMapPipeline(
     defer fs_module.release();
 
     const color_targets = [_]wgpu.ColorTargetState{.{
-        .format = zgpu.GraphicsContext.swapchain_format,
+        .format = .rgba8_unorm,
     }};
 
     const vertex_buffers = [_]wgpu.VertexBufferLayout{};
@@ -61,5 +61,5 @@ pub fn createTerrainHeightMapPipeline(
         pipeline_descriptor,
     );
 
-    return try Pipeline.init(gctx, pipeline_handle);
+    return Pipeline.init(gctx, pipeline_handle);
 }

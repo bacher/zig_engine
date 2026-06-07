@@ -1,27 +1,27 @@
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-pub const DepthTexture = struct {
+pub const ScreenColorTexture = struct {
     texture: zgpu.TextureHandle,
-    view_handle: zgpu.TextureViewHandle,
     view: wgpu.TextureView,
+    view_handle: zgpu.TextureViewHandle,
 
-    pub fn init(gctx: *zgpu.GraphicsContext, width: u32, height: u32) !DepthTexture {
+    pub fn init(gctx: *zgpu.GraphicsContext, width: u32, height: u32) ScreenColorTexture {
         const texture = gctx.createTexture(.{
-            .usage = .{ .render_attachment = true },
+            .usage = .{ .render_attachment = true, .texture_binding = true },
             .dimension = .tdim_2d,
             .size = .{
                 .width = width,
                 .height = height,
                 .depth_or_array_layers = 1,
             },
-            .format = .depth32_float,
+            .format = .rgba8_unorm,
             .mip_level_count = 1,
             .sample_count = 1,
         });
 
         const view_handle = gctx.createTextureView(texture, .{});
-        const view = gctx.lookupResource(view_handle) orelse return error.TextureIsNoAvailable;
+        const view = gctx.lookupResource(view_handle) orelse @panic("Can't create a texture");
 
         return .{
             .texture = texture,
@@ -30,8 +30,8 @@ pub const DepthTexture = struct {
         };
     }
 
-    pub fn deinit(depth_texture: *const DepthTexture, gctx: *zgpu.GraphicsContext) void {
-        gctx.releaseResource(depth_texture.view_handle);
-        gctx.destroyResource(depth_texture.texture);
+    pub fn deinit(screen_color_texture: ScreenColorTexture, gctx: *zgpu.GraphicsContext) void {
+        gctx.releaseResource(screen_color_texture.view_handle);
+        gctx.destroyResource(screen_color_texture.texture);
     }
 };

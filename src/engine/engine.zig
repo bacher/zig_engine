@@ -18,9 +18,10 @@ const Pipelines = @import("./pipelines.zig").Pipelines;
 // -- bind groups --
 const BindGroupLayouts = @import("./bind_group_layouts.zig").BindGroupLayouts;
 const BindGroup = @import("./bind_group.zig").BindGroup;
-// -- depth texture --
-const DepthTexture = @import("./depth_texture.zig").DepthTexture;
-const ShadowMapTexture = @import("./shadow_map_texture.zig").ShadowMapTexture;
+// -- textures --
+const DepthTexture = @import("./textures/depth_texture.zig").DepthTexture;
+const ShadowMapTexture = @import("./textures/shadow_map_texture.zig").ShadowMapTexture;
+const ScreenColorTexture = @import("./textures/screen_color_texture.zig").ScreenColorTexture;
 // -- display object descriptors --
 const ModelDescriptor = @import("./display_object_descriptors/model_descriptor.zig").ModelDescriptor;
 const BillboardMode = @import("./display_object_descriptors/model_descriptor.zig").BillboardMode;
@@ -50,7 +51,7 @@ const DirectionalLight = @import("./light.zig").DirectionalLight;
 const DirectionalLightCascade = @import("./light.zig").DirectionalLightCascade;
 
 const DEBUG_INTERNAL_TEXTURE = false;
-const DEBUG_SHOW_WIREFRAME_OBJECTS = true;
+const DEBUG_SHOW_WIREFRAME_OBJECTS = false;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 
@@ -93,17 +94,24 @@ pub const Engine = struct {
     bind_group_debug_shadow_map_texture: BindGroup,
     bind_group_shadow_map: BindGroup,
     bind_group_lines: BindGroup,
+    bind_group_final_pass: BindGroup,
 
+    models_hash: std.AutoHashMap(LoadedModelId, *Model),
+
+    // -- textures --
     depth_texture: DepthTexture,
+    shadow_map_texture: ShadowMapTexture,
+    shadow_map_depth_texture: DepthTexture,
+    first_pass_output_texture: ScreenColorTexture,
+
+    // -- special textures (mostly for debug purposes) --
+    uv_test_texture: types.TextureDescriptor,
+
+    // -- samplers --
     texture_sampler: zgpu.SamplerHandle,
     texture_repeat_sampler: zgpu.SamplerHandle,
     texture_mirror_sampler: zgpu.SamplerHandle,
 
-    models_hash: std.AutoHashMap(LoadedModelId, *Model),
-    shadow_map_texture: ShadowMapTexture,
-    shadow_map_depth_texture: DepthTexture,
-
-    uv_test_texture: types.TextureDescriptor,
     identity_joint_matrix_buffer: SkeletalAnimation.JointMatrixBuffer,
 
     active_scene: ?*Scene,
@@ -192,9 +200,9 @@ pub const Engine = struct {
         window_context: WindowContext,
         content_dir: []const u8,
         callbacks: Callbacks,
-    ) !*Engine {
+    ) *Engine {
         if (Engine.is_instanced) {
-            return error.EngineCanHaveOnlyOneInstance;
+            @panic("Engine is already initialized");
         }
 
         zstbi.init(io, allocator);
@@ -202,12 +210,22 @@ pub const Engine = struct {
         const gctx = window_context.gctx;
         const init_time = gctx.stats.time;
 
-        const shadow_map_texture = try ShadowMapTexture.init(gctx, .{ .layers_count = 3 });
-        errdefer shadow_map_texture.deinit();
+        // -- textures --
+        const depth_texture = DepthTexture.init(
+            gctx,
+            gctx.swapchain_descriptor.width,
+            gctx.swapchain_descriptor.height,
+        );
 
-        const shadow_map_depth_texture = try DepthTexture.init(gctx, 1024, 1024);
-        errdefer shadow_map_depth_texture.deinit(gctx);
+        const first_pass_output_texture = ScreenColorTexture.init(
+            gctx,
+            gctx.swapchain_descriptor.width,
+            gctx.swapchain_descriptor.height,
+        );
+        const shadow_map_texture = ShadowMapTexture.init(gctx, .{ .layers_count = 3 });
+        const shadow_map_depth_texture = DepthTexture.init(gctx, 1024, 1024);
 
+        // -- samplers --
         const texture_sampler = gctx.createSampler(.{});
         const texture_repeat_sampler = gctx.createSampler(.{
             .address_mode_u = .repeat,
@@ -238,43 +256,39 @@ pub const Engine = struct {
         );
         const bind_group_lines = bind_group_layouts.lines.createBindGroup(gctx);
 
+        const bind_group_final_pass = bind_group_layouts.final_pass.createBindGroup(
+            gctx,
+            texture_sampler,
+            first_pass_output_texture.view_handle,
+        );
+
         // ---
         // pipelines
         // ---
         const pipelines = Pipelines.init(gctx, &bind_group_layouts);
 
-        const depth_texture = try DepthTexture.init(
-            gctx,
-            gctx.swapchain_descriptor.width,
-            gctx.swapchain_descriptor.height,
-        );
-        errdefer depth_texture.deinit(gctx);
-
-        const input_controller = try InputController.init(allocator, window_context.window);
+        const input_controller = InputController.init(allocator, window_context.window) catch @panic("InputController can't be initialized");
         input_controller.listenWindowEvents();
-        errdefer input_controller.deinit();
 
-        const content_dir_copied = try allocator.dupe(u8, content_dir);
-        errdefer allocator.free(content_dir_copied);
+        const content_dir_copied = allocator.dupe(u8, content_dir) catch @panic("Can't dupe");
 
-        var uv_test_image = try gltf_loader.StbiWrapper.loadTextureData(
+        var uv_test_image = gltf_loader.StbiWrapper.loadTextureData(
             allocator,
             "content/uv-test.png",
             .{},
-        );
+        ) catch @panic("uv-test texture can't be loaded");
         defer uv_test_image.deinit();
 
-        const uv_test_texture = try load_texture.loadTextureIntoGpu(
+        const uv_test_texture = load_texture.loadTextureIntoGpu(
             gctx,
             allocator,
             uv_test_image,
             .{ .generate_mipmaps = false }, // TODO: set true, maybe???
-        );
+        ) catch @panic("uv-test texture can't be loaded");
 
-        const identity_joint_matrix_buffer = try SkeletalAnimation.createIdentityJointMatrixBuffer(gctx);
+        const identity_joint_matrix_buffer = SkeletalAnimation.createIdentityJointMatrixBuffer(gctx) catch @panic("SkeletalAnimation buffer can't be created");
 
         const engine = allocator.create(Engine) catch @panic("Failed to create engine");
-        errdefer allocator.destroy(engine);
 
         engine.* = .{
             .allocator = allocator,
@@ -292,16 +306,23 @@ pub const Engine = struct {
             .bind_group_shadow_map = bind_group_shadow_map,
             .bind_group_debug_shadow_map_texture = bind_group_debug_shadow_map_texture,
             .bind_group_lines = bind_group_lines,
+            .bind_group_final_pass = bind_group_final_pass,
 
+            // -- textures --
             .depth_texture = depth_texture,
+            .first_pass_output_texture = first_pass_output_texture,
+            .shadow_map_texture = shadow_map_texture,
+            .shadow_map_depth_texture = shadow_map_depth_texture,
+            .uv_test_texture = uv_test_texture,
+
+            // -- samplers --
             .texture_sampler = texture_sampler,
             .texture_repeat_sampler = texture_repeat_sampler,
             .texture_mirror_sampler = texture_mirror_sampler,
-            .models_hash = std.AutoHashMap(LoadedModelId, *Model).init(allocator),
-            .shadow_map_texture = shadow_map_texture,
-            .shadow_map_depth_texture = shadow_map_depth_texture,
 
-            .uv_test_texture = uv_test_texture,
+            // rest
+            .models_hash = std.AutoHashMap(LoadedModelId, *Model).init(allocator),
+
             .identity_joint_matrix_buffer = identity_joint_matrix_buffer,
 
             .active_scene = null,
@@ -312,10 +333,8 @@ pub const Engine = struct {
 
             .temp_buffers = .init(allocator),
         };
-        errdefer engine.temp_buffers.deinit(allocator);
 
-        engine.cube_wireframe_model = try engine.loadCubeWireframeModel();
-        errdefer engine.cube_wireframe_model.deinit(engine.gctx);
+        engine.cube_wireframe_model = engine.loadCubeWireframeModel() catch @panic("Wireframe model can't be loaded");
 
         Engine.is_instanced = true;
         return engine;
@@ -539,10 +558,10 @@ pub const Engine = struct {
                 }
             }
 
-            // main pass
+            // first pass
             {
                 const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
-                    .view = back_buffer_view,
+                    .view = engine.first_pass_output_texture.view,
                     .load_op = .clear,
                     .store_op = .store,
                 }};
@@ -645,6 +664,36 @@ pub const Engine = struct {
                         engine.drawTextureDebugScreen(pass);
                     }
                 }
+            }
+
+            // render to screen pass (final)
+            {
+                const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
+                    .view = back_buffer_view,
+                    .load_op = .clear,
+                    .store_op = .store,
+                }};
+                // const depth_attachment = wgpu.RenderPassDepthStencilAttachment{
+                //     .view = engine.depth_texture.view,
+                //     .depth_load_op = .clear,
+                //     .depth_store_op = .store,
+                //     .depth_clear_value = 1.0,
+                // };
+                const render_pass_info = wgpu.RenderPassDescriptor{
+                    .color_attachments = &color_attachments,
+                    .color_attachment_count = color_attachments.len,
+                    .depth_stencil_attachment = null,
+                };
+                const pass = encoder.beginRenderPass(render_pass_info);
+                defer {
+                    pass.end();
+                    pass.release();
+                }
+
+                // render
+                pass.setPipeline(engine.pipelines.screen_quad_pipeline.pipeline_gpu);
+                pass.setBindGroup(0, engine.bind_group_final_pass.wgpu_bind_group, &.{});
+                pass.draw(6, 1, 0, 0);
             }
 
             if (engine.callbacks.onRender) |onRender| {
@@ -1280,14 +1329,24 @@ pub const Engine = struct {
         return model;
     }
 
-    fn recreateDepthTexture(engine: *Engine) !void {
-        // Release old depth texture.
-        engine.depth_texture.deinit(engine.gctx);
-        // Create a new depth texture to match the new window size.
-        engine.depth_texture = try DepthTexture.init(
-            engine.gctx,
-            engine.gctx.swapchain_descriptor.width,
-            engine.gctx.swapchain_descriptor.height,
+    fn recreateScreenDependantTextures(engine: *Engine) void {
+        const gctx = engine.gctx;
+
+        // Cleanup old textures
+        engine.first_pass_output_texture.deinit(gctx);
+        engine.depth_texture.deinit(gctx);
+
+        // Re-create textures
+        engine.first_pass_output_texture = .init(
+            gctx,
+            gctx.swapchain_descriptor.width,
+            gctx.swapchain_descriptor.height,
+        );
+
+        engine.depth_texture = .init(
+            gctx,
+            gctx.swapchain_descriptor.width,
+            gctx.swapchain_descriptor.height,
         );
     }
 
@@ -1314,7 +1373,7 @@ pub const Engine = struct {
                 .normal_execution => {},
                 .swap_chain_resized => {
                     engine.aspect_ratio = getAspectRatio(engine.gctx);
-                    try engine.recreateDepthTexture();
+                    engine.recreateScreenDependantTextures();
                 },
             }
 

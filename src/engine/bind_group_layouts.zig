@@ -9,6 +9,7 @@ pub const RegularOldBindGroupLayout = @import("./bind_group_layouts/regular_old.
 pub const ShadowMapBindGroupLayout = @import("./bind_group_layouts/shadow_map.zig").ShadowMapBindGroupLayout;
 pub const LinesBindGroupLayout = @import("./bind_group_layouts/lines.zig").LinesBindGroupLayout;
 pub const DebugTextureBindGroupLayout = @import("./bind_group_layouts/debug_texture.zig").DebugTextureBindGroupLayout;
+pub const FinalPassBindGroupLayout = @import("./bind_group_layouts/final_pass.zig").FinalPassBindGroupLayout;
 
 pub const BindGroupLayouts = struct {
     scene: SceneBindGroupLayout,
@@ -21,6 +22,7 @@ pub const BindGroupLayouts = struct {
     shadow_map: ShadowMapBindGroupLayout,
     lines: LinesBindGroupLayout,
     debug_texture: DebugTextureBindGroupLayout,
+    final_pass: FinalPassBindGroupLayout,
 
     pub fn init(gctx: *zgpu.GraphicsContext) BindGroupLayouts {
         return .{
@@ -34,6 +36,7 @@ pub const BindGroupLayouts = struct {
             .shadow_map = ShadowMapBindGroupLayout.init(gctx),
             .lines = LinesBindGroupLayout.init(gctx),
             .debug_texture = DebugTextureBindGroupLayout.init(gctx),
+            .final_pass = FinalPassBindGroupLayout.init(gctx),
         };
     }
 
@@ -48,5 +51,6 @@ pub const BindGroupLayouts = struct {
         layouts.shadow_map.deinit(gctx);
         layouts.lines.deinit(gctx);
         layouts.debug_texture.deinit(gctx);
+        layouts.final_pass.deinit(gctx);
     }
 };

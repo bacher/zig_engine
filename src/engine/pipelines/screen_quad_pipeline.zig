@@ -1,18 +1,19 @@
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-const wgsl_vs = @embedFile("../shaders/window_box/vs.wgsl");
-const wgsl_fs = @embedFile("../shaders/window_box/fs.wgsl");
+const wgsl_vs = @embedFile("../shaders/quad/vs.wgsl");
+const wgsl_fs = @embedFile("../shaders/quad/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
 const BindGroupLayouts = @import("../bind_group_layouts.zig").BindGroupLayouts;
 
-pub fn createWindowBoxPipeline(
+pub fn createScreenQuadPipeline(
     gctx: *zgpu.GraphicsContext,
     bind_group_layouts: *const BindGroupLayouts,
+    output_format: wgpu.TextureFormat,
 ) Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
-        bind_group_layouts.regular_old.bind_group_layout_handle,
+        bind_group_layouts.final_pass.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 
@@ -23,35 +24,27 @@ pub fn createWindowBoxPipeline(
     defer fs_module.release();
 
     const color_targets = [_]wgpu.ColorTargetState{.{
-        .format = .rgba8_unorm,
+        .format = output_format,
     }};
 
-    const vertex_buffers = [_]wgpu.VertexBufferLayout{
-        // position
-        .{
-            .array_stride = @sizeOf([3]f32),
-            .attributes = &.{.{ .format = .float32x3, .offset = 0, .shader_location = 0 }},
-            .attribute_count = 1,
-        },
-    };
-
     const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
-        .label = "window_box_pipeline",
+        .label = "screen_quad_pipeline",
         .primitive = wgpu.PrimitiveState{
             .front_face = .ccw,
-            .cull_mode = .back,
+            .cull_mode = .none,
             .topology = .triangle_list,
         },
-        .depth_stencil = &wgpu.DepthStencilState{
-            .format = .depth32_float,
-            .depth_write_enabled = true,
-            .depth_compare = .less,
-        },
+        // .depth_stencil = &wgpu.DepthStencilState{
+        //     .format = .depth32_float,
+        //     .depth_write_enabled = true,
+        //     .depth_compare = .less,
+        // },
+        .depth_stencil = null,
         .vertex = wgpu.VertexState{
             .module = vs_module,
             .entry_point = "main",
-            .buffers = &vertex_buffers,
-            .buffer_count = vertex_buffers.len,
+            .buffers = &.{}, // no vertex buffers, quad coordinates built-in in vertex shader itself.
+            .buffer_count = 0,
         },
         .fragment = &wgpu.FragmentState{
             .module = fs_module,

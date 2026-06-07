@@ -10,7 +10,7 @@ const BindGroupLayouts = @import("../bind_group_layouts.zig").BindGroupLayouts;
 pub fn createShadowMapPipeline(
     gctx: *zgpu.GraphicsContext,
     bind_group_layouts: *const BindGroupLayouts,
-) !Pipeline {
+) Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
         bind_group_layouts.scene.bind_group_layout_handle,
     });
@@ -66,5 +66,5 @@ pub fn createShadowMapPipeline(
         pipeline_descriptor,
     );
 
-    return try Pipeline.init(gctx, pipeline_handle);
+    return Pipeline.init(gctx, pipeline_handle);
 }

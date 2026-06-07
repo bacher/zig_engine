@@ -5,15 +5,11 @@ pub const Pipeline = struct {
     pipeline_handle: zgpu.RenderPipelineHandle,
     pipeline_gpu: wgpu.RenderPipeline,
 
-    pub fn init(gctx: *zgpu.GraphicsContext, pipeline_handle: zgpu.RenderPipelineHandle) !Pipeline {
-        if (gctx.lookupResource(pipeline_handle)) |pipeline_gpu| {
-            return .{
-                .pipeline_handle = pipeline_handle,
-                .pipeline_gpu = pipeline_gpu,
-            };
-        } else {
-            return error.PipelineNotReady;
-        }
+    pub fn init(gctx: *zgpu.GraphicsContext, pipeline_handle: zgpu.RenderPipelineHandle) Pipeline {
+        return .{
+            .pipeline_handle = pipeline_handle,
+            .pipeline_gpu = gctx.lookupResource(pipeline_handle).?,
+        };
     }
 
     pub fn deinit(pipeline: Pipeline, gctx: *zgpu.GraphicsContext) void {

@@ -63,7 +63,7 @@ pub fn main(init: std.process.Init) !void {
     const game: *Game = try .init(allocator);
     defer game.deinit();
 
-    const engine = try Engine.init(init.io, allocator, window_context, content_dir, .{
+    const engine = Engine.init(init.io, allocator, window_context, content_dir, .{
         .argument = game,
         .onUpdate = onUpdate,
         .onRender = onRender,

@@ -10,7 +10,7 @@ const BindGroupLayouts = @import("../bind_group_layouts.zig").BindGroupLayouts;
 pub fn createBasicSkinnedPipeline(
     gctx: *zgpu.GraphicsContext,
     bind_group_layouts: *const BindGroupLayouts,
-) !Pipeline {
+) Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
         bind_group_layouts.scene.bind_group_layout_handle,
         bind_group_layouts.regular.bind_group_layout_handle,
@@ -26,7 +26,7 @@ pub fn createBasicSkinnedPipeline(
     defer fs_module.release();
 
     const color_targets = [_]wgpu.ColorTargetState{.{
-        .format = zgpu.GraphicsContext.swapchain_format,
+        .format = .rgba8_unorm,
     }};
 
     const vertex_buffers = [_]wgpu.VertexBufferLayout{
@@ -94,5 +94,5 @@ pub fn createBasicSkinnedPipeline(
         pipeline_descriptor,
     );
 
-    return try Pipeline.init(gctx, pipeline_handle);
+    return Pipeline.init(gctx, pipeline_handle);
 }
