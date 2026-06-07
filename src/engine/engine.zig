@@ -257,6 +257,7 @@ pub const Engine = struct {
         const bind_group_final_pass = bind_group_layouts.final_pass.createBindGroup(
             gctx,
             texture_sampler,
+            depth_texture.view_handle,
             first_pass_color_output_texture.view_handle,
             first_pass_normal_output_texture.view_handle,
         );

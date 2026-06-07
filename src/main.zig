@@ -97,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
     const scene = try engine.createScene();
     defer scene.deinit();
 
-    scene.camera.updatePosition(.{ 1.06, -2.96, 8.45 });
+    scene.camera.updatePosition(.{ -2.06, -2.96, 8.45 });
     // scene.camera.updatePosition(.{ -47.69, -13.09, 9.12 });
     // -- look at hydrant closely --
     // scene.camera.updatePosition(.{ -34.92, -8.55, 3.12 });

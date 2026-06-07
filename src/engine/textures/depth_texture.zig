@@ -8,7 +8,7 @@ pub const DepthTexture = struct {
 
     pub fn init(gctx: *zgpu.GraphicsContext, width: u32, height: u32) DepthTexture {
         const texture = gctx.createTexture(.{
-            .usage = .{ .render_attachment = true },
+            .usage = .{ .render_attachment = true, .texture_binding = true },
             .dimension = .tdim_2d,
             .size = .{
                 .width = width,
