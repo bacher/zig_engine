@@ -36,6 +36,7 @@ pub fn createWindowBoxPipeline(
     };
 
     const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
+        .label = "window_box_pipeline",
         .primitive = wgpu.PrimitiveState{
             .front_face = .ccw,
             .cull_mode = .back,

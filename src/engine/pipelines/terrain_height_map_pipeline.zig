@@ -30,6 +30,7 @@ pub fn createTerrainHeightMapPipeline(
     const vertex_buffers = [_]wgpu.VertexBufferLayout{};
 
     const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
+        .label = "terrain_height_map_pipeline",
         .primitive = wgpu.PrimitiveState{
             .front_face = .ccw,
             .cull_mode = .back,

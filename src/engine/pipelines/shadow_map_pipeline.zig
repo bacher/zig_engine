@@ -36,6 +36,7 @@ pub fn createShadowMapPipeline(
     };
 
     const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
+        .label = "shadow_map_pipeline",
         .primitive = wgpu.PrimitiveState{
             .front_face = .ccw,
             .cull_mode = .back,

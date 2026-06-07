@@ -52,6 +52,7 @@ pub fn createSkyboxPipeline(
     };
 
     const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
+        .label = "skybox_pipeline",
         .primitive = wgpu.PrimitiveState{
             .front_face = .ccw,
             .cull_mode = .back,

@@ -36,6 +36,7 @@ pub fn createPrimitiveColorizedPipeline(
     };
 
     const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
+        .label = "primitive_colorized_pipeline",
         .primitive = wgpu.PrimitiveState{
             .front_face = .ccw,
             .cull_mode = .back,

@@ -27,6 +27,7 @@ pub fn createDebugTexturePipeline(
     }};
 
     const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
+        .label = "debug_texture_pipeline",
         .primitive = wgpu.PrimitiveState{
             .front_face = .ccw,
             .cull_mode = .back,
