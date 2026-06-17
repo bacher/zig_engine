@@ -698,9 +698,17 @@ pub const Engine = struct {
                     pass.release();
                 }
 
+                const clip_to_view_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+
+                if (engine.active_scene) |scene| {
+                    clip_to_view_uniform.slice[0] = zmath.transpose(scene.camera.clip_to_view);
+                }
+
                 // render
                 pass.setPipeline(engine.pipelines.screen_quad_pipeline.pipeline_gpu);
-                pass.setBindGroup(0, engine.bind_group_final_pass.wgpu_bind_group, &.{});
+                pass.setBindGroup(0, engine.bind_group_final_pass.wgpu_bind_group, &.{
+                    clip_to_view_uniform.offset,
+                });
                 pass.draw(6, 1, 0, 0);
             }
 

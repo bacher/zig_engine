@@ -1,5 +1,6 @@
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
+const zmath = @import("zmath");
 
 const TextureDescriptor = @import("../types.zig").TextureDescriptor;
 const BindGroup = @import("../bind_group.zig").BindGroup;
@@ -44,6 +45,14 @@ pub const FinalPassBindGroupLayout = struct {
                 4,
                 .{ .fragment = true },
                 .non_filtering,
+            ),
+            // clip to view matrix
+            zgpu.bufferEntry(
+                5,
+                .{ .fragment = true },
+                .uniform,
+                true,
+                0,
             ),
         });
 
@@ -95,6 +104,14 @@ pub const FinalPassBindGroupLayout = struct {
                 .{
                     .binding = 4,
                     .sampler_handle = sampler,
+                },
+
+                // clip to view matrix
+                .{
+                    .binding = 5,
+                    .buffer_handle = gctx.uniforms.buffer,
+                    .offset = 0,
+                    .size = @sizeOf(zmath.Mat),
                 },
             },
         );

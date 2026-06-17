@@ -15,6 +15,7 @@ pub const Camera = struct {
     camera_to_normalized_view: zmath.Mat,
     normalized_view_to_view: zmath.Mat,
     view_to_clip: zmath.Mat,
+    clip_to_view: zmath.Mat,
 
     // derived
     camera_to_view: zmath.Mat,
@@ -45,6 +46,7 @@ pub const Camera = struct {
             .camera_to_normalized_view = camera_to_normalized_view,
             .normalized_view_to_view = zmath.identity(),
             .view_to_clip = view_to_clip,
+            .clip_to_view = zmath.inverse(view_to_clip),
 
             // derived:
             .camera_to_view = undefined,
@@ -83,6 +85,7 @@ pub const Camera = struct {
 
         camera.aspect_ratio = aspect_ratio;
         camera.view_to_clip = createProjectionMatrix(aspect_ratio);
+        camera.clip_to_view = zmath.inverse(camera.view_to_clip);
         camera.updateDerivedMatrices();
     }
 
