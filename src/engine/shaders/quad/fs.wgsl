@@ -13,6 +13,10 @@
     // var color = textureSample(color_texture, texture_sampler, uv);
     // return sqrt(color);
 
+    let normal = textureSampleLevel(normal_texture, depth_sampler, uv, 0);
+
+    return vec4f(normal.rgb, 1);
+
     var depth = textureSampleLevel(depth_texture, depth_sampler, uv, 0).r;
     var view_pos = vec4f((uv * 2) - 1, depth, 1.0) * clip_to_view;
     view_pos = view_pos / view_pos.w;

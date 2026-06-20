@@ -5,10 +5,12 @@
 
 struct VertexOut {
     @builtin(position) position_clip: vec4<f32>,
-    @location(0) texcoord: vec2<f32>,
-    @location(1) position_light_clip_0: vec4<f32>,
-    @location(2) position_light_clip_1: vec4<f32>,
-    @location(3) position_light_clip_2: vec4<f32>,
+    @location(0) normal: vec4<f32>,
+    @location(1) texcoord: vec2<f32>,
+    // --
+    @location(2) position_light_clip_0: vec4<f32>,
+    @location(3) position_light_clip_1: vec4<f32>,
+    @location(4) position_light_clip_2: vec4<f32>,
 }
 
 @vertex fn main(
@@ -25,6 +27,7 @@ struct VertexOut {
 
     var output: VertexOut;
     output.position_clip = position4 * instances[instance_index] * world_to_clip;
+    output.normal = vec4f(normal, 0) * instances[instance_index] * world_to_clip;
     output.position_light_clip_0 = position4 * object_to_light_clip_array[0];
     output.position_light_clip_1 = position4 * object_to_light_clip_array[1];
     output.position_light_clip_2 = position4 * object_to_light_clip_array[2];
