@@ -47,6 +47,7 @@ const Scene = @import("./scene.zig").Scene;
 const InstanceBufferEntry = @import("./scene.zig").InstanceBufferEntry;
 const Camera = @import("./camera.zig").Camera;
 const InputController = @import("./input_controller.zig").InputController;
+const KeyParams = @import("./input_controller.zig").KeyParams;
 const GameObject = @import("./game_object.zig").GameObject;
 const xRotate = @import("./game_object.zig").xRotate;
 const DirectionalLight = @import("./light.zig").DirectionalLight;
@@ -65,6 +66,10 @@ const billboard_normalization_matrix = utils.matMul(
         zmath.quatFromNormAxisAngle(.{ 1, 0, 0, 1 }, 0.5 * math.pi),
     ),
 );
+
+const EngineState = struct {
+    ssao_enabled: bool = true,
+};
 
 pub const Engine = struct {
     pub const LoadedModelId = enum(u32) { _ };
@@ -88,8 +93,10 @@ pub const Engine = struct {
     init_time: f64,
     time: f64,
 
-    pipelines: Pipelines,
+    state: EngineState = .{},
 
+    // ---
+    pipelines: Pipelines,
     bind_group_layouts: BindGroupLayouts,
 
     // ---
@@ -118,7 +125,7 @@ pub const Engine = struct {
     identity_joint_matrix_buffer: SkeletalAnimation.JointMatrixBuffer,
 
     active_scene: ?*Scene,
-    input_controller: *InputController,
+    input_controller: *InputController(Engine),
 
     frame_stats: struct {
         game_objects_drawn_count: u32 = 0,
@@ -267,7 +274,12 @@ pub const Engine = struct {
         // ---
         const pipelines = Pipelines.init(gctx, &bind_group_layouts);
 
-        const input_controller = InputController.init(allocator, window_context.window) catch @panic("InputController can't be initialized");
+        const engine = allocator.create(Engine) catch @panic("Failed to create engine");
+
+        const input_controller = InputController(Engine).init(allocator, window_context.window, .{
+            .context = engine,
+            .on_key_press = onKeyPress,
+        }) catch @panic("InputController can't be initialized");
         input_controller.listenWindowEvents();
 
         const content_dir_copied = allocator.dupe(u8, content_dir) catch @panic("Can't dupe");
@@ -287,8 +299,6 @@ pub const Engine = struct {
         ) catch @panic("uv-test texture can't be loaded");
 
         const identity_joint_matrix_buffer = SkeletalAnimation.createIdentityJointMatrixBuffer(gctx) catch @panic("SkeletalAnimation buffer can't be created");
-
-        const engine = allocator.create(Engine) catch @panic("Failed to create engine");
 
         engine.* = .{
             .allocator = allocator,
@@ -362,6 +372,16 @@ pub const Engine = struct {
         zstbi.deinit();
         engine.allocator.destroy(engine);
         Engine.is_instanced = false;
+    }
+
+    fn onKeyPress(engine: *Engine, key_params: KeyParams) void {
+        switch (key_params.key) {
+            .e => {
+                engine.state.ssao_enabled = !engine.state.ssao_enabled;
+                std.debug.print("SSAO = {}\n", .{engine.state.ssao_enabled});
+            },
+            else => {},
+        }
     }
 
     pub fn createScene(engine: *Engine) !*Scene {

@@ -67,7 +67,9 @@ pub const Scene = struct {
 
         const spectator_camera = try allocator.create(SpectatorCamera);
         errdefer allocator.destroy(spectator_camera);
-        spectator_camera.* = SpectatorCamera.init(camera, engine.input_controller);
+        // @ptrCast to dismiss Engine generic type parameter, using `void` as a generic type parameter
+        // because SpectatorCamera doesn't need to know about the Engine type
+        spectator_camera.* = SpectatorCamera.init(camera, @ptrCast(engine.input_controller));
 
         const instance_buffer_handle = engine.gctx.createBuffer(.{
             .usage = .{

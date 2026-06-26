@@ -5,7 +5,7 @@ const debug = @import("debug");
 
 const utils = @import("./utils.zig");
 const Camera = @import("./camera.zig").Camera;
-const InputController = @import("./input_controller.zig").InputController;
+const InputControllerGeneric = @import("./input_controller.zig").InputControllerGeneric;
 
 const DEBUG = false;
 
@@ -13,11 +13,11 @@ const zero_vec = zmath.Vec{ 0, 0, 0, 0 };
 
 pub const SpectatorCamera = struct {
     camera: *Camera,
-    input_controller: *const InputController,
+    input_controller: *const InputControllerGeneric,
     pitch: f32 = 0,
     yaw: f32 = 0,
 
-    pub fn init(camera: *Camera, input_controller: *const InputController) SpectatorCamera {
+    pub fn init(camera: *Camera, input_controller: *const InputControllerGeneric) SpectatorCamera {
         return .{
             .camera = camera,
             .input_controller = input_controller,
