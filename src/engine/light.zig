@@ -24,6 +24,7 @@ const DirectLightLayer = enum(u8) {
 pub const DirectionalLightCascade = struct {
     layer: DirectLightLayer,
     world_to_clip: zmath.Mat = undefined,
+    world_to_view: zmath.Mat = undefined,
     clip_to_world: zmath.Mat = undefined,
 
     // TODO:

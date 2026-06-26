@@ -17,9 +17,17 @@ pub const SceneBindGroupLayout = struct {
                 true,
                 0,
             ),
-            // Instances buffer
+            // world to view matrix
             zgpu.bufferEntry(
                 1,
+                .{ .vertex = true },
+                .uniform,
+                true,
+                0,
+            ),
+            // Instances buffer
+            zgpu.bufferEntry(
+                2,
                 .{ .vertex = true },
                 .read_only_storage,
                 false,
@@ -52,9 +60,16 @@ pub const SceneBindGroupLayout = struct {
                     .offset = 0,
                     .size = @sizeOf(zmath.Mat),
                 },
-                // Instances buffer
+                // world to view matrix
                 .{
                     .binding = 1,
+                    .buffer_handle = gctx.uniforms.buffer,
+                    .offset = 0,
+                    .size = @sizeOf(zmath.Mat),
+                },
+                // Instances buffer
+                .{
+                    .binding = 2,
                     .buffer_handle = instances_buffer,
                     .offset = 0,
                     .size = size,

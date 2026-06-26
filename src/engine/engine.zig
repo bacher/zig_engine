@@ -520,6 +520,7 @@ pub const Engine = struct {
                             world_to_clip_uniform.slice[0] = zmath.transpose(cascade.world_to_clip);
                             shadow_map_pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
                                 world_to_clip_uniform.offset,
+                                world_to_clip_uniform.offset, // Is it okay to use the same buffer for both uniforms?
                             });
 
                             for (potentially_visible_game_objects) |game_object| {
@@ -559,7 +560,7 @@ pub const Engine = struct {
                 }
             }
 
-            // first pass
+            // forward rendering pass
             {
                 const color_attachments = [_]wgpu.RenderPassColorAttachment{
                     .{
@@ -601,9 +602,12 @@ pub const Engine = struct {
 
                     const world_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                     world_to_clip_uniform.slice[0] = zmath.transpose(scene.camera.world_to_clip);
+                    const world_to_view_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+                    world_to_view_uniform.slice[0] = zmath.transpose(scene.camera.world_to_view);
 
                     pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
                         world_to_clip_uniform.offset,
+                        world_to_view_uniform.offset,
                     });
 
                     // TODO: WHY IT DOES NOT WORK HERE, BUT WORKS IF IN SPACE TREE?
@@ -698,15 +702,18 @@ pub const Engine = struct {
                     pass.release();
                 }
 
+                const view_to_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                 const clip_to_view_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
 
                 if (engine.active_scene) |scene| {
+                    view_to_clip_uniform.slice[0] = zmath.transpose(scene.camera.view_to_clip);
                     clip_to_view_uniform.slice[0] = zmath.transpose(scene.camera.clip_to_view);
                 }
 
                 // render
                 pass.setPipeline(engine.pipelines.screen_quad_pipeline.pipeline_gpu);
                 pass.setBindGroup(0, engine.bind_group_final_pass.wgpu_bind_group, &.{
+                    view_to_clip_uniform.offset,
                     clip_to_view_uniform.offset,
                 });
                 pass.draw(6, 1, 0, 0);

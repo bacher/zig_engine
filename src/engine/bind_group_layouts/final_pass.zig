@@ -46,9 +46,17 @@ pub const FinalPassBindGroupLayout = struct {
                 .{ .fragment = true },
                 .non_filtering,
             ),
-            // clip to view matrix
+            // view to clip matrix
             zgpu.bufferEntry(
                 5,
+                .{ .fragment = true },
+                .uniform,
+                true,
+                0,
+            ),
+            // clip to view matrix
+            zgpu.bufferEntry(
+                6,
                 .{ .fragment = true },
                 .uniform,
                 true,
@@ -106,9 +114,17 @@ pub const FinalPassBindGroupLayout = struct {
                     .sampler_handle = sampler,
                 },
 
-                // clip to view matrix
+                // view to clip matrix
                 .{
                     .binding = 5,
+                    .buffer_handle = gctx.uniforms.buffer,
+                    .offset = 0,
+                    .size = @sizeOf(zmath.Mat),
+                },
+
+                // clip to view matrix
+                .{
+                    .binding = 6,
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
                     .size = @sizeOf(zmath.Mat),

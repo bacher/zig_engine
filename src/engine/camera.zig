@@ -20,6 +20,7 @@ pub const Camera = struct {
     // derived
     camera_to_view: zmath.Mat,
     world_to_clip: zmath.Mat,
+    world_to_view: zmath.Mat,
     clip_to_world: zmath.Mat,
 
     pub fn init(aspect_ratio: f32) Camera {
@@ -51,6 +52,7 @@ pub const Camera = struct {
             // derived:
             .camera_to_view = undefined,
             .world_to_clip = undefined,
+            .world_to_view = undefined,
             .clip_to_world = undefined,
         };
 
@@ -67,12 +69,14 @@ pub const Camera = struct {
             camera.normalized_view_to_view,
         );
 
-        camera.world_to_clip = zmath.mul(
+        camera.world_to_view = zmath.mul(
             camera.world_to_camera,
-            zmath.mul(
-                camera.camera_to_view,
-                camera.view_to_clip,
-            ),
+            camera.camera_to_view,
+        );
+
+        camera.world_to_clip = zmath.mul(
+            camera.world_to_view,
+            camera.view_to_clip,
         );
 
         camera.clip_to_world = zmath.inverse(camera.world_to_clip);

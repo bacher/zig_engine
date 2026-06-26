@@ -12,13 +12,13 @@ struct FragmentOut {
 }
 
 @fragment fn main(
-    @location(0) normal_float: vec4<f32>,
+    @location(0) normal: vec3<f32>,
     @location(1) uv: vec2<f32>,
     @location(2) position_light_clip_0: vec4<f32>,
     @location(3) position_light_clip_1: vec4<f32>,
     @location(4) position_light_clip_2: vec4<f32>,
 ) -> FragmentOut {
-    let normal = (normal_float + 1) * 0.5;
+    let normal_rgb_encoded = vec4f((normalize(normal) + 1.0) * 0.5, 0); // [-1..1] -> [0..1] encoding
     var color = textureSample(color_texture, texture_sampler, uv);
 
     let shadow_map_uv_0 = clipToUv(position_light_clip_0);
@@ -63,7 +63,7 @@ struct FragmentOut {
         }
         return FragmentOut(
             vec4f(color.rgb * modifier, color.a),
-            normal,
+            normal_rgb_encoded,
         );
     }
 
@@ -78,7 +78,7 @@ struct FragmentOut {
         }
         return FragmentOut(
             vec4f(color.rgb * modifier, color.a),
-            normal,
+            normal_rgb_encoded,
         );
     }
 
@@ -97,7 +97,7 @@ struct FragmentOut {
         }
         return FragmentOut(
             vec4f(color.rgb * modifier, color.a),
-            normal,
+            normal_rgb_encoded,
         );
     // }
 
