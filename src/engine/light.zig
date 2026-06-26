@@ -2,10 +2,10 @@ const std = @import("std");
 const zmath = @import("zmath");
 const debug = @import("debug");
 
+const utils = @import("./utils.zig");
 const BoundBox = @import("./bound_box.zig").BoundBox;
 const Camera = @import("./camera.zig").Camera;
 const FrustumPoints = @import("./frustum.zig").FrustumPoints;
-const resolvePosition = @import("./utils.zig").resolvePosition;
 
 const DEBUG_LIGHT = false;
 
@@ -104,7 +104,7 @@ pub const DirectionalLight = struct {
 
         // --
         if (DEBUG_LIGHT) {
-            const mat = zmath.mul(look_to, move_mat);
+            const mat = utils.matMul(move_mat, look_to);
 
             const projected_and_moved_frustum_points = frustum_points.applyMatrix(mat);
 
@@ -119,9 +119,9 @@ pub const DirectionalLight = struct {
         }
         // --
 
-        cascade.clip_from_world = zmath.mul(
+        cascade.clip_from_world = utils.matMul(
+            utils.matMul(clip_from_view, move_mat),
             look_to,
-            zmath.mul(move_mat, clip_from_view),
         );
 
         // --
@@ -143,6 +143,10 @@ pub const DirectionalLight = struct {
     }
 };
 
+inline fn resolve(mat: zmath.Mat, vec: zmath.Vec) zmath.Vec {
+    return utils.resolvePosition(utils.matApply(mat, vec));
+}
+
 const CubePoints = struct {
     left_bottom_far: zmath.Vec,
     left_top_far: zmath.Vec,
@@ -155,14 +159,14 @@ const CubePoints = struct {
 
     pub fn initFromMatrix(matrix: zmath.Mat) CubePoints {
         return .{
-            .left_bottom_far = resolvePosition(zmath.mul(zmath.Vec{ -1, -1, 1, 1 }, matrix)),
-            .left_top_far = resolvePosition(zmath.mul(zmath.Vec{ -1, 1, 1, 1 }, matrix)),
-            .right_bottom_far = resolvePosition(zmath.mul(zmath.Vec{ 1, -1, 1, 1 }, matrix)),
-            .right_top_far = resolvePosition(zmath.mul(zmath.Vec{ 1, 1, 1, 1 }, matrix)),
-            .left_bottom_near = resolvePosition(zmath.mul(zmath.Vec{ -1, -1, -1, 1 }, matrix)),
-            .left_top_near = resolvePosition(zmath.mul(zmath.Vec{ -1, 1, -1, 1 }, matrix)),
-            .right_bottom_near = resolvePosition(zmath.mul(zmath.Vec{ 1, -1, -1, 1 }, matrix)),
-            .right_top_near = resolvePosition(zmath.mul(zmath.Vec{ 1, 1, -1, 1 }, matrix)),
+            .left_bottom_far = resolve(matrix, zmath.Vec{ -1, -1, 1, 1 }),
+            .left_top_far = resolve(matrix, zmath.Vec{ -1, 1, 1, 1 }),
+            .right_bottom_far = resolve(matrix, zmath.Vec{ 1, -1, 1, 1 }),
+            .right_top_far = resolve(matrix, zmath.Vec{ 1, 1, 1, 1 }),
+            .left_bottom_near = resolve(matrix, zmath.Vec{ -1, -1, -1, 1 }),
+            .left_top_near = resolve(matrix, zmath.Vec{ -1, 1, -1, 1 }),
+            .right_bottom_near = resolve(matrix, zmath.Vec{ 1, -1, -1, 1 }),
+            .right_top_near = resolve(matrix, zmath.Vec{ 1, 1, -1, 1 }),
         };
     }
 

@@ -3,6 +3,7 @@ const math = std.math;
 const zmath = @import("zmath");
 const debug = @import("debug");
 
+const utils = @import("./utils.zig");
 const BoundBox = @import("./bound_box.zig").BoundBox;
 const FrustumPoints = @import("./frustum.zig").FrustumPoints;
 
@@ -64,19 +65,19 @@ pub const Camera = struct {
     pub fn deinit(_: *Camera) void {}
 
     fn updateDerivedMatrices(camera: *Camera) void {
-        camera.view_from_camera = zmath.mul(
-            camera.normalized_view_from_camera,
+        camera.view_from_camera = utils.matMul(
             camera.view_from_normalized_view,
+            camera.normalized_view_from_camera,
         );
 
-        camera.view_from_world = zmath.mul(
-            camera.camera_from_world,
+        camera.view_from_world = utils.matMul(
             camera.view_from_camera,
+            camera.camera_from_world,
         );
 
-        camera.clip_from_world = zmath.mul(
-            camera.view_from_world,
+        camera.clip_from_world = utils.matMul(
             camera.clip_from_view,
+            camera.view_from_world,
         );
 
         camera.world_from_clip = zmath.inverse(camera.clip_from_world);

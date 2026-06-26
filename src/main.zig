@@ -444,9 +444,9 @@ fn traverseGroup(
                 parent_group,
             );
 
-            const aggregated_matrix = zmath.mul(
-                parent_group.aggregated_matrix,
+            const aggregated_matrix = utils.matMul(
                 normalized,
+                parent_group.aggregated_matrix,
             );
 
             utils.assertMatricesEqual(&aggregated_matrix, &group.aggregated_matrix);

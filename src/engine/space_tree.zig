@@ -128,7 +128,7 @@ pub fn SpaceTree(comptime ElementType: type) type {
 
         fn toggleObject(space_tree: *This, object: *ElementType, is_adding: bool) !void {
             const bounds = object.model.getBounds();
-            const bound_center = utils.applyMat(bounds.offset, object.aggregated_matrix);
+            const bound_center = utils.matApply1(object.aggregated_matrix, bounds.offset);
             const scale = zmath.util.getScaleVec(object.aggregated_matrix);
             // TODO: Maybe work with AABB instead of bounding spheres?
             // Or get more presice bounding spheres to reduce empty space inside of sphere.

@@ -2,8 +2,10 @@ const std = @import("std");
 const zmath = @import("zmath");
 
 const debug = @import("debug");
-const Camera = @import("camera.zig").Camera;
-const InputController = @import("input_controller.zig").InputController;
+
+const utils = @import("./utils.zig");
+const Camera = @import("./camera.zig").Camera;
+const InputController = @import("./input_controller.zig").InputController;
 
 const DEBUG = false;
 
@@ -69,9 +71,9 @@ pub const SpectatorCamera = struct {
                 // matrices containing only rotation information (ortonormal matrices),
                 // tranpose operation gives us the same results as inverse, but
                 // computationally is much easier.
-                aligned_direction = zmath.mul(
-                    direction,
+                aligned_direction = utils.matApply(
                     zmath.transpose(camera.view_from_camera),
+                    direction,
                 );
             }
         }
@@ -118,9 +120,9 @@ pub const SpectatorCamera = struct {
 
         // NOTE: inverting position because moving of camera is effectively moving
         //       of the world in oposite direction.
-        const view_mat = zmath.mul(
-            zmath.rotationY(-spectator_camera.yaw),
+        const view_mat = utils.matMul(
             zmath.rotationX(-spectator_camera.pitch),
+            zmath.rotationY(-spectator_camera.yaw),
         );
 
         spectator_camera.camera.updateView(view_mat);

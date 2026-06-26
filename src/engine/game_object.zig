@@ -136,7 +136,7 @@ pub const GameObject = struct {
         if (flip_yz) {
             // NOTE: converting from Y-up to Z-up coordinate system,
             // should be done only for models which is made with Y-up logic.
-            return zmath.mul(xRotate, game_object.aggregated_matrix);
+            return utils.matMul(game_object.aggregated_matrix, xRotate);
         }
         return game_object.aggregated_matrix;
     }
@@ -235,9 +235,9 @@ pub const GameObject = struct {
         // if game object has parent, multiply its aggregated matrix by parent's
         // aggregated matrix on each update
         if (game_object.parent) |parent| {
-            game_object.aggregated_matrix = zmath.mul(
-                game_object.aggregated_matrix,
+            game_object.aggregated_matrix = utils.matMul(
                 parent.aggregated_matrix,
+                game_object.aggregated_matrix,
             );
         }
 

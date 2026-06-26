@@ -3,6 +3,34 @@ const zmath = @import("zmath");
 
 const STRICT = true;
 
+pub inline fn matMul(mat1: zmath.Mat, mat2: zmath.Mat) zmath.Mat {
+    // Inversed order used to mirror the WGSL matrix multiplication order.
+    return zmath.mul(mat2, mat1);
+}
+
+pub inline fn matApply(mat: zmath.Mat, vec: zmath.Vec) zmath.Vec {
+    // Inversed order used to mirror the WGSL matrix multiplication order.
+    return zmath.mul(vec, mat);
+}
+
+pub fn pos1(pos: zmath.Vec) zmath.Vec {
+    var tmp = pos;
+    tmp[3] = 1;
+    return tmp;
+}
+
+pub fn pos0(pos: zmath.Vec) zmath.Vec {
+    var tmp = pos;
+    tmp[3] = 0;
+    return tmp;
+}
+
+pub fn matApply1(mat: zmath.Mat, vec: zmath.Vec) zmath.Vec {
+    // adding 1 to 4th position of position vector, and forcing it to 0 after
+    // the transformation.
+    return pos0(matApply(mat, pos1(vec)));
+}
+
 pub fn resolvePosition(position: zmath.Vec) zmath.Vec {
     const result_0 = zmath.Vec{
         position[0] / position[3],
@@ -35,7 +63,7 @@ pub const DecodedTransformMatrix = struct {
 };
 
 pub fn parseTransformMatrix(matrix: *const zmath.Mat) DecodedTransformMatrix {
-    const position = zmath.mul(zmath.Vec{ 0, 0, 0, 1 }, matrix.*);
+    const position = matApply(matrix.*, zmath.Vec{ 0, 0, 0, 1 });
 
     // NOTE: alternative way to get scale (manually)
     // const scaled = zmath.mul(zmath.Vec{ 1, 0, 0, 0 }, matrix);
@@ -51,13 +79,13 @@ pub fn parseTransformMatrix(matrix: *const zmath.Mat) DecodedTransformMatrix {
     }
 
     // NOTE: quatFromMat works only with matrices without scaling, so we need to undo scaling
-    const rotation = zmath.quatFromMat(zmath.mul(
-        matrix.*,
+    const rotation = zmath.quatFromMat(matMul(
         zmath.scaling(
             1 / scale_vec[0],
             1 / scale_vec[1],
             1 / scale_vec[2],
         ),
+        matrix.*,
     ));
 
     return .{
@@ -67,24 +95,6 @@ pub fn parseTransformMatrix(matrix: *const zmath.Mat) DecodedTransformMatrix {
         .scale = scale_vec,
         .scale_scalar = scale_vec[0],
     };
-}
-
-pub fn pos1(pos: zmath.Vec) zmath.Vec {
-    var tmp = pos;
-    tmp[3] = 1;
-    return tmp;
-}
-
-pub fn pos0(pos: zmath.Vec) zmath.Vec {
-    var tmp = pos;
-    tmp[3] = 0;
-    return tmp;
-}
-
-pub fn applyMat(vec: zmath.Vec, mat: zmath.Mat) zmath.Vec {
-    // adding 1 to 4th position of position vector, and forcing it to 0 after
-    // the transformation.
-    return pos0(zmath.mul(pos1(vec), mat));
 }
 
 pub inline fn lengthSq3(vec: zmath.Vec) f32 {
@@ -98,20 +108,22 @@ pub inline fn length3(vec: zmath.Vec) f32 {
 }
 
 pub fn updateAggregatedMatrix_abstract(T: anytype, game_object: *T) void {
-    game_object.aggregated_matrix = zmath.mul(
-        zmath.matFromQuat(game_object.rotation),
-        zmath.mul(
-            zmath.scaling(
-                game_object.scale,
-                game_object.scale,
-                game_object.scale,
-            ),
+    game_object.aggregated_matrix = matMul(
+        matMul(
             zmath.translation(
                 game_object.position[0],
                 game_object.position[1],
                 game_object.position[2],
             ),
+            // TODO: the order is broken here, probably should be SRT order?
+            // TODO: since scaling is uniform, can we just multiply by scale scalar instead?
+            zmath.scaling(
+                game_object.scale,
+                game_object.scale,
+                game_object.scale,
+            ),
         ),
+        zmath.matFromQuat(game_object.rotation),
     );
 }
 

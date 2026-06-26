@@ -57,12 +57,12 @@ const DEBUG_SHOW_WIREFRAME_OBJECTS = false;
 
 const GraphicsContextState = @typeInfo(@TypeOf(zgpu.GraphicsContext.present)).@"fn".return_type.?;
 
-const billboard_normalization_matrix = zmath.mul(
-    zmath.matFromQuat(
-        zmath.quatFromNormAxisAngle(.{ 1, 0, 0, 1 }, 0.5 * math.pi),
-    ),
+const billboard_normalization_matrix = utils.matMul(
     zmath.matFromQuat(
         zmath.quatFromNormAxisAngle(.{ 0, 0, 1, 1 }, 1 * math.pi),
+    ),
+    zmath.matFromQuat(
+        zmath.quatFromNormAxisAngle(.{ 1, 0, 0, 1 }, 0.5 * math.pi),
     ),
 );
 
@@ -813,8 +813,7 @@ pub const Engine = struct {
             const scale_vec = zmath.util.getScaleVec(game_object.aggregated_matrix);
             const position = game_object.aggregated_matrix[3];
 
-            const billboard_rotation_matrix = if (billboard_mode == .spherical) zmath.mul(
-                billboard_normalization_matrix,
+            const billboard_rotation_matrix = if (billboard_mode == .spherical) utils.matMul(
                 // inverse is needed because lookAtRh returns matrix which rotates world to camera,
                 // but we need to rotate the object in the world space.
                 zmath.inverse(
@@ -824,6 +823,7 @@ pub const Engine = struct {
                         .{ 0, 0, 1, 0 },
                     ),
                 ),
+                billboard_normalization_matrix,
             ) else cylindric_rotation_matrix: {
                 const direction = zmath.loadArr3(scene.camera.position) - position;
                 const angle = math.atan2(direction[1], direction[0]);
@@ -834,13 +834,13 @@ pub const Engine = struct {
                 );
             };
 
-            world_from_model = zmath.mul(
-                zmath.mul(
-                    zmath.scalingV(scale_vec),
+            world_from_model = utils.matMul(
+                zmath.translationV(position),
+                utils.matMul(
                     // instead of inner rotate, we apply billboard rotation matrix
                     billboard_rotation_matrix,
+                    zmath.scalingV(scale_vec),
                 ),
-                zmath.translationV(position),
             );
         }
 
@@ -851,17 +851,17 @@ pub const Engine = struct {
         if (flip_yz) {
             // NOTE: converting from Y-up to Z-up coordinate system,
             // should be done only for models which is made with Y-up logic.
-            world_from_model = zmath.mul(xRotate, world_from_model);
+            world_from_model = utils.matMul(world_from_model, xRotate);
         }
 
-        var clip_from_object = zmath.mul(world_from_model, scene.camera.clip_from_world);
+        var clip_from_object = utils.matMul(scene.camera.clip_from_world, world_from_model);
         if (game_object.model == .skybox_model or game_object.model == .skybox_cubemap_model) {
-            clip_from_object = zmath.mul(
-                scene.camera.view_from_camera,
+            clip_from_object = utils.matMul(
                 scene.camera.clip_from_view,
+                scene.camera.view_from_camera,
             );
             if (game_object.model == .skybox_cubemap_model) {
-                clip_from_object = zmath.mul(xRotate, clip_from_object);
+                clip_from_object = utils.matMul(clip_from_object, xRotate);
             }
         }
 
@@ -920,9 +920,9 @@ pub const Engine = struct {
                 // rotation matrix and negative position shift (and scale if needed).
                 // inverse is much more compute intensive than listed below operations.
                 const model_from_world = zmath.inverse(world_from_model);
-                const camera_position_in_model_space = zmath.mul(
-                    camera_position,
+                const camera_position_in_model_space = utils.matApply(
                     model_from_world,
+                    camera_position,
                 );
 
                 camera_position_in_model_space_uniform.slice[0] = camera_position_in_model_space;
@@ -973,18 +973,18 @@ pub const Engine = struct {
         model_descriptor.position.applyVertexBuffer(pass, 0);
 
         const bounds = game_object.model.getBounds();
-        const bound_center = utils.applyMat(bounds.offset, game_object.aggregated_matrix);
+        const bound_center = utils.matApply1(game_object.aggregated_matrix, bounds.offset);
         const scale = zmath.util.getScaleVec(game_object.aggregated_matrix);
         const radius = bounds.radius * scale[0];
 
         const world_from_model =
-            zmath.mul(
+            utils.matMul(
                 // Ignoring rotation since box should be always axis-aligned.
-                zmath.scaling(radius, radius, radius),
                 zmath.translationV(bound_center),
+                zmath.scaling(radius, radius, radius),
             );
 
-        const clip_from_object = zmath.mul(world_from_model, scene.camera.clip_from_world);
+        const clip_from_object = utils.matMul(scene.camera.clip_from_world, world_from_model);
         const clip_from_object_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
         clip_from_object_uniform.slice[0] = clip_from_object;
 
@@ -1384,9 +1384,9 @@ fn getLightClipMatrixArray(gctx: *zgpu.GraphicsContext, light: *const Directiona
     const uniform = gctx.uniformsAllocate(zmath.Mat, 3);
 
     for (&light.cascades, 0..) |*cascade, i| {
-        const light_clip_from_object = zmath.mul(
-            world_from_model,
+        const light_clip_from_object = utils.matMul(
             cascade.clip_from_world,
+            world_from_model,
         );
         uniform.slice[i] = light_clip_from_object;
     }

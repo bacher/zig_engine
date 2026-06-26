@@ -119,9 +119,9 @@ pub const GameObjectGroup = struct {
         // if group has parent, multiply its aggregated matrix by parent's
         // aggregated matrix on each update
         if (group.parent) |parent| {
-            group.aggregated_matrix = zmath.mul(
-                group.aggregated_matrix,
+            group.aggregated_matrix = utils.matMul(
                 parent.aggregated_matrix,
+                group.aggregated_matrix,
             );
         }
 

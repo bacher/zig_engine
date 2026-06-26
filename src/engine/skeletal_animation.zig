@@ -3,6 +3,8 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 const zmath = @import("zmath");
 const gltf_loader = @import("gltf_loader");
+
+const utils = @import("./utils.zig");
 const types = @import("./types.zig");
 
 const gltf_types = gltf_loader.types;
@@ -66,16 +68,16 @@ const NodeTransform = struct {
             return matrix;
         }
 
-        return zmath.mul(
-            zmath.scaling(transform.scale[0], transform.scale[1], transform.scale[2]),
-            zmath.mul(
-                zmath.matFromQuat(transform.rotation),
+        return utils.matMul(
+            utils.matMul(
                 zmath.translation(
                     transform.translation[0],
                     transform.translation[1],
                     transform.translation[2],
                 ),
+                zmath.matFromQuat(transform.rotation),
             ),
+            zmath.scaling(transform.scale[0], transform.scale[1], transform.scale[2]),
         );
     }
 };
@@ -463,9 +465,12 @@ pub fn update(
 
     for (self.data.joint_node_indices, 0..) |node_index, joint_index| {
         const joint_global = self.computeGlobalNodeMatrix(node_index);
-        self.joint_matrices[joint_index] = zmath.mul(
-            zmath.mul(self.data.inverse_bind_matrices[joint_index], joint_global),
+        self.joint_matrices[joint_index] = utils.matMul(
             inverse_mesh_global,
+            utils.matMul(
+                joint_global,
+                self.data.inverse_bind_matrices[joint_index],
+            ),
         );
     }
 
@@ -572,7 +577,7 @@ fn computeGlobalNodeMatrix(self: *Self, node_index: usize) zmath.Mat {
 
     const local_matrix = self.current_node_transforms[node_index].toMatrix();
     const global_matrix = if (self.data.parent_node_indices[node_index]) |parent_index|
-        zmath.mul(local_matrix, self.computeGlobalNodeMatrix(parent_index))
+        utils.matMul(self.computeGlobalNodeMatrix(parent_index), local_matrix)
     else
         local_matrix;
 

@@ -2,7 +2,11 @@ const std = @import("std");
 const zmath = @import("zmath");
 
 const BoundBox = @import("./bound_box.zig").BoundBox;
-const resolvePosition = @import("./utils.zig").resolvePosition;
+const utils = @import("./utils.zig");
+
+inline fn resolve(mat: zmath.Mat, vec: zmath.Vec) zmath.Vec {
+    return utils.resolvePosition(utils.matApply(mat, vec));
+}
 
 pub const FrustumPoints = struct {
     left_bottom_far: zmath.Vec,
@@ -13,10 +17,10 @@ pub const FrustumPoints = struct {
 
     pub fn initFromMatrix(matrix: zmath.Mat, point_of_view: zmath.Vec, depth: f32) FrustumPoints {
         return .{
-            .left_bottom_far = resolvePosition(zmath.mul(zmath.Vec{ -1, -1, depth, 1 }, matrix)),
-            .left_top_far = resolvePosition(zmath.mul(zmath.Vec{ -1, 1, depth, 1 }, matrix)),
-            .right_bottom_far = resolvePosition(zmath.mul(zmath.Vec{ 1, -1, depth, 1 }, matrix)),
-            .right_top_far = resolvePosition(zmath.mul(zmath.Vec{ 1, 1, depth, 1 }, matrix)),
+            .left_bottom_far = resolve(matrix, zmath.Vec{ -1, -1, depth, 1 }),
+            .left_top_far = resolve(matrix, zmath.Vec{ -1, 1, depth, 1 }),
+            .right_bottom_far = resolve(matrix, zmath.Vec{ 1, -1, depth, 1 }),
+            .right_top_far = resolve(matrix, zmath.Vec{ 1, 1, depth, 1 }),
             .point_of_view = point_of_view,
         };
     }
@@ -43,11 +47,11 @@ pub const FrustumPoints = struct {
 
     pub fn applyMatrix(self: *const FrustumPoints, matrix: zmath.Mat) FrustumPoints {
         return .{
-            .left_bottom_far = resolvePosition(zmath.mul(self.left_bottom_far, matrix)),
-            .left_top_far = resolvePosition(zmath.mul(self.left_top_far, matrix)),
-            .right_bottom_far = resolvePosition(zmath.mul(self.right_bottom_far, matrix)),
-            .right_top_far = resolvePosition(zmath.mul(self.right_top_far, matrix)),
-            .point_of_view = resolvePosition(zmath.mul(self.point_of_view, matrix)),
+            .left_bottom_far = resolve(matrix, self.left_bottom_far),
+            .left_top_far = resolve(matrix, self.left_top_far),
+            .right_bottom_far = resolve(matrix, self.right_bottom_far),
+            .right_top_far = resolve(matrix, self.right_top_far),
+            .point_of_view = resolve(matrix, self.point_of_view),
         };
     }
 
