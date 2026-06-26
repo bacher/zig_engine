@@ -11,11 +11,11 @@ const RADIUS = 0.5;
 const BIAS = 0.025;
 
 fn uvToClipSpacePos(uv: vec2f) -> vec2f {
-    return vec2f(uv.x, 1.0 - uv.y) * 2 - 1;
+    return (uv - 0.5) * vec2f(2.0, -2.0);
 }
 
 fn clipSpaceToUv(clip_space_xy_pos: vec2f) -> vec2f {
-    return vec2f(clip_space_xy_pos.x, -clip_space_xy_pos.y) * 0.5 + 0.5;
+    return clip_space_xy_pos * vec2f(0.5, -0.5) + 0.5;
 }
 
 fn reconstructViewSpacePosition(clip_space_xy_pos: vec2f, depth: f32) -> vec3f {
