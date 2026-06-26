@@ -66,12 +66,12 @@ pub const SpectatorCamera = struct {
 
             if (direction[0] != 0 or direction[2] != 0) {
                 // we are using transpose instead of inverse here, because in case of
-                // matrices containing only rotation information, tranpose operation
-                // gives us the same results as inverse but computationally is much
-                // easier.
+                // matrices containing only rotation information (ortonormal matrices),
+                // tranpose operation gives us the same results as inverse, but
+                // computationally is much easier.
                 aligned_direction = zmath.mul(
                     direction,
-                    zmath.transpose(camera.camera_to_view),
+                    zmath.transpose(camera.view_from_camera),
                 );
             }
         }

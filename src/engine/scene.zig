@@ -195,7 +195,7 @@ pub const Scene = struct {
         errdefer game_object.deinit(scene.engine.gctx);
 
         scene.instance_buffer.buffer[instance_index] = .{
-            .model_matrix = zmath.transpose(game_object.getModelMatrix()),
+            .model_matrix = game_object.getModelMatrix(),
         };
 
         if (params.animation_name) |animation_name| {

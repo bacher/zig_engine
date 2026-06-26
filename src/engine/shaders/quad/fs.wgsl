@@ -3,8 +3,8 @@
 @group(0) @binding(2) var view_space_normal_texture: texture_2d<f32>;
 @group(0) @binding(3) var texture_sampler: sampler;
 @group(0) @binding(4) var depth_sampler: sampler;
-@group(0) @binding(5) var<uniform> view_to_clip: mat4x4<f32>;
-@group(0) @binding(6) var<uniform> clip_to_view: mat4x4<f32>;
+@group(0) @binding(5) var<uniform> clip_from_view: mat4x4<f32>;
+@group(0) @binding(6) var<uniform> view_from_clip: mat4x4<f32>;
 
 const KERNEL_SIZE = 32;
 const RADIUS = 0.5;
@@ -19,7 +19,7 @@ fn clipSpaceToUv(clip_space_xy_pos: vec2f) -> vec2f {
 }
 
 fn reconstructViewSpacePosition(clip_space_xy_pos: vec2f, depth: f32) -> vec3f {
-    var view_space_pos = vec4f(clip_space_xy_pos, depth, 1.0) * clip_to_view;
+    var view_space_pos = view_from_clip * vec4f(clip_space_xy_pos, depth, 1.0);
     view_space_pos = view_space_pos / view_space_pos.w;
     return view_space_pos.xyz;
 }
@@ -69,8 +69,7 @@ fn reconstructViewSpacePosition(clip_space_xy_pos: vec2f, depth: f32) -> vec3f {
     // let view_space_sample_pos: vec3f = view_space_pos + (vec3f(0, 0, -1) * RADIUS) * TBN;
     let view_space_sample_pos: vec3f = view_space_pos + (view_space_normal * RADIUS * 0.3); // -- using just direction toward normal
 
-    // var clip_space_offset = view_to_clip * vec4f(view_space_sample_pos, 1.0);
-    var clip_space_offset = vec4f(view_space_sample_pos, 1.0) * view_to_clip;
+    var clip_space_offset = clip_from_view * vec4f(view_space_sample_pos, 1.0);
     clip_space_offset = clip_space_offset / clip_space_offset.w;
 
     var sample_uv = clipSpaceToUv(clip_space_offset.xy);

@@ -481,7 +481,7 @@ fn writeJointMatrixUniform(self: *const Self, target: *JointMatrixUniform) void 
 
     const joint_count = @min(self.joint_matrices.len, target.len);
     for (self.joint_matrices[0..joint_count], 0..) |matrix, index| {
-        target[index] = zmath.transpose(matrix);
+        target[index] = matrix;
     }
 }
 

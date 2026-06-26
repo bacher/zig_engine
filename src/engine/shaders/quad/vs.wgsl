@@ -19,7 +19,7 @@ const positions = array(
 
     let position = positions[vertex_index];
 
-    output.position_clip = vec4f(position * vec2f(2.0, 2.0) + vec2f(-1, -1), 0.0, 1.0);
+    output.position_clip = vec4f(position * 2.0 - 1, 0.0, 1.0);
     output.texcoord = vec2f(position.x, 1.0 - position.y);
     return output;
 }

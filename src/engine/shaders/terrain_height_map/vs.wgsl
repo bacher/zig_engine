@@ -1,8 +1,8 @@
-@group(0) @binding(0) var<uniform> object_to_clip: mat4x4<f32>;
+@group(0) @binding(0) var<uniform> clip_from_object: mat4x4<f32>;
 // @group(0) @binding(4) var depth_texture: texture_2d<f32>;
 @group(0) @binding(3) var depth_texture: texture_2d<u32>;
 
-@group(1) @binding(0) var<uniform> object_to_light_clip_array: array<mat4x4<f32>, 3>;
+@group(1) @binding(0) var<uniform> light_clip_from_object_array: array<mat4x4<f32>, 3>;
 
 struct VertexOut {
     @builtin(position) position_clip: vec4<f32>,
@@ -120,10 +120,10 @@ const positions = array(
     );
 
     var output: VertexOut;
-    output.position_clip = position4 * object_to_clip;
-    output.position_light_clip_0 = position4 * object_to_light_clip_array[0];
-    output.position_light_clip_1 = position4 * object_to_light_clip_array[1];
-    output.position_light_clip_2 = position4 * object_to_light_clip_array[2];
+    output.position_clip = clip_from_object * position4;
+    output.position_light_clip_0 = light_clip_from_object_array[0] * position4;
+    output.position_light_clip_1 = light_clip_from_object_array[1] * position4;
+    output.position_light_clip_2 = light_clip_from_object_array[2] * position4;
     output.texcoord = uv;
     return output;
 }

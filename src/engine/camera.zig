@@ -11,49 +11,49 @@ pub const Camera = struct {
 
     position: [3]f32,
 
-    world_to_camera: zmath.Mat,
-    camera_to_normalized_view: zmath.Mat,
-    normalized_view_to_view: zmath.Mat,
-    view_to_clip: zmath.Mat,
-    clip_to_view: zmath.Mat,
+    camera_from_world: zmath.Mat,
+    normalized_view_from_camera: zmath.Mat,
+    view_from_normalized_view: zmath.Mat,
+    clip_from_view: zmath.Mat,
+    view_from_clip: zmath.Mat,
 
     // derived
-    camera_to_view: zmath.Mat,
-    world_to_clip: zmath.Mat,
-    world_to_view: zmath.Mat,
-    clip_to_world: zmath.Mat,
+    view_from_camera: zmath.Mat,
+    clip_from_world: zmath.Mat,
+    view_from_world: zmath.Mat,
+    world_from_clip: zmath.Mat,
 
     pub fn init(aspect_ratio: f32) Camera {
         const position: [3]f32 = .{ 0, 0, 0 };
 
-        const world_to_camera = zmath.translation(0, 0, 0);
+        const camera_from_world = zmath.translation(0, 0, 0);
 
         // NOTE: this matrix is effectively the same as:
-        // const camera_to_normalized_view = zmath.rotationX(-0.5 * math.pi);
-        const camera_to_normalized_view = zmath.lookAtRh(
+        // const normalized_view_from_camera = zmath.rotationX(-0.5 * math.pi);
+        const normalized_view_from_camera = zmath.lookAtRh(
             zmath.Vec{ 0, 0, 0, 1 },
             zmath.Vec{ 0, 1, 0, 1 },
             zmath.Vec{ 0, 0, 1, 0 },
         );
 
-        const view_to_clip = createProjectionMatrix(aspect_ratio);
+        const clip_from_view = createProjectionMatrix(aspect_ratio);
 
         var camera = Camera{
             .aspect_ratio = aspect_ratio,
 
             .position = position,
 
-            .world_to_camera = world_to_camera,
-            .camera_to_normalized_view = camera_to_normalized_view,
-            .normalized_view_to_view = zmath.identity(),
-            .view_to_clip = view_to_clip,
-            .clip_to_view = zmath.inverse(view_to_clip),
+            .camera_from_world = camera_from_world,
+            .normalized_view_from_camera = normalized_view_from_camera,
+            .view_from_normalized_view = zmath.identity(),
+            .clip_from_view = clip_from_view,
+            .view_from_clip = zmath.inverse(clip_from_view),
 
             // derived:
-            .camera_to_view = undefined,
-            .world_to_clip = undefined,
-            .world_to_view = undefined,
-            .clip_to_world = undefined,
+            .view_from_camera = undefined,
+            .clip_from_world = undefined,
+            .view_from_world = undefined,
+            .world_from_clip = undefined,
         };
 
         camera.updateDerivedMatrices();
@@ -64,22 +64,22 @@ pub const Camera = struct {
     pub fn deinit(_: *Camera) void {}
 
     fn updateDerivedMatrices(camera: *Camera) void {
-        camera.camera_to_view = zmath.mul(
-            camera.camera_to_normalized_view,
-            camera.normalized_view_to_view,
+        camera.view_from_camera = zmath.mul(
+            camera.normalized_view_from_camera,
+            camera.view_from_normalized_view,
         );
 
-        camera.world_to_view = zmath.mul(
-            camera.world_to_camera,
-            camera.camera_to_view,
+        camera.view_from_world = zmath.mul(
+            camera.camera_from_world,
+            camera.view_from_camera,
         );
 
-        camera.world_to_clip = zmath.mul(
-            camera.world_to_view,
-            camera.view_to_clip,
+        camera.clip_from_world = zmath.mul(
+            camera.view_from_world,
+            camera.clip_from_view,
         );
 
-        camera.clip_to_world = zmath.inverse(camera.world_to_clip);
+        camera.world_from_clip = zmath.inverse(camera.clip_from_world);
     }
 
     pub fn updateTargetScreenSize(camera: *Camera, aspect_ratio: f32) void {
@@ -88,8 +88,8 @@ pub const Camera = struct {
         }
 
         camera.aspect_ratio = aspect_ratio;
-        camera.view_to_clip = createProjectionMatrix(aspect_ratio);
-        camera.clip_to_view = zmath.inverse(camera.view_to_clip);
+        camera.clip_from_view = createProjectionMatrix(aspect_ratio);
+        camera.view_from_clip = zmath.inverse(camera.clip_from_view);
         camera.updateDerivedMatrices();
     }
 
@@ -99,7 +99,7 @@ pub const Camera = struct {
 
         // NOTE: inverting position because moving of camera is effectively moving
         //       of the world in oposite direction.
-        camera.world_to_camera = zmath.translation(
+        camera.camera_from_world = zmath.translation(
             -position[0],
             -position[1],
             -position[2],
@@ -108,7 +108,7 @@ pub const Camera = struct {
     }
 
     pub fn updateView(camera: *Camera, view_mat: zmath.Mat) void {
-        camera.normalized_view_to_view = view_mat;
+        camera.view_from_normalized_view = view_mat;
         camera.updateDerivedMatrices();
     }
 
@@ -123,7 +123,7 @@ pub const Camera = struct {
 
     pub fn getFrustumPoints(camera: *const Camera, options: struct { depth: f32 = 1.0 }) FrustumPoints {
         return FrustumPoints.initFromMatrix(
-            camera.clip_to_world,
+            camera.world_from_clip,
             zmath.Vec{
                 camera.position[0],
                 camera.position[1],

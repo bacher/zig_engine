@@ -23,15 +23,15 @@ const DirectLightLayer = enum(u8) {
 
 pub const DirectionalLightCascade = struct {
     layer: DirectLightLayer,
-    world_to_clip: zmath.Mat = undefined,
-    world_to_view: zmath.Mat = undefined,
-    clip_to_world: zmath.Mat = undefined,
+    clip_from_world: zmath.Mat = undefined,
+    view_from_world: zmath.Mat = undefined,
+    world_from_clip: zmath.Mat = undefined,
 
     // TODO:
     // Current approach with single bounding box is not optimal, the light view
     // can be very toll, so a lot of unused space in bound box.
     pub fn getLightViewBoundBox(cascade: *const DirectionalLightCascade) BoundBox(f32) {
-        const cube_points = CubePoints.initFromMatrix(cascade.clip_to_world);
+        const cube_points = CubePoints.initFromMatrix(cascade.world_from_clip);
         return cube_points.getBoundingBox();
     }
 };
@@ -82,7 +82,7 @@ pub const DirectionalLight = struct {
             debug.printVecAsVec3Labeled("projected camera view bound box max", max);
         }
 
-        const view_to_clip = zmath.orthographicRh(
+        const clip_from_view = zmath.orthographicRh(
             max[0] - min[0],
             max[1] - min[1],
             0.001,
@@ -119,14 +119,14 @@ pub const DirectionalLight = struct {
         }
         // --
 
-        cascade.world_to_clip = zmath.mul(
+        cascade.clip_from_world = zmath.mul(
             look_to,
-            zmath.mul(move_mat, view_to_clip),
+            zmath.mul(move_mat, clip_from_view),
         );
 
         // --
         if (DEBUG_LIGHT) {
-            const ort_frustum_points = frustum_points.applyMatrix(cascade.world_to_clip);
+            const ort_frustum_points = frustum_points.applyMatrix(cascade.clip_from_world);
 
             debug.printVecAsVec3Labeled(
                 "ort camera view bound box min",
@@ -139,7 +139,7 @@ pub const DirectionalLight = struct {
         }
         // --
 
-        cascade.clip_to_world = zmath.inverse(cascade.world_to_clip);
+        cascade.world_from_clip = zmath.inverse(cascade.clip_from_world);
     }
 };
 
