@@ -4,6 +4,11 @@ const zmath = @import("zmath");
 
 const BindGroup = @import("../bind_group.zig").BindGroup;
 
+pub const SceneShaderRuntimeSettings = packed struct {
+    ssao_enabled: bool,
+    _padding: u31 = 0,
+};
+
 pub const SceneBindGroupLayout = struct {
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
@@ -25,13 +30,21 @@ pub const SceneBindGroupLayout = struct {
                 true,
                 0,
             ),
-            // Instances buffer
+            // instances buffer
             zgpu.bufferEntry(
                 2,
                 .{ .vertex = true },
                 .read_only_storage,
                 false,
                 0, // min_binding_size, is it okay to be zero for storage buffers?
+            ),
+            // settings
+            zgpu.bufferEntry(
+                3,
+                .{ .vertex = true, .fragment = true },
+                .uniform,
+                true,
+                0,
             ),
         });
 
@@ -67,12 +80,19 @@ pub const SceneBindGroupLayout = struct {
                     .offset = 0,
                     .size = @sizeOf(zmath.Mat),
                 },
-                // Instances buffer
+                // instances buffer
                 .{
                     .binding = 2,
                     .buffer_handle = instances_buffer,
                     .offset = 0,
                     .size = size,
+                },
+                // settings
+                .{
+                    .binding = 3,
+                    .buffer_handle = gctx.uniforms.buffer,
+                    .offset = 0,
+                    .size = @sizeOf(SceneShaderRuntimeSettings),
                 },
             },
         );

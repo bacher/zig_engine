@@ -5,6 +5,11 @@ const zmath = @import("zmath");
 const TextureDescriptor = @import("../types.zig").TextureDescriptor;
 const BindGroup = @import("../bind_group.zig").BindGroup;
 
+pub const PostEffectShaderRuntimeSettings = packed struct {
+    ssao_enabled: bool,
+    _padding: u31 = 0,
+};
+
 pub const FinalPassBindGroupLayout = struct {
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
 
@@ -57,6 +62,14 @@ pub const FinalPassBindGroupLayout = struct {
             // clip to view matrix
             zgpu.bufferEntry(
                 6,
+                .{ .fragment = true },
+                .uniform,
+                true,
+                0,
+            ),
+            // settings
+            zgpu.bufferEntry(
+                7,
                 .{ .fragment = true },
                 .uniform,
                 true,
@@ -128,6 +141,14 @@ pub const FinalPassBindGroupLayout = struct {
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
                     .size = @sizeOf(zmath.Mat),
+                },
+
+                // settings
+                .{
+                    .binding = 7,
+                    .buffer_handle = gctx.uniforms.buffer,
+                    .offset = 0,
+                    .size = @sizeOf(PostEffectShaderRuntimeSettings),
                 },
             },
         );

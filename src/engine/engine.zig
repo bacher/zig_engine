@@ -52,6 +52,8 @@ const GameObject = @import("./game_object.zig").GameObject;
 const xRotate = @import("./game_object.zig").xRotate;
 const DirectionalLight = @import("./light.zig").DirectionalLight;
 const DirectionalLightCascade = @import("./light.zig").DirectionalLightCascade;
+const SceneShaderRuntimeSettings = @import("./bind_group_layouts/scene.zig").SceneShaderRuntimeSettings;
+const PostEffectShaderRuntimeSettings = @import("./bind_group_layouts/final_pass.zig").PostEffectShaderRuntimeSettings;
 
 const DEBUG_INTERNAL_TEXTURE = false;
 const DEBUG_SHOW_WIREFRAME_OBJECTS = false;
@@ -538,9 +540,16 @@ pub const Engine = struct {
 
                             const clip_from_world_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                             clip_from_world_uniform.slice[0] = cascade.clip_from_world;
+
+                            const settings_uniform = engine.gctx.uniformsAllocate(SceneShaderRuntimeSettings, 1);
+                            settings_uniform.slice[0] = .{
+                                .ssao_enabled = engine.state.ssao_enabled,
+                            };
+
                             shadow_map_pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
                                 clip_from_world_uniform.offset,
                                 clip_from_world_uniform.offset, // Is it okay to use the same buffer for both uniforms?
+                                settings_uniform.offset,
                             });
 
                             for (potentially_visible_game_objects) |game_object| {
@@ -624,10 +633,15 @@ pub const Engine = struct {
                     clip_from_world_uniform.slice[0] = scene.camera.clip_from_world;
                     const view_from_world_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                     view_from_world_uniform.slice[0] = scene.camera.view_from_world;
+                    const settings_uniform = engine.gctx.uniformsAllocate(SceneShaderRuntimeSettings, 1);
+                    settings_uniform.slice[0] = .{
+                        .ssao_enabled = engine.state.ssao_enabled,
+                    };
 
                     pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
                         clip_from_world_uniform.offset,
                         view_from_world_uniform.offset,
+                        settings_uniform.offset,
                     });
 
                     // TODO: WHY IT DOES NOT WORK HERE, BUT WORKS IF IN SPACE TREE?
@@ -724,6 +738,10 @@ pub const Engine = struct {
 
                 const clip_from_view_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                 const view_from_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+                const shader_run_time_settings_uniform = engine.gctx.uniformsAllocate(PostEffectShaderRuntimeSettings, 1);
+                shader_run_time_settings_uniform.slice[0] = .{
+                    .ssao_enabled = engine.state.ssao_enabled,
+                };
 
                 if (engine.active_scene) |scene| {
                     clip_from_view_uniform.slice[0] = scene.camera.clip_from_view;
@@ -735,6 +753,7 @@ pub const Engine = struct {
                 pass.setBindGroup(0, engine.bind_group_final_pass.wgpu_bind_group, &.{
                     clip_from_view_uniform.offset,
                     view_from_clip_uniform.offset,
+                    shader_run_time_settings_uniform.offset,
                 });
                 pass.draw(6, 1, 0, 0);
             }

@@ -5,10 +5,13 @@
 @group(0) @binding(4) var depth_sampler: sampler;
 @group(0) @binding(5) var<uniform> clip_from_view: mat4x4<f32>;
 @group(0) @binding(6) var<uniform> view_from_clip: mat4x4<f32>;
+@group(0) @binding(7) var<uniform> settings: u32;
 
 const KERNEL_SIZE = 32;
 const RADIUS = 0.5;
 const BIAS = 0.025;
+
+const SSAO_ENABLED_MASK = 0x1;
 
 fn uvToClipSpacePos(uv: vec2f) -> vec2f {
     return (uv - 0.5) * vec2f(2.0, -2.0);
@@ -29,6 +32,11 @@ fn reconstructViewSpacePosition(clip_space_xy_pos: vec2f, depth: f32) -> vec3f {
     @location(0) uv: vec2<f32>,
 ) -> @location(0) vec4<f32> {
     let color = textureSample(color_texture, texture_sampler, uv);
+
+    // if SSAO is disabled, return original color
+    if ((settings & SSAO_ENABLED_MASK) == 0) {
+        return color;
+    }
 
     var view_space_normal = textureSampleLevel(view_space_normal_texture, depth_sampler, uv, 0).xyz;
     // (debug) Display normals
@@ -89,7 +97,7 @@ fn reconstructViewSpacePosition(clip_space_xy_pos: vec2f, depth: f32) -> vec3f {
     // (debug) to see occlusion:
     // return vec4f(occlusion, occlusion, occlusion, 1.0);
 
-    // debug:
+    // debug version (using pure green if occlusion is less than 0.5):
     if (occlusion < 0.5) {
         return vec4f(0.0, 1.0, 0.0, 1.0);
     } else {
