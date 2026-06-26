@@ -1008,7 +1008,7 @@ pub const Engine = struct {
         game_object: *GameObject,
     ) void {
         _ = scene;
-        // TODO:
+        _ = cascade;
         _ = light;
 
         switch (game_object.model) {
@@ -1023,60 +1023,26 @@ pub const Engine = struct {
                     game_object.updateAnimation(engine.gctx, @floatCast(engine.time));
                 }
                 model_descriptor.index.applyIndexBuffer(pass);
-            },
-            .terrain_height_map_model => {
-                // nothing to do
-                // TODO: can't be rendered because shadow map relies on vertex data
-                return;
-            },
-            .window_box_model => |window_box_model| {
-                const model_descriptor = window_box_model.model_descriptor;
-                model_descriptor.position.applyVertexBuffer(pass, 0);
-            },
-            .primitive_colorized => |primitive_colorized_model| {
-                const model_descriptor = primitive_colorized_model.model_descriptor;
-                model_descriptor.position.applyVertexBuffer(pass, 0);
-            },
-            .skybox_model,
-            .skybox_cubemap_model,
-            => {
-                return;
-            },
-        }
 
-        var world_from_model = game_object.aggregated_matrix;
-
-        const flip_yz = switch (game_object.model) {
-            .regular_model => |model| model.model_descriptor.options.mesh_y_up,
-            else => false,
-        };
-        if (flip_yz) {
-            // NOTE: converting from Y-up to Z-up coordinate system,
-            // should be done only for models which is made with Y-up logic.
-            world_from_model = zmath.mul(xRotate, world_from_model);
-        }
-
-        const clip_from_object = zmath.mul(world_from_model, cascade.clip_from_world);
-
-        // TODO (!!!): clip_from_object_uniform is not used !!!
-        const clip_from_object_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
-        clip_from_object_uniform.slice[0] = zmath.transpose(clip_from_object);
-
-        switch (game_object.model) {
-            .regular_model => |model| {
                 if (game_object.joints_bind_group) |joints_bind_group| {
                     pass.setBindGroup(1, joints_bind_group.wgpu_bind_group, &.{});
                 }
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index orelse 0);
             },
             .terrain_height_map_model => {
-                // TODO: make customizable
-                pass.draw(getTerrainHeightMapElementsCountForSide(64), 1, 0, 0);
+                // nothing to do
+                // TODO: can't be rendered because shadow map relies on vertex data
+                // pass.draw(getTerrainHeightMapElementsCountForSide(64), 1, 0, 0);
+                return;
             },
             .window_box_model => |window_box_model| {
+                const model_descriptor = window_box_model.model_descriptor;
+                model_descriptor.position.applyVertexBuffer(pass, 0);
                 pass.draw(window_box_model.model_descriptor.position.elements_count, 1, 0, game_object.instance_index orelse 0);
             },
             .primitive_colorized => |primitive_colorized_model| {
+                const model_descriptor = primitive_colorized_model.model_descriptor;
+                model_descriptor.position.applyVertexBuffer(pass, 0);
                 pass.draw(primitive_colorized_model.model_descriptor.position.elements_count, 1, 0, game_object.instance_index orelse 0);
             },
             .skybox_model,
