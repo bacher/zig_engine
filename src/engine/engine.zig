@@ -71,6 +71,7 @@ const billboard_normalization_matrix = utils.matMul(
 
 const EngineState = struct {
     ssao_enabled: bool = true,
+    debug_ssao_enabled: bool = false,
 };
 
 pub const Engine = struct {
@@ -381,6 +382,10 @@ pub const Engine = struct {
             .e => {
                 engine.state.ssao_enabled = !engine.state.ssao_enabled;
                 std.debug.print("SSAO = {}\n", .{engine.state.ssao_enabled});
+            },
+            .r => {
+                engine.state.debug_ssao_enabled = !engine.state.debug_ssao_enabled;
+                std.debug.print("Debug SSAO = {}\n", .{engine.state.debug_ssao_enabled});
             },
             else => {},
         }
@@ -741,6 +746,7 @@ pub const Engine = struct {
                 const shader_run_time_settings_uniform = engine.gctx.uniformsAllocate(PostEffectShaderRuntimeSettings, 1);
                 shader_run_time_settings_uniform.slice[0] = .{
                     .ssao_enabled = engine.state.ssao_enabled,
+                    .debug_ssao_enabled = engine.state.debug_ssao_enabled,
                 };
 
                 if (engine.active_scene) |scene| {

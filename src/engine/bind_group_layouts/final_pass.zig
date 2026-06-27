@@ -7,7 +7,9 @@ const BindGroup = @import("../bind_group.zig").BindGroup;
 
 pub const PostEffectShaderRuntimeSettings = packed struct {
     ssao_enabled: bool,
-    _padding: u31 = 0,
+    debug_ssao_enabled: bool,
+
+    _padding: u30 = 0,
 };
 
 pub const FinalPassBindGroupLayout = struct {
