@@ -10,6 +10,25 @@ const SSAO_KERNEL_SIZE = 16;
 @group(0) @binding(7) var<uniform> settings: u32;
 @group(0) @binding(8) var<storage, read> ssao_kernel: array<vec3f, SSAO_KERNEL_SIZE>;
 
+const NOISE_VECTORS = array<vec2f, 16>(
+    vec2f(-0.7522673109163377,   0.658858021827694),
+    vec2f(-0.406561663132687,    0.9136233436546942),
+    vec2f(-0.6058867822895615,   0.7955508827515695),
+    vec2f( 0.5900196794141315,   0.8073888641194189),
+    vec2f(-0.9993966302936446,   0.034732914615797514),
+    vec2f(-0.19997339442560727, -0.979801327577127),
+    vec2f( 0.5906710419426898,   0.8069124613056469),
+    vec2f( 0.22808847069883675, -0.9736404107956211),
+    vec2f( 0.1396678315580476,   0.9901984128586921),
+    vec2f( 0.17516184299346685,  0.9845396532182602),
+    vec2f( 0.6675832326174399,   0.7445351754806815),
+    vec2f(-0.9296517732480357,  -0.36843938510531515),
+    vec2f( 0.4622709410139219,   0.8867387310217724),
+    vec2f(-0.9537578153151433,   0.3005761629359273),
+    vec2f(-0.8344127230243967,   0.5511400980286332),
+    vec2f( 0.46230915296333175,  0.8867188094803937),
+);
+
 const SSAO_RADIUS = 0.5;
 const SSAO_BIAS = 0.025;
 
@@ -32,7 +51,7 @@ fn reconstructViewSpacePosition(clip_space_xy_pos: vec2f, depth: f32) -> vec3f {
 }
 
 @fragment fn main(
-    // @builtin(position) position: vec4<f32>,
+    @builtin(position) frag_coord: vec4<f32>,
     @location(0) uv: vec2<f32>,
 ) -> @location(0) vec4<f32> {
     let color = textureSample(color_texture, texture_sampler, uv);
@@ -59,9 +78,13 @@ fn reconstructViewSpacePosition(clip_space_xy_pos: vec2f, depth: f32) -> vec3f {
     // (debug) to see view space position z:
     // return vec4f(-view_space_pos.z / 256.0, 0, 0, 1);
 
-    let randomVec = vec3f(0, 0, -1);
+    let noise_x = u32(frag_coord.x) % 4;
+    let noise_y = u32(frag_coord.y) % 4;
+    let random_vec = vec3f(NOISE_VECTORS[noise_y * 4 + noise_x], 0);
+    // or just use some fixed random vector:
+    // let random_vec = vec3f(0, 0, -1);
 
-    let tangent = normalize(randomVec - view_space_normal * dot(randomVec, view_space_normal));
+    let tangent = normalize(random_vec - view_space_normal * dot(random_vec, view_space_normal));
     let bitangent = cross(view_space_normal, tangent);
 
     let TBN = mat3x3f(
