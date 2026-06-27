@@ -380,11 +380,21 @@ pub const Engine = struct {
     fn onKeyPress(engine: *Engine, key_params: KeyParams) void {
         switch (key_params.key) {
             .e => {
-                engine.state.ssao_enabled = !engine.state.ssao_enabled;
+                if (engine.state.debug_ssao_enabled) {
+                    engine.state.ssao_enabled = true;
+                    engine.state.debug_ssao_enabled = false;
+                } else {
+                    engine.state.ssao_enabled = !engine.state.ssao_enabled;
+                }
                 std.debug.print("SSAO = {}\n", .{engine.state.ssao_enabled});
             },
             .r => {
-                engine.state.debug_ssao_enabled = !engine.state.debug_ssao_enabled;
+                if (!engine.state.debug_ssao_enabled) {
+                    engine.state.ssao_enabled = true;
+                    engine.state.debug_ssao_enabled = true;
+                } else {
+                    engine.state.debug_ssao_enabled = false;
+                }
                 std.debug.print("Debug SSAO = {}\n", .{engine.state.debug_ssao_enabled});
             },
             else => {},
