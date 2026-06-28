@@ -94,6 +94,7 @@ fn reconstructViewSpacePosition(clip_space_xy_pos: vec2f, depth: f32) -> vec3f {
     );
 
     var occlusion = 0.0;
+    // var occlusions_count = 0.0;
 
     for (var i = 0; i < SSAO_KERNEL_SIZE; i += 1) {
         let view_space_sample_pos: vec3f = view_space_pos + TBN * ssao_kernel[i] * SSAO_RADIUS;
@@ -110,14 +111,24 @@ fn reconstructViewSpacePosition(clip_space_xy_pos: vec2f, depth: f32) -> vec3f {
         let delta = view_space_real_pos.z - view_space_sample_pos.z;
 
         // More lightweight version, but with almost the same result:
-        // if (delta > SSAO_BIAS && delta < SSAO_RADIUS) {
-        //     occlusion += 1;
-        // }
+        if (delta > SSAO_BIAS && delta < SSAO_RADIUS) {
+            occlusion += 1;
+        }
 
         // More accurate version, but with more computational cost:
-        if (delta > SSAO_BIAS) {
-            occlusion += smoothstep(0, 1, SSAO_RADIUS / abs(view_space_pos.z - view_space_real_pos.z));
-        }
+        // if (delta > SSAO_BIAS) {
+        //     occlusion += smoothstep(0, 1, SSAO_RADIUS / abs(view_space_pos.z - view_space_real_pos.z));
+        // }
+
+        // Try to ignore occlusions that are too far away:
+        // if (delta > SSAO_BIAS) {
+        //     if (delta < SSAO_RADIUS) {
+        //         occlusion += 1;
+        //         occlusions_count += 1;
+        //     }
+        // } else {
+        //     occlusions_count += 1;
+        // }
     }
 
     occlusion = 1.0 - occlusion / SSAO_KERNEL_SIZE;
