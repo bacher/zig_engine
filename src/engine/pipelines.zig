@@ -15,6 +15,7 @@ const shadow_map_skinned_pipeline_module = @import("./pipelines/shadow_map_skinn
 const lines_pipeline_module = @import("./pipelines/lines_pipeline.zig");
 const debug_texture_pipeline_module = @import("./pipelines/debug_texture_pipeline.zig");
 const screen_quad_pipeline_module = @import("./pipelines/screen_quad_pipeline.zig");
+const ssao_pipeline_module = @import("./pipelines/ssao_pipeline.zig");
 
 pub const Pipelines = struct {
     // -- basic pipelines --
@@ -32,6 +33,7 @@ pub const Pipelines = struct {
     lines: Pipeline,
     debug_texture: Pipeline,
     // -- rest --
+    ssao_pipeline: Pipeline,
     screen_quad_pipeline: Pipeline,
 
     pub fn init(gctx: *zgpu.GraphicsContext, bind_group_layouts: *const BindGroupLayouts) Pipelines {
@@ -90,6 +92,11 @@ pub const Pipelines = struct {
             bind_group_layouts,
         );
 
+        const ssao_pipeline = ssao_pipeline_module.createSsaoPipeline(
+            gctx,
+            bind_group_layouts,
+        );
+
         const screen_quad_pipeline = screen_quad_pipeline_module.createScreenQuadPipeline(
             gctx,
             bind_group_layouts,
@@ -108,6 +115,7 @@ pub const Pipelines = struct {
             .shadow_map_skinned = shadow_map_skinned_pipeline,
             .lines = lines_pipeline,
             .debug_texture = debug_texture_pipeline,
+            .ssao_pipeline = ssao_pipeline,
             .screen_quad_pipeline = screen_quad_pipeline,
         };
     }
@@ -124,5 +132,7 @@ pub const Pipelines = struct {
         pipelines.shadow_map_skinned.deinit(gctx);
         pipelines.lines.deinit(gctx);
         pipelines.debug_texture.deinit(gctx);
+        pipelines.ssao_pipeline.deinit(gctx);
+        pipelines.screen_quad_pipeline.deinit(gctx);
     }
 };

@@ -17,6 +17,7 @@ const utils = @import("./utils.zig");
 const Pipelines = @import("./pipelines.zig").Pipelines;
 const COLOR_OUTPUT_FORMAT = @import("./pipelines/_first_pass_color_targets.zig").COLOR_OUTPUT_FORMAT;
 const NORMAL_OUTPUT_FORMAT = @import("./pipelines/_first_pass_color_targets.zig").NORMAL_OUTPUT_FORMAT;
+const SSAO_OUTPUT_FORMAT = @import("./pipelines/_first_pass_color_targets.zig").SSAO_OUTPUT_FORMAT;
 // -- bind groups --
 const BindGroupLayouts = @import("./bind_group_layouts.zig").BindGroupLayouts;
 const BindGroup = @import("./bind_group.zig").BindGroup;
@@ -106,6 +107,7 @@ pub const Engine = struct {
     bind_group_debug_shadow_map_texture: BindGroup,
     bind_group_shadow_map: BindGroup,
     bind_group_lines: BindGroup,
+    bind_group_ssao_pass: BindGroup,
     bind_group_final_pass: BindGroup,
 
     models_hash: std.AutoHashMap(LoadedModelId, *Model),
@@ -116,6 +118,7 @@ pub const Engine = struct {
     shadow_map_depth_texture: DepthTexture,
     first_pass_color_output_texture: ScreenTexture,
     first_pass_normal_output_texture: ScreenTexture,
+    ssao_output_texture: ScreenTexture,
 
     // -- special textures (mostly for debug purposes) --
     uv_test_texture: types.TextureDescriptor,
@@ -230,6 +233,7 @@ pub const Engine = struct {
         const depth_texture = DepthTexture.init(gctx, w, h);
         const first_pass_color_output_texture = ScreenTexture.init(gctx, w, h, COLOR_OUTPUT_FORMAT);
         const first_pass_normal_output_texture = ScreenTexture.init(gctx, w, h, NORMAL_OUTPUT_FORMAT);
+        const ssao_output_texture = ScreenTexture.init(gctx, w, h, SSAO_OUTPUT_FORMAT);
         const shadow_map_texture = ShadowMapTexture.init(gctx, .{ .layers_count = 3 });
         const shadow_map_depth_texture = DepthTexture.init(gctx, 1024, 1024);
 
@@ -264,12 +268,21 @@ pub const Engine = struct {
         );
         const bind_group_lines = bind_group_layouts.lines.createBindGroup(gctx);
 
+        const bind_group_ssao_pass = bind_group_layouts.ssao_pass.createBindGroup(
+            gctx,
+            texture_sampler,
+            depth_texture.view_handle,
+            // first_pass_color_output_texture.view_handle,
+            first_pass_normal_output_texture.view_handle,
+        );
+
         const bind_group_final_pass = bind_group_layouts.final_pass.createBindGroup(
             gctx,
             texture_sampler,
             depth_texture.view_handle,
             first_pass_color_output_texture.view_handle,
             first_pass_normal_output_texture.view_handle,
+            ssao_output_texture.view_handle,
         );
 
         // ---
@@ -319,12 +332,14 @@ pub const Engine = struct {
             .bind_group_shadow_map = bind_group_shadow_map,
             .bind_group_debug_shadow_map_texture = bind_group_debug_shadow_map_texture,
             .bind_group_lines = bind_group_lines,
+            .bind_group_ssao_pass = bind_group_ssao_pass,
             .bind_group_final_pass = bind_group_final_pass,
 
             // -- textures --
             .depth_texture = depth_texture,
             .first_pass_color_output_texture = first_pass_color_output_texture,
             .first_pass_normal_output_texture = first_pass_normal_output_texture,
+            .ssao_output_texture = ssao_output_texture,
             .shadow_map_texture = shadow_map_texture,
             .shadow_map_depth_texture = shadow_map_depth_texture,
             .uv_test_texture = uv_test_texture,
@@ -725,6 +740,48 @@ pub const Engine = struct {
                         engine.drawTextureDebugScreen(pass);
                     }
                 }
+            }
+
+            // SSAO pass
+            {
+                const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
+                    .view = engine.ssao_output_texture.view,
+                    .load_op = .clear,
+                    .store_op = .store,
+                }};
+                const render_pass_info = wgpu.RenderPassDescriptor{
+                    .color_attachments = &color_attachments,
+                    .color_attachment_count = color_attachments.len,
+                    .depth_stencil_attachment = null,
+                };
+                const pass = encoder.beginRenderPass(render_pass_info);
+                defer {
+                    pass.end();
+                    pass.release();
+                }
+
+                // TODO: remove duplication with the final pass:
+                const clip_from_view_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+                const view_from_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+                const shader_run_time_settings_uniform = engine.gctx.uniformsAllocate(PostEffectShaderRuntimeSettings, 1);
+                shader_run_time_settings_uniform.slice[0] = .{
+                    .ssao_enabled = engine.state.ssao_enabled,
+                    .debug_ssao_enabled = engine.state.debug_ssao_enabled,
+                };
+
+                if (engine.active_scene) |scene| {
+                    clip_from_view_uniform.slice[0] = scene.camera.clip_from_view;
+                    view_from_clip_uniform.slice[0] = scene.camera.view_from_clip;
+                }
+
+                // render
+                pass.setPipeline(engine.pipelines.ssao_pipeline.pipeline_gpu);
+                pass.setBindGroup(0, engine.bind_group_ssao_pass.wgpu_bind_group, &.{
+                    clip_from_view_uniform.offset,
+                    view_from_clip_uniform.offset,
+                    shader_run_time_settings_uniform.offset,
+                });
+                pass.draw(6, 1, 0, 0);
             }
 
             // render to screen pass (final)
@@ -1380,7 +1437,7 @@ pub const Engine = struct {
         engine.depth_texture.deinit(gctx);
         engine.first_pass_color_output_texture.deinit(gctx);
         engine.first_pass_normal_output_texture.deinit(gctx);
-
+        engine.ssao_output_texture.deinit(gctx);
         // Re-create textures
         const w = gctx.swapchain_descriptor.width;
         const h = gctx.swapchain_descriptor.height;
@@ -1388,6 +1445,7 @@ pub const Engine = struct {
         engine.depth_texture = .init(gctx, w, h);
         engine.first_pass_color_output_texture = .init(gctx, w, h, COLOR_OUTPUT_FORMAT);
         engine.first_pass_normal_output_texture = .init(gctx, w, h, NORMAL_OUTPUT_FORMAT);
+        engine.ssao_output_texture = .init(gctx, w, h, SSAO_OUTPUT_FORMAT);
     }
 
     pub fn runLoop(engine: *Engine) !void {

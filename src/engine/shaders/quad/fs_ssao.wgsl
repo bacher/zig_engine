@@ -1,7 +1,6 @@
 const SSAO_KERNEL_SIZE = 16;
 
 @group(0) @binding(0) var depth_texture: texture_2d<f32>;
-@group(0) @binding(1) var color_texture: texture_2d<f32>;
 @group(0) @binding(2) var view_space_normal_texture: texture_2d<f32>;
 @group(0) @binding(3) var texture_sampler: sampler;
 @group(0) @binding(4) var depth_sampler: sampler;
@@ -32,10 +31,6 @@ const NOISE_VECTORS = array<vec2f, 16>(
 const SSAO_RADIUS = 0.5;
 const SSAO_BIAS = 0.025;
 
-const SSAO_ENABLED_MASK = 0x1;
-const DEBUG_SSAO_ENABLED_MASK = 0x2;
-
-
 fn uvToClipSpacePos(uv: vec2f) -> vec2f {
     return (uv - 0.5) * vec2f(2.0, -2.0);
 }
@@ -53,14 +48,7 @@ fn reconstructViewSpacePosition(clip_space_xy_pos: vec2f, depth: f32) -> vec3f {
 @fragment fn main(
     @builtin(position) frag_coord: vec4<f32>,
     @location(0) uv: vec2<f32>,
-) -> @location(0) vec4<f32> {
-    let color = textureSample(color_texture, texture_sampler, uv);
-
-    // if SSAO is disabled, return original color
-    if ((settings & SSAO_ENABLED_MASK) == 0 && (settings & DEBUG_SSAO_ENABLED_MASK) == 0) {
-        return color;
-    }
-
+) -> @location(0) f32 {
     var view_space_normal = textureSampleLevel(view_space_normal_texture, depth_sampler, uv, 0).xyz;
     // (debug) Display normals
     // return vec4f(view_space_normal, 1);
@@ -133,17 +121,5 @@ fn reconstructViewSpacePosition(clip_space_xy_pos: vec2f, depth: f32) -> vec3f {
 
     occlusion = 1.0 - occlusion / SSAO_KERNEL_SIZE;
 
-    // (debug) to see occlusion:
-    if ((settings & DEBUG_SSAO_ENABLED_MASK) != 0) {
-        return vec4f(occlusion, occlusion, occlusion, 1.0);
-    }
-
-    // debug version (using pure green if occlusion is less than 0.5):
-    // if (occlusion < 0.5) {
-    //     return vec4f(0.0, 1.0, 0.0, 1.0);
-    // } else {
-    //     return color;
-    // }
-
-    return vec4f(color.rgb * (0.5 + occlusion * 0.5), 1.0);
+    return occlusion;
 }

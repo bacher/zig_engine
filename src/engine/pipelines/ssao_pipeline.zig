@@ -2,18 +2,19 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
 const wgsl_vs = @embedFile("../shaders/quad/vs.wgsl");
-const wgsl_fs = @embedFile("../shaders/quad/fs_final.wgsl");
+const wgsl_fs = @embedFile("../shaders/quad/fs_ssao.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
 const BindGroupLayouts = @import("../bind_group_layouts.zig").BindGroupLayouts;
 
-pub fn createScreenQuadPipeline(
+const SSAO_OUTPUT_FORMAT = @import("./_first_pass_color_targets.zig").SSAO_OUTPUT_FORMAT;
+
+pub fn createSsaoPipeline(
     gctx: *zgpu.GraphicsContext,
     bind_group_layouts: *const BindGroupLayouts,
-    output_format: wgpu.TextureFormat,
 ) Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
-        bind_group_layouts.final_pass.bind_group_layout_handle,
+        bind_group_layouts.ssao_pass.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 
@@ -24,11 +25,11 @@ pub fn createScreenQuadPipeline(
     defer fs_module.release();
 
     const color_targets = [_]wgpu.ColorTargetState{.{
-        .format = output_format,
+        .format = SSAO_OUTPUT_FORMAT,
     }};
 
     const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
-        .label = "screen_pipeline",
+        .label = "ssao_pipeline",
         .primitive = wgpu.PrimitiveState{
             .front_face = .ccw,
             .cull_mode = .none,
