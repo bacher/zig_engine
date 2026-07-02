@@ -54,7 +54,7 @@ const xRotate = @import("./game_object.zig").xRotate;
 const DirectionalLight = @import("./light.zig").DirectionalLight;
 const DirectionalLightCascade = @import("./light.zig").DirectionalLightCascade;
 const SceneShaderRuntimeSettings = @import("./bind_group_layouts/scene.zig").SceneShaderRuntimeSettings;
-const PostEffectShaderRuntimeSettings = @import("./bind_group_layouts/final_pass.zig").PostEffectShaderRuntimeSettings;
+const PostEffectShaderRuntimeSettings = @import("./bind_group_layouts/_types.zig").PostEffectShaderRuntimeSettings;
 
 const DEBUG_INTERNAL_TEXTURE = false;
 const DEBUG_SHOW_WIREFRAME_OBJECTS = false;
@@ -73,6 +73,7 @@ const billboard_normalization_matrix = utils.matMul(
 const EngineState = struct {
     ssao_enabled: bool = true,
     debug_ssao_enabled: bool = false,
+    ssao_blur_enabled: bool = true,
 };
 
 pub const Engine = struct {
@@ -90,6 +91,7 @@ pub const Engine = struct {
     gctx: *zgpu.GraphicsContext,
     io: std.Io,
     allocator: std.mem.Allocator,
+    screen_size: @Vector(2, f32),
     aspect_ratio: f32,
     window_context: WindowContext,
     callbacks: Callbacks,
@@ -316,10 +318,16 @@ pub const Engine = struct {
 
         const identity_joint_matrix_buffer = SkeletalAnimation.createIdentityJointMatrixBuffer(gctx) catch @panic("SkeletalAnimation buffer can't be created");
 
+        const screen_size = .{
+            @as(f32, @floatFromInt(gctx.swapchain_descriptor.width)),
+            @as(f32, @floatFromInt(gctx.swapchain_descriptor.height)),
+        };
+
         engine.* = .{
             .allocator = allocator,
             .io = io,
-            .aspect_ratio = getAspectRatio(gctx),
+            .screen_size = screen_size,
+            .aspect_ratio = screen_size[0] / screen_size[1],
             .window_context = window_context,
             .callbacks = callbacks,
             .content_dir = content_dir_copied,
@@ -411,6 +419,10 @@ pub const Engine = struct {
                     engine.state.debug_ssao_enabled = false;
                 }
                 std.debug.print("Debug SSAO = {}\n", .{engine.state.debug_ssao_enabled});
+            },
+            .b => {
+                engine.state.ssao_blur_enabled = !engine.state.ssao_blur_enabled;
+                std.debug.print("SSAO Blur = {}\n", .{engine.state.ssao_blur_enabled});
             },
             else => {},
         }
@@ -522,6 +534,12 @@ pub const Engine = struct {
         const commands = commands: {
             const encoder = gctx.device.createCommandEncoder(null);
             defer encoder.release();
+
+            const shader_settings = PostEffectShaderRuntimeSettings{
+                .ssao_enabled = engine.state.ssao_enabled,
+                .debug_ssao_enabled = engine.state.debug_ssao_enabled,
+                .ssao_blur_enabled = engine.state.ssao_blur_enabled,
+            };
 
             // shadow map pass
             {
@@ -764,10 +782,7 @@ pub const Engine = struct {
                 const clip_from_view_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                 const view_from_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                 const shader_run_time_settings_uniform = engine.gctx.uniformsAllocate(PostEffectShaderRuntimeSettings, 1);
-                shader_run_time_settings_uniform.slice[0] = .{
-                    .ssao_enabled = engine.state.ssao_enabled,
-                    .debug_ssao_enabled = engine.state.debug_ssao_enabled,
-                };
+                shader_run_time_settings_uniform.slice[0] = shader_settings;
 
                 if (engine.active_scene) |scene| {
                     clip_from_view_uniform.slice[0] = scene.camera.clip_from_view;
@@ -811,10 +826,9 @@ pub const Engine = struct {
                 const clip_from_view_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                 const view_from_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                 const shader_run_time_settings_uniform = engine.gctx.uniformsAllocate(PostEffectShaderRuntimeSettings, 1);
-                shader_run_time_settings_uniform.slice[0] = .{
-                    .ssao_enabled = engine.state.ssao_enabled,
-                    .debug_ssao_enabled = engine.state.debug_ssao_enabled,
-                };
+                shader_run_time_settings_uniform.slice[0] = shader_settings;
+                const frag_size_uniform = engine.gctx.uniformsAllocate(@Vector(2, f32), 1);
+                frag_size_uniform.slice[0] = @Vector(2, f32){ 1.0, 1.0 } / engine.screen_size;
 
                 if (engine.active_scene) |scene| {
                     clip_from_view_uniform.slice[0] = scene.camera.clip_from_view;
@@ -827,6 +841,7 @@ pub const Engine = struct {
                     clip_from_view_uniform.offset,
                     view_from_clip_uniform.offset,
                     shader_run_time_settings_uniform.offset,
+                    frag_size_uniform.offset,
                 });
                 pass.draw(6, 1, 0, 0);
             }
@@ -1470,7 +1485,11 @@ pub const Engine = struct {
             switch (gctx_state) {
                 .normal_execution => {},
                 .swap_chain_resized => {
-                    engine.aspect_ratio = getAspectRatio(engine.gctx);
+                    engine.screen_size = .{
+                        @as(f32, @floatFromInt(engine.gctx.swapchain_descriptor.width)),
+                        @as(f32, @floatFromInt(engine.gctx.swapchain_descriptor.height)),
+                    };
+                    engine.aspect_ratio = engine.screen_size[0] / engine.screen_size[1];
                     engine.recreateScreenDependantTextures();
                 },
             }
@@ -1486,11 +1505,6 @@ fn slowOperation() void {
     while (std.time.milliTimestamp() < end) {
         // noop
     }
-}
-
-fn getAspectRatio(gctx: *const zgpu.GraphicsContext) f32 {
-    return @as(f32, @floatFromInt(gctx.swapchain_descriptor.width)) /
-        @as(f32, @floatFromInt(gctx.swapchain_descriptor.height));
 }
 
 fn getLightClipMatrixArray(gctx: *zgpu.GraphicsContext, light: *const DirectionalLight, world_from_model: zmath.Mat) struct { slice: []zmath.Mat, offset: u32 } {
