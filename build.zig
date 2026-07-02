@@ -12,14 +12,31 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const exe = b.addExecutable(.{
-        .name = "zig_engine",
+    const engine_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "engine",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            // In this case the main source file is merely a path, however, in more
+            // complicated build scripts, this could be a generated file.
+            .root_source_file = b.path("src/engine/root.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
+
+    b.installArtifact(engine_lib);
+
+    const exe = b.addExecutable(.{
+        .name = "zig_engine_test_app",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/demo_app/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    exe.root_module.linkLibrary(engine_lib);
+    exe.root_module.addImport("engine", engine_lib.root_module);
 
     // Deps start
 
@@ -27,43 +44,45 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    exe.root_module.addImport("zglfw", zglfw.module("root"));
-    exe.root_module.linkLibrary(zglfw.artifact("glfw"));
+    engine_lib.root_module.addImport("zglfw", zglfw.module("root"));
+    engine_lib.root_module.linkLibrary(zglfw.artifact("glfw"));
 
-    @import("zgpu").addLibraryPathsTo(exe);
+    @import("zgpu").addLibraryPathsTo(engine_lib);
     const zgpu = b.dependency("zgpu", .{
         .target = target,
         .optimize = optimize,
     });
-    exe.root_module.addImport("zgpu", zgpu.module("root"));
-    exe.root_module.linkLibrary(zgpu.artifact("zdawn"));
+    engine_lib.root_module.addImport("zgpu", zgpu.module("root"));
+    engine_lib.root_module.linkLibrary(zgpu.artifact("zdawn"));
 
     const zgui = b.dependency("zgui", .{
         .target = target,
         .optimize = optimize,
         .backend = .glfw_wgpu,
     });
-    exe.root_module.addImport("zgui", zgui.module("root"));
-    exe.root_module.linkLibrary(zgui.artifact("imgui"));
+    engine_lib.root_module.addImport("zgui", zgui.module("root"));
+    engine_lib.root_module.linkLibrary(zgui.artifact("imgui"));
 
     const zmath = b.dependency("zmath", .{
         .target = target,
         .optimize = optimize,
     });
-    exe.root_module.addImport("zmath", zmath.module("root"));
+    engine_lib.root_module.addImport("zmath", zmath.module("root"));
 
     const zstbi = b.dependency("zstbi", .{
         .target = target,
         .optimize = optimize,
     });
-    exe.root_module.addImport("zstbi", zstbi.module("root"));
+    engine_lib.root_module.addImport("zstbi", zstbi.module("root"));
 
     const gltf_loader = b.dependency("gltf_loader", .{
         .target = target,
         .optimize = optimize,
     });
     gltf_loader.module("root").addImport("zstbi", zstbi.module("root"));
+
     exe.root_module.addImport("gltf_loader", gltf_loader.module("root"));
+    engine_lib.root_module.addImport("gltf_loader", gltf_loader.module("root"));
 
     // Local modules
 

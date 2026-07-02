@@ -1,25 +1,25 @@
 const std = @import("std");
-const zmath = @import("zmath");
 const math = std.math;
-const zgpu = @import("zgpu");
+const zmath = @import("zmath");
+const zgpu = @import("engine").zgpu;
 const wgpu = zgpu.wgpu;
-const zgui = @import("zgui");
-const zglfw = @import("zglfw");
+const zgui = @import("engine").zgui;
+const zglfw = @import("engine").zglfw;
 const gltf_loader = @import("gltf_loader");
 const content_dir = @import("build_options").content_dir;
 
 const debug = @import("debug");
-const WindowContext = @import("./engine/glue.zig").WindowContext;
+const WindowContext = @import("engine").WindowContext;
 // BUG: if put "Engine.zig" instead of "engine.zig" imports get broken
 // const Engine = @import("./engine/Engine.zig").Engine;
-const Engine = @import("./engine/engine.zig").Engine;
-const GameObject = @import("./engine/game_object.zig").GameObject;
-const GameObjectGroup = @import("./engine/game_object_group.zig").GameObjectGroup;
-const Scene = @import("./engine/scene.zig").Scene;
-const loader_utils = @import("./loader_utils/utils.zig");
-const tube = @import("./engine/shape_generation/tube.zig");
+const Engine = @import("engine").Engine;
+const GameObject = @import("engine").GameObject;
+const GameObjectGroup = @import("engine").GameObjectGroup;
+const Scene = @import("engine").Scene;
+const tube = @import("engine").tube;
+const utils = @import("engine").utils;
+
 const zgui_utils = @import("./zgui.zig");
-const utils = @import("./engine/utils.zig");
 
 const Game = struct {
     allocator: std.mem.Allocator,
@@ -433,7 +433,7 @@ fn traverseGroup(
         const group = try parent_group.addGroup();
 
         if (node.transform_matrix) |node_matrix| {
-            const normalized = loader_utils.convertMatFromUpYToZ(zmath.matFromArr(node_matrix.*));
+            const normalized = utils.convertMatFromUpYToZ(zmath.matFromArr(node_matrix.*));
 
             const matrix_params = utils.parseTransformMatrix(&normalized);
 

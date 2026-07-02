@@ -1,8 +1,8 @@
 const std = @import("std");
 const math = std.math;
-const zgui = @import("zgui");
-const zglfw = @import("zglfw");
-const zgpu = @import("zgpu");
+const zgui = @import("engine").zgui;
+const zglfw = @import("engine").zglfw;
+const zgpu = @import("engine").zgpu;
 const wgpu = zgpu.wgpu;
 const content_dir = @import("build_options").content_dir;
 
