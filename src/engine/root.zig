@@ -10,4 +10,4 @@ pub const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;
 pub const Scene = @import("./scene.zig").Scene;
 pub const tube = @import("./shape_generation/tube.zig");
 pub const utils = @import("./utils.zig");
-pub const zgui_utils = @import("./zgui.zig");
+pub const zgui_utils = @import("./zgui_utils.zig");

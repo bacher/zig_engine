@@ -62,11 +62,20 @@ pub fn main(init: std.process.Init) !void {
     const game: *Game = try .init(allocator);
     defer game.deinit();
 
-    const engine = Engine.init(init.io, allocator, window_context, content_dir, .{
-        .argument = game,
-        .onUpdate = onUpdate,
-        .onRender = onRender,
-    });
+    const engine = Engine.init(
+        init.io,
+        allocator,
+        .{
+            .window_context = window_context,
+            .content_dir = content_dir,
+            .zgui = true,
+        },
+        .{
+            .argument = game,
+            .onUpdate = onUpdate,
+            .onRender = onRender,
+        },
+    );
     defer engine.deinit();
 
     const man_model_id = id: {
@@ -311,57 +320,9 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
 }
 
 fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
+    _ = engine;
+    _ = pass;
     _ = game_opaque;
-
-    zgui.backend.newFrame(
-        engine.gctx.swapchain_descriptor.width,
-        engine.gctx.swapchain_descriptor.height,
-    );
-    // zgui.showDemoWindow(null);
-
-    const camera = engine.active_scene.?.camera;
-
-    _ = zgui.begin("Debug", .{
-        .flags = .{
-            .always_auto_resize = true,
-            .no_saved_settings = true,
-            .no_collapse = true,
-            .no_mouse_inputs = true,
-            .no_focus_on_appearing = true,
-            .no_nav_focus = true,
-            .no_move = true,
-            .no_resize = true,
-        },
-    });
-    zgui.text("camera: {d:2.2}, {d:2.2}, {d:2.2}", .{
-        camera.position[0],
-        camera.position[1],
-        camera.position[2],
-    });
-
-    const stats = &engine.gctx.stats;
-
-    zgui.beginGroup();
-    zgui.text("Frame stats", .{});
-    zgui.text("time: {d:.1}s", .{stats.time});
-    zgui.text("fps: {d:.1}", .{stats.fps});
-    zgui.text("frame time: {d:.1}ms", .{stats.delta_time * 1000});
-    zgui.text("cpu time (avg): {d:.1}", .{stats.average_cpu_time});
-    // zgui.text("fps_counter: {d}", .{stats.fps_counter});
-    // zgui.text("fps_refresh_time: {d}", .{stats.fps_refresh_time});
-    // zgui.text("cpu_frame_number: {d}", .{stats.cpu_frame_number});
-    // zgui.text("gpu_frame_number: {d}", .{stats.gpu_frame_number});
-    zgui.text("objects drawn: {d}", .{engine.frame_stats.game_objects_drawn_count});
-    zgui.text("shadow map pass time taken: {d:.3}ms", .{engine.frame_stats.shadow_map_pass_time_taken});
-    zgui.text("main pass time taken: {d:.3}ms", .{engine.frame_stats.main_pass_time_taken});
-    zgui.text("active nodes: {d}", .{engine.frame_stats.active_space_nodes_count});
-    zgui.text("find objects sub-invokes: {d}", .{engine.frame_stats.find_objects_sub_invocations_count});
-    zgui.text("instances written: {d}", .{engine.frame_stats.instances_written_count});
-    zgui.endGroup();
-
-    zgui.end();
-
-    zgui.backend.draw(pass);
 }
 
 const GAPS: [8][]const u8 = .{

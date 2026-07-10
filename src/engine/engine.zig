@@ -5,6 +5,7 @@ const wgpu = zgpu.wgpu;
 const zglfw = @import("zglfw");
 const zmath = @import("zmath");
 const zstbi = @import("zstbi");
+const zgui = @import("zgui");
 const gltf_loader = @import("gltf_loader");
 
 const debug = @import("debug");
@@ -55,6 +56,7 @@ const DirectionalLight = @import("./light.zig").DirectionalLight;
 const DirectionalLightCascade = @import("./light.zig").DirectionalLightCascade;
 const SceneShaderRuntimeSettings = @import("./bind_group_layouts/scene.zig").SceneShaderRuntimeSettings;
 const PostEffectShaderRuntimeSettings = @import("./bind_group_layouts/_types.zig").PostEffectShaderRuntimeSettings;
+const zgui_utils = @import("./zgui_utils.zig");
 
 const DEBUG_INTERNAL_TEXTURE = false;
 const DEBUG_SHOW_WIREFRAME_OBJECTS = false;
@@ -76,6 +78,12 @@ const EngineState = struct {
     ssao_blur_enabled: bool = true,
 };
 
+const EngineInitOptions = struct {
+    window_context: WindowContext,
+    content_dir: []const u8,
+    zgui: bool,
+};
+
 pub const Engine = struct {
     pub const LoadedModelId = enum(u32) { _ };
 
@@ -94,6 +102,7 @@ pub const Engine = struct {
     screen_size: @Vector(2, f32),
     aspect_ratio: f32,
     window_context: WindowContext,
+    zgui: bool = false,
     callbacks: Callbacks,
     content_dir: []const u8,
     init_time: f64,
@@ -215,8 +224,7 @@ pub const Engine = struct {
     pub fn init(
         io: std.Io,
         allocator: std.mem.Allocator,
-        window_context: WindowContext,
-        content_dir: []const u8,
+        options: EngineInitOptions,
         callbacks: Callbacks,
     ) *Engine {
         if (Engine.is_instanced) {
@@ -225,6 +233,7 @@ pub const Engine = struct {
 
         zstbi.init(io, allocator);
 
+        const window_context = options.window_context;
         const gctx = window_context.gctx;
         const init_time = gctx.stats.time;
 
@@ -300,7 +309,7 @@ pub const Engine = struct {
         }) catch @panic("InputController can't be initialized");
         input_controller.listenWindowEvents();
 
-        const content_dir_copied = allocator.dupe(u8, content_dir) catch @panic("Can't dupe");
+        const content_dir_copied = allocator.dupe(u8, options.content_dir) catch @panic("Can't dupe");
 
         var uv_test_image = gltf_loader.StbiWrapper.loadTextureData(
             allocator,
@@ -329,6 +338,7 @@ pub const Engine = struct {
             .screen_size = screen_size,
             .aspect_ratio = screen_size[0] / screen_size[1],
             .window_context = window_context,
+            .zgui = options.zgui,
             .callbacks = callbacks,
             .content_dir = content_dir_copied,
             .init_time = init_time,
@@ -862,7 +872,19 @@ pub const Engine = struct {
                     pass.release();
                 }
 
+                if (engine.zgui) {
+                    zgui_utils.beginFrame(
+                        engine.gctx.swapchain_descriptor.width,
+                        engine.gctx.swapchain_descriptor.height,
+                    );
+                    zgui_utils.drawDebugWindow(engine);
+                }
+
                 onRender(engine, pass, engine.callbacks.argument);
+
+                if (engine.zgui) {
+                    zgui_utils.endFrame(pass);
+                }
             }
 
             break :commands encoder.finish(null);
