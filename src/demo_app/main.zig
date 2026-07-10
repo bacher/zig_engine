@@ -18,8 +18,7 @@ const GameObjectGroup = @import("engine").GameObjectGroup;
 const Scene = @import("engine").Scene;
 const tube = @import("engine").tube;
 const utils = @import("engine").utils;
-
-const zgui_utils = @import("./zgui.zig");
+const zgui_utils = @import("engine").zgui_utils;
 
 const Game = struct {
     allocator: std.mem.Allocator,
@@ -289,7 +288,7 @@ pub fn main(init: std.process.Init) !void {
 
     // -- ZGui --
 
-    zgui_utils.zguiInit(allocator, window_context.window, engine.gctx.device);
+    zgui_utils.zguiInit(allocator, window_context.window, engine.gctx.device, content_dir);
     defer zgui_utils.zguiDeinit();
 
     // -- Game loop --

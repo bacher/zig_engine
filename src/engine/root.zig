@@ -1,4 +1,4 @@
-// re-export some deps
+// re-export 3rd party libraries
 pub const zgpu = @import("zgpu");
 pub const zgui = @import("zgui");
 pub const zglfw = @import("zglfw");
@@ -10,3 +10,4 @@ pub const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;
 pub const Scene = @import("./scene.zig").Scene;
 pub const tube = @import("./shape_generation/tube.zig");
 pub const utils = @import("./utils.zig");
+pub const zgui_utils = @import("./zgui.zig");
