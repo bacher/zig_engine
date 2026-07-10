@@ -26,8 +26,10 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(engine_lib);
 
-    const exe = b.addExecutable(.{
-        .name = "zig_engine_test_app",
+    // debug app
+
+    const demo_exe = b.addExecutable(.{
+        .name = "zig_engine_demo_app",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/demo_app/main.zig"),
             .target = target,
@@ -35,8 +37,22 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    exe.root_module.linkLibrary(engine_lib);
-    exe.root_module.addImport("engine", engine_lib.root_module);
+    demo_exe.root_module.linkLibrary(engine_lib);
+    demo_exe.root_module.addImport("engine", engine_lib.root_module);
+
+    // voxel app
+
+    const voxel_exe = b.addExecutable(.{
+        .name = "zig_engine_voxel_app",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    voxel_exe.root_module.linkLibrary(engine_lib);
+    voxel_exe.root_module.addImport("engine", engine_lib.root_module);
 
     // Deps start
 
@@ -68,6 +84,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     engine_lib.root_module.addImport("zmath", zmath.module("root"));
+    demo_exe.root_module.addImport("zmath", zmath.module("root"));
+    voxel_exe.root_module.addImport("zmath", zmath.module("root"));
 
     const zstbi = b.dependency("zstbi", .{
         .target = target,
@@ -75,14 +93,16 @@ pub fn build(b: *std.Build) void {
     });
     engine_lib.root_module.addImport("zstbi", zstbi.module("root"));
 
-    const gltf_loader = b.dependency("gltf_loader", .{
+    // GLTF loader
+    const gltf_loader_module = b.dependency("gltf_loader", .{
         .target = target,
         .optimize = optimize,
-    });
-    gltf_loader.module("root").addImport("zstbi", zstbi.module("root"));
+    }).module("root");
+    gltf_loader_module.addImport("zstbi", zstbi.module("root"));
 
-    exe.root_module.addImport("gltf_loader", gltf_loader.module("root"));
-    engine_lib.root_module.addImport("gltf_loader", gltf_loader.module("root"));
+    engine_lib.root_module.addImport("gltf_loader", gltf_loader_module);
+    demo_exe.root_module.addImport("gltf_loader", gltf_loader_module);
+    voxel_exe.root_module.addImport("gltf_loader", gltf_loader_module);
 
     // Local modules
 
@@ -90,37 +110,48 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/modules/debug/debug.zig"),
     });
     debug_module.addImport("zmath", zmath.module("root"));
-    exe.root_module.addImport("debug", debug_module);
+    demo_exe.root_module.addImport("debug", debug_module);
+    voxel_exe.root_module.addImport("debug", debug_module);
 
     // Deps end
 
-    const exe_options = b.addOptions();
-    exe.root_module.addOptions("build_options", exe_options);
     const content_path_name = "content";
-    exe_options.addOption([]const u8, "content_dir", content_path_name);
-
     const install_content_step = b.addInstallDirectory(.{
         .source_dir = b.path(content_path_name),
         .install_dir = .{ .custom = "" },
         .install_subdir = b.pathJoin(&.{ "bin", content_path_name }),
     });
-    exe.step.dependOn(&install_content_step.step);
+
+    // Demo app options
+    const exe_options = b.addOptions();
+    demo_exe.root_module.addOptions("build_options", exe_options);
+    exe_options.addOption([]const u8, "content_dir", content_path_name);
+    demo_exe.step.dependOn(&install_content_step.step);
+
+    // Voxel app options
+    const voxel_exe_options = b.addOptions();
+    voxel_exe.root_module.addOptions("build_options", voxel_exe_options);
+    voxel_exe_options.addOption([]const u8, "content_dir", content_path_name);
+    voxel_exe.step.dependOn(&install_content_step.step);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
-    b.installArtifact(exe);
+    b.installArtifact(demo_exe);
+    b.installArtifact(voxel_exe);
 
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
     // such a dependency.
-    const run_cmd = b.addRunArtifact(exe);
+    const run_cmd = b.addRunArtifact(demo_exe);
+    const run_voxel_cmd = b.addRunArtifact(voxel_exe);
 
     // By making the run step depend on the install step, it will be run from the
     // installation directory rather than directly from within the cache directory.
     // This is not necessary, however, if the application depends on other installed
     // files, this ensures they will be present and in the expected location.
     run_cmd.step.dependOn(b.getInstallStep());
+    run_voxel_cmd.step.dependOn(b.getInstallStep());
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
@@ -128,11 +159,14 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const run_step = b.step("run", "Run the app");
+    const run_step = b.step("run", "Run the demo app");
     run_step.dependOn(&run_cmd.step);
 
+    const run_voxel_step = b.step("run_voxel", "Run the voxel app");
+    run_voxel_step.dependOn(&run_voxel_cmd.step);
+
     const exe_unit_tests = b.addTest(.{
-        .root_module = exe.root_module,
+        .root_module = demo_exe.root_module,
     });
     exe_unit_tests.root_module.addImport("zmath", zmath.module("root"));
 
