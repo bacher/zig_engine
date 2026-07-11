@@ -1,0 +1,71 @@
+const std = @import("std");
+
+pub const CHUNK_SIZE = 32;
+
+pub const Side = enum(u8) {
+    top = 0,
+    bottom = 1,
+    front = 2,
+    back = 3,
+    left = 4,
+    right = 5,
+};
+
+pub const BlockType = enum(u8) {
+    air = 0,
+    stone,
+    dirt,
+    grass,
+    water,
+    sand,
+    snow,
+};
+
+pub const BlockInfo = struct {
+    coords: [3]u8,
+    block_type: BlockType,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(BlockInfo) == 4);
+}
+
+pub const BlockCoordList = std.ArrayList(BlockInfo);
+
+pub const ChunkSideInfo = struct {
+    chunk_origin: [3]u16,
+    side: Side,
+    _padding: u8 = 0,
+};
+
+comptime {
+    std.debug.assert(@sizeOf(ChunkSideInfo) == 8);
+}
+
+pub const VoxelChunk = struct {
+    pub const Self = @This();
+
+    chunk_origin: [3]u16,
+
+    blocks_grouped_by_side: [6]BlockCoordList = .{BlockCoordList.empty} ** 6,
+
+    pub fn init(chunk_origin: [3]u16) Self {
+        return .{
+            .chunk_origin = chunk_origin,
+        };
+    }
+
+    pub fn loadTestData(self: *Self, allocator: std.mem.Allocator) void {
+        self.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        self.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 1, 1, 0 }, .block_type = .stone }) catch unreachable;
+        self.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 3, 0 }, .block_type = .dirt }) catch unreachable;
+        self.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 1, 1, 1 }, .block_type = .dirt }) catch unreachable;
+        self.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 0, CHUNK_SIZE - 1 }, .block_type = .stone }) catch unreachable;
+    }
+
+    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        for (&self.blocks_grouped_by_side) |*block| {
+            block.deinit(allocator);
+        }
+    }
+};

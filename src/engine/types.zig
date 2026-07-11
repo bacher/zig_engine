@@ -99,3 +99,9 @@ pub const GeometryBounds = struct {
         return (self.min + self.max) * @as(F32x3, @splat(0.5));
     }
 };
+
+pub const GPUBuffer = struct {
+    handle: zgpu.BufferHandle,
+    buffer: wgpu.Buffer,
+    size: usize,
+};

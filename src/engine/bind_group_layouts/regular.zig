@@ -4,7 +4,6 @@ const zmath = @import("zmath");
 
 const TextureDescriptor = @import("../types.zig").TextureDescriptor;
 const BindGroup = @import("../bind_group.zig").BindGroup;
-const SkeletalAnimation = @import("../skeletal_animation.zig");
 
 pub const RegularBindGroupLayout = struct {
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,

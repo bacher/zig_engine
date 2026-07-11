@@ -1,0 +1,112 @@
+@group(0) @binding(0) var<uniform> clip_from_world: mat4x4<f32>;
+@group(0) @binding(1) var<uniform> view_from_world: mat4x4<f32>;
+
+struct ChunkSideInfo {
+    origin_xy: u32,
+    origin_z_side: u32,
+}
+
+@group(2) @binding(0) var<uniform> light_clip_from_object_array: array<mat4x4<f32>, 3>;
+@group(3) @binding(0) var<storage, read> chunk_side_info_array: array<ChunkSideInfo>;
+@group(3) @binding(1) var<storage, read> block_array: array<u32>;
+
+struct VertexOut {
+    @builtin(position) position_clip: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) texcoord: vec2<f32>,
+    // --
+    @location(2) position_light_clip_0: vec4<f32>,
+    @location(3) position_light_clip_1: vec4<f32>,
+    @location(4) position_light_clip_2: vec4<f32>,
+}
+
+struct PosUv {
+    pos: vec3<u32>,
+    uv: vec2f,
+}
+
+fn getPositionUv(side: u32, vertex_index: u32) -> PosUv {
+    switch side {
+        case 0, default: {
+            switch vertex_index {
+                case 0, default: {
+                    return PosUv(vec3(0, 0, 1), vec2(0.0, 1.0));
+                }
+                case 1: {
+                    return PosUv(vec3(1, 1, 1), vec2(1.0, 0.0));
+                }
+                case 2: {
+                    return PosUv(vec3(0, 1, 1), vec2(0.0, 0.0));
+                }
+                case 3: {
+                    return PosUv(vec3(0, 0, 1), vec2(0.0, 1.0));
+                }
+                case 4: {
+                    return PosUv(vec3(1, 0, 1), vec2(1.0, 1.0));
+                }
+                case 5: {
+                    return PosUv(vec3(1, 1, 1), vec2(1.0, 0.0));
+                }
+            }
+        }
+    }
+}
+
+@vertex fn main(
+    @builtin(instance_index) instance_index: u32,
+    @builtin(vertex_index) vertex_index: u32,
+) -> VertexOut {
+    let chunk_side_info = chunk_side_info_array[instance_index];
+    let chunk_origin = vec3(
+        chunk_side_info.origin_xy & 0xffffu,
+        chunk_side_info.origin_xy >> 16u,
+        chunk_side_info.origin_z_side & 0xffffu,
+    );
+    let side = (chunk_side_info.origin_z_side >> 16u) & 0xffu;
+
+    let block_index = vertex_index / 6;
+    let block = block_array[block_index];
+    let block_origin = vec3(
+        block & 0xffu,
+        (block >> 8) & 0xffu,
+        (block >> 16) & 0xffu,
+    );
+    let block_type = (block >> 24) & 0xffu;
+
+    let side_vertex_index = vertex_index % 6;
+
+    let pos_uv = getPositionUv(side, side_vertex_index);
+
+    let position4 = vec4(vec3f(chunk_origin + block_origin + pos_uv.pos), 1.0);
+
+    var output: VertexOut;
+    output.position_clip = clip_from_world * position4;
+
+    var normal: vec3f;
+    switch side {
+        case 0, default: {
+            normal = vec3(0.0, 0.0, 1.0);
+        }
+        case 1: {
+            normal = vec3(0.0, 0.0, -1.0);
+        }
+        case 2: {
+            normal = vec3(0.0, 1.0, 0.0);
+        }
+        case 3: {
+            normal = vec3(0.0, -1.0, 0.0);
+        }
+        case 4: {
+            normal = vec3(1.0, 0.0, 0.0);
+        }
+        case 5: {
+            normal = vec3(-1.0, 0.0, 0.0);
+        }
+    }
+    output.normal = (view_from_world * vec4f(normal, 0)).xyz;
+    output.texcoord = pos_uv.uv;
+    output.position_light_clip_0 = light_clip_from_object_array[0] * position4;
+    output.position_light_clip_1 = light_clip_from_object_array[1] * position4;
+    output.position_light_clip_2 = light_clip_from_object_array[2] * position4;
+    return output;
+}

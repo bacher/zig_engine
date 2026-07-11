@@ -18,6 +18,7 @@ const light_module = @import("./light.zig");
 const BindGroup = @import("./bind_group.zig").BindGroup;
 const DirectionalLight = light_module.DirectionalLight;
 const DirectionalLightParams = light_module.DirectionalLightParams;
+const VoxelGrid = @import("./voxel_grid.zig").VoxelGrid;
 
 const INSTANCE_BUFFER_ENTRY_SIZE = 1024;
 const MAX_OBJECTS_COUNT = 4096;
@@ -35,6 +36,8 @@ pub const Scene = struct {
     lights: std.ArrayList(*DirectionalLight) = .empty,
     skybox_object: ?*GameObject,
     space_tree: *SpaceTree(GameObject),
+    voxel_grid: *VoxelGrid,
+    voxel_bind_group: BindGroup,
     camera: *Camera,
     spectator_camera: *SpectatorCamera,
     previous_frame_time: f64,
@@ -97,6 +100,16 @@ pub const Scene = struct {
         );
         errdefer scene_bind_group.deinit(engine.gctx);
 
+        const voxel_grid = VoxelGrid.init(allocator, engine.gctx);
+        errdefer voxel_grid.deinit(engine.gctx);
+
+        const voxel_bind_group = engine.bind_group_layouts.voxel.createBindGroup(
+            engine.gctx,
+            voxel_grid.gpu_chunk_info_buffer,
+            voxel_grid.gpu_block_buffer,
+        );
+        errdefer voxel_bind_group.deinit(engine.gctx);
+
         scene.* = .{
             .engine = engine,
             .allocator = allocator,
@@ -105,6 +118,8 @@ pub const Scene = struct {
             .lights = .empty,
             .skybox_object = null,
             .space_tree = space_tree,
+            .voxel_grid = voxel_grid,
+            .voxel_bind_group = voxel_bind_group,
             .camera = camera,
             .spectator_camera = spectator_camera,
             .previous_frame_time = 0,
@@ -129,6 +144,7 @@ pub const Scene = struct {
         }
         scene.lights.deinit(scene.allocator);
 
+        scene.voxel_grid.deinit(gctx);
         scene.space_tree.deinit();
 
         for (scene.root_groups.items) |root_group| {
@@ -163,6 +179,8 @@ pub const Scene = struct {
             InstanceBufferEntry,
             scene.instance_buffer.buffer[0..scene.instance_buffer.next_index],
         );
+
+        scene.voxel_grid.uploadToGPU(scene.engine.gctx);
     }
 
     pub fn updateInstanceBuffer(scene: *Scene, instance_index: u32) void {

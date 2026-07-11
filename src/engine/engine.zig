@@ -120,6 +120,7 @@ pub const Engine = struct {
     bind_group_lines: BindGroup,
     bind_group_ssao_pass: BindGroup,
     bind_group_final_pass: BindGroup,
+    bind_group_debug_regular: BindGroup,
 
     models_hash: std.AutoHashMap(LoadedModelId, *Model),
 
@@ -325,6 +326,8 @@ pub const Engine = struct {
             .{ .generate_mipmaps = false }, // TODO: set true, maybe???
         ) catch @panic("uv-test texture can't be loaded");
 
+        const bind_group_debug_regular = bind_group_layouts.regular.createBindGroup(gctx, texture_repeat_sampler, uv_test_texture);
+
         const identity_joint_matrix_buffer = SkeletalAnimation.createIdentityJointMatrixBuffer(gctx) catch @panic("SkeletalAnimation buffer can't be created");
 
         const screen_size = .{
@@ -352,6 +355,7 @@ pub const Engine = struct {
             .bind_group_lines = bind_group_lines,
             .bind_group_ssao_pass = bind_group_ssao_pass,
             .bind_group_final_pass = bind_group_final_pass,
+            .bind_group_debug_regular = bind_group_debug_regular,
 
             // -- textures --
             .depth_texture = depth_texture,
@@ -705,6 +709,23 @@ pub const Engine = struct {
                     // TODO: WHY IT DOES NOT WORK HERE, BUT WORKS IF IN SPACE TREE?
                     if (scene.skybox_object) |skybox_object| {
                         engine.drawGameObject(pass, scene, skybox_object);
+                    }
+
+                    pass.setPipeline(engine.pipelines.voxel_pipeline.pipeline_gpu);
+                    pass.setBindGroup(1, engine.bind_group_debug_regular.wgpu_bind_group, &.{});
+
+                    const global_light_clip_matrix_array = getGlobalLightClipMatrixArray(gctx, scene.lights.items[0]);
+                    pass.setBindGroup(2, engine.bind_group_shadow_map.wgpu_bind_group, &.{
+                        global_light_clip_matrix_array.offset,
+                    });
+
+                    pass.setBindGroup(3, scene.voxel_bind_group.wgpu_bind_group, &.{});
+
+                    for (scene.voxel_grid.chunks.items) |chunk| {
+                        for (chunk.blocks_grouped_by_side) |chunk_side| {
+                            const vertex_count = chunk_side.items.len * 6;
+                            pass.draw(@intCast(vertex_count), 1, 0, 0);
+                        }
                     }
 
                     const potentially_visible_game_objects_for_camera = engine.temp_buffers.getNextVisibleObjectsChunk();
@@ -1529,7 +1550,11 @@ fn slowOperation() void {
     }
 }
 
-fn getLightClipMatrixArray(gctx: *zgpu.GraphicsContext, light: *const DirectionalLight, world_from_model: zmath.Mat) struct { slice: []zmath.Mat, offset: u32 } {
+fn getLightClipMatrixArray(
+    gctx: *zgpu.GraphicsContext,
+    light: *const DirectionalLight,
+    world_from_model: zmath.Mat,
+) struct { slice: []zmath.Mat, offset: u32 } {
     const uniform = gctx.uniformsAllocate(zmath.Mat, 3);
 
     for (&light.cascades, 0..) |*cascade, i| {
@@ -1538,6 +1563,22 @@ fn getLightClipMatrixArray(gctx: *zgpu.GraphicsContext, light: *const Directiona
             world_from_model,
         );
         uniform.slice[i] = light_clip_from_object;
+    }
+
+    // Have to recreated the struct even though uniform and resulting struct
+    // have the same underlaying types.
+    // Zig can't understand that they are the same and will complain about it.
+    return .{ .slice = uniform.slice, .offset = uniform.offset };
+}
+
+fn getGlobalLightClipMatrixArray(
+    gctx: *zgpu.GraphicsContext,
+    light: *const DirectionalLight,
+) struct { slice: []zmath.Mat, offset: u32 } {
+    const uniform = gctx.uniformsAllocate(zmath.Mat, 3);
+
+    for (&light.cascades, 0..) |*cascade, i| {
+        uniform.slice[i] = cascade.clip_from_world;
     }
 
     // Have to recreated the struct even though uniform and resulting struct

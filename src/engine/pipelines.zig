@@ -10,6 +10,7 @@ const skybox_cubemap_pipeline_module = @import("./pipelines/skybox_cubemap_pipel
 const window_box_pipeline_module = @import("./pipelines/window_box_pipeline.zig");
 const primitive_colorized_pipeline_module = @import("./pipelines/primitive_colorized_pipeline.zig");
 const terrain_height_map_pipeline_module = @import("./pipelines/terrain_height_map_pipeline.zig");
+const voxel_pipeline_module = @import("./pipelines/voxel_pipeline.zig");
 const shadow_map_pipeline_module = @import("./pipelines/shadow_map_pipeline.zig");
 const shadow_map_skinned_pipeline_module = @import("./pipelines/shadow_map_skinned_pipeline.zig");
 const lines_pipeline_module = @import("./pipelines/lines_pipeline.zig");
@@ -26,6 +27,7 @@ pub const Pipelines = struct {
     window_box: Pipeline,
     primitive_colorized: Pipeline,
     terrain_height_map: Pipeline,
+    voxel_pipeline: Pipeline,
     // -- shadow pipelines --
     shadow_map: Pipeline,
     shadow_map_skinned: Pipeline,
@@ -72,6 +74,11 @@ pub const Pipelines = struct {
             bind_group_layouts,
         );
 
+        const voxel_pipeline = voxel_pipeline_module.createVoxelPipeline(
+            gctx,
+            bind_group_layouts,
+        );
+
         const shadow_map_pipeline = shadow_map_pipeline_module.createShadowMapPipeline(
             gctx,
             bind_group_layouts,
@@ -111,6 +118,7 @@ pub const Pipelines = struct {
             .window_box = window_box_pipeline,
             .primitive_colorized = primitive_colorized_pipeline,
             .terrain_height_map = terrain_height_map_pipeline,
+            .voxel_pipeline = voxel_pipeline,
             .shadow_map = shadow_map_pipeline,
             .shadow_map_skinned = shadow_map_skinned_pipeline,
             .lines = lines_pipeline,
@@ -128,6 +136,7 @@ pub const Pipelines = struct {
         pipelines.window_box.deinit(gctx);
         pipelines.primitive_colorized.deinit(gctx);
         pipelines.terrain_height_map.deinit(gctx);
+        pipelines.voxel_pipeline.deinit(gctx);
         pipelines.shadow_map.deinit(gctx);
         pipelines.shadow_map_skinned.deinit(gctx);
         pipelines.lines.deinit(gctx);
