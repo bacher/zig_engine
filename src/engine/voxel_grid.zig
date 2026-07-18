@@ -116,18 +116,18 @@ pub const VoxelGrid = struct {
         var chunk_index: u32 = 0;
 
         for (self.chunks.items) |*chunk| {
-            var total_data_size: u32 = 0;
+            var total_data_size: u16 = 0;
 
             var chunk_info: ChunkInfo = .{
                 .side_data_indices = .{ 0, 0, 0, 0, 0, 0 },
                 .chunk_origin = chunk.chunk_origin,
+                .data_slot_index = @intCast(self.next_free_block_slot), // TODO: remove cast
             };
 
             for (chunk.blocks_grouped_by_side, 0..) |side, side_index| {
                 if (side.items.len > 0) {
-                    const data_index = self.next_free_block_slot * BLOCKS_PER_SLOT + total_data_size;
-
-                    chunk_info.side_data_indices[side_index] = data_index;
+                    const data_index = chunk_info.data_slot_index * BLOCKS_PER_SLOT + total_data_size;
+                    chunk_info.side_data_indices[side_index] = total_data_size;
 
                     gctx.queue.writeBuffer(
                         block_buffer,

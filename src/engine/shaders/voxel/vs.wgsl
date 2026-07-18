@@ -2,14 +2,17 @@
 @group(0) @binding(1) var<uniform> view_from_world: mat4x4<f32>;
 
 struct ChunkInfo {
-    side_data_indices: array<u32, 6>,
+    side_data_indices: array<u32, 3>,
     origin_xy: u32,
-    origin_z_side: u32,
+    origin_z_slot_index: u32,
 }
 
 @group(2) @binding(0) var<uniform> light_clip_from_object_array: array<mat4x4<f32>, 3>;
 @group(3) @binding(0) var<storage, read> chunk_info_array: array<ChunkInfo>;
 @group(3) @binding(1) var<storage, read> block_array: array<u32>;
+
+// SHOULD BE IN SYNC WITH THE SAME NAMED CONSTANT IN ZIG CODE (in src/engine/voxel_grid.zig)
+const BLOCKS_PER_SLOT = 256;
 
 struct VertexOut {
     @builtin(position) position_clip: vec4<f32>,
@@ -211,6 +214,30 @@ fn getNormal(side: u32) -> vec3<f32> {
     }
 }
 
+// decoding [3]u32 into [6]u16
+fn extractSideDataIndex(indices: array<u32, 3>, side: u32) -> u32 {
+    switch side {
+        case 0, default: {
+            return indices[0] & 0xffffu;
+        }
+        case 1: {
+            return indices[0] >> 16u;
+        }
+        case 2: {
+            return indices[1] & 0xffffu;
+        }
+        case 3: {
+            return indices[1] >> 16u;
+        }
+        case 4: {
+            return indices[2] & 0xffffu;
+        }
+        case 5: {
+            return indices[2] >> 16u;
+        }
+    }
+}
+
 @vertex fn main(
     @builtin(instance_index) instance_index: u32,
     @builtin(vertex_index) vertex_index: u32,
@@ -222,11 +249,16 @@ fn getNormal(side: u32) -> vec3<f32> {
     let chunk_origin = vec3(
         chunk_info.origin_xy & 0xffffu,
         chunk_info.origin_xy >> 16u,
-        chunk_info.origin_z_side & 0xffffu,
+        chunk_info.origin_z_slot_index & 0xffffu,
     );
-
+    let data_slot_index = chunk_info.origin_z_slot_index >> 16u;
     let block_index = vertex_index / 6;
-    let block = block_array[chunk_info.side_data_indices[chunk_side] + block_index];
+    let global_block_index =
+        data_slot_index * BLOCKS_PER_SLOT +
+        extractSideDataIndex(chunk_info.side_data_indices, chunk_side) +
+        block_index;
+
+    let block = block_array[global_block_index];
     let block_origin = vec3(
         block & 0xffu,
         (block >> 8) & 0xffu,

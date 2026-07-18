@@ -33,13 +33,13 @@ comptime {
 pub const BlockCoordList = std.ArrayList(BlockInfo);
 
 pub const ChunkInfo = struct {
-    side_data_indices: [6]u32,
+    side_data_indices: [6]u16,
     chunk_origin: [3]u16,
-    _padding: u16 = 0,
+    data_slot_index: u16,
 };
 
 comptime {
-    std.debug.assert(@sizeOf(ChunkInfo) == 32);
+    std.debug.assert(@sizeOf(ChunkInfo) == 20);
 }
 
 pub const VoxelChunk = struct {
