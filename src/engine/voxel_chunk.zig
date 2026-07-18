@@ -32,14 +32,14 @@ comptime {
 
 pub const BlockCoordList = std.ArrayList(BlockInfo);
 
-pub const ChunkSideInfo = struct {
-    block_data_index: u32,
+pub const ChunkInfo = struct {
+    side_data_indices: [6]u32,
     chunk_origin: [3]u16,
-    side: Side,
+    _padding: u16 = 0,
 };
 
 comptime {
-    std.debug.assert(@sizeOf(ChunkSideInfo) == 12);
+    std.debug.assert(@sizeOf(ChunkInfo) == 32);
 }
 
 pub const VoxelChunk = struct {
@@ -49,8 +49,9 @@ pub const VoxelChunk = struct {
 
     blocks_grouped_by_side: [6]BlockCoordList = .{BlockCoordList.empty} ** 6,
 
-    slot_index: u32 = 0,
-    slot_size_level: u8 = 0,
+    chunk_index: u32 = 0,
+    data_slot_index: u32 = 0,
+    data_slot_size_level: u8 = 0,
 
     pub fn init(chunk_origin: [3]u16) Self {
         return .{

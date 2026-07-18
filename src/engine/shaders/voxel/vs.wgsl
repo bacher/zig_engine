@@ -1,14 +1,14 @@
 @group(0) @binding(0) var<uniform> clip_from_world: mat4x4<f32>;
 @group(0) @binding(1) var<uniform> view_from_world: mat4x4<f32>;
 
-struct ChunkSideInfo {
-    block_data_index: u32,
+struct ChunkInfo {
+    side_data_indices: array<u32, 6>,
     origin_xy: u32,
     origin_z_side: u32,
 }
 
 @group(2) @binding(0) var<uniform> light_clip_from_object_array: array<mat4x4<f32>, 3>;
-@group(3) @binding(0) var<storage, read> chunk_side_info_array: array<ChunkSideInfo>;
+@group(3) @binding(0) var<storage, read> chunk_info_array: array<ChunkInfo>;
 @group(3) @binding(1) var<storage, read> block_array: array<u32>;
 
 struct VertexOut {
@@ -215,16 +215,18 @@ fn getNormal(side: u32) -> vec3<f32> {
     @builtin(instance_index) instance_index: u32,
     @builtin(vertex_index) vertex_index: u32,
 ) -> VertexOut {
-    let chunk_side_info = chunk_side_info_array[instance_index];
+    let chunk_index = instance_index >> 3;
+    let chunk_side = instance_index & 0x7u;
+
+    let chunk_info = chunk_info_array[chunk_index];
     let chunk_origin = vec3(
-        chunk_side_info.origin_xy & 0xffffu,
-        chunk_side_info.origin_xy >> 16u,
-        chunk_side_info.origin_z_side & 0xffffu,
+        chunk_info.origin_xy & 0xffffu,
+        chunk_info.origin_xy >> 16u,
+        chunk_info.origin_z_side & 0xffffu,
     );
-    let side = (chunk_side_info.origin_z_side >> 16u) & 0xffu;
 
     let block_index = vertex_index / 6;
-    let block = block_array[chunk_side_info.block_data_index + block_index];
+    let block = block_array[chunk_info.side_data_indices[chunk_side] + block_index];
     let block_origin = vec3(
         block & 0xffu,
         (block >> 8) & 0xffu,
@@ -234,9 +236,9 @@ fn getNormal(side: u32) -> vec3<f32> {
 
     let side_vertex_index = vertex_index % 6;
 
-    let pos = getPosition(side, side_vertex_index);
-    let uv = getUv(side, side_vertex_index);
-    let normal = getNormal(side);
+    let pos = getPosition(chunk_side, side_vertex_index);
+    let uv = getUv(chunk_side, side_vertex_index);
+    let normal = getNormal(chunk_side);
 
     let position4 = vec4(vec3f(chunk_origin + block_origin + pos), 1.0);
 

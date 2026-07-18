@@ -4,7 +4,7 @@ const wgpu = zgpu.wgpu;
 
 const GPUBuffer = @import("./types.zig").GPUBuffer;
 const VoxelChunk = @import("./voxel_chunk.zig").VoxelChunk;
-const ChunkSideInfo = @import("./voxel_chunk.zig").ChunkSideInfo;
+const ChunkInfo = @import("./voxel_chunk.zig").ChunkInfo;
 const Side = @import("./voxel_chunk.zig").Side;
 const BlockInfo = @import("./voxel_chunk.zig").BlockInfo;
 
@@ -42,7 +42,7 @@ pub const VoxelGrid = struct {
 
         // chunk info buffer
         {
-            const size = VOXEL_GRID_SLOT_COUNT * @sizeOf(ChunkSideInfo);
+            const size = VOXEL_GRID_SLOT_COUNT * @sizeOf(ChunkInfo);
 
             const handle = gctx.createBuffer(.{
                 .usage = .{
@@ -113,27 +113,22 @@ pub const VoxelGrid = struct {
         const block_buffer = self.gpu_block_buffer.buffer;
         const chunk_info_buffer = self.gpu_chunk_info_buffer.buffer;
 
-        var chunk_side_index: u32 = 0;
+        var chunk_index: u32 = 0;
 
         for (self.chunks.items) |*chunk| {
             var total_data_size: u32 = 0;
+
+            var chunk_info: ChunkInfo = .{
+                .side_data_indices = .{ 0, 0, 0, 0, 0, 0 },
+                .chunk_origin = chunk.chunk_origin,
+            };
 
             for (chunk.blocks_grouped_by_side, 0..) |side, side_index| {
                 if (side.items.len > 0) {
                     const data_index = self.next_free_block_slot * BLOCKS_PER_SLOT + total_data_size;
 
-                    const chunk_side_info: ChunkSideInfo = .{
-                        .block_data_index = data_index,
-                        .chunk_origin = chunk.chunk_origin,
-                        .side = @enumFromInt(side_index),
-                    };
+                    chunk_info.side_data_indices[side_index] = data_index;
 
-                    gctx.queue.writeBuffer(
-                        chunk_info_buffer,
-                        chunk_side_index * @sizeOf(ChunkSideInfo),
-                        ChunkSideInfo,
-                        &.{chunk_side_info},
-                    );
                     gctx.queue.writeBuffer(
                         block_buffer,
                         data_index * @sizeOf(BlockInfo),
@@ -141,13 +136,19 @@ pub const VoxelGrid = struct {
                         side.items,
                     );
 
-                    chunk_side_index += 1;
                     total_data_size += @intCast(side.items.len);
                 }
             }
 
             if (total_data_size > 0) {
-                const slot_size_level: u8 = @intFromFloat(
+                gctx.queue.writeBuffer(
+                    chunk_info_buffer,
+                    chunk_index * @sizeOf(ChunkInfo),
+                    ChunkInfo,
+                    &.{chunk_info},
+                );
+
+                const data_slot_size_level: u8 = @intFromFloat(
                     @ceil(
                         std.math.log2(
                             @ceil(
@@ -157,20 +158,22 @@ pub const VoxelGrid = struct {
                     ),
                 );
 
-                if (slot_size_level > MAX_SLOT_SIZE_LEVEL) {
+                if (data_slot_size_level > MAX_SLOT_SIZE_LEVEL) {
                     @panic("Slot size level is too high");
                 }
 
                 const occupied_slot_count: u32 = std.math.pow(
                     u32,
                     2,
-                    slot_size_level,
+                    data_slot_size_level,
                 );
 
-                chunk.slot_index = self.next_free_block_slot;
-                chunk.slot_size_level = slot_size_level;
+                chunk.chunk_index = chunk_index;
+                chunk.data_slot_index = self.next_free_block_slot;
+                chunk.data_slot_size_level = data_slot_size_level;
 
                 self.next_free_block_slot += occupied_slot_count;
+                chunk_index += 1;
             }
         }
     }

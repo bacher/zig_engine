@@ -721,12 +721,12 @@ pub const Engine = struct {
 
                     pass.setBindGroup(3, scene.voxel_bind_group.wgpu_bind_group, &.{});
 
-                    var index: u32 = 0;
                     for (scene.voxel_grid.chunks.items) |chunk| {
+                        var side: u32 = 0;
                         for (chunk.blocks_grouped_by_side) |chunk_side| {
                             const vertex_count = chunk_side.items.len * 6;
-                            pass.draw(@intCast(vertex_count), 1, 0, index);
-                            index += 1;
+                            pass.draw(@intCast(vertex_count), 1, 0, (chunk.chunk_index << 3) + side);
+                            side += 1;
                         }
                     }
 
