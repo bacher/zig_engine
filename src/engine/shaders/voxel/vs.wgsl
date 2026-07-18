@@ -2,6 +2,7 @@
 @group(0) @binding(1) var<uniform> view_from_world: mat4x4<f32>;
 
 struct ChunkSideInfo {
+    block_data_index: u32,
     origin_xy: u32,
     origin_z_side: u32,
 }
@@ -20,34 +21,192 @@ struct VertexOut {
     @location(4) position_light_clip_2: vec4<f32>,
 }
 
-struct PosUv {
-    pos: vec3<u32>,
-    uv: vec2f,
+
+fn getUv(side: u32, vertex_index: u32) -> vec2f {
+    switch vertex_index {
+        case 0, default: {
+            return vec2(0.0, 1.0);
+        }
+        case 1: {
+            return vec2(1.0, 0.0);
+        }
+        case 2: {
+            return vec2(0.0, 0.0);
+        }
+        case 3: {
+            return vec2(0.0, 1.0);
+        }
+        case 4: {
+            return vec2(1.0, 1.0);
+        }
+        case 5: {
+            return vec2(1.0, 0.0);
+        }
+    }
 }
 
-fn getPositionUv(side: u32, vertex_index: u32) -> PosUv {
+fn getPosition(side: u32, vertex_index: u32) -> vec3<u32> {
     switch side {
+        // top
         case 0, default: {
             switch vertex_index {
                 case 0, default: {
-                    return PosUv(vec3(0, 0, 1), vec2(0.0, 1.0));
+                    return vec3(0, 0, 1);
                 }
                 case 1: {
-                    return PosUv(vec3(1, 1, 1), vec2(1.0, 0.0));
+                    return vec3(1, 1, 1);
                 }
                 case 2: {
-                    return PosUv(vec3(0, 1, 1), vec2(0.0, 0.0));
+                    return vec3(0, 1, 1);
                 }
                 case 3: {
-                    return PosUv(vec3(0, 0, 1), vec2(0.0, 1.0));
+                    return vec3(0, 0, 1);
                 }
                 case 4: {
-                    return PosUv(vec3(1, 0, 1), vec2(1.0, 1.0));
+                    return vec3(1, 0, 1);
                 }
                 case 5: {
-                    return PosUv(vec3(1, 1, 1), vec2(1.0, 0.0));
+                    return vec3(1, 1, 1);
                 }
             }
+        }
+        // bottom
+        case 1: {
+            switch vertex_index {
+                case 0, default: {
+                    return vec3(0, 1, 0);
+                }
+                case 1: {
+                    return vec3(1, 0, 0);
+                }
+                case 2: {
+                    return vec3(0, 0, 0);
+                }
+                case 3: {
+                    return vec3(0, 1, 0);
+                }
+                case 4: {
+                    return vec3(1, 1, 0);
+                }
+                case 5: {
+                    return vec3(1, 0, 0);
+                }
+            }
+        }
+        // front
+        case 2: {
+            switch vertex_index {
+                case 0, default: {
+                    return vec3(0, 0, 0);
+                }
+                case 1: {
+                    return vec3(1, 0, 1);
+                }
+                case 2: {
+                    return vec3(0, 0, 1);
+                }
+                case 3: {
+                    return vec3(0, 0, 0);
+                }
+                case 4: {
+                    return vec3(1, 0, 0);
+                }
+                case 5: {
+                    return vec3(1, 0, 1);
+                }
+            }
+        }
+        // back
+        case 3: {
+            switch vertex_index {
+                case 0, default: {
+                    return vec3(1, 1, 0);
+                }
+                case 1: {
+                    return vec3(0, 1, 1);
+                }
+                case 2: {
+                    return vec3(1, 1, 1);
+                }
+                case 3: {
+                    return vec3(1, 1, 0);
+                }
+                case 4: {
+                    return vec3(0, 1, 0);
+                }
+                case 5: {
+                    return vec3(0, 1, 1);
+                }
+            }
+        }
+        // left
+        case 4: {
+            switch vertex_index {
+                case 0, default: {
+                    return vec3(0, 1, 0);
+                }
+                case 1: {
+                    return vec3(0, 0, 1);
+                }
+                case 2: {
+                    return vec3(0, 1, 1);
+                }
+                case 3: {
+                    return vec3(0, 1, 0);
+                }
+                case 4: {
+                    return vec3(0, 0, 0);
+                }
+                case 5: {
+                    return vec3(0, 0, 1);
+                }
+            }
+        }
+        // right
+        case 5: {
+            switch vertex_index {
+                case 0, default: {
+                    return vec3(1, 0, 0);
+                }
+                case 1: {
+                    return vec3(1, 1, 1);
+                }
+                case 2: {
+                    return vec3(1, 0, 1);
+                }
+                case 3: {
+                    return vec3(1, 0, 0);
+                }
+                case 4: {
+                    return vec3(1, 1, 0);
+                }
+                case 5: {
+                    return vec3(1, 1, 1);
+                }
+            }
+        }
+    }
+}
+
+fn getNormal(side: u32) -> vec3<f32> {
+    switch side {
+        case 0, default: {
+            return vec3(0.0, 0.0, 1.0);
+        }
+        case 1: {
+            return vec3(0.0, 0.0, -1.0);
+        }
+        case 2: {
+            return vec3(0.0, 1.0, 0.0);
+        }
+        case 3: {
+            return vec3(0.0, -1.0, 0.0);
+        }
+        case 4: {
+            return vec3(1.0, 0.0, 0.0);
+        }
+        case 5: {
+            return vec3(-1.0, 0.0, 0.0);
         }
     }
 }
@@ -65,7 +224,7 @@ fn getPositionUv(side: u32, vertex_index: u32) -> PosUv {
     let side = (chunk_side_info.origin_z_side >> 16u) & 0xffu;
 
     let block_index = vertex_index / 6;
-    let block = block_array[block_index];
+    let block = block_array[chunk_side_info.block_data_index + block_index];
     let block_origin = vec3(
         block & 0xffu,
         (block >> 8) & 0xffu,
@@ -75,36 +234,16 @@ fn getPositionUv(side: u32, vertex_index: u32) -> PosUv {
 
     let side_vertex_index = vertex_index % 6;
 
-    let pos_uv = getPositionUv(side, side_vertex_index);
+    let pos = getPosition(side, side_vertex_index);
+    let uv = getUv(side, side_vertex_index);
+    let normal = getNormal(side);
 
-    let position4 = vec4(vec3f(chunk_origin + block_origin + pos_uv.pos), 1.0);
+    let position4 = vec4(vec3f(chunk_origin + block_origin + pos), 1.0);
 
     var output: VertexOut;
     output.position_clip = clip_from_world * position4;
-
-    var normal: vec3f;
-    switch side {
-        case 0, default: {
-            normal = vec3(0.0, 0.0, 1.0);
-        }
-        case 1: {
-            normal = vec3(0.0, 0.0, -1.0);
-        }
-        case 2: {
-            normal = vec3(0.0, 1.0, 0.0);
-        }
-        case 3: {
-            normal = vec3(0.0, -1.0, 0.0);
-        }
-        case 4: {
-            normal = vec3(1.0, 0.0, 0.0);
-        }
-        case 5: {
-            normal = vec3(-1.0, 0.0, 0.0);
-        }
-    }
     output.normal = (view_from_world * vec4f(normal, 0)).xyz;
-    output.texcoord = pos_uv.uv;
+    output.texcoord = uv;
     output.position_light_clip_0 = light_clip_from_object_array[0] * position4;
     output.position_light_clip_1 = light_clip_from_object_array[1] * position4;
     output.position_light_clip_2 = light_clip_from_object_array[2] * position4;

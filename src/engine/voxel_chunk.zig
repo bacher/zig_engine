@@ -33,13 +33,13 @@ comptime {
 pub const BlockCoordList = std.ArrayList(BlockInfo);
 
 pub const ChunkSideInfo = struct {
+    block_data_index: u32,
     chunk_origin: [3]u16,
     side: Side,
-    _padding: u8 = 0,
 };
 
 comptime {
-    std.debug.assert(@sizeOf(ChunkSideInfo) == 8);
+    std.debug.assert(@sizeOf(ChunkSideInfo) == 12);
 }
 
 pub const VoxelChunk = struct {
@@ -49,6 +49,9 @@ pub const VoxelChunk = struct {
 
     blocks_grouped_by_side: [6]BlockCoordList = .{BlockCoordList.empty} ** 6,
 
+    slot_index: u32 = 0,
+    slot_size_level: u8 = 0,
+
     pub fn init(chunk_origin: [3]u16) Self {
         return .{
             .chunk_origin = chunk_origin,
@@ -57,6 +60,12 @@ pub const VoxelChunk = struct {
 
     pub fn loadTestData(self: *Self, allocator: std.mem.Allocator) void {
         self.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        self.blocks_grouped_by_side[1].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        self.blocks_grouped_by_side[2].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        self.blocks_grouped_by_side[3].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        self.blocks_grouped_by_side[4].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        self.blocks_grouped_by_side[5].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+
         self.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 1, 1, 0 }, .block_type = .stone }) catch unreachable;
         self.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 3, 0 }, .block_type = .dirt }) catch unreachable;
         self.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 1, 1, 1 }, .block_type = .dirt }) catch unreachable;
