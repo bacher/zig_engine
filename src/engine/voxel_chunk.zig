@@ -12,7 +12,7 @@ pub const Side = enum(u8) {
 };
 
 pub const BlockType = enum(u8) {
-    air = 0,
+    none = 0,
     stone,
     dirt,
     grass,
@@ -25,6 +25,14 @@ pub const BlockInfo = struct {
     coords: [3]u8,
     block_type: BlockType,
 };
+
+pub fn makeInteriorBlockCoords(x: anytype, y: anytype, z: anytype) [3]u8 {
+    return .{
+        @intCast(x),
+        @intCast(y),
+        @intCast(z),
+    };
+}
 
 comptime {
     std.debug.assert(@sizeOf(BlockInfo) == 4);

@@ -14,12 +14,19 @@ const Engine = @import("engine").Engine;
 const GameObject = @import("engine").GameObject;
 const GameObjectGroup = @import("engine").GameObjectGroup;
 const Scene = @import("engine").Scene;
+const voxel_chunk_module = @import("engine").voxel_chunk;
 const tube = @import("engine").tube;
 const utils = @import("engine").utils;
 const zgui_utils = @import("engine").zgui_utils;
 
+const world_module = @import("world.zig");
+const World = @import("world.zig").World;
+const consts = @import("./consts.zig");
+const world_engine = @import("./world_engine_glue.zig");
+
 const Game = struct {
     allocator: std.mem.Allocator,
+    world: ?World = null,
     saved_game_objects: std.StringHashMapUnmanaged(*GameObject) = .empty,
     saved_game_object_groups: std.StringHashMapUnmanaged(*GameObjectGroup) = .empty,
 
@@ -34,9 +41,48 @@ const Game = struct {
     pub fn deinit(game: *Game) void {
         game.saved_game_objects.deinit(game.allocator);
         game.saved_game_object_groups.deinit(game.allocator);
+        if (game.world) |*world| {
+            world.deinit();
+        }
         game.allocator.destroy(game);
     }
 };
+
+fn initWorld(allocator: std.mem.Allocator, game: *Game) void {
+    var world = World.init(allocator);
+    world.initFlatWorld();
+    game.world = world;
+}
+
+fn loadChunkMeshData(allocator: std.mem.Allocator, game: *Game, engine: *Engine) void {
+    const world = game.world.?;
+
+    for (0..consts.WORLD_SIZE[2]) |z| {
+        for (0..1) |y| {
+            for (0..4) |x| {
+                const world_chunk_opt = world.chunks.get(world_module.encodeChunkPosition(x, y, z));
+
+                if (world_chunk_opt) |world_chunk| {
+                    std.debug.print("block {} {} {}!\n", .{ x, y, z });
+                    if (world_chunk.world_chunk_data) |world_chunk_data| {
+                        std.debug.print("  with data\n", .{});
+
+                        var voxel_chunk = voxel_chunk_module.VoxelChunk.init(.{
+                            @intCast(x),
+                            @intCast(y),
+                            @intCast(z),
+                        });
+                        world_engine.updateVoxelChunk(allocator, world_chunk_data, &voxel_chunk);
+
+                        // voxel_chunk.loadTestData(allocator);
+
+                        engine.active_scene.?.voxel_grid.appendChunk(voxel_chunk);
+                    }
+                }
+            }
+        }
+    }
+}
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -142,6 +188,9 @@ pub fn main(init: std.process.Init) !void {
         .parent = null,
         .animation_name = "walkLikeMan",
     }));
+
+    initWorld(allocator, game);
+    loadChunkMeshData(allocator, game, engine);
 
     // -- Tube data for coordinates --
 

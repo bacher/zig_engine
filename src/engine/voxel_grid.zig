@@ -9,7 +9,7 @@ const Side = @import("./voxel_chunk.zig").Side;
 const BlockInfo = @import("./voxel_chunk.zig").BlockInfo;
 
 pub const VOXEL_GRID_SLOT_SIZE = 1024;
-pub const VOXEL_GRID_SLOT_COUNT = 1024;
+pub const VOXEL_GRID_SLOT_COUNT = 2 * 1024;
 pub const VOXEL_GRID_BUFFER_SIZE = VOXEL_GRID_SLOT_SIZE * VOXEL_GRID_SLOT_COUNT;
 
 comptime {
@@ -91,10 +91,6 @@ pub const VoxelGrid = struct {
 
         grid.chunks.ensureTotalCapacity(allocator, 1024) catch @panic("OOM");
 
-        var chunk = VoxelChunk.init(.{ 0, 0, 0 });
-        chunk.loadTestData(allocator);
-        grid.chunks.appendAssumeCapacity(chunk);
-
         return grid;
     }
 
@@ -107,6 +103,10 @@ pub const VoxelGrid = struct {
         }
         self.chunks.deinit(self.allocator);
         self.allocator.destroy(self);
+    }
+
+    pub fn appendChunk(self: *Self, chunk: VoxelChunk) void {
+        self.chunks.append(self.allocator, chunk) catch @panic("OOM");
     }
 
     pub fn uploadToGPU(self: *Self, gctx: *zgpu.GraphicsContext) void {
