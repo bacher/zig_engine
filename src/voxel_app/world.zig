@@ -12,7 +12,7 @@ pub fn encodeChunkPosition(x: anytype, y: anytype, z: anytype) ChunkPosition {
 
 pub fn decodeChunkPosition(position: ChunkPosition) [3]u32 {
     return .{
-        @as(u32, @intCast(position & 0xfff)), //     first 12 bit
+        @as(u32, @intCast(position & 0xfff)), //      first 12 bit
         @as(u32, @intCast(position >> 12 & 0xff)), // then 8 bit
         @as(u32, @intCast(position >> 20)), //        and rest (3/4 bit)
     };
@@ -55,12 +55,14 @@ pub const World = struct {
     }
 
     pub fn initFlatWorld(self: *World) void {
+        const center_z = WORLD_SIZE[2] / 2;
+
         for (0..WORLD_SIZE[2]) |z| {
             for (0..WORLD_SIZE[1]) |y| {
-                for (0..WORLD_SIZE[1]) |x| { // TODO: change to WORLD_SIZE[0]
+                for (0..WORLD_SIZE[0]) |x| {
                     var map_chunk: MapChunk = undefined;
 
-                    if (z == WORLD_SIZE[2] / 2) {
+                    if (z == center_z - 1) {
                         const world_chunk_data = self.allocator.create(WorldChunkData) catch @panic("OOM");
 
                         world_chunk_data.* = WorldChunkData.initFlat();
@@ -69,7 +71,7 @@ pub const World = struct {
                             .state = MapChunkState.semi_solid,
                             .world_chunk_data = world_chunk_data,
                         };
-                    } else if (z == (WORLD_SIZE[2] / 2) - 1) {
+                    } else if (z == center_z - 2) {
                         // const world_chunk_data = self.allocator.create(WorldChunkData) catch @panic("OOM");
                         // world_chunk_data.* = WorldChunkData.initSolid();
 
@@ -78,7 +80,7 @@ pub const World = struct {
                             // .world_chunk_data = world_chunk_data,
                             .world_chunk_data = null,
                         };
-                    } else if (z < (WORLD_SIZE[2] / 2) - 1) {
+                    } else if (z < center_z - 2) {
                         map_chunk = .{
                             .state = .solid_unloaded,
                             .world_chunk_data = null,

@@ -13,6 +13,7 @@ struct ChunkInfo /* 32 byte */ {
 
 // SHOULD BE IN SYNC WITH THE SAME NAMED CONSTANT IN ZIG CODE (in src/engine/voxel_grid.zig)
 const BLOCKS_PER_SLOT = 256;
+const WORLD_ORIGIN = vec3u(256, 128, 4);
 const CHUNK_SIZE = 32;
 
 struct VertexOut {
@@ -247,7 +248,7 @@ fn extractSideDataIndex(indices: array<u32, 3>, side: u32) -> u32 {
     let chunk_side = instance_index & 0x7u;
 
     let chunk_info = chunk_info_array[chunk_index];
-    let chunk_origin = chunk_info.chunk_origin * CHUNK_SIZE;
+    let chunk_origin = (vec3i(chunk_info.chunk_origin) - vec3i(WORLD_ORIGIN)) * CHUNK_SIZE;
     let block_index = vertex_index / 6;
     let global_block_index =
         chunk_info.slot_index * BLOCKS_PER_SLOT +
@@ -268,7 +269,7 @@ fn extractSideDataIndex(indices: array<u32, 3>, side: u32) -> u32 {
     let uv = getUv(chunk_side, side_vertex_index);
     let normal = getNormal(chunk_side);
 
-    let position4 = vec4(vec3f(chunk_origin + block_origin + block_vertex), 1.0);
+    let position4 = vec4f(vec3f(chunk_origin + vec3i(block_origin + block_vertex)), 1.0);
 
     var output: VertexOut;
     output.position_clip = clip_from_world * position4;

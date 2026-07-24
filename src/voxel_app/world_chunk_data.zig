@@ -24,7 +24,7 @@ pub const WorldChunkData = struct {
     pub fn initFlat() WorldChunkData {
         var chunk = WorldChunkData.initEmpty();
 
-        for ((CHUNK_SIZE / 2)..CHUNK_SIZE) |z| {
+        for (0..(CHUNK_SIZE / 2)) |z| {
             for (0..CHUNK_SIZE) |y| {
                 for (0..CHUNK_SIZE) |x| {
                     chunk.blocks[z][y][x] = BlockType.stone;

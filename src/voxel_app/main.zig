@@ -57,9 +57,13 @@ fn initWorld(allocator: std.mem.Allocator, game: *Game) void {
 fn loadChunkMeshData(allocator: std.mem.Allocator, game: *Game, engine: *Engine) void {
     const world = game.world.?;
 
-    for (0..consts.WORLD_SIZE[2]) |z| {
-        for (0..1) |y| {
-            for (0..4) |x| {
+    for (0..5) |z_world| {
+        for (0..5) |y_world| {
+            for (0..5) |x_world| {
+                const x = (consts.WORLD_ORIGIN[0] - 2) + x_world;
+                const y = (consts.WORLD_ORIGIN[1] - 2) + y_world;
+                const z = (consts.WORLD_ORIGIN[2] - 2) + z_world;
+
                 const world_chunk_opt = world.chunks.get(world_module.encodeChunkPosition(x, y, z));
 
                 if (world_chunk_opt) |world_chunk| {
