@@ -1,10 +1,10 @@
 @group(0) @binding(0) var<uniform> clip_from_world: mat4x4<f32>;
 @group(0) @binding(1) var<uniform> view_from_world: mat4x4<f32>;
 
-struct ChunkInfo {
+struct ChunkInfo /* 32 byte */ {
     side_data_indices: array<u32, 3>,
-    origin_xy: u32,
-    origin_z_slot_index: u32,
+    chunk_origin: vec3u,
+    slot_index: u32,
 }
 
 @group(2) @binding(0) var<uniform> light_clip_from_object_array: array<mat4x4<f32>, 3>;
@@ -247,15 +247,10 @@ fn extractSideDataIndex(indices: array<u32, 3>, side: u32) -> u32 {
     let chunk_side = instance_index & 0x7u;
 
     let chunk_info = chunk_info_array[chunk_index];
-    let chunk_origin = vec3(
-        chunk_info.origin_xy & 0xffffu,
-        chunk_info.origin_xy >> 16u,
-        chunk_info.origin_z_slot_index & 0xffffu,
-    ) * CHUNK_SIZE;
-    let data_slot_index = chunk_info.origin_z_slot_index >> 16u;
+    let chunk_origin = chunk_info.chunk_origin * CHUNK_SIZE;
     let block_index = vertex_index / 6;
     let global_block_index =
-        data_slot_index * BLOCKS_PER_SLOT +
+        chunk_info.slot_index * BLOCKS_PER_SLOT +
         extractSideDataIndex(chunk_info.side_data_indices, chunk_side) +
         block_index;
 

@@ -21,7 +21,7 @@ pub const BlockType = enum(u8) {
     snow,
 };
 
-pub const BlockInfo = struct {
+pub const BlockInfo = extern struct {
     coords: [3]u8,
     block_type: BlockType,
 };
@@ -40,20 +40,21 @@ comptime {
 
 pub const BlockCoordList = std.ArrayList(BlockInfo);
 
-pub const ChunkInfo = struct {
+pub const ChunkInfo = extern struct {
     side_data_indices: [6]u16,
-    chunk_origin: [3]u16,
-    data_slot_index: u16,
+    _padding: u32 = 0,
+    chunk_origin: [3]u32,
+    data_slot_index: u32,
 };
 
 comptime {
-    std.debug.assert(@sizeOf(ChunkInfo) == 20);
+    std.debug.assert(@sizeOf(ChunkInfo) == 32);
 }
 
 pub const VoxelChunk = struct {
     pub const Self = @This();
 
-    chunk_origin: [3]u16,
+    chunk_origin: [3]u32,
 
     blocks_grouped_by_side: [6]BlockCoordList = .{BlockCoordList.empty} ** 6,
 
@@ -61,7 +62,7 @@ pub const VoxelChunk = struct {
     data_slot_index: u32 = 0,
     data_slot_size_level: u8 = 0,
 
-    pub fn init(chunk_origin: [3]u16) Self {
+    pub fn init(chunk_origin: [3]u32) Self {
         return .{
             .chunk_origin = chunk_origin,
         };
