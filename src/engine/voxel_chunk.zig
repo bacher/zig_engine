@@ -9,6 +9,21 @@ pub const Side = enum(u8) {
     back = 3,
     left = 4,
     right = 5,
+
+    pub fn getOpposite(self: Side) Side {
+        switch (self) {
+            .top => return .bottom,
+            .bottom => return .top,
+            .front => return .back,
+            .back => return .front,
+            .left => return .right,
+            .right => return .left,
+        }
+    }
+
+    pub fn getOppositeIndex(self: Side) u8 {
+        return @intFromEnum(self.getOpposite());
+    }
 };
 
 pub const BlockType = enum(u8) {

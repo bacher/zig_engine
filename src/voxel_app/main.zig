@@ -15,12 +15,16 @@ const GameObject = @import("engine").GameObject;
 const GameObjectGroup = @import("engine").GameObjectGroup;
 const Scene = @import("engine").Scene;
 const voxel_chunk_module = @import("engine").voxel_chunk;
+const Side = @import("engine").voxel_chunk.Side;
 const tube = @import("engine").tube;
 const utils = @import("engine").utils;
 const zgui_utils = @import("engine").zgui_utils;
 
 const world_module = @import("world.zig");
 const World = @import("world.zig").World;
+const encodeChunkPositionArray = @import("world.zig").encodeChunkPositionArray;
+const WorldChunk = @import("world.zig").WorldChunk;
+const ChunksHashMap = @import("world.zig").ChunksHashMap;
 const consts = @import("./consts.zig");
 const world_engine = @import("./world_engine_glue.zig");
 
@@ -54,6 +58,82 @@ fn initWorld(allocator: std.mem.Allocator, game: *Game) void {
     game.world = world;
 }
 
+pub fn normalizeChunkCoords(coords_in: [3]i32) ?[3]u32 {
+    var coords = coords_in;
+
+    if (coords[0] < 0) {
+        coords[0] += consts.WORLD_SIZE[0];
+    } else if (coords[0] >= consts.WORLD_SIZE[0]) {
+        coords[0] -= consts.WORLD_SIZE[0];
+    }
+
+    if (coords[1] < 0 or coords[1] >= consts.WORLD_SIZE[1]) {
+        return null;
+    }
+
+    if (coords[2] < 0 or coords[2] >= consts.WORLD_SIZE[2]) {
+        return null;
+    }
+
+    return .{
+        @intCast(coords[0]),
+        @intCast(coords[1]),
+        @intCast(coords[2]),
+    };
+}
+
+const SurroundingChunk = union(enum) {
+    invalid: bool,
+    chunk: ?*const WorldChunk,
+};
+
+pub fn getSurroundingChunks(chunks: *const ChunksHashMap, coords: [3]u32) [6]SurroundingChunk {
+    const coords_i = [3]i32{ @intCast(coords[0]), @intCast(coords[1]), @intCast(coords[2]) };
+
+    const left_opt = normalizeChunkCoords(.{ coords_i[0] - 1, coords_i[1], coords_i[2] });
+    const right_opt = normalizeChunkCoords(.{ coords_i[0] + 1, coords_i[1], coords_i[2] });
+    const back_opt = normalizeChunkCoords(.{ coords_i[0], coords_i[1] - 1, coords_i[2] });
+    const front_opt = normalizeChunkCoords(.{ coords_i[0], coords_i[1] + 1, coords_i[2] });
+    const bottom_opt = normalizeChunkCoords(.{ coords_i[0], coords_i[1], coords_i[2] - 1 });
+    const top_opt = normalizeChunkCoords(.{ coords_i[0], coords_i[1], coords_i[2] + 1 });
+
+    const invalid = SurroundingChunk{ .invalid = true };
+    var resulting_chunks = [6]SurroundingChunk{ invalid, invalid, invalid, invalid, invalid, invalid };
+
+    if (left_opt) |left| {
+        resulting_chunks[@intFromEnum(Side.left)] = .{
+            .chunk = chunks.getPtr(encodeChunkPositionArray(left)),
+        };
+    }
+    if (right_opt) |right| {
+        resulting_chunks[@intFromEnum(Side.right)] = .{
+            .chunk = chunks.getPtr(encodeChunkPositionArray(right)),
+        };
+    }
+    if (back_opt) |back| {
+        resulting_chunks[@intFromEnum(Side.back)] = .{
+            .chunk = chunks.getPtr(encodeChunkPositionArray(back)),
+        };
+    }
+    if (front_opt) |front| {
+        resulting_chunks[@intFromEnum(Side.front)] = .{
+            .chunk = chunks.getPtr(encodeChunkPositionArray(front)),
+        };
+    }
+    if (bottom_opt) |bottom| {
+        resulting_chunks[@intFromEnum(Side.bottom)] = .{
+            .chunk = chunks.getPtr(encodeChunkPositionArray(bottom)),
+        };
+    }
+    if (top_opt) |top| {
+        resulting_chunks[@intFromEnum(Side.top)] = .{
+            .chunk = chunks.getPtr(encodeChunkPositionArray(top)),
+        };
+    }
+
+    return resulting_chunks;
+}
+
 fn loadChunkMeshData(allocator: std.mem.Allocator, game: *Game, engine: *Engine) void {
     const world = game.world.?;
 
@@ -64,24 +144,57 @@ fn loadChunkMeshData(allocator: std.mem.Allocator, game: *Game, engine: *Engine)
                 const y = (consts.WORLD_ORIGIN[1] - 2) + y_world;
                 const z = (consts.WORLD_ORIGIN[2] - 2) + z_world;
 
-                const world_chunk_opt = world.chunks.get(world_module.encodeChunkPosition(x, y, z));
+                const chunk_coords: [3]u32 = .{
+                    @intCast(x),
+                    @intCast(y),
+                    @intCast(z),
+                };
+
+                const world_chunk_opt = world.chunks.getPtr(world_module.encodeChunkPositionArray(chunk_coords));
 
                 if (world_chunk_opt) |world_chunk| {
                     std.debug.print("block {} {} {}!\n", .{ x, y, z });
-                    if (world_chunk.world_chunk_data) |world_chunk_data| {
-                        std.debug.print("  with data\n", .{});
+                    std.debug.print("  with data\n", .{});
 
-                        var voxel_chunk = voxel_chunk_module.VoxelChunk.init(.{
-                            @intCast(x),
-                            @intCast(y),
-                            @intCast(z),
-                        });
-                        world_engine.updateVoxelChunk(allocator, world_chunk_data, &voxel_chunk);
+                    // CHECKING
 
-                        // voxel_chunk.loadTestData(allocator);
+                    const surrounding_chunks = getSurroundingChunks(&world.chunks, chunk_coords);
 
-                        engine.active_scene.?.voxel_grid.appendChunk(voxel_chunk);
+                    var can_be_skipped = true;
+
+                    for (surrounding_chunks, 0..) |surrounding_chunk, side_index| {
+                        const side = @as(Side, @enumFromInt(side_index));
+                        const opposite_side = side.getOpposite();
+
+                        switch (surrounding_chunk) {
+                            .chunk => |chunk_opt| {
+                                if (chunk_opt) |chunk| {
+                                    if (!chunk.flags.getSideSolidness(opposite_side)) {
+                                        can_be_skipped = false;
+                                        break;
+                                    }
+                                } else {
+                                    // if there is no chunk, it's probably a border of the world, so we can't skip
+                                }
+                            },
+                            .invalid => {
+                                // it's okay, meaning we are out of world bounds
+                            },
+                        }
                     }
+
+                    if (can_be_skipped) {
+                        continue;
+                    }
+
+                    //
+
+                    var voxel_chunk = voxel_chunk_module.VoxelChunk.init(chunk_coords);
+                    world_engine.updateVoxelChunk(allocator, world_chunk, &voxel_chunk);
+
+                    // voxel_chunk.loadTestData(allocator);
+
+                    engine.active_scene.?.voxel_grid.appendChunk(voxel_chunk);
                 }
             }
         }

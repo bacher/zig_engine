@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const WorldChunkData = @import("./world_chunk_data.zig").WorldChunkData;
+const ChunkFlags = @import("./world_chunk_data.zig").ChunkFlags;
 const BlockPosition = @import("./consts.zig").BlockPosition;
 const ChunkPosition = @import("./consts.zig").ChunkPosition;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
@@ -8,6 +9,10 @@ const WORLD_SIZE = @import("./consts.zig").WORLD_SIZE;
 
 pub fn encodeChunkPosition(x: anytype, y: anytype, z: anytype) ChunkPosition {
     return @as(ChunkPosition, @intCast(x)) | @as(ChunkPosition, @intCast(y)) << 12 | @as(ChunkPosition, @intCast(z)) << 20;
+}
+
+pub fn encodeChunkPositionArray(coords: anytype) ChunkPosition {
+    return encodeChunkPosition(coords[0], coords[1], coords[2]);
 }
 
 pub fn decodeChunkPosition(position: ChunkPosition) [3]u32 {
@@ -18,19 +23,20 @@ pub fn decodeChunkPosition(position: ChunkPosition) [3]u32 {
     };
 }
 
-const MapChunkState = enum(u8) {
+const WorldChunkState = enum(u8) {
     empty,
     semi_solid,
     solid_loaded,
     solid_unloaded,
 };
 
-const MapChunk = struct {
-    state: MapChunkState,
+pub const WorldChunk = struct {
+    state: WorldChunkState,
+    flags: ChunkFlags,
     world_chunk_data: ?*WorldChunkData,
 };
 
-const ChunksHashMap = std.AutoHashMapUnmanaged(ChunkPosition, MapChunk);
+pub const ChunksHashMap = std.AutoHashMapUnmanaged(ChunkPosition, WorldChunk);
 
 pub const World = struct {
     allocator: std.mem.Allocator,
@@ -60,7 +66,7 @@ pub const World = struct {
         for (0..WORLD_SIZE[2]) |z| {
             for (0..WORLD_SIZE[1]) |y| {
                 for (0..WORLD_SIZE[0]) |x| {
-                    var map_chunk: MapChunk = undefined;
+                    var map_chunk: WorldChunk = undefined;
 
                     if (z == center_z - 1) {
                         const world_chunk_data = self.allocator.create(WorldChunkData) catch @panic("OOM");
@@ -68,7 +74,8 @@ pub const World = struct {
                         world_chunk_data.* = WorldChunkData.initFlat();
 
                         map_chunk = .{
-                            .state = MapChunkState.semi_solid,
+                            .state = .semi_solid,
+                            .flags = WorldChunkData.getMetaFlags(world_chunk_data),
                             .world_chunk_data = world_chunk_data,
                         };
                     } else if (z == center_z - 2) {
@@ -76,18 +83,21 @@ pub const World = struct {
                         // world_chunk_data.* = WorldChunkData.initSolid();
 
                         map_chunk = .{
-                            .state = MapChunkState.solid_unloaded,
+                            .state = .solid_unloaded,
                             // .world_chunk_data = world_chunk_data,
+                            .flags = .{},
                             .world_chunk_data = null,
                         };
                     } else if (z < center_z - 2) {
                         map_chunk = .{
                             .state = .solid_unloaded,
+                            .flags = .{},
                             .world_chunk_data = null,
                         };
                     } else {
                         map_chunk = .{
                             .state = .empty,
+                            .flags = .{},
                             .world_chunk_data = null,
                         };
                     }

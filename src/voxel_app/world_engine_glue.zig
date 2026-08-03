@@ -6,9 +6,18 @@ const Side = engine.voxel_chunk.Side;
 const VoxelChunk = engine.voxel_chunk.VoxelChunk;
 
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
-const WorldChunkData = @import("./world_chunk_data.zig").WorldChunkData;
+const WORLD_SIZE = @import("./consts.zig").WORLD_SIZE;
+const WorldChunk = @import("./world.zig").WorldChunk;
+const ChunksHashMap = @import("./world.zig").ChunksHashMap;
+const encodeChunkPosition = @import("./world.zig").encodeChunkPosition;
+const encodeChunkPositionArray = @import("./world.zig").encodeChunkPositionArray;
 
-pub fn updateVoxelChunk(allocator: std.mem.Allocator, world_chunk_data: *const WorldChunkData, voxel_chunk: *VoxelChunk) void {
+pub fn updateVoxelChunk(allocator: std.mem.Allocator, world_chunk: *const WorldChunk, voxel_chunk: *VoxelChunk) void {
+    if (world_chunk.world_chunk_data == null) {
+        return;
+    }
+
+    const world_chunk_data = world_chunk.world_chunk_data.?;
     const b = &world_chunk_data.blocks;
 
     for (b, 0..) |slice, z| {
