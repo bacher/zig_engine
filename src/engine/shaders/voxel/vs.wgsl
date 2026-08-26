@@ -202,16 +202,16 @@ fn getNormal(side: u32) -> vec3<f32> {
             return vec3(0.0, 0.0, -1.0);
         }
         case 2: {
-            return vec3(0.0, 1.0, 0.0);
-        }
-        case 3: {
             return vec3(0.0, -1.0, 0.0);
         }
+        case 3: {
+            return vec3(0.0, 1.0, 0.0);
+        }
         case 4: {
-            return vec3(1.0, 0.0, 0.0);
+            return vec3(-1.0, 0.0, 0.0);
         }
         case 5: {
-            return vec3(-1.0, 0.0, 0.0);
+            return vec3(1.0, 0.0, 0.0);
         }
     }
 }
