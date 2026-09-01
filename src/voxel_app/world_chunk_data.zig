@@ -52,6 +52,9 @@ pub const WorldChunkData = struct {
                 }
             }
         }
+        chunk.blocks[CHUNK_SIZE / 2 - 1][0][0] = BlockType.snow;
+        chunk.blocks[CHUNK_SIZE / 2 - 1][0][1] = BlockType.snow;
+        chunk.blocks[CHUNK_SIZE / 2 - 1][1][0] = BlockType.snow;
 
         return chunk;
     }

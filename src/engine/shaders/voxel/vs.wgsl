@@ -30,27 +30,38 @@ struct VertexOut {
 }
 
 
-fn getUv(side: u32, vertex_index: u32) -> vec2f {
-    switch vertex_index {
-        case 0, default: {
-            return vec2(0.0, 1.0);
+const ATLAS_SLOT = 0.046875;
+
+fn getUv(side: u32, vertex_index: u32, block_type: u32) -> vec2f {
+    var shift = vec2(0.0, 0.0);
+    // should be synced with src/engine/voxel_chunk.zig's BlockType enum
+    switch block_type {
+        case 0, default: { /* none  */ shift = vec2( 0.0,  0.0); }
+        case 1: {          /* stone */ shift = vec2( 1.0,  0.0); }
+        case 2: {          /* dirt  */ shift = vec2( 2.0,  0.0); }
+        case 3: {          /* grass */
+            switch side {
+                case 0:  { shift = vec2( 12.0, 12.0); }
+                case 1:  { shift = vec2(  0.0,  2.0); }
+                default: { shift = vec2(  3.0,  0.0); }
+            }
         }
-        case 1: {
-            return vec2(1.0, 0.0);
-        }
-        case 2: {
-            return vec2(0.0, 0.0);
-        }
-        case 3: {
-            return vec2(0.0, 1.0);
-        }
-        case 4: {
-            return vec2(1.0, 1.0);
-        }
-        case 5: {
-            return vec2(1.0, 0.0);
-        }
+        case 4: {          /* water */ shift = vec2(13.0, 12.0); }
+        case 5: {          /* sand  */ shift = vec2( 2.0,  1.0); }
+        case 6: {          /* snow  */ shift = vec2( 0.0,  4.0); }
     }
+
+    var uv = vec2(0.0, 0.0);
+    switch vertex_index {
+        case 0, default: { uv = vec2(0.0, 1.0); }
+        case 1:          { uv = vec2(1.0, 0.0); }
+        case 2:          { uv = vec2(0.0, 0.0); }
+        case 3:          { uv = vec2(0.0, 1.0); }
+        case 4:          { uv = vec2(1.0, 1.0); }
+        case 5:          { uv = vec2(1.0, 0.0); }
+    }
+
+    return (shift + uv) * ATLAS_SLOT;
 }
 
 fn getPosition(side: u32, vertex_index: u32) -> vec3<u32> {
@@ -278,7 +289,7 @@ fn extractSideDataIndex(indices: array<u32, 3>, side: u32) -> u32 {
     let side_vertex_index = vertex_index % 6;
 
     let block_vertex = getPosition(chunk_side, side_vertex_index);
-    let uv = getUv(chunk_side, side_vertex_index);
+    let uv = getUv(chunk_side, side_vertex_index, block_type);
     let normal = getNormal(chunk_side);
 
     let position4 = vec4f(vec3f(chunk_origin + vec3i(block_origin + block_vertex)), 1.0);
