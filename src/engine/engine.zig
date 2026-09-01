@@ -607,11 +607,16 @@ pub const Engine = struct {
                             settings_uniform.slice[0] = .{
                                 .ssao_enabled = engine.state.ssao_enabled,
                             };
+                            const camera_chunk_uniform = engine.gctx.uniformsAllocate([3]u32, 1);
+                            camera_chunk_uniform.slice[0] = scene.camera.chunk;
 
                             shadow_map_pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
                                 clip_from_world_uniform.offset,
                                 clip_from_world_uniform.offset, // Is it okay to use the same buffer for both uniforms?
                                 settings_uniform.offset,
+                                // TODO: fix later
+                                clip_from_world_uniform.offset,
+                                camera_chunk_uniform.offset,
                             });
 
                             for (potentially_visible_game_objects) |game_object| {
@@ -699,11 +704,17 @@ pub const Engine = struct {
                     settings_uniform.slice[0] = .{
                         .ssao_enabled = engine.state.ssao_enabled,
                     };
+                    const clip_from_world_chunked_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+                    clip_from_world_chunked_uniform.slice[0] = scene.camera.clip_from_world_chunked;
+                    const camera_chunk_uniform = engine.gctx.uniformsAllocate([3]u32, 1);
+                    camera_chunk_uniform.slice[0] = scene.camera.chunk;
 
                     pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
                         clip_from_world_uniform.offset,
                         view_from_world_uniform.offset,
                         settings_uniform.offset,
+                        clip_from_world_chunked_uniform.offset,
+                        camera_chunk_uniform.offset,
                     });
 
                     // TODO: WHY IT DOES NOT WORK HERE, BUT WORKS IF IN SPACE TREE?

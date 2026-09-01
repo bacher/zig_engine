@@ -46,6 +46,22 @@ pub const SceneBindGroupLayout = struct {
                 true,
                 0,
             ),
+            // world to clip matrix (chunked)
+            zgpu.bufferEntry(
+                4,
+                .{ .vertex = true },
+                .uniform,
+                true,
+                0,
+            ),
+            // camera chunk
+            zgpu.bufferEntry(
+                5,
+                .{ .vertex = true },
+                .uniform,
+                true,
+                0,
+            ),
         });
 
         return .{
@@ -93,6 +109,20 @@ pub const SceneBindGroupLayout = struct {
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
                     .size = @sizeOf(SceneShaderRuntimeSettings),
+                },
+                // world to clip matrix (chunked)
+                .{
+                    .binding = 4,
+                    .buffer_handle = gctx.uniforms.buffer,
+                    .offset = 0,
+                    .size = @sizeOf(zmath.Mat),
+                },
+                // camera chunk
+                .{
+                    .binding = 5,
+                    .buffer_handle = gctx.uniforms.buffer,
+                    .offset = 0,
+                    .size = @sizeOf([3]u32),
                 },
             },
         );

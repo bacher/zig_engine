@@ -140,21 +140,24 @@ fn loadChunkMeshData(allocator: std.mem.Allocator, game: *Game, engine: *Engine)
     for (0..5) |z_world| {
         for (0..5) |y_world| {
             for (0..5) |x_world| {
+                // const x: u32 = @intCast(x_world);
+                // const y: u32 = @intCast(y_world);
+                // const z: u32 = @intCast(z_world);
+                // const x = @as(i32, @intCast(x_world)) - 2;
+                // const y = @as(i32, @intCast(y_world)) - 2;
+                // const z = @as(i32, @intCast(z_world)); // - 2;
                 const x = (consts.WORLD_ORIGIN[0] - 2) + x_world;
                 const y = (consts.WORLD_ORIGIN[1] - 2) + y_world;
                 const z = (consts.WORLD_ORIGIN[2] - 2) + z_world;
 
-                const chunk_coords: [3]u32 = .{
-                    @intCast(x),
-                    @intCast(y),
-                    @intCast(z),
-                };
+                const chunk_coords: [3]u32 = world_module.normalizeChunkPosition(x, y, z);
+                // const chunk_coords: [3]u32 = .{ x, y, z };
 
                 const world_chunk_opt = world.chunks.getPtr(world_module.encodeChunkPositionArray(chunk_coords));
 
                 if (world_chunk_opt) |world_chunk| {
-                    std.debug.print("block {} {} {}!\n", .{ x, y, z });
-                    std.debug.print("  with data\n", .{});
+                    std.debug.print("block[i] {} {} {}!\n", .{ x, y, z });
+                    std.debug.print("block[n] {} {} {}!\n", .{ chunk_coords[0], chunk_coords[1], chunk_coords[2] });
 
                     // CHECKING
 
@@ -254,6 +257,8 @@ pub fn main(init: std.process.Init) !void {
     defer scene.deinit();
 
     scene.camera.updatePosition(.{ -2.06, -2.96, 8.45 });
+    // edge of the world:
+    // scene.camera.updatePosition(.{ -8192.0, -4096.0, 0 });
 
     // -- Skybox (old) --
 

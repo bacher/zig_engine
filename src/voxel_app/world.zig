@@ -7,6 +7,34 @@ const ChunkPosition = @import("./consts.zig").ChunkPosition;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const WORLD_SIZE = @import("./consts.zig").WORLD_SIZE;
 
+pub fn normalizeChunkPosition(x: anytype, y: anytype, z: anytype) [3]u32 {
+    var normalized_x = x;
+    var normalized_y = y;
+    var normalized_z = z;
+
+    if (x >= WORLD_SIZE[0]) {
+        normalized_x = x - WORLD_SIZE[0];
+    } else if (x < 0) {
+        normalized_x = x + WORLD_SIZE[0];
+    }
+    if (y >= WORLD_SIZE[1]) {
+        normalized_y = y - WORLD_SIZE[1];
+    } else if (y < 0) {
+        normalized_y = y + WORLD_SIZE[1];
+    }
+    if (z >= WORLD_SIZE[2]) {
+        normalized_z = z - WORLD_SIZE[2];
+    } else if (z < 0) {
+        normalized_z = z + WORLD_SIZE[2];
+    }
+
+    return .{
+        @intCast(normalized_x),
+        @intCast(normalized_y),
+        @intCast(normalized_z),
+    };
+}
+
 pub fn encodeChunkPosition(x: anytype, y: anytype, z: anytype) ChunkPosition {
     return @as(ChunkPosition, @intCast(x)) | @as(ChunkPosition, @intCast(y)) << 12 | @as(ChunkPosition, @intCast(z)) << 20;
 }

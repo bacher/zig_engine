@@ -1,5 +1,7 @@
 @group(0) @binding(0) var<uniform> clip_from_world: mat4x4<f32>;
 @group(0) @binding(1) var<uniform> view_from_world: mat4x4<f32>;
+@group(0) @binding(4) var<uniform> clip_from_world_chunked: mat4x4<f32>;
+@group(0) @binding(5) var<uniform> camera_chunk: vec3u;
 
 struct ChunkInfo /* 32 byte */ {
     side_data_indices: array<u32, 3>,
@@ -14,6 +16,7 @@ struct ChunkInfo /* 32 byte */ {
 // SHOULD BE IN SYNC WITH THE SAME NAMED CONSTANT IN ZIG CODE (in src/engine/voxel_grid.zig)
 const BLOCKS_PER_SLOT = 256;
 const WORLD_ORIGIN = vec3u(256, 128, 4);
+const WORLD_SIZE = vec3u(512, 256, 8);
 const CHUNK_SIZE = 32;
 
 struct VertexOut {
@@ -248,7 +251,16 @@ fn extractSideDataIndex(indices: array<u32, 3>, side: u32) -> u32 {
     let chunk_side = instance_index & 0x7u;
 
     let chunk_info = chunk_info_array[chunk_index];
-    let chunk_origin = (vec3i(chunk_info.chunk_origin) - vec3i(WORLD_ORIGIN)) * CHUNK_SIZE;
+    // let chunk_origin = (vec3i(chunk_info.chunk_origin) - vec3i(WORLD_ORIGIN)) * CHUNK_SIZE;
+    var diff = vec3i(chunk_info.chunk_origin) - vec3i(camera_chunk);
+    // Wrapping logic for the x axis
+    if (diff.x > i32(WORLD_ORIGIN[0])) {
+        diff.x -= i32(WORLD_SIZE[0]);
+    } else if (diff.x < -i32(WORLD_ORIGIN[0])) {
+        diff.x += i32(WORLD_SIZE[0]);
+    }
+
+    let chunk_origin = diff * CHUNK_SIZE;
     let block_index = vertex_index / 6;
     let global_block_index =
         chunk_info.slot_index * BLOCKS_PER_SLOT +
@@ -272,7 +284,7 @@ fn extractSideDataIndex(indices: array<u32, 3>, side: u32) -> u32 {
     let position4 = vec4f(vec3f(chunk_origin + vec3i(block_origin + block_vertex)), 1.0);
 
     var output: VertexOut;
-    output.position_clip = clip_from_world * position4;
+    output.position_clip = clip_from_world_chunked * position4;
     output.normal = (view_from_world * vec4f(normal, 0)).xyz;
     output.texcoord = uv;
     output.position_light_clip_0 = light_clip_from_object_array[0] * position4;

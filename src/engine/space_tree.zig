@@ -214,6 +214,10 @@ pub fn SpaceTree(comptime ElementType: type) type {
         }
 
         pub fn getObjectsInBoundBox(space_tree: *This, bound_box: BoundBox(f32)) []*ElementType {
+            // if (true) {
+            //     return &.{};
+            // }
+
             Debug.find_invocations_count = 0;
             Debug.active_space_nodes_count = 0;
 

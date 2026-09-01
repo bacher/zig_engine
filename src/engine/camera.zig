@@ -7,12 +7,32 @@ const utils = @import("./utils.zig");
 const BoundBox = @import("./bound_box.zig").BoundBox;
 const FrustumPoints = @import("./frustum.zig").FrustumPoints;
 
+pub const CHUNK_SIZE = 32.0;
+// TODO: dedupe
+const WORLD_ORIGIN_CHUNK = [_]i32{ 256, 128, 4 };
+const WORLD_SIZE = [_]u32{
+    std.math.pow(u32, 2, 9), //   512 chunks ( 16384 blocks)
+    std.math.pow(u32, 2, 8), //   256 chunks (  8192 blocks)
+    std.math.pow(u32, 2, 3), //     8 chunks (   256 blocks)
+};
+
+fn getChunk(position: [3]f32) [3]u32 {
+    // TODO: refactor to use integer and bitwise shift operations instead of float operations
+    return .{
+        @intCast(@mod(@as(i32, @intFromFloat(@divFloor(position[0], CHUNK_SIZE))) + WORLD_ORIGIN_CHUNK[0], WORLD_SIZE[0])),
+        @intCast(@mod(@as(i32, @intFromFloat(@divFloor(position[1], CHUNK_SIZE))) + WORLD_ORIGIN_CHUNK[1], WORLD_SIZE[1])),
+        @intCast(@mod(@as(i32, @intFromFloat(@divFloor(position[2], CHUNK_SIZE))) + WORLD_ORIGIN_CHUNK[2], WORLD_SIZE[2])),
+    };
+}
+
 pub const Camera = struct {
     aspect_ratio: f32,
 
     position: [3]f32,
+    chunk: [3]u32,
 
     camera_from_world: zmath.Mat,
+    camera_from_world_chunked: zmath.Mat,
     normalized_view_from_camera: zmath.Mat,
     view_from_normalized_view: zmath.Mat,
     clip_from_view: zmath.Mat,
@@ -21,13 +41,15 @@ pub const Camera = struct {
     // derived
     view_from_camera: zmath.Mat,
     clip_from_world: zmath.Mat,
+    clip_from_world_chunked: zmath.Mat, // NEW
     view_from_world: zmath.Mat,
     world_from_clip: zmath.Mat,
 
     pub fn init(aspect_ratio: f32) Camera {
         const position: [3]f32 = .{ 0, 0, 0 };
+        const chunk: [3]u32 = .{ 0, 0, 0 };
 
-        const camera_from_world = zmath.translation(0, 0, 0);
+        const no_translation = zmath.translation(0, 0, 0);
 
         // NOTE: this matrix is effectively the same as:
         // const normalized_view_from_camera = zmath.rotationX(-0.5 * math.pi);
@@ -43,8 +65,10 @@ pub const Camera = struct {
             .aspect_ratio = aspect_ratio,
 
             .position = position,
+            .chunk = chunk,
 
-            .camera_from_world = camera_from_world,
+            .camera_from_world = no_translation,
+            .camera_from_world_chunked = no_translation,
             .normalized_view_from_camera = normalized_view_from_camera,
             .view_from_normalized_view = zmath.identity(),
             .clip_from_view = clip_from_view,
@@ -53,6 +77,7 @@ pub const Camera = struct {
             // derived:
             .view_from_camera = undefined,
             .clip_from_world = undefined,
+            .clip_from_world_chunked = undefined,
             .view_from_world = undefined,
             .world_from_clip = undefined,
         };
@@ -75,9 +100,19 @@ pub const Camera = struct {
             camera.camera_from_world,
         );
 
+        const view_from_world_chunked = utils.matMul(
+            camera.view_from_camera,
+            camera.camera_from_world_chunked,
+        );
+
         camera.clip_from_world = utils.matMul(
             camera.clip_from_view,
             camera.view_from_world,
+        );
+
+        camera.clip_from_world_chunked = utils.matMul(
+            camera.clip_from_view,
+            view_from_world_chunked,
         );
 
         camera.world_from_clip = zmath.inverse(camera.clip_from_world);
@@ -96,6 +131,7 @@ pub const Camera = struct {
 
     pub fn updatePosition(camera: *Camera, position: [3]f32) void {
         camera.position = position;
+        camera.chunk = getChunk(position);
         // debug.printVec3Labeled("camera position", position);
 
         // NOTE: inverting position because moving of camera is effectively moving
@@ -104,6 +140,11 @@ pub const Camera = struct {
             -position[0],
             -position[1],
             -position[2],
+        );
+        camera.camera_from_world_chunked = zmath.translation(
+            -@mod(position[0], CHUNK_SIZE),
+            -@mod(position[1], CHUNK_SIZE),
+            -@mod(position[2], CHUNK_SIZE),
         );
         camera.updateDerivedMatrices();
     }
