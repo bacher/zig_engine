@@ -37,18 +37,18 @@ fn getUv(side: u32, vertex_index: u32, block_type: u32) -> vec2f {
     // should be synced with src/engine/voxel_chunk.zig's BlockType enum
     switch block_type {
         case 0, default: { /* none  */ shift = vec2( 0.0,  0.0); }
-        case 1: {          /* stone */ shift = vec2( 1.0,  0.0); }
-        case 2: {          /* dirt  */ shift = vec2( 2.0,  0.0); }
-        case 3: {          /* grass */
+        case 1:          { /* stone */ shift = vec2( 1.0,  0.0); }
+        case 2:          { /* dirt  */ shift = vec2( 2.0,  0.0); }
+        case 3:          { /* grass */
             switch side {
                 case 0:  { shift = vec2( 12.0, 12.0); }
                 case 1:  { shift = vec2(  0.0,  2.0); }
                 default: { shift = vec2(  3.0,  0.0); }
             }
         }
-        case 4: {          /* water */ shift = vec2(13.0, 12.0); }
-        case 5: {          /* sand  */ shift = vec2( 2.0,  1.0); }
-        case 6: {          /* snow  */ shift = vec2( 0.0,  4.0); }
+        case 4:          { /* water */ shift = vec2(13.0, 12.0); }
+        case 5:          { /* sand  */ shift = vec2( 2.0,  1.0); }
+        case 6:          { /* snow  */ shift = vec2( 0.0,  4.0); }
     }
 
     var uv = vec2(0.0, 0.0);
@@ -69,139 +69,67 @@ fn getPosition(side: u32, vertex_index: u32) -> vec3<u32> {
         // top
         case 0, default: {
             switch vertex_index {
-                case 0, default: {
-                    return vec3(0, 0, 1);
-                }
-                case 1: {
-                    return vec3(1, 1, 1);
-                }
-                case 2: {
-                    return vec3(0, 1, 1);
-                }
-                case 3: {
-                    return vec3(0, 0, 1);
-                }
-                case 4: {
-                    return vec3(1, 0, 1);
-                }
-                case 5: {
-                    return vec3(1, 1, 1);
-                }
+                case 0, default: { return vec3(0, 0, 1); }
+                case 1:          { return vec3(1, 1, 1); }
+                case 2:          { return vec3(0, 1, 1); }
+                case 3:          { return vec3(0, 0, 1); }
+                case 4:          { return vec3(1, 0, 1); }
+                case 5:          { return vec3(1, 1, 1); }
             }
         }
         // bottom
         case 1: {
             switch vertex_index {
-                case 0, default: {
-                    return vec3(0, 1, 0);
-                }
-                case 1: {
-                    return vec3(1, 0, 0);
-                }
-                case 2: {
-                    return vec3(0, 0, 0);
-                }
-                case 3: {
-                    return vec3(0, 1, 0);
-                }
-                case 4: {
-                    return vec3(1, 1, 0);
-                }
-                case 5: {
-                    return vec3(1, 0, 0);
-                }
+                case 0, default: { return vec3(0, 1, 0); }
+                case 1:          { return vec3(1, 0, 0); }
+                case 2:          { return vec3(0, 0, 0); }
+                case 3:          { return vec3(0, 1, 0); }
+                case 4:          { return vec3(1, 1, 0); }
+                case 5:          { return vec3(1, 0, 0); }
             }
         }
         // front
         case 2: {
             switch vertex_index {
-                case 0, default: {
-                    return vec3(0, 0, 0);
-                }
-                case 1: {
-                    return vec3(1, 0, 1);
-                }
-                case 2: {
-                    return vec3(0, 0, 1);
-                }
-                case 3: {
-                    return vec3(0, 0, 0);
-                }
-                case 4: {
-                    return vec3(1, 0, 0);
-                }
-                case 5: {
-                    return vec3(1, 0, 1);
-                }
+                case 0, default: { return vec3(0, 0, 0); }
+                case 1:          { return vec3(1, 0, 1); }
+                case 2:          { return vec3(0, 0, 1); }
+                case 3:          { return vec3(0, 0, 0); }
+                case 4:          { return vec3(1, 0, 0); }
+                case 5:          { return vec3(1, 0, 1); }
             }
         }
         // back
         case 3: {
             switch vertex_index {
-                case 0, default: {
-                    return vec3(1, 1, 0);
-                }
-                case 1: {
-                    return vec3(0, 1, 1);
-                }
-                case 2: {
-                    return vec3(1, 1, 1);
-                }
-                case 3: {
-                    return vec3(1, 1, 0);
-                }
-                case 4: {
-                    return vec3(0, 1, 0);
-                }
-                case 5: {
-                    return vec3(0, 1, 1);
-                }
+                case 0, default: { return vec3(1, 1, 0); }
+                case 1:          { return vec3(0, 1, 1); }
+                case 2:          { return vec3(1, 1, 1); }
+                case 3:          { return vec3(1, 1, 0); }
+                case 4:          { return vec3(0, 1, 0); }
+                case 5:          { return vec3(0, 1, 1); }
             }
         }
         // left
         case 4: {
             switch vertex_index {
-                case 0, default: {
-                    return vec3(0, 1, 0);
-                }
-                case 1: {
-                    return vec3(0, 0, 1);
-                }
-                case 2: {
-                    return vec3(0, 1, 1);
-                }
-                case 3: {
-                    return vec3(0, 1, 0);
-                }
-                case 4: {
-                    return vec3(0, 0, 0);
-                }
-                case 5: {
-                    return vec3(0, 0, 1);
-                }
+                case 0, default: { return vec3(0, 1, 0); }
+                case 1:          { return vec3(0, 0, 1); }
+                case 2:          { return vec3(0, 1, 1); }
+                case 3:          { return vec3(0, 1, 0); }
+                case 4:          { return vec3(0, 0, 0); }
+                case 5:          { return vec3(0, 0, 1); }
             }
         }
         // right
         case 5: {
             switch vertex_index {
-                case 0, default: {
-                    return vec3(1, 0, 0);
-                }
-                case 1: {
-                    return vec3(1, 1, 1);
-                }
-                case 2: {
-                    return vec3(1, 0, 1);
-                }
-                case 3: {
-                    return vec3(1, 0, 0);
-                }
-                case 4: {
-                    return vec3(1, 1, 0);
-                }
-                case 5: {
-                    return vec3(1, 1, 1);
-                }
+                case 0, default: { return vec3(1, 0, 0); }
+                case 1:          { return vec3(1, 1, 1); }
+                case 2:          { return vec3(1, 0, 1); }
+                case 3:          { return vec3(1, 0, 0); }
+                case 4:          { return vec3(1, 1, 0); }
+                case 5:          { return vec3(1, 1, 1); }
             }
         }
     }
@@ -209,24 +137,12 @@ fn getPosition(side: u32, vertex_index: u32) -> vec3<u32> {
 
 fn getNormal(side: u32) -> vec3<f32> {
     switch side {
-        case 0, default: {
-            return vec3(0.0, 0.0, 1.0);
-        }
-        case 1: {
-            return vec3(0.0, 0.0, -1.0);
-        }
-        case 2: {
-            return vec3(0.0, -1.0, 0.0);
-        }
-        case 3: {
-            return vec3(0.0, 1.0, 0.0);
-        }
-        case 4: {
-            return vec3(-1.0, 0.0, 0.0);
-        }
-        case 5: {
-            return vec3(1.0, 0.0, 0.0);
-        }
+        case 0, default: { return vec3( 0.0,  0.0,  1.0); }
+        case 1:          { return vec3( 0.0,  0.0, -1.0); }
+        case 2:          { return vec3( 0.0, -1.0,  0.0); }
+        case 3:          { return vec3( 0.0,  1.0,  0.0); }
+        case 4:          { return vec3(-1.0,  0.0,  0.0); }
+        case 5:          { return vec3( 1.0,  0.0,  0.0); }
     }
 }
 
