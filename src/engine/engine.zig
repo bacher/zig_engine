@@ -121,6 +121,7 @@ pub const Engine = struct {
     bind_group_ssao_pass: BindGroup,
     bind_group_final_pass: BindGroup,
     bind_group_debug_regular: BindGroup,
+    bind_group_minecraft_texture: BindGroup,
 
     models_hash: std.AutoHashMap(LoadedModelId, *Model),
 
@@ -131,6 +132,7 @@ pub const Engine = struct {
     first_pass_color_output_texture: ScreenTexture,
     first_pass_normal_output_texture: ScreenTexture,
     ssao_output_texture: ScreenTexture,
+    minecraft_texture: types.TextureDescriptor,
 
     // -- special textures (mostly for debug purposes) --
     uv_test_texture: types.TextureDescriptor,
@@ -326,7 +328,22 @@ pub const Engine = struct {
             .{ .generate_mipmaps = false }, // TODO: set true, maybe???
         ) catch @panic("uv-test texture can't be loaded");
 
+        var minecraft_texture_image = gltf_loader.StbiWrapper.loadTextureData(
+            allocator,
+            "content/minecraft.png",
+            .{},
+        ) catch @panic("minecraft texture can't be loaded");
+        defer minecraft_texture_image.deinit();
+
+        const minecraft_texture = load_texture.loadTextureIntoGpu(
+            gctx,
+            allocator,
+            minecraft_texture_image,
+            .{ .generate_mipmaps = true },
+        ) catch @panic("minecraft texture can't be loaded");
+
         const bind_group_debug_regular = bind_group_layouts.regular.createBindGroup(gctx, texture_repeat_sampler, uv_test_texture);
+        const bind_group_minecraft_texture = bind_group_layouts.regular.createBindGroup(gctx, texture_repeat_sampler, minecraft_texture);
 
         const identity_joint_matrix_buffer = SkeletalAnimation.createIdentityJointMatrixBuffer(gctx) catch @panic("SkeletalAnimation buffer can't be created");
 
@@ -356,6 +373,7 @@ pub const Engine = struct {
             .bind_group_ssao_pass = bind_group_ssao_pass,
             .bind_group_final_pass = bind_group_final_pass,
             .bind_group_debug_regular = bind_group_debug_regular,
+            .bind_group_minecraft_texture = bind_group_minecraft_texture,
 
             // -- textures --
             .depth_texture = depth_texture,
@@ -365,6 +383,7 @@ pub const Engine = struct {
             .shadow_map_texture = shadow_map_texture,
             .shadow_map_depth_texture = shadow_map_depth_texture,
             .uv_test_texture = uv_test_texture,
+            .minecraft_texture = minecraft_texture,
 
             // -- samplers --
             .texture_sampler = texture_sampler,
@@ -723,7 +742,7 @@ pub const Engine = struct {
                     }
 
                     pass.setPipeline(engine.pipelines.voxel_pipeline.pipeline_gpu);
-                    pass.setBindGroup(1, engine.bind_group_debug_regular.wgpu_bind_group, &.{});
+                    pass.setBindGroup(1, engine.bind_group_minecraft_texture.wgpu_bind_group, &.{});
 
                     const global_light_clip_matrix_array = getGlobalLightClipMatrixArray(gctx, scene.lights.items[0]);
                     pass.setBindGroup(2, engine.bind_group_shadow_map.wgpu_bind_group, &.{

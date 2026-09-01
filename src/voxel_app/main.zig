@@ -156,8 +156,7 @@ fn loadChunkMeshData(allocator: std.mem.Allocator, game: *Game, engine: *Engine)
                 const world_chunk_opt = world.chunks.getPtr(world_module.encodeChunkPositionArray(chunk_coords));
 
                 if (world_chunk_opt) |world_chunk| {
-                    std.debug.print("block[i] {} {} {}!\n", .{ x, y, z });
-                    std.debug.print("block[n] {} {} {}!\n", .{ chunk_coords[0], chunk_coords[1], chunk_coords[2] });
+                    // std.debug.print("block {any}\n", .{chunk_coords});
 
                     // CHECKING
 
