@@ -245,11 +245,21 @@ fn terrainHeight(noise: PerlinNoise, block_x: anytype, block_y: anytype, params:
     var amplitude: f64 = 1.0;
     var amplitude_sum: f64 = 0.0;
     var frequency = 1.0 / params.noise_scale;
+    const world_width_blocks = WORLD_SIZE[0] * CHUNK_SIZE;
+    const world_width: f64 = @floatFromInt(world_width_blocks);
 
     for (0..params.octaves) |_| {
-        value += noise.sample2D(
-            @as(f64, @floatFromInt(block_x)) * frequency,
+        // Use a whole number of noise cells around the world's circumference.
+        // Wrapping lattice gradients then makes x=world_width meet x=0 with
+        // matching values and slopes, regardless of the requested noise scale.
+        const x_period: u32 = @intFromFloat(@max(1.0, @round(world_width * frequency)));
+        const periodic_x = @as(f64, @floatFromInt(block_x)) *
+            @as(f64, @floatFromInt(x_period)) / world_width;
+
+        value += noise.sample2DPeriodicX(
+            periodic_x,
             @as(f64, @floatFromInt(block_y)) * frequency,
+            x_period,
         ) * amplitude;
         amplitude_sum += amplitude;
         frequency *= params.lacunarity;

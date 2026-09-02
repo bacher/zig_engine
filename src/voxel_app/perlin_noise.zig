@@ -10,15 +10,27 @@ pub const PerlinNoise = struct {
 
     /// Returns a smoothly varying value in the range [-1, 1].
     pub fn sample2D(self: PerlinNoise, x: f64, y: f64) f64 {
+        return self.sample2DInternal(x, y, null);
+    }
+
+    /// Returns noise that repeats after `period` lattice cells on the x-axis.
+    pub fn sample2DPeriodicX(self: PerlinNoise, x: f64, y: f64, period: u32) f64 {
+        std.debug.assert(period > 0);
+        return self.sample2DInternal(x, y, @intCast(period));
+    }
+
+    fn sample2DInternal(self: PerlinNoise, x: f64, y: f64, x_period: ?i64) f64 {
         const x0: i64 = @intFromFloat(@floor(x));
         const y0: i64 = @intFromFloat(@floor(y));
         const local_x = x - @as(f64, @floatFromInt(x0));
         const local_y = y - @as(f64, @floatFromInt(y0));
+        const gradient_x0 = if (x_period) |period| @mod(x0, period) else x0;
+        const gradient_x1 = if (x_period) |period| @mod(x0 + 1, period) else x0 + 1;
 
-        const bottom_left = gradientDot(self.seed, x0, y0, local_x, local_y);
-        const bottom_right = gradientDot(self.seed, x0 + 1, y0, local_x - 1.0, local_y);
-        const top_left = gradientDot(self.seed, x0, y0 + 1, local_x, local_y - 1.0);
-        const top_right = gradientDot(self.seed, x0 + 1, y0 + 1, local_x - 1.0, local_y - 1.0);
+        const bottom_left = gradientDot(self.seed, gradient_x0, y0, local_x, local_y);
+        const bottom_right = gradientDot(self.seed, gradient_x1, y0, local_x - 1.0, local_y);
+        const top_left = gradientDot(self.seed, gradient_x0, y0 + 1, local_x, local_y - 1.0);
+        const top_right = gradientDot(self.seed, gradient_x1, y0 + 1, local_x - 1.0, local_y - 1.0);
 
         const u = fade(local_x);
         const v = fade(local_y);
@@ -93,4 +105,14 @@ test "noise is continuous and bounded" {
     try std.testing.expect(first >= -1.0 and first <= 1.0);
     try std.testing.expect(nearby >= -1.0 and nearby <= 1.0);
     try std.testing.expectApproxEqAbs(first, nearby, 0.001);
+}
+
+test "periodic noise repeats on the x-axis" {
+    const noise = PerlinNoise.init(42);
+    const period: u32 = 16;
+
+    const first = noise.sample2DPeriodicX(1.25, 7.75, period);
+    const repeated = noise.sample2DPeriodicX(17.25, 7.75, period);
+
+    try std.testing.expectEqual(first, repeated);
 }
