@@ -54,7 +54,7 @@ const Game = struct {
 
 fn initWorld(allocator: std.mem.Allocator, game: *Game) void {
     var world = World.init(allocator);
-    world.initFlatWorld();
+    world.generateWorld(12345, .{});
     game.world = world;
 }
 
