@@ -16,12 +16,12 @@ const WORLD_SIZE = [_]u32{
     std.math.pow(u32, 2, 3), //     8 chunks (   256 blocks)
 };
 
-fn getChunk(position: [3]f32) [3]u32 {
+fn getChunk(position: [3]f32) [3]i32 {
     // TODO: refactor to use integer and bitwise shift operations instead of float operations
     return .{
-        @intCast(@mod(@as(i32, @intFromFloat(@divFloor(position[0], CHUNK_SIZE))) + WORLD_ORIGIN_CHUNK[0], WORLD_SIZE[0])),
-        @intCast(@mod(@as(i32, @intFromFloat(@divFloor(position[1], CHUNK_SIZE))) + WORLD_ORIGIN_CHUNK[1], WORLD_SIZE[1])),
-        @intCast(@mod(@as(i32, @intFromFloat(@divFloor(position[2], CHUNK_SIZE))) + WORLD_ORIGIN_CHUNK[2], WORLD_SIZE[2])),
+        @mod(@as(i32, @intFromFloat(@divFloor(position[0], CHUNK_SIZE))) + WORLD_ORIGIN_CHUNK[0], WORLD_SIZE[0]),
+        @as(i32, @intFromFloat(@divFloor(position[1], CHUNK_SIZE))) + WORLD_ORIGIN_CHUNK[1],
+        @as(i32, @intFromFloat(@divFloor(position[2], CHUNK_SIZE))) + WORLD_ORIGIN_CHUNK[2],
     };
 }
 
@@ -29,7 +29,7 @@ pub const Camera = struct {
     aspect_ratio: f32,
 
     position: [3]f32,
-    chunk: [3]u32,
+    chunk: [3]i32,
 
     camera_from_world: zmath.Mat,
     camera_from_world_chunked: zmath.Mat,
@@ -47,7 +47,7 @@ pub const Camera = struct {
 
     pub fn init(aspect_ratio: f32) Camera {
         const position: [3]f32 = .{ 0, 0, 0 };
-        const chunk: [3]u32 = .{ 0, 0, 0 };
+        const chunk: [3]i32 = .{ 0, 0, 0 };
 
         const no_translation = zmath.translation(0, 0, 0);
 

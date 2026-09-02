@@ -1,7 +1,7 @@
 @group(0) @binding(0) var<uniform> clip_from_world: mat4x4<f32>;
 @group(0) @binding(1) var<uniform> view_from_world: mat4x4<f32>;
 @group(0) @binding(4) var<uniform> clip_from_world_chunked: mat4x4<f32>;
-@group(0) @binding(5) var<uniform> camera_chunk: vec3u;
+@group(0) @binding(5) var<uniform> camera_chunk: vec3i;
 
 struct ChunkInfo /* 32 byte */ {
     side_data_indices: array<u32, 3>,
@@ -179,7 +179,7 @@ fn extractSideDataIndex(indices: array<u32, 3>, side: u32) -> u32 {
 
     let chunk_info = chunk_info_array[chunk_index];
     // let chunk_origin = (vec3i(chunk_info.chunk_origin) - vec3i(WORLD_ORIGIN)) * CHUNK_SIZE;
-    var diff = vec3i(chunk_info.chunk_origin) - vec3i(camera_chunk);
+    var diff = vec3i(chunk_info.chunk_origin) - camera_chunk;
     // Wrapping logic for the x axis
     if (diff.x > i32(WORLD_ORIGIN[0])) {
         diff.x -= i32(WORLD_SIZE[0]);

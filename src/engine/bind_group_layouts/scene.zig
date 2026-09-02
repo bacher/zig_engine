@@ -122,7 +122,7 @@ pub const SceneBindGroupLayout = struct {
                     .binding = 5,
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
-                    .size = @sizeOf([3]u32),
+                    .size = @sizeOf([3]i32),
                 },
             },
         );
