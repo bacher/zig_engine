@@ -578,7 +578,7 @@ test "init" {
 
     std.debug.print("\n=== obj_2 ===\n", .{});
 
-    const obj_2: TestObject = .{
+    var obj_2: TestObject = .{
         .id = 43,
         .position = .{ 8, 3.4, 3.2 },
         .aggregated_matrix = zmath.identity(),
