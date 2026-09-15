@@ -35,7 +35,7 @@ const solid_chunk_flags = ChunkFlags{
     .solid_right = true,
 };
 
-pub fn normalizeChunkPosition(x: anytype, y: anytype, z: anytype) [3]u32 {
+pub fn normalizeChunkPosition(x: anytype, y: anytype, z: anytype) [3]u30 {
     var normalized_x = x;
     var normalized_y = y;
     var normalized_z = z;

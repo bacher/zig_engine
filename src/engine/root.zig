@@ -12,4 +12,5 @@ pub const VoxelGrid = @import("./voxel_grid.zig").VoxelGrid;
 pub const voxel_chunk = @import("./voxel_chunk.zig");
 pub const tube = @import("./shape_generation/tube.zig");
 pub const utils = @import("./utils.zig");
+pub const chunk_utils = @import("./chunk_utils.zig");
 pub const zgui_utils = @import("./zgui_utils.zig");

@@ -69,7 +69,7 @@ comptime {
 pub const VoxelChunk = struct {
     pub const Self = @This();
 
-    chunk_origin: [3]u32,
+    chunk_origin: [3]u30,
 
     blocks_grouped_by_side: [6]BlockCoordList = .{BlockCoordList.empty} ** 6,
 
@@ -77,7 +77,7 @@ pub const VoxelChunk = struct {
     data_slot_index: u32 = 0,
     data_slot_size_level: u8 = 0,
 
-    pub fn init(chunk_origin: [3]u32) Self {
+    pub fn init(chunk_origin: [3]u30) Self {
         return .{
             .chunk_origin = chunk_origin,
         };

@@ -6,6 +6,8 @@ const debug = @import("debug");
 const utils = @import("./utils.zig");
 const BoundBox = @import("./bound_box.zig").BoundBox;
 const FrustumPoints = @import("./frustum.zig").FrustumPoints;
+const chunk_utils = @import("./chunk_utils.zig");
+const getChunkCoords = chunk_utils.getChunkCoords;
 
 pub const CHUNK_SIZE = 32.0;
 // TODO: dedupe
@@ -15,15 +17,6 @@ const WORLD_SIZE = [_]u32{
     std.math.pow(u32, 2, 8), //   256 chunks (  8192 blocks)
     std.math.pow(u32, 2, 3), //     8 chunks (   256 blocks)
 };
-
-fn getChunk(position: [3]f32) [3]i32 {
-    // TODO: refactor to use integer and bitwise shift operations instead of float operations
-    return .{
-        @mod(@as(i32, @intFromFloat(@divFloor(position[0], CHUNK_SIZE))) + WORLD_ORIGIN_CHUNK[0], WORLD_SIZE[0]),
-        @as(i32, @intFromFloat(@divFloor(position[1], CHUNK_SIZE))) + WORLD_ORIGIN_CHUNK[1],
-        @as(i32, @intFromFloat(@divFloor(position[2], CHUNK_SIZE))) + WORLD_ORIGIN_CHUNK[2],
-    };
-}
 
 pub const Camera = struct {
     aspect_ratio: f32,
@@ -131,7 +124,7 @@ pub const Camera = struct {
 
     pub fn updatePosition(camera: *Camera, position: [3]f32) void {
         camera.position = position;
-        camera.chunk = getChunk(position);
+        camera.chunk = getChunkCoords(position);
         // debug.printVec3Labeled("camera position", position);
 
         // NOTE: inverting position because moving of camera is effectively moving

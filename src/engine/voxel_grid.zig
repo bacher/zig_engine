@@ -120,7 +120,11 @@ pub const VoxelGrid = struct {
 
             var chunk_info: ChunkInfo = .{
                 .side_data_indices = .{ 0, 0, 0, 0, 0, 0 },
-                .chunk_origin = chunk.chunk_origin,
+                .chunk_origin = .{
+                    chunk.chunk_origin[0],
+                    chunk.chunk_origin[1],
+                    chunk.chunk_origin[2],
+                },
                 .data_slot_index = @intCast(self.next_free_block_slot), // TODO: remove cast
             };
 
