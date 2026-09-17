@@ -16,10 +16,6 @@ const SLOTS_PER_SPAN: u32 = 1 << MAX_SPAN_SIZE_EXPONENT; // 64
 // 1 span = 4 16x blocks
 // 1 span = 2 32x blocks -- do we need 32x blocks?
 
-pub const BufferSpanMap = struct {
-    availability_map: u64, // 64 bits for 64 blocks
-};
-
 fn lowNBits(n: u32) u64 {
     if (n >= 64) {
         return std.math.maxInt(u64); // all 64 bits set
@@ -29,6 +25,15 @@ fn lowNBits(n: u32) u64 {
     }
     return (@as(u64, 1) << @intCast(n)) - 1;
 }
+
+pub const BufferSpan = struct {
+    // occupancy bitmask: 0 = free, 1 = occupied
+    map: u64 = 0,
+    // size exponent this span is currently allocated for
+    size: u8 = 0,
+};
+
+const SpanList = std.MultiArrayList(BufferSpan);
 
 pub const GpuBufferManager = struct {
     const Self = @This();
@@ -40,11 +45,17 @@ pub const GpuBufferManager = struct {
     // this size (it's either already full or it's used for a different size)
     // initially all 0 because there are no spans yet
     span_meta_maps: [MAX_SPAN_SIZE_EXPONENT + 1]u64 = @splat(0),
-    // span maps hold the availability map for each span, 0 means the slot is free, 1 means the slot is occupied
-    span_maps: [SPAN_COUNT]BufferSpanMap = @splat(.{ .availability_map = 0 }),
-    // span sizes hold the size of each span
-    span_sizes: [SPAN_COUNT]u8 = @splat(0),
+    // SoA backing store for BufferSpan { map, size }; accessed via spanList().get/set
+    span_storage: [SpanList.capacityInBytes(SPAN_COUNT)]u8 align(@alignOf(BufferSpan)) = @splat(0),
     span_count: u32 = 0,
+
+    fn spanList(self: *Self) SpanList {
+        return .{
+            .bytes = &self.span_storage,
+            .len = SPAN_COUNT,
+            .capacity = SPAN_COUNT,
+        };
+    }
 
     fn findFirstNonFullSpan(self: *const Self, size_exponent: u8) error{NotFound}!u32 {
         const meta_map = self.span_meta_maps[size_exponent];
@@ -79,14 +90,19 @@ pub const GpuBufferManager = struct {
         const bits_to_check = @divExact(64, slot_size);
         const all_occupied = lowNBits(bits_to_check);
 
+        var spans = self.spanList();
+
         if (self.findFirstNonFullSpan(size_exponent)) |span_index| {
             const i = span_index;
+            var span = spans.get(i);
 
             // meaning that the span is empty
-            if (self.span_maps[i].availability_map == 0) {
+            if (span.map == 0) {
                 // occupy the first slot in the span
-                self.span_maps[i].availability_map = 1;
-                self.span_sizes[i] = size_exponent;
+                spans.set(i, .{
+                    .map = 1,
+                    .size = size_exponent,
+                });
                 const meta_mask = ~(@as(u64, 1) << @intCast(i));
                 // mark the span as unavailable for all other sizes, and for the max-size block
                 // since it fills the span immediately
@@ -98,14 +114,15 @@ pub const GpuBufferManager = struct {
                 return @as(u32, @intCast(i)) * SLOTS_PER_SPAN;
             }
 
-            if (self.span_maps[i].availability_map != all_occupied) {
+            if (span.map != all_occupied) {
                 for (0..bits_to_check) |j| {
                     const mask: u64 = @as(u64, 1) << @intCast(j);
-                    if ((self.span_maps[i].availability_map & mask) == 0) {
-                        self.span_maps[i].availability_map |= mask;
+                    if ((span.map & mask) == 0) {
+                        span.map |= mask;
+                        spans.set(i, span);
 
                         // if the span is full, remove it from the meta map
-                        if (self.span_maps[i].availability_map == all_occupied) {
+                        if (span.map == all_occupied) {
                             self.span_meta_maps[size_exponent] &= ~(@as(u64, 1) << @intCast(i));
                         }
 
@@ -126,8 +143,10 @@ pub const GpuBufferManager = struct {
         }
 
         const new_span_index = self.span_count;
-        self.span_maps[new_span_index] = .{ .availability_map = 1 };
-        self.span_sizes[new_span_index] = size_exponent;
+        spans.set(new_span_index, .{
+            .map = 1,
+            .size = size_exponent,
+        });
         // update the meta map for the new span
         // special case for span with maximum size, it can't be used because right after initialization it's already
         // full (the block occupies the whole span)
@@ -141,16 +160,19 @@ pub const GpuBufferManager = struct {
 
     pub fn freeBlock(self: *Self, block_index: u32) void {
         const span_index, const slot_index = divmod(block_index, SLOTS_PER_SPAN);
-        const span_slot_size: u32 = @as(u32, 1) << @intCast(self.span_sizes[span_index]);
+        var spans = self.spanList();
+        var span = spans.get(span_index);
+
+        const span_slot_size: u32 = @as(u32, 1) << @intCast(span.size);
         const mask: u64 = @as(u64, 1) << @intCast(@divExact(slot_index, span_slot_size));
 
-        const previous_availability_map_value = self.span_maps[span_index].availability_map;
-
-        self.span_maps[span_index].availability_map &= ~mask;
+        const previous_availability_map_value = span.map;
+        span.map &= ~mask;
+        spans.set(span_index, span);
 
         const meta_mask = (@as(u64, 1) << @intCast(span_index));
         // if the span is empty, we should mark it as available for all sizes
-        if (self.span_maps[span_index].availability_map == 0) {
+        if (span.map == 0) {
             for (0..MAX_SPAN_SIZE_EXPONENT + 1) |i| {
                 self.span_meta_maps[i] |= meta_mask;
             }
@@ -160,7 +182,7 @@ pub const GpuBufferManager = struct {
 
             if (previous_availability_map_value == all_occupied) {
                 // a previously full span has a free slot again
-                self.span_meta_maps[self.span_sizes[span_index]] |= meta_mask;
+                self.span_meta_maps[span.size] |= meta_mask;
             }
         }
     }
