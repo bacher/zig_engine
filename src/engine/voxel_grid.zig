@@ -7,10 +7,11 @@ const VoxelChunk = @import("./voxel_chunk.zig").VoxelChunk;
 const ChunkInfo = @import("./voxel_chunk.zig").ChunkInfo;
 const Side = @import("./voxel_chunk.zig").Side;
 const BlockInfo = @import("./voxel_chunk.zig").BlockInfo;
+const GpuBufferManager = @import("./voxel_buffer_utils.zig").GpuBufferManager;
 
-pub const VOXEL_GRID_SLOT_SIZE = 1024;
-pub const VOXEL_GRID_SLOT_COUNT = 2 * 1024;
-pub const VOXEL_GRID_BUFFER_SIZE = VOXEL_GRID_SLOT_SIZE * VOXEL_GRID_SLOT_COUNT;
+const VOXEL_GRID_SLOT_COUNT = @import("./voxel_consts.zig").VOXEL_GRID_SLOT_COUNT;
+const VOXEL_GRID_SLOT_SIZE = @import("./voxel_consts.zig").VOXEL_GRID_SLOT_SIZE;
+const VOXEL_GRID_BUFFER_SIZE = @import("./voxel_consts.zig").VOXEL_GRID_BUFFER_SIZE;
 
 comptime {
     std.debug.assert(VOXEL_GRID_SLOT_SIZE % @sizeOf(BlockInfo) == 0);
@@ -32,8 +33,8 @@ pub const VoxelGrid = struct {
     gpu_chunk_info_buffer: GPUBuffer,
 
     // block data section:
+    gpu_block_buffer_manager: GpuBufferManager = .{},
     gpu_block_buffer: GPUBuffer,
-    freed_block_slots: [MAX_SLOT_SIZE_LEVEL + 1]std.ArrayList(u32) = .{std.ArrayList(u32).empty} ** (MAX_SLOT_SIZE_LEVEL + 1),
     next_free_block_slot: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator, gctx: *zgpu.GraphicsContext) *Self {

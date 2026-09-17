@@ -562,10 +562,10 @@ test "init" {
 
     try std.testing.expectEqual(space_tree.grid[0][0].level, 0);
 
-    printNodeInfo(space_tree.grid[0][0]);
-    printNodeInfo(space_tree.grid[GRID_DIMENSTION - 1][GRID_DIMENSTION - 1]);
-    printNodeInfo(space_tree.grid[GRID_DIMENSTION - 1][GRID_DIMENSTION - 1].child_nodes[0]);
-    printNodeInfo(space_tree.grid[GRID_DIMENSTION - 1][GRID_DIMENSTION - 1].child_nodes[7]);
+    // printNodeInfo(space_tree.grid[0][0]);
+    // printNodeInfo(space_tree.grid[GRID_DIMENSTION - 1][GRID_DIMENSTION - 1]);
+    // printNodeInfo(space_tree.grid[GRID_DIMENSTION - 1][GRID_DIMENSTION - 1].child_nodes[0]);
+    // printNodeInfo(space_tree.grid[GRID_DIMENSTION - 1][GRID_DIMENSTION - 1].child_nodes[7]);
 
     // std.debug.print("\n=== obj_1 ===\n", .{});
     //
@@ -576,7 +576,7 @@ test "init" {
     //
     // try space_tree.toggleObject(&obj_1, true);
 
-    std.debug.print("\n=== obj_2 ===\n", .{});
+    // std.debug.print("\n=== obj_2 ===\n", .{});
 
     var obj_2: TestObject = .{
         .id = 43,
