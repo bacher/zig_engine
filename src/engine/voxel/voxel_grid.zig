@@ -14,6 +14,7 @@ const ChunkInfo = @import("./voxel_chunk.zig").ChunkInfo;
 const Side = @import("./voxel_chunk.zig").Side;
 const BlockInfo = @import("./voxel_chunk.zig").BlockInfo;
 const DynamicSlotBufferManager = @import("./DynamicSlotBufferManager.zig").DynamicSlotBufferManager;
+const SlotBufferManager = @import("./SlotBufferManager.zig").SlotBufferManager;
 
 comptime {
     std.debug.assert(VOXEL_GRID_SLOT_SIZE % @sizeOf(BlockInfo) == 0);
@@ -30,6 +31,7 @@ pub const VoxelGrid = struct {
     allocator: std.mem.Allocator,
     chunks: ChunkList = .empty,
 
+    gpu_chunk_info_buffer_manager: SlotBufferManager = .{},
     gpu_chunk_info_buffer: GPUBuffer,
 
     // block data section:
@@ -113,8 +115,6 @@ pub const VoxelGrid = struct {
         const block_buffer = self.gpu_block_buffer.buffer;
         const chunk_info_buffer = self.gpu_chunk_info_buffer.buffer;
 
-        var chunk_index: u32 = 0;
-
         for (self.chunks.items) |*chunk| {
             var total_data_size_total: usize = 0;
             for (chunk.blocks_grouped_by_side) |side| {
@@ -165,6 +165,9 @@ pub const VoxelGrid = struct {
             }
 
             if (total_data_size > 0) {
+                const chunk_index = self.gpu_chunk_info_buffer_manager.occupyBlock() catch
+                    @panic("Not enough space in the chunk info buffer");
+
                 gctx.queue.writeBuffer(
                     chunk_info_buffer,
                     chunk_index * @sizeOf(ChunkInfo),
@@ -175,8 +178,6 @@ pub const VoxelGrid = struct {
                 chunk.chunk_index = chunk_index;
                 chunk.data_slot_index = data_slot_index;
                 chunk.data_slot_size_level = data_slot_size_level;
-
-                chunk_index += 1;
             }
         }
     }
