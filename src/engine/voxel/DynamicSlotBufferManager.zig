@@ -35,7 +35,15 @@ pub const BufferSpan = struct {
 
 const SpanList = std.MultiArrayList(BufferSpan);
 
-pub const GpuBufferManager = struct {
+// DynamicSlotBufferManager allows to hold 64 spans of 64 blocks each (4096 blocks total).
+// Each span can be used for a different size of blocks.
+// The size of the blocks is determined by the size exponent.
+// The size exponent is the exponent of 2 that represents the size of the blocks.
+// For example, a size exponent of 0 represents blocks of size 1, a size exponent of 1 represents blocks of size 2, etc.
+// The size exponent is stored in the BufferSpan struct.
+// The map is a bitmask that represents the availability of the blocks in the span.
+// The map is a 64-bit integer that is used to track the availability of the blocks in the span.
+pub const DynamicSlotBufferManager = struct {
     const Self = @This();
 
     // pub const SPAN_COUNT = @divExact(VOXEL_GRID_SLOT_COUNT, SLOTS_PER_SPAN);
@@ -192,8 +200,8 @@ fn divmod(a: u32, b: u32) struct { u32, u32 } {
     return .{ @divFloor(a, b), @mod(a, b) };
 }
 
-test "GpuBufferManager can hold blocks of different sizes" {
-    var manager: GpuBufferManager = .{};
+test "DynamicSlotBufferManager can hold blocks of different sizes" {
+    var manager: DynamicSlotBufferManager = .{};
     _ = try manager.occupyBlock(.{ .size_exponent = 0 });
     _ = try manager.occupyBlock(.{ .size_exponent = 1 });
     _ = try manager.occupyBlock(.{ .size_exponent = 2 });
@@ -206,7 +214,7 @@ test "GpuBufferManager can hold blocks of different sizes" {
 }
 
 test "the same slot can be occupied multiple times" {
-    var manager: GpuBufferManager = .{};
+    var manager: DynamicSlotBufferManager = .{};
     _ = try manager.occupyBlock(.{ .size_exponent = 0 });
     _ = try manager.occupyBlock(.{ .size_exponent = 0 });
     _ = try manager.occupyBlock(.{ .size_exponent = 0 });
@@ -222,7 +230,7 @@ test "the same slot can be occupied multiple times" {
 }
 
 test "the same span can be used for different sizes after being freed" {
-    var manager: GpuBufferManager = .{};
+    var manager: DynamicSlotBufferManager = .{};
 
     const first_span_index = try manager.occupyBlock(.{ .size_exponent = 6 });
     try std.testing.expectEqual(first_span_index, 0);
@@ -237,7 +245,7 @@ test "the same span can be used for different sizes after being freed" {
 }
 
 test "block indices within a span stride by slot size" {
-    var manager: GpuBufferManager = .{};
+    var manager: DynamicSlotBufferManager = .{};
 
     const first = try manager.occupyBlock(.{ .size_exponent = 2 });
     const second = try manager.occupyBlock(.{ .size_exponent = 2 });
@@ -250,7 +258,7 @@ test "block indices within a span stride by slot size" {
 }
 
 test "occupying past a full span uses the next span" {
-    var manager: GpuBufferManager = .{};
+    var manager: DynamicSlotBufferManager = .{};
     const slots_in_span = @as(u32, 1) << (6 - 1); // exponent 1: 32 slots of size 2
 
     var last_in_first_span: u32 = 0;
@@ -265,7 +273,7 @@ test "occupying past a full span uses the next span" {
 }
 
 test "freeing a slot in a full span reuses that hole" {
-    var manager: GpuBufferManager = .{};
+    var manager: DynamicSlotBufferManager = .{};
     const slots_in_span = @as(u32, SLOTS_PER_SPAN);
 
     var hole: u32 = 0;
@@ -284,7 +292,7 @@ test "freeing a slot in a full span reuses that hole" {
 }
 
 test "an emptied span packs correctly after changing size" {
-    var manager: GpuBufferManager = .{};
+    var manager: DynamicSlotBufferManager = .{};
 
     const first = try manager.occupyBlock(.{ .size_exponent = 0 });
     try std.testing.expectEqual(0, first);
@@ -303,19 +311,19 @@ test "an emptied span packs correctly after changing size" {
 }
 
 test "occupying every span then fails with NoSpaceLeft" {
-    var manager: GpuBufferManager = .{};
+    var manager: DynamicSlotBufferManager = .{};
 
-    for (0..GpuBufferManager.SPAN_COUNT) |i| {
+    for (0..DynamicSlotBufferManager.SPAN_COUNT) |i| {
         const block_index = try manager.occupyBlock(.{ .size_exponent = 6 });
         try std.testing.expectEqual(i * SLOTS_PER_SPAN, block_index);
     }
-    try std.testing.expectEqual(GpuBufferManager.SPAN_COUNT, manager.span_count);
+    try std.testing.expectEqual(DynamicSlotBufferManager.SPAN_COUNT, manager.span_count);
     try std.testing.expectError(error.NoSpaceLeft, manager.occupyBlock(.{ .size_exponent = 6 }));
     try std.testing.expectError(error.NoSpaceLeft, manager.occupyBlock(.{ .size_exponent = 0 }));
 }
 
 test "an emptied span can be reused as a max-size block" {
-    var manager: GpuBufferManager = .{};
+    var manager: DynamicSlotBufferManager = .{};
 
     const first = try manager.occupyBlock(.{ .size_exponent = 0 });
     try std.testing.expectEqual(0, first);
@@ -332,11 +340,11 @@ test "an emptied span can be reused as a max-size block" {
 }
 
 test "a hole in the last span is found and reused" {
-    var manager: GpuBufferManager = .{};
-    const last_span_index = GpuBufferManager.SPAN_COUNT - 1;
+    var manager: DynamicSlotBufferManager = .{};
+    const last_span_index = DynamicSlotBufferManager.SPAN_COUNT - 1;
 
     var last_block: u32 = 0;
-    for (0..GpuBufferManager.SPAN_COUNT) |_| {
+    for (0..DynamicSlotBufferManager.SPAN_COUNT) |_| {
         last_block = try manager.occupyBlock(.{ .size_exponent = 6 });
     }
     try std.testing.expectEqual(last_span_index * SLOTS_PER_SPAN, last_block);
@@ -344,6 +352,6 @@ test "a hole in the last span is found and reused" {
     manager.freeBlock(last_block);
     const reused = try manager.occupyBlock(.{ .size_exponent = 6 });
     try std.testing.expectEqual(last_block, reused);
-    try std.testing.expectEqual(GpuBufferManager.SPAN_COUNT, manager.span_count);
+    try std.testing.expectEqual(DynamicSlotBufferManager.SPAN_COUNT, manager.span_count);
     try std.testing.expectError(error.NoSpaceLeft, manager.occupyBlock(.{ .size_exponent = 6 }));
 }

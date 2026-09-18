@@ -200,7 +200,7 @@ pub fn build(b: *std.Build) void {
 
     const voxel_buffer_utils_unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/engine/voxel_buffer_utils.zig"),
+            .root_source_file = b.path("src/engine/voxel/DynamicSlotBufferManager.zig"),
             .target = target,
             .optimize = optimize,
         }),

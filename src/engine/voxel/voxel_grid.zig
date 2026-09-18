@@ -2,12 +2,12 @@ const std = @import("std");
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-const GPUBuffer = @import("./types.zig").GPUBuffer;
+const GPUBuffer = @import("../types.zig").GPUBuffer;
 const VoxelChunk = @import("./voxel_chunk.zig").VoxelChunk;
 const ChunkInfo = @import("./voxel_chunk.zig").ChunkInfo;
 const Side = @import("./voxel_chunk.zig").Side;
 const BlockInfo = @import("./voxel_chunk.zig").BlockInfo;
-const GpuBufferManager = @import("./voxel_buffer_utils.zig").GpuBufferManager;
+const DynamicSlotBufferManager = @import("./DynamicSlotBufferManager.zig").DynamicSlotBufferManager;
 
 const VOXEL_GRID_SLOT_COUNT = @import("./voxel_consts.zig").VOXEL_GRID_SLOT_COUNT;
 const VOXEL_GRID_SLOT_SIZE = @import("./voxel_consts.zig").VOXEL_GRID_SLOT_SIZE;
@@ -33,7 +33,7 @@ pub const VoxelGrid = struct {
     gpu_chunk_info_buffer: GPUBuffer,
 
     // block data section:
-    gpu_block_buffer_manager: GpuBufferManager = .{},
+    gpu_block_buffer_manager: DynamicSlotBufferManager = .{},
     gpu_block_buffer: GPUBuffer,
     next_free_block_slot: u32 = 0,
 

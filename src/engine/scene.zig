@@ -18,7 +18,7 @@ const light_module = @import("./light.zig");
 const BindGroup = @import("./bind_group.zig").BindGroup;
 const DirectionalLight = light_module.DirectionalLight;
 const DirectionalLightParams = light_module.DirectionalLightParams;
-const VoxelGrid = @import("./voxel_grid.zig").VoxelGrid;
+const VoxelGrid = @import("./voxel/voxel_grid.zig").VoxelGrid;
 
 const INSTANCE_BUFFER_ENTRY_SIZE = 1024;
 const MAX_OBJECTS_COUNT = 4096;
