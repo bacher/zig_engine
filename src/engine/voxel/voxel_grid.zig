@@ -3,15 +3,17 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
 const GPUBuffer = @import("../types.zig").GPUBuffer;
+
+const VOXEL_GRID_SLOT_COUNT = @import("./voxel_consts.zig").VOXEL_GRID_SLOT_COUNT;
+const VOXEL_GRID_SLOT_SIZE = @import("./voxel_consts.zig").VOXEL_GRID_SLOT_SIZE;
+const VOXEL_GRID_BUFFER_SIZE = @import("./voxel_consts.zig").VOXEL_GRID_BUFFER_SIZE;
+const MAX_SPAN_SIZE_EXPONENT = @import("./voxel_consts.zig").MAX_SPAN_SIZE_EXPONENT;
+const calculateDataSlotSizeLevel = @import("./voxel_utils.zig").calculateDataSlotSizeLevel;
 const VoxelChunk = @import("./voxel_chunk.zig").VoxelChunk;
 const ChunkInfo = @import("./voxel_chunk.zig").ChunkInfo;
 const Side = @import("./voxel_chunk.zig").Side;
 const BlockInfo = @import("./voxel_chunk.zig").BlockInfo;
 const DynamicSlotBufferManager = @import("./DynamicSlotBufferManager.zig").DynamicSlotBufferManager;
-
-const VOXEL_GRID_SLOT_COUNT = @import("./voxel_consts.zig").VOXEL_GRID_SLOT_COUNT;
-const VOXEL_GRID_SLOT_SIZE = @import("./voxel_consts.zig").VOXEL_GRID_SLOT_SIZE;
-const VOXEL_GRID_BUFFER_SIZE = @import("./voxel_consts.zig").VOXEL_GRID_BUFFER_SIZE;
 
 comptime {
     std.debug.assert(VOXEL_GRID_SLOT_SIZE % @sizeOf(BlockInfo) == 0);
@@ -21,8 +23,6 @@ const BLOCKS_PER_SLOT: u32 = VOXEL_GRID_SLOT_SIZE / @sizeOf(BlockInfo);
 const BLOCKS_PER_SLOT_INV: f32 = 1.0 / @as(f32, @floatFromInt(BLOCKS_PER_SLOT));
 
 const ChunkList = std.ArrayList(VoxelChunk);
-
-const MAX_SLOT_SIZE_LEVEL: u8 = 5;
 
 pub const VoxelGrid = struct {
     pub const Self = @This();
@@ -35,7 +35,6 @@ pub const VoxelGrid = struct {
     // block data section:
     gpu_block_buffer_manager: DynamicSlotBufferManager = .{},
     gpu_block_buffer: GPUBuffer,
-    next_free_block_slot: u32 = 0,
 
     pub fn init(allocator: std.mem.Allocator, gctx: *zgpu.GraphicsContext) *Self {
         var gpu_chunk_info_buffer: GPUBuffer = undefined;
@@ -117,7 +116,26 @@ pub const VoxelGrid = struct {
         var chunk_index: u32 = 0;
 
         for (self.chunks.items) |*chunk| {
-            var total_data_size: u16 = 0;
+            var total_data_size_total: usize = 0;
+            for (chunk.blocks_grouped_by_side) |side| {
+                total_data_size_total += side.items.len;
+            }
+
+            if (total_data_size_total == 0) {
+                continue;
+            }
+
+            const data_slot_size_level: u8 = calculateDataSlotSizeLevel(
+                @as(f32, @floatFromInt(total_data_size_total)) * BLOCKS_PER_SLOT_INV,
+            );
+
+            if (data_slot_size_level > MAX_SPAN_SIZE_EXPONENT) {
+                @panic("Slot size level is too high");
+            }
+
+            const data_slot_index = self.gpu_block_buffer_manager.occupyBlock(.{
+                .size_exponent = data_slot_size_level,
+            }) catch @panic("Not enough space in the block data buffer");
 
             var chunk_info: ChunkInfo = .{
                 .side_data_indices = .{ 0, 0, 0, 0, 0, 0 },
@@ -126,9 +144,10 @@ pub const VoxelGrid = struct {
                     chunk.chunk_origin[1],
                     chunk.chunk_origin[2],
                 },
-                .data_slot_index = @intCast(self.next_free_block_slot), // TODO: remove cast
+                .data_slot_index = data_slot_index,
             };
 
+            var total_data_size: u16 = 0;
             for (chunk.blocks_grouped_by_side, 0..) |side, side_index| {
                 if (side.items.len > 0) {
                     const data_index = chunk_info.data_slot_index * BLOCKS_PER_SLOT + total_data_size;
@@ -153,31 +172,10 @@ pub const VoxelGrid = struct {
                     &.{chunk_info},
                 );
 
-                const data_slot_size_level: u8 = @intFromFloat(
-                    @ceil(
-                        std.math.log2(
-                            @ceil(
-                                @as(f32, @floatFromInt(total_data_size)) * BLOCKS_PER_SLOT_INV,
-                            ),
-                        ),
-                    ),
-                );
-
-                if (data_slot_size_level > MAX_SLOT_SIZE_LEVEL) {
-                    @panic("Slot size level is too high");
-                }
-
-                const occupied_slot_count: u32 = std.math.pow(
-                    u32,
-                    2,
-                    data_slot_size_level,
-                );
-
                 chunk.chunk_index = chunk_index;
-                chunk.data_slot_index = self.next_free_block_slot;
+                chunk.data_slot_index = data_slot_index;
                 chunk.data_slot_size_level = data_slot_size_level;
 
-                self.next_free_block_slot += occupied_slot_count;
                 chunk_index += 1;
             }
         }

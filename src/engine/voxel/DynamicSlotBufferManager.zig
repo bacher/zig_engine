@@ -1,8 +1,7 @@
 const std = @import("std");
 
+const MAX_SPAN_SIZE_EXPONENT = @import("./voxel_consts.zig").MAX_SPAN_SIZE_EXPONENT;
 const VOXEL_GRID_SLOT_COUNT = @import("./voxel_consts.zig").VOXEL_GRID_SLOT_COUNT;
-
-const MAX_SPAN_SIZE_EXPONENT = 6;
 
 const SLOTS_PER_SPAN: u32 = 1 << MAX_SPAN_SIZE_EXPONENT; // 64
 

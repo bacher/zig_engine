@@ -198,9 +198,17 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    const voxel_buffer_utils_unit_tests = b.addTest(.{
+    const dynamic_slot_buffer_manager_unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/engine/voxel/DynamicSlotBufferManager.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const voxel_utils_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/engine/voxel/voxel_utils.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -210,12 +218,14 @@ pub fn build(b: *std.Build) void {
     const run_voxel_exe_unit_tests = b.addRunArtifact(voxel_exe_unit_tests);
     const run_engine_utils_unit_tests = b.addRunArtifact(engine_utils_unit_tests);
     const run_space_tree_unit_tests = b.addRunArtifact(space_tree_unit_tests);
-    const run_voxel_buffer_utils_unit_tests = b.addRunArtifact(voxel_buffer_utils_unit_tests);
+    const run_dynamic_slot_buffer_manager_unit_tests = b.addRunArtifact(dynamic_slot_buffer_manager_unit_tests);
+    const run_voxel_utils_unit_tests = b.addRunArtifact(voxel_utils_unit_tests);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_unit_tests.step);
     test_step.dependOn(&run_voxel_exe_unit_tests.step);
     test_step.dependOn(&run_engine_utils_unit_tests.step);
     test_step.dependOn(&run_space_tree_unit_tests.step);
-    test_step.dependOn(&run_voxel_buffer_utils_unit_tests.step);
+    test_step.dependOn(&run_dynamic_slot_buffer_manager_unit_tests.step);
+    test_step.dependOn(&run_voxel_utils_unit_tests.step);
 }
