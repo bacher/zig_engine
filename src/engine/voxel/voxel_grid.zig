@@ -107,6 +107,15 @@ pub const VoxelGrid = struct {
         self.allocator.destroy(self);
     }
 
+    pub fn clearChunks(self: *Self) void {
+        for (self.chunks.items) |*chunk| {
+            self.gpu_chunk_info_buffer_manager.freeBlock(chunk.chunk_index);
+            self.gpu_block_buffer_manager.freeBlock(chunk.data_slot_index);
+            chunk.deinit(self.allocator);
+        }
+        self.chunks.clearRetainingCapacity();
+    }
+
     pub fn appendChunk(self: *Self, chunk: VoxelChunk) void {
         self.chunks.append(self.allocator, chunk) catch @panic("OOM");
     }

@@ -64,6 +64,9 @@ const Game = struct {
         }
         const engine = game.engine;
         const world = game.world.?;
+        const voxel_grid = engine.active_scene.?.voxel_grid;
+
+        voxel_grid.clearChunks();
 
         const camera_position = engine.active_scene.?.camera.position;
 
@@ -101,7 +104,7 @@ const Game = struct {
                                 // voxel_chunk.loadTestData(allocator);
                                 world_engine.updateVoxelChunk(game.allocator, world_chunk, &voxel_chunk);
 
-                                engine.active_scene.?.voxel_grid.appendChunk(voxel_chunk);
+                                voxel_grid.appendChunk(voxel_chunk);
                             }
                         }
 
@@ -114,6 +117,8 @@ const Game = struct {
             }
             chunk_z += 1;
         }
+
+        voxel_grid.uploadToGPU(engine.gctx);
     }
 
     fn checkIfChunkCanBeSkipped(game: *const Game, chunk_coords: [3]u30) bool {
@@ -333,7 +338,7 @@ pub fn main(init: std.process.Init) !void {
     }));
 
     initWorld(allocator, game);
-    game.updateChunksAroundCamera();
+    // game.updateChunksAroundCamera();
 
     // -- Tube data for coordinates --
 
@@ -411,8 +416,7 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
     //     group.setPosition(.{ 0, 0, @floatCast(math.sin(engine.time) * 10), 0 });
     // }
 
-    // TODO: Uncomment this when we have a way to update the chunks on engine's side
-    // game.updateChunksAroundCamera();
+    game.updateChunksAroundCamera();
 }
 
 fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
