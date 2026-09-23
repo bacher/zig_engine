@@ -13,10 +13,6 @@ const encodeChunkPosition = @import("./world.zig").encodeChunkPosition;
 const encodeChunkPositionArray = @import("./world.zig").encodeChunkPositionArray;
 
 pub fn updateVoxelChunk(allocator: std.mem.Allocator, world_chunk: *const WorldChunk, voxel_chunk: *VoxelChunk) void {
-    if (world_chunk.world_chunk_data == null) {
-        return;
-    }
-
     const world_chunk_data = world_chunk.world_chunk_data.?;
     const b = &world_chunk_data.blocks;
 

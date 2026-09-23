@@ -180,7 +180,7 @@ pub const Scene = struct {
             scene.instance_buffer.buffer[0..scene.instance_buffer.next_index],
         );
 
-        scene.voxel_grid.uploadToGPU(scene.engine.gctx);
+        // scene.voxel_grid.uploadToGPU(scene.engine.gctx);
     }
 
     pub fn updateInstanceBuffer(scene: *Scene, instance_index: u32) void {

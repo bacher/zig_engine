@@ -193,6 +193,13 @@ pub const DynamicSlotBufferManager = struct {
             }
         }
     }
+
+    pub fn clear(self: *Self) void {
+        // self.span_meta_maps = @splat(0);
+        // self.span_storage = @splat(0);
+        // self.span_count = 0;
+        self.* = .{};
+    }
 };
 
 fn divmod(a: u32, b: u32) struct { u32, u32 } {

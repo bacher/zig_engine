@@ -627,7 +627,7 @@ pub const Engine = struct {
                                 .ssao_enabled = engine.state.ssao_enabled,
                             };
                             const camera_chunk_uniform = engine.gctx.uniformsAllocate([3]i32, 1);
-                            camera_chunk_uniform.slice[0] = scene.camera.chunk;
+                            camera_chunk_uniform.slice[0] = @as([4]i32, scene.camera.chunk)[0..3].*;
 
                             shadow_map_pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
                                 clip_from_world_uniform.offset,
@@ -726,7 +726,7 @@ pub const Engine = struct {
                     const clip_from_world_chunked_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                     clip_from_world_chunked_uniform.slice[0] = scene.camera.clip_from_world_chunked;
                     const camera_chunk_uniform = engine.gctx.uniformsAllocate([3]i32, 1);
-                    camera_chunk_uniform.slice[0] = scene.camera.chunk;
+                    camera_chunk_uniform.slice[0] = @as([4]i32, scene.camera.chunk)[0..3].*;
 
                     pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
                         clip_from_world_uniform.offset,

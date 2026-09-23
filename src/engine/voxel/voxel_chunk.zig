@@ -69,6 +69,7 @@ comptime {
 pub const VoxelChunk = struct {
     pub const Self = @This();
 
+    // TODO: should we add chunk_id here?
     chunk_origin: [3]u30,
 
     blocks_grouped_by_side: [6]BlockCoordList = .{BlockCoordList.empty} ** 6,

@@ -37,45 +37,58 @@ const solid_chunk_flags = ChunkFlags{
 
 pub fn normalizeChunkPosition(x: anytype, y: anytype, z: anytype) [3]u30 {
     var normalized_x = x;
-    var normalized_y = y;
-    var normalized_z = z;
 
+    // only x wraps, y and z are not wrapped
     if (x >= WORLD_SIZE[0]) {
         normalized_x = x - WORLD_SIZE[0];
     } else if (x < 0) {
         normalized_x = x + WORLD_SIZE[0];
     }
-    if (y >= WORLD_SIZE[1]) {
-        normalized_y = y - WORLD_SIZE[1];
-    } else if (y < 0) {
-        normalized_y = y + WORLD_SIZE[1];
-    }
-    if (z >= WORLD_SIZE[2]) {
-        normalized_z = z - WORLD_SIZE[2];
-    } else if (z < 0) {
-        normalized_z = z + WORLD_SIZE[2];
-    }
+    // if (y >= WORLD_SIZE[1]) {
+    //     normalized_y = y - WORLD_SIZE[1];
+    // } else if (y < 0) {
+    //     normalized_y = y + WORLD_SIZE[1];
+    // }
+    // if (z >= WORLD_SIZE[2]) {
+    //     normalized_z = z - WORLD_SIZE[2];
+    // } else if (z < 0) {
+    //     normalized_z = z + WORLD_SIZE[2];
+    // }
+
+    std.debug.assert(y >= 0 and y < WORLD_SIZE[1]);
+    std.debug.assert(z >= 0 and z < WORLD_SIZE[2]);
 
     return .{
         @intCast(normalized_x),
-        @intCast(normalized_y),
-        @intCast(normalized_z),
+        @intCast(y),
+        @intCast(z),
     };
 }
 
 pub fn encodeChunkPosition(x: anytype, y: anytype, z: anytype) ChunkPosition {
-    return @as(ChunkPosition, @intCast(x)) | @as(ChunkPosition, @intCast(y)) << 12 | @as(ChunkPosition, @intCast(z)) << 20;
+    return @as(ChunkPosition, @intCast(x)) |
+        @as(ChunkPosition, @intCast(y)) << 12 |
+        @as(ChunkPosition, @intCast(z)) << 20;
 }
 
 pub fn encodeChunkPositionArray(coords: anytype) ChunkPosition {
     return encodeChunkPosition(coords[0], coords[1], coords[2]);
 }
 
-pub fn decodeChunkPosition(position: ChunkPosition) [3]u32 {
+pub fn decodeChunkPosition(position: ChunkPosition) [3]u30 {
     return .{
-        @as(u32, @intCast(position & 0xfff)), //      first 12 bit
-        @as(u32, @intCast(position >> 12 & 0xff)), // then 8 bit
-        @as(u32, @intCast(position >> 20)), //        and rest (3/4 bit)
+        @as(u30, @intCast(position & 0xfff)), //      first 12 bit
+        @as(u30, @intCast(position >> 12 & 0xff)), // then 8 bit
+        @as(u30, @intCast(position >> 20)), //        and rest (3/4 bit)
+    };
+}
+
+pub fn decodeChunkPositionVec(position: ChunkPosition) @Vector(4, i32) {
+    return .{
+        @as(i32, @intCast(position & 0xfff)), //      first 12 bit
+        @as(i32, @intCast(position >> 12 & 0xff)), // then 8 bit
+        @as(i32, @intCast(position >> 20)), //        and rest (3/4 bit)
+        0,
     };
 }
 

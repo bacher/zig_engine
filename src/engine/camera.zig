@@ -22,7 +22,7 @@ pub const Camera = struct {
     aspect_ratio: f32,
 
     position: [3]f32,
-    chunk: [3]i32,
+    chunk: @Vector(4, i32),
 
     camera_from_world: zmath.Mat,
     camera_from_world_chunked: zmath.Mat,
@@ -40,7 +40,6 @@ pub const Camera = struct {
 
     pub fn init(aspect_ratio: f32) Camera {
         const position: [3]f32 = .{ 0, 0, 0 };
-        const chunk: [3]i32 = .{ 0, 0, 0 };
 
         const no_translation = zmath.translation(0, 0, 0);
 
@@ -58,7 +57,7 @@ pub const Camera = struct {
             .aspect_ratio = aspect_ratio,
 
             .position = position,
-            .chunk = chunk,
+            .chunk = @splat(0),
 
             .camera_from_world = no_translation,
             .camera_from_world_chunked = no_translation,

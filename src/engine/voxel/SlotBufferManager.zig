@@ -50,6 +50,10 @@ pub const SlotBufferManager = struct {
         const bit: u6 = @intCast(slot_index % BITS_PER_WORD);
         self.occupancy[word_index] &= ~(@as(u64, 1) << bit);
     }
+
+    pub fn clear(self: *Self) void {
+        self.occupancy = @splat(0);
+    }
 };
 
 test "occupyBlock returns consecutive slot indices" {

@@ -30,6 +30,7 @@ pub const VoxelGrid = struct {
 
     allocator: std.mem.Allocator,
     chunks: ChunkList = .empty,
+    chunks_to_upload: ChunkList = .empty,
 
     gpu_chunk_info_buffer_manager: SlotBufferManager = .{},
     gpu_chunk_info_buffer: GPUBuffer,
@@ -92,6 +93,7 @@ pub const VoxelGrid = struct {
         };
 
         grid.chunks.ensureTotalCapacity(allocator, 1024) catch @panic("OOM");
+        grid.chunks_to_upload.ensureTotalCapacity(allocator, 128) catch @panic("OOM");
 
         return grid;
     }
@@ -104,27 +106,61 @@ pub const VoxelGrid = struct {
             chunk.deinit(self.allocator);
         }
         self.chunks.deinit(self.allocator);
+
+        for (self.chunks_to_upload.items) |*chunk| {
+            chunk.deinit(self.allocator);
+        }
+        self.chunks_to_upload.deinit(self.allocator);
+
         self.allocator.destroy(self);
     }
 
     pub fn clearChunks(self: *Self) void {
         for (self.chunks.items) |*chunk| {
-            self.gpu_chunk_info_buffer_manager.freeBlock(chunk.chunk_index);
-            self.gpu_block_buffer_manager.freeBlock(chunk.data_slot_index);
+            // self.gpu_chunk_info_buffer_manager.freeBlock(chunk.chunk_index);
+            // self.gpu_block_buffer_manager.freeBlock(chunk.data_slot_index);
             chunk.deinit(self.allocator);
         }
+        for (self.chunks_to_upload.items) |*chunk| {
+            chunk.deinit(self.allocator);
+        }
+
         self.chunks.clearRetainingCapacity();
+        self.chunks_to_upload.clearRetainingCapacity();
+
+        self.gpu_chunk_info_buffer_manager.clear();
+        self.gpu_block_buffer_manager.clear();
     }
 
     pub fn appendChunk(self: *Self, chunk: VoxelChunk) void {
-        self.chunks.append(self.allocator, chunk) catch @panic("OOM");
+        self.chunks_to_upload.append(self.allocator, chunk) catch @panic("OOM");
+    }
+
+    /// Removes a chunk (if it's loaded) from the voxel grid and releases the GPU memory slot.
+    pub fn removeChunk(self: *Self, chunk_coords: [3]u30) void {
+        for (self.chunks.items, 0..) |*chunk, i| {
+            if (chunk.chunk_origin[0] == chunk_coords[0] and
+                chunk.chunk_origin[1] == chunk_coords[1] and
+                chunk.chunk_origin[2] == chunk_coords[2])
+            {
+                self.gpu_chunk_info_buffer_manager.freeBlock(chunk.chunk_index);
+                self.gpu_block_buffer_manager.freeBlock(chunk.data_slot_index);
+                _ = self.chunks.swapRemove(i);
+                chunk.deinit(self.allocator);
+                return;
+            }
+        }
     }
 
     pub fn uploadToGPU(self: *Self, gctx: *zgpu.GraphicsContext) void {
         const block_buffer = self.gpu_block_buffer.buffer;
         const chunk_info_buffer = self.gpu_chunk_info_buffer.buffer;
 
-        for (self.chunks.items) |*chunk| {
+        if (self.chunks_to_upload.items.len > 0) {
+            std.debug.print("Uploading {} voxel chunks to GPU\n", .{self.chunks_to_upload.items.len});
+        }
+
+        for (self.chunks_to_upload.items) |*chunk| {
             var total_data_size_total: usize = 0;
             for (chunk.blocks_grouped_by_side) |side| {
                 total_data_size_total += side.items.len;
@@ -188,6 +224,10 @@ pub const VoxelGrid = struct {
                 chunk.data_slot_index = data_slot_index;
                 chunk.data_slot_size_level = data_slot_size_level;
             }
+
+            self.chunks.append(self.allocator, chunk.*) catch @panic("OOM");
         }
+
+        self.chunks_to_upload.clearRetainingCapacity();
     }
 };
