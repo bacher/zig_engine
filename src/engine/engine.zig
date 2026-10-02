@@ -105,8 +105,8 @@ pub const Engine = struct {
     zgui: bool = false,
     callbacks: Callbacks,
     content_dir: []const u8,
-    init_time: f64,
-    time: f64,
+    init_time: f64, // seconds
+    time: f64, // seconds
 
     state: EngineState = .{},
 
@@ -480,7 +480,7 @@ pub const Engine = struct {
         // resetting frame stats before each frame
         engine.frame_stats = .{};
 
-        try engine.input_controller.updateMouseState();
+        try engine.input_controller.updateMouseState(engine.time);
 
         if (engine.active_scene) |scene| {
             scene.camera.updateTargetScreenSize(engine.aspect_ratio);

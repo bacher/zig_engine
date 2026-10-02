@@ -33,6 +33,8 @@ pub fn InputController(comptime Context: type) type {
         cursor_left_button_pressed: bool = false,
         cursor_right_button_pressed: bool = false,
 
+        last_update_time: f64 = 0.0, // seconds
+
         pub fn init(
             allocator: std.mem.Allocator,
             window: *zglfw.Window,
@@ -114,22 +116,33 @@ pub fn InputController(comptime Context: type) type {
             }
         }
 
-        pub fn updateMouseState(input_controller: *Self) !void {
+        pub fn updateMouseState(input_controller: *Self, time_sec: f64) !void {
             const window = input_controller.window;
 
             const new_position = getCursorPosition(window);
 
-            const delta: [2]f32 = .{
+            var delta: [2]f32 = .{
                 new_position[0] - input_controller.cursor_position[0],
                 new_position[1] - input_controller.cursor_position[1],
             };
 
-            if (delta[0] < -35 or delta[0] > 35 or delta[1] < -35 or delta[1] > 35) {
-                input_controller.cursor_position_delta = .{ 0, 0 };
-            } else {
-                input_controller.cursor_position_delta = delta;
+            const delta_time: f32 = @floatCast(time_sec - input_controller.last_update_time);
+            input_controller.last_update_time = time_sec;
+
+            // ignore too fast mouse movement when fps is reasonable (>= 50 fps)
+            if (delta_time < 0.02) {
+                const threshold = 20000 * delta_time;
+
+                // for  60 fsp ~> 333px
+                // for 120 fsp ~> 177px
+                if (@abs(delta[0]) > threshold or
+                    @abs(delta[1]) > threshold)
+                {
+                    delta = .{ 0, 0 };
+                }
             }
 
+            input_controller.cursor_position_delta = delta;
             input_controller.cursor_position = new_position;
 
             const cursor_left_button_pressed = window.getMouseButton(.left) != .release;
