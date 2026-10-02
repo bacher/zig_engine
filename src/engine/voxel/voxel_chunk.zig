@@ -56,14 +56,17 @@ comptime {
 pub const BlockCoordList = std.ArrayList(BlockInfo);
 
 pub const ChunkInfo = extern struct {
-    side_data_indices: [6]u16,
-    _padding: u32 = 0,
-    chunk_origin: [3]u32,
-    data_slot_index: u32,
+    // TODO: can we hold all needed info in [8]u32 -> [8][u10,u10,u10,u2], 10 bits per coord
+    // [2]u16 = {count, index}
+    view_side_data_indices: [8][3][2]u16, // 96 bytes
+    chunk_origin: [3]u32, // 12 bytes
+    data_slot_index: u32, // 4 bytes
+    // total: 112 bytes
 };
 
 comptime {
-    std.debug.assert(@sizeOf(ChunkInfo) == 32);
+    // @compileLog("ChunkInfo size", @sizeOf(ChunkInfo));
+    std.debug.assert(@sizeOf(ChunkInfo) == 112);
 }
 
 pub const VoxelChunk = struct {
@@ -72,7 +75,10 @@ pub const VoxelChunk = struct {
     // TODO: should we add chunk_id here?
     chunk_origin: [3]u30,
 
-    blocks_grouped_by_side: [6]BlockCoordList = .{BlockCoordList.empty} ** 6,
+    // TODO: we should not hold all side data after it's loaded into GPU memory
+    blocks_grouped_by_side: [6]BlockCoordList = @splat(BlockCoordList.empty),
+
+    faces_count_per_view: [8]u16 = @splat(0),
 
     chunk_index: u32 = 0,
     data_slot_index: u32 = 0,

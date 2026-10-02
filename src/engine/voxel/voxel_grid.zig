@@ -25,6 +25,11 @@ const BLOCKS_PER_SLOT_INV: f32 = 1.0 / @as(f32, @floatFromInt(BLOCKS_PER_SLOT));
 
 const ChunkList = std.ArrayList(VoxelChunk);
 
+const SideDataPosition = struct {
+    index: u16,
+    count: u16,
+};
+
 pub const VoxelGrid = struct {
     pub const Self = @This();
 
@@ -182,8 +187,9 @@ pub const VoxelGrid = struct {
                 .size_exponent = data_slot_size_level,
             }) catch @panic("Not enough space in the block data buffer");
 
+            // TODO: rename into GPUChunkInfo
             var chunk_info: ChunkInfo = .{
-                .side_data_indices = .{ 0, 0, 0, 0, 0, 0 },
+                .view_side_data_indices = undefined,
                 .chunk_origin = .{
                     chunk.chunk_origin[0],
                     chunk.chunk_origin[1],
@@ -193,10 +199,14 @@ pub const VoxelGrid = struct {
             };
 
             var total_data_size: u16 = 0;
+            var side_data_indices: [6]SideDataPosition = @splat(.{ .index = 0, .count = 0 });
             for (chunk.blocks_grouped_by_side, 0..) |side, side_index| {
                 if (side.items.len > 0) {
                     const data_index = chunk_info.data_slot_index * BLOCKS_PER_SLOT + total_data_size;
-                    chunk_info.side_data_indices[side_index] = total_data_size;
+                    side_data_indices[side_index] = .{
+                        .index = total_data_size,
+                        .count = @intCast(side.items.len),
+                    };
 
                     gctx.queue.writeBuffer(
                         block_buffer,
@@ -208,6 +218,12 @@ pub const VoxelGrid = struct {
                     total_data_size += @intCast(side.items.len);
                 }
             }
+
+            const perspective_data = convertSideDataIndicesIntoPerspectiveIndices(
+                side_data_indices,
+            );
+            chunk_info.view_side_data_indices = perspective_data.view_side_data_indices;
+            chunk.faces_count_per_view = perspective_data.faces_count_per_view;
 
             if (total_data_size > 0) {
                 const chunk_index = self.gpu_chunk_info_buffer_manager.occupyBlock() catch
@@ -231,3 +247,74 @@ pub const VoxelGrid = struct {
         self.chunks_to_upload.clearRetainingCapacity();
     }
 };
+
+// 0 top     +z
+// 1 bottom  -z
+// 2 front   -y
+// 3 back    +y
+// 4 left    -x
+// 5 right   +x
+
+const INDEXES: [8][3]usize = .{
+    .{ 0, 2, 4 },
+    .{ 0, 2, 5 },
+    .{ 0, 3, 4 },
+    .{ 0, 3, 5 },
+    .{ 1, 2, 4 },
+    .{ 1, 2, 5 },
+    .{ 1, 3, 4 },
+    .{ 1, 3, 5 },
+};
+
+fn convertSideDataIndicesIntoPerspectiveIndices(side_data_indices: [6]SideDataPosition) struct {
+    view_side_data_indices: [8][3][2]u16,
+    faces_count_per_view: [8]u16,
+} {
+    var view_side_data_indices: [8][3][2]u16 = undefined;
+    var faces_count_per_view: [8]u16 = undefined;
+
+    for (0..8) |i| {
+        const ind = INDEXES[i];
+
+        const faces_count = .{
+            side_data_indices[ind[0]].count,
+            side_data_indices[ind[1]].count,
+            side_data_indices[ind[2]].count,
+        };
+
+        const total_faces_count = faces_count[0] + faces_count[1] + faces_count[2];
+
+        view_side_data_indices[i] = .{
+            .{
+                faces_count[0],
+                side_data_indices[ind[0]].index,
+            },
+            .{
+                faces_count[0] + faces_count[1],
+                side_data_indices[ind[1]].index - faces_count[0],
+            },
+            .{
+                total_faces_count,
+                side_data_indices[ind[2]].index - faces_count[0] - faces_count[1],
+            },
+        };
+
+        faces_count_per_view[i] = total_faces_count;
+    }
+
+    return .{
+        .view_side_data_indices = view_side_data_indices,
+        .faces_count_per_view = faces_count_per_view,
+    };
+
+    // return .{
+    //     .{ side_data_indices[1], side_data_indices[2], side_data_indices[4], 0 }, // -x -y -z
+    //     .{ side_data_indices[1], side_data_indices[2], side_data_indices[5], 0 }, // +x -y -z
+    //     .{ side_data_indices[1], side_data_indices[3], side_data_indices[4], 0 }, // -x +y -z
+    //     .{ side_data_indices[1], side_data_indices[3], side_data_indices[5], 0 }, // +x +y -z
+    //     .{ side_data_indices[0], side_data_indices[2], side_data_indices[4], 0 }, // -x -y +z
+    //     .{ side_data_indices[0], side_data_indices[2], side_data_indices[5], 0 }, // +x -y +z
+    //     .{ side_data_indices[0], side_data_indices[3], side_data_indices[4], 0 }, // -x +y +z
+    //     .{ side_data_indices[0], side_data_indices[3], side_data_indices[5], 0 }, // +x +y +z
+    // };
+}

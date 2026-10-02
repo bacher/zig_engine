@@ -36,7 +36,7 @@ const Game = struct {
     engine: *Engine,
     world: ?World = null,
     loaded_chunk_ids: std.AutoHashMapUnmanaged(u32, void) = .empty,
-    last_camera_chunk_coords: ?@Vector(4, u30) = null,
+    last_camera_chunk_coords: ?@Vector(4, i32) = null,
     saved_game_objects: std.StringHashMapUnmanaged(*GameObject) = .empty,
     saved_game_object_groups: std.StringHashMapUnmanaged(*GameObjectGroup) = .empty,
 
@@ -188,6 +188,8 @@ const Game = struct {
         }
 
         voxel_grid.uploadToGPU(engine.gctx);
+
+        game.last_camera_chunk_coords = camera_chunk_coords;
     }
 
     fn uploadChunkIfNeeded(game: *Game, chunk_x: i32, chunk_y: i32, chunk_z: i32) void {

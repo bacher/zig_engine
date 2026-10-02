@@ -752,11 +752,30 @@ pub const Engine = struct {
                     pass.setBindGroup(3, scene.voxel_bind_group.wgpu_bind_group, &.{});
 
                     for (scene.voxel_grid.chunks.items) |chunk| {
-                        var side: u32 = 0;
-                        for (chunk.blocks_grouped_by_side) |chunk_side| {
-                            const vertex_count = chunk_side.items.len * 6;
-                            pass.draw(@intCast(vertex_count), 1, 0, (chunk.chunk_index << 3) + side);
-                            side += 1;
+                        // for (chunk.blocks_grouped_by_side) |chunk_side| {
+                        // const vertex_count = chunk_side.items.len * 6;
+
+                        const chunk_coords = @Vector(4, i32){
+                            chunk.chunk_origin[0],
+                            chunk.chunk_origin[1],
+                            chunk.chunk_origin[2],
+                            0,
+                        };
+
+                        const view_direction = chunk_coords - scene.camera.chunk;
+
+                        // if camera is looking at the chunk only from one side of each axis, draw two views covering whole chunk
+                        if (view_direction[0] == 0 or view_direction[1] == 0 or view_direction[2] == 0) {
+                            pass.draw(@intCast(chunk.faces_count_per_view[0] * 6), 1, 0, (chunk.chunk_index << 3) + 0);
+                            pass.draw(@intCast(chunk.faces_count_per_view[7] * 6), 1, 0, (chunk.chunk_index << 3) + 7);
+                        } else {
+                            // or draw only one view covering the sides of the chunk which is visible from the camera
+                            const view_index: u3 =
+                                @intCast((if (view_direction[0] > 0) @as(u3, 0) else @as(u3, 1)) +
+                                    (if (view_direction[1] > 0) @as(u3, 0) else @as(u3, 2)) +
+                                    (if (view_direction[2] > 0) @as(u3, 4) else @as(u3, 0)));
+
+                            pass.draw(@intCast(chunk.faces_count_per_view[view_index] * 6), 1, 0, (chunk.chunk_index << 3) + view_index);
                         }
                     }
 
