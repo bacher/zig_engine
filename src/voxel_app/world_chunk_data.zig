@@ -4,21 +4,21 @@ const Side = @import("engine").voxel_chunk.Side;
 const CHUNK_SIZE = 32;
 
 pub const ChunkFlags = packed struct {
-    solid_top: bool = false,
-    solid_bottom: bool = false,
-    solid_front: bool = false,
-    solid_back: bool = false,
     solid_left: bool = false,
     solid_right: bool = false,
+    solid_front: bool = false,
+    solid_back: bool = false,
+    solid_bottom: bool = false,
+    solid_top: bool = false,
 
     pub fn getSideSolidness(self: *const ChunkFlags, side: Side) bool {
         switch (side) {
-            .top => return self.solid_top,
-            .bottom => return self.solid_bottom,
-            .front => return self.solid_front,
-            .back => return self.solid_back,
             .left => return self.solid_left,
             .right => return self.solid_right,
+            .front => return self.solid_front,
+            .back => return self.solid_back,
+            .bottom => return self.solid_bottom,
+            .top => return self.solid_top,
         }
     }
 };
@@ -75,12 +75,12 @@ pub const WorldChunkData = struct {
 
     pub fn getMetaFlags(self: *const WorldChunkData) ChunkFlags {
         var flags: ChunkFlags = .{
-            .solid_top = true,
-            .solid_bottom = true,
-            .solid_front = true,
-            .solid_back = true,
             .solid_left = true,
             .solid_right = true,
+            .solid_front = true,
+            .solid_back = true,
+            .solid_bottom = true,
+            .solid_top = true,
         };
 
         for (0..CHUNK_SIZE) |y| {

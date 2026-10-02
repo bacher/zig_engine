@@ -3,21 +3,21 @@ const std = @import("std");
 pub const CHUNK_SIZE = 32;
 
 pub const Side = enum(u8) {
-    top = 0,
-    bottom = 1,
-    front = 2,
-    back = 3,
-    left = 4,
-    right = 5,
+    left = 0, //   -x
+    right = 1, //  +x
+    front = 2, //  -y
+    back = 3, //   +y
+    bottom = 4, // -z
+    top = 5, //    +z
 
     pub fn getOpposite(self: Side) Side {
         switch (self) {
-            .top => return .bottom,
-            .bottom => return .top,
-            .front => return .back,
-            .back => return .front,
             .left => return .right,
             .right => return .left,
+            .front => return .back,
+            .back => return .front,
+            .bottom => return .top,
+            .top => return .bottom,
         }
     }
 

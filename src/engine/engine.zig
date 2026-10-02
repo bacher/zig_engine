@@ -773,9 +773,9 @@ pub const Engine = struct {
                         } else {
                             // or draw only one view covering the sides of the chunk which is visible from the camera
                             const view_index: u3 =
-                                @intCast((if (view_direction[0] > 0) @as(u3, 0) else @as(u3, 1)) +
+                                @intCast((if (view_direction[0] > 0) @as(u3, 0) else @as(u3, 4)) +
                                     (if (view_direction[1] > 0) @as(u3, 0) else @as(u3, 2)) +
-                                    (if (view_direction[2] > 0) @as(u3, 4) else @as(u3, 0)));
+                                    (if (view_direction[2] > 0) @as(u3, 0) else @as(u3, 1)));
 
                             pass.draw(@intCast(info.faces_count_per_view[view_index] * 6), 1, 0, (info.chunk_index << 3) + view_index);
                         }

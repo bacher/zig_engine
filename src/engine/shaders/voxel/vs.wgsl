@@ -41,8 +41,8 @@ fn getUv(side: u32, vertex_index: u32, block_type: u32) -> vec2f {
         case 2:          { /* dirt  */ shift = vec2( 2.0,  0.0); }
         case 3:          { /* grass */
             switch side {
-                case 0:  { shift = vec2( 12.0, 12.0); }
-                case 1:  { shift = vec2(  0.0,  2.0); }
+                case 5:  { shift = vec2( 12.0, 12.0); }
+                case 4:  { shift = vec2(  0.0,  2.0); }
                 default: { shift = vec2(  3.0,  0.0); }
             }
         }
@@ -66,26 +66,26 @@ fn getUv(side: u32, vertex_index: u32, block_type: u32) -> vec2f {
 
 fn getPosition(side: u32, vertex_index: u32) -> vec3<u32> {
     switch side {
-        // top
+        // left
         case 0, default: {
             switch vertex_index {
-                case 0, default: { return vec3(0, 0, 1); }
-                case 1:          { return vec3(1, 1, 1); }
+                case 0, default: { return vec3(0, 1, 0); }
+                case 1:          { return vec3(0, 0, 1); }
                 case 2:          { return vec3(0, 1, 1); }
-                case 3:          { return vec3(0, 0, 1); }
-                case 4:          { return vec3(1, 0, 1); }
-                case 5:          { return vec3(1, 1, 1); }
+                case 3:          { return vec3(0, 1, 0); }
+                case 4:          { return vec3(0, 0, 0); }
+                case 5:          { return vec3(0, 0, 1); }
             }
         }
-        // bottom
+        // right
         case 1: {
             switch vertex_index {
-                case 0, default: { return vec3(0, 1, 0); }
-                case 1:          { return vec3(1, 0, 0); }
-                case 2:          { return vec3(0, 0, 0); }
-                case 3:          { return vec3(0, 1, 0); }
+                case 0, default: { return vec3(1, 0, 0); }
+                case 1:          { return vec3(1, 1, 1); }
+                case 2:          { return vec3(1, 0, 1); }
+                case 3:          { return vec3(1, 0, 0); }
                 case 4:          { return vec3(1, 1, 0); }
-                case 5:          { return vec3(1, 0, 0); }
+                case 5:          { return vec3(1, 1, 1); }
             }
         }
         // front
@@ -110,25 +110,25 @@ fn getPosition(side: u32, vertex_index: u32) -> vec3<u32> {
                 case 5:          { return vec3(0, 1, 1); }
             }
         }
-        // left
+        // bottom
         case 4: {
             switch vertex_index {
                 case 0, default: { return vec3(0, 1, 0); }
-                case 1:          { return vec3(0, 0, 1); }
-                case 2:          { return vec3(0, 1, 1); }
+                case 1:          { return vec3(1, 0, 0); }
+                case 2:          { return vec3(0, 0, 0); }
                 case 3:          { return vec3(0, 1, 0); }
-                case 4:          { return vec3(0, 0, 0); }
-                case 5:          { return vec3(0, 0, 1); }
+                case 4:          { return vec3(1, 1, 0); }
+                case 5:          { return vec3(1, 0, 0); }
             }
         }
-        // right
+        // top
         case 5: {
             switch vertex_index {
-                case 0, default: { return vec3(1, 0, 0); }
+                case 0, default: { return vec3(0, 0, 1); }
                 case 1:          { return vec3(1, 1, 1); }
-                case 2:          { return vec3(1, 0, 1); }
-                case 3:          { return vec3(1, 0, 0); }
-                case 4:          { return vec3(1, 1, 0); }
+                case 2:          { return vec3(0, 1, 1); }
+                case 3:          { return vec3(0, 0, 1); }
+                case 4:          { return vec3(1, 0, 1); }
                 case 5:          { return vec3(1, 1, 1); }
             }
         }
@@ -137,36 +137,12 @@ fn getPosition(side: u32, vertex_index: u32) -> vec3<u32> {
 
 fn getNormal(side: u32) -> vec3<f32> {
     switch side {
-        case 0, default: { return vec3( 0.0,  0.0,  1.0); }
-        case 1:          { return vec3( 0.0,  0.0, -1.0); }
+        case 0, default: { return vec3(-1.0,  0.0,  0.0); }
+        case 1:          { return vec3( 1.0,  0.0,  0.0); }
         case 2:          { return vec3( 0.0, -1.0,  0.0); }
         case 3:          { return vec3( 0.0,  1.0,  0.0); }
-        case 4:          { return vec3(-1.0,  0.0,  0.0); }
-        case 5:          { return vec3( 1.0,  0.0,  0.0); }
-    }
-}
-
-// decoding [3]u32 into [6]u16
-fn extractSideDataIndex(indices: array<u32, 3>, side: u32) -> u32 {
-    switch side {
-        case 0, default: {
-            return indices[0] & 0xffffu;
-        }
-        case 1: {
-            return indices[0] >> 16u;
-        }
-        case 2: {
-            return indices[1] & 0xffffu;
-        }
-        case 3: {
-            return indices[1] >> 16u;
-        }
-        case 4: {
-            return indices[2] & 0xffffu;
-        }
-        case 5: {
-            return indices[2] >> 16u;
-        }
+        case 4:          { return vec3( 0.0,  0.0, -1.0); }
+        case 5:          { return vec3( 0.0,  0.0,  1.0); }
     }
 }
 

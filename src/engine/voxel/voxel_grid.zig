@@ -255,12 +255,12 @@ pub const VoxelGrid = struct {
     }
 };
 
-// 0 top     +z
-// 1 bottom  -z
+// 0 left    -x
+// 1 right   +x
 // 2 front   -y
 // 3 back    +y
-// 4 left    -x
-// 5 right   +x
+// 4 bottom  -z
+// 5 top     +z
 
 const INDEXES: [8][3]usize = .{
     .{ 0, 2, 4 },
@@ -281,12 +281,25 @@ fn convertSideDataIndicesIntoPerspectiveIndices(side_data_indices: [6]SideDataPo
     var faces_count_per_view: [8]u16 = undefined;
 
     for (0..8) |i| {
-        const ind = INDEXES[i];
+        // Effectively matches to this mapping:
+        //   i | x, y, z
+        //   --|--------
+        //   0 | 0, 2, 4
+        //   1 | 0, 2, 5
+        //   2 | 0, 3, 4
+        //   3 | 0, 3, 5
+        //   4 | 1, 2, 4
+        //   5 | 1, 2, 5
+        //   6 | 1, 3, 4
+        //   7 | 1, 3, 5
+        const x = i >> 2;
+        const y = 2 + ((i >> 1) & 1);
+        const z = 4 + (i & 1);
 
         const faces_count = .{
-            side_data_indices[ind[0]].count,
-            side_data_indices[ind[1]].count,
-            side_data_indices[ind[2]].count,
+            side_data_indices[x].count,
+            side_data_indices[y].count,
+            side_data_indices[z].count,
         };
 
         const total_faces_count = faces_count[0] + faces_count[1] + faces_count[2];
@@ -294,15 +307,15 @@ fn convertSideDataIndicesIntoPerspectiveIndices(side_data_indices: [6]SideDataPo
         view_side_data_indices[i] = .{
             .{
                 faces_count[0],
-                side_data_indices[ind[0]].index,
+                side_data_indices[x].index,
             },
             .{
                 faces_count[0] + faces_count[1],
-                side_data_indices[ind[1]].index - faces_count[0],
+                side_data_indices[y].index - faces_count[0],
             },
             .{
                 total_faces_count,
-                side_data_indices[ind[2]].index - faces_count[0] - faces_count[1],
+                side_data_indices[z].index - faces_count[0] - faces_count[1],
             },
         };
 
