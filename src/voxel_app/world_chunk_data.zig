@@ -38,14 +38,14 @@ pub const WorldChunkData = struct {
         };
     }
 
-    pub fn initEmpty() WorldChunkData {
-        var chunk = WorldChunkData{
-            .blocks = undefined,
+    pub fn initFilled(block_type: BlockType) WorldChunkData {
+        return .{
+            .blocks = @splat(@splat(@splat(block_type))),
         };
+    }
 
-        @memset(&chunk.blocks, .{.{BlockType.none} ** 32} ** 32);
-
-        return chunk;
+    pub fn initEmpty() WorldChunkData {
+        return initFilled(.none);
     }
 
     pub fn initFlat() WorldChunkData {
@@ -66,17 +66,7 @@ pub const WorldChunkData = struct {
     }
 
     pub fn initSolid() WorldChunkData {
-        var chunk = WorldChunkData.initEmpty();
-
-        for (0..CHUNK_SIZE) |z| {
-            for (0..CHUNK_SIZE) |y| {
-                for (0..CHUNK_SIZE) |x| {
-                    chunk.blocks[z][y][x] = BlockType.stone;
-                }
-            }
-        }
-
-        return chunk;
+        return initFilled(.stone);
     }
 
     pub fn getMetaFlags(self: *const WorldChunkData) ChunkFlags {

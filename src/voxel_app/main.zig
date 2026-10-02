@@ -24,17 +24,32 @@ const chunk_utils = @import("engine").chunk_utils;
 
 const world_module = @import("world.zig");
 const World = @import("world.zig").World;
+const encodeChunkPosition = @import("world.zig").encodeChunkPosition;
 const encodeChunkPositionArray = @import("world.zig").encodeChunkPositionArray;
 const WorldChunk = @import("world.zig").WorldChunk;
+const world_generator = @import("./world_generator.zig");
+const world_data_service = @import("./world_data_service.zig");
+const WorldDataService = world_data_service.WorldDataService;
+const ChunkResponse = world_data_service.ChunkResponse;
 const consts = @import("./consts.zig");
 const world_engine = @import("./world_engine_glue.zig");
 
 const DEBUG = true;
 
+/// Chunks within this distance from the camera chunk are requested and uploaded to the GPU.
+const CHUNK_LOAD_RADIUS = 2;
+/// Chunks farther than this are evicted. Larger than `CHUNK_LOAD_RADIUS`, so moving back and
+/// forth across a chunk border doesn't re-request the same chunks.
+const CHUNK_KEEP_RADIUS = CHUNK_LOAD_RADIUS + 1;
+
 const Game = struct {
     allocator: std.mem.Allocator,
     engine: *Engine,
     world: ?World = null,
+    world_data: ?*WorldDataService = null,
+    /// Chunks requested from the world-data thread, mapped to the id of the awaited request.
+    requested_chunks: std.AutoHashMapUnmanaged(u32, u64) = .empty,
+    chunk_responses: std.ArrayList(ChunkResponse) = .empty,
     loaded_chunk_ids: std.AutoHashMapUnmanaged(u32, void) = .empty,
     last_camera_chunk_coords: ?@Vector(4, i32) = null,
     saved_game_objects: std.StringHashMapUnmanaged(*GameObject) = .empty,
@@ -50,6 +65,13 @@ const Game = struct {
     }
 
     pub fn deinit(game: *Game) void {
+        if (game.world_data) |world_data| {
+            // Hand the latest modifications over, so they can be persisted.
+            game.flushChunkUpdates();
+            world_data.destroy();
+        }
+        game.requested_chunks.deinit(game.allocator);
+        game.chunk_responses.deinit(game.allocator);
         game.loaded_chunk_ids.deinit(game.allocator);
 
         game.saved_game_objects.deinit(game.allocator);
@@ -61,11 +83,152 @@ const Game = struct {
         game.allocator.destroy(game);
     }
 
-    pub fn updateChunksAroundCamera(game: *Game) void {
+    pub fn updateWorld(game: *Game) void {
         if (game.world == null) {
             return;
         }
 
+        game.flushChunkUpdates();
+        const has_new_chunks = game.receiveChunks();
+        game.updateChunksAroundCamera(has_new_chunks);
+    }
+
+    /// Sends the chunks modified since the previous flush to the world-data thread.
+    fn flushChunkUpdates(game: *Game) void {
+        const world = &game.world.?;
+        const world_data = game.world_data.?;
+
+        for (world.unsyncedChunks()) |position| {
+            const chunk = world.chunks.get(position).?;
+            world_data.submitChunkUpdate(position, chunk.revision, chunk.content.blocks);
+        }
+        world.markChunksSynced();
+    }
+
+    /// Moves the chunks received from the world-data thread into the world.
+    /// Returns true if any chunk was added.
+    fn receiveChunks(game: *Game) bool {
+        const world = &game.world.?;
+        const responses = &game.chunk_responses;
+
+        game.world_data.?.takeResponses(responses);
+        defer responses.clearRetainingCapacity();
+
+        var has_new_chunks = false;
+        for (responses.items) |response| {
+            const chunk_id = encodeChunkPositionArray(response.coords);
+
+            // The chunk was evicted (and maybe requested again) while the request was in flight.
+            if (game.requested_chunks.get(chunk_id) != response.request_id) {
+                response.chunk.content.deinit(game.allocator);
+                continue;
+            }
+            _ = game.requested_chunks.remove(chunk_id);
+
+            world.insertChunk(response.coords, response.chunk) catch |err| switch (err) {
+                // Requests are processed in order, so it means the protocol is broken somewhere.
+                // Asking again is still better than losing modifications.
+                error.StaleChunk => {
+                    std.debug.print("received stale chunk {any}, requesting it again\n", .{response.coords});
+                    response.chunk.content.deinit(game.allocator);
+                    game.requestChunkRange(.{ response.coords[0], response.coords[1] }, response.coords[2], response.coords[2] + 1);
+                    continue;
+                },
+            };
+            has_new_chunks = true;
+        }
+
+        return has_new_chunks;
+    }
+
+    fn requestChunkRange(game: *Game, column: [2]u30, z_start: u30, z_end: u30) void {
+        const request_id = game.world_data.?.requestChunks(column, z_start, z_end);
+
+        var z = z_start;
+        while (z < z_end) : (z += 1) {
+            game.requested_chunks.put(game.allocator, encodeChunkPosition(column[0], column[1], z), request_id) catch @panic("OOM");
+        }
+    }
+
+    fn isChunkMissing(game: *const Game, coords: [3]u30) bool {
+        return !game.world.?.hasChunk(coords) and
+            !game.requested_chunks.contains(encodeChunkPositionArray(coords));
+    }
+
+    /// Requests the missing chunks of the camera box, the closest columns first. Consecutive
+    /// missing chunks of a column are requested together, so the column-wide part of the
+    /// generation is done once for them.
+    fn requestChunksAroundCamera(game: *Game, camera_chunk_coords: @Vector(4, i32)) void {
+        const z_min = @max(camera_chunk_coords[2] - CHUNK_LOAD_RADIUS, 0);
+        const z_max = @min(camera_chunk_coords[2] + CHUNK_LOAD_RADIUS, consts.WORLD_SIZE[2] - 1);
+
+        var radius: i32 = 0;
+        while (radius <= CHUNK_LOAD_RADIUS) : (radius += 1) {
+            var dy = -radius;
+            while (dy <= radius) : (dy += 1) {
+                var dx = -radius;
+                while (dx <= radius) : (dx += 1) {
+                    if (@max(@abs(dx), @abs(dy)) != radius) {
+                        continue;
+                    }
+
+                    const bottom_coords = normalizeChunkCoords(.{
+                        camera_chunk_coords[0] + dx,
+                        camera_chunk_coords[1] + dy,
+                        0,
+                    }) orelse continue;
+                    const column = [2]u30{ bottom_coords[0], bottom_coords[1] };
+
+                    var range_start: ?u30 = null;
+                    var z = z_min;
+                    while (z <= z_max + 1) : (z += 1) {
+                        const is_missing = z <= z_max and game.isChunkMissing(.{ column[0], column[1], @intCast(z) });
+                        if (is_missing) {
+                            range_start = range_start orelse @intCast(z);
+                        } else if (range_start) |start| {
+                            game.requestChunkRange(column, start, @intCast(z));
+                            range_start = null;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Forgets the chunks (received or requested) that are too far from the camera.
+    fn evictFarChunks(game: *Game, camera_chunk_coords: @Vector(4, i32)) void {
+        const world = &game.world.?;
+
+        // Modifications have to reach the world-data thread before the chunks are freed.
+        game.flushChunkUpdates();
+
+        var far_chunk_ids: std.ArrayList(u32) = .empty;
+        defer far_chunk_ids.deinit(game.allocator);
+
+        var requested_iterator = game.requested_chunks.keyIterator();
+        while (requested_iterator.next()) |chunk_id| {
+            if (getChunkDistance(chunk_id.*, camera_chunk_coords) > CHUNK_KEEP_RADIUS) {
+                far_chunk_ids.append(game.allocator, chunk_id.*) catch @panic("OOM");
+            }
+        }
+        for (far_chunk_ids.items) |chunk_id| {
+            _ = game.requested_chunks.remove(chunk_id);
+        }
+
+        far_chunk_ids.clearRetainingCapacity();
+        var received_iterator = world.chunks.keyIterator();
+        while (received_iterator.next()) |chunk_id| {
+            if (getChunkDistance(chunk_id.*, camera_chunk_coords) > CHUNK_KEEP_RADIUS) {
+                far_chunk_ids.append(game.allocator, chunk_id.*) catch @panic("OOM");
+            }
+        }
+        for (far_chunk_ids.items) |chunk_id| {
+            game.removeChunkByIdIfNeeded(chunk_id);
+            world.removeChunk(world_module.decodeChunkPosition(chunk_id));
+        }
+    }
+
+    pub fn updateChunksAroundCamera(game: *Game, has_new_chunks: bool) void {
         const engine = game.engine;
         const voxel_grid = engine.active_scene.?.voxel_grid;
 
@@ -73,14 +236,49 @@ const Game = struct {
 
         const camera_chunk_coords = chunk_utils.getChunkCoords(camera_position);
 
-        if (game.last_camera_chunk_coords) |last_camera_chunk_coords| {
-            if (@reduce(.And, camera_chunk_coords == last_camera_chunk_coords)) {
-                return;
-            }
+        const has_camera_moved = if (game.last_camera_chunk_coords) |last_camera_chunk_coords|
+            !@reduce(.And, camera_chunk_coords == last_camera_chunk_coords)
+        else
+            true;
+
+        if (!has_camera_moved and !has_new_chunks) {
+            return;
         }
 
-        const camera_box = fitBoxIntoWorld(getBoxAroundChunk(camera_chunk_coords, 2));
+        const camera_box = fitBoxIntoWorld(getBoxAroundChunk(camera_chunk_coords, CHUNK_LOAD_RADIUS));
 
+        if (has_camera_moved) {
+            game.unloadChunksAwayFromCamera(camera_chunk_coords, camera_box);
+            game.evictFarChunks(camera_chunk_coords);
+            game.requestChunksAroundCamera(camera_chunk_coords);
+
+            std.debug.print("camera_box: {any} <-> {any}\n", .{ camera_box.start, camera_box.end });
+        }
+
+        // Chunks that aren't received yet are skipped here and picked up by one of the next
+        // calls, once new chunks arrive.
+        // TODO: in case of small delta chunks, we can traverse only the plain along the movement direction
+        var chunk_z = camera_box.start[2];
+        while (chunk_z <= camera_box.end[2]) {
+            var chunk_y = camera_box.start[1];
+            while (chunk_y <= camera_box.end[1]) {
+                var chunk_x = camera_box.start[0];
+                while (chunk_x <= camera_box.end[0]) {
+                    game.uploadChunkIfNeeded(chunk_x, chunk_y, chunk_z);
+
+                    chunk_x += 1;
+                }
+                chunk_y += 1;
+            }
+            chunk_z += 1;
+        }
+
+        voxel_grid.uploadToGPU(engine.gctx);
+
+        game.last_camera_chunk_coords = camera_chunk_coords;
+    }
+
+    fn unloadChunksAwayFromCamera(game: *Game, camera_chunk_coords: @Vector(4, i32), camera_box: ChunkBox) void {
         if (game.last_camera_chunk_coords) |last_camera_chunk_coords| {
             std.debug.print("DIFFING {any}\n", .{last_camera_chunk_coords});
 
@@ -168,32 +366,11 @@ const Game = struct {
                 }
             }
         }
-
-        std.debug.print("camera_box: {any} <-> {any}\n", .{ camera_box.start, camera_box.end });
-
-        // TODO: in case of small delta chunks, we can traverse only the plain along the movement direction
-        var chunk_z = camera_box.start[2];
-        while (chunk_z <= camera_box.end[2]) {
-            var chunk_y = camera_box.start[1];
-            while (chunk_y <= camera_box.end[1]) {
-                var chunk_x = camera_box.start[0];
-                while (chunk_x <= camera_box.end[0]) {
-                    game.uploadChunkIfNeeded(chunk_x, chunk_y, chunk_z);
-
-                    chunk_x += 1;
-                }
-                chunk_y += 1;
-            }
-            chunk_z += 1;
-        }
-
-        voxel_grid.uploadToGPU(engine.gctx);
-
-        game.last_camera_chunk_coords = camera_chunk_coords;
     }
 
     fn uploadChunkIfNeeded(game: *Game, chunk_x: i32, chunk_y: i32, chunk_z: i32) void {
         const voxel_grid = game.engine.active_scene.?.voxel_grid;
+        const world = &game.world.?;
 
         const chunk_coords = world_module.normalizeChunkPosition(chunk_x, chunk_y, chunk_z);
         const chunk_id = encodeChunkPositionArray(chunk_coords);
@@ -202,7 +379,7 @@ const Game = struct {
             return;
         }
 
-        const world_chunk = game.world.?.getChunk(chunk_coords);
+        const world_chunk = world.getChunk(chunk_coords) orelse return;
         if (world_chunk.content == .blocks) {
             voxel_grid.appendChunk(.{
                 .chunk_coords = chunk_coords,
@@ -252,9 +429,19 @@ const Game = struct {
         const camera_position = game.engine.active_scene.?.camera.position;
         const top = getColumnTopUnderPosition(camera_position) orelse return;
 
-        const edited_block = switch (action) {
+        const edit_result = switch (action) {
             .remove => world.removeTopBlockInColumn(top),
             .add_dirt => world.dropBlockInColumn(top, .dirt),
+        };
+        // Chunks near the camera are normally received, so this happens only while they are
+        // still loading, or when the column has to be searched too far from the camera.
+        const edited_block = edit_result catch |err| switch (err) {
+            error.ChunkNotReceived => {
+                if (DEBUG) {
+                    std.debug.print("can't {s} block under {any}, chunks aren't received yet\n", .{ @tagName(action), top });
+                }
+                return;
+            },
         } orelse return;
 
         if (DEBUG) {
@@ -283,9 +470,14 @@ const Game = struct {
             neighbor_coords_i[axis] += offset;
             const neighbor_coords = normalizeChunkCoords(neighbor_coords_i) orelse continue;
 
-            // Solid chunks have no block data, so the walls of the hole wouldn't be rendered.
-            if (is_block_removed and world.getChunk(neighbor_coords).content == .solid) {
-                _ = world.ensureChunkData(neighbor_coords);
+            // Uniform chunks have no block data, so the walls of the hole wouldn't be rendered.
+            // Neighbors near the camera are normally received; if not, the walls stay hidden.
+            if (is_block_removed) {
+                if (world.getChunk(neighbor_coords)) |neighbor| {
+                    if (neighbor.content == .uniform and neighbor.content.uniform != .none) {
+                        _ = world.ensureChunkData(neighbor_coords);
+                    }
+                }
             }
 
             game.reloadChunkIfLoaded(neighbor_coords);
@@ -332,8 +524,21 @@ fn getColumnTopUnderPosition(position: [3]f32) ?[3]u32 {
     };
 }
 
-fn initWorld(allocator: std.mem.Allocator, game: *Game) void {
-    game.world = World.init(allocator, .{ .terrain = .{ .seed = 12345 } });
+fn initWorld(game: *Game) !void {
+    game.world_data = try WorldDataService.create(game.engine.io, game.allocator, .{ .terrain = .{ .seed = 12345 } });
+    game.world = World.init(game.allocator);
+}
+
+/// Chebyshev distance between the chunk and the camera chunk, in chunks. The x axis wraps.
+fn getChunkDistance(chunk_id: u32, camera_chunk_coords: @Vector(4, i32)) i32 {
+    const coords = world_module.decodeChunkPosition(chunk_id);
+    const world_width: i32 = consts.WORLD_SIZE[0];
+
+    const dx = @mod(@as(i32, coords[0]) - camera_chunk_coords[0], world_width);
+    const dy: i32 = @intCast(@abs(@as(i32, coords[1]) - camera_chunk_coords[1]));
+    const dz: i32 = @intCast(@abs(@as(i32, coords[2]) - camera_chunk_coords[2]));
+
+    return @max(@min(dx, world_width - dx), dy, dz);
 }
 
 pub fn normalizeChunkCoords(coords_in: [3]i32) ?[3]u30 {
@@ -360,9 +565,9 @@ pub fn normalizeChunkCoords(coords_in: [3]i32) ?[3]u30 {
     };
 }
 
-/// Returns neighbors indexed by `Side`, generating them if needed.
-/// `null` means the neighbor is out of world bounds.
-fn getSurroundingChunks(world: *World, coords: [3]u30) [6]?WorldChunk {
+/// Returns neighbors indexed by `Side`, `null` items are out of world bounds.
+/// Returns null if any of the neighbors isn't received from the world-data thread yet.
+fn getSurroundingChunks(world: *const World, coords: [3]u30) ?[6]?WorldChunk {
     const coords_i = [3]i32{ @intCast(coords[0]), @intCast(coords[1]), @intCast(coords[2]) };
 
     const neighbors = [_]struct { Side, [3]i32 }{
@@ -378,7 +583,7 @@ fn getSurroundingChunks(world: *World, coords: [3]u30) [6]?WorldChunk {
     for (neighbors) |neighbor| {
         const side, const neighbor_coords = neighbor;
         if (normalizeChunkCoords(neighbor_coords)) |normalized_coords| {
-            resulting_chunks[@intFromEnum(side)] = world.getChunk(normalized_coords);
+            resulting_chunks[@intFromEnum(side)] = world.getChunk(normalized_coords) orelse return null;
         }
     }
 
@@ -536,7 +741,7 @@ pub fn main(init: std.process.Init) !void {
         .animation_name = "walkLikeMan",
     }));
 
-    initWorld(allocator, game);
+    try initWorld(game);
 
     // -- Tube data for coordinates --
 
@@ -614,7 +819,7 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
     //     group.setPosition(.{ 0, 0, @floatCast(math.sin(engine.time) * 10), 0 });
     // }
 
-    game.updateChunksAroundCamera();
+    game.updateWorld();
 }
 
 fn onKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque) void {
@@ -636,4 +841,6 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
 
 test {
     _ = world_module;
+    _ = world_generator;
+    _ = world_data_service;
 }
