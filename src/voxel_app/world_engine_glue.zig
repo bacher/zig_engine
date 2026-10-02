@@ -8,18 +8,17 @@ const ChunkSideData = engine.voxel_chunk.ChunkSideData;
 
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const WORLD_SIZE = @import("./consts.zig").WORLD_SIZE;
-const WorldChunk = @import("./world.zig").WorldChunk;
+const WorldChunkData = @import("./world_chunk_data.zig").WorldChunkData;
 const ChunksHashMap = @import("./world.zig").ChunksHashMap;
 const encodeChunkPosition = @import("./world.zig").encodeChunkPosition;
 const encodeChunkPositionArray = @import("./world.zig").encodeChunkPositionArray;
 
 pub fn extractChunkSideData(
     allocator: std.mem.Allocator,
-    world_chunk: *const WorldChunk,
+    world_chunk_data: *const WorldChunkData,
 ) ChunkSideData {
     var chunk_side_data: ChunkSideData = .{};
 
-    const world_chunk_data = world_chunk.world_chunk_data.?;
     const b = &world_chunk_data.blocks;
 
     for (b, 0..) |slice, z| {

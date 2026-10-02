@@ -203,15 +203,12 @@ const Game = struct {
         }
 
         const world_chunk = game.world.?.getChunk(chunk_coords);
-        if (world_chunk.state != .empty and
-            world_chunk.world_chunk_data != null and
-            !game.checkIfChunkCanBeSkipped(chunk_coords))
-        {
+        if (world_chunk.content == .blocks and !game.checkIfChunkCanBeSkipped(chunk_coords)) {
             voxel_grid.appendChunk(.{
                 .chunk_coords = chunk_coords,
                 // Can be used for testing:
                 // .chunk_side_data = ChunkSideData.initWithTestData(game.allocator),
-                .chunk_side_data = world_engine.extractChunkSideData(game.allocator, &world_chunk),
+                .chunk_side_data = world_engine.extractChunkSideData(game.allocator, world_chunk.content.blocks),
             });
 
             if (DEBUG) {
@@ -287,7 +284,7 @@ const Game = struct {
             const neighbor_coords = normalizeChunkCoords(neighbor_coords_i) orelse continue;
 
             // Solid chunks have no block data, so the walls of the hole wouldn't be rendered.
-            if (is_block_removed and world.getChunk(neighbor_coords).state == .solid_unloaded) {
+            if (is_block_removed and world.getChunk(neighbor_coords).content == .solid) {
                 _ = world.ensureChunkData(neighbor_coords);
             }
 
