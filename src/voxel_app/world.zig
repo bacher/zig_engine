@@ -103,7 +103,25 @@ pub const WorldChunk = struct {
     state: WorldChunkState,
     flags: ChunkFlags,
     world_chunk_data: ?*WorldChunkData,
+    /// The chunk was modified by the player and can't be re-generated from the generator anymore.
+    is_dirty: bool = false,
 };
+
+/// Splits global block coordinates into chunk coordinates and coordinates inside of the chunk.
+pub fn splitBlockCoords(block: [3]u32) struct { [3]u30, [3]u5 } {
+    return .{
+        .{
+            @intCast(block[0] / CHUNK_SIZE),
+            @intCast(block[1] / CHUNK_SIZE),
+            @intCast(block[2] / CHUNK_SIZE),
+        },
+        .{
+            @intCast(block[0] % CHUNK_SIZE),
+            @intCast(block[1] % CHUNK_SIZE),
+            @intCast(block[2] % CHUNK_SIZE),
+        },
+    };
+}
 
 pub const ChunksHashMap = std.AutoHashMapUnmanaged(ChunkPosition, WorldChunk);
 
@@ -169,6 +187,94 @@ pub const World = struct {
         return self.chunks.get(position).?;
     }
 
+    /// Makes sure the chunk has block data, generating it from the generator if needed.
+    /// The returned pointer is invalidated by any further column generation.
+    pub fn ensureChunkData(self: *World, coords: [3]u30) *WorldChunk {
+        _ = self.getChunk(coords);
+        const chunk = self.chunks.getPtr(encodeChunkPositionArray(coords)).?;
+        if (chunk.world_chunk_data != null) {
+            return chunk;
+        }
+
+        const world_chunk_data = self.allocator.create(WorldChunkData) catch @panic("OOM");
+        world_chunk_data.* = switch (chunk.state) {
+            .empty => WorldChunkData.initEmpty(),
+            .solid_unloaded, .solid_loaded => self.generateSolidChunkData(coords),
+            .semi_solid => unreachable, // semi-solid chunks are always generated with data
+        };
+        chunk.world_chunk_data = world_chunk_data;
+
+        if (chunk.state == .solid_unloaded) {
+            chunk.state = .solid_loaded;
+        }
+
+        return chunk;
+    }
+
+    pub fn isBlockSolid(self: *World, block: [3]u32) bool {
+        const chunk_coords, const local = splitBlockCoords(block);
+        const chunk = self.getChunk(chunk_coords);
+
+        if (chunk.world_chunk_data) |world_chunk_data| {
+            return world_chunk_data.blocks[local[2]][local[1]][local[0]] != .none;
+        }
+
+        return chunk.state != .empty;
+    }
+
+    /// Sets the block and marks its chunk as dirty.
+    pub fn setBlock(self: *World, block: [3]u32, block_type: BlockType) void {
+        const chunk_coords, const local = splitBlockCoords(block);
+        const chunk = self.ensureChunkData(chunk_coords);
+        const world_chunk_data = chunk.world_chunk_data.?;
+
+        world_chunk_data.blocks[local[2]][local[1]][local[0]] = block_type;
+        chunk.state = .semi_solid;
+        chunk.flags = WorldChunkData.getMetaFlags(world_chunk_data);
+        chunk.is_dirty = true;
+    }
+
+    /// Removes the topmost solid block at or below `top`.
+    /// Returns the removed block, or null if there is nothing to remove.
+    pub fn removeTopBlockInColumn(self: *World, top: [3]u32) ?[3]u32 {
+        var block = top;
+        while (true) : (block[2] -= 1) {
+            if (self.isBlockSolid(block)) {
+                self.setBlock(block, .none);
+                return block;
+            }
+            if (block[2] == 0) {
+                return null;
+            }
+        }
+    }
+
+    /// Drops the block down the column starting at `top`, placing it on the first solid block
+    /// (or on the bottom of the world). Returns the placed block, or null if `top` is occupied.
+    pub fn dropBlockInColumn(self: *World, top: [3]u32, block_type: BlockType) ?[3]u32 {
+        if (self.isBlockSolid(top)) {
+            return null;
+        }
+
+        var block = top;
+        while (block[2] > 0 and !self.isBlockSolid(.{ block[0], block[1], block[2] - 1 })) {
+            block[2] -= 1;
+        }
+
+        self.setBlock(block, block_type);
+        return block;
+    }
+
+    fn generateSolidChunkData(self: *World, coords: [3]u30) WorldChunkData {
+        return switch (self.generator) {
+            .flat => WorldChunkData.initSolid(),
+            .terrain => |terrain| data: {
+                const heights = terrainColumnHeights(coords[0], coords[1], terrain.seed, terrain.params);
+                break :data generateTerrainChunk(&heights, @as(u32, coords[2]) * CHUNK_SIZE, terrain.params.dirt_depth);
+            },
+        };
+    }
+
     fn generateColumn(self: *World, chunk_x: u30, chunk_y: u30) void {
         self.chunks.ensureUnusedCapacity(self.allocator, WORLD_SIZE[2]) catch @panic("OOM");
 
@@ -229,19 +335,13 @@ pub const World = struct {
         seed: u64,
         params: WorldGenerationParams,
     ) void {
-        const noise = PerlinNoise.init(seed);
+        const heights = terrainColumnHeights(chunk_x, chunk_y, seed, params);
 
-        var heights: [CHUNK_SIZE][CHUNK_SIZE]u32 = undefined;
         var minimum_height: u32 = WORLD_SIZE[2] * CHUNK_SIZE;
         var maximum_height: u32 = 0;
 
-        for (0..CHUNK_SIZE) |local_y| {
-            for (0..CHUNK_SIZE) |local_x| {
-                const block_x = @as(usize, chunk_x) * CHUNK_SIZE + local_x;
-                const block_y = @as(usize, chunk_y) * CHUNK_SIZE + local_y;
-                const height = terrainHeight(noise, block_x, block_y, params);
-
-                heights[local_y][local_x] = height;
+        for (heights) |row| {
+            for (row) |height| {
                 minimum_height = @min(minimum_height, height);
                 maximum_height = @max(maximum_height, height);
             }
@@ -289,6 +389,26 @@ pub const World = struct {
         self.chunks.clearRetainingCapacity();
     }
 };
+
+fn terrainColumnHeights(
+    chunk_x: u30,
+    chunk_y: u30,
+    seed: u64,
+    params: WorldGenerationParams,
+) [CHUNK_SIZE][CHUNK_SIZE]u32 {
+    const noise = PerlinNoise.init(seed);
+
+    var heights: [CHUNK_SIZE][CHUNK_SIZE]u32 = undefined;
+    for (0..CHUNK_SIZE) |local_y| {
+        for (0..CHUNK_SIZE) |local_x| {
+            const block_x = @as(usize, chunk_x) * CHUNK_SIZE + local_x;
+            const block_y = @as(usize, chunk_y) * CHUNK_SIZE + local_y;
+            heights[local_y][local_x] = terrainHeight(noise, block_x, block_y, params);
+        }
+    }
+
+    return heights;
+}
 
 fn terrainHeight(noise: PerlinNoise, block_x: anytype, block_y: anytype, params: WorldGenerationParams) u32 {
     var value: f64 = 0.0;
@@ -410,4 +530,49 @@ test "terrain column has a surface chunk between solid and empty chunks" {
         }
     }
     try std.testing.expect(semi_solid_count > 0);
+}
+
+test "removing and dropping a block in a column are inverse operations" {
+    var world = World.init(std.testing.allocator, .{ .terrain = .{ .seed = 12345 } });
+    defer world.deinit();
+
+    const top = [3]u32{ 100, 200, WORLD_SIZE[2] * CHUNK_SIZE - 1 };
+
+    const removed = world.removeTopBlockInColumn(top).?;
+    try std.testing.expect(!world.isBlockSolid(removed));
+    try std.testing.expect(world.isBlockSolid(.{ removed[0], removed[1], removed[2] - 1 }));
+
+    const chunk_coords, _ = splitBlockCoords(removed);
+    try std.testing.expect(world.getChunk(chunk_coords).is_dirty);
+
+    const placed = world.dropBlockInColumn(top, .dirt).?;
+    try std.testing.expectEqual(removed, placed);
+    try std.testing.expect(world.isBlockSolid(placed));
+}
+
+test "editing a solid chunk generates its data from the generator" {
+    var world = World.init(std.testing.allocator, .{ .terrain = .{ .seed = 12345 } });
+    defer world.deinit();
+
+    try std.testing.expectEqual(WorldChunkState.solid_unloaded, world.getChunk(.{ 0, 0, 0 }).state);
+
+    const removed = world.removeTopBlockInColumn(.{ 5, 5, CHUNK_SIZE - 1 }).?;
+    try std.testing.expectEqual([3]u32{ 5, 5, CHUNK_SIZE - 1 }, removed);
+
+    const chunk = world.getChunk(.{ 0, 0, 0 });
+    try std.testing.expectEqual(WorldChunkState.semi_solid, chunk.state);
+    try std.testing.expect(chunk.is_dirty);
+    try std.testing.expect(!chunk.flags.solid_top);
+    try std.testing.expect(chunk.flags.solid_bottom);
+    try std.testing.expectEqual(BlockType.stone, chunk.world_chunk_data.?.blocks[0][0][0]);
+}
+
+test "column operations do nothing when there is no room" {
+    var world = World.init(std.testing.allocator, .{ .flat = {} });
+    defer world.deinit();
+
+    const bottom = [3]u32{ 0, 0, 0 };
+    try std.testing.expectEqual(null, world.dropBlockInColumn(bottom, .dirt));
+    try std.testing.expectEqual(bottom, world.removeTopBlockInColumn(bottom).?);
+    try std.testing.expectEqual(null, world.removeTopBlockInColumn(bottom));
 }

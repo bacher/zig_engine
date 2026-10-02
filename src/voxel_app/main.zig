@@ -11,6 +11,7 @@ const zmath = @import("zmath");
 const debug = @import("debug");
 const WindowContext = @import("engine").WindowContext;
 const Engine = @import("engine").Engine;
+const KeyParams = @import("engine").KeyParams;
 const GameObject = @import("engine").GameObject;
 const GameObjectGroup = @import("engine").GameObjectGroup;
 const Scene = @import("engine").Scene;
@@ -247,7 +248,92 @@ const Game = struct {
 
         return true;
     }
+
+    fn editBlockUnderCamera(game: *Game, action: BlockAction) void {
+        const world = if (game.world) |*world| world else return;
+
+        const camera_position = game.engine.active_scene.?.camera.position;
+        const top = getColumnTopUnderPosition(camera_position) orelse return;
+
+        const edited_block = switch (action) {
+            .remove => world.removeTopBlockInColumn(top),
+            .add_dirt => world.dropBlockInColumn(top, .dirt),
+        } orelse return;
+
+        if (DEBUG) {
+            std.debug.print("{s} block {any}\n", .{ @tagName(action), edited_block });
+        }
+
+        game.reloadChunksAroundBlock(edited_block, action == .remove);
+    }
+
+    /// Re-uploads the chunk of the edited block and the neighbor chunks sharing a face with it,
+    /// because their visibility depends on the solidness of the chunk sides.
+    fn reloadChunksAroundBlock(game: *Game, block: [3]u32, is_block_removed: bool) void {
+        const world = &game.world.?;
+        const chunk_coords, const local = world_module.splitBlockCoords(block);
+
+        game.reloadChunkIfLoaded(chunk_coords);
+
+        for (0..3) |axis| {
+            const offset: i32 = switch (local[axis]) {
+                0 => -1,
+                consts.CHUNK_SIZE - 1 => 1,
+                else => continue,
+            };
+
+            var neighbor_coords_i = [3]i32{ chunk_coords[0], chunk_coords[1], chunk_coords[2] };
+            neighbor_coords_i[axis] += offset;
+            const neighbor_coords = normalizeChunkCoords(neighbor_coords_i) orelse continue;
+
+            // Solid chunks have no block data, so the walls of the hole wouldn't be rendered.
+            if (is_block_removed and world.getChunk(neighbor_coords).state == .solid_unloaded) {
+                _ = world.ensureChunkData(neighbor_coords);
+            }
+
+            game.reloadChunkIfLoaded(neighbor_coords);
+        }
+
+        game.engine.active_scene.?.voxel_grid.uploadToGPU(game.engine.gctx);
+    }
+
+    fn reloadChunkIfLoaded(game: *Game, chunk_coords: [3]u30) void {
+        const chunk_id = encodeChunkPositionArray(chunk_coords);
+        if (!game.loaded_chunk_ids.contains(chunk_id)) {
+            return;
+        }
+
+        game.removeChunkByIdIfNeeded(chunk_id);
+        game.uploadChunkIfNeeded(chunk_coords[0], chunk_coords[1], chunk_coords[2]);
+    }
 };
+
+const BlockAction = enum {
+    remove,
+    add_dirt,
+};
+
+/// Returns the block containing `position`, clamped to the top of the world.
+/// Returns null if the position is outside of the world (or below its bottom).
+fn getColumnTopUnderPosition(position: [3]f32) ?[3]u32 {
+    var block: [3]i64 = undefined;
+    for (0..3) |axis| {
+        block[axis] = @as(i64, @intFromFloat(@floor(position[axis]))) +
+            @as(i64, consts.WORLD_ORIGIN[axis]) * consts.CHUNK_SIZE;
+    }
+
+    const world_size = consts.WORLD_SIZE_IN_BLOCKS;
+
+    if (block[1] < 0 or block[1] >= world_size[1] or block[2] < 0) {
+        return null;
+    }
+
+    return .{
+        @intCast(@mod(block[0], world_size[0])),
+        @intCast(block[1]),
+        @intCast(@min(block[2], world_size[2] - 1)),
+    };
+}
 
 fn initWorld(allocator: std.mem.Allocator, game: *Game) void {
     game.world = World.init(allocator, .{ .terrain = .{ .seed = 12345 } });
@@ -285,8 +371,8 @@ pub fn getSurroundingChunks(world: *World, coords: [3]u30) [6]?WorldChunk {
     const neighbors = [_]struct { Side, [3]i32 }{
         .{ .left, .{ coords_i[0] - 1, coords_i[1], coords_i[2] } },
         .{ .right, .{ coords_i[0] + 1, coords_i[1], coords_i[2] } },
-        .{ .back, .{ coords_i[0], coords_i[1] - 1, coords_i[2] } },
-        .{ .front, .{ coords_i[0], coords_i[1] + 1, coords_i[2] } },
+        .{ .back, .{ coords_i[0], coords_i[1] + 1, coords_i[2] } },
+        .{ .front, .{ coords_i[0], coords_i[1] - 1, coords_i[2] } },
         .{ .bottom, .{ coords_i[0], coords_i[1], coords_i[2] - 1 } },
         .{ .top, .{ coords_i[0], coords_i[1], coords_i[2] + 1 } },
     };
@@ -379,6 +465,7 @@ pub fn main(init: std.process.Init) !void {
             .argument = game,
             .onUpdate = onUpdate,
             .onRender = onRender,
+            .onKeyPress = onKeyPress,
         },
     );
     game.engine = engine;
@@ -531,6 +618,17 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
     // }
 
     game.updateChunksAroundCamera();
+}
+
+fn onKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque) void {
+    _ = engine;
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
+
+    switch (key_params.key) {
+        .x => game.editBlockUnderCamera(.remove),
+        .z => game.editBlockUnderCamera(.add_dirt),
+        else => {},
+    }
 }
 
 fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {

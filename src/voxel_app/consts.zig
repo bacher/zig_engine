@@ -10,6 +10,12 @@ pub const WORLD_SIZE = [_]u30{
     std.math.pow(u30, 2, 3), //     8 chunks (   256 blocks)
 };
 
+pub const WORLD_SIZE_IN_BLOCKS = [_]u32{
+    WORLD_SIZE[0] * CHUNK_SIZE,
+    WORLD_SIZE[1] * CHUNK_SIZE,
+    WORLD_SIZE[2] * CHUNK_SIZE,
+};
+
 pub const ChunkPosition = u32; // 12 bit x, 8 bit y, 3 bit z
 pub const BlockPosition = u64; // 30 bit x, 30 bit y, 4 bit z
 

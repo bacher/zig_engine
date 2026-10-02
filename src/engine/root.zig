@@ -4,6 +4,7 @@ pub const zgui = @import("zgui");
 pub const zglfw = @import("zglfw");
 
 pub const Engine = @import("./engine.zig").Engine;
+pub const KeyParams = @import("./input_controller.zig").KeyParams;
 pub const WindowContext = @import("./glue.zig").WindowContext;
 pub const GameObject = @import("./game_object.zig").GameObject;
 pub const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;

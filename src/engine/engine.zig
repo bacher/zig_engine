@@ -94,6 +94,7 @@ pub const Engine = struct {
         argument: *anyopaque,
         onUpdate: ?*const fn (engine: *Engine, argument: *anyopaque) void,
         onRender: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder, argument: *anyopaque) void,
+        onKeyPress: ?*const fn (engine: *Engine, key_params: KeyParams, argument: *anyopaque) void = null,
     };
 
     gctx: *zgpu.GraphicsContext,
@@ -458,6 +459,10 @@ pub const Engine = struct {
                 std.debug.print("SSAO Blur = {}\n", .{engine.state.ssao_blur_enabled});
             },
             else => {},
+        }
+
+        if (engine.callbacks.onKeyPress) |callback| {
+            callback(engine, key_params, engine.callbacks.argument);
         }
     }
 
