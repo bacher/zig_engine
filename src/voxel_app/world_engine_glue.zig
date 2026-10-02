@@ -29,7 +29,7 @@ pub fn extractChunkSideData(
                     continue;
                 }
 
-                const voxel_block = engine.voxel_chunk.BlockInfo{
+                const voxel_block = engine.voxel_chunk.GPU_BlockInfo{
                     .coords = engine.voxel_chunk.makeInteriorBlockCoords(x, y, z),
                     .block_type = block,
                 };

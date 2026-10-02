@@ -36,7 +36,8 @@ pub const BlockType = enum(u8) {
     snow,
 };
 
-pub const BlockInfo = extern struct {
+/// Structs starting with GPU_ prefix are uploaded to the GPU, memory layout is important
+pub const GPU_BlockInfo = extern struct {
     coords: [3]u8,
     block_type: BlockType,
 };
@@ -50,12 +51,13 @@ pub fn makeInteriorBlockCoords(x: anytype, y: anytype, z: anytype) [3]u8 {
 }
 
 comptime {
-    std.debug.assert(@sizeOf(BlockInfo) == 4);
+    std.debug.assert(@sizeOf(GPU_BlockInfo) == 4);
 }
 
-pub const BlockCoordList = std.ArrayList(BlockInfo);
+pub const BlockCoordList = std.ArrayList(GPU_BlockInfo);
 
-pub const ChunkInfo = extern struct {
+/// Structs starting with GPU_ prefix are uploaded to the GPU, memory layout is important
+pub const GPU_ChunkInfo = extern struct {
     // TODO: can we hold all needed info in [8]u32 -> [8][u10,u10,u10,u2], 10 bits per coord
     // [2]u16 = {count, index}
     view_side_data_indices: [8][3][2]u16, // 96 bytes
@@ -65,8 +67,8 @@ pub const ChunkInfo = extern struct {
 };
 
 comptime {
-    // @compileLog("ChunkInfo size", @sizeOf(ChunkInfo));
-    std.debug.assert(@sizeOf(ChunkInfo) == 112);
+    // @compileLog("GPU_ChunkInfo size", @sizeOf(GPU_ChunkInfo));
+    std.debug.assert(@sizeOf(GPU_ChunkInfo) == 112);
 }
 
 pub const VoxelChunk = struct {

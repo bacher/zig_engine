@@ -9,19 +9,19 @@ const VOXEL_GRID_SLOT_SIZE = @import("./voxel_consts.zig").VOXEL_GRID_SLOT_SIZE;
 const VOXEL_GRID_BUFFER_SIZE = @import("./voxel_consts.zig").VOXEL_GRID_BUFFER_SIZE;
 const MAX_SPAN_SIZE_EXPONENT = @import("./voxel_consts.zig").MAX_SPAN_SIZE_EXPONENT;
 const calculateDataSlotSizeLevel = @import("./voxel_utils.zig").calculateDataSlotSizeLevel;
-const ChunkInfo = @import("./voxel_chunk.zig").ChunkInfo;
+const GPU_ChunkInfo = @import("./voxel_chunk.zig").GPU_ChunkInfo;
 const VoxelChunk = @import("./voxel_chunk.zig").VoxelChunk;
 const VoxelChunkUpload = @import("./voxel_chunk.zig").VoxelChunkUpload;
 const Side = @import("./voxel_chunk.zig").Side;
-const BlockInfo = @import("./voxel_chunk.zig").BlockInfo;
+const GPU_BlockInfo = @import("./voxel_chunk.zig").GPU_BlockInfo;
 const DynamicSlotBufferManager = @import("./DynamicSlotBufferManager.zig").DynamicSlotBufferManager;
 const SlotBufferManager = @import("./SlotBufferManager.zig").SlotBufferManager;
 
 comptime {
-    std.debug.assert(VOXEL_GRID_SLOT_SIZE % @sizeOf(BlockInfo) == 0);
+    std.debug.assert(VOXEL_GRID_SLOT_SIZE % @sizeOf(GPU_BlockInfo) == 0);
 }
 
-const BLOCKS_PER_SLOT: u32 = VOXEL_GRID_SLOT_SIZE / @sizeOf(BlockInfo);
+const BLOCKS_PER_SLOT: u32 = VOXEL_GRID_SLOT_SIZE / @sizeOf(GPU_BlockInfo);
 const BLOCKS_PER_SLOT_INV: f32 = 1.0 / @as(f32, @floatFromInt(BLOCKS_PER_SLOT));
 
 const ChunkList = std.ArrayList(VoxelChunk);
@@ -52,7 +52,7 @@ pub const VoxelGrid = struct {
 
         // chunk info buffer
         {
-            const size = VOXEL_GRID_SLOT_COUNT * @sizeOf(ChunkInfo);
+            const size = VOXEL_GRID_SLOT_COUNT * @sizeOf(GPU_ChunkInfo);
 
             const handle = gctx.createBuffer(.{
                 .usage = .{
@@ -183,8 +183,7 @@ pub const VoxelGrid = struct {
                 .size_exponent = data_slot_size_level,
             }) catch @panic("Not enough space in the block data buffer");
 
-            // TODO: rename into GPUChunkInfo
-            var chunk_info: ChunkInfo = .{
+            var chunk_info: GPU_ChunkInfo = .{
                 .view_side_data_indices = undefined,
                 .chunk_origin = .{
                     upload_chunk.chunk_coords[0],
@@ -206,8 +205,8 @@ pub const VoxelGrid = struct {
 
                     gctx.queue.writeBuffer(
                         block_buffer,
-                        data_index * @sizeOf(BlockInfo),
-                        BlockInfo,
+                        data_index * @sizeOf(GPU_BlockInfo),
+                        GPU_BlockInfo,
                         side.items,
                     );
 
@@ -232,8 +231,8 @@ pub const VoxelGrid = struct {
 
                 gctx.queue.writeBuffer(
                     chunk_info_buffer,
-                    chunk_index * @sizeOf(ChunkInfo),
-                    ChunkInfo,
+                    chunk_index * @sizeOf(GPU_ChunkInfo),
+                    GPU_ChunkInfo,
                     &.{chunk_info},
                 );
 

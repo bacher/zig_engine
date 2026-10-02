@@ -3,14 +3,14 @@
 @group(0) @binding(4) var<uniform> clip_from_world_chunked: mat4x4<f32>;
 @group(0) @binding(5) var<uniform> camera_chunk: vec3i;
 
-struct ChunkInfo {
+struct GPU_ChunkInfo {
     view_side_data_indices: array<array<u32, 3>, 8>,
     chunk_origin: vec3u,
     slot_index: u32,
 }
 
 @group(2) @binding(0) var<uniform> light_clip_from_object_array: array<mat4x4<f32>, 3>;
-@group(3) @binding(0) var<storage, read> chunk_info_array: array<ChunkInfo>;
+@group(3) @binding(0) var<storage, read> chunk_info_array: array<GPU_ChunkInfo>;
 @group(3) @binding(1) var<storage, read> block_array: array<u32>;
 
 // SHOULD BE IN SYNC WITH THE SAME NAMED CONSTANT IN ZIG CODE (in src/engine/voxel_grid.zig)

@@ -3,7 +3,7 @@ const std = @import("std");
 const VOXEL_GRID_SLOT_COUNT = @import("./voxel_consts.zig").VOXEL_GRID_SLOT_COUNT;
 
 /// Tracks occupancy of a fixed-size GPU buffer where each slot is one abstract unit
-/// (one `ChunkInfo`). Allocation and free are O(capacity / SIMD width).
+/// (one `GPU_ChunkInfo`). Allocation and free are O(capacity / SIMD width).
 pub const SlotBufferManager = struct {
     const Self = @This();
 
