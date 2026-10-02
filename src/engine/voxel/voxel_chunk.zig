@@ -75,38 +75,54 @@ pub const VoxelChunk = struct {
     // TODO: should we add chunk_id here?
     chunk_origin: [3]u30,
 
-    // TODO: we should not hold all side data after it's loaded into GPU memory
-    blocks_grouped_by_side: [6]BlockCoordList = @splat(BlockCoordList.empty),
-
-    faces_count_per_view: [8]u16 = @splat(0),
-
-    chunk_index: u32 = 0,
-    data_slot_index: u32 = 0,
-    data_slot_size_level: u8 = 0,
+    // if null, then it means that the chunk is not resident on the GPU most likely because does not have visible faces
+    gpu_residence_info: ?GpuResidenceInfo = null,
 
     pub fn init(chunk_origin: [3]u30) Self {
         return .{
             .chunk_origin = chunk_origin,
         };
     }
+};
 
-    pub fn loadTestData(self: *Self, allocator: std.mem.Allocator) void {
-        self.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
-        self.blocks_grouped_by_side[1].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
-        self.blocks_grouped_by_side[2].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
-        self.blocks_grouped_by_side[3].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
-        self.blocks_grouped_by_side[4].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
-        self.blocks_grouped_by_side[5].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+pub const GpuResidenceInfo = struct {
+    faces_count_per_view: [8]u16,
+    chunk_index: u32,
+    data_slot_index: u32,
+    data_slot_size_level: u8,
+};
 
-        self.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 1, 1, 0 }, .block_type = .stone }) catch unreachable;
-        self.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 3, 0 }, .block_type = .dirt }) catch unreachable;
-        self.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 1, 1, 1 }, .block_type = .dirt }) catch unreachable;
-        self.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 0, CHUNK_SIZE - 1 }, .block_type = .stone }) catch unreachable;
-    }
+pub const ChunkSideData = struct {
+    const Self = @This();
+
+    blocks_grouped_by_side: [6]BlockCoordList = @splat(BlockCoordList.empty),
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         for (&self.blocks_grouped_by_side) |*block| {
             block.deinit(allocator);
         }
     }
+
+    pub fn initWithTestData(allocator: std.mem.Allocator) void {
+        var chunk_side_data: Self = .{};
+
+        chunk_side_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        chunk_side_data.blocks_grouped_by_side[1].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        chunk_side_data.blocks_grouped_by_side[2].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        chunk_side_data.blocks_grouped_by_side[3].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        chunk_side_data.blocks_grouped_by_side[4].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        chunk_side_data.blocks_grouped_by_side[5].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+
+        chunk_side_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 1, 1, 0 }, .block_type = .stone }) catch unreachable;
+        chunk_side_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 3, 0 }, .block_type = .dirt }) catch unreachable;
+        chunk_side_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 1, 1, 1 }, .block_type = .dirt }) catch unreachable;
+        chunk_side_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 0, CHUNK_SIZE - 1 }, .block_type = .stone }) catch unreachable;
+
+        return chunk_side_data;
+    }
+};
+
+pub const VoxelChunkUpload = struct {
+    chunk_coords: [3]u30,
+    chunk_side_data: ChunkSideData,
 };

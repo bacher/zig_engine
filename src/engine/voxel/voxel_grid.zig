@@ -9,8 +9,9 @@ const VOXEL_GRID_SLOT_SIZE = @import("./voxel_consts.zig").VOXEL_GRID_SLOT_SIZE;
 const VOXEL_GRID_BUFFER_SIZE = @import("./voxel_consts.zig").VOXEL_GRID_BUFFER_SIZE;
 const MAX_SPAN_SIZE_EXPONENT = @import("./voxel_consts.zig").MAX_SPAN_SIZE_EXPONENT;
 const calculateDataSlotSizeLevel = @import("./voxel_utils.zig").calculateDataSlotSizeLevel;
-const VoxelChunk = @import("./voxel_chunk.zig").VoxelChunk;
 const ChunkInfo = @import("./voxel_chunk.zig").ChunkInfo;
+const VoxelChunk = @import("./voxel_chunk.zig").VoxelChunk;
+const VoxelChunkUpload = @import("./voxel_chunk.zig").VoxelChunkUpload;
 const Side = @import("./voxel_chunk.zig").Side;
 const BlockInfo = @import("./voxel_chunk.zig").BlockInfo;
 const DynamicSlotBufferManager = @import("./DynamicSlotBufferManager.zig").DynamicSlotBufferManager;
@@ -24,6 +25,7 @@ const BLOCKS_PER_SLOT: u32 = VOXEL_GRID_SLOT_SIZE / @sizeOf(BlockInfo);
 const BLOCKS_PER_SLOT_INV: f32 = 1.0 / @as(f32, @floatFromInt(BLOCKS_PER_SLOT));
 
 const ChunkList = std.ArrayList(VoxelChunk);
+const ChunkUploadList = std.ArrayList(VoxelChunkUpload);
 
 const SideDataPosition = struct {
     index: u16,
@@ -35,7 +37,7 @@ pub const VoxelGrid = struct {
 
     allocator: std.mem.Allocator,
     chunks: ChunkList = .empty,
-    chunks_to_upload: ChunkList = .empty,
+    chunks_to_upload: ChunkUploadList = .empty,
 
     gpu_chunk_info_buffer_manager: SlotBufferManager = .{},
     gpu_chunk_info_buffer: GPUBuffer,
@@ -107,13 +109,10 @@ pub const VoxelGrid = struct {
         gctx.destroyResource(self.gpu_block_buffer.handle);
         gctx.destroyResource(self.gpu_chunk_info_buffer.handle);
 
-        for (self.chunks.items) |*chunk| {
-            chunk.deinit(self.allocator);
-        }
         self.chunks.deinit(self.allocator);
 
         for (self.chunks_to_upload.items) |*chunk| {
-            chunk.deinit(self.allocator);
+            chunk.chunk_side_data.deinit(self.allocator);
         }
         self.chunks_to_upload.deinit(self.allocator);
 
@@ -121,13 +120,8 @@ pub const VoxelGrid = struct {
     }
 
     pub fn clearChunks(self: *Self) void {
-        for (self.chunks.items) |*chunk| {
-            // self.gpu_chunk_info_buffer_manager.freeBlock(chunk.chunk_index);
-            // self.gpu_block_buffer_manager.freeBlock(chunk.data_slot_index);
-            chunk.deinit(self.allocator);
-        }
         for (self.chunks_to_upload.items) |*chunk| {
-            chunk.deinit(self.allocator);
+            chunk.chunk_side_data.deinit(self.allocator);
         }
 
         self.chunks.clearRetainingCapacity();
@@ -137,7 +131,7 @@ pub const VoxelGrid = struct {
         self.gpu_block_buffer_manager.clear();
     }
 
-    pub fn appendChunk(self: *Self, chunk: VoxelChunk) void {
+    pub fn appendChunk(self: *Self, chunk: VoxelChunkUpload) void {
         self.chunks_to_upload.append(self.allocator, chunk) catch @panic("OOM");
     }
 
@@ -148,10 +142,12 @@ pub const VoxelGrid = struct {
                 chunk.chunk_origin[1] == chunk_coords[1] and
                 chunk.chunk_origin[2] == chunk_coords[2])
             {
-                self.gpu_chunk_info_buffer_manager.freeBlock(chunk.chunk_index);
-                self.gpu_block_buffer_manager.freeBlock(chunk.data_slot_index);
+                if (chunk.gpu_residence_info) |info| {
+                    self.gpu_chunk_info_buffer_manager.freeBlock(info.chunk_index);
+                    self.gpu_block_buffer_manager.freeBlock(info.data_slot_index);
+                }
+
                 _ = self.chunks.swapRemove(i);
-                chunk.deinit(self.allocator);
                 return;
             }
         }
@@ -165,9 +161,9 @@ pub const VoxelGrid = struct {
             std.debug.print("Uploading {} voxel chunks to GPU\n", .{self.chunks_to_upload.items.len});
         }
 
-        for (self.chunks_to_upload.items) |*chunk| {
+        for (self.chunks_to_upload.items) |*upload_chunk| {
             var total_data_size_total: usize = 0;
-            for (chunk.blocks_grouped_by_side) |side| {
+            for (upload_chunk.chunk_side_data.blocks_grouped_by_side) |side| {
                 total_data_size_total += side.items.len;
             }
 
@@ -191,16 +187,16 @@ pub const VoxelGrid = struct {
             var chunk_info: ChunkInfo = .{
                 .view_side_data_indices = undefined,
                 .chunk_origin = .{
-                    chunk.chunk_origin[0],
-                    chunk.chunk_origin[1],
-                    chunk.chunk_origin[2],
+                    upload_chunk.chunk_coords[0],
+                    upload_chunk.chunk_coords[1],
+                    upload_chunk.chunk_coords[2],
                 },
                 .data_slot_index = data_slot_index,
             };
 
             var total_data_size: u16 = 0;
             var side_data_indices: [6]SideDataPosition = @splat(.{ .index = 0, .count = 0 });
-            for (chunk.blocks_grouped_by_side, 0..) |side, side_index| {
+            for (upload_chunk.chunk_side_data.blocks_grouped_by_side, 0..) |side, side_index| {
                 if (side.items.len > 0) {
                     const data_index = chunk_info.data_slot_index * BLOCKS_PER_SLOT + total_data_size;
                     side_data_indices[side_index] = .{
@@ -222,8 +218,13 @@ pub const VoxelGrid = struct {
             const perspective_data = convertSideDataIndicesIntoPerspectiveIndices(
                 side_data_indices,
             );
+
             chunk_info.view_side_data_indices = perspective_data.view_side_data_indices;
-            chunk.faces_count_per_view = perspective_data.faces_count_per_view;
+
+            var chunk_inner_data: VoxelChunk = .{
+                .chunk_origin = upload_chunk.chunk_coords,
+                .gpu_residence_info = null,
+            };
 
             if (total_data_size > 0) {
                 const chunk_index = self.gpu_chunk_info_buffer_manager.occupyBlock() catch
@@ -236,14 +237,21 @@ pub const VoxelGrid = struct {
                     &.{chunk_info},
                 );
 
-                chunk.chunk_index = chunk_index;
-                chunk.data_slot_index = data_slot_index;
-                chunk.data_slot_size_level = data_slot_size_level;
+                chunk_inner_data.gpu_residence_info = .{
+                    .faces_count_per_view = perspective_data.faces_count_per_view,
+                    .chunk_index = chunk_index,
+                    .data_slot_index = data_slot_index,
+                    .data_slot_size_level = data_slot_size_level,
+                };
             }
 
-            self.chunks.append(self.allocator, chunk.*) catch @panic("OOM");
+            self.chunks.append(self.allocator, chunk_inner_data) catch @panic("OOM");
         }
 
+        // deinit all chunk side data and clear the upload list
+        for (self.chunks_to_upload.items) |*chunk| {
+            chunk.chunk_side_data.deinit(self.allocator);
+        }
         self.chunks_to_upload.clearRetainingCapacity();
     }
 };

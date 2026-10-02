@@ -207,10 +207,12 @@ const Game = struct {
                 world_chunk.world_chunk_data != null and
                 !game.checkIfChunkCanBeSkipped(chunk_coords))
             {
-                var voxel_chunk = voxel_chunk_module.VoxelChunk.init(chunk_coords);
-                // voxel_chunk.loadTestData(allocator);
-                world_engine.updateVoxelChunk(game.allocator, world_chunk, &voxel_chunk);
-                voxel_grid.appendChunk(voxel_chunk);
+                voxel_grid.appendChunk(.{
+                    .chunk_coords = chunk_coords,
+                    // Can be used for testing:
+                    // .chunk_side_data = ChunkSideData.initWithTestData(game.allocator),
+                    .chunk_side_data = world_engine.extractChunkSideData(game.allocator, world_chunk),
+                });
 
                 if (DEBUG) {
                     std.debug.print("appended chunk {any}\n", .{chunk_coords});

@@ -4,6 +4,7 @@ const engine = @import("engine");
 const BlockType = engine.voxel_chunk.BlockType;
 const Side = engine.voxel_chunk.Side;
 const VoxelChunk = engine.voxel_chunk.VoxelChunk;
+const ChunkSideData = engine.voxel_chunk.ChunkSideData;
 
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const WORLD_SIZE = @import("./consts.zig").WORLD_SIZE;
@@ -12,7 +13,12 @@ const ChunksHashMap = @import("./world.zig").ChunksHashMap;
 const encodeChunkPosition = @import("./world.zig").encodeChunkPosition;
 const encodeChunkPositionArray = @import("./world.zig").encodeChunkPositionArray;
 
-pub fn updateVoxelChunk(allocator: std.mem.Allocator, world_chunk: *const WorldChunk, voxel_chunk: *VoxelChunk) void {
+pub fn extractChunkSideData(
+    allocator: std.mem.Allocator,
+    world_chunk: *const WorldChunk,
+) ChunkSideData {
+    var chunk_side_data: ChunkSideData = .{};
+
     const world_chunk_data = world_chunk.world_chunk_data.?;
     const b = &world_chunk_data.blocks;
 
@@ -29,29 +35,31 @@ pub fn updateVoxelChunk(allocator: std.mem.Allocator, world_chunk: *const WorldC
                 };
 
                 if (y == CHUNK_SIZE - 1 or b[z][y + 1][x] == BlockType.none) {
-                    voxel_chunk.blocks_grouped_by_side[@intFromEnum(Side.back)].append(allocator, voxel_block) catch @panic("OOM");
+                    chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.back)].append(allocator, voxel_block) catch @panic("OOM");
                 }
 
                 if (y == 0 or b[z][y - 1][x] == BlockType.none) {
-                    voxel_chunk.blocks_grouped_by_side[@intFromEnum(Side.front)].append(allocator, voxel_block) catch @panic("OOM");
+                    chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.front)].append(allocator, voxel_block) catch @panic("OOM");
                 }
 
                 if (x == CHUNK_SIZE - 1 or b[z][y][x + 1] == BlockType.none) {
-                    voxel_chunk.blocks_grouped_by_side[@intFromEnum(Side.right)].append(allocator, voxel_block) catch @panic("OOM");
+                    chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.right)].append(allocator, voxel_block) catch @panic("OOM");
                 }
 
                 if (x == 0 or b[z][y][x - 1] == BlockType.none) {
-                    voxel_chunk.blocks_grouped_by_side[@intFromEnum(Side.left)].append(allocator, voxel_block) catch @panic("OOM");
+                    chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.left)].append(allocator, voxel_block) catch @panic("OOM");
                 }
 
                 if (z == CHUNK_SIZE - 1 or b[z + 1][y][x] == BlockType.none) {
-                    voxel_chunk.blocks_grouped_by_side[@intFromEnum(Side.top)].append(allocator, voxel_block) catch @panic("OOM");
+                    chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.top)].append(allocator, voxel_block) catch @panic("OOM");
                 }
 
                 if (z == 0 or b[z - 1][y][x] == BlockType.none) {
-                    voxel_chunk.blocks_grouped_by_side[@intFromEnum(Side.bottom)].append(allocator, voxel_block) catch @panic("OOM");
+                    chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.bottom)].append(allocator, voxel_block) catch @panic("OOM");
                 }
             }
         }
     }
+
+    return chunk_side_data;
 }
