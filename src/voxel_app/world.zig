@@ -1,39 +1,13 @@
 const std = @import("std");
 
 const BlockType = @import("engine").voxel_chunk.BlockType;
-const PerlinNoise = @import("./perlin_noise.zig").PerlinNoise;
 const WorldChunkData = @import("./world_chunk_data.zig").WorldChunkData;
 const ChunkFlags = @import("./world_chunk_data.zig").ChunkFlags;
+const world_generator = @import("./world_generator.zig");
 const BlockPosition = @import("./consts.zig").BlockPosition;
 const ChunkPosition = @import("./consts.zig").ChunkPosition;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const WORLD_SIZE = @import("./consts.zig").WORLD_SIZE;
-
-pub const WorldGenerationParams = struct {
-    /// Width, in blocks, of the first noise octave's features.
-    noise_scale: f64 = 192.0,
-    /// Number of noise layers. More octaves add smaller terrain details.
-    octaves: u8 = 4,
-    /// Frequency multiplier applied to each successive octave.
-    lacunarity: f64 = 2.0,
-    /// Amplitude multiplier applied to each successive octave.
-    persistence: f64 = 0.5,
-    /// Average terrain height measured in blocks from the bottom of the world.
-    base_height: u32 = WORLD_SIZE[2] * CHUNK_SIZE / 2,
-    /// Maximum vertical displacement from base_height.
-    height_amplitude: f64 = 48.0,
-    /// Number of dirt blocks below each grass surface block.
-    dirt_depth: u8 = 4,
-};
-
-const solid_chunk_flags = ChunkFlags{
-    .solid_top = true,
-    .solid_bottom = true,
-    .solid_front = true,
-    .solid_back = true,
-    .solid_left = true,
-    .solid_right = true,
-};
 
 pub fn normalizeChunkPosition(x: anytype, y: anytype, z: anytype) [3]u30 {
     var normalized_x = x;
@@ -95,21 +69,69 @@ pub fn decodeChunkPositionVec(position: ChunkPosition) @Vector(4, i32) {
 /// What the chunk consists of. Uniform chunks don't store their blocks, so most of the world
 /// (air above the terrain and rock below it) takes almost no memory.
 pub const ChunkContent = union(enum) {
-    /// Every block is `.none`. Nothing is allocated.
-    empty,
-    /// Every block is solid. Nothing is allocated, the exact block types are known only to the
-    /// generator and are produced by `World.ensureChunkData` when they are needed.
-    solid,
+    /// Every block has this type. Nothing is allocated.
+    uniform: BlockType,
     /// Every block is stored individually. Used for chunks crossing the terrain surface and for
-    /// any chunk touched by an edit, even if the edit made it fully empty or fully solid.
+    /// any chunk touched by an edit, even if the edit made it uniform.
     blocks: *WorldChunkData,
+
+    pub fn deinit(self: ChunkContent, allocator: std.mem.Allocator) void {
+        switch (self) {
+            .blocks => |world_chunk_data| allocator.destroy(world_chunk_data),
+            .uniform => {},
+        }
+    }
+
+    pub fn toData(self: ChunkContent) WorldChunkData {
+        return switch (self) {
+            .uniform => |block_type| WorldChunkData.initFilled(block_type),
+            .blocks => |world_chunk_data| world_chunk_data.*,
+        };
+    }
+
+    pub fn getBlock(self: ChunkContent, local: [3]u5) BlockType {
+        return switch (self) {
+            .uniform => |block_type| block_type,
+            .blocks => |world_chunk_data| world_chunk_data.blocks[local[2]][local[1]][local[0]],
+        };
+    }
 };
 
+/// A chunk is self-contained: its content and flags are everything needed to render and edit it.
 pub const WorldChunk = struct {
     content: ChunkContent,
     flags: ChunkFlags,
+    /// Number of modifications made by the player. 0 means the chunk is exactly as generated.
+    /// New revisions are produced only by the main thread, which owns block modifications.
+    revision: u32 = 0,
+
+    pub fn initUniform(block_type: BlockType) WorldChunk {
+        const is_solid = block_type != .none;
+        return .{
+            .content = .{ .uniform = block_type },
+            .flags = .{
+                .solid_left = is_solid,
+                .solid_right = is_solid,
+                .solid_front = is_solid,
+                .solid_back = is_solid,
+                .solid_bottom = is_solid,
+                .solid_top = is_solid,
+            },
+        };
+    }
+
+    /// Takes ownership of the data.
+    pub fn initBlocks(world_chunk_data: *WorldChunkData) WorldChunk {
+        return .{
+            .content = .{ .blocks = world_chunk_data },
+            .flags = WorldChunkData.getMetaFlags(world_chunk_data),
+        };
+    }
+
     /// The chunk was modified by the player and can't be re-generated from the generator anymore.
-    is_dirty: bool = false,
+    pub fn isDirty(self: WorldChunk) bool {
+        return self.revision > 0;
+    }
 };
 
 /// Splits global block coordinates into chunk coordinates and coordinates inside of the chunk.
@@ -130,107 +152,120 @@ pub fn splitBlockCoords(block: [3]u32) struct { [3]u30, [3]u5 } {
 
 pub const ChunksHashMap = std.AutoHashMapUnmanaged(ChunkPosition, WorldChunk);
 
-pub const WorldGenerator = union(enum) {
-    flat,
-    terrain: struct {
-        seed: u64,
-        params: WorldGenerationParams = .{},
-    },
-};
+pub const ChunkNotReceivedError = error{ChunkNotReceived};
 
+/// Main thread copy of the chunks received from the world-data thread. It's the source of truth
+/// for block modifications: they are applied here immediately and then sent to the world-data
+/// thread as chunk snapshots (see `unsyncedChunks`).
 pub const World = struct {
     allocator: std.mem.Allocator,
-    generator: WorldGenerator,
-    /// Contains only chunks of the columns generated so far.
+    /// Contains only the received chunks.
     chunks: ChunksHashMap,
+    /// Chunks modified since the last `markChunksSynced` call.
+    unsynced_chunks: std.AutoArrayHashMapUnmanaged(ChunkPosition, void),
+    /// The latest revision produced for every chunk ever modified, including the chunks removed
+    /// since. A received chunk with a lower revision is stale.
+    latest_revisions: std.AutoHashMapUnmanaged(ChunkPosition, u32),
 
-    pub fn init(allocator: std.mem.Allocator, generator: WorldGenerator) World {
-        switch (generator) {
-            .flat => {},
-            .terrain => |terrain| {
-                const params = terrain.params;
-                std.debug.assert(params.noise_scale > 0.0 and std.math.isFinite(params.noise_scale));
-                std.debug.assert(params.octaves > 0);
-                std.debug.assert(params.lacunarity > 0.0 and std.math.isFinite(params.lacunarity));
-                std.debug.assert(params.persistence >= 0.0 and std.math.isFinite(params.persistence));
-                std.debug.assert(params.height_amplitude >= 0.0 and std.math.isFinite(params.height_amplitude));
-            },
-        }
-
+    pub fn init(allocator: std.mem.Allocator) World {
         return World{
             .allocator = allocator,
-            .generator = generator,
             .chunks = .empty,
+            .unsynced_chunks = .empty,
+            .latest_revisions = .empty,
         };
     }
 
     pub fn deinit(self: *World) void {
-        self.destroyChunksData();
+        var iterator = self.chunks.valueIterator();
+        while (iterator.next()) |chunk| {
+            chunk.content.deinit(self.allocator);
+        }
         self.chunks.deinit(self.allocator);
+        self.unsynced_chunks.deinit(self.allocator);
+        self.latest_revisions.deinit(self.allocator);
     }
 
-    /// Returns the chunk at `coords`, generating its whole column on first access.
-    /// Returned by value: generating other chunks may reallocate `chunks` and
-    /// invalidate pointers into it.
-    pub fn getChunk(self: *World, coords: [3]u30) WorldChunk {
+    pub fn hasChunk(self: *const World, coords: [3]u30) bool {
+        return self.chunks.contains(encodeChunkPositionArray(coords));
+    }
+
+    /// Takes ownership of the chunk data. If the chunk misses modifications already made on this
+    /// thread, it's rejected and stays owned by the caller.
+    pub fn insertChunk(self: *World, coords: [3]u30, chunk: WorldChunk) error{StaleChunk}!void {
+        const position = encodeChunkPositionArray(coords);
+        std.debug.assert(!self.chunks.contains(position));
+
+        if (self.latest_revisions.get(position)) |latest_revision| {
+            if (chunk.revision < latest_revision) {
+                return error.StaleChunk;
+            }
+        }
+
+        self.chunks.put(self.allocator, position, chunk) catch @panic("OOM");
+    }
+
+    /// Removes the chunk and frees its data. Its modifications must be synced first, otherwise
+    /// they would be lost.
+    pub fn removeChunk(self: *World, coords: [3]u30) void {
+        const position = encodeChunkPositionArray(coords);
+        std.debug.assert(!self.unsynced_chunks.contains(position));
+        self.chunks.fetchRemove(position).?.value.content.deinit(self.allocator);
+    }
+
+    /// Returns the chunk, or null if it isn't received yet.
+    /// Returned by value: inserting chunks may reallocate `chunks` and invalidate pointers into it.
+    pub fn getChunk(self: *const World, coords: [3]u30) ?WorldChunk {
         std.debug.assert(coords[0] < WORLD_SIZE[0]);
         std.debug.assert(coords[1] < WORLD_SIZE[1]);
         std.debug.assert(coords[2] < WORLD_SIZE[2]);
 
-        const position = encodeChunkPositionArray(coords);
-        if (self.chunks.get(position)) |chunk| {
-            return chunk;
-        }
-
-        self.generateColumn(coords[0], coords[1]);
-        return self.chunks.get(position).?;
+        return self.chunks.get(encodeChunkPositionArray(coords));
     }
 
-    /// Makes sure the chunk stores its blocks, generating them if needed, and returns them.
+    /// Makes sure the chunk stores its blocks and returns them. The chunk must be received.
     pub fn ensureChunkData(self: *World, coords: [3]u30) *WorldChunkData {
-        _ = self.getChunk(coords);
         const chunk = self.chunks.getPtr(encodeChunkPositionArray(coords)).?;
 
-        const generated_data = switch (chunk.content) {
+        switch (chunk.content) {
             .blocks => |world_chunk_data| return world_chunk_data,
-            .empty => WorldChunkData.initEmpty(),
-            .solid => self.generateSolidChunkData(coords),
-        };
-
-        const world_chunk_data = self.allocator.create(WorldChunkData) catch @panic("OOM");
-        world_chunk_data.* = generated_data;
-        chunk.content = .{ .blocks = world_chunk_data };
-
-        return world_chunk_data;
+            .uniform => {
+                const world_chunk_data = self.allocator.create(WorldChunkData) catch @panic("OOM");
+                world_chunk_data.* = chunk.content.toData();
+                chunk.content = .{ .blocks = world_chunk_data };
+                return world_chunk_data;
+            },
+        }
     }
 
-    pub fn isBlockSolid(self: *World, block: [3]u32) bool {
+    pub fn isBlockSolid(self: *const World, block: [3]u32) ChunkNotReceivedError!bool {
         const chunk_coords, const local = splitBlockCoords(block);
-
-        return switch (self.getChunk(chunk_coords).content) {
-            .empty => false,
-            .solid => true,
-            .blocks => |world_chunk_data| world_chunk_data.blocks[local[2]][local[1]][local[0]] != .none,
-        };
+        const chunk = self.getChunk(chunk_coords) orelse return error.ChunkNotReceived;
+        return chunk.content.getBlock(local) != .none;
     }
 
-    /// Sets the block and marks its chunk as dirty.
+    /// Sets the block and bumps the revision of its chunk. The chunk must be received.
     pub fn setBlock(self: *World, block: [3]u32, block_type: BlockType) void {
         const chunk_coords, const local = splitBlockCoords(block);
         const world_chunk_data = self.ensureChunkData(chunk_coords);
         world_chunk_data.blocks[local[2]][local[1]][local[0]] = block_type;
 
-        const chunk = self.chunks.getPtr(encodeChunkPositionArray(chunk_coords)).?;
+        const position = encodeChunkPositionArray(chunk_coords);
+        const chunk = self.chunks.getPtr(position).?;
         chunk.flags = WorldChunkData.getMetaFlags(world_chunk_data);
-        chunk.is_dirty = true;
+        chunk.revision += 1;
+
+        self.latest_revisions.put(self.allocator, position, chunk.revision) catch @panic("OOM");
+        self.unsynced_chunks.put(self.allocator, position, {}) catch @panic("OOM");
     }
 
     /// Removes the topmost solid block at or below `top`.
-    /// Returns the removed block, or null if there is nothing to remove.
-    pub fn removeTopBlockInColumn(self: *World, top: [3]u32) ?[3]u32 {
+    /// Returns the removed block, or null if there is nothing to remove. Fails without changing
+    /// anything if it has to look into a chunk that isn't received.
+    pub fn removeTopBlockInColumn(self: *World, top: [3]u32) ChunkNotReceivedError!?[3]u32 {
         var block = top;
         while (true) : (block[2] -= 1) {
-            if (self.isBlockSolid(block)) {
+            if (try self.isBlockSolid(block)) {
                 self.setBlock(block, .none);
                 return block;
             }
@@ -241,14 +276,16 @@ pub const World = struct {
     }
 
     /// Drops the block down the column starting at `top`, placing it on the first solid block
-    /// (or on the bottom of the world). Returns the placed block, or null if `top` is occupied.
-    pub fn dropBlockInColumn(self: *World, top: [3]u32, block_type: BlockType) ?[3]u32 {
-        if (self.isBlockSolid(top)) {
+    /// (or on the bottom of the world).
+    /// Returns the placed block, or null if `top` is occupied. Fails without changing anything
+    /// if it has to look into a chunk that isn't received.
+    pub fn dropBlockInColumn(self: *World, top: [3]u32, block_type: BlockType) ChunkNotReceivedError!?[3]u32 {
+        if (try self.isBlockSolid(top)) {
             return null;
         }
 
         var block = top;
-        while (block[2] > 0 and !self.isBlockSolid(.{ block[0], block[1], block[2] - 1 })) {
+        while (block[2] > 0 and !try self.isBlockSolid(.{ block[0], block[1], block[2] - 1 })) {
             block[2] -= 1;
         }
 
@@ -256,311 +293,121 @@ pub const World = struct {
         return block;
     }
 
-    fn generateSolidChunkData(self: *World, coords: [3]u30) WorldChunkData {
-        return switch (self.generator) {
-            .flat => WorldChunkData.initSolid(),
-            .terrain => |terrain| data: {
-                const heights = terrainColumnHeights(coords[0], coords[1], terrain.seed, terrain.params);
-                break :data generateTerrainChunk(&heights, @as(u32, coords[2]) * CHUNK_SIZE, terrain.params.dirt_depth);
-            },
-        };
+    /// Chunks modified since the last `markChunksSynced` call. They always store their blocks.
+    pub fn unsyncedChunks(self: *const World) []const ChunkPosition {
+        return self.unsynced_chunks.keys();
     }
 
-    fn generateColumn(self: *World, chunk_x: u30, chunk_y: u30) void {
-        self.chunks.ensureUnusedCapacity(self.allocator, WORLD_SIZE[2]) catch @panic("OOM");
-
-        switch (self.generator) {
-            .flat => self.generateFlatColumn(chunk_x, chunk_y),
-            .terrain => |terrain| self.generateTerrainColumn(chunk_x, chunk_y, terrain.seed, terrain.params),
-        }
-    }
-
-    fn generateFlatColumn(self: *World, chunk_x: u30, chunk_y: u30) void {
-        const center_z = WORLD_SIZE[2] / 2;
-
-        for (0..WORLD_SIZE[2]) |z| {
-            var map_chunk: WorldChunk = undefined;
-
-            if (z == center_z - 1) {
-                const world_chunk_data = self.allocator.create(WorldChunkData) catch @panic("OOM");
-
-                world_chunk_data.* = WorldChunkData.initFlat();
-
-                map_chunk = .{
-                    .content = .{ .blocks = world_chunk_data },
-                    .flags = WorldChunkData.getMetaFlags(world_chunk_data),
-                };
-            } else if (z == center_z - 2) {
-                // const world_chunk_data = self.allocator.create(WorldChunkData) catch @panic("OOM");
-                // world_chunk_data.* = WorldChunkData.initSolid();
-
-                map_chunk = .{
-                    // .content = .{ .blocks = world_chunk_data },
-                    .content = .solid,
-                    .flags = solid_chunk_flags,
-                };
-            } else if (z < center_z - 2) {
-                map_chunk = .{
-                    .content = .solid,
-                    .flags = solid_chunk_flags,
-                };
-            } else {
-                map_chunk = .{
-                    .content = .empty,
-                    .flags = .{},
-                };
-            }
-
-            self.chunks.putAssumeCapacity(encodeChunkPosition(chunk_x, chunk_y, z), map_chunk);
-        }
-    }
-
-    fn generateTerrainColumn(
-        self: *World,
-        chunk_x: u30,
-        chunk_y: u30,
-        seed: u64,
-        params: WorldGenerationParams,
-    ) void {
-        const heights = terrainColumnHeights(chunk_x, chunk_y, seed, params);
-
-        var minimum_height: u32 = WORLD_SIZE[2] * CHUNK_SIZE;
-        var maximum_height: u32 = 0;
-
-        for (heights) |row| {
-            for (row) |height| {
-                minimum_height = @min(minimum_height, height);
-                maximum_height = @max(maximum_height, height);
-            }
-        }
-
-        for (0..WORLD_SIZE[2]) |chunk_z| {
-            const chunk_bottom: u32 = @intCast(chunk_z * CHUNK_SIZE);
-            const chunk_top = chunk_bottom + CHUNK_SIZE;
-            var map_chunk: WorldChunk = undefined;
-
-            if (chunk_top <= minimum_height) {
-                map_chunk = .{
-                    .content = .solid,
-                    .flags = solid_chunk_flags,
-                };
-            } else if (chunk_bottom >= maximum_height) {
-                map_chunk = .{
-                    .content = .empty,
-                    .flags = .{},
-                };
-            } else {
-                const world_chunk_data = self.allocator.create(WorldChunkData) catch @panic("OOM");
-                world_chunk_data.* = generateTerrainChunk(&heights, chunk_bottom, params.dirt_depth);
-
-                map_chunk = .{
-                    .content = .{ .blocks = world_chunk_data },
-                    .flags = WorldChunkData.getMetaFlags(world_chunk_data),
-                };
-            }
-
-            self.chunks.putAssumeCapacity(encodeChunkPosition(chunk_x, chunk_y, chunk_z), map_chunk);
-        }
-    }
-
-    fn clearChunks(self: *World) void {
-        self.destroyChunksData();
-        self.chunks.clearRetainingCapacity();
-    }
-
-    fn destroyChunksData(self: *World) void {
-        var iterator = self.chunks.valueIterator();
-        while (iterator.next()) |entry| {
-            switch (entry.content) {
-                .blocks => |world_chunk_data| self.allocator.destroy(world_chunk_data),
-                .empty, .solid => {},
-            }
-        }
+    pub fn markChunksSynced(self: *World) void {
+        self.unsynced_chunks.clearRetainingCapacity();
     }
 };
 
-fn terrainColumnHeights(
-    chunk_x: u30,
-    chunk_y: u30,
-    seed: u64,
-    params: WorldGenerationParams,
-) [CHUNK_SIZE][CHUNK_SIZE]u32 {
-    const noise = PerlinNoise.init(seed);
-
-    var heights: [CHUNK_SIZE][CHUNK_SIZE]u32 = undefined;
-    for (0..CHUNK_SIZE) |local_y| {
-        for (0..CHUNK_SIZE) |local_x| {
-            const block_x = @as(usize, chunk_x) * CHUNK_SIZE + local_x;
-            const block_y = @as(usize, chunk_y) * CHUNK_SIZE + local_y;
-            heights[local_y][local_x] = terrainHeight(noise, block_x, block_y, params);
-        }
+fn insertGeneratedChunks(
+    world: *World,
+    generator: world_generator.WorldGenerator,
+    column: [2]u30,
+    z_start: u30,
+    z_end: u30,
+) !void {
+    const column_generator = world_generator.ColumnGenerator.init(generator, column);
+    var z = z_start;
+    while (z < z_end) : (z += 1) {
+        try world.insertChunk(.{ column[0], column[1], z }, column_generator.generateChunk(world.allocator, z));
     }
-
-    return heights;
 }
 
-fn terrainHeight(noise: PerlinNoise, block_x: anytype, block_y: anytype, params: WorldGenerationParams) u32 {
-    var value: f64 = 0.0;
-    var amplitude: f64 = 1.0;
-    var amplitude_sum: f64 = 0.0;
-    var frequency = 1.0 / params.noise_scale;
-    const world_width_blocks = WORLD_SIZE[0] * CHUNK_SIZE;
-    const world_width: f64 = @floatFromInt(world_width_blocks);
-
-    for (0..params.octaves) |_| {
-        // Use a whole number of noise cells around the world's circumference.
-        // Wrapping lattice gradients then makes x=world_width meet x=0 with
-        // matching values and slopes, regardless of the requested noise scale.
-        const x_period: u32 = @intFromFloat(@max(1.0, @round(world_width * frequency)));
-        const periodic_x = @as(f64, @floatFromInt(block_x)) *
-            @as(f64, @floatFromInt(x_period)) / world_width;
-
-        value += noise.sample2DPeriodicX(
-            periodic_x,
-            @as(f64, @floatFromInt(block_y)) * frequency,
-            x_period,
-        ) * amplitude;
-        amplitude_sum += amplitude;
-        frequency *= params.lacunarity;
-        amplitude *= params.persistence;
-    }
-
-    const normalized_noise = value / amplitude_sum;
-    const generated_height = @as(f64, @floatFromInt(params.base_height)) +
-        normalized_noise * params.height_amplitude;
-    const world_height: f64 = @floatFromInt(WORLD_SIZE[2] * CHUNK_SIZE);
-    const bounded_height = std.math.clamp(@round(generated_height), 1.0, world_height);
-
-    return @intFromFloat(bounded_height);
-}
-
-fn generateTerrainChunk(
-    heights: *const [CHUNK_SIZE][CHUNK_SIZE]u32,
-    chunk_bottom: u32,
-    dirt_depth: u8,
-) WorldChunkData {
-    var chunk = WorldChunkData.initUninitialized();
-
-    for (0..CHUNK_SIZE) |local_z| {
-        const block_z = chunk_bottom + local_z;
-
-        for (0..CHUNK_SIZE) |local_y| {
-            for (0..CHUNK_SIZE) |local_x| {
-                const height = heights[local_y][local_x];
-                const depth_below_surface = height -| (block_z + 1);
-
-                chunk.blocks[local_z][local_y][local_x] = if (block_z >= height)
-                    BlockType.none
-                else if (depth_below_surface == 0)
-                    BlockType.grass
-                else if (depth_below_surface <= dirt_depth)
-                    BlockType.dirt
-                else
-                    BlockType.stone;
-            }
-        }
-    }
-
-    return chunk;
-}
-
-test "getChunk generates only the requested column" {
-    var world = World.init(std.testing.allocator, .{ .terrain = .{ .seed = 12345 } });
+test "chunks are available only after they are inserted" {
+    var world = World.init(std.testing.allocator);
     defer world.deinit();
 
-    _ = world.getChunk(.{ 3, 7, 0 });
-    try std.testing.expectEqual(WORLD_SIZE[2], world.chunks.count());
+    try std.testing.expectEqual(null, world.getChunk(.{ 3, 7, 4 }));
 
-    _ = world.getChunk(.{ 3, 7, WORLD_SIZE[2] - 1 });
-    try std.testing.expectEqual(WORLD_SIZE[2], world.chunks.count());
+    try insertGeneratedChunks(&world, .{ .terrain = .{ .seed = 12345 } }, .{ 3, 7 }, 4, 5);
+    try std.testing.expect(world.hasChunk(.{ 3, 7, 4 }));
+    try std.testing.expectEqual(null, world.getChunk(.{ 3, 7, 3 }));
 
-    _ = world.getChunk(.{ 4, 7, 0 });
-    try std.testing.expectEqual(2 * WORLD_SIZE[2], world.chunks.count());
-}
-
-test "terrain generation is deterministic and independent of access order" {
-    var first = World.init(std.testing.allocator, .{ .terrain = .{ .seed = 12345 } });
-    defer first.deinit();
-    var second = World.init(std.testing.allocator, .{ .terrain = .{ .seed = 12345 } });
-    defer second.deinit();
-
-    _ = second.getChunk(.{ WORLD_SIZE[0] - 1, 0, 0 });
-    _ = second.getChunk(.{ 10, 20, 0 });
-
-    for (0..WORLD_SIZE[2]) |z| {
-        const coords = [3]u30{ 10, 20, @intCast(z) };
-        const a = first.getChunk(coords);
-        const b = second.getChunk(coords);
-
-        try std.testing.expectEqual(std.meta.activeTag(a.content), std.meta.activeTag(b.content));
-        try std.testing.expectEqual(a.flags, b.flags);
-        if (a.content == .blocks) {
-            try std.testing.expectEqualSlices(
-                u8,
-                std.mem.asBytes(&a.content.blocks.blocks),
-                std.mem.asBytes(&b.content.blocks.blocks),
-            );
-        }
-    }
-}
-
-test "terrain column has a surface chunk between solid and empty chunks" {
-    var world = World.init(std.testing.allocator, .{ .terrain = .{ .seed = 12345 } });
-    defer world.deinit();
-
-    try std.testing.expect(world.getChunk(.{ 0, 0, 0 }).content == .solid);
-    try std.testing.expect(world.getChunk(.{ 0, 0, WORLD_SIZE[2] - 1 }).content == .empty);
-
-    var surface_chunk_count: usize = 0;
-    for (0..WORLD_SIZE[2]) |z| {
-        if (world.getChunk(.{ 0, 0, @intCast(z) }).content == .blocks) {
-            surface_chunk_count += 1;
-        }
-    }
-    try std.testing.expect(surface_chunk_count > 0);
+    world.removeChunk(.{ 3, 7, 4 });
+    try std.testing.expectEqual(null, world.getChunk(.{ 3, 7, 4 }));
 }
 
 test "removing and dropping a block in a column are inverse operations" {
-    var world = World.init(std.testing.allocator, .{ .terrain = .{ .seed = 12345 } });
+    var world = World.init(std.testing.allocator);
     defer world.deinit();
 
     const top = [3]u32{ 100, 200, WORLD_SIZE[2] * CHUNK_SIZE - 1 };
+    const column, _ = splitBlockCoords(top);
+    try insertGeneratedChunks(&world, .{ .terrain = .{ .seed = 12345 } }, .{ column[0], column[1] }, 0, WORLD_SIZE[2]);
 
-    const removed = world.removeTopBlockInColumn(top).?;
-    try std.testing.expect(!world.isBlockSolid(removed));
-    try std.testing.expect(world.isBlockSolid(.{ removed[0], removed[1], removed[2] - 1 }));
+    const removed = (try world.removeTopBlockInColumn(top)).?;
+    try std.testing.expect(!try world.isBlockSolid(removed));
+    try std.testing.expect(try world.isBlockSolid(.{ removed[0], removed[1], removed[2] - 1 }));
 
     const chunk_coords, _ = splitBlockCoords(removed);
-    try std.testing.expect(world.getChunk(chunk_coords).is_dirty);
+    try std.testing.expect(world.getChunk(chunk_coords).?.isDirty());
 
-    const placed = world.dropBlockInColumn(top, .dirt).?;
+    const placed = (try world.dropBlockInColumn(top, .dirt)).?;
     try std.testing.expectEqual(removed, placed);
-    try std.testing.expect(world.isBlockSolid(placed));
+    try std.testing.expect(try world.isBlockSolid(placed));
+    try std.testing.expectEqual(2, world.getChunk(chunk_coords).?.revision);
+    try std.testing.expectEqualSlices(ChunkPosition, &.{encodeChunkPositionArray(chunk_coords)}, world.unsyncedChunks());
 }
 
-test "editing a solid chunk generates its data from the generator" {
-    var world = World.init(std.testing.allocator, .{ .terrain = .{ .seed = 12345 } });
+test "editing a uniform chunk fills its data with its block type" {
+    var world = World.init(std.testing.allocator);
     defer world.deinit();
+    try insertGeneratedChunks(&world, .{ .terrain = .{ .seed = 12345 } }, .{ 0, 0 }, 0, 1);
 
-    try std.testing.expect(world.getChunk(.{ 0, 0, 0 }).content == .solid);
+    try std.testing.expectEqual(WorldChunk.initUniform(.stone), world.getChunk(.{ 0, 0, 0 }).?);
 
-    const removed = world.removeTopBlockInColumn(.{ 5, 5, CHUNK_SIZE - 1 }).?;
+    const removed = (try world.removeTopBlockInColumn(.{ 5, 5, CHUNK_SIZE - 1 })).?;
     try std.testing.expectEqual([3]u32{ 5, 5, CHUNK_SIZE - 1 }, removed);
 
-    const chunk = world.getChunk(.{ 0, 0, 0 });
+    const chunk = world.getChunk(.{ 0, 0, 0 }).?;
     try std.testing.expect(chunk.content == .blocks);
-    try std.testing.expect(chunk.is_dirty);
+    try std.testing.expect(chunk.isDirty());
     try std.testing.expect(!chunk.flags.solid_top);
     try std.testing.expect(chunk.flags.solid_bottom);
     try std.testing.expectEqual(BlockType.stone, chunk.content.blocks.blocks[0][0][0]);
 }
 
 test "column operations do nothing when there is no room" {
-    var world = World.init(std.testing.allocator, .{ .flat = {} });
+    var world = World.init(std.testing.allocator);
     defer world.deinit();
+    try insertGeneratedChunks(&world, .flat, .{ 0, 0 }, 0, 1);
 
     const bottom = [3]u32{ 0, 0, 0 };
-    try std.testing.expectEqual(null, world.dropBlockInColumn(bottom, .dirt));
-    try std.testing.expectEqual(bottom, world.removeTopBlockInColumn(bottom).?);
-    try std.testing.expectEqual(null, world.removeTopBlockInColumn(bottom));
+    try std.testing.expectEqual(null, try world.dropBlockInColumn(bottom, .dirt));
+    try std.testing.expectEqual(bottom, (try world.removeTopBlockInColumn(bottom)).?);
+    try std.testing.expectEqual(null, try world.removeTopBlockInColumn(bottom));
+}
+
+test "column operations fail without changes when they reach a chunk that isn't received" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+    // Only the air at the top of the column.
+    try insertGeneratedChunks(&world, .{ .terrain = .{ .seed = 12345 } }, .{ 0, 0 }, WORLD_SIZE[2] - 1, WORLD_SIZE[2]);
+
+    const top = [3]u32{ 5, 5, WORLD_SIZE[2] * CHUNK_SIZE - 1 };
+    try std.testing.expectError(error.ChunkNotReceived, world.removeTopBlockInColumn(top));
+    try std.testing.expectError(error.ChunkNotReceived, world.dropBlockInColumn(top, .dirt));
+    try std.testing.expectEqual(0, world.unsyncedChunks().len);
+    try std.testing.expect(!world.getChunk(.{ 0, 0, WORLD_SIZE[2] - 1 }).?.isDirty());
+}
+
+test "chunk missing local modifications is rejected" {
+    const generator = world_generator.WorldGenerator{ .terrain = .{ .seed = 12345 } };
+
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+    try insertGeneratedChunks(&world, generator, .{ 0, 0 }, 0, 1);
+
+    _ = (try world.removeTopBlockInColumn(.{ 5, 5, CHUNK_SIZE - 1 })).?;
+    world.markChunksSynced();
+    world.removeChunk(.{ 0, 0, 0 });
+
+    const stale_chunk = world_generator.ColumnGenerator.init(generator, .{ 0, 0 }).generateChunk(std.testing.allocator, 0);
+    defer stale_chunk.content.deinit(std.testing.allocator);
+    try std.testing.expectError(error.StaleChunk, world.insertChunk(.{ 0, 0, 0 }, stale_chunk));
+    try std.testing.expect(!world.hasChunk(.{ 0, 0, 0 }));
 }
