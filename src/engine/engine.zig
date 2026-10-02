@@ -757,25 +757,29 @@ pub const Engine = struct {
                         }
                         const info = chunk.gpu_residence_info.?;
 
-                        const chunk_coords = @Vector(4, i32){
+                        const view_direction = @Vector(4, i32){
                             chunk.chunk_origin[0],
                             chunk.chunk_origin[1],
                             chunk.chunk_origin[2],
                             0,
-                        };
+                        } - scene.camera.chunk;
 
-                        const view_direction = chunk_coords - scene.camera.chunk;
+                        const dx = view_direction[0];
+                        const dy = view_direction[1];
+                        const dz = view_direction[2];
 
                         // if camera is looking at the chunk only from one side of each axis, draw two views covering whole chunk
-                        if (view_direction[0] == 0 or view_direction[1] == 0 or view_direction[2] == 0) {
-                            pass.draw(@intCast(info.faces_count_per_view[0] * 6), 1, 0, (info.chunk_index << 3) + 0);
-                            pass.draw(@intCast(info.faces_count_per_view[7] * 6), 1, 0, (info.chunk_index << 3) + 7);
+                        if (dx == 0 or dy == 0 or dz == 0) {
+                            inline for (.{ 0, 7 }) |view_index| {
+                                pass.draw(@intCast(info.faces_count_per_view[view_index] * 6), 1, 0, (info.chunk_index << 3) + view_index);
+                                // pass.draw(@intCast(info.faces_count_per_view[7] * 6), 1, 0, (info.chunk_index << 3) + 7);
+                            }
                         } else {
                             // or draw only one view covering the sides of the chunk which is visible from the camera
                             const view_index: u3 =
-                                @intCast((if (view_direction[0] > 0) @as(u3, 0) else @as(u3, 4)) +
-                                    (if (view_direction[1] > 0) @as(u3, 0) else @as(u3, 2)) +
-                                    (if (view_direction[2] > 0) @as(u3, 0) else @as(u3, 1)));
+                                @as(u3, @intFromBool(dx < 0)) << 2 |
+                                @as(u3, @intFromBool(dy < 0)) << 1 |
+                                @as(u3, @intFromBool(dz < 0));
 
                             pass.draw(@intCast(info.faces_count_per_view[view_index] * 6), 1, 0, (info.chunk_index << 3) + view_index);
                         }
