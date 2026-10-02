@@ -25,7 +25,6 @@ const world_module = @import("world.zig");
 const World = @import("world.zig").World;
 const encodeChunkPositionArray = @import("world.zig").encodeChunkPositionArray;
 const WorldChunk = @import("world.zig").WorldChunk;
-const ChunksHashMap = @import("world.zig").ChunksHashMap;
 const consts = @import("./consts.zig");
 const world_engine = @import("./world_engine_glue.zig");
 
@@ -202,21 +201,20 @@ const Game = struct {
             return;
         }
 
-        if (game.world.?.chunks.getPtr(world_module.encodeChunkPositionArray(chunk_coords))) |world_chunk| {
-            if (world_chunk.state != .empty and
-                world_chunk.world_chunk_data != null and
-                !game.checkIfChunkCanBeSkipped(chunk_coords))
-            {
-                voxel_grid.appendChunk(.{
-                    .chunk_coords = chunk_coords,
-                    // Can be used for testing:
-                    // .chunk_side_data = ChunkSideData.initWithTestData(game.allocator),
-                    .chunk_side_data = world_engine.extractChunkSideData(game.allocator, world_chunk),
-                });
+        const world_chunk = game.world.?.getChunk(chunk_coords);
+        if (world_chunk.state != .empty and
+            world_chunk.world_chunk_data != null and
+            !game.checkIfChunkCanBeSkipped(chunk_coords))
+        {
+            voxel_grid.appendChunk(.{
+                .chunk_coords = chunk_coords,
+                // Can be used for testing:
+                // .chunk_side_data = ChunkSideData.initWithTestData(game.allocator),
+                .chunk_side_data = world_engine.extractChunkSideData(game.allocator, &world_chunk),
+            });
 
-                if (DEBUG) {
-                    std.debug.print("appended chunk {any}\n", .{chunk_coords});
-                }
+            if (DEBUG) {
+                std.debug.print("appended chunk {any}\n", .{chunk_coords});
             }
         }
 
@@ -234,26 +232,16 @@ const Game = struct {
         }
     }
 
-    fn checkIfChunkCanBeSkipped(game: *const Game, chunk_coords: [3]u30) bool {
-        const surrounding_chunks = getSurroundingChunks(&game.world.?.chunks, chunk_coords);
+    fn checkIfChunkCanBeSkipped(game: *Game, chunk_coords: [3]u30) bool {
+        const surrounding_chunks = getSurroundingChunks(&game.world.?, chunk_coords);
 
-        for (surrounding_chunks, 0..) |surrounding_chunk, side_index| {
+        for (surrounding_chunks, 0..) |surrounding_chunk_opt, side_index| {
+            // out of world bounds, nothing can be seen from there
+            const surrounding_chunk = surrounding_chunk_opt orelse continue;
+
             const side = @as(Side, @enumFromInt(side_index));
-            const opposite_side = side.getOpposite();
-
-            switch (surrounding_chunk) {
-                .chunk => |chunk_opt| {
-                    if (chunk_opt) |chunk| {
-                        if (!chunk.flags.getSideSolidness(opposite_side)) {
-                            return false;
-                        }
-                    } else {
-                        // if there is no chunk, it's probably a border of the world, so we can't skip
-                    }
-                },
-                .invalid => {
-                    // it's okay, meaning we are out of world bounds
-                },
+            if (!surrounding_chunk.flags.getSideSolidness(side.getOpposite())) {
+                return false;
             }
         }
 
@@ -262,12 +250,10 @@ const Game = struct {
 };
 
 fn initWorld(allocator: std.mem.Allocator, game: *Game) void {
-    var world = World.init(allocator);
-    world.generateWorld(12345, .{});
-    game.world = world;
+    game.world = World.init(allocator, .{ .terrain = .{ .seed = 12345 } });
 }
 
-pub fn normalizeChunkCoords(coords_in: [3]i32) ?[3]u32 {
+pub fn normalizeChunkCoords(coords_in: [3]i32) ?[3]u30 {
     var coords = coords_in;
 
     if (coords[0] < 0) {
@@ -291,53 +277,26 @@ pub fn normalizeChunkCoords(coords_in: [3]i32) ?[3]u32 {
     };
 }
 
-const SurroundingChunk = union(enum) {
-    invalid: bool,
-    chunk: ?*const WorldChunk,
-};
-
-pub fn getSurroundingChunks(chunks: *const ChunksHashMap, coords: [3]u30) [6]SurroundingChunk {
+/// Returns neighbors indexed by `Side`, generating them if needed.
+/// `null` means the neighbor is out of world bounds.
+pub fn getSurroundingChunks(world: *World, coords: [3]u30) [6]?WorldChunk {
     const coords_i = [3]i32{ @intCast(coords[0]), @intCast(coords[1]), @intCast(coords[2]) };
 
-    const left_opt = normalizeChunkCoords(.{ coords_i[0] - 1, coords_i[1], coords_i[2] });
-    const right_opt = normalizeChunkCoords(.{ coords_i[0] + 1, coords_i[1], coords_i[2] });
-    const back_opt = normalizeChunkCoords(.{ coords_i[0], coords_i[1] - 1, coords_i[2] });
-    const front_opt = normalizeChunkCoords(.{ coords_i[0], coords_i[1] + 1, coords_i[2] });
-    const bottom_opt = normalizeChunkCoords(.{ coords_i[0], coords_i[1], coords_i[2] - 1 });
-    const top_opt = normalizeChunkCoords(.{ coords_i[0], coords_i[1], coords_i[2] + 1 });
+    const neighbors = [_]struct { Side, [3]i32 }{
+        .{ .left, .{ coords_i[0] - 1, coords_i[1], coords_i[2] } },
+        .{ .right, .{ coords_i[0] + 1, coords_i[1], coords_i[2] } },
+        .{ .back, .{ coords_i[0], coords_i[1] - 1, coords_i[2] } },
+        .{ .front, .{ coords_i[0], coords_i[1] + 1, coords_i[2] } },
+        .{ .bottom, .{ coords_i[0], coords_i[1], coords_i[2] - 1 } },
+        .{ .top, .{ coords_i[0], coords_i[1], coords_i[2] + 1 } },
+    };
 
-    const invalid = SurroundingChunk{ .invalid = true };
-    var resulting_chunks = [6]SurroundingChunk{ invalid, invalid, invalid, invalid, invalid, invalid };
-
-    if (left_opt) |left| {
-        resulting_chunks[@intFromEnum(Side.left)] = .{
-            .chunk = chunks.getPtr(encodeChunkPositionArray(left)),
-        };
-    }
-    if (right_opt) |right| {
-        resulting_chunks[@intFromEnum(Side.right)] = .{
-            .chunk = chunks.getPtr(encodeChunkPositionArray(right)),
-        };
-    }
-    if (back_opt) |back| {
-        resulting_chunks[@intFromEnum(Side.back)] = .{
-            .chunk = chunks.getPtr(encodeChunkPositionArray(back)),
-        };
-    }
-    if (front_opt) |front| {
-        resulting_chunks[@intFromEnum(Side.front)] = .{
-            .chunk = chunks.getPtr(encodeChunkPositionArray(front)),
-        };
-    }
-    if (bottom_opt) |bottom| {
-        resulting_chunks[@intFromEnum(Side.bottom)] = .{
-            .chunk = chunks.getPtr(encodeChunkPositionArray(bottom)),
-        };
-    }
-    if (top_opt) |top| {
-        resulting_chunks[@intFromEnum(Side.top)] = .{
-            .chunk = chunks.getPtr(encodeChunkPositionArray(top)),
-        };
+    var resulting_chunks: [6]?WorldChunk = @splat(null);
+    for (neighbors) |neighbor| {
+        const side, const neighbor_coords = neighbor;
+        if (normalizeChunkCoords(neighbor_coords)) |normalized_coords| {
+            resulting_chunks[@intFromEnum(side)] = world.getChunk(normalized_coords);
+        }
     }
 
     return resulting_chunks;
@@ -578,4 +537,8 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
     _ = engine;
     _ = pass;
     _ = game_opaque;
+}
+
+test {
+    _ = world_module;
 }
