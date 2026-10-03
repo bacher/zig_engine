@@ -14,6 +14,8 @@ The world-data service owns block contents and revisions. Each worker uses its o
 
 Loading a chunk subscribes that client to snapshots of subsequent changes. Eviction unsubscribes it; subscription tokens prevent queued responses from restoring evicted chunks. Stop client workers before destroying the service, which drains submitted edits and owns endpoint lifetimes. Modified chunks are retained in memory; disk persistence is not implemented.
 
+Local edits and received snapshots mark affected loaded chunks dirty. After processing updates and camera loading, each dirty chunk's mesh is rebuilt once from its latest contents and uploaded before rendering. Unloading a chunk cancels its pending rebuild.
+
 A simulation worker places a dirt block at the surface midpoint of the central chunk column, removes it after two seconds, and places it again two seconds later. It communicates only with the world-data service, so the main thread receives these changes through the same subscription mechanism.
 
 Run `zig build test` for the protocol, cache reconciliation, and simulation tests.
