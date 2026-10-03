@@ -203,7 +203,7 @@ const Game = struct {
         }
 
         const world_chunk = game.world.?.getChunk(chunk_coords);
-        if (world_chunk.content == .blocks and !game.checkIfChunkCanBeSkipped(chunk_coords)) {
+        if (world_chunk.content == .blocks) {
             voxel_grid.appendChunk(.{
                 .chunk_coords = chunk_coords,
                 // Can be used for testing:
@@ -230,21 +230,21 @@ const Game = struct {
         }
     }
 
-    fn checkIfChunkCanBeSkipped(game: *Game, chunk_coords: [3]u30) bool {
-        const surrounding_chunks = getSurroundingChunks(&game.world.?, chunk_coords);
-
-        for (surrounding_chunks, 0..) |surrounding_chunk_opt, side_index| {
-            // out of world bounds, nothing can be seen from there
-            const surrounding_chunk = surrounding_chunk_opt orelse continue;
-
-            const side = @as(Side, @enumFromInt(side_index));
-            if (!surrounding_chunk.flags.getSideSolidness(side.getOpposite())) {
-                return false;
-            }
-        }
-
-        return true;
-    }
+    // TODO: will be refactored later, for now just draw all chunks
+    // fn checkIfChunkCanBeSkipped(game: *Game, chunk_coords: [3]u30) bool {
+    //     const surrounding_chunks = getSurroundingChunks(&game.world.?, chunk_coords);
+    //
+    //     for (surrounding_chunks, 0..) |surrounding_chunk_opt, side_index| {
+    //         // out of world bounds, nothing can be seen from there
+    //         const surrounding_chunk = surrounding_chunk_opt orelse continue;
+    //
+    //         const side = @as(Side, @enumFromInt(side_index));
+    //         if (!surrounding_chunk.flags.getSideSolidness(side.getOpposite())) {
+    //             return false;
+    //         }
+    //     }
+    //     return true;
+    // }
 
     fn editBlockUnderCamera(game: *Game, action: BlockAction) void {
         const world = if (game.world) |*world| world else return;
@@ -362,7 +362,7 @@ pub fn normalizeChunkCoords(coords_in: [3]i32) ?[3]u30 {
 
 /// Returns neighbors indexed by `Side`, generating them if needed.
 /// `null` means the neighbor is out of world bounds.
-pub fn getSurroundingChunks(world: *World, coords: [3]u30) [6]?WorldChunk {
+fn getSurroundingChunks(world: *World, coords: [3]u30) [6]?WorldChunk {
     const coords_i = [3]i32{ @intCast(coords[0]), @intCast(coords[1]), @intCast(coords[2]) };
 
     const neighbors = [_]struct { Side, [3]i32 }{

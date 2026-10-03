@@ -4,11 +4,17 @@ const Side = @import("engine").voxel_chunk.Side;
 const CHUNK_SIZE = 32;
 
 pub const ChunkFlags = packed struct {
+    /// means that the chunk is solid from the left side
     solid_left: bool = false,
+    /// means that the chunk is solid from the right side
     solid_right: bool = false,
+    /// means that the chunk is solid from the front side
     solid_front: bool = false,
+    /// means that the chunk is solid from the back side
     solid_back: bool = false,
+    /// means that the chunk is solid from the bottom side
     solid_bottom: bool = false,
+    /// means that the chunk is solid from the top side
     solid_top: bool = false,
 
     pub fn getSideSolidness(self: *const ChunkFlags, side: Side) bool {
