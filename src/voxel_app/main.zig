@@ -31,6 +31,7 @@ const world_generator = @import("./world_generator.zig");
 const world_data_service = @import("./world_data_service.zig");
 const WorldDataService = world_data_service.WorldDataService;
 const ChunkResponse = world_data_service.ChunkResponse;
+const SimulationWorker = @import("./simulation_worker.zig").SimulationWorker;
 const consts = @import("./consts.zig");
 const world_engine = @import("./world_engine_glue.zig");
 
@@ -47,8 +48,10 @@ const Game = struct {
     engine: *Engine,
     world: ?World = null,
     world_data: ?*WorldDataService = null,
-    /// Chunks requested from the world-data thread, mapped to the id of the awaited request.
-    requested_chunks: std.AutoHashMapUnmanaged(u32, u64) = .empty,
+    world_client: ?*world_data_service.Client = null,
+    simulation: ?*SimulationWorker = null,
+    /// Active subscriptions, including loads still in flight. Kept until cache eviction.
+    chunk_subscriptions: std.AutoHashMapUnmanaged(u32, u64) = .empty,
     chunk_responses: std.ArrayList(ChunkResponse) = .empty,
     loaded_chunk_ids: std.AutoHashMapUnmanaged(u32, void) = .empty,
     last_camera_chunk_coords: ?@Vector(4, i32) = null,
@@ -65,12 +68,14 @@ const Game = struct {
     }
 
     pub fn deinit(game: *Game) void {
+        if (game.simulation) |simulation| simulation.destroy();
         if (game.world_data) |world_data| {
-            // Hand the latest modifications over, so they can be persisted.
-            game.flushChunkUpdates();
+            // Submit remaining local commands before the service drains its queue.
+            game.flushBlockOperations();
             world_data.destroy();
         }
-        game.requested_chunks.deinit(game.allocator);
+        game.chunk_subscriptions.deinit(game.allocator);
+        for (game.chunk_responses.items) |response| response.chunk.content.deinit(game.allocator);
         game.chunk_responses.deinit(game.allocator);
         game.loaded_chunk_ids.deinit(game.allocator);
 
@@ -88,71 +93,63 @@ const Game = struct {
             return;
         }
 
-        game.flushChunkUpdates();
+        game.flushBlockOperations();
         const has_new_chunks = game.receiveChunks();
         game.updateChunksAroundCamera(has_new_chunks);
     }
 
-    /// Sends the chunks modified since the previous flush to the world-data thread.
-    fn flushChunkUpdates(game: *Game) void {
+    /// Submit commands in optimistic edit order; no chunk data crosses in this direction.
+    fn flushBlockOperations(game: *Game) void {
         const world = &game.world.?;
-        const world_data = game.world_data.?;
-
-        for (world.unsyncedChunks()) |position| {
-            const chunk = world.chunks.get(position).?;
-            world_data.submitChunkUpdate(position, chunk.revision, chunk.content);
+        for (world.pending_operations.items) |*pending| {
+            if (pending.request_id == null) {
+                pending.request_id = game.world_client.?.submitOperation(pending.operation);
+            }
         }
-        world.markChunksSynced();
     }
 
-    /// Moves the chunks received from the world-data thread into the world.
-    /// Returns true if any chunk was added.
+    /// Retire completed commands even when evicted; reconcile only active subscriptions.
     fn receiveChunks(game: *Game) bool {
         const world = &game.world.?;
         const responses = &game.chunk_responses;
-
-        game.world_data.?.takeResponses(responses);
+        game.world_client.?.takeResponses(responses);
         defer responses.clearRetainingCapacity();
 
         var has_new_chunks = false;
         for (responses.items) |response| {
-            const chunk_id = encodeChunkPositionArray(response.coords);
-
-            // The chunk was evicted (and maybe requested again) while the request was in flight.
-            if (game.requested_chunks.get(chunk_id) != response.request_id) {
-                response.chunk.content.deinit(game.allocator);
-                continue;
+            if (response.operation) |result| {
+                if (result.status != .success) {
+                    std.debug.print("block operation {d} failed: {s}\n", .{ result.request_id, @tagName(result.status) });
+                }
             }
-            _ = game.requested_chunks.remove(chunk_id);
-
-            world.insertChunk(response.coords, response.chunk) catch |err| switch (err) {
-                // Requests are processed in order, so it means the protocol is broken somewhere.
-                // Asking again is still better than losing modifications.
-                error.StaleChunk => {
-                    std.debug.print("received stale chunk {any}, requesting it again\n", .{response.coords});
-                    response.chunk.content.deinit(game.allocator);
-                    game.requestChunkRange(.{ response.coords[0], response.coords[1] }, response.coords[2], response.coords[2] + 1);
-                    continue;
-                },
-            };
+            if (!applyChunkResponse(world, &game.chunk_subscriptions, response)) continue;
+            const chunk_id = encodeChunkPositionArray(response.coords);
+            // Invalidate GPU data for authoritative changes and optimistic rollbacks alike.
+            game.removeChunkByIdIfNeeded(chunk_id);
+            for (0..3) |axis| {
+                for ([_]i32{ -1, 1 }) |offset| {
+                    var neighbor = [3]i32{ response.coords[0], response.coords[1], response.coords[2] };
+                    neighbor[axis] += offset;
+                    if (normalizeChunkCoords(neighbor)) |coords| game.removeChunkIfNeeded(coords);
+                }
+            }
             has_new_chunks = true;
         }
-
         return has_new_chunks;
     }
 
     fn requestChunkRange(game: *Game, column: [2]u30, z_start: u30, z_end: u30) void {
-        const request_id = game.world_data.?.requestChunks(column, z_start, z_end);
+        const request_id = game.world_client.?.requestChunks(column, z_start, z_end);
 
         var z = z_start;
         while (z < z_end) : (z += 1) {
-            game.requested_chunks.put(game.allocator, encodeChunkPosition(column[0], column[1], z), request_id) catch @panic("OOM");
+            game.chunk_subscriptions.put(game.allocator, encodeChunkPosition(column[0], column[1], z), request_id) catch @panic("OOM");
         }
     }
 
     fn isChunkMissing(game: *const Game, coords: [3]u30) bool {
         return !game.world.?.hasChunk(coords) and
-            !game.requested_chunks.contains(encodeChunkPositionArray(coords));
+            !game.chunk_subscriptions.contains(encodeChunkPositionArray(coords));
     }
 
     /// Requests the missing chunks of the camera box, the closest columns first. Consecutive
@@ -203,32 +200,24 @@ const Game = struct {
     fn evictFarChunks(game: *Game, camera_chunk_coords: @Vector(4, i32)) void {
         const world = &game.world.?;
 
-        // Modifications have to reach the world-data thread before the chunks are freed.
-        game.flushChunkUpdates();
+        // Preserve command ordering relative to eviction and subsequent re-subscription.
+        game.flushBlockOperations();
 
         var far_chunk_ids: std.ArrayList(u32) = .empty;
         defer far_chunk_ids.deinit(game.allocator);
 
-        var requested_iterator = game.requested_chunks.keyIterator();
-        while (requested_iterator.next()) |chunk_id| {
+        var subscription_iterator = game.chunk_subscriptions.keyIterator();
+        while (subscription_iterator.next()) |chunk_id| {
             if (getChunkDistance(chunk_id.*, camera_chunk_coords) > CHUNK_KEEP_RADIUS) {
                 far_chunk_ids.append(game.allocator, chunk_id.*) catch @panic("OOM");
             }
         }
         for (far_chunk_ids.items) |chunk_id| {
-            _ = game.requested_chunks.remove(chunk_id);
-        }
-
-        far_chunk_ids.clearRetainingCapacity();
-        var received_iterator = world.chunks.keyIterator();
-        while (received_iterator.next()) |chunk_id| {
-            if (getChunkDistance(chunk_id.*, camera_chunk_coords) > CHUNK_KEEP_RADIUS) {
-                far_chunk_ids.append(game.allocator, chunk_id.*) catch @panic("OOM");
-            }
-        }
-        for (far_chunk_ids.items) |chunk_id| {
+            const subscription = game.chunk_subscriptions.fetchRemove(chunk_id).?;
+            game.world_client.?.evictChunk(chunk_id, subscription.value);
             game.removeChunkByIdIfNeeded(chunk_id);
-            world.removeChunk(world_module.decodeChunkPosition(chunk_id));
+            const coords = world_module.decodeChunkPosition(chunk_id);
+            if (world.hasChunk(coords)) world.removeChunk(coords);
         }
     }
 
@@ -305,8 +294,9 @@ const Game = struct {
                     while (z < box.end[2]) {
                         var y = box.start[1];
                         while (y < box.end[1]) {
-                            const pos = world_module.normalizeChunkPosition(fixed_x, y, z);
-                            game.removeChunkIfNeeded(pos);
+                            if (normalizeChunkCoords(.{ fixed_x, y, z })) |pos| {
+                                game.removeChunkIfNeeded(pos);
+                            }
                             y += 1;
                         }
                         z += 1;
@@ -320,8 +310,9 @@ const Game = struct {
                     while (z < box.end[2]) {
                         var x = box.start[0];
                         while (x < box.end[0]) {
-                            const pos = world_module.normalizeChunkPosition(x, fixed_y, z);
-                            game.removeChunkIfNeeded(pos);
+                            if (normalizeChunkCoords(.{ x, fixed_y, z })) |pos| {
+                                game.removeChunkIfNeeded(pos);
+                            }
                             x += 1;
                         }
                         z += 1;
@@ -335,8 +326,9 @@ const Game = struct {
                     while (y < box.end[1]) {
                         var x = box.start[0];
                         while (x < box.end[0]) {
-                            const pos = world_module.normalizeChunkPosition(x, y, fixed_z);
-                            game.removeChunkIfNeeded(pos);
+                            if (normalizeChunkCoords(.{ x, y, fixed_z })) |pos| {
+                                game.removeChunkIfNeeded(pos);
+                            }
                             x += 1;
                         }
                         y += 1;
@@ -489,6 +481,22 @@ const Game = struct {
     }
 };
 
+/// Consumes the response, including stale and evicted snapshots. Acknowledgements are
+/// independent of subscription lifetime so pending edits can always be retired.
+fn applyChunkResponse(world: *World, subscriptions: *const std.AutoHashMapUnmanaged(u32, u64), response: ChunkResponse) bool {
+    if (response.operation) |result| world.acknowledgeOperation(result.request_id);
+    const token = subscriptions.get(encodeChunkPositionArray(response.coords));
+    if (token == null or token != response.subscription_id) {
+        response.chunk.content.deinit(world.allocator);
+        return false;
+    }
+    world.insertChunk(response.coords, response.chunk) catch {
+        response.chunk.content.deinit(world.allocator);
+        return false;
+    };
+    return true;
+}
+
 const BlockAction = enum {
     remove,
     add_dirt,
@@ -519,6 +527,8 @@ fn getColumnTopUnderPosition(position: [3]f32) ?[3]u32 {
 fn initWorld(game: *Game) !void {
     game.world_data = try WorldDataService.create(game.engine.io, game.allocator, .{ .terrain = .{ .seed = 12345 } });
     game.world = World.init(game.allocator);
+    game.world_client = try game.world_data.?.createClient();
+    game.simulation = try SimulationWorker.create(game.world_data.?);
 }
 
 /// Chebyshev distance between the chunk and the camera chunk, in chunks. The x axis wraps.
@@ -851,6 +861,7 @@ test {
     _ = world_module;
     _ = world_generator;
     _ = world_data_service;
+    _ = SimulationWorker;
 }
 
 test "chunk distance is the largest axis distance and wraps around x" {
@@ -956,4 +967,59 @@ test "camera outside of the world height has no chunks to request" {
 
     try expectMissingChunkRanges(&.{}, 0, -3, &all_missing);
     try expectMissingChunkRanges(&.{}, consts.WORLD_SIZE[2] + 2, consts.WORLD_SIZE[2] - 1, &all_missing);
+}
+
+test "evicted edit replies retire pending work without restoring chunks" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+    var subscriptions: std.AutoHashMapUnmanaged(u32, u64) = .empty;
+    defer subscriptions.deinit(std.testing.allocator);
+    const coords = [3]u30{ 0, 0, 0 };
+    try world.insertChunk(coords, WorldChunk.initEmpty());
+    world.setBlock(.{ 0, 0, 0 }, .dirt);
+    world.pending_operations.items[0].request_id = 7;
+    world.removeChunk(coords);
+    try std.testing.expect(!applyChunkResponse(&world, &subscriptions, .{
+        .coords = coords,
+        .subscription_id = 1,
+        .operation = .{ .request_id = 7, .status = .already_exists },
+        .chunk = WorldChunk.initEmpty(),
+    }));
+    try std.testing.expect(!world.hasChunk(coords));
+    try std.testing.expectEqual(0, world.pending_operations.items.len);
+    // A response without a subscription must never be accepted just because both are null.
+    try std.testing.expect(!applyChunkResponse(&world, &subscriptions, .{
+        .coords = coords,
+        .subscription_id = null,
+        .chunk = WorldChunk.initEmpty(),
+    }));
+}
+
+test "new subscription rejects queued snapshots from an evicted generation" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+    var subscriptions: std.AutoHashMapUnmanaged(u32, u64) = .empty;
+    defer subscriptions.deinit(std.testing.allocator);
+    const coords = [3]u30{ 0, 0, 0 };
+    try subscriptions.put(std.testing.allocator, encodeChunkPositionArray(coords), 2);
+    try std.testing.expect(!applyChunkResponse(&world, &subscriptions, .{
+        .coords = coords,
+        .subscription_id = 1,
+        .chunk = WorldChunk.initEmpty(),
+    }));
+    try std.testing.expect(applyChunkResponse(&world, &subscriptions, .{
+        .coords = coords,
+        .subscription_id = 2,
+        .chunk = WorldChunk.initEmpty(),
+    }));
+    var update = WorldChunk.initEmpty();
+    _ = update.apply(std.testing.allocator, .{ 1, 2, 3 }, .{ .put = .dirt });
+    update.revision = 1;
+    try std.testing.expect(applyChunkResponse(&world, &subscriptions, .{
+        .coords = coords,
+        .subscription_id = 2,
+        .chunk = update,
+    }));
+    try std.testing.expect(try world.isBlockSolid(.{ 1, 2, 3 }));
+    try std.testing.expectEqual(2, subscriptions.get(encodeChunkPositionArray(coords)));
 }

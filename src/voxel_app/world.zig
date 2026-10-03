@@ -101,8 +101,8 @@ pub const WorldChunk = struct {
     flags: ChunkFlags,
     /// Number of blocks of the content that aren't `.none`.
     solid_block_count: u16,
-    /// Number of modifications made by the player. 0 means the chunk is exactly as generated.
-    /// New revisions are produced only by the main thread, which owns block modifications.
+    /// Authoritative revision, advanced only by the world-data service after a successful edit.
+    /// Optimistic edits never change it. 0 means no edits have been committed yet.
     revision: u32 = 0,
 
     pub fn initEmpty() WorldChunk {
@@ -122,7 +122,58 @@ pub const WorldChunk = struct {
         };
     }
 
-    /// The chunk was modified by the player and can't be re-generated from the generator anymore.
+    pub fn clone(self: WorldChunk, allocator: std.mem.Allocator) WorldChunk {
+        var copy = self;
+        if (self.content == .blocks) {
+            const data = allocator.create(WorldChunkData) catch @panic("OOM");
+            data.* = self.content.blocks.*;
+            copy.content = .{ .blocks = data };
+        }
+        return copy;
+    }
+
+    pub fn ensureData(self: *WorldChunk, allocator: std.mem.Allocator) *WorldChunkData {
+        if (self.content == .empty) {
+            const data = allocator.create(WorldChunkData) catch @panic("OOM");
+            data.* = WorldChunkData.initEmpty();
+            self.content = .{ .blocks = data };
+        }
+        return self.content.blocks;
+    }
+
+    /// Applies the same preconditions to authoritative commands and optimistic replay.
+    /// Revision assignment belongs to the service, not this data manipulation helper.
+    pub fn apply(self: *WorldChunk, allocator: std.mem.Allocator, local: [3]u5, action: BlockAction) OperationStatus {
+        const existing = self.content.getBlock(local);
+        const block_type: BlockType = switch (action) {
+            .put => |block_type| blk: {
+                std.debug.assert(block_type != .none);
+                if (existing != .none) return .already_exists;
+                break :blk block_type;
+            },
+            .remove => blk: {
+                if (existing == .none) return .already_removed;
+                break :blk .none;
+            },
+        };
+        const data = self.ensureData(allocator);
+        data.blocks[local[2]][local[1]][local[0]] = block_type;
+        if (block_type == .none) {
+            self.solid_block_count -= 1;
+        } else {
+            self.solid_block_count += 1;
+        }
+        if (self.solid_block_count == 0) {
+            self.content.deinit(allocator);
+            self.content = .empty;
+            self.flags = .{};
+        } else {
+            self.flags = data.getMetaFlags();
+        }
+        return .success;
+    }
+
+    /// The service has committed modifications that must be preserved.
     pub fn isDirty(self: WorldChunk) bool {
         return self.revision > 0;
     }
@@ -148,126 +199,113 @@ pub const ChunksHashMap = std.AutoHashMapUnmanaged(ChunkPosition, WorldChunk);
 
 pub const ChunkNotReceivedError = error{ChunkNotReceived};
 
-/// Main thread copy of the chunks received from the world-data thread. It's the source of truth
-/// for block modifications: they are applied here immediately and then sent to the world-data
-/// thread as chunk snapshots (see `unsyncedChunks`).
+pub const BlockAction = union(enum) {
+    put: BlockType,
+    remove,
+};
+
+pub const OperationStatus = enum { success, already_exists, already_removed };
+
+/// Commands contain global block coordinates and intent, never chunk snapshots.
+pub const BlockOperation = struct {
+    block: [3]u32,
+    action: BlockAction,
+
+    pub fn validate(self: BlockOperation) void {
+        for (0..3) |axis| std.debug.assert(self.block[axis] < WORLD_SIZE[axis] * CHUNK_SIZE);
+        if (self.action == .put) std.debug.assert(self.action.put != .none);
+    }
+};
+
+pub const PendingOperation = struct {
+    operation: BlockOperation,
+    /// Assigned when the command is submitted to the service.
+    request_id: ?u64 = null,
+};
+
+/// Main-thread cache: authoritative snapshots with unacknowledged local operations replayed
+/// on top. Receiving a failed operation's snapshot rolls it back without losing later edits.
 pub const World = struct {
     allocator: std.mem.Allocator,
-    /// Contains only the received chunks.
-    chunks: ChunksHashMap,
-    /// Chunks modified since the last `markChunksSynced` call.
-    unsynced_chunks: std.AutoArrayHashMapUnmanaged(ChunkPosition, void),
-    /// The latest revision produced for every chunk ever modified, including the chunks removed
-    /// since. A received chunk with a lower revision is stale.
-    latest_revisions: std.AutoHashMapUnmanaged(ChunkPosition, u32),
+    chunks: ChunksHashMap = .empty,
+    pending_operations: std.ArrayList(PendingOperation) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) World {
-        return World{
-            .allocator = allocator,
-            .chunks = .empty,
-            .unsynced_chunks = .empty,
-            .latest_revisions = .empty,
-        };
+        return .{ .allocator = allocator };
     }
 
     pub fn deinit(self: *World) void {
         var iterator = self.chunks.valueIterator();
-        while (iterator.next()) |chunk| {
-            chunk.content.deinit(self.allocator);
-        }
+        while (iterator.next()) |chunk| chunk.content.deinit(self.allocator);
         self.chunks.deinit(self.allocator);
-        self.unsynced_chunks.deinit(self.allocator);
-        self.latest_revisions.deinit(self.allocator);
+        self.pending_operations.deinit(self.allocator);
     }
 
     pub fn hasChunk(self: *const World, coords: [3]u30) bool {
         return self.chunks.contains(encodeChunkPositionArray(coords));
     }
 
-    /// Takes ownership of the chunk data. If the chunk misses modifications already made on this
-    /// thread, it's rejected and stays owned by the caller.
+    /// Takes ownership on success. Subscription tokens must be checked by the caller first.
+    /// Replaces the cache with authoritative data, then replays pending commands in order.
     pub fn insertChunk(self: *World, coords: [3]u30, chunk: WorldChunk) error{StaleChunk}!void {
         const position = encodeChunkPositionArray(coords);
-        std.debug.assert(!self.chunks.contains(position));
-
-        if (self.latest_revisions.get(position)) |latest_revision| {
-            if (chunk.revision < latest_revision) {
-                return error.StaleChunk;
+        if (self.chunks.getPtr(position)) |previous| {
+            if (chunk.revision < previous.revision) return error.StaleChunk;
+            previous.content.deinit(self.allocator);
+        }
+        var updated = chunk;
+        for (self.pending_operations.items) |pending| {
+            const pending_coords, const local = splitBlockCoords(pending.operation.block);
+            if (encodeChunkPositionArray(pending_coords) == position) {
+                _ = updated.apply(self.allocator, local, pending.operation.action);
             }
         }
-
-        self.chunks.put(self.allocator, position, chunk) catch @panic("OOM");
+        self.chunks.put(self.allocator, position, updated) catch @panic("OOM");
     }
 
-    /// Removes the chunk and frees its data. Its modifications must be synced first, otherwise
-    /// they would be lost.
+    /// Retire both successful and failed commands before incorporating their snapshot.
+    pub fn acknowledgeOperation(self: *World, request_id: u64) void {
+        for (self.pending_operations.items, 0..) |pending, i| {
+            if (pending.request_id == request_id) {
+                _ = self.pending_operations.orderedRemove(i);
+                return;
+            }
+        }
+    }
+
+    /// Submitted operations survive eviction until acknowledged. Their results must never
+    /// resurrect an evicted chunk; the subscription token decides whether to accept the data.
     pub fn removeChunk(self: *World, coords: [3]u30) void {
-        const position = encodeChunkPositionArray(coords);
-        std.debug.assert(!self.unsynced_chunks.contains(position));
-        self.chunks.fetchRemove(position).?.value.content.deinit(self.allocator);
+        self.chunks.fetchRemove(encodeChunkPositionArray(coords)).?.value.content.deinit(self.allocator);
     }
 
-    /// Returns the chunk, or null if it isn't received yet.
-    /// Returned by value: inserting chunks may reallocate `chunks` and invalidate pointers into it.
     pub fn getChunk(self: *const World, coords: [3]u30) ?WorldChunk {
-        std.debug.assert(coords[0] < WORLD_SIZE[0]);
-        std.debug.assert(coords[1] < WORLD_SIZE[1]);
-        std.debug.assert(coords[2] < WORLD_SIZE[2]);
-
+        for (0..3) |axis| std.debug.assert(coords[axis] < WORLD_SIZE[axis]);
         return self.chunks.get(encodeChunkPositionArray(coords));
     }
 
-    /// Makes sure the chunk stores its blocks and returns them. An empty chunk gets its blocks
-    /// filled with `.none`. The chunk must be received.
     pub fn ensureChunkData(self: *World, coords: [3]u30) *WorldChunkData {
-        const chunk = self.chunks.getPtr(encodeChunkPositionArray(coords)).?;
-
-        switch (chunk.content) {
-            .blocks => |world_chunk_data| return world_chunk_data,
-            .empty => {
-                const world_chunk_data = self.allocator.create(WorldChunkData) catch @panic("OOM");
-                world_chunk_data.* = WorldChunkData.initEmpty();
-                chunk.content = .{ .blocks = world_chunk_data };
-                return world_chunk_data;
-            },
-        }
+        return self.chunks.getPtr(encodeChunkPositionArray(coords)).?.ensureData(self.allocator);
     }
 
     pub fn isBlockSolid(self: *const World, block: [3]u32) ChunkNotReceivedError!bool {
-        const chunk_coords, const local = splitBlockCoords(block);
-        const chunk = self.getChunk(chunk_coords) orelse return error.ChunkNotReceived;
+        const coords, const local = splitBlockCoords(block);
+        const chunk = self.getChunk(coords) orelse return error.ChunkNotReceived;
         return chunk.content.getBlock(local) != .none;
     }
 
-    /// Sets the block and bumps the revision of its chunk. The chunk becomes `.empty` once it
-    /// has no solid blocks left. The chunk must be received.
+    /// Apply immediately and queue intent for the next flush. A locally conflicting edit is
+    /// a no-op; the service independently checks every command that does get submitted.
     pub fn setBlock(self: *World, block: [3]u32, block_type: BlockType) void {
-        const chunk_coords, const local = splitBlockCoords(block);
-        const world_chunk_data = self.ensureChunkData(chunk_coords);
-        const target = &world_chunk_data.blocks[local[2]][local[1]][local[0]];
-        const was_solid = target.* != .none;
-        target.* = block_type;
-
-        const position = encodeChunkPositionArray(chunk_coords);
-        const chunk = self.chunks.getPtr(position).?;
-        if (was_solid) {
-            chunk.solid_block_count -= 1;
-        }
-        if (block_type != .none) {
-            chunk.solid_block_count += 1;
-        }
-
-        if (chunk.solid_block_count == 0) {
-            chunk.content.deinit(self.allocator);
-            chunk.content = .empty;
-            chunk.flags = .{};
-        } else {
-            chunk.flags = WorldChunkData.getMetaFlags(world_chunk_data);
-        }
-        chunk.revision += 1;
-
-        self.latest_revisions.put(self.allocator, position, chunk.revision) catch @panic("OOM");
-        self.unsynced_chunks.put(self.allocator, position, {}) catch @panic("OOM");
+        const operation = BlockOperation{
+            .block = block,
+            .action = if (block_type == .none) .remove else .{ .put = block_type },
+        };
+        operation.validate();
+        const coords, const local = splitBlockCoords(block);
+        const chunk = self.chunks.getPtr(encodeChunkPositionArray(coords)).?;
+        if (chunk.apply(self.allocator, local, operation.action) != .success) return;
+        self.pending_operations.append(self.allocator, .{ .operation = operation }) catch @panic("OOM");
     }
 
     /// Removes the topmost solid block at or below `top`.
@@ -302,15 +340,6 @@ pub const World = struct {
 
         self.setBlock(block, block_type);
         return block;
-    }
-
-    /// Chunks modified since the last `markChunksSynced` call.
-    pub fn unsyncedChunks(self: *const World) []const ChunkPosition {
-        return self.unsynced_chunks.keys();
-    }
-
-    pub fn markChunksSynced(self: *World) void {
-        self.unsynced_chunks.clearRetainingCapacity();
     }
 };
 
@@ -355,13 +384,12 @@ test "removing and dropping a block in a column are inverse operations" {
     try std.testing.expect(try world.isBlockSolid(.{ removed[0], removed[1], removed[2] - 1 }));
 
     const chunk_coords, _ = splitBlockCoords(removed);
-    try std.testing.expect(world.getChunk(chunk_coords).?.isDirty());
+    try std.testing.expect(!world.getChunk(chunk_coords).?.isDirty());
 
     const placed = (try world.dropBlockInColumn(top, .dirt)).?;
     try std.testing.expectEqual(removed, placed);
     try std.testing.expect(try world.isBlockSolid(placed));
-    try std.testing.expectEqual(2, world.getChunk(chunk_coords).?.revision);
-    try std.testing.expectEqualSlices(ChunkPosition, &.{encodeChunkPositionArray(chunk_coords)}, world.unsyncedChunks());
+    try std.testing.expectEqual(0, world.getChunk(chunk_coords).?.revision);
 }
 
 test "editing a generated stone chunk keeps the rest of its blocks" {
@@ -373,7 +401,7 @@ test "editing a generated stone chunk keeps the rest of its blocks" {
     try std.testing.expectEqual([3]u32{ 5, 5, CHUNK_SIZE - 1 }, removed);
 
     const chunk = world.getChunk(.{ 0, 0, 0 }).?;
-    try std.testing.expect(chunk.isDirty());
+    try std.testing.expect(!chunk.isDirty());
     try std.testing.expect(!chunk.flags.solid_top);
     try std.testing.expect(chunk.flags.solid_bottom);
     try std.testing.expectEqual(BlockType.stone, chunk.content.blocks.blocks[0][0][0]);
@@ -399,25 +427,8 @@ test "column operations fail without changes when they reach a chunk that isn't 
     const top = [3]u32{ 5, 5, WORLD_SIZE[2] * CHUNK_SIZE - 1 };
     try std.testing.expectError(error.ChunkNotReceived, world.removeTopBlockInColumn(top));
     try std.testing.expectError(error.ChunkNotReceived, world.dropBlockInColumn(top, .dirt));
-    try std.testing.expectEqual(0, world.unsyncedChunks().len);
+    try std.testing.expectEqual(0, world.pending_operations.items.len);
     try std.testing.expect(!world.getChunk(.{ 0, 0, WORLD_SIZE[2] - 1 }).?.isDirty());
-}
-
-test "chunk missing local modifications is rejected" {
-    const generator = world_generator.WorldGenerator{ .terrain = .{ .seed = 12345 } };
-
-    var world = World.init(std.testing.allocator);
-    defer world.deinit();
-    try insertGeneratedChunks(&world, generator, .{ 0, 0 }, 0, 1);
-
-    _ = (try world.removeTopBlockInColumn(.{ 5, 5, CHUNK_SIZE - 1 })).?;
-    world.markChunksSynced();
-    world.removeChunk(.{ 0, 0, 0 });
-
-    const stale_chunk = world_generator.ColumnGenerator.init(generator, .{ 0, 0 }).generateChunk(std.testing.allocator, 0);
-    defer stale_chunk.content.deinit(std.testing.allocator);
-    try std.testing.expectError(error.StaleChunk, world.insertChunk(.{ 0, 0, 0 }, stale_chunk));
-    try std.testing.expect(!world.hasChunk(.{ 0, 0, 0 }));
 }
 
 fn createSolidChunk(revision: u32) WorldChunk {
@@ -479,62 +490,9 @@ test "materializing an empty chunk fills it with air and isn't a modification" {
     try std.testing.expectEqual(world_chunk_data, chunk.content.blocks);
     try std.testing.expectEqual(WorldChunk.initEmpty().flags, chunk.flags);
     try std.testing.expect(!chunk.isDirty());
-    try std.testing.expectEqual(0, world.unsyncedChunks().len);
-    try std.testing.expectEqual(0, world.latest_revisions.count());
+    try std.testing.expectEqual(0, world.pending_operations.items.len);
 
     world.removeChunk(coords);
-}
-
-test "received chunk is accepted if it has the latest local revision or a newer one" {
-    var world = World.init(std.testing.allocator);
-    defer world.deinit();
-
-    const coords = [3]u30{ 0, 0, 0 };
-    try world.insertChunk(coords, createSolidChunk(0));
-    world.setBlock(.{ 0, 0, 0 }, .none);
-    world.setBlock(.{ 1, 0, 0 }, .none);
-    world.markChunksSynced();
-    world.removeChunk(coords);
-
-    const older = createSolidChunk(1);
-    defer older.content.deinit(std.testing.allocator);
-    try std.testing.expectError(error.StaleChunk, world.insertChunk(coords, older));
-    try std.testing.expect(!world.hasChunk(coords));
-
-    try world.insertChunk(coords, createSolidChunk(2));
-    try std.testing.expectEqual(2, world.getChunk(coords).?.revision);
-    world.removeChunk(coords);
-
-    try world.insertChunk(coords, createSolidChunk(3));
-    world.setBlock(.{ 0, 0, 0 }, .none);
-    try std.testing.expectEqual(4, world.getChunk(coords).?.revision);
-    try std.testing.expectEqual(4, world.latest_revisions.get(encodeChunkPositionArray(coords)));
-}
-
-test "unsynced chunks list every modified chunk once until they are synced" {
-    var world = World.init(std.testing.allocator);
-    defer world.deinit();
-
-    try world.insertChunk(.{ 0, 0, 0 }, createSolidChunk(0));
-    try world.insertChunk(.{ 1, 0, 0 }, createSolidChunk(0));
-    const first = encodeChunkPosition(0, 0, 0);
-    const second = encodeChunkPosition(1, 0, 0);
-
-    world.setBlock(.{ 0, 0, 0 }, .none);
-    world.setBlock(.{ 1, 0, 0 }, .none);
-    world.setBlock(.{ 2, 0, 0 }, .dirt);
-    try std.testing.expectEqualSlices(ChunkPosition, &.{first}, world.unsyncedChunks());
-    try std.testing.expectEqual(3, world.getChunk(.{ 0, 0, 0 }).?.revision);
-
-    world.setBlock(.{ CHUNK_SIZE, 0, 0 }, .none);
-    try std.testing.expectEqualSlices(ChunkPosition, &.{ first, second }, world.unsyncedChunks());
-
-    world.markChunksSynced();
-    try std.testing.expectEqual(0, world.unsyncedChunks().len);
-
-    world.setBlock(.{ CHUNK_SIZE + 1, 0, 0 }, .none);
-    try std.testing.expectEqualSlices(ChunkPosition, &.{second}, world.unsyncedChunks());
-    try std.testing.expectEqual(2, world.getChunk(.{ 1, 0, 0 }).?.revision);
 }
 
 test "column operations modify the chunk below when they cross a chunk border" {
@@ -549,22 +507,17 @@ test "column operations modify the chunk below when they cross a chunk border" {
     const top = [3]u32{ 3, 4, WORLD_SIZE[2] * CHUNK_SIZE - 1 };
     const lower_top = [3]u32{ 3, 4, upper[2] * CHUNK_SIZE - 1 };
     try std.testing.expectEqual(lower_top, (try world.removeTopBlockInColumn(top)).?);
-    try std.testing.expectEqual(1, world.getChunk(lower).?.revision);
+    try std.testing.expectEqual(0, world.getChunk(lower).?.revision);
     try std.testing.expectEqual(WorldChunk.initEmpty(), world.getChunk(upper).?);
 
     try std.testing.expectEqual(lower_top, (try world.dropBlockInColumn(top, .dirt)).?);
     const upper_bottom = [3]u32{ 3, 4, upper[2] * CHUNK_SIZE };
     try std.testing.expectEqual(upper_bottom, (try world.dropBlockInColumn(top, .dirt)).?);
 
-    try std.testing.expectEqual(2, world.getChunk(lower).?.revision);
+    try std.testing.expectEqual(0, world.getChunk(lower).?.revision);
     const upper_chunk = world.getChunk(upper).?;
-    try std.testing.expectEqual(1, upper_chunk.revision);
+    try std.testing.expectEqual(0, upper_chunk.revision);
     try std.testing.expectEqual(BlockType.dirt, upper_chunk.content.getBlock(.{ 3, 4, 0 }));
-    try std.testing.expectEqualSlices(
-        ChunkPosition,
-        &.{ encodeChunkPositionArray(lower), encodeChunkPositionArray(upper) },
-        world.unsyncedChunks(),
-    );
 }
 
 test "dropped block falls to the bottom of the world" {
@@ -573,7 +526,7 @@ test "dropped block falls to the bottom of the world" {
     try world.insertChunk(.{ 0, 0, 0 }, WorldChunk.initEmpty());
 
     try std.testing.expectEqual([3]u32{ 7, 8, 0 }, (try world.dropBlockInColumn(.{ 7, 8, CHUNK_SIZE - 1 }, .dirt)).?);
-    try std.testing.expectEqual(1, world.getChunk(.{ 0, 0, 0 }).?.revision);
+    try std.testing.expectEqual(0, world.getChunk(.{ 0, 0, 0 }).?.revision);
 }
 
 test "placing a block into an empty chunk keeps the rest of it air" {
@@ -590,7 +543,6 @@ test "placing a block into an empty chunk keeps the rest of it air" {
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&expected.blocks), std.mem.asBytes(&chunk.content.blocks.blocks));
     try std.testing.expectEqual(expected.getMetaFlags(), chunk.flags);
     try std.testing.expectEqual(1, chunk.solid_block_count);
-    try std.testing.expectEqualSlices(ChunkPosition, &.{encodeChunkPosition(0, 0, 0)}, world.unsyncedChunks());
 }
 
 test "solid block count follows block edits" {
@@ -613,7 +565,7 @@ test "solid block count follows block edits" {
     const chunk = world.getChunk(coords).?;
     try std.testing.expectEqual(full_count, chunk.solid_block_count);
     try std.testing.expectEqual(chunk.content.blocks.countSolidBlocks(), chunk.solid_block_count);
-    try std.testing.expectEqual(4, chunk.revision);
+    try std.testing.expectEqual(0, chunk.revision);
 }
 
 test "removing the last solid block turns the chunk back into empty" {
@@ -633,10 +585,8 @@ test "removing the last solid block turns the chunk back into empty" {
     try std.testing.expect(chunk.content == .empty);
     try std.testing.expectEqual(WorldChunk.initEmpty().flags, chunk.flags);
     try std.testing.expectEqual(0, chunk.solid_block_count);
-    // It's still a modification: the generator may have produced blocks there.
-    try std.testing.expectEqual(4, chunk.revision);
-    try std.testing.expectEqual(4, world.latest_revisions.get(encodeChunkPositionArray(coords)));
-    try std.testing.expectEqualSlices(ChunkPosition, &.{encodeChunkPositionArray(coords)}, world.unsyncedChunks());
+    // The service has not acknowledged these optimistic changes yet.
+    try std.testing.expectEqual(0, chunk.revision);
 }
 
 test "setting air into an empty chunk keeps it empty" {
@@ -649,5 +599,104 @@ test "setting air into an empty chunk keeps it empty" {
 
     const chunk = world.getChunk(coords).?;
     try std.testing.expect(chunk.content == .empty);
-    try std.testing.expectEqual(1, chunk.revision);
+    try std.testing.expectEqual(0, chunk.revision);
+}
+
+test "failed optimistic put restores authority while preserving later edits" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+    const coords = [3]u30{ 0, 0, 0 };
+    try world.insertChunk(coords, WorldChunk.initEmpty());
+    world.setBlock(.{ 1, 2, 3 }, .dirt);
+    world.pending_operations.items[0].request_id = 10;
+    world.setBlock(.{ 4, 5, 6 }, .grass);
+    world.pending_operations.items[1].request_id = 11;
+
+    // A worker won the race to the first block. Rebase the two pending commands on its push.
+    var authority = WorldChunk.initEmpty();
+    defer authority.content.deinit(std.testing.allocator);
+    _ = authority.apply(std.testing.allocator, .{ 1, 2, 3 }, .{ .put = .stone });
+    authority.revision = 1;
+    try world.insertChunk(coords, authority.clone(std.testing.allocator));
+    try std.testing.expectEqual(BlockType.stone, world.getChunk(coords).?.content.getBlock(.{ 1, 2, 3 }));
+    try std.testing.expectEqual(BlockType.grass, world.getChunk(coords).?.content.getBlock(.{ 4, 5, 6 }));
+
+    world.acknowledgeOperation(10); // already_exists, same authoritative revision
+    try world.insertChunk(coords, authority.clone(std.testing.allocator));
+    const reconciled = world.getChunk(coords).?;
+    try std.testing.expectEqual(BlockType.stone, reconciled.content.getBlock(.{ 1, 2, 3 }));
+    try std.testing.expectEqual(BlockType.grass, reconciled.content.getBlock(.{ 4, 5, 6 }));
+    try std.testing.expectEqual(1, reconciled.revision);
+    try std.testing.expectEqual(1, world.pending_operations.items.len);
+}
+
+test "acknowledging edits in order preserves pending remove and put on the same block" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+    const coords = [3]u30{ 0, 0, 0 };
+    try world.insertChunk(coords, WorldChunk.initEmpty());
+    world.setBlock(.{ 1, 2, 3 }, .dirt);
+    world.setBlock(.{ 1, 2, 3 }, .none);
+    world.setBlock(.{ 1, 2, 3 }, .grass);
+    for (world.pending_operations.items, 1..) |*pending, id| pending.request_id = id;
+    var authority = WorldChunk.initEmpty();
+    defer authority.content.deinit(std.testing.allocator);
+    for ([_]BlockAction{ .{ .put = .dirt }, .remove, .{ .put = .grass } }, 1..) |action, id| {
+        _ = authority.apply(std.testing.allocator, .{ 1, 2, 3 }, action);
+        authority.revision = @intCast(id);
+        world.acknowledgeOperation(id);
+        try world.insertChunk(coords, authority.clone(std.testing.allocator));
+        try std.testing.expectEqual(BlockType.grass, world.getChunk(coords).?.content.getBlock(.{ 1, 2, 3 }));
+        try std.testing.expectEqual(id, world.getChunk(coords).?.revision);
+    }
+    try std.testing.expectEqual(0, world.pending_operations.items.len);
+}
+
+test "failed remove and unrelated worker edits survive reconciliation" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+    const coords = [3]u30{ 0, 0, 0 };
+    var initial = WorldChunk.initEmpty();
+    _ = initial.apply(std.testing.allocator, .{ 1, 2, 3 }, .{ .put = .dirt });
+    try world.insertChunk(coords, initial);
+    world.setBlock(.{ 1, 2, 3 }, .none);
+    world.pending_operations.items[0].request_id = 1;
+    world.setBlock(.{ 1, 2, 3 }, .grass);
+    world.pending_operations.items[1].request_id = 2;
+
+    var authority = WorldChunk.initEmpty();
+    _ = authority.apply(std.testing.allocator, .{ 4, 5, 6 }, .{ .put = .stone });
+    authority.revision = 3;
+    world.acknowledgeOperation(1); // already_removed
+    try world.insertChunk(coords, authority);
+    const chunk = world.getChunk(coords).?;
+    try std.testing.expectEqual(BlockType.grass, chunk.content.getBlock(.{ 1, 2, 3 }));
+    try std.testing.expectEqual(BlockType.stone, chunk.content.getBlock(.{ 4, 5, 6 }));
+    try std.testing.expectEqual(2, chunk.solid_block_count);
+}
+
+test "older authoritative snapshots cannot undo a newer revision" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+    const coords = [3]u30{ 0, 0, 0 };
+    try world.insertChunk(coords, createSolidChunk(3));
+    const older = createSolidChunk(2);
+    defer older.content.deinit(std.testing.allocator);
+    try std.testing.expectError(error.StaleChunk, world.insertChunk(coords, older));
+    try std.testing.expectEqual(3, world.getChunk(coords).?.revision);
+}
+
+test "local conflicts queue no command and do not change metadata" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+    try world.insertChunk(.{ 0, 0, 0 }, WorldChunk.initEmpty());
+    world.setBlock(.{ 0, 0, 0 }, .none);
+    try std.testing.expectEqual(0, world.pending_operations.items.len);
+    world.setBlock(.{ 0, 0, 0 }, .dirt);
+    world.setBlock(.{ 0, 0, 0 }, .stone);
+    try std.testing.expectEqual(1, world.pending_operations.items.len);
+    const chunk = world.getChunk(.{ 0, 0, 0 }).?;
+    try std.testing.expectEqual(BlockType.dirt, chunk.content.getBlock(.{ 0, 0, 0 }));
+    try std.testing.expectEqual(1, chunk.solid_block_count);
+    try std.testing.expectEqual(0, chunk.revision);
 }
