@@ -70,8 +70,7 @@ pub fn decodeChunkPositionVec(position: ChunkPosition) @Vector(4, i32) {
 pub const ChunkContent = union(enum) {
     /// Every block is `.none`. Nothing is allocated and nothing is rendered.
     empty,
-    /// Every block is stored individually. Used for any chunk with at least one solid block and
-    /// for any chunk touched by an edit, even if the edit made it empty.
+    /// Every block is stored individually. Used for any chunk with at least one solid block.
     blocks: *WorldChunkData,
 
     pub fn deinit(self: ChunkContent, allocator: std.mem.Allocator) void {
@@ -100,6 +99,8 @@ pub const ChunkContent = union(enum) {
 pub const WorldChunk = struct {
     content: ChunkContent,
     flags: ChunkFlags,
+    /// Number of blocks of the content that aren't `.none`.
+    solid_block_count: u16,
     /// Number of modifications made by the player. 0 means the chunk is exactly as generated.
     /// New revisions are produced only by the main thread, which owns block modifications.
     revision: u32 = 0,
@@ -108,6 +109,7 @@ pub const WorldChunk = struct {
         return .{
             .content = .empty,
             .flags = .{},
+            .solid_block_count = 0,
         };
     }
 
@@ -116,6 +118,7 @@ pub const WorldChunk = struct {
         return .{
             .content = .{ .blocks = world_chunk_data },
             .flags = WorldChunkData.getMetaFlags(world_chunk_data),
+            .solid_block_count = world_chunk_data.countSolidBlocks(),
         };
     }
 
@@ -236,16 +239,31 @@ pub const World = struct {
         return chunk.content.getBlock(local) != .none;
     }
 
-    /// Sets the block and bumps the revision of its chunk. The chunk must be received.
+    /// Sets the block and bumps the revision of its chunk. The chunk becomes `.empty` once it
+    /// has no solid blocks left. The chunk must be received.
     pub fn setBlock(self: *World, block: [3]u32, block_type: BlockType) void {
         const chunk_coords, const local = splitBlockCoords(block);
         const world_chunk_data = self.ensureChunkData(chunk_coords);
-        world_chunk_data.blocks[local[2]][local[1]][local[0]] = block_type;
+        const target = &world_chunk_data.blocks[local[2]][local[1]][local[0]];
+        const was_solid = target.* != .none;
+        target.* = block_type;
 
         const position = encodeChunkPositionArray(chunk_coords);
         const chunk = self.chunks.getPtr(position).?;
-        // TODO: turn the chunk back into `.empty` once all its blocks are removed.
-        chunk.flags = WorldChunkData.getMetaFlags(world_chunk_data);
+        if (was_solid) {
+            chunk.solid_block_count -= 1;
+        }
+        if (block_type != .none) {
+            chunk.solid_block_count += 1;
+        }
+
+        if (chunk.solid_block_count == 0) {
+            chunk.content.deinit(self.allocator);
+            chunk.content = .empty;
+            chunk.flags = .{};
+        } else {
+            chunk.flags = WorldChunkData.getMetaFlags(world_chunk_data);
+        }
         chunk.revision += 1;
 
         self.latest_revisions.put(self.allocator, position, chunk.revision) catch @panic("OOM");
@@ -286,7 +304,7 @@ pub const World = struct {
         return block;
     }
 
-    /// Chunks modified since the last `markChunksSynced` call. They always store their blocks.
+    /// Chunks modified since the last `markChunksSynced` call.
     pub fn unsyncedChunks(self: *const World) []const ChunkPosition {
         return self.unsynced_chunks.keys();
     }
@@ -571,5 +589,65 @@ test "placing a block into an empty chunk keeps the rest of it air" {
     try std.testing.expect(chunk.content == .blocks);
     try std.testing.expectEqualSlices(u8, std.mem.asBytes(&expected.blocks), std.mem.asBytes(&chunk.content.blocks.blocks));
     try std.testing.expectEqual(expected.getMetaFlags(), chunk.flags);
+    try std.testing.expectEqual(1, chunk.solid_block_count);
     try std.testing.expectEqualSlices(ChunkPosition, &.{encodeChunkPosition(0, 0, 0)}, world.unsyncedChunks());
+}
+
+test "solid block count follows block edits" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+
+    const coords = [3]u30{ 0, 0, 0 };
+    const full_count = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
+    try world.insertChunk(coords, createSolidChunk(0));
+    try std.testing.expectEqual(full_count, world.getChunk(coords).?.solid_block_count);
+
+    world.setBlock(.{ 1, 2, 3 }, .none);
+    try std.testing.expectEqual(full_count - 1, world.getChunk(coords).?.solid_block_count);
+    world.setBlock(.{ 1, 2, 3 }, .none);
+    try std.testing.expectEqual(full_count - 1, world.getChunk(coords).?.solid_block_count);
+    world.setBlock(.{ 4, 5, 6 }, .dirt);
+    try std.testing.expectEqual(full_count - 1, world.getChunk(coords).?.solid_block_count);
+    world.setBlock(.{ 1, 2, 3 }, .dirt);
+
+    const chunk = world.getChunk(coords).?;
+    try std.testing.expectEqual(full_count, chunk.solid_block_count);
+    try std.testing.expectEqual(chunk.content.blocks.countSolidBlocks(), chunk.solid_block_count);
+    try std.testing.expectEqual(4, chunk.revision);
+}
+
+test "removing the last solid block turns the chunk back into empty" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+
+    const coords = [3]u30{ 0, 0, 0 };
+    try world.insertChunk(coords, WorldChunk.initEmpty());
+    world.setBlock(.{ 1, 2, 3 }, .dirt);
+    world.setBlock(.{ 4, 5, 6 }, .stone);
+
+    world.setBlock(.{ 1, 2, 3 }, .none);
+    try std.testing.expect(world.getChunk(coords).?.content == .blocks);
+
+    world.setBlock(.{ 4, 5, 6 }, .none);
+    const chunk = world.getChunk(coords).?;
+    try std.testing.expect(chunk.content == .empty);
+    try std.testing.expectEqual(WorldChunk.initEmpty().flags, chunk.flags);
+    try std.testing.expectEqual(0, chunk.solid_block_count);
+    // It's still a modification: the generator may have produced blocks there.
+    try std.testing.expectEqual(4, chunk.revision);
+    try std.testing.expectEqual(4, world.latest_revisions.get(encodeChunkPositionArray(coords)));
+    try std.testing.expectEqualSlices(ChunkPosition, &.{encodeChunkPositionArray(coords)}, world.unsyncedChunks());
+}
+
+test "setting air into an empty chunk keeps it empty" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+
+    const coords = [3]u30{ 0, 0, 0 };
+    try world.insertChunk(coords, WorldChunk.initEmpty());
+    world.setBlock(.{ 1, 2, 3 }, .none);
+
+    const chunk = world.getChunk(coords).?;
+    try std.testing.expect(chunk.content == .empty);
+    try std.testing.expectEqual(1, chunk.revision);
 }

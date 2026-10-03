@@ -100,7 +100,7 @@ const Game = struct {
 
         for (world.unsyncedChunks()) |position| {
             const chunk = world.chunks.get(position).?;
-            world_data.submitChunkUpdate(position, chunk.revision, chunk.content.blocks);
+            world_data.submitChunkUpdate(position, chunk.revision, chunk.content);
         }
         world.markChunksSynced();
     }

@@ -69,6 +69,20 @@ pub const WorldChunkData = struct {
         return initFilled(.stone);
     }
 
+    pub fn countSolidBlocks(self: *const WorldChunkData) u16 {
+        var count: u16 = 0;
+        for (self.blocks) |layer| {
+            for (layer) |row| {
+                for (row) |block| {
+                    if (block != .none) {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        return count;
+    }
+
     pub fn getMetaFlags(self: *const WorldChunkData) ChunkFlags {
         var flags: ChunkFlags = .{
             .solid_left = true,

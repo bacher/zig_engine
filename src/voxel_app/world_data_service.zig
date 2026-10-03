@@ -4,6 +4,7 @@ const Io = std.Io;
 const world_module = @import("./world.zig");
 const World = world_module.World;
 const WorldChunk = world_module.WorldChunk;
+const ChunkContent = world_module.ChunkContent;
 const encodeChunkPositionArray = world_module.encodeChunkPositionArray;
 const world_generator = @import("./world_generator.zig");
 const WorldGenerator = world_generator.WorldGenerator;
@@ -78,7 +79,7 @@ const ChunkUpdate = struct {
     position: ChunkPosition,
     revision: u32,
     /// Snapshot of the whole chunk, owned by the message.
-    data: *WorldChunkData,
+    content: ChunkContent,
 };
 
 const Request = union(enum) {
@@ -180,14 +181,11 @@ pub const WorldDataService = struct {
     }
 
     /// Sends a copy of the modified chunk.
-    pub fn submitChunkUpdate(self: *WorldDataService, position: ChunkPosition, revision: u32, data: *const WorldChunkData) void {
-        const snapshot = self.allocator.create(WorldChunkData) catch @panic("OOM");
-        snapshot.* = data.*;
-
+    pub fn submitChunkUpdate(self: *WorldDataService, position: ChunkPosition, revision: u32, content: ChunkContent) void {
         self.requests.push(self.io, self.allocator, .{ .update_chunk = .{
             .position = position,
             .revision = revision,
-            .data = snapshot,
+            .content = copyContent(self.allocator, content),
         } });
     }
 
@@ -229,9 +227,20 @@ pub const WorldDataService = struct {
     }
 };
 
+fn copyContent(allocator: std.mem.Allocator, content: ChunkContent) ChunkContent {
+    switch (content) {
+        .empty => return .empty,
+        .blocks => |world_chunk_data| {
+            const copy = allocator.create(WorldChunkData) catch @panic("OOM");
+            copy.* = world_chunk_data.*;
+            return .{ .blocks = copy };
+        },
+    }
+}
+
 const StoredChunk = struct {
     revision: u32,
-    data: *WorldChunkData,
+    content: ChunkContent,
 };
 
 const WorkerState = struct {
@@ -243,7 +252,7 @@ const WorkerState = struct {
     fn deinit(self: *WorkerState, allocator: std.mem.Allocator) void {
         var iterator = self.modified_chunks.valueIterator();
         while (iterator.next()) |stored| {
-            allocator.destroy(stored.data);
+            stored.content.deinit(allocator);
         }
         self.modified_chunks.deinit(allocator);
     }
@@ -252,15 +261,15 @@ const WorkerState = struct {
         const entry = self.modified_chunks.getOrPut(allocator, update.position) catch @panic("OOM");
         if (entry.found_existing) {
             if (update.revision <= entry.value_ptr.revision) {
-                allocator.destroy(update.data);
+                update.content.deinit(allocator);
                 return;
             }
-            allocator.destroy(entry.value_ptr.data);
+            entry.value_ptr.content.deinit(allocator);
         }
 
         entry.value_ptr.* = .{
             .revision = update.revision,
-            .data = update.data,
+            .content = update.content,
         };
     }
 
@@ -273,10 +282,10 @@ const WorkerState = struct {
         const stored = self.modified_chunks.get(encodeChunkPositionArray(coords)) orelse
             return column_generator.generateChunk(allocator, coords[2]);
 
-        const world_chunk_data = allocator.create(WorldChunkData) catch @panic("OOM");
-        world_chunk_data.* = stored.data.*;
-
-        var chunk = WorldChunk.initBlocks(world_chunk_data);
+        var chunk = switch (copyContent(allocator, stored.content)) {
+            .empty => WorldChunk.initEmpty(),
+            .blocks => |world_chunk_data| WorldChunk.initBlocks(world_chunk_data),
+        };
         chunk.revision = stored.revision;
         return chunk;
     }
@@ -299,6 +308,11 @@ fn insertResponses(world: *World, responses: *std.ArrayList(ChunkResponse)) !voi
         try world.insertChunk(response.coords, response.chunk);
     }
     responses.clearRetainingCapacity();
+}
+
+fn submitBlocksUpdate(service: *WorldDataService, position: ChunkPosition, revision: u32, data: *const WorldChunkData) void {
+    var copy = data.*;
+    service.submitChunkUpdate(position, revision, .{ .blocks = &copy });
 }
 
 fn deinitResponses(responses: *std.ArrayList(ChunkResponse)) void {
@@ -433,8 +447,40 @@ test "loaded chunks match the generator" {
         try std.testing.expectEqual([3]u30{ 10, 20, @intCast(z) }, response.coords);
         try std.testing.expectEqual(std.meta.activeTag(expected.content), std.meta.activeTag(response.chunk.content));
         try std.testing.expectEqual(expected.flags, response.chunk.flags);
+        try std.testing.expectEqual(expected.solid_block_count, response.chunk.solid_block_count);
         try std.testing.expectEqual(0, response.chunk.revision);
     }
+}
+
+test "chunk updated to empty is loaded as empty until a newer update" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    defer service.destroy();
+
+    // The surface chunk of the flat world, generated with blocks.
+    const coords = [3]u30{ 0, 0, WORLD_SIZE[2] / 2 - 1 };
+    const column = [2]u30{ coords[0], coords[1] };
+    const position = encodeChunkPositionArray(coords);
+    service.submitChunkUpdate(position, 2, .empty);
+    submitBlocksUpdate(service, position, 1, &WorldChunkData.initSolid());
+    _ = service.requestChunks(column, coords[2], coords[2] + 1);
+    var newer = WorldChunkData.initEmpty();
+    newer.blocks[0][0][0] = .dirt;
+    submitBlocksUpdate(service, position, 3, &newer);
+    _ = service.requestChunks(column, coords[2], coords[2] + 1);
+
+    var responses: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&responses);
+    try waitForResponses(service, &responses, 2);
+
+    const emptied = responses.items[0].chunk;
+    try std.testing.expect(emptied.content == .empty);
+    try std.testing.expectEqual(2, emptied.revision);
+    try std.testing.expectEqual(0, emptied.solid_block_count);
+
+    const refilled = responses.items[1].chunk;
+    try std.testing.expectEqual(3, refilled.revision);
+    try std.testing.expectEqual(1, refilled.solid_block_count);
+    try std.testing.expectEqual(.dirt, refilled.content.blocks.blocks[0][0][0]);
 }
 
 test "chunk requested after an update contains it" {
@@ -458,7 +504,7 @@ test "chunk requested after an update contains it" {
     // Same order as the main thread uses: sync, evict and request again without waiting.
     for (world.unsyncedChunks()) |position| {
         const chunk = world.chunks.get(position).?;
-        service.submitChunkUpdate(position, chunk.revision, chunk.content.blocks);
+        service.submitChunkUpdate(position, chunk.revision, chunk.content);
     }
     world.markChunksSynced();
     world.removeChunk(chunk_coords);
@@ -479,8 +525,8 @@ test "outdated chunk updates are ignored" {
     newer.blocks[0][0][0] = .dirt;
     const older = WorldChunkData.initEmpty();
 
-    service.submitChunkUpdate(position, 2, &newer);
-    service.submitChunkUpdate(position, 1, &older);
+    submitBlocksUpdate(service, position, 2, &newer);
+    submitBlocksUpdate(service, position, 1, &older);
     _ = service.requestChunks(.{ 0, 0 }, 0, 1);
 
     var responses: std.ArrayList(ChunkResponse) = .empty;
@@ -532,9 +578,9 @@ test "modified chunks of a range come from their snapshots, the rest is generate
     const modified_z = WORLD_SIZE[2] / 2;
     var modified = WorldChunkData.initEmpty();
     modified.blocks[1][2][3] = .dirt;
-    service.submitChunkUpdate(encodeChunkPositionArray([3]u30{ column[0], column[1], modified_z }), 3, &modified);
+    submitBlocksUpdate(service, encodeChunkPositionArray([3]u30{ column[0], column[1], modified_z }), 3, &modified);
     const neighbor = WorldChunkData.initSolid();
-    service.submitChunkUpdate(encodeChunkPositionArray([3]u30{ column[0] + 1, column[1], modified_z }), 5, &neighbor);
+    submitBlocksUpdate(service, encodeChunkPositionArray([3]u30{ column[0] + 1, column[1], modified_z }), 5, &neighbor);
 
     _ = service.requestChunks(column, 0, WORLD_SIZE[2]);
 
@@ -574,7 +620,7 @@ test "update submitted between two requests of a chunk is contained only in the 
     const column = [2]u30{ coords[0], coords[1] };
     const first_id = service.requestChunks(column, coords[2], coords[2] + 1);
     const update = WorldChunkData.initSolid();
-    service.submitChunkUpdate(encodeChunkPositionArray(coords), 1, &update);
+    submitBlocksUpdate(service, encodeChunkPositionArray(coords), 1, &update);
     const second_id = service.requestChunks(column, coords[2], coords[2] + 1);
 
     var responses: std.ArrayList(ChunkResponse) = .empty;
@@ -612,10 +658,10 @@ test "update with the stored revision is ignored, a newer one replaces the snaps
     var newer = WorldChunkData.initEmpty();
     newer.blocks[0][0][0] = .grass;
 
-    service.submitChunkUpdate(position, 2, &stored);
-    service.submitChunkUpdate(position, 2, &same_revision);
+    submitBlocksUpdate(service, position, 2, &stored);
+    submitBlocksUpdate(service, position, 2, &same_revision);
     _ = service.requestChunks(.{ 0, 0 }, 0, 1);
-    service.submitChunkUpdate(position, 3, &newer);
+    submitBlocksUpdate(service, position, 3, &newer);
     _ = service.requestChunks(.{ 0, 0 }, 0, 1);
 
     var responses: std.ArrayList(ChunkResponse) = .empty;
@@ -634,7 +680,7 @@ test "submitted update is a copy of the chunk" {
 
     var data = WorldChunkData.initEmpty();
     data.blocks[0][0][0] = .dirt;
-    service.submitChunkUpdate(encodeChunkPositionArray([3]u30{ 0, 0, 0 }), 1, &data);
+    service.submitChunkUpdate(encodeChunkPositionArray([3]u30{ 0, 0, 0 }), 1, .{ .blocks = &data });
     data.blocks[0][0][0] = .stone;
     _ = service.requestChunks(.{ 0, 0 }, 0, 1);
 
@@ -649,11 +695,11 @@ test "destroying the service frees the queued requests and the responses nobody 
     const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .{ .terrain = .{ .seed = 12345 } });
 
     const update = WorldChunkData.initSolid();
-    service.submitChunkUpdate(encodeChunkPositionArray([3]u30{ 0, 0, 0 }), 1, &update);
+    submitBlocksUpdate(service, encodeChunkPositionArray([3]u30{ 0, 0, 0 }), 1, &update);
     for (0..4) |x| {
         _ = service.requestChunks(.{ @intCast(x), 0 }, 0, WORLD_SIZE[2]);
     }
-    service.submitChunkUpdate(encodeChunkPositionArray([3]u30{ 0, 0, 0 }), 2, &update);
+    submitBlocksUpdate(service, encodeChunkPositionArray([3]u30{ 0, 0, 0 }), 2, &update);
 
     service.destroy();
 }
@@ -675,7 +721,7 @@ test "shutting down worker skips chunk loads but still applies updates" {
     const position = encodeChunkPositionArray([3]u30{ 0, 0, 0 });
     const update = WorldChunkData.initSolid();
     _ = service.requestChunks(.{ 0, 0 }, 0, WORLD_SIZE[2]);
-    service.submitChunkUpdate(position, 1, &update);
+    submitBlocksUpdate(&service, position, 1, &update);
     _ = service.requestChunks(.{ 1, 0 }, 0, WORLD_SIZE[2]);
 
     service.is_shutting_down.store(true, .monotonic);

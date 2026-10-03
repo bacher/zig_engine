@@ -323,6 +323,7 @@ test "shortcut terrain chunks match the full generation, only chunks without blo
             std.mem.asBytes(&chunk.content.toData().blocks),
         );
         try std.testing.expectEqual(expected.getMetaFlags(), chunk.flags);
+        try std.testing.expectEqual(expected.countSolidBlocks(), chunk.solid_block_count);
 
         const has_blocks = std.mem.indexOfNone(BlockType, asFlatBlocks(&expected), &.{.none}) != null;
         try std.testing.expectEqual(!has_blocks, chunk.content == .empty);
