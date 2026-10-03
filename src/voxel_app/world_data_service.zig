@@ -292,6 +292,117 @@ fn insertResponses(world: *World, responses: *std.ArrayList(ChunkResponse)) !voi
     responses.clearRetainingCapacity();
 }
 
+fn deinitResponses(responses: *std.ArrayList(ChunkResponse)) void {
+    for (responses.items) |response| {
+        response.chunk.content.deinit(std.testing.allocator);
+    }
+    responses.deinit(std.testing.allocator);
+}
+
+fn pushNumbers(mailbox: *Mailbox(u32), io: Io, first: u32, count: u32) void {
+    for (first..first + count) |number| {
+        mailbox.push(io, std.testing.allocator, @intCast(number));
+    }
+}
+
+fn waitUntilClosed(mailbox: *Mailbox(u32), io: Io) bool {
+    var out: std.ArrayList(u32) = .empty;
+    defer out.deinit(std.testing.allocator);
+    return mailbox.waitAndTakeAll(io, &out);
+}
+
+test "mailbox gives out items in push order without waiting" {
+    const io = std.testing.io;
+    var mailbox: Mailbox(u32) = .{};
+    defer mailbox.deinit(std.testing.allocator);
+
+    var out: std.ArrayList(u32) = .empty;
+    defer out.deinit(std.testing.allocator);
+
+    mailbox.takeAll(io, &out);
+    try std.testing.expectEqual(0, out.items.len);
+
+    mailbox.push(io, std.testing.allocator, 1);
+    mailbox.push(io, std.testing.allocator, 2);
+    mailbox.push(io, std.testing.allocator, 3);
+    mailbox.takeAll(io, &out);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2, 3 }, out.items);
+
+    out.clearRetainingCapacity();
+    mailbox.takeAll(io, &out);
+    try std.testing.expectEqual(0, out.items.len);
+}
+
+test "closed mailbox gives out the remaining items before reporting that it's closed" {
+    const io = std.testing.io;
+    var mailbox: Mailbox(u32) = .{};
+    defer mailbox.deinit(std.testing.allocator);
+
+    var out: std.ArrayList(u32) = .empty;
+    defer out.deinit(std.testing.allocator);
+
+    mailbox.push(io, std.testing.allocator, 1);
+    mailbox.push(io, std.testing.allocator, 2);
+    mailbox.close(io);
+
+    try std.testing.expect(mailbox.waitAndTakeAll(io, &out));
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, out.items);
+
+    out.clearRetainingCapacity();
+    try std.testing.expect(!mailbox.waitAndTakeAll(io, &out));
+    try std.testing.expectEqual(0, out.items.len);
+}
+
+test "closing an empty mailbox releases the waiting consumer" {
+    const io = std.testing.io;
+    var mailbox: Mailbox(u32) = .{};
+    defer mailbox.deinit(std.testing.allocator);
+
+    var consumer = try io.concurrent(waitUntilClosed, .{ &mailbox, io });
+    mailbox.close(io);
+    try std.testing.expect(!consumer.await(io));
+}
+
+test "items pushed by concurrent producers are received exactly once and in order per producer" {
+    const io = std.testing.io;
+    const producer_count = 4;
+    const items_per_producer = 1000;
+
+    var mailbox: Mailbox(u32) = .{};
+    defer mailbox.deinit(std.testing.allocator);
+
+    var producers: Io.Group = .init;
+    defer producers.cancel(io);
+    for (0..producer_count) |producer| {
+        try producers.concurrent(io, pushNumbers, .{ &mailbox, io, @intCast(producer * items_per_producer), items_per_producer });
+    }
+
+    var next_numbers: [producer_count]u32 = undefined;
+    for (&next_numbers, 0..) |*next_number, producer| {
+        next_number.* = @intCast(producer * items_per_producer);
+    }
+
+    var batch: std.ArrayList(u32) = .empty;
+    defer batch.deinit(std.testing.allocator);
+
+    var received_count: usize = 0;
+    while (received_count < producer_count * items_per_producer) {
+        try std.testing.expect(mailbox.waitAndTakeAll(io, &batch));
+        for (batch.items) |number| {
+            try std.testing.expect(number < producer_count * items_per_producer);
+            const producer = number / items_per_producer;
+            try std.testing.expectEqual(next_numbers[producer], number);
+            next_numbers[producer] += 1;
+        }
+        received_count += batch.items.len;
+        batch.clearRetainingCapacity();
+    }
+    try producers.await(io);
+
+    mailbox.close(io);
+    try std.testing.expect(!mailbox.waitAndTakeAll(io, &batch));
+}
+
 test "loaded chunks match the generator" {
     const generator = WorldGenerator{ .terrain = .{ .seed = 12345 } };
     const service = try WorldDataService.create(std.testing.io, std.testing.allocator, generator);
@@ -371,4 +482,169 @@ test "outdated chunk updates are ignored" {
     defer chunk.content.deinit(std.testing.allocator);
     try std.testing.expectEqual(2, chunk.revision);
     try std.testing.expectEqual(.dirt, chunk.content.blocks.blocks[0][0][0]);
+}
+
+test "every chunk of a range gets a response and requests are answered in order" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    defer service.destroy();
+
+    const first_id = service.requestChunks(.{ 1, 2 }, 0, WORLD_SIZE[2]);
+    const second_id = service.requestChunks(.{ WORLD_SIZE[0] - 1, WORLD_SIZE[1] - 1 }, WORLD_SIZE[2] - 1, WORLD_SIZE[2]);
+    const third_id = service.requestChunks(.{ 1, 2 }, 1, 3);
+    try std.testing.expect(first_id < second_id and second_id < third_id);
+
+    var responses: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&responses);
+    try waitForResponses(service, &responses, WORLD_SIZE[2] + 1 + 2);
+
+    const requests = [_]struct { u64, [2]u30, u30, u30 }{
+        .{ first_id, .{ 1, 2 }, 0, WORLD_SIZE[2] },
+        .{ second_id, .{ WORLD_SIZE[0] - 1, WORLD_SIZE[1] - 1 }, WORLD_SIZE[2] - 1, WORLD_SIZE[2] },
+        .{ third_id, .{ 1, 2 }, 1, 3 },
+    };
+    var index: usize = 0;
+    for (requests) |request| {
+        const request_id, const column, const z_start, const z_end = request;
+        for (z_start..z_end) |z| {
+            const response = responses.items[index];
+            try std.testing.expectEqual(request_id, response.request_id);
+            try std.testing.expectEqual([3]u30{ column[0], column[1], @intCast(z) }, response.coords);
+            index += 1;
+        }
+    }
+}
+
+test "modified chunks of a range come from their snapshots, the rest is generated" {
+    const generator = WorldGenerator{ .terrain = .{ .seed = 12345 } };
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, generator);
+    defer service.destroy();
+
+    const column = [2]u30{ 4, 5 };
+    const modified_z = WORLD_SIZE[2] / 2;
+    var modified = WorldChunkData.initEmpty();
+    modified.blocks[1][2][3] = .dirt;
+    service.submitChunkUpdate(encodeChunkPositionArray([3]u30{ column[0], column[1], modified_z }), 3, &modified);
+    const neighbor = WorldChunkData.initSolid();
+    service.submitChunkUpdate(encodeChunkPositionArray([3]u30{ column[0] + 1, column[1], modified_z }), 5, &neighbor);
+
+    _ = service.requestChunks(column, 0, WORLD_SIZE[2]);
+
+    var responses: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&responses);
+    try waitForResponses(service, &responses, WORLD_SIZE[2]);
+
+    const column_generator = ColumnGenerator.init(generator, column);
+    for (responses.items, 0..) |response, z| {
+        const chunk = response.chunk;
+        if (z == modified_z) {
+            try std.testing.expectEqual(3, chunk.revision);
+            try std.testing.expect(chunk.content == .blocks);
+            try std.testing.expectEqual(modified.getMetaFlags(), chunk.flags);
+            try std.testing.expectEqualSlices(u8, std.mem.asBytes(&modified.blocks), std.mem.asBytes(&chunk.content.blocks.blocks));
+        } else {
+            const expected = column_generator.generateChunk(std.testing.allocator, @intCast(z));
+            defer expected.content.deinit(std.testing.allocator);
+
+            try std.testing.expectEqual(0, chunk.revision);
+            try std.testing.expectEqual(std.meta.activeTag(expected.content), std.meta.activeTag(chunk.content));
+            try std.testing.expectEqual(expected.flags, chunk.flags);
+            try std.testing.expectEqualSlices(
+                u8,
+                std.mem.asBytes(&expected.content.toData().blocks),
+                std.mem.asBytes(&chunk.content.toData().blocks),
+            );
+        }
+    }
+}
+
+test "update submitted between two requests of a chunk is contained only in the second response" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    defer service.destroy();
+
+    const coords = [3]u30{ 7, 8, WORLD_SIZE[2] / 2 - 1 };
+    const column = [2]u30{ coords[0], coords[1] };
+    const first_id = service.requestChunks(column, coords[2], coords[2] + 1);
+    const update = WorldChunkData.initSolid();
+    service.submitChunkUpdate(encodeChunkPositionArray(coords), 1, &update);
+    const second_id = service.requestChunks(column, coords[2], coords[2] + 1);
+
+    var responses: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&responses);
+    try waitForResponses(service, &responses, 2);
+
+    const generated = responses.items[0];
+    try std.testing.expectEqual(first_id, generated.request_id);
+    try std.testing.expectEqual(0, generated.chunk.revision);
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&WorldChunkData.initFlat().blocks),
+        std.mem.asBytes(&generated.chunk.content.toData().blocks),
+    );
+
+    const updated = responses.items[1];
+    try std.testing.expectEqual(second_id, updated.request_id);
+    try std.testing.expectEqual(1, updated.chunk.revision);
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&update.blocks),
+        std.mem.asBytes(&updated.chunk.content.toData().blocks),
+    );
+}
+
+test "update with the stored revision is ignored, a newer one replaces the snapshot" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    defer service.destroy();
+
+    const position = encodeChunkPositionArray([3]u30{ 0, 0, 0 });
+    var stored = WorldChunkData.initEmpty();
+    stored.blocks[0][0][0] = .dirt;
+    var same_revision = WorldChunkData.initEmpty();
+    same_revision.blocks[0][0][0] = .stone;
+    var newer = WorldChunkData.initEmpty();
+    newer.blocks[0][0][0] = .grass;
+
+    service.submitChunkUpdate(position, 2, &stored);
+    service.submitChunkUpdate(position, 2, &same_revision);
+    _ = service.requestChunks(.{ 0, 0 }, 0, 1);
+    service.submitChunkUpdate(position, 3, &newer);
+    _ = service.requestChunks(.{ 0, 0 }, 0, 1);
+
+    var responses: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&responses);
+    try waitForResponses(service, &responses, 2);
+
+    try std.testing.expectEqual(2, responses.items[0].chunk.revision);
+    try std.testing.expectEqual(.dirt, responses.items[0].chunk.content.blocks.blocks[0][0][0]);
+    try std.testing.expectEqual(3, responses.items[1].chunk.revision);
+    try std.testing.expectEqual(.grass, responses.items[1].chunk.content.blocks.blocks[0][0][0]);
+}
+
+test "submitted update is a copy of the chunk" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    defer service.destroy();
+
+    var data = WorldChunkData.initEmpty();
+    data.blocks[0][0][0] = .dirt;
+    service.submitChunkUpdate(encodeChunkPositionArray([3]u30{ 0, 0, 0 }), 1, &data);
+    data.blocks[0][0][0] = .stone;
+    _ = service.requestChunks(.{ 0, 0 }, 0, 1);
+
+    var responses: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&responses);
+    try waitForResponses(service, &responses, 1);
+
+    try std.testing.expectEqual(.dirt, responses.items[0].chunk.content.blocks.blocks[0][0][0]);
+}
+
+test "destroying the service frees the queued requests and the responses nobody took" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .{ .terrain = .{ .seed = 12345 } });
+
+    const update = WorldChunkData.initSolid();
+    service.submitChunkUpdate(encodeChunkPositionArray([3]u30{ 0, 0, 0 }), 1, &update);
+    for (0..4) |x| {
+        _ = service.requestChunks(.{ @intCast(x), 0 }, 0, WORLD_SIZE[2]);
+    }
+    service.submitChunkUpdate(encodeChunkPositionArray([3]u30{ 0, 0, 0 }), 2, &update);
+
+    service.destroy();
 }

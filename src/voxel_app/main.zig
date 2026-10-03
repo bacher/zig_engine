@@ -177,23 +177,27 @@ const Game = struct {
                         camera_chunk_coords[1] + dy,
                         0,
                     }) orelse continue;
-                    const column = [2]u30{ bottom_coords[0], bottom_coords[1] };
-
-                    var range_start: ?u30 = null;
-                    var z = z_min;
-                    while (z <= z_max + 1) : (z += 1) {
-                        const is_missing = z <= z_max and game.isChunkMissing(.{ column[0], column[1], @intCast(z) });
-                        if (is_missing) {
-                            range_start = range_start orelse @intCast(z);
-                        } else if (range_start) |start| {
-                            game.requestChunkRange(column, start, @intCast(z));
-                            range_start = null;
-                        }
-                    }
+                    forEachMissingChunkRange(z_min, z_max, MissingColumnChunks{
+                        .game = game,
+                        .column = .{ bottom_coords[0], bottom_coords[1] },
+                    });
                 }
             }
         }
     }
+
+    const MissingColumnChunks = struct {
+        game: *Game,
+        column: [2]u30,
+
+        fn isMissing(self: MissingColumnChunks, z: u30) bool {
+            return self.game.isChunkMissing(.{ self.column[0], self.column[1], z });
+        }
+
+        fn onRange(self: MissingColumnChunks, z_start: u30, z_end: u30) void {
+            self.game.requestChunkRange(self.column, z_start, z_end);
+        }
+    };
 
     /// Forgets the chunks (received or requested) that are too far from the camera.
     fn evictFarChunks(game: *Game, camera_chunk_coords: @Vector(4, i32)) void {
@@ -541,6 +545,22 @@ fn getChunkDistance(chunk_id: u32, camera_chunk_coords: @Vector(4, i32)) i32 {
     return @max(@min(dx, world_width - dx), dy, dz);
 }
 
+/// Calls `context.onRange(z_start, z_end)` for every range [z_start, z_end) of consecutive z
+/// in [z_min, z_max] for which `context.isMissing(z)` is true. Does nothing if z_min > z_max.
+fn forEachMissingChunkRange(z_min: i32, z_max: i32, context: anytype) void {
+    var range_start: ?u30 = null;
+    var z = z_min;
+    while (z <= z_max + 1) : (z += 1) {
+        const is_missing = z <= z_max and context.isMissing(@intCast(z));
+        if (is_missing) {
+            range_start = range_start orelse @intCast(z);
+        } else if (range_start) |start| {
+            context.onRange(start, @intCast(z));
+            range_start = null;
+        }
+    }
+}
+
 pub fn normalizeChunkCoords(coords_in: [3]i32) ?[3]u30 {
     var coords = coords_in;
 
@@ -843,4 +863,109 @@ test {
     _ = world_module;
     _ = world_generator;
     _ = world_data_service;
+}
+
+test "chunk distance is the largest axis distance and wraps around x" {
+    const camera = @Vector(4, i32){ 0, 10, 2, 0 };
+    const world_width: i32 = consts.WORLD_SIZE[0];
+
+    try std.testing.expectEqual(0, getChunkDistance(encodeChunkPosition(0, 10, 2), camera));
+    try std.testing.expectEqual(3, getChunkDistance(encodeChunkPosition(3, 10, 2), camera));
+    try std.testing.expectEqual(1, getChunkDistance(encodeChunkPosition(consts.WORLD_SIZE[0] - 1, 10, 2), camera));
+    try std.testing.expectEqual(1, getChunkDistance(encodeChunkPosition(0, 10, 2), .{ world_width - 1, 10, 2, 0 }));
+    try std.testing.expectEqual(1, getChunkDistance(encodeChunkPosition(0, 10, 2), .{ -1, 10, 2, 0 }));
+    try std.testing.expectEqual(world_width / 2, getChunkDistance(encodeChunkPosition(consts.WORLD_SIZE[0] / 2, 10, 2), camera));
+
+    try std.testing.expectEqual(4, getChunkDistance(encodeChunkPosition(1, 6, 2), camera));
+    try std.testing.expectEqual(10, getChunkDistance(encodeChunkPosition(0, 0, 2), camera));
+    try std.testing.expectEqual(consts.WORLD_SIZE[1] - 1 - 10, getChunkDistance(encodeChunkPosition(0, consts.WORLD_SIZE[1] - 1, 2), camera));
+    try std.testing.expectEqual(2, getChunkDistance(encodeChunkPosition(1, 11, 0), camera));
+    try std.testing.expectEqual(consts.WORLD_SIZE[2] - 1 - 2, getChunkDistance(encodeChunkPosition(1, 11, consts.WORLD_SIZE[2] - 1), camera));
+}
+
+test "chunk coords wrap around x and are out of the world beyond y and z" {
+    const width: i32 = consts.WORLD_SIZE[0];
+    const depth: i32 = consts.WORLD_SIZE[1];
+    const height: i32 = consts.WORLD_SIZE[2];
+
+    try std.testing.expectEqual([3]u30{ 1, 2, 3 }, normalizeChunkCoords(.{ 1, 2, 3 }).?);
+    try std.testing.expectEqual([3]u30{ consts.WORLD_SIZE[0] - 1, 0, 0 }, normalizeChunkCoords(.{ -1, 0, 0 }).?);
+    try std.testing.expectEqual([3]u30{ 0, consts.WORLD_SIZE[1] - 1, consts.WORLD_SIZE[2] - 1 }, normalizeChunkCoords(.{ width, depth - 1, height - 1 }).?);
+    try std.testing.expectEqual(null, normalizeChunkCoords(.{ 0, -1, 0 }));
+    try std.testing.expectEqual(null, normalizeChunkCoords(.{ 0, depth, 0 }));
+    try std.testing.expectEqual(null, normalizeChunkCoords(.{ 0, 0, -1 }));
+    try std.testing.expectEqual(null, normalizeChunkCoords(.{ 0, 0, height }));
+}
+
+test "box around a chunk is clamped to the world along y and z only" {
+    const box = fitBoxIntoWorld(getBoxAroundChunk(.{ 0, 1, consts.WORLD_SIZE[2] - 1, 0 }, 2));
+    try std.testing.expectEqual(@Vector(4, i32){ -2, 0, consts.WORLD_SIZE[2] - 3, 0 }, box.start);
+    try std.testing.expectEqual(@Vector(4, i32){ 2, 3, consts.WORLD_SIZE[2] - 1, 0 }, box.end);
+    try std.testing.expect(box.isContainingChunk(.{ -2, 0, consts.WORLD_SIZE[2] - 1, 0 }));
+    try std.testing.expect(!box.isContainingChunk(.{ 3, 0, consts.WORLD_SIZE[2] - 1, 0 }));
+}
+
+test "column top under a position is clamped to the top of the world" {
+    const origin = [3]u32{
+        consts.WORLD_ORIGIN[0] * consts.CHUNK_SIZE,
+        consts.WORLD_ORIGIN[1] * consts.CHUNK_SIZE,
+        consts.WORLD_ORIGIN[2] * consts.CHUNK_SIZE,
+    };
+    const world_size = consts.WORLD_SIZE_IN_BLOCKS;
+
+    try std.testing.expectEqual(origin, getColumnTopUnderPosition(.{ 0.5, 0.5, 0.5 }).?);
+    try std.testing.expectEqual([3]u32{ origin[0] - 1, origin[1] - 1, origin[2] - 1 }, getColumnTopUnderPosition(.{ -0.5, -0.5, -0.5 }).?);
+    try std.testing.expectEqual([3]u32{ origin[0], origin[1], world_size[2] - 1 }, getColumnTopUnderPosition(.{ 0, 0, 1.0e6 }).?);
+    try std.testing.expectEqual([3]u32{ world_size[0] - 1, origin[1], origin[2] }, getColumnTopUnderPosition(.{ -@as(f32, @floatFromInt(origin[0])) - 1, 0, 0 }).?);
+    try std.testing.expectEqual(null, getColumnTopUnderPosition(.{ 0, 0, -@as(f32, @floatFromInt(origin[2])) - 1 }));
+    try std.testing.expectEqual(null, getColumnTopUnderPosition(.{ 0, @floatFromInt(world_size[1]), 0 }));
+}
+
+const TestColumn = struct {
+    is_missing: []const bool,
+    ranges: std.ArrayList([2]u30) = .empty,
+
+    fn isMissing(self: *const TestColumn, z: u30) bool {
+        return self.is_missing[z];
+    }
+
+    fn onRange(self: *TestColumn, z_start: u30, z_end: u30) void {
+        self.ranges.append(std.testing.allocator, .{ z_start, z_end }) catch @panic("OOM");
+    }
+};
+
+fn expectMissingChunkRanges(expected: []const [2]u30, z_min: i32, z_max: i32, is_missing: []const bool) !void {
+    var column = TestColumn{ .is_missing = is_missing };
+    defer column.ranges.deinit(std.testing.allocator);
+
+    forEachMissingChunkRange(z_min, z_max, &column);
+    try std.testing.expectEqualSlices([2]u30, expected, column.ranges.items);
+}
+
+test "missing chunks of a column are split into ranges of consecutive chunks" {
+    const height = consts.WORLD_SIZE[2];
+    const all_missing: [height]bool = @splat(true);
+    const none_missing: [height]bool = @splat(false);
+
+    try expectMissingChunkRanges(&.{.{ 0, height }}, 0, height - 1, &all_missing);
+    try expectMissingChunkRanges(&.{.{ 1, 3 }}, 1, 2, &all_missing);
+    try expectMissingChunkRanges(&.{}, 0, height - 1, &none_missing);
+
+    var with_gaps = all_missing;
+    with_gaps[0] = false;
+    with_gaps[2] = false;
+    with_gaps[3] = false;
+    try expectMissingChunkRanges(&.{ .{ 1, 2 }, .{ 4, height } }, 0, height - 1, &with_gaps);
+    try expectMissingChunkRanges(&.{.{ 1, 2 }}, 0, 3, &with_gaps);
+
+    var only_top = none_missing;
+    only_top[height - 1] = true;
+    try expectMissingChunkRanges(&.{.{ height - 1, height }}, 0, height - 1, &only_top);
+}
+
+test "camera outside of the world height has no chunks to request" {
+    const all_missing: [consts.WORLD_SIZE[2]]bool = @splat(true);
+
+    try expectMissingChunkRanges(&.{}, 0, -3, &all_missing);
+    try expectMissingChunkRanges(&.{}, consts.WORLD_SIZE[2] + 2, consts.WORLD_SIZE[2] - 1, &all_missing);
 }

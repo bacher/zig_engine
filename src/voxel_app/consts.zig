@@ -17,7 +17,6 @@ pub const WORLD_SIZE_IN_BLOCKS = [_]u32{
 };
 
 pub const ChunkPosition = u32; // 12 bit x, 8 bit y, 3 bit z
-pub const BlockPosition = u64; // 30 bit x, 30 bit y, 4 bit z
 
 pub const WORLD_ORIGIN = [_]u30{
     WORLD_SIZE[0] / 2,

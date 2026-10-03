@@ -265,6 +265,29 @@ test "terrain column has surface chunks between stone and air" {
     try std.testing.expect(surface_chunk_count > 0);
 }
 
+test "flat world has the surface chunk in the middle, stone below and air above" {
+    const column_generator = ColumnGenerator.init(.flat, .{ WORLD_SIZE[0] - 1, WORLD_SIZE[1] - 1 });
+    const surface_z = WORLD_SIZE[2] / 2 - 1;
+
+    for (0..WORLD_SIZE[2]) |z| {
+        var chunk = column_generator.generateChunk(std.testing.allocator, @intCast(z));
+        defer chunk.content.deinit(std.testing.allocator);
+
+        if (z == surface_z) {
+            try std.testing.expect(chunk.content == .blocks);
+            try std.testing.expectEqualSlices(
+                u8,
+                std.mem.asBytes(&WorldChunkData.initFlat().blocks),
+                std.mem.asBytes(&chunk.content.blocks.blocks),
+            );
+        } else if (z < surface_z) {
+            try std.testing.expectEqual(WorldChunk.initUniform(.stone), chunk);
+        } else {
+            try std.testing.expectEqual(WorldChunk.initUniform(.none), chunk);
+        }
+    }
+}
+
 test "uniform terrain chunks match the full generation" {
     const params = WorldGenerationParams{};
     const coords = [2]u30{ 7, 3 };

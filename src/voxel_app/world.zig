@@ -4,7 +4,6 @@ const BlockType = @import("engine").voxel_chunk.BlockType;
 const WorldChunkData = @import("./world_chunk_data.zig").WorldChunkData;
 const ChunkFlags = @import("./world_chunk_data.zig").ChunkFlags;
 const world_generator = @import("./world_generator.zig");
-const BlockPosition = @import("./consts.zig").BlockPosition;
 const ChunkPosition = @import("./consts.zig").ChunkPosition;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const WORLD_SIZE = @import("./consts.zig").WORLD_SIZE;
@@ -410,4 +409,157 @@ test "chunk missing local modifications is rejected" {
     defer stale_chunk.content.deinit(std.testing.allocator);
     try std.testing.expectError(error.StaleChunk, world.insertChunk(.{ 0, 0, 0 }, stale_chunk));
     try std.testing.expect(!world.hasChunk(.{ 0, 0, 0 }));
+}
+
+fn createSolidChunk(revision: u32) WorldChunk {
+    const world_chunk_data = std.testing.allocator.create(WorldChunkData) catch @panic("OOM");
+    world_chunk_data.* = WorldChunkData.initSolid();
+    var chunk = WorldChunk.initBlocks(world_chunk_data);
+    chunk.revision = revision;
+    return chunk;
+}
+
+test "uniform chunk is solid from every side unless it's air" {
+    const air = WorldChunk.initUniform(.none);
+    const stone = WorldChunk.initUniform(.stone);
+
+    inline for (std.meta.fields(ChunkFlags)) |field| {
+        try std.testing.expect(!@field(air.flags, field.name));
+        try std.testing.expect(@field(stone.flags, field.name));
+    }
+    try std.testing.expect(!stone.isDirty());
+
+    try std.testing.expectEqual(BlockType.stone, stone.content.getBlock(.{ 31, 0, 17 }));
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&WorldChunkData.initSolid().blocks),
+        std.mem.asBytes(&stone.content.toData().blocks),
+    );
+}
+
+test "chunk content with blocks is indexed by local x, y, z" {
+    var world_chunk_data = WorldChunkData.initEmpty();
+    world_chunk_data.blocks[3][2][1] = .dirt;
+    const chunk = WorldChunk.initBlocks(&world_chunk_data);
+
+    try std.testing.expectEqual(BlockType.dirt, chunk.content.getBlock(.{ 1, 2, 3 }));
+    try std.testing.expectEqual(BlockType.none, chunk.content.getBlock(.{ 3, 2, 1 }));
+    try std.testing.expectEqual(world_chunk_data.getMetaFlags(), chunk.flags);
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&world_chunk_data.blocks),
+        std.mem.asBytes(&chunk.content.toData().blocks),
+    );
+}
+
+test "materializing a uniform chunk isn't a modification" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+
+    const coords = [3]u30{ 0, 0, 0 };
+    try world.insertChunk(coords, WorldChunk.initUniform(.stone));
+
+    const world_chunk_data = world.ensureChunkData(coords);
+    try std.testing.expectEqual(BlockType.stone, world_chunk_data.blocks[5][6][7]);
+    try std.testing.expectEqual(world_chunk_data, world.ensureChunkData(coords));
+
+    const chunk = world.getChunk(coords).?;
+    try std.testing.expectEqual(world_chunk_data, chunk.content.blocks);
+    try std.testing.expectEqual(WorldChunk.initUniform(.stone).flags, chunk.flags);
+    try std.testing.expect(!chunk.isDirty());
+    try std.testing.expectEqual(0, world.unsyncedChunks().len);
+    try std.testing.expectEqual(0, world.latest_revisions.count());
+
+    world.removeChunk(coords);
+}
+
+test "received chunk is accepted if it has the latest local revision or a newer one" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+
+    const coords = [3]u30{ 0, 0, 0 };
+    try world.insertChunk(coords, WorldChunk.initUniform(.stone));
+    world.setBlock(.{ 0, 0, 0 }, .none);
+    world.setBlock(.{ 1, 0, 0 }, .none);
+    world.markChunksSynced();
+    world.removeChunk(coords);
+
+    const older = createSolidChunk(1);
+    defer older.content.deinit(std.testing.allocator);
+    try std.testing.expectError(error.StaleChunk, world.insertChunk(coords, older));
+    try std.testing.expect(!world.hasChunk(coords));
+
+    try world.insertChunk(coords, createSolidChunk(2));
+    try std.testing.expectEqual(2, world.getChunk(coords).?.revision);
+    world.removeChunk(coords);
+
+    try world.insertChunk(coords, createSolidChunk(3));
+    world.setBlock(.{ 0, 0, 0 }, .none);
+    try std.testing.expectEqual(4, world.getChunk(coords).?.revision);
+    try std.testing.expectEqual(4, world.latest_revisions.get(encodeChunkPositionArray(coords)));
+}
+
+test "unsynced chunks list every modified chunk once until they are synced" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+
+    try world.insertChunk(.{ 0, 0, 0 }, WorldChunk.initUniform(.stone));
+    try world.insertChunk(.{ 1, 0, 0 }, WorldChunk.initUniform(.stone));
+    const first = encodeChunkPosition(0, 0, 0);
+    const second = encodeChunkPosition(1, 0, 0);
+
+    world.setBlock(.{ 0, 0, 0 }, .none);
+    world.setBlock(.{ 1, 0, 0 }, .none);
+    world.setBlock(.{ 2, 0, 0 }, .dirt);
+    try std.testing.expectEqualSlices(ChunkPosition, &.{first}, world.unsyncedChunks());
+    try std.testing.expectEqual(3, world.getChunk(.{ 0, 0, 0 }).?.revision);
+
+    world.setBlock(.{ CHUNK_SIZE, 0, 0 }, .none);
+    try std.testing.expectEqualSlices(ChunkPosition, &.{ first, second }, world.unsyncedChunks());
+
+    world.markChunksSynced();
+    try std.testing.expectEqual(0, world.unsyncedChunks().len);
+
+    world.setBlock(.{ CHUNK_SIZE + 1, 0, 0 }, .none);
+    try std.testing.expectEqualSlices(ChunkPosition, &.{second}, world.unsyncedChunks());
+    try std.testing.expectEqual(2, world.getChunk(.{ 1, 0, 0 }).?.revision);
+}
+
+test "column operations modify the chunk below when they cross a chunk border" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+
+    const lower = [3]u30{ 0, 0, WORLD_SIZE[2] - 2 };
+    const upper = [3]u30{ 0, 0, WORLD_SIZE[2] - 1 };
+    try world.insertChunk(lower, WorldChunk.initUniform(.stone));
+    try world.insertChunk(upper, WorldChunk.initUniform(.none));
+
+    const top = [3]u32{ 3, 4, WORLD_SIZE[2] * CHUNK_SIZE - 1 };
+    const lower_top = [3]u32{ 3, 4, upper[2] * CHUNK_SIZE - 1 };
+    try std.testing.expectEqual(lower_top, (try world.removeTopBlockInColumn(top)).?);
+    try std.testing.expectEqual(1, world.getChunk(lower).?.revision);
+    try std.testing.expectEqual(WorldChunk.initUniform(.none), world.getChunk(upper).?);
+
+    try std.testing.expectEqual(lower_top, (try world.dropBlockInColumn(top, .dirt)).?);
+    const upper_bottom = [3]u32{ 3, 4, upper[2] * CHUNK_SIZE };
+    try std.testing.expectEqual(upper_bottom, (try world.dropBlockInColumn(top, .dirt)).?);
+
+    try std.testing.expectEqual(2, world.getChunk(lower).?.revision);
+    const upper_chunk = world.getChunk(upper).?;
+    try std.testing.expectEqual(1, upper_chunk.revision);
+    try std.testing.expectEqual(BlockType.dirt, upper_chunk.content.getBlock(.{ 3, 4, 0 }));
+    try std.testing.expectEqualSlices(
+        ChunkPosition,
+        &.{ encodeChunkPositionArray(lower), encodeChunkPositionArray(upper) },
+        world.unsyncedChunks(),
+    );
+}
+
+test "dropped block falls to the bottom of the world" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+    try world.insertChunk(.{ 0, 0, 0 }, WorldChunk.initUniform(.none));
+
+    try std.testing.expectEqual([3]u32{ 7, 8, 0 }, (try world.dropBlockInColumn(.{ 7, 8, CHUNK_SIZE - 1 }, .dirt)).?);
+    try std.testing.expectEqual(1, world.getChunk(.{ 0, 0, 0 }).?.revision);
 }
