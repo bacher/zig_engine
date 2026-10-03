@@ -120,6 +120,9 @@ pub const WorldDataService = struct {
     requests: Mailbox(Request) = .{},
     responses: Mailbox(ChunkResponse) = .{},
     next_request_id: u64 = 1,
+    /// Set by `destroy`. Nobody is going to take the responses after it, so the worker stops
+    /// loading chunks, but still applies the updates.
+    is_shutting_down: std.atomic.Value(bool) = .init(false),
     worker: Io.Future(void),
     /// Accessed only by the worker while it's running.
     worker_state: WorkerState,
@@ -142,8 +145,10 @@ pub const WorldDataService = struct {
         return self;
     }
 
-    /// Waits until the worker processes all requests sent so far, then stops it.
+    /// Waits until the worker applies all chunk updates sent so far, then stops it. Pending
+    /// chunk loads are dropped.
     pub fn destroy(self: *WorldDataService) void {
+        self.is_shutting_down.store(true, .monotonic);
         self.requests.close(self.io);
         self.worker.await(self.io);
 
@@ -201,10 +206,14 @@ pub const WorldDataService = struct {
                 switch (request) {
                     .update_chunk => |update| self.worker_state.applyUpdate(self.allocator, update),
                     .load_chunks => |load| {
+                        if (self.is_shutting_down.load(.monotonic)) {
+                            continue;
+                        }
+
                         const column_generator = ColumnGenerator.init(self.worker_state.generator, load.column);
 
                         var z = load.z_start;
-                        while (z < load.z_end) : (z += 1) {
+                        while (z < load.z_end and !self.is_shutting_down.load(.monotonic)) : (z += 1) {
                             const coords = [3]u30{ load.column[0], load.column[1], z };
                             self.responses.push(self.io, self.allocator, .{
                                 .request_id = load.request_id,
@@ -647,4 +656,32 @@ test "destroying the service frees the queued requests and the responses nobody 
     service.submitChunkUpdate(encodeChunkPositionArray([3]u30{ 0, 0, 0 }), 2, &update);
 
     service.destroy();
+}
+
+test "shutting down worker skips chunk loads but still applies updates" {
+    // The worker runs on the test thread, so everything queued is processed when it returns.
+    var service = WorldDataService{
+        .io = std.testing.io,
+        .allocator = std.testing.allocator,
+        .worker = undefined,
+        .worker_state = .{ .generator = .flat },
+    };
+    defer {
+        service.requests.deinit(std.testing.allocator);
+        service.responses.deinit(std.testing.allocator);
+        service.worker_state.deinit(std.testing.allocator);
+    }
+
+    const position = encodeChunkPositionArray([3]u30{ 0, 0, 0 });
+    const update = WorldChunkData.initSolid();
+    _ = service.requestChunks(.{ 0, 0 }, 0, WORLD_SIZE[2]);
+    service.submitChunkUpdate(position, 1, &update);
+    _ = service.requestChunks(.{ 1, 0 }, 0, WORLD_SIZE[2]);
+
+    service.is_shutting_down.store(true, .monotonic);
+    service.requests.close(service.io);
+    service.runWorker();
+
+    try std.testing.expectEqual(0, service.responses.items.items.len);
+    try std.testing.expectEqual(1, service.worker_state.modified_chunks.get(position).?.revision);
 }
