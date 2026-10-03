@@ -16,6 +16,10 @@ Loading a chunk subscribes that client to snapshots of subsequent changes. Evict
 
 Local edits and received snapshots mark affected loaded chunks dirty. After processing updates and camera loading, each dirty chunk's mesh is rebuilt once from its latest contents and uploaded before rendering. Unloading a chunk cancels its pending rebuild.
 
+An **unreachable chunk** is enclosed by the fully solid adjacent faces of its six neighbors. It keeps its regular CPU block data and subscriptions, but skips mesh generation and GPU upload. Generation certifies enclosure using the heightmap plus a one-block strip beyond each horizontal face, with x wrapping; outer y/z boundary chunks remain reachable. This assumes the generated terrain has no caves or transparent blocks. A noclip camera inside an enclosed chunk would need a rendering exception.
+
+Opening a neighboring wall clears `is_unreachable` immediately in the main-thread cache, including across snapshot reconciliation. The service independently clears the flag, advances the revealed chunk's revision, retains it as modified even if nobody has loaded it, and notifies its subscribers. Reveals are permanent: rebuilding a wall does not hide the chunk again. This avoids waiting for a service round trip when digging across chunk boundaries. A metadata-only reveal retains the full CPU block data, so it can increase service memory usage.
+
 A simulation worker places a dirt block at the surface midpoint of the central chunk column, removes it after two seconds, and places it again two seconds later. It communicates only with the world-data service, so the main thread receives these changes through the same subscription mechanism.
 
 Run `zig build test` for the protocol, cache reconciliation, and simulation tests.

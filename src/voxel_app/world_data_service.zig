@@ -11,6 +11,7 @@ const ColumnGenerator = world_generator.ColumnGenerator;
 const ChunkPosition = @import("./consts.zig").ChunkPosition;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const WORLD_SIZE = @import("./consts.zig").WORLD_SIZE;
+const Side = @import("engine").voxel_chunk.Side;
 
 /// Unbounded multi-producer queue. Pushing never waits for the consumer (only for the short
 /// critical section), the consumer takes all queued items at once.
@@ -268,6 +269,21 @@ pub const WorldDataService = struct {
                     return;
                 }
                 if (result.status == .success) {
+                    // Reveal snapshots precede the edited wall, and go to every subscriber,
+                    // including the origin when it also has the neighboring chunk cached.
+                    for (result.revealed_neighbors) |neighbor_opt| {
+                        const neighbor = neighbor_opt orelse continue;
+                        const neighbor_position = encodeChunkPositionArray(neighbor);
+                        const revealed = self.worker_state.modified_chunks.get(neighbor_position).?;
+                        for (self.clients.items) |client| {
+                            const token = client.subscriptions.get(neighbor_position) orelse continue;
+                            client.responses.push(self.io, self.allocator, .{
+                                .subscription_id = token,
+                                .coords = neighbor,
+                                .chunk = revealed.clone(self.allocator),
+                            });
+                        }
+                    }
                     for (self.clients.items) |client| {
                         if (client == edit.client) continue;
                         const token = client.subscriptions.get(position) orelse continue;
@@ -305,21 +321,54 @@ const WorkerState = struct {
         return generator.generateChunk(allocator, coords[2]);
     }
 
-    fn applyOperation(self: *WorkerState, allocator: std.mem.Allocator, operation: BlockOperation) struct { status: OperationStatus, chunk: WorldChunk } {
+    fn applyOperation(self: *WorkerState, allocator: std.mem.Allocator, operation: BlockOperation) struct {
+        status: OperationStatus,
+        chunk: WorldChunk,
+        revealed_neighbors: [6]?[3]u30,
+    } {
         const coords, const local = world_module.splitBlockCoords(operation.block);
         const position = encodeChunkPositionArray(coords);
         var chunk = if (self.modified_chunks.get(position)) |stored| stored.clone(allocator) else blk: {
             const generator = ColumnGenerator.init(self.generator, .{ coords[0], coords[1] });
             break :blk generator.generateChunk(allocator, coords[2]);
         };
+        const previous_flags = chunk.flags;
         const status = chunk.apply(allocator, local, operation.action);
+        var revealed_neighbors: [6]?[3]u30 = @splat(null);
         if (status == .success) {
             chunk.revision += 1;
             const entry = self.modified_chunks.getOrPut(allocator, position) catch @panic("OOM");
             if (entry.found_existing) entry.value_ptr.content.deinit(allocator);
             entry.value_ptr.* = chunk.clone(allocator);
+            for (std.enums.values(Side)) |side| {
+                if (!previous_flags.getSideSolidness(side) or chunk.flags.getSideSolidness(side)) continue;
+                const neighbor = world_module.adjacentChunk(coords, side) orelse continue;
+                if (self.revealChunk(allocator, neighbor)) revealed_neighbors[@intFromEnum(side)] = neighbor;
+            }
         }
-        return .{ .status = status, .chunk = chunk };
+        return .{ .status = status, .chunk = chunk, .revealed_neighbors = revealed_neighbors };
+    }
+
+    /// Reveals even an unsubscribed chunk. Its revision makes it dirty, so later loads
+    /// use this retained state instead of regenerating the original unreachable flag.
+    fn revealChunk(self: *WorkerState, allocator: std.mem.Allocator, coords: [3]u30) bool {
+        const position = encodeChunkPositionArray(coords);
+        if (self.modified_chunks.getPtr(position)) |chunk| {
+            if (!chunk.flags.is_unreachable) return false;
+            chunk.flags.is_unreachable = false;
+            chunk.revision += 1;
+            return true;
+        }
+        const generator = ColumnGenerator.init(self.generator, .{ coords[0], coords[1] });
+        var chunk = generator.generateChunk(allocator, coords[2]);
+        if (!chunk.flags.is_unreachable) {
+            chunk.content.deinit(allocator);
+            return false;
+        }
+        chunk.flags.is_unreachable = false;
+        chunk.revision += 1;
+        self.modified_chunks.put(allocator, position, chunk) catch @panic("OOM");
+        return true;
     }
 };
 
@@ -614,4 +663,140 @@ test "shutdown skips generation requests but still commits commands" {
     try std.testing.expectEqual(0, client.responses.items.items.len);
     try std.testing.expectEqual(0, client.subscriptions.count());
     try std.testing.expectEqual(1, service.worker_state.modified_chunks.get(0).?.revision);
+}
+
+test "losing solid faces retains previously unloaded neighbors as dirty revisions" {
+    var state = WorkerState{ .generator = .{ .terrain = .{ .seed = 1, .params = .{ .base_height = 200, .height_amplitude = 0 } } } };
+    defer state.deinit(std.testing.allocator);
+    const coords = [3]u30{ 0, 2, 3 };
+    for (std.enums.values(Side), 0..) |side, index| {
+        var local = [3]u32{ 8, 8, 8 };
+        local[index / 2] = if (index % 2 == 0) 0 else CHUNK_SIZE - 1;
+        const result = state.applyOperation(std.testing.allocator, .{
+            .block = .{ coords[0] * CHUNK_SIZE + local[0], coords[1] * CHUNK_SIZE + local[1], coords[2] * CHUNK_SIZE + local[2] },
+            .action = .remove,
+        });
+        defer result.chunk.content.deinit(std.testing.allocator);
+        try std.testing.expectEqual(OperationStatus.success, result.status);
+        try std.testing.expectEqual(index + 1, result.chunk.revision);
+        for (result.revealed_neighbors, 0..) |neighbor_opt, neighbor_index| {
+            if (neighbor_index == index) {
+                const neighbor_coords = world_module.adjacentChunk(coords, side).?;
+                try std.testing.expectEqual(neighbor_coords, neighbor_opt.?);
+                const retained = state.modified_chunks.get(encodeChunkPositionArray(neighbor_coords)).?;
+                try std.testing.expect(!retained.flags.is_unreachable);
+                try std.testing.expect(retained.isDirty());
+                try std.testing.expectEqual(1, retained.revision);
+                try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, retained.solid_block_count);
+                const generator = ColumnGenerator.init(state.generator, .{ neighbor_coords[0], neighbor_coords[1] });
+                const reloaded = state.loadChunk(std.testing.allocator, &generator, neighbor_coords);
+                defer reloaded.content.deinit(std.testing.allocator);
+                try std.testing.expectEqual(retained.flags, reloaded.flags);
+                try std.testing.expectEqual(retained.revision, reloaded.revision);
+            } else {
+                try std.testing.expectEqual(null, neighbor_opt);
+            }
+        }
+    }
+    try std.testing.expectEqual(7, state.modified_chunks.count());
+
+    // Resealing and reopening a wall never hides or revises the revealed neighbor again.
+    for ([_]world_module.BlockAction{ .{ .put = .stone }, .remove, .remove }) |action| {
+        const result = state.applyOperation(std.testing.allocator, .{
+            .block = .{ 0, 2 * CHUNK_SIZE + 8, 3 * CHUNK_SIZE + 8 },
+            .action = action,
+        });
+        defer result.chunk.content.deinit(std.testing.allocator);
+        for (result.revealed_neighbors) |neighbor| try std.testing.expectEqual(null, neighbor);
+    }
+    const wrapped_neighbor = state.modified_chunks.get(world_module.encodeChunkPosition(WORLD_SIZE[0] - 1, 2, 3)).?;
+    try std.testing.expectEqual(1, wrapped_neighbor.revision);
+    try std.testing.expect(!wrapped_neighbor.flags.is_unreachable);
+}
+
+test "interior edits expose no neighbors and a corner reveals three face neighbors" {
+    var state = WorkerState{ .generator = .flat };
+    defer state.deinit(std.testing.allocator);
+    const interior = state.applyOperation(std.testing.allocator, .{
+        .block = .{ 8, 2 * CHUNK_SIZE + 8, 2 * CHUNK_SIZE + 8 },
+        .action = .remove,
+    });
+    defer interior.chunk.content.deinit(std.testing.allocator);
+    try std.testing.expect(interior.chunk.flags.is_unreachable);
+    for (interior.revealed_neighbors) |neighbor| try std.testing.expectEqual(null, neighbor);
+    try std.testing.expectEqual(1, state.modified_chunks.count());
+
+    const corner = state.applyOperation(std.testing.allocator, .{
+        .block = .{ 0, 2 * CHUNK_SIZE, 2 * CHUNK_SIZE },
+        .action = .remove,
+    });
+    defer corner.chunk.content.deinit(std.testing.allocator);
+    for (corner.revealed_neighbors, 0..) |neighbor, side| {
+        try std.testing.expectEqual(side % 2 == 0, neighbor != null);
+    }
+    try std.testing.expectEqual(4, state.modified_chunks.count());
+    try std.testing.expect(!state.modified_chunks.contains(world_module.encodeChunkPosition(WORLD_SIZE[0] - 1, 1, 1)));
+
+    // Revealing a previously edited chunk must preserve its blocks and advance its own
+    // revision, independently of the operation that opened the neighboring wall.
+    const opening = state.applyOperation(std.testing.allocator, .{
+        .block = .{ CHUNK_SIZE, 2 * CHUNK_SIZE + 8, 2 * CHUNK_SIZE + 8 },
+        .action = .remove,
+    });
+    defer opening.chunk.content.deinit(std.testing.allocator);
+    try std.testing.expectEqual([3]u30{ 0, 2, 2 }, opening.revealed_neighbors[@intFromEnum(Side.left)].?);
+    const revealed = state.modified_chunks.get(world_module.encodeChunkPosition(0, 2, 2)).?;
+    try std.testing.expectEqual(3, revealed.revision);
+    try std.testing.expect(!revealed.flags.is_unreachable);
+    try std.testing.expectEqual(.none, revealed.content.getBlock(.{ 8, 8, 8 }));
+    try std.testing.expectEqual(.none, revealed.content.getBlock(.{ 0, 0, 0 }));
+    try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE - 2, revealed.solid_block_count);
+}
+
+test "reveals notify all neighbor subscribers and survive eviction and reload" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    defer service.destroy();
+    const origin = try service.createClient();
+    const observer = try service.createClient();
+    const other = try service.createClient();
+    const coords = [3]u30{ 1, 1, 2 };
+    const position = encodeChunkPositionArray(coords);
+    const origin_token = origin.requestChunks(.{ 1, 1 }, 2, 3);
+    const observer_token = observer.requestChunks(.{ 1, 1 }, 2, 3);
+    _ = other.requestChunks(.{ 5, 5 }, 2, 3);
+    const edit = origin.submitOperation(.{ .block = .{ CHUNK_SIZE + 8, CHUNK_SIZE + 8, 3 * CHUNK_SIZE }, .action = .remove });
+    var origin_responses: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&origin_responses);
+    try waitForResponses(origin, &origin_responses, 3);
+    try std.testing.expect(origin_responses.items[0].chunk.flags.is_unreachable);
+    const reveal = origin_responses.items[1];
+    try std.testing.expectEqual(coords, reveal.coords);
+    try std.testing.expectEqual(origin_token, reveal.subscription_id);
+    try std.testing.expectEqual(null, reveal.operation);
+    try std.testing.expect(!reveal.chunk.flags.is_unreachable);
+    try std.testing.expectEqual(1, reveal.chunk.revision);
+    try std.testing.expectEqual(edit, origin_responses.items[2].operation.?.request_id);
+
+    var observed: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&observed);
+    observer.takeResponses(&observed);
+    try std.testing.expectEqual(2, observed.items.len);
+    try std.testing.expectEqual(observer_token, observed.items[1].subscription_id);
+    try std.testing.expectEqual(coords, observed.items[1].coords);
+    try std.testing.expectEqual(null, observed.items[1].operation);
+    try std.testing.expectEqual(1, observed.items[1].chunk.revision);
+    try std.testing.expect(!observed.items[1].chunk.flags.is_unreachable);
+    var unrelated: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&unrelated);
+    other.takeResponses(&unrelated);
+    try std.testing.expectEqual(1, unrelated.items.len);
+
+    origin.evictChunk(position, origin_token);
+    const reload_token = origin.requestChunks(.{ 1, 1 }, 2, 3);
+    try waitForResponses(origin, &origin_responses, 4);
+    const reload = origin_responses.items[3];
+    try std.testing.expectEqual(reload_token, reload.subscription_id);
+    try std.testing.expectEqual(1, reload.chunk.revision);
+    try std.testing.expect(!reload.chunk.flags.is_unreachable);
+    try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, reload.chunk.solid_block_count);
 }

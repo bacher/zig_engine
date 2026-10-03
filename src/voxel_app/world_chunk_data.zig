@@ -4,6 +4,9 @@ const Side = @import("engine").voxel_chunk.Side;
 const CHUNK_SIZE = 32;
 
 pub const ChunkFlags = packed struct {
+    /// All six neighboring chunks have solid walls facing this chunk. Generation may
+    /// set this flag; revealing the chunk clears it permanently, even if walls are rebuilt.
+    is_unreachable: bool = false,
     /// means that the chunk is solid from the left side
     solid_left: bool = false,
     /// means that the chunk is solid from the right side

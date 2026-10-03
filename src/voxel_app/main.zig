@@ -37,7 +37,7 @@ const world_engine = @import("./world_engine_glue.zig");
 
 const DEBUG = true;
 
-/// Chunks within this distance from the camera chunk are requested and uploaded to the GPU.
+/// Chunks within this distance are requested; reachable chunks are uploaded to the GPU.
 const CHUNK_LOAD_RADIUS = 2;
 /// Chunks farther than this are evicted. Larger than `CHUNK_LOAD_RADIUS`, so moving back and
 /// forth across a chunk border doesn't re-request the same chunks.
@@ -387,22 +387,6 @@ const Game = struct {
         }
     }
 
-    // TODO: will be refactored later, for now just draw all chunks
-    // fn checkIfChunkCanBeSkipped(game: *Game, chunk_coords: [3]u30) bool {
-    //     const surrounding_chunks = getSurroundingChunks(&game.world.?, chunk_coords);
-    //
-    //     for (surrounding_chunks, 0..) |surrounding_chunk_opt, side_index| {
-    //         // out of world bounds, nothing can be seen from there
-    //         const surrounding_chunk = surrounding_chunk_opt orelse continue;
-    //
-    //         const side = @as(Side, @enumFromInt(side_index));
-    //         if (!surrounding_chunk.flags.getSideSolidness(side.getOpposite())) {
-    //             return false;
-    //         }
-    //     }
-    //     return true;
-    // }
-
     fn editBlockUnderCamera(game: *Game, action: BlockAction) void {
         const world = if (game.world) |*world| world else return;
 
@@ -481,7 +465,7 @@ const Game = struct {
             const coords = world_module.decodeChunkPosition(chunk_id.*);
             voxel_grid.removeChunk(coords);
             const chunk = world.getChunk(coords) orelse continue;
-            if (chunk.content == .blocks) {
+            if (chunk.content == .blocks and !chunk.flags.is_unreachable) {
                 voxel_grid.appendChunk(.{
                     .chunk_coords = coords,
                     .chunk_side_data = world_engine.extractChunkSideData(game.allocator, chunk.content.blocks),
@@ -1161,4 +1145,87 @@ test "new subscription rejects queued snapshots from an evicted generation" {
     }));
     try std.testing.expect(try world.isBlockSolid(.{ 1, 2, 3 }));
     try std.testing.expectEqual(2, subscriptions.get(encodeChunkPositionArray(coords)));
+}
+
+test "unreachable chunks keep CPU blocks and queue a mesh immediately after a local reveal" {
+    const allocator = std.testing.allocator;
+    var grid: @import("engine").VoxelGrid = .{
+        .allocator = allocator,
+        .gpu_chunk_info_buffer = undefined,
+        .gpu_block_buffer = undefined,
+    };
+    defer {
+        grid.clearChunks();
+        grid.chunks.deinit(allocator);
+        grid.chunks_to_upload.deinit(allocator);
+    }
+    var scene: Scene = undefined;
+    scene.voxel_grid = &grid;
+    var engine: Engine = undefined;
+    engine.active_scene = &scene;
+    var game: Game = .{ .allocator = allocator, .engine = &engine, .world = World.init(allocator) };
+    defer game.world.?.deinit();
+    defer game.loaded_chunk_ids.deinit(allocator);
+    defer game.dirty_chunk_ids.deinit(allocator);
+    defer game.chunk_subscriptions.deinit(allocator);
+    const coords = [3]u30{ 1, 1, 2 };
+    const column = world_generator.ColumnGenerator.init(.flat, .{ 1, 1 });
+    try game.world.?.insertChunk(coords, column.generateChunk(allocator, 2));
+    try game.world.?.insertChunk(.{ 1, 1, 3 }, column.generateChunk(allocator, 3));
+    game.loadChunkIfNeeded(1, 1, 2);
+    game.rebuildDirtyChunks();
+    try std.testing.expectEqual(0, grid.chunks_to_upload.items.len);
+    try std.testing.expect(game.loaded_chunk_ids.contains(encodeChunkPositionArray(coords)));
+    try std.testing.expect(game.world.?.getChunk(coords).?.flags.is_unreachable);
+    try std.testing.expect(try game.world.?.isBlockSolid(.{ consts.CHUNK_SIZE + 8, consts.CHUNK_SIZE + 8, 2 * consts.CHUNK_SIZE + 31 }));
+
+    // The service has not been contacted. Opening the bottom wall of the surface chunk
+    // reveals the chunk below and queues its mesh in this same frame.
+    const block = [3]u32{ consts.CHUNK_SIZE + 8, consts.CHUNK_SIZE + 8, 3 * consts.CHUNK_SIZE };
+    game.world.?.setBlock(block, .none);
+    game.markChunksAroundBlockDirty(block);
+    try std.testing.expectEqual(1, game.world.?.pending_operations.items.len);
+    try std.testing.expectEqual(0, game.world.?.getChunk(coords).?.revision);
+    try std.testing.expect(!game.world.?.getChunk(coords).?.flags.is_unreachable);
+    game.rebuildDirtyChunks();
+    try std.testing.expectEqual(1, grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(coords, grid.chunks_to_upload.items[0].chunk_coords);
+    for (grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side) |side| {
+        try std.testing.expectEqual(consts.CHUNK_SIZE * consts.CHUNK_SIZE, side.items.len);
+    }
+    grid.clearChunks();
+
+    // An older in-flight load cannot hide the chunk while the wall edit is outstanding.
+    try game.chunk_subscriptions.put(allocator, encodeChunkPositionArray(coords), 1);
+    try std.testing.expect(applyChunkResponse(&game.world.?, &game.chunk_subscriptions, .{
+        .coords = coords,
+        .subscription_id = 1,
+        .chunk = column.generateChunk(allocator, 2),
+    }));
+    game.markChunkAndNeighborsDirty(coords);
+    game.rebuildDirtyChunks();
+    try std.testing.expectEqual(1, grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(coords, grid.chunks_to_upload.items[0].chunk_coords);
+    grid.clearChunks();
+
+    // A service-only metadata change also invalidates a hidden chunk's GPU state.
+    const remote_coords = [3]u30{ 5, 5, 2 };
+    const remote_column = world_generator.ColumnGenerator.init(.flat, .{ 5, 5 });
+    try game.world.?.insertChunk(remote_coords, remote_column.generateChunk(allocator, 2));
+    game.loadChunkIfNeeded(5, 5, 2);
+    game.rebuildDirtyChunks();
+    try std.testing.expectEqual(0, grid.chunks_to_upload.items.len);
+    try game.chunk_subscriptions.put(allocator, encodeChunkPositionArray(remote_coords), 2);
+    var reveal = remote_column.generateChunk(allocator, 2);
+    reveal.flags.is_unreachable = false;
+    reveal.revision = 1;
+    try std.testing.expect(applyChunkResponse(&game.world.?, &game.chunk_subscriptions, .{
+        .coords = remote_coords,
+        .subscription_id = 2,
+        .chunk = reveal,
+    }));
+    game.markChunkAndNeighborsDirty(remote_coords);
+    game.rebuildDirtyChunks();
+    try std.testing.expectEqual(1, grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(remote_coords, grid.chunks_to_upload.items[0].chunk_coords);
 }

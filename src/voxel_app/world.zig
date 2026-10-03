@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const BlockType = @import("engine").voxel_chunk.BlockType;
+const Side = @import("engine").voxel_chunk.Side;
 const WorldChunkData = @import("./world_chunk_data.zig").WorldChunkData;
 const ChunkFlags = @import("./world_chunk_data.zig").ChunkFlags;
 const world_generator = @import("./world_generator.zig");
@@ -46,6 +47,16 @@ pub fn encodeChunkPosition(x: anytype, y: anytype, z: anytype) ChunkPosition {
 
 pub fn encodeChunkPositionArray(coords: anytype) ChunkPosition {
     return encodeChunkPosition(coords[0], coords[1], coords[2]);
+}
+
+/// Face neighbors wrap around x; missing neighbors beyond y/z leave the world exposed.
+pub fn adjacentChunk(coords: [3]u30, side: Side) ?[3]u30 {
+    const axis = @intFromEnum(side) / 2;
+    var neighbor = [3]i32{ coords[0], coords[1], coords[2] };
+    neighbor[axis] += if (@intFromEnum(side) % 2 == 0) @as(i32, -1) else 1;
+    if (neighbor[1] < 0 or neighbor[1] >= WORLD_SIZE[1] or
+        neighbor[2] < 0 or neighbor[2] >= WORLD_SIZE[2]) return null;
+    return normalizeChunkPosition(neighbor[0], neighbor[1], neighbor[2]);
 }
 
 pub fn decodeChunkPosition(position: ChunkPosition) [3]u30 {
@@ -101,7 +112,7 @@ pub const WorldChunk = struct {
     flags: ChunkFlags,
     /// Number of blocks of the content that aren't `.none`.
     solid_block_count: u16,
-    /// Authoritative revision, advanced only by the world-data service after a successful edit.
+    /// Authoritative revision, advanced only by the world-data service for content or flag changes.
     /// Optimistic edits never change it. 0 means no edits have been committed yet.
     revision: u32 = 0,
 
@@ -157,6 +168,7 @@ pub const WorldChunk = struct {
             },
         };
         const data = self.ensureData(allocator);
+        const was_unreachable = self.flags.is_unreachable;
         data.blocks[local[2]][local[1]][local[0]] = block_type;
         if (block_type == .none) {
             self.solid_block_count -= 1;
@@ -170,6 +182,8 @@ pub const WorldChunk = struct {
         } else {
             self.flags = data.getMetaFlags();
         }
+        // Face flags describe our blocks; reachability describes neighboring walls.
+        self.flags.is_unreachable = was_unreachable;
         return .success;
     }
 
@@ -249,18 +263,40 @@ pub const World = struct {
     /// Replaces the cache with authoritative data, then replays pending commands in order.
     pub fn insertChunk(self: *World, coords: [3]u30, chunk: WorldChunk) error{StaleChunk}!void {
         const position = encodeChunkPositionArray(coords);
+        var updated = chunk;
         if (self.chunks.getPtr(position)) |previous| {
             if (chunk.revision < previous.revision) return error.StaleChunk;
+            // An in-flight snapshot must never undo an optimistic reveal.
+            updated.flags.is_unreachable = updated.flags.is_unreachable and previous.flags.is_unreachable;
             previous.content.deinit(self.allocator);
         }
-        var updated = chunk;
         for (self.pending_operations.items) |pending| {
             const pending_coords, const local = splitBlockCoords(pending.operation.block);
             if (encodeChunkPositionArray(pending_coords) == position) {
                 _ = updated.apply(self.allocator, local, pending.operation.action);
             }
         }
+        // Loads and neighboring snapshots can arrive in either order. Account for walls
+        // already opened in the cache, including edits that haven't reached the service.
+        for (std.enums.values(Side)) |side| {
+            const neighbor_coords = adjacentChunk(coords, side) orelse continue;
+            const neighbor = self.getChunk(neighbor_coords) orelse continue;
+            if (!neighbor.flags.getSideSolidness(side.getOpposite())) updated.flags.is_unreachable = false;
+        }
         self.chunks.put(self.allocator, position, updated) catch @panic("OOM");
+        self.revealNeighbors(coords, updated.flags);
+    }
+
+    /// Only a performance hint changes locally. No command or revision is needed: the
+    /// service independently reveals these neighbors when it commits the block operation.
+    fn revealNeighbors(self: *World, coords: [3]u30, flags: ChunkFlags) void {
+        for (std.enums.values(Side)) |side| {
+            if (flags.getSideSolidness(side)) continue;
+            const neighbor_coords = adjacentChunk(coords, side) orelse continue;
+            if (self.chunks.getPtr(encodeChunkPositionArray(neighbor_coords))) |neighbor| {
+                neighbor.flags.is_unreachable = false;
+            }
+        }
     }
 
     /// Retire both successful and failed commands before incorporating their snapshot.
@@ -305,6 +341,7 @@ pub const World = struct {
         const coords, const local = splitBlockCoords(block);
         const chunk = self.chunks.getPtr(encodeChunkPositionArray(coords)).?;
         if (chunk.apply(self.allocator, local, operation.action) != .success) return;
+        self.revealNeighbors(coords, chunk.flags);
         self.pending_operations.append(self.allocator, .{ .operation = operation }) catch @panic("OOM");
     }
 
@@ -699,4 +736,86 @@ test "local conflicts queue no command and do not change metadata" {
     try std.testing.expectEqual(BlockType.dirt, chunk.content.getBlock(.{ 0, 0, 0 }));
     try std.testing.expectEqual(1, chunk.solid_block_count);
     try std.testing.expectEqual(0, chunk.revision);
+}
+
+test "opening each solid face reveals only its cached neighbor without queuing metadata edits" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+    const coords = [3]u30{ 0, 3, 2 };
+    var source = createSolidChunk(3);
+    source.flags.is_unreachable = true;
+    try world.insertChunk(coords, source);
+    for (std.enums.values(Side)) |side| {
+        var neighbor = createSolidChunk(4);
+        neighbor.flags.is_unreachable = true;
+        try world.insertChunk(adjacentChunk(coords, side).?, neighbor);
+    }
+    // Interior edits preserve the reachability flag and expose no neighbor.
+    world.setBlock(.{ 16, 3 * CHUNK_SIZE + 16, 2 * CHUNK_SIZE + 16 }, .none);
+    try std.testing.expect(world.getChunk(coords).?.flags.is_unreachable);
+    for (std.enums.values(Side)) |side| {
+        try std.testing.expect(world.getChunk(adjacentChunk(coords, side).?).?.flags.is_unreachable);
+    }
+    for (std.enums.values(Side), 0..) |side, index| {
+        var local = [3]u32{ 8, 8, 8 };
+        local[index / 2] = if (index % 2 == 0) 0 else CHUNK_SIZE - 1;
+        world.setBlock(.{ coords[0] * CHUNK_SIZE + local[0], coords[1] * CHUNK_SIZE + local[1], coords[2] * CHUNK_SIZE + local[2] }, .none);
+        for (std.enums.values(Side), 0..) |other_side, other_index| {
+            const neighbor = world.getChunk(adjacentChunk(coords, other_side).?).?;
+            try std.testing.expectEqual(other_index > index, neighbor.flags.is_unreachable);
+            try std.testing.expectEqual(4, neighbor.revision);
+            try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, neighbor.solid_block_count);
+        }
+        try std.testing.expect(!world.getChunk(coords).?.flags.getSideSolidness(side));
+    }
+    try std.testing.expectEqual(7, world.pending_operations.items.len);
+    try std.testing.expectEqual(3, world.getChunk(coords).?.revision);
+}
+
+test "optimistic reveals survive in-flight snapshots and failed-edit rollback" {
+    var world = World.init(std.testing.allocator);
+    defer world.deinit();
+    const source_coords = [3]u30{ 1, 1, 2 };
+    const target_coords = [3]u30{ 1, 1, 1 };
+    const authority = createSolidChunk(0);
+    defer authority.content.deinit(std.testing.allocator);
+    var hidden = createSolidChunk(0);
+    defer hidden.content.deinit(std.testing.allocator);
+    hidden.flags.is_unreachable = true;
+    try world.insertChunk(source_coords, authority.clone(std.testing.allocator));
+    try world.insertChunk(target_coords, hidden.clone(std.testing.allocator));
+    world.setBlock(.{ CHUNK_SIZE + 8, CHUNK_SIZE + 8, 2 * CHUNK_SIZE }, .none);
+    world.pending_operations.items[0].request_id = 1;
+    try std.testing.expect(!world.getChunk(target_coords).?.flags.is_unreachable);
+    try std.testing.expect(!world.getChunk(target_coords).?.isDirty());
+    try world.insertChunk(target_coords, hidden.clone(std.testing.allocator));
+    try std.testing.expect(!world.getChunk(target_coords).?.flags.is_unreachable);
+
+    world.acknowledgeOperation(1);
+    try world.insertChunk(source_coords, authority.clone(std.testing.allocator));
+    try world.insertChunk(target_coords, hidden.clone(std.testing.allocator));
+    try std.testing.expect(world.getChunk(source_coords).?.flags.solid_bottom);
+    try std.testing.expect(!world.getChunk(target_coords).?.flags.is_unreachable);
+    try std.testing.expectEqual(0, world.pending_operations.items.len);
+}
+
+test "loading an opened wall and hidden neighbor in either order reveals the neighbor" {
+    for ([_]bool{ false, true }) |wall_first| {
+        var world = World.init(std.testing.allocator);
+        defer world.deinit();
+        var wall = createSolidChunk(1);
+        _ = wall.apply(std.testing.allocator, .{ 0, 8, 8 }, .remove);
+        var hidden = createSolidChunk(0);
+        hidden.flags.is_unreachable = true;
+        const target_coords = [3]u30{ WORLD_SIZE[0] - 1, 2, 1 };
+        if (wall_first) {
+            try world.insertChunk(.{ 0, 2, 1 }, wall);
+            try world.insertChunk(target_coords, hidden);
+        } else {
+            try world.insertChunk(target_coords, hidden);
+            try world.insertChunk(.{ 0, 2, 1 }, wall);
+        }
+        try std.testing.expect(!world.getChunk(target_coords).?.flags.is_unreachable);
+        try std.testing.expectEqual(0, world.getChunk(target_coords).?.revision);
+    }
 }
