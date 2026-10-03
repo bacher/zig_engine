@@ -87,9 +87,9 @@ fn generateFlatChunk(allocator: std.mem.Allocator, chunk_z: u30) WorldChunk {
         return allocateChunk(allocator, WorldChunkData.initFlat());
     }
     if (chunk_z + 2 <= center_z) {
-        return WorldChunk.initUniform(.stone);
+        return allocateChunk(allocator, WorldChunkData.initSolid());
     }
-    return WorldChunk.initUniform(.none);
+    return WorldChunk.initEmpty();
 }
 
 const TerrainColumn = struct {
@@ -124,11 +124,11 @@ const TerrainColumn = struct {
 
         // Entirely above the surface.
         if (chunk_bottom >= self.maximum_height) {
-            return WorldChunk.initUniform(.none);
+            return WorldChunk.initEmpty();
         }
         // Entirely below the dirt layer.
         if (chunk_top + self.dirt_depth < self.minimum_height) {
-            return WorldChunk.initUniform(.stone);
+            return allocateChunk(allocator, WorldChunkData.initSolid());
         }
 
         return allocateChunk(allocator, generateTerrainChunk(&self.heights, chunk_bottom, self.dirt_depth));
@@ -250,19 +250,32 @@ test "terrain column has surface chunks between stone and air" {
     const column_generator = ColumnGenerator.init(.{ .terrain = .{ .seed = 12345 } }, .{ 0, 0 });
 
     const bottom = column_generator.generateChunk(std.testing.allocator, 0);
-    try std.testing.expectEqual(WorldChunk.initUniform(.stone), bottom);
+    defer bottom.content.deinit(std.testing.allocator);
+    try std.testing.expect(bottom.content == .blocks);
+    try std.testing.expectEqualSlices(
+        u8,
+        std.mem.asBytes(&WorldChunkData.initSolid().blocks),
+        std.mem.asBytes(&bottom.content.blocks.blocks),
+    );
+    try std.testing.expectEqual(WorldChunkData.initSolid().getMetaFlags(), bottom.flags);
+
     const top = column_generator.generateChunk(std.testing.allocator, WORLD_SIZE[2] - 1);
-    try std.testing.expectEqual(WorldChunk.initUniform(.none), top);
+    try std.testing.expectEqual(WorldChunk.initEmpty(), top);
 
     var surface_chunk_count: usize = 0;
     for (0..WORLD_SIZE[2]) |z| {
         var chunk = column_generator.generateChunk(std.testing.allocator, @intCast(z));
         defer chunk.content.deinit(std.testing.allocator);
-        if (chunk.content == .blocks) {
+        const data = chunk.content.toData();
+        if (std.mem.indexOfScalar(BlockType, asFlatBlocks(&data), .grass) != null) {
             surface_chunk_count += 1;
         }
     }
     try std.testing.expect(surface_chunk_count > 0);
+}
+
+fn asFlatBlocks(data: *const WorldChunkData) []const BlockType {
+    return @as(*const [CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]BlockType, @ptrCast(&data.blocks));
 }
 
 test "flat world has the surface chunk in the middle, stone below and air above" {
@@ -281,14 +294,19 @@ test "flat world has the surface chunk in the middle, stone below and air above"
                 std.mem.asBytes(&chunk.content.blocks.blocks),
             );
         } else if (z < surface_z) {
-            try std.testing.expectEqual(WorldChunk.initUniform(.stone), chunk);
+            try std.testing.expect(chunk.content == .blocks);
+            try std.testing.expectEqualSlices(
+                u8,
+                std.mem.asBytes(&WorldChunkData.initSolid().blocks),
+                std.mem.asBytes(&chunk.content.blocks.blocks),
+            );
         } else {
-            try std.testing.expectEqual(WorldChunk.initUniform(.none), chunk);
+            try std.testing.expectEqual(WorldChunk.initEmpty(), chunk);
         }
     }
 }
 
-test "uniform terrain chunks match the full generation" {
+test "shortcut terrain chunks match the full generation, only chunks without blocks are empty" {
     const params = WorldGenerationParams{};
     const coords = [2]u30{ 7, 3 };
     const column_generator = ColumnGenerator.init(.{ .terrain = .{ .seed = 12345, .params = params } }, coords);
@@ -304,5 +322,9 @@ test "uniform terrain chunks match the full generation" {
             std.mem.asBytes(&expected.blocks),
             std.mem.asBytes(&chunk.content.toData().blocks),
         );
+        try std.testing.expectEqual(expected.getMetaFlags(), chunk.flags);
+
+        const has_blocks = std.mem.indexOfNone(BlockType, asFlatBlocks(&expected), &.{.none}) != null;
+        try std.testing.expectEqual(!has_blocks, chunk.content == .empty);
     }
 }

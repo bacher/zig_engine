@@ -452,13 +452,12 @@ const Game = struct {
             std.debug.print("{s} block {any}\n", .{ @tagName(action), edited_block });
         }
 
-        game.reloadChunksAroundBlock(edited_block, action == .remove);
+        game.reloadChunksAroundBlock(edited_block);
     }
 
     /// Re-uploads the chunk of the edited block and the neighbor chunks sharing a face with it,
     /// because their visibility depends on the solidness of the chunk sides.
-    fn reloadChunksAroundBlock(game: *Game, block: [3]u32, is_block_removed: bool) void {
-        const world = &game.world.?;
+    fn reloadChunksAroundBlock(game: *Game, block: [3]u32) void {
         const chunk_coords, const local = world_module.splitBlockCoords(block);
 
         game.reloadChunkIfLoaded(chunk_coords);
@@ -473,17 +472,6 @@ const Game = struct {
             var neighbor_coords_i = [3]i32{ chunk_coords[0], chunk_coords[1], chunk_coords[2] };
             neighbor_coords_i[axis] += offset;
             const neighbor_coords = normalizeChunkCoords(neighbor_coords_i) orelse continue;
-
-            // Uniform chunks have no block data, so the walls of the hole wouldn't be rendered.
-            // Neighbors near the camera are normally received; if not, the walls stay hidden.
-            if (is_block_removed) {
-                if (world.getChunk(neighbor_coords)) |neighbor| {
-                    if (neighbor.content == .uniform and neighbor.content.uniform != .none) {
-                        _ = world.ensureChunkData(neighbor_coords);
-                    }
-                }
-            }
-
             game.reloadChunkIfLoaded(neighbor_coords);
         }
 
