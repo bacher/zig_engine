@@ -137,6 +137,15 @@ pub const VoxelGrid = struct {
 
     /// Removes a chunk (if it's loaded) from the voxel grid and releases the GPU memory slot.
     pub fn removeChunk(self: *Self, chunk_coords: [3]u30) void {
+        // Multiple packages can replace a mesh before the frame's upload. Cancel the
+        // previous queued ownership as well as any resident geometry.
+        var queued: usize = 0;
+        while (queued < self.chunks_to_upload.items.len) {
+            if (std.mem.eql(u30, &self.chunks_to_upload.items[queued].chunk_coords, &chunk_coords)) {
+                var obsolete = self.chunks_to_upload.orderedRemove(queued);
+                obsolete.chunk_side_data.deinit(self.allocator);
+            } else queued += 1;
+        }
         for (self.chunks.items, 0..) |*chunk, i| {
             if (chunk.chunk_origin[0] == chunk_coords[0] and
                 chunk.chunk_origin[1] == chunk_coords[1] and
@@ -151,6 +160,23 @@ pub const VoxelGrid = struct {
                 return;
             }
         }
+    }
+
+    /// Simulate the exact allocation sequence, including span fragmentation and rounding,
+    /// before writing any part of the frame's uploads. Also usable without a GPU device.
+    pub fn hasUploadCapacity(self: *const Self) bool {
+        var blocks = self.gpu_block_buffer_manager;
+        var chunks = self.gpu_chunk_info_buffer_manager;
+        for (self.chunks_to_upload.items) |upload| {
+            var count: usize = 0;
+            for (upload.chunk_side_data.blocks_grouped_by_side) |side| count += side.items.len;
+            if (count == 0) continue;
+            const level = calculateDataSlotSizeLevel(@as(f32, @floatFromInt(count)) * BLOCKS_PER_SLOT_INV);
+            if (level > MAX_SPAN_SIZE_EXPONENT) return false;
+            _ = blocks.occupyBlock(.{ .size_exponent = level }) catch return false;
+            _ = chunks.occupyBlock() catch return false;
+        }
+        return true;
     }
 
     pub fn uploadToGPU(self: *Self, gctx: *zgpu.GraphicsContext) void {
@@ -311,11 +337,13 @@ fn convertSideDataIndicesIntoPerspectiveIndices(side_data_indices: [6]SideDataPo
             },
             .{
                 faces_count[0] + faces_count[1],
-                side_data_indices[y].index - faces_count[0],
+                // Empty directions have no stored range and the shader never reads
+                // their offset. Subtracting from their default zero would underflow.
+                if (faces_count[1] == 0) 0 else side_data_indices[y].index - faces_count[0],
             },
             .{
                 total_faces_count,
-                side_data_indices[z].index - faces_count[0] - faces_count[1],
+                if (faces_count[2] == 0) 0 else side_data_indices[z].index - faces_count[0] - faces_count[1],
             },
         };
 
@@ -337,4 +365,30 @@ fn convertSideDataIndicesIntoPerspectiveIndices(side_data_indices: [6]SideDataPo
     //     .{ side_data_indices[0], side_data_indices[3], side_data_indices[4], 0 }, // -x +y +z
     //     .{ side_data_indices[0], side_data_indices[3], side_data_indices[5], 0 }, // +x +y +z
     // };
+}
+
+test "perspective offsets address the correct faces for every combination of empty directions" {
+    for (0..64) |mask| {
+        var positions: [6]SideDataPosition = @splat(.{ .index = 0, .count = 0 });
+        var next: u16 = 0;
+        for (&positions, 0..) |*position, i| {
+            if (mask & (@as(usize, 1) << @intCast(i)) == 0) continue;
+            position.* = .{ .index = next, .count = @intCast(i + 1) };
+            next += position.count;
+        }
+        const perspective = convertSideDataIndicesIntoPerspectiveIndices(positions);
+        for (INDEXES, 0..) |sides, view| {
+            var face_index: u16 = 0;
+            for (sides, 0..) |side, range| {
+                const entry = positions[side];
+                for (0..entry.count) |local| {
+                    const shader_offset = perspective.view_side_data_indices[view][range][1];
+                    try std.testing.expectEqual(entry.index + local, face_index + shader_offset);
+                    face_index += 1;
+                }
+                try std.testing.expectEqual(face_index, perspective.view_side_data_indices[view][range][0]);
+            }
+            try std.testing.expectEqual(face_index, perspective.faces_count_per_view[view]);
+        }
+    }
 }
