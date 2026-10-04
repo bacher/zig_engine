@@ -38,12 +38,12 @@ const world_engine = @import("./world_engine_glue.zig");
 const DEBUG = true;
 
 /// Chunks within this distance are requested; reachable chunks are uploaded to the GPU.
-const CHUNK_LOAD_RADIUS = 2;
-/// Chunks farther than this are evicted. Larger than `CHUNK_LOAD_RADIUS`, so moving back and
-/// forth across a chunk border doesn't re-request the same chunks.
-const CHUNK_KEEP_RADIUS = CHUNK_LOAD_RADIUS + 1;
+const CHUNK_LOAD_RADIUS = 3;
+const BLOCK_LOAD_RADIUS = 1;
+const TOOL_REACH: f32 = 20;
 
 const Game = struct {
+    const MeshVersion = struct { chunk_revision: u32, mesh_revision: u64 };
     allocator: std.mem.Allocator,
     engine: *Engine,
     world: ?World = null,
@@ -52,7 +52,14 @@ const Game = struct {
     simulation: ?*SimulationWorker = null,
     /// Active subscriptions, including loads still in flight. Kept until cache eviction.
     chunk_subscriptions: std.AutoHashMapUnmanaged(u32, u64) = .empty,
-    chunk_responses: std.ArrayList(ChunkResponse) = .empty,
+    chunk_packages: std.ArrayList(world_data_service.ResponsePackage) = .empty,
+    chunk_modes: std.AutoHashMapUnmanaged(u32, world_data_service.Representation) = .empty,
+    /// Metadata only: CPU mesh arrays transfer directly to the GPU upload queue.
+    mesh_versions: std.AutoHashMapUnmanaged(u32, MeshVersion) = .empty,
+    pinned_chunks: std.AutoHashMapUnmanaged(u32, void) = .empty,
+    render_radius: i32 = CHUNK_LOAD_RADIUS,
+    gpu_capacity_warning: bool = false,
+
     loaded_chunk_ids: std.AutoHashMapUnmanaged(u32, void) = .empty,
     /// Loaded chunks whose meshes must be rebuilt at the end of this frame's world update.
     dirty_chunk_ids: std.AutoHashMapUnmanaged(u32, void) = .empty,
@@ -77,8 +84,11 @@ const Game = struct {
             world_data.destroy();
         }
         game.chunk_subscriptions.deinit(game.allocator);
-        for (game.chunk_responses.items) |response| response.chunk.content.deinit(game.allocator);
-        game.chunk_responses.deinit(game.allocator);
+        for (game.chunk_packages.items) |*package| package.deinit(game.allocator);
+        game.chunk_packages.deinit(game.allocator);
+        game.chunk_modes.deinit(game.allocator);
+        game.mesh_versions.deinit(game.allocator);
+        game.pinned_chunks.deinit(game.allocator);
         game.loaded_chunk_ids.deinit(game.allocator);
         game.dirty_chunk_ids.deinit(game.allocator);
 
@@ -97,10 +107,23 @@ const Game = struct {
         }
 
         game.flushBlockOperations();
+        game.updateChunksAroundCamera(false);
         const has_new_chunks = game.receiveChunks();
         game.updateChunksAroundCamera(has_new_chunks);
         game.rebuildDirtyChunks();
-        game.engine.active_scene.?.voxel_grid.uploadToGPU(game.engine.gctx);
+        const grid = game.engine.active_scene.?.voxel_grid;
+        if (!grid.hasUploadCapacity() and game.render_radius > 2) {
+            std.debug.print("voxel buffer capacity reached; reducing the visible box to 5x5x5\n", .{});
+            game.render_radius = 2;
+            game.updateChunksAroundCamera(false);
+        }
+        if (!grid.hasUploadCapacity()) {
+            if (!game.gpu_capacity_warning) std.debug.print("voxel uploads exceed buffer capacity even at 5x5x5; retaining pending uploads\n", .{});
+            game.gpu_capacity_warning = true;
+            return;
+        }
+        game.gpu_capacity_warning = false;
+        grid.uploadToGPU(game.engine.gctx);
     }
 
     /// Submit commands in optimistic edit order; no chunk data crosses in this direction.
@@ -113,249 +136,160 @@ const Game = struct {
         }
     }
 
-    /// Retire completed commands even when evicted; reconcile only active subscriptions.
+    /// A package is consumed in full before any mesh rebuild or GPU upload. Retire all
+    /// acknowledgments first, then replay only commands not represented by these snapshots.
     fn receiveChunks(game: *Game) bool {
+        game.world_client.?.takePackages(&game.chunk_packages);
+        defer game.chunk_packages.clearRetainingCapacity();
+        var changed = false;
+        for (game.chunk_packages.items) |*package| {
+            game.applyPackage(package);
+            package.responses.deinit(game.allocator);
+            changed = true;
+        }
+        return changed;
+    }
+
+    fn applyPackage(game: *Game, package: *world_data_service.ResponsePackage) void {
         const world = &game.world.?;
-        const responses = &game.chunk_responses;
-        game.world_client.?.takeResponses(responses);
-        defer responses.clearRetainingCapacity();
-
-        var has_new_chunks = false;
-        for (responses.items) |response| {
+        for (package.responses.items) |response| {
             if (response.operation) |result| {
-                if (result.status != .success) {
-                    std.debug.print("block operation {d} failed: {s}\n", .{ result.request_id, @tagName(result.status) });
-                }
+                world.acknowledgeOperation(result.request_id);
+                if (result.status != .success) std.debug.print("block operation {d} failed: {s}\n", .{ result.request_id, @tagName(result.status) });
             }
-            if (!applyChunkResponse(world, &game.chunk_subscriptions, response)) continue;
-            // Invalidate GPU data for authoritative changes and optimistic rollbacks alike.
-            game.markChunkAndNeighborsDirty(response.coords);
-            has_new_chunks = true;
         }
-        return has_new_chunks;
-    }
-
-    fn requestChunkRange(game: *Game, column: [2]u30, z_start: u30, z_end: u30) void {
-        const request_id = game.world_client.?.requestChunks(column, z_start, z_end);
-
-        var z = z_start;
-        while (z < z_end) : (z += 1) {
-            game.chunk_subscriptions.put(game.allocator, encodeChunkPosition(column[0], column[1], z), request_id) catch @panic("OOM");
-        }
-    }
-
-    fn isChunkMissing(game: *const Game, coords: [3]u30) bool {
-        return !game.world.?.hasChunk(coords) and
-            !game.chunk_subscriptions.contains(encodeChunkPositionArray(coords));
-    }
-
-    /// Requests the missing chunks of the camera box, the closest columns first. Consecutive
-    /// missing chunks of a column are requested together, so the column-wide part of the
-    /// generation is done once for them.
-    fn requestChunksAroundCamera(game: *Game, camera_chunk_coords: @Vector(4, i32)) void {
-        const z_min = @max(camera_chunk_coords[2] - CHUNK_LOAD_RADIUS, 0);
-        const z_max = @min(camera_chunk_coords[2] + CHUNK_LOAD_RADIUS, consts.WORLD_SIZE[2] - 1);
-
-        var radius: i32 = 0;
-        while (radius <= CHUNK_LOAD_RADIUS) : (radius += 1) {
-            var dy = -radius;
-            while (dy <= radius) : (dy += 1) {
-                var dx = -radius;
-                while (dx <= radius) : (dx += 1) {
-                    if (@max(@abs(dx), @abs(dy)) != radius) {
+        for (package.responses.items) |response| {
+            const id = encodeChunkPositionArray(response.coords);
+            const token = game.chunk_subscriptions.get(id);
+            if (token == null or token != response.subscription_id) {
+                response.deinit(game.allocator);
+                continue;
+            }
+            switch (response.data) {
+                .acknowledgement => {},
+                .blocks => |chunk| {
+                    if ((game.chunk_modes.get(id) orelse .blocks) != .blocks) {
+                        response.deinit(game.allocator);
                         continue;
                     }
+                    world.insertChunk(response.coords, chunk) catch {
+                        response.deinit(game.allocator);
+                        continue;
+                    };
+                    game.loadChunkIfNeeded(response.coords[0], response.coords[1], response.coords[2]);
+                    game.markChunkAndNeighborsDirty(response.coords);
+                },
+                .mesh => |mesh| {
+                    if (game.chunk_modes.get(id) != .mesh) {
+                        response.deinit(game.allocator);
+                        continue;
+                    }
+                    if (game.mesh_versions.get(id)) |old| {
+                        if (response.mesh_revision < old.mesh_revision) {
+                            response.deinit(game.allocator);
+                            continue;
+                        }
+                    }
+                    game.engine.active_scene.?.voxel_grid.removeChunk(response.coords);
+                    game.engine.active_scene.?.voxel_grid.appendChunk(.{ .chunk_coords = response.coords, .chunk_side_data = mesh });
+                    game.loaded_chunk_ids.put(game.allocator, id, {}) catch @panic("OOM");
+                    game.mesh_versions.put(game.allocator, id, .{ .chunk_revision = response.chunk_revision, .mesh_revision = response.mesh_revision }) catch @panic("OOM");
+                    _ = game.dirty_chunk_ids.remove(id);
+                    if (world.hasChunk(response.coords)) world.removeChunk(response.coords);
+                },
+            }
+        }
+        // Reuse only an authoritative mesh certified by the final block snapshot and with
+        // no outstanding local edit in any of its face dependencies.
+        for (package.responses.items) |response| {
+            if (response.data != .blocks) continue;
+            const id = encodeChunkPositionArray(response.coords);
+            const token = game.chunk_subscriptions.get(id);
+            if (token == null or token != response.subscription_id or (game.chunk_modes.get(id) orelse .blocks) != .blocks) continue;
+            const chunk = world.getChunk(response.coords) orelse continue;
+            const installed = game.mesh_versions.get(id) orelse continue;
+            if (chunk.chunk_revision == response.chunk_revision and
+                installed.chunk_revision == response.chunk_revision and installed.mesh_revision == response.mesh_revision and
+                !world.hasPendingMeshDependency(response.coords))
+                _ = game.dirty_chunk_ids.remove(id);
+        }
+    }
 
-                    const bottom_coords = normalizeChunkCoords(.{
-                        camera_chunk_coords[0] + dx,
-                        camera_chunk_coords[1] + dy,
-                        0,
-                    }) orelse continue;
-                    forEachMissingChunkRange(z_min, z_max, MissingColumnChunks{
-                        .game = game,
-                        .column = .{ bottom_coords[0], bottom_coords[1] },
-                    });
-                }
+    fn requestChunkMode(game: *Game, coords: [3]u30, mode: world_data_service.Representation) void {
+        const id = encodeChunkPositionArray(coords);
+        if (game.chunk_subscriptions.contains(id) and game.chunk_modes.get(id) == mode) return;
+        const token = game.world_client.?.requestChunksInMode(.{ coords[0], coords[1] }, coords[2], coords[2] + 1, mode);
+        game.chunk_subscriptions.put(game.allocator, id, token) catch @panic("OOM");
+        game.chunk_modes.put(game.allocator, id, mode) catch @panic("OOM");
+    }
+
+    fn wantsBlocks(game: *const Game, coords: [3]u30) bool {
+        const id = encodeChunkPositionArray(coords);
+        return game.pinned_chunks.contains(id) or if (game.last_camera_chunk_coords) |camera| getChunkDistance(id, camera) <= BLOCK_LOAD_RADIUS else true;
+    }
+
+    fn refreshPinnedChunks(game: *Game) void {
+        game.pinned_chunks.clearRetainingCapacity();
+        for (game.world.?.pending_operations.items) |pending| {
+            const coords, const local = world_module.splitBlockCoords(pending.operation.block);
+            game.pinned_chunks.put(game.allocator, encodeChunkPositionArray(coords), {}) catch @panic("OOM");
+            for (std.enums.values(Side)) |side| {
+                const i = @intFromEnum(side);
+                if (local[i / 2] != (if (i % 2 == 0) @as(u5, 0) else consts.CHUNK_SIZE - 1)) continue;
+                const neighbor = world_module.adjacentChunk(coords, side) orelse continue;
+                game.pinned_chunks.put(game.allocator, encodeChunkPositionArray(neighbor), {}) catch @panic("OOM");
             }
         }
     }
 
-    const MissingColumnChunks = struct {
-        game: *Game,
-        column: [2]u30,
-
-        fn isMissing(self: MissingColumnChunks, z: u30) bool {
-            return self.game.isChunkMissing(.{ self.column[0], self.column[1], z });
-        }
-
-        fn onRange(self: MissingColumnChunks, z_start: u30, z_end: u30) void {
-            self.game.requestChunkRange(self.column, z_start, z_end);
-        }
-    };
-
-    /// Forgets the chunks (received or requested) that are too far from the camera.
-    fn evictFarChunks(game: *Game, camera_chunk_coords: @Vector(4, i32)) void {
-        const world = &game.world.?;
-
-        // Preserve command ordering relative to eviction and subsequent re-subscription.
-        game.flushBlockOperations();
-
-        var far_chunk_ids: std.ArrayList(u32) = .empty;
-        defer far_chunk_ids.deinit(game.allocator);
-
-        var subscription_iterator = game.chunk_subscriptions.keyIterator();
-        while (subscription_iterator.next()) |chunk_id| {
-            if (getChunkDistance(chunk_id.*, camera_chunk_coords) > CHUNK_KEEP_RADIUS) {
-                far_chunk_ids.append(game.allocator, chunk_id.*) catch @panic("OOM");
+    pub fn updateChunksAroundCamera(game: *Game, _: bool) void {
+        const camera = chunk_utils.getChunkCoords(game.engine.active_scene.?.camera.position);
+        const previous = game.last_camera_chunk_coords;
+        game.last_camera_chunk_coords = camera;
+        game.refreshPinnedChunks();
+        // Omitted boundaries become eligible on movement. A previously reused service
+        // mesh also needs recertification: block subscriptions don't report changes in
+        // outside-core neighbors, whose faces were invisible from the previous camera.
+        if (previous == null or !@reduce(.And, previous.? == camera)) {
+            var chunks = game.world.?.chunks.keyIterator();
+            while (chunks.next()) |id| {
+                game.markChunkDirtyIfLoaded(world_module.decodeChunkPosition(id.*));
             }
         }
-        for (far_chunk_ids.items) |chunk_id| {
-            const subscription = game.chunk_subscriptions.fetchRemove(chunk_id).?;
-            game.world_client.?.evictChunk(chunk_id, subscription.value);
-            game.removeChunkByIdIfNeeded(chunk_id);
-            const coords = world_module.decodeChunkPosition(chunk_id);
-            if (world.hasChunk(coords)) world.removeChunk(coords);
-        }
-    }
 
-    pub fn updateChunksAroundCamera(game: *Game, has_new_chunks: bool) void {
-        const engine = game.engine;
-
-        const camera_position = engine.active_scene.?.camera.position;
-
-        const camera_chunk_coords = chunk_utils.getChunkCoords(camera_position);
-
-        const has_camera_moved = if (game.last_camera_chunk_coords) |last_camera_chunk_coords|
-            !@reduce(.And, camera_chunk_coords == last_camera_chunk_coords)
-        else
-            true;
-
-        if (!has_camera_moved and !has_new_chunks) {
-            return;
-        }
-
-        const camera_box = fitBoxIntoWorld(getBoxAroundChunk(camera_chunk_coords, CHUNK_LOAD_RADIUS));
-
-        if (has_camera_moved) {
-            game.unloadChunksAwayFromCamera(camera_chunk_coords, camera_box);
-            game.evictFarChunks(camera_chunk_coords);
-            game.requestChunksAroundCamera(camera_chunk_coords);
-
-            std.debug.print("camera_box: {any} <-> {any}\n", .{ camera_box.start, camera_box.end });
-        }
-
-        // Chunks that aren't received yet are skipped here and picked up by one of the next
-        // calls, once new chunks arrive.
-        // TODO: in case of small delta chunks, we can traverse only the plain along the movement direction
-        var chunk_z = camera_box.start[2];
-        while (chunk_z <= camera_box.end[2]) {
-            var chunk_y = camera_box.start[1];
-            while (chunk_y <= camera_box.end[1]) {
-                var chunk_x = camera_box.start[0];
-                while (chunk_x <= camera_box.end[0]) {
-                    game.loadChunkIfNeeded(chunk_x, chunk_y, chunk_z);
-
-                    chunk_x += 1;
-                }
-                chunk_y += 1;
-            }
-            chunk_z += 1;
-        }
-
-        game.last_camera_chunk_coords = camera_chunk_coords;
-    }
-
-    fn unloadChunksAwayFromCamera(game: *Game, camera_chunk_coords: @Vector(4, i32), camera_box: ChunkBox) void {
-        if (game.last_camera_chunk_coords) |last_camera_chunk_coords| {
-            std.debug.print("DIFFING {any}\n", .{last_camera_chunk_coords});
-
-            const delta_chunks = camera_chunk_coords - last_camera_chunk_coords;
-            // if only 1 chunk shift (movement in adjacent chunk)
-            const delta_chunks_abs = @abs(delta_chunks);
-            if (@reduce(.Add, delta_chunks_abs) == 1) {
-                std.debug.print("1 chunk shift\n", .{});
-                // removing 4 chunks away chunks, keeping 3 chunks away
-                const box = getBoxAroundChunk(camera_chunk_coords, 4);
-
-                // yz plane
-                if (delta_chunks_abs[0] == 1) {
-                    // if the player moves x + 1, then we need to cleanup plane along x - 4
-                    // (in backward direction)
-                    const delta_x = -4 * delta_chunks[0];
-                    const fixed_x = camera_chunk_coords[0] + delta_x;
-
-                    var z = box.start[2];
-                    while (z < box.end[2]) {
-                        var y = box.start[1];
-                        while (y < box.end[1]) {
-                            if (normalizeChunkCoords(.{ fixed_x, y, z })) |pos| {
-                                game.removeChunkIfNeeded(pos);
-                            }
-                            y += 1;
-                        }
-                        z += 1;
-                    }
-                    // xz plane
-                } else if (delta_chunks_abs[1] == 1) {
-                    const delta_y = -4 * delta_chunks[1];
-                    const fixed_y = camera_chunk_coords[1] + delta_y;
-
-                    var z = box.start[2];
-                    while (z < box.end[2]) {
-                        var x = box.start[0];
-                        while (x < box.end[0]) {
-                            if (normalizeChunkCoords(.{ x, fixed_y, z })) |pos| {
-                                game.removeChunkIfNeeded(pos);
-                            }
-                            x += 1;
-                        }
-                        z += 1;
-                    }
-                } else {
-                    // xy plane
-                    const delta_z = -4 * delta_chunks[2];
-                    const fixed_z = camera_chunk_coords[2] + delta_z;
-
-                    var y = box.start[1];
-                    while (y < box.end[1]) {
-                        var x = box.start[0];
-                        while (x < box.end[0]) {
-                            if (normalizeChunkCoords(.{ x, y, fixed_z })) |pos| {
-                                game.removeChunkIfNeeded(pos);
-                            }
-                            x += 1;
-                        }
-                        y += 1;
-                    }
-                }
-            } else {
-                // Mean that already loaded chunks are not overlapping with the new camera box
-                if (@reduce(.Max, @abs(delta_chunks)) > 6) {
-                    std.debug.print("full cleanup\n", .{});
-                    // full cleanup
-                    // TODO: In case of full cleanup, we can remove all loaded chunks by reseting
-                    // buffers, instead of removing them one by one.
-                    // var iterator = game.loaded_chunk_ids.keyIterator();
-                    // while (iterator.next()) |chunk_id_ptr| {
-                    //     const chunk_id = chunk_id_ptr.*;
-                    //     game.removeChunkByIdIfNeeded(chunk_id);
-                    // }
-                    game.engine.active_scene.?.voxel_grid.clearChunks();
-                    game.loaded_chunk_ids.clearRetainingCapacity();
-                    game.dirty_chunk_ids.clearRetainingCapacity();
-                } else {
-                    // intersection cleanup
-                    std.debug.print("partial cleanup\n", .{});
-                    var iterator = game.loaded_chunk_ids.keyIterator();
-                    while (iterator.next()) |chunk_id_ptr| {
-                        const chunk_id = chunk_id_ptr.*;
-                        const chunk_coords = world_module.decodeChunkPositionVec(chunk_id);
-                        if (!camera_box.isContainingChunk(chunk_coords)) {
-                            game.removeChunkByIdIfNeeded(chunk_id);
-                        }
+        // Retain pending commands and their affected face neighbors even after movement.
+        var pins = game.pinned_chunks.keyIterator();
+        while (pins.next()) |id| game.requestChunkMode(world_module.decodeChunkPosition(id.*), .blocks);
+        // Closest shells first: all block requests precede new distant mesh requests.
+        var radius: i32 = 0;
+        while (radius <= game.render_radius) : (radius += 1) {
+            var dz = -radius;
+            while (dz <= radius) : (dz += 1) {
+                var dy = -radius;
+                while (dy <= radius) : (dy += 1) {
+                    var dx = -radius;
+                    while (dx <= radius) : (dx += 1) {
+                        if (@max(@abs(dx), @abs(dy), @abs(dz)) != radius) continue;
+                        const coords = normalizeChunkCoords(.{ camera[0] + dx, camera[1] + dy, camera[2] + dz }) orelse continue;
+                        game.requestChunkMode(coords, if (game.wantsBlocks(coords)) .blocks else .mesh);
                     }
                 }
             }
+        }
+        var evicted: std.ArrayList(u32) = .empty;
+        defer evicted.deinit(game.allocator);
+        var subscriptions = game.chunk_subscriptions.keyIterator();
+        while (subscriptions.next()) |id| {
+            if (getChunkDistance(id.*, camera) > game.render_radius and !game.pinned_chunks.contains(id.*))
+                evicted.append(game.allocator, id.*) catch @panic("OOM");
+        }
+        for (evicted.items) |id| {
+            const token = game.chunk_subscriptions.fetchRemove(id).?.value;
+            game.world_client.?.evictChunk(id, token);
+            _ = game.chunk_modes.remove(id);
+            game.removeChunkByIdIfNeeded(id);
+            const coords = world_module.decodeChunkPosition(id);
+            if (game.world.?.hasChunk(coords)) game.world.?.removeChunk(coords);
         }
     }
 
@@ -381,6 +315,7 @@ const Game = struct {
 
     fn removeChunkByIdIfNeeded(game: *Game, chunk_id: u32) void {
         _ = game.dirty_chunk_ids.remove(chunk_id);
+        _ = game.mesh_versions.remove(chunk_id);
         if (game.loaded_chunk_ids.contains(chunk_id)) {
             _ = game.loaded_chunk_ids.remove(chunk_id);
             game.engine.active_scene.?.voxel_grid.removeChunk(world_module.decodeChunkPosition(chunk_id));
@@ -393,9 +328,12 @@ const Game = struct {
         const camera_position = game.engine.active_scene.?.camera.position;
         const top = getColumnTopUnderPosition(camera_position) orelse return;
 
+        const camera_z = camera_position[2] + @as(f32, @floatFromInt(consts.WORLD_ORIGIN[2] * consts.CHUNK_SIZE));
+        if (camera_z - @as(f32, @floatFromInt(top[2] + 1)) > TOOL_REACH) return;
+        const minimum_z: u32 = @intFromFloat(@max(0, @floor(camera_z - TOOL_REACH)));
         const edit_result = switch (action) {
-            .remove => world.removeTopBlockInColumn(top),
-            .add_dirt => world.dropBlockInColumn(top, .dirt),
+            .remove => world.removeTopBlockInColumn(top, minimum_z),
+            .add_dirt => world.dropBlockInColumn(top, .dirt, minimum_z),
         };
         // Chunks near the camera are normally received, so this happens only while they are
         // still loading, or when the column has to be searched too far from the camera.
@@ -463,15 +401,32 @@ const Game = struct {
         var iterator = game.dirty_chunk_ids.keyIterator();
         while (iterator.next()) |chunk_id| {
             const coords = world_module.decodeChunkPosition(chunk_id.*);
-            voxel_grid.removeChunk(coords);
             const chunk = world.getChunk(coords) orelse continue;
+            // Retained blocks can also repair a demotion's old display while its service
+            // mesh is in flight. Camera movement may have made an omitted face visible.
+            _ = game.mesh_versions.remove(chunk_id.*);
+            voxel_grid.removeChunk(coords);
             if (chunk.content == .blocks and !chunk.flags.is_unreachable) {
                 voxel_grid.appendChunk(.{
                     .chunk_coords = coords,
-                    .chunk_side_data = world_engine.extractChunkSideData(game.allocator, chunk.content.blocks),
+                    .chunk_side_data = world_engine.extractChunkSideData(game.allocator, chunk.content, game.meshNeighbors(coords)),
                 });
             }
         }
+    }
+    fn meshNeighbors(game: *const Game, coords: [3]u30) [6]world_engine.Neighbor {
+        var neighbors: [6]world_engine.Neighbor = @splat(.exposed);
+        const in_core = if (game.last_camera_chunk_coords) |camera| getChunkDistance(encodeChunkPositionArray(coords), camera) <= BLOCK_LOAD_RADIUS else false;
+        for (std.enums.values(Side)) |side| {
+            const adjacent = world_module.adjacentChunk(coords, side) orelse continue;
+            const i = @intFromEnum(side);
+            if (in_core and !game.wantsBlocks(adjacent)) {
+                neighbors[i] = .suppressed;
+            } else if (game.world.?.getChunk(adjacent)) |neighbor| {
+                neighbors[i] = .{ .content = neighbor.content };
+            }
+        }
+        return neighbors;
     }
 };
 
@@ -481,11 +436,11 @@ fn applyChunkResponse(world: *World, subscriptions: *const std.AutoHashMapUnmana
     if (response.operation) |result| world.acknowledgeOperation(result.request_id);
     const token = subscriptions.get(encodeChunkPositionArray(response.coords));
     if (token == null or token != response.subscription_id) {
-        response.chunk.content.deinit(world.allocator);
+        response.deinit(world.allocator);
         return false;
     }
-    world.insertChunk(response.coords, response.chunk) catch {
-        response.chunk.content.deinit(world.allocator);
+    world.insertChunk(response.coords, response.data.blocks) catch {
+        response.deinit(world.allocator);
         return false;
     };
     return true;
@@ -897,11 +852,11 @@ test "chunk loads, edits, and snapshots share one rebuild using the final conten
 
     try game.chunk_subscriptions.put(allocator, chunk_id, 1);
     var snapshot = WorldChunk.initEmpty();
-    snapshot.revision = 1;
+    snapshot.chunk_revision = 1;
     try std.testing.expect(applyChunkResponse(&game.world.?, &game.chunk_subscriptions, .{
         .coords = coords,
         .subscription_id = 1,
-        .chunk = snapshot,
+        .data = .{ .blocks = snapshot },
     }));
     game.markChunkAndNeighborsDirty(coords);
 
@@ -1106,7 +1061,7 @@ test "evicted edit replies retire pending work without restoring chunks" {
         .coords = coords,
         .subscription_id = 1,
         .operation = .{ .request_id = 7, .status = .already_exists },
-        .chunk = WorldChunk.initEmpty(),
+        .data = .{ .blocks = WorldChunk.initEmpty() },
     }));
     try std.testing.expect(!world.hasChunk(coords));
     try std.testing.expectEqual(0, world.pending_operations.items.len);
@@ -1114,7 +1069,7 @@ test "evicted edit replies retire pending work without restoring chunks" {
     try std.testing.expect(!applyChunkResponse(&world, &subscriptions, .{
         .coords = coords,
         .subscription_id = null,
-        .chunk = WorldChunk.initEmpty(),
+        .data = .{ .blocks = WorldChunk.initEmpty() },
     }));
 }
 
@@ -1128,20 +1083,20 @@ test "new subscription rejects queued snapshots from an evicted generation" {
     try std.testing.expect(!applyChunkResponse(&world, &subscriptions, .{
         .coords = coords,
         .subscription_id = 1,
-        .chunk = WorldChunk.initEmpty(),
+        .data = .{ .blocks = WorldChunk.initEmpty() },
     }));
     try std.testing.expect(applyChunkResponse(&world, &subscriptions, .{
         .coords = coords,
         .subscription_id = 2,
-        .chunk = WorldChunk.initEmpty(),
+        .data = .{ .blocks = WorldChunk.initEmpty() },
     }));
     var update = WorldChunk.initEmpty();
     _ = update.apply(std.testing.allocator, .{ 1, 2, 3 }, .{ .put = .dirt });
-    update.revision = 1;
+    update.chunk_revision = 1;
     try std.testing.expect(applyChunkResponse(&world, &subscriptions, .{
         .coords = coords,
         .subscription_id = 2,
-        .chunk = update,
+        .data = .{ .blocks = update },
     }));
     try std.testing.expect(try world.isBlockSolid(.{ 1, 2, 3 }));
     try std.testing.expectEqual(2, subscriptions.get(encodeChunkPositionArray(coords)));
@@ -1185,13 +1140,14 @@ test "unreachable chunks keep CPU blocks and queue a mesh immediately after a lo
     game.world.?.setBlock(block, .none);
     game.markChunksAroundBlockDirty(block);
     try std.testing.expectEqual(1, game.world.?.pending_operations.items.len);
-    try std.testing.expectEqual(0, game.world.?.getChunk(coords).?.revision);
+    try std.testing.expectEqual(0, game.world.?.getChunk(coords).?.chunk_revision);
     try std.testing.expect(!game.world.?.getChunk(coords).?.flags.is_unreachable);
     game.rebuildDirtyChunks();
     try std.testing.expectEqual(1, grid.chunks_to_upload.items.len);
     try std.testing.expectEqual(coords, grid.chunks_to_upload.items[0].chunk_coords);
-    for (grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side) |side| {
-        try std.testing.expectEqual(consts.CHUNK_SIZE * consts.CHUNK_SIZE, side.items.len);
+    for (grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side, 0..) |side, i| {
+        // The neighboring chunk above now exposes only the single removed wall block.
+        try std.testing.expectEqual(if (i == @intFromEnum(Side.top)) @as(usize, 1) else consts.CHUNK_SIZE * consts.CHUNK_SIZE, side.items.len);
     }
     grid.clearChunks();
 
@@ -1200,7 +1156,7 @@ test "unreachable chunks keep CPU blocks and queue a mesh immediately after a lo
     try std.testing.expect(applyChunkResponse(&game.world.?, &game.chunk_subscriptions, .{
         .coords = coords,
         .subscription_id = 1,
-        .chunk = column.generateChunk(allocator, 2),
+        .data = .{ .blocks = column.generateChunk(allocator, 2) },
     }));
     game.markChunkAndNeighborsDirty(coords);
     game.rebuildDirtyChunks();
@@ -1218,14 +1174,323 @@ test "unreachable chunks keep CPU blocks and queue a mesh immediately after a lo
     try game.chunk_subscriptions.put(allocator, encodeChunkPositionArray(remote_coords), 2);
     var reveal = remote_column.generateChunk(allocator, 2);
     reveal.flags.is_unreachable = false;
-    reveal.revision = 1;
+    reveal.chunk_revision = 1;
     try std.testing.expect(applyChunkResponse(&game.world.?, &game.chunk_subscriptions, .{
         .coords = remote_coords,
         .subscription_id = 2,
-        .chunk = reveal,
+        .data = .{ .blocks = reveal },
     }));
     game.markChunkAndNeighborsDirty(remote_coords);
     game.rebuildDirtyChunks();
     try std.testing.expectEqual(1, grid.chunks_to_upload.items.len);
     try std.testing.expectEqual(remote_coords, grid.chunks_to_upload.items[0].chunk_coords);
+}
+
+/// Exercises the actual subscription and upload paths without a graphics device.
+const StreamingTest = struct {
+    camera: std.meta.Child(@TypeOf(@as(Scene, undefined).camera)) = undefined,
+    grid: @import("engine").VoxelGrid = undefined,
+    scene: Scene = undefined,
+    engine: Engine = undefined,
+    game: Game = undefined,
+
+    fn init(self: *StreamingTest) void {
+        self.camera.position = .{ 0, 0, 0 };
+        self.grid = .{ .allocator = std.testing.allocator, .gpu_chunk_info_buffer = undefined, .gpu_block_buffer = undefined };
+        self.scene.voxel_grid = &self.grid;
+        self.scene.camera = &self.camera;
+        self.engine.active_scene = &self.scene;
+        self.game = .{ .allocator = std.testing.allocator, .engine = &self.engine, .world = World.init(std.testing.allocator) };
+    }
+
+    fn deinit(self: *StreamingTest) void {
+        const allocator = self.game.allocator;
+        self.game.world.?.deinit();
+        self.game.chunk_subscriptions.deinit(allocator);
+        self.game.chunk_modes.deinit(allocator);
+        self.game.mesh_versions.deinit(allocator);
+        self.game.pinned_chunks.deinit(allocator);
+        self.game.loaded_chunk_ids.deinit(allocator);
+        self.game.dirty_chunk_ids.deinit(allocator);
+        for (self.game.chunk_packages.items) |*package| package.deinit(allocator);
+        self.game.chunk_packages.deinit(allocator);
+        self.grid.clearChunks();
+        self.grid.chunks.deinit(allocator);
+        self.grid.chunks_to_upload.deinit(allocator);
+    }
+
+    fn subscribe(self: *StreamingTest, coords: [3]u30, token: u64, mode: world_data_service.Representation) !void {
+        try self.game.chunk_subscriptions.put(self.game.allocator, encodeChunkPositionArray(coords), token);
+        try self.game.chunk_modes.put(self.game.allocator, encodeChunkPositionArray(coords), mode);
+    }
+
+    fn apply(self: *StreamingTest, responses: []const ChunkResponse) !void {
+        var package: world_data_service.ResponsePackage = .{};
+        try package.responses.appendSlice(self.game.allocator, responses);
+        defer package.responses.deinit(self.game.allocator);
+        self.game.applyPackage(&package);
+    }
+
+    fn settled(self: *const StreamingTest) bool {
+        if (self.game.world.?.pending_operations.items.len != 0) return false;
+        var iterator = self.game.chunk_modes.iterator();
+        while (iterator.next()) |entry| {
+            const coords = world_module.decodeChunkPosition(entry.key_ptr.*);
+            if (!self.game.loaded_chunk_ids.contains(entry.key_ptr.*)) return false;
+            if ((entry.value_ptr.* == .blocks) != self.game.world.?.hasChunk(coords)) return false;
+        }
+        return true;
+    }
+
+    fn drainUntilSettled(self: *StreamingTest) !void {
+        while (!self.settled()) {
+            var packages: std.ArrayList(world_data_service.ResponsePackage) = .empty;
+            try std.testing.expect(try self.game.world_client.?.waitPackages(&packages));
+            for (packages.items) |*package| {
+                self.game.applyPackage(package);
+                package.responses.deinit(self.game.allocator);
+            }
+            packages.deinit(self.game.allocator);
+            self.game.updateChunksAroundCamera(true);
+            self.game.rebuildDirtyChunks();
+        }
+    }
+};
+
+fn singleTestBlock(local: [3]u5, revision: u32) WorldChunk {
+    var chunk = WorldChunk.initEmpty();
+    _ = chunk.apply(std.testing.allocator, local, .{ .put = .stone });
+    chunk.chunk_revision = revision;
+    return chunk;
+}
+
+test "promotion reuses matching authoritative mesh but rejects a neighbor-only revision change" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const coords = [3]u30{ 1, 1, 1 };
+    const id = encodeChunkPositionArray(coords);
+    const chunk = singleTestBlock(.{ 31, 8, 8 }, 12);
+    defer chunk.content.deinit(std.testing.allocator);
+    try fixture.subscribe(coords, 1, .mesh);
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .chunk_revision = 12, .mesh_revision = 20, .data = .{ .mesh = world_engine.extractChunkSideData(std.testing.allocator, chunk.content, @splat(.exposed)) } }});
+    try std.testing.expect(!fixture.game.world.?.hasChunk(coords));
+    const original_faces = fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[0].items.ptr;
+    try fixture.subscribe(coords, 2, .blocks);
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 2, .chunk_revision = 12, .mesh_revision = 20, .data = .{ .blocks = chunk.clone(std.testing.allocator) } }});
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expect(fixture.game.world.?.hasChunk(coords));
+    try std.testing.expect(fixture.game.mesh_versions.contains(id));
+    try std.testing.expectEqual(original_faces, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[0].items.ptr);
+
+    try fixture.game.world.?.insertChunk(.{ 2, 1, 1 }, singleTestBlock(.{ 0, 8, 8 }, 1));
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 2, .chunk_revision = 12, .mesh_revision = 21, .data = .{ .blocks = chunk.clone(std.testing.allocator) } }});
+    try std.testing.expect(fixture.game.dirty_chunk_ids.contains(id));
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expect(!fixture.game.mesh_versions.contains(id));
+    try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(0, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
+}
+
+test "pending neighboring edit prevents canonical mesh reuse and mode tokens reject late payloads" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const coords = [3]u30{ 1, 1, 1 };
+    const neighbor = [3]u30{ 2, 1, 1 };
+    const chunk = singleTestBlock(.{ 31, 8, 8 }, 1);
+    defer chunk.content.deinit(std.testing.allocator);
+    try fixture.game.world.?.insertChunk(neighbor, singleTestBlock(.{ 0, 8, 8 }, 1));
+    try fixture.subscribe(coords, 1, .mesh);
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .chunk_revision = 1, .mesh_revision = 4, .data = .{ .mesh = world_engine.extractChunkSideData(std.testing.allocator, chunk.content, fixture.game.meshNeighbors(coords)) } }});
+    fixture.game.world.?.setBlock(.{ 2 * consts.CHUNK_SIZE, consts.CHUNK_SIZE + 8, consts.CHUNK_SIZE + 8 }, .none);
+    try fixture.subscribe(coords, 2, .blocks);
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 2, .chunk_revision = 1, .mesh_revision = 4, .data = .{ .blocks = chunk.clone(std.testing.allocator) } }});
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
+    // Even a numerically newer mesh cannot cross an obsolete subscription generation.
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .chunk_revision = 100, .mesh_revision = 100, .data = .{ .mesh = .{} } }});
+    try std.testing.expect(fixture.game.world.?.hasChunk(coords));
+    try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items.len);
+    try std.testing.expect(!fixture.game.mesh_versions.contains(encodeChunkPositionArray(coords)));
+}
+
+test "core movement exposes previously suppressed faces then culls newly loaded neighbors" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const coords = [3]u30{ 2, 1, 1 };
+    fixture.game.last_camera_chunk_coords = .{ 1, 1, 1, 0 };
+    try fixture.game.world.?.insertChunk(coords, singleTestBlock(.{ 31, 8, 8 }, 0));
+    fixture.game.loadChunkIfNeeded(2, 1, 1);
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expectEqual(0, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
+    fixture.game.last_camera_chunk_coords = .{ 2, 1, 1, 0 };
+    fixture.game.markChunkDirtyIfLoaded(coords);
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
+    try fixture.game.world.?.insertChunk(.{ 3, 1, 1 }, singleTestBlock(.{ 0, 8, 8 }, 0));
+    fixture.game.markChunkAndNeighborsDirty(.{ 3, 1, 1 });
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expectEqual(0, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
+}
+
+test "mixed packages retire all commands and produce one final optimistic mesh" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const coords = [3]u30{ 1, 1, 1 };
+    const block = [3]u32{ consts.CHUNK_SIZE + 8, consts.CHUNK_SIZE + 8, consts.CHUNK_SIZE + 8 };
+    try fixture.subscribe(coords, 1, .blocks);
+    try fixture.game.world.?.insertChunk(coords, singleTestBlock(.{ 8, 8, 8 }, 0));
+    fixture.game.loadChunkIfNeeded(1, 1, 1);
+    fixture.game.world.?.setBlock(block, .none);
+    fixture.game.world.?.setBlock(block, .dirt);
+    fixture.game.world.?.pending_operations.items[0].request_id = 10;
+    fixture.game.world.?.pending_operations.items[1].request_id = 11;
+    var removed = WorldChunk.initEmpty();
+    removed.chunk_revision = 1;
+    try fixture.apply(&.{
+        .{ .coords = coords, .subscription_id = 1, .operation = .{ .request_id = 10, .status = .success }, .chunk_revision = 1, .mesh_revision = 1, .data = .{ .blocks = removed } },
+        .{ .coords = coords, .subscription_id = 1, .operation = .{ .request_id = 11, .status = .already_exists }, .chunk_revision = 2, .mesh_revision = 2, .data = .{ .blocks = singleTestBlock(.{ 8, 8, 8 }, 2) } },
+    });
+    try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
+    try std.testing.expectEqual(0, fixture.grid.chunks_to_upload.items.len);
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items.len);
+    for (fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side) |side| try std.testing.expectEqual(voxel_chunk_module.BlockType.stone, side.items[0].block_type);
+}
+
+test "streaming holds 27 block chunks, pins edits across movement, and completes mesh handoffs" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    defer service.destroy();
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    fixture.game.world_client = try service.createClient();
+    fixture.game.updateChunksAroundCamera(false);
+    try fixture.drainUntilSettled();
+    try std.testing.expectEqual(343, fixture.game.chunk_subscriptions.count());
+    try std.testing.expectEqual(27, fixture.game.world.?.chunks.count());
+    const origin = consts.WORLD_ORIGIN;
+    const block = [3]u32{ origin[0] * consts.CHUNK_SIZE, origin[1] * consts.CHUNK_SIZE + 8, origin[2] * consts.CHUNK_SIZE + 8 };
+    fixture.game.world.?.setBlock(block, .dirt);
+    fixture.game.markChunksAroundBlockDirty(block);
+    fixture.game.flushBlockOperations();
+    fixture.camera.position[0] = 64;
+    fixture.game.updateChunksAroundCamera(false);
+    try std.testing.expectEqual(2, fixture.game.pinned_chunks.count());
+    try std.testing.expectEqual(world_data_service.Representation.blocks, fixture.game.chunk_modes.get(encodeChunkPositionArray(origin)).?);
+    try fixture.drainUntilSettled();
+    try std.testing.expectEqual(27, fixture.game.world.?.chunks.count());
+    try std.testing.expectEqual(343, fixture.game.chunk_subscriptions.count());
+    try std.testing.expectEqual(0, fixture.game.pinned_chunks.count());
+    try std.testing.expect(!fixture.game.world.?.hasChunk(origin));
+    try std.testing.expect(fixture.game.mesh_versions.contains(encodeChunkPositionArray(origin)));
+    try std.testing.expect(fixture.grid.hasUploadCapacity());
+
+    // Reverse while mesh and block requests are still in flight; obsolete tokens must drain.
+    fixture.camera.position[0] = 96;
+    fixture.game.updateChunksAroundCamera(false);
+    fixture.camera.position[0] = 0;
+    fixture.game.updateChunksAroundCamera(false);
+    try fixture.drainUntilSettled();
+    try std.testing.expectEqual(27, fixture.game.world.?.chunks.count());
+    try std.testing.expect(try fixture.game.world.?.isBlockSolid(block));
+}
+
+test "column tools stop within 20 blocks of the actual camera and never place at an unsupported limit" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    fixture.camera.position = .{ 0.5, 0.5, 20.5 };
+    const origin = consts.WORLD_ORIGIN;
+    try fixture.game.world.?.insertChunk(origin, WorldChunk.initEmpty());
+    // This surface is 19.5 blocks below the camera, so removal is allowed.
+    fixture.game.world.?.setBlock(.{ origin[0] * consts.CHUNK_SIZE, origin[1] * consts.CHUNK_SIZE, origin[2] * consts.CHUNK_SIZE }, .stone);
+    fixture.game.world.?.pending_operations.clearRetainingCapacity();
+    fixture.game.editBlockUnderCamera(.remove);
+    try std.testing.expectEqual(1, fixture.game.world.?.pending_operations.items.len);
+    fixture.game.world.?.pending_operations.clearRetainingCapacity();
+    // An empty search must stop before looking into the missing chunk below the core.
+    fixture.game.editBlockUnderCamera(.add_dirt);
+    try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
+    var below = WorldChunk.initEmpty();
+    _ = below.apply(std.testing.allocator, .{ 0, 0, 31 }, .{ .put = .stone });
+    try fixture.game.world.?.insertChunk(.{ origin[0], origin[1], origin[2] - 1 }, below);
+    fixture.game.editBlockUnderCamera(.remove);
+    fixture.game.editBlockUnderCamera(.add_dirt);
+    try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
+    // Moving one block closer makes that same surface reachable for placement.
+    fixture.camera.position[2] -= 1;
+    fixture.game.editBlockUnderCamera(.add_dirt);
+    try std.testing.expectEqual(1, fixture.game.world.?.pending_operations.items.len);
+}
+
+test "demotion repairs omitted camera-facing boundaries while the service mesh is loading" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const coords = [3]u30{ 2, 2, 2 };
+    fixture.game.last_camera_chunk_coords = .{ 3, 2, 2, 0 };
+    try fixture.game.world.?.insertChunk(coords, singleTestBlock(.{ 0, 8, 8 }, 0));
+    fixture.game.loadChunkIfNeeded(2, 2, 2);
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expectEqual(0, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.left)].items.len);
+    fixture.game.last_camera_chunk_coords = .{ 0, 2, 2, 0 };
+    try fixture.subscribe(coords, 2, .mesh);
+    fixture.game.markChunkDirtyIfLoaded(coords);
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.left)].items.len);
+    try std.testing.expect(fixture.game.world.?.hasChunk(coords));
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 2, .data = .{ .mesh = .{} } }});
+    try std.testing.expect(!fixture.game.world.?.hasChunk(coords));
+    try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items.len);
+    for (fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side) |side| try std.testing.expectEqual(0, side.items.len);
+}
+
+test "GPU preflight reduces subscriptions to 5x5x5 without writing a partial upload" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    defer service.destroy();
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    fixture.game.world_client = try service.createClient();
+    // Occupy every allocator span. The undefined graphics device must never be accessed.
+    for (0..64) |_| _ = try fixture.grid.gpu_block_buffer_manager.occupyBlock(.{ .size_exponent = 6 });
+    var mesh: voxel_chunk_module.ChunkSideData = .{};
+    try mesh.blocks_grouped_by_side[0].append(std.testing.allocator, .{ .coords = .{ 8, 8, 8 }, .block_type = .stone });
+    fixture.grid.appendChunk(.{ .chunk_coords = .{ 0, 0, 0 }, .chunk_side_data = mesh });
+    fixture.game.updateWorld();
+    try std.testing.expectEqual(2, fixture.game.render_radius);
+    try std.testing.expectEqual(125, fixture.game.chunk_subscriptions.count());
+    try std.testing.expect(fixture.game.gpu_capacity_warning);
+    try std.testing.expect(fixture.grid.chunks_to_upload.items.len > 0);
+}
+
+test "movement recertifies reused service meshes when formerly outside-core neighbors become relevant" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    defer service.destroy();
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    fixture.game.world_client = try service.createClient();
+    const origin = consts.WORLD_ORIGIN;
+    const coords = [3]u30{ origin[0] + 1, origin[1], origin[2] };
+    const id = encodeChunkPositionArray(coords);
+    const chunk = singleTestBlock(.{ 31, 8, 8 }, 1);
+    defer chunk.content.deinit(std.testing.allocator);
+    var neighbors: [6]world_engine.Neighbor = @splat(.exposed);
+    neighbors[@intFromEnum(Side.right)] = .suppressed;
+    try fixture.subscribe(coords, 1, .mesh);
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .chunk_revision = 1, .mesh_revision = 1, .data = .{ .mesh = world_engine.extractChunkSideData(std.testing.allocator, chunk.content, neighbors) } }});
+    try fixture.subscribe(coords, 2, .blocks);
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 2, .chunk_revision = 1, .mesh_revision = 1, .data = .{ .blocks = chunk.clone(std.testing.allocator) } }});
+    try std.testing.expect(!fixture.game.dirty_chunk_ids.contains(id));
+    fixture.game.last_camera_chunk_coords = .{ origin[0], origin[1], origin[2], 0 };
+    fixture.camera.position[0] = 32;
+    fixture.game.updateChunksAroundCamera(false);
+    try std.testing.expect(fixture.game.dirty_chunk_ids.contains(id));
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
 }

@@ -99,6 +99,14 @@ pub const ChunkSideData = struct {
 
     blocks_grouped_by_side: [6]BlockCoordList = @splat(BlockCoordList.empty),
 
+    pub fn clone(self: Self, allocator: std.mem.Allocator) Self {
+        var copy: Self = .{};
+        for (self.blocks_grouped_by_side, &copy.blocks_grouped_by_side) |source, *dest| {
+            dest.appendSlice(allocator, source.items) catch @panic("OOM");
+        }
+        return copy;
+    }
+
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         for (&self.blocks_grouped_by_side) |*block| {
             block.deinit(allocator);

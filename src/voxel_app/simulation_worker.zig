@@ -42,7 +42,7 @@ pub const SimulationWorker = struct {
         const token = client.requestChunks(column, 0, consts.WORLD_SIZE[2]);
         var responses: std.ArrayList(ChunkResponse) = .empty;
         defer {
-            for (responses.items) |response| response.chunk.content.deinit(service.allocator);
+            for (responses.items) |response| response.deinit(service.allocator);
             responses.deinit(service.allocator);
         }
         // Eviction also happens on cancellation during startup. The service drains it later.
@@ -56,14 +56,14 @@ pub const SimulationWorker = struct {
         while (count < received.len) {
             if (!try client.waitResponses(&responses)) return;
             for (responses.items) |response| {
-                defer response.chunk.content.deinit(service.allocator);
+                defer response.deinit(service.allocator);
                 if (response.subscription_id != token) continue;
                 const z = response.coords[2];
                 if (!received[z]) {
                     received[z] = true;
                     count += 1;
                 }
-                surface_z = @max(surface_z, surfaceAboveChunk(response.chunk, z));
+                surface_z = @max(surface_z, surfaceAboveChunk(response.data.blocks, z));
             }
             responses.clearRetainingCapacity();
         }
@@ -90,7 +90,7 @@ pub const SimulationWorker = struct {
         while (try self.client.waitResponses(responses)) {
             var status: ?world.OperationStatus = null;
             for (responses.items) |response| {
-                response.chunk.content.deinit(self.client.service.allocator);
+                response.deinit(self.client.service.allocator);
                 if (response.operation) |result| {
                     if (result.request_id == id) status = result.status;
                 }
@@ -151,12 +151,12 @@ test "simulation repeatedly pushes put remove put to a subscribed client" {
     const token = observer.requestChunks(.{ consts.WORLD_ORIGIN[0], consts.WORLD_ORIGIN[1] }, surface_chunk_z, surface_chunk_z + 1);
     var responses: std.ArrayList(ChunkResponse) = .empty;
     defer {
-        for (responses.items) |response| response.chunk.content.deinit(allocator);
+        for (responses.items) |response| response.deinit(allocator);
         responses.deinit(allocator);
     }
     try std.testing.expect(try observer.waitResponses(&responses));
     try std.testing.expectEqual(1, responses.items.len);
-    responses.items[0].chunk.content.deinit(allocator);
+    responses.items[0].data.blocks.content.deinit(allocator);
     responses.clearRetainingCapacity();
 
     const started = Io.Clock.awake.now(io);
@@ -168,12 +168,12 @@ test "simulation repeatedly pushes put remove put to a subscribed client" {
         for (responses.items) |response| {
             try std.testing.expectEqual(token, response.subscription_id);
             try std.testing.expectEqual(null, response.operation);
-            try std.testing.expectEqual(changes + 1, response.chunk.revision);
+            try std.testing.expectEqual(changes + 1, response.data.blocks.chunk_revision);
             const expected: @import("engine").voxel_chunk.BlockType = if (changes % 2 == 0) .dirt else .none;
-            try std.testing.expectEqual(expected, response.chunk.content.getBlock(.{ 16, 16, 16 }));
+            try std.testing.expectEqual(expected, response.data.blocks.content.getBlock(.{ 16, 16, 16 }));
             changes += 1;
         }
-        for (responses.items) |response| response.chunk.content.deinit(allocator);
+        for (responses.items) |response| response.deinit(allocator);
         responses.clearRetainingCapacity();
     }
     try std.testing.expect(started.durationTo(Io.Clock.awake.now(io)).nanoseconds >= 4 * std.time.ns_per_s);
