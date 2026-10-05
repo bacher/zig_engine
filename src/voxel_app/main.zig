@@ -179,7 +179,7 @@ const Game = struct {
                     game.loadChunkIfNeeded(response.coords[0], response.coords[1], response.coords[2]);
                     game.markChunkAndNeighborsDirty(response.coords);
                 },
-                .mesh => |mesh| {
+                .mesh, .unreachable_chunk => {
                     if (game.chunk_modes.get(id) != .mesh) {
                         response.deinit(game.allocator);
                         continue;
@@ -191,7 +191,9 @@ const Game = struct {
                         }
                     }
                     game.engine.active_scene.?.voxel_grid.removeChunk(response.coords);
-                    game.engine.active_scene.?.voxel_grid.appendChunk(.{ .chunk_coords = response.coords, .chunk_side_data = mesh });
+                    if (response.data == .mesh) {
+                        game.engine.active_scene.?.voxel_grid.appendChunk(.{ .chunk_coords = response.coords, .chunk_side_data = response.data.mesh });
+                    }
                     game.loaded_chunk_ids.put(game.allocator, id, {}) catch @panic("OOM");
                     game.mesh_versions.put(game.allocator, id, .{ .chunk_revision = response.chunk_revision, .mesh_revision = response.mesh_revision }) catch @panic("OOM");
                     _ = game.dirty_chunk_ids.remove(id);
@@ -1447,6 +1449,42 @@ test "demotion repairs omitted camera-facing boundaries while the service mesh i
     try std.testing.expect(!fixture.game.world.?.hasChunk(coords));
     try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items.len);
     for (fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side) |side| try std.testing.expectEqual(0, side.items.len);
+}
+
+test "unreachable status completes demotion without uploading and cannot hide a later reveal" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const coords = [3]u30{ 2, 2, 2 };
+    const id = encodeChunkPositionArray(coords);
+    const chunk = singleTestBlock(.{ 8, 8, 8 }, 0);
+    defer chunk.content.deinit(std.testing.allocator);
+    try fixture.game.world.?.insertChunk(coords, chunk.clone(std.testing.allocator));
+    fixture.game.loadChunkIfNeeded(2, 2, 2);
+    fixture.game.rebuildDirtyChunks();
+    try fixture.subscribe(coords, 2, .mesh);
+    fixture.game.markChunkDirtyIfLoaded(coords);
+    // A late reply from a previous subscription must preserve the retained display.
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .data = .unreachable_chunk }});
+    try std.testing.expect(fixture.game.world.?.hasChunk(coords));
+    try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items.len);
+
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 2, .chunk_revision = 0, .mesh_revision = 4, .data = .unreachable_chunk }});
+    try std.testing.expect(!fixture.game.world.?.hasChunk(coords));
+    try std.testing.expect(fixture.game.loaded_chunk_ids.contains(id));
+    try std.testing.expect(!fixture.game.dirty_chunk_ids.contains(id));
+    try std.testing.expectEqual(2, fixture.game.chunk_subscriptions.get(id).?);
+    try std.testing.expectEqual(0, fixture.game.mesh_versions.get(id).?.chunk_revision);
+    try std.testing.expectEqual(4, fixture.game.mesh_versions.get(id).?.mesh_revision);
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expectEqual(0, fixture.grid.chunks_to_upload.items.len);
+
+    // The same subscription resumes mesh delivery when its enclosure is opened.
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 2, .chunk_revision = 1, .mesh_revision = 5, .data = .{ .mesh = world_engine.extractChunkSideData(std.testing.allocator, chunk.content, @splat(.exposed)) } }});
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 2, .chunk_revision = 0, .mesh_revision = 4, .data = .unreachable_chunk }});
+    try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(5, fixture.game.mesh_versions.get(id).?.mesh_revision);
+    for (fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side) |side| try std.testing.expectEqual(1, side.items.len);
 }
 
 test "GPU preflight reduces subscriptions to 5x5x5 without writing a partial upload" {

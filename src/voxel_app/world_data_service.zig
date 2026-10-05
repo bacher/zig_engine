@@ -102,7 +102,13 @@ pub const ChunkResponse = struct {
     chunk_revision: u32 = 0,
     mesh_revision: u64 = 0,
     /// Owned by the receiver. A zero-face mesh does not imply empty block contents.
-    data: union(enum) { blocks: WorldChunk, mesh: ChunkSideData, acknowledgement },
+    data: union(enum) {
+        blocks: WorldChunk,
+        mesh: ChunkSideData,
+        /// Mesh subscription is current, but enclosure makes geometry unnecessary.
+        unreachable_chunk,
+        acknowledgement,
+    },
 
     pub fn deinit(self: ChunkResponse, allocator: std.mem.Allocator) void {
         switch (self.data) {
@@ -111,7 +117,7 @@ pub const ChunkResponse = struct {
                 var owned = mesh;
                 owned.deinit(allocator);
             },
-            .acknowledgement => {},
+            .unreachable_chunk, .acknowledgement => {},
         }
     }
 };
@@ -398,7 +404,13 @@ pub const WorldDataService = struct {
         for (self.clients.items) |client| {
             const sub = client.subscriptions.getPtr(position) orelse continue;
             if (sub.mode != .mesh or !sub.mesh_pending) continue;
-            client.append(.{ .coords = coords, .subscription_id = sub.id, .chunk_revision = chunk.chunk_revision, .mesh_revision = self.worker_state.meshRevision(coords), .data = .{ .mesh = mesh.clone(self.allocator) } });
+            client.append(.{
+                .coords = coords,
+                .subscription_id = sub.id,
+                .chunk_revision = chunk.chunk_revision,
+                .mesh_revision = self.worker_state.meshRevision(coords),
+                .data = if (chunk.flags.is_unreachable) .unreachable_chunk else .{ .mesh = mesh.clone(self.allocator) },
+            });
             sub.mesh_pending = false;
         }
     }
@@ -1097,7 +1109,7 @@ test "worker coalesces boundary meshes while preserving all operation acknowledg
     try std.testing.expectEqual(0, updates[3].data.mesh.blocks_grouped_by_side[@intFromEnum(Side.left)].items.len);
 }
 
-test "zero face mesh remains a subscribed solid chunk and updates on reveal" {
+test "unreachable mesh subscriptions receive only metadata until reveal while block subscriptions receive blocks" {
     const allocator = std.testing.allocator;
     const service = try WorldDataService.create(std.testing.io, allocator, .flat);
     defer service.destroy();
@@ -1106,7 +1118,19 @@ test "zero face mesh remains a subscribed solid chunk and updates on reveal" {
     var responses: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&responses);
     try waitForResponses(client, &responses, 1);
-    for (responses.items[0].data.mesh.blocks_grouped_by_side) |side| try std.testing.expectEqual(0, side.items.len);
+    try std.testing.expect(responses.items[0].data == .unreachable_chunk);
+    try std.testing.expectEqual(token, responses.items[0].subscription_id.?);
+    try std.testing.expectEqual(0, responses.items[0].chunk_revision);
+
+    const block_client = try service.createClient();
+    _ = block_client.requestChunks(.{ 2, 2 }, 2, 3);
+    var block_responses: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&block_responses);
+    try waitForResponses(block_client, &block_responses, 1);
+    const enclosed = block_responses.items[0].data.blocks;
+    try std.testing.expect(enclosed.flags.is_unreachable);
+    try std.testing.expect(enclosed.content == .blocks);
+    try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, enclosed.solid_block_count);
     _ = client.submitOperation(.{ .block = .{ 2 * CHUNK_SIZE + 8, 2 * CHUNK_SIZE + 8, 3 * CHUNK_SIZE }, .action = .remove });
     var packages = try takeTestPackages(client);
     defer deinitTestPackages(&packages);
@@ -1114,6 +1138,7 @@ test "zero face mesh remains a subscribed solid chunk and updates on reveal" {
     for (packages.items[0].responses.items) |response| {
         if (response.subscription_id != token) continue;
         try std.testing.expectEqual(1, response.chunk_revision);
+        try std.testing.expect(response.mesh_revision > responses.items[0].mesh_revision);
         try std.testing.expectEqual(1, response.data.mesh.blocks_grouped_by_side[@intFromEnum(Side.top)].items.len);
         revealed = true;
     }
@@ -1143,6 +1168,7 @@ test "default terrain 7x7x7 meshes fit the unchanged GPU allocator including fra
     }
     var bytes: usize = 0;
     for (responses.items) |response| {
+        if (response.data == .unreachable_chunk) continue;
         for (response.data.mesh.blocks_grouped_by_side) |side| bytes += 4 * side.items.len;
         grid.appendChunk(.{ .chunk_coords = response.coords, .chunk_side_data = response.data.mesh.clone(allocator) });
     }
