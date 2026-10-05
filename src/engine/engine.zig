@@ -1,4 +1,6 @@
 const std = @import("std");
+const chunk_utils = @import("chunk_utils.zig");
+const ChunkTransform = @import("chunk_transform.zig").ChunkTransform;
 const math = std.math;
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
@@ -504,15 +506,13 @@ pub const Engine = struct {
 
             fn update(self: *@This(), scene: *Scene, game_object: *const GameObject) void {
                 if (game_object.instance_index) |instance_index| {
-                    if (scene.instance_buffer.outdated_indices.isSet(instance_index)) {
+                    if (scene.instance_buffer.outdated_indices.isSet(instance_index) or isBillboard(game_object)) {
                         scene.instance_buffer.outdated_indices.unset(instance_index);
 
                         self.min = @min(self.min, instance_index);
                         self.max = @max(self.max, instance_index);
 
-                        scene.instance_buffer.buffer[instance_index] = .{
-                            .model_matrix = game_object.getModelMatrix(),
-                        };
+                        scene.instance_buffer.buffer[instance_index] = getRenderTransform(game_object, scene.camera);
                     }
                 }
             }
@@ -538,7 +538,7 @@ pub const Engine = struct {
                 }
             }
 
-            const camera_view_bound_box = scene.camera.getCameraViewBoundBox();
+            const camera_view_bound_box = scene.camera.getChunkFrustumPoints(.{}).getBoundingBox();
             const visible_objects = scene.space_tree.getObjectsInBoundBox(
                 camera_view_bound_box,
             );
@@ -624,22 +624,21 @@ pub const Engine = struct {
 
                             const potentially_visible_game_objects = engine.temp_buffers.getNextVisibleObjectsChunk();
 
-                            const clip_from_world_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
-                            clip_from_world_uniform.slice[0] = cascade.clip_from_world;
+                            const clip_from_chunk_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+                            clip_from_chunk_uniform.slice[0] = cascade.clip_from_chunk;
 
                             const settings_uniform = engine.gctx.uniformsAllocate(SceneShaderRuntimeSettings, 1);
                             settings_uniform.slice[0] = .{
                                 .ssao_enabled = engine.state.ssao_enabled,
                             };
                             const camera_chunk_uniform = engine.gctx.uniformsAllocate([3]i32, 1);
-                            camera_chunk_uniform.slice[0] = @as([4]i32, scene.camera.chunk)[0..3].*;
+                            camera_chunk_uniform.slice[0] = @as([4]i32, cascade.chunk)[0..3].*;
 
                             shadow_map_pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
-                                clip_from_world_uniform.offset,
-                                clip_from_world_uniform.offset, // Is it okay to use the same buffer for both uniforms?
+                                clip_from_chunk_uniform.offset,
+                                clip_from_chunk_uniform.offset, // Shadow shaders do not read the view matrix.
                                 settings_uniform.offset,
-                                // TODO: fix later
-                                clip_from_world_uniform.offset,
+                                clip_from_chunk_uniform.offset,
                                 camera_chunk_uniform.offset,
                             });
 
@@ -667,6 +666,17 @@ pub const Engine = struct {
                                 shadow_map_pass.setPipeline(engine.pipelines.shadow_map_skinned.pipeline_gpu);
                                 for (engine.temp_buffers.skinned_objects.items) |game_object| {
                                     engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, cascade, game_object);
+                                }
+                            }
+
+                            shadow_map_pass.setPipeline(engine.pipelines.shadow_map_voxel.pipeline_gpu);
+                            shadow_map_pass.setBindGroup(1, scene.voxel_bind_group.wgpu_bind_group, &.{});
+                            for (scene.voxel_grid.chunks.items) |chunk| {
+                                const info = chunk.gpu_residence_info orelse continue;
+                                // Opposite views cover all six sides. Shadow visibility must
+                                // not depend on which faces the camera can see.
+                                inline for (.{ 0, 7 }) |view_index| {
+                                    shadow_map_pass.draw(@intCast(info.faces_count_per_view[view_index] * 6), 1, 0, (info.chunk_index << 3) + view_index);
                                 }
                             }
 
@@ -720,24 +730,22 @@ pub const Engine = struct {
                     engine.frame_stats.find_objects_sub_invocations_count = stats.invocations_count;
                     // debug end
 
-                    const clip_from_world_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
-                    clip_from_world_uniform.slice[0] = scene.camera.clip_from_world;
-                    const view_from_world_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
-                    view_from_world_uniform.slice[0] = scene.camera.view_from_world;
+                    const clip_from_chunk_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+                    clip_from_chunk_uniform.slice[0] = scene.camera.clip_from_world_chunked;
+                    const view_from_chunk_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+                    view_from_chunk_uniform.slice[0] = scene.camera.view_from_world_chunked;
                     const settings_uniform = engine.gctx.uniformsAllocate(SceneShaderRuntimeSettings, 1);
                     settings_uniform.slice[0] = .{
                         .ssao_enabled = engine.state.ssao_enabled,
                     };
-                    const clip_from_world_chunked_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
-                    clip_from_world_chunked_uniform.slice[0] = scene.camera.clip_from_world_chunked;
                     const camera_chunk_uniform = engine.gctx.uniformsAllocate([3]i32, 1);
                     camera_chunk_uniform.slice[0] = @as([4]i32, scene.camera.chunk)[0..3].*;
 
                     pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
-                        clip_from_world_uniform.offset,
-                        view_from_world_uniform.offset,
+                        clip_from_chunk_uniform.offset,
+                        view_from_chunk_uniform.offset,
                         settings_uniform.offset,
-                        clip_from_world_chunked_uniform.offset,
+                        clip_from_chunk_uniform.offset,
                         camera_chunk_uniform.offset,
                     });
 
@@ -762,12 +770,12 @@ pub const Engine = struct {
                         }
                         const info = chunk.gpu_residence_info.?;
 
-                        const view_direction = @Vector(4, i32){
+                        const view_direction = chunk_utils.getChunkDelta(.{
                             chunk.chunk_origin[0],
                             chunk.chunk_origin[1],
                             chunk.chunk_origin[2],
                             0,
-                        } - scene.camera.chunk;
+                        }, scene.camera.chunk);
 
                         const dx = view_direction[0];
                         const dy = view_direction[1];
@@ -1034,59 +1042,10 @@ pub const Engine = struct {
             },
         }
 
-        const billboard_mode = switch (game_object.model) {
-            .regular_model => |model| model.model_descriptor.options.billboard_mode,
-            else => .none,
-        };
+        const transform = getRenderTransform(game_object, scene.camera);
+        const camera_chunk_from_model = transform.relativeTo(scene.camera.chunk);
 
-        var world_from_model = game_object.aggregated_matrix;
-
-        if (billboard_mode != .none) {
-            const scale_vec = zmath.util.getScaleVec(game_object.aggregated_matrix);
-            const position = game_object.aggregated_matrix[3];
-
-            const billboard_rotation_matrix = if (billboard_mode == .spherical) utils.matMul(
-                // inverse is needed because lookAtRh returns matrix which rotates world to camera,
-                // but we need to rotate the object in the world space.
-                zmath.inverse(
-                    zmath.lookAtRh(
-                        .{ 0, 0, 0, 1 },
-                        zmath.loadArr3(scene.camera.position) - position,
-                        .{ 0, 0, 1, 0 },
-                    ),
-                ),
-                billboard_normalization_matrix,
-            ) else cylindric_rotation_matrix: {
-                const direction = zmath.loadArr3(scene.camera.position) - position;
-                const angle = math.atan2(direction[1], direction[0]);
-
-                break :cylindric_rotation_matrix zmath.matFromNormAxisAngle(
-                    .{ 0, 0, 1, 1 },
-                    angle + 0.5 * math.pi,
-                );
-            };
-
-            world_from_model = utils.matMul(
-                zmath.translationV(position),
-                utils.matMul(
-                    // instead of inner rotate, we apply billboard rotation matrix
-                    billboard_rotation_matrix,
-                    zmath.scalingV(scale_vec),
-                ),
-            );
-        }
-
-        const flip_yz = switch (game_object.model) {
-            .regular_model => |model| model.model_descriptor.options.mesh_y_up,
-            else => false,
-        };
-        if (flip_yz) {
-            // NOTE: converting from Y-up to Z-up coordinate system,
-            // should be done only for models which is made with Y-up logic.
-            world_from_model = utils.matMul(world_from_model, xRotate);
-        }
-
-        var clip_from_object = utils.matMul(scene.camera.clip_from_world, world_from_model);
+        var clip_from_object = utils.matMul(scene.camera.clip_from_world_chunked, camera_chunk_from_model);
         if (game_object.model == .skybox_model or game_object.model == .skybox_cubemap_model) {
             clip_from_object = utils.matMul(
                 scene.camera.clip_from_view,
@@ -1100,21 +1059,15 @@ pub const Engine = struct {
         const clip_from_object_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
         clip_from_object_uniform.slice[0] = clip_from_object;
 
-        // TODO: support multiple lights
-        const light_clip_from_object_array_uniform = getLightClipMatrixArray(
-            engine.gctx,
-            scene.lights.items[0],
-            world_from_model,
-        );
-
         const camera_position_in_model_space_uniform = engine.gctx.uniformsAllocate(zmath.Vec, 1);
+        camera_position_in_model_space_uniform.slice[0] = .{ 0, 0, 0, 1 };
 
         switch (game_object.model) {
             .regular_model => |model| {
                 pass.setBindGroup(1, model.bind_group.wgpu_bind_group, &.{});
 
                 pass.setBindGroup(2, engine.bind_group_shadow_map.wgpu_bind_group, &.{
-                    light_clip_from_object_array_uniform.offset,
+                    getGlobalLightClipMatrixArray(engine.gctx, scene.lights.items[0]).offset,
                 });
 
                 if (game_object.joints_bind_group) |joints_bind_group| {
@@ -1124,6 +1077,7 @@ pub const Engine = struct {
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index orelse 0);
             },
             .terrain_height_map_model => |model| {
+                const light_clip_from_object_array_uniform = getLightClipMatrixArray(engine.gctx, scene.lights.items[0], transform);
                 const time_uniform = engine.gctx.uniformsAllocate(u32, 1);
                 time_uniform.slice[0] = @intFromFloat(engine.time * 1000);
 
@@ -1139,21 +1093,15 @@ pub const Engine = struct {
                 pass.draw(getTerrainHeightMapElementsCountForSide(64), 1, 0, 0);
             },
             .window_box_model => |window_box_model| {
-                const camera_position = zmath.Vec{
-                    // TODO: how it can be simplified?
-                    scene.camera.position[0],
-                    scene.camera.position[1],
-                    scene.camera.position[2],
-                    1,
-                };
+                const camera_position = scene.camera.getLocalPosition();
 
                 // TODO:
                 // Instead of inverse it will be better to just apply transposed
                 // rotation matrix and negative position shift (and scale if needed).
                 // inverse is much more compute intensive than listed below operations.
-                const model_from_world = zmath.inverse(world_from_model);
+                const model_from_camera_chunk = zmath.inverse(camera_chunk_from_model);
                 const camera_position_in_model_space = utils.matApply(
-                    model_from_world,
+                    model_from_camera_chunk,
                     camera_position,
                 );
 
@@ -1205,18 +1153,19 @@ pub const Engine = struct {
         model_descriptor.position.applyVertexBuffer(pass, 0);
 
         const bounds = game_object.model.getBounds();
-        const bound_center = utils.matApply1(game_object.aggregated_matrix, bounds.offset);
+        const relative_model = ChunkTransform.init(game_object.aggregated_matrix).relativeTo(scene.camera.chunk);
+        const bound_center = utils.matApply1(relative_model, bounds.offset);
         const scale = zmath.util.getScaleVec(game_object.aggregated_matrix);
         const radius = bounds.radius * scale[0];
 
-        const world_from_model =
+        const camera_chunk_from_model =
             utils.matMul(
                 // Ignoring rotation since box should be always axis-aligned.
                 zmath.translationV(bound_center),
                 zmath.scaling(radius, radius, radius),
             );
 
-        const clip_from_object = utils.matMul(scene.camera.clip_from_world, world_from_model);
+        const clip_from_object = utils.matMul(scene.camera.clip_from_world_chunked, camera_chunk_from_model);
         const clip_from_object_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
         clip_from_object_uniform.slice[0] = clip_from_object;
 
@@ -1239,8 +1188,6 @@ pub const Engine = struct {
         cascade: *const DirectionalLightCascade,
         game_object: *GameObject,
     ) void {
-        _ = scene;
-        _ = cascade;
         _ = light;
 
         switch (game_object.model) {
@@ -1261,11 +1208,15 @@ pub const Engine = struct {
                 }
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index orelse 0);
             },
-            .terrain_height_map_model => {
-                // nothing to do
-                // TODO: can't be rendered because shadow map relies on vertex data
-                // pass.draw(getTerrainHeightMapElementsCountForSide(64), 1, 0, 0);
-                return;
+            .terrain_height_map_model => |model| {
+                const relative_model = getRenderTransform(game_object, scene.camera).relativeTo(cascade.chunk);
+                const clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+                clip_uniform.slice[0] = utils.matMul(cascade.clip_from_chunk, relative_model);
+                const time_uniform = engine.gctx.uniformsAllocate(u32, 1);
+                time_uniform.slice[0] = @intFromFloat(engine.time * 1000);
+                pass.setPipeline(engine.pipelines.shadow_map_terrain.pipeline_gpu);
+                pass.setBindGroup(0, model.bind_group.wgpu_bind_group, &.{ clip_uniform.offset, time_uniform.offset });
+                pass.draw(getTerrainHeightMapElementsCountForSide(64), 1, 0, 0);
             },
             .window_box_model => |window_box_model| {
                 const model_descriptor = window_box_model.model_descriptor;
@@ -1612,17 +1563,82 @@ fn slowOperation() void {
     }
 }
 
+fn isBillboard(game_object: *const GameObject) bool {
+    return switch (game_object.model) {
+        .regular_model => |model| model.model_descriptor.options.billboard_mode != .none,
+        else => false,
+    };
+}
+
+fn getRenderTransform(game_object: *const GameObject, camera: *const @import("camera.zig").Camera) ChunkTransform {
+    const billboard_mode = switch (game_object.model) {
+        .regular_model => |model| model.model_descriptor.options.billboard_mode,
+        else => .none,
+    };
+
+    var transform = ChunkTransform.init(game_object.aggregated_matrix);
+    var chunk_from_model = transform.chunk_from_model;
+
+    if (billboard_mode != .none) {
+        const scale_vec = zmath.util.getScaleVec(game_object.aggregated_matrix);
+        const position = transform.chunk_from_model[3];
+        const direction = camera.getLocalPosition() - transform.relativeTo(camera.chunk)[3];
+
+        const billboard_rotation_matrix = if (billboard_mode == .spherical) utils.matMul(
+            // inverse is needed because lookAtRh returns matrix which rotates world to camera,
+            // but we need to rotate the object in the world space.
+            zmath.inverse(
+                zmath.lookAtRh(
+                    .{ 0, 0, 0, 1 },
+                    direction,
+                    .{ 0, 0, 1, 0 },
+                ),
+            ),
+            billboard_normalization_matrix,
+        ) else cylindric_rotation_matrix: {
+            const angle = math.atan2(direction[1], direction[0]);
+
+            break :cylindric_rotation_matrix zmath.matFromNormAxisAngle(
+                .{ 0, 0, 1, 1 },
+                angle + 0.5 * math.pi,
+            );
+        };
+
+        chunk_from_model = utils.matMul(
+            zmath.translationV(position),
+            utils.matMul(
+                // instead of inner rotate, we apply billboard rotation matrix
+                billboard_rotation_matrix,
+                zmath.scalingV(scale_vec),
+            ),
+        );
+    }
+
+    const flip_yz = switch (game_object.model) {
+        .regular_model => |model| model.model_descriptor.options.mesh_y_up,
+        else => false,
+    };
+    if (flip_yz) {
+        // NOTE: converting from Y-up to Z-up coordinate system,
+        // should be done only for models which is made with Y-up logic.
+        chunk_from_model = utils.matMul(chunk_from_model, xRotate);
+    }
+
+    transform.chunk_from_model = chunk_from_model;
+    return transform;
+}
+
 fn getLightClipMatrixArray(
     gctx: *zgpu.GraphicsContext,
     light: *const DirectionalLight,
-    world_from_model: zmath.Mat,
+    transform: ChunkTransform,
 ) struct { slice: []zmath.Mat, offset: u32 } {
     const uniform = gctx.uniformsAllocate(zmath.Mat, 3);
 
     for (&light.cascades, 0..) |*cascade, i| {
         const light_clip_from_object = utils.matMul(
-            cascade.clip_from_world,
-            world_from_model,
+            cascade.clip_from_chunk,
+            transform.relativeTo(cascade.chunk),
         );
         uniform.slice[i] = light_clip_from_object;
     }
@@ -1640,7 +1656,7 @@ fn getGlobalLightClipMatrixArray(
     const uniform = gctx.uniformsAllocate(zmath.Mat, 3);
 
     for (&light.cascades, 0..) |*cascade, i| {
-        uniform.slice[i] = cascade.clip_from_world;
+        uniform.slice[i] = cascade.clip_from_chunk;
     }
 
     // Have to recreated the struct even though uniform and resulting struct

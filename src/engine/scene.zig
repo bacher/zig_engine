@@ -12,7 +12,7 @@ const SkyBoxModel = @import("./model.zig").SkyBoxModel;
 const SkyBoxCubemapModel = @import("./model.zig").SkyBoxCubemapModel;
 const PrimitiveModel = @import("./model.zig").PrimitiveModel;
 const Camera = @import("./camera.zig").Camera;
-const SpaceTree = @import("./space_tree.zig").SpaceTree;
+const SpaceTree = @import("./naive_space_tree.zig").SpaceTree;
 const SpectatorCamera = @import("./spectator_camera.zig").SpectatorCamera;
 const light_module = @import("./light.zig");
 const BindGroup = @import("./bind_group.zig").BindGroup;
@@ -20,12 +20,10 @@ const DirectionalLight = light_module.DirectionalLight;
 const DirectionalLightParams = light_module.DirectionalLightParams;
 const VoxelGrid = @import("./voxel/voxel_grid.zig").VoxelGrid;
 
-const INSTANCE_BUFFER_ENTRY_SIZE = 1024;
+const INSTANCE_BUFFER_ENTRY_SIZE = MAX_OBJECTS_COUNT;
 const MAX_OBJECTS_COUNT = 4096;
 
-pub const InstanceBufferEntry = extern struct {
-    model_matrix: zmath.Mat,
-};
+pub const InstanceBufferEntry = @import("chunk_transform.zig").ChunkTransform;
 
 pub const Scene = struct {
     engine: *Engine,
@@ -214,9 +212,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        scene.instance_buffer.buffer[instance_index] = .{
-            .model_matrix = game_object.getModelMatrix(),
-        };
+        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(game_object.getModelMatrix());
 
         if (params.animation_name) |animation_name| {
             try game_object.playAnimation(scene.animationContext(), animation_name);
@@ -237,6 +233,7 @@ pub const Scene = struct {
     pub fn addTerrainHeightMapObject(scene: *Scene, params: AddTerrainHeightMapObjectParams) !*GameObject {
         try scene.checkMaxObjectsCount();
 
+        const instance_index = scene.instance_buffer.next_index;
         const game_object = try GameObject.init(scene.allocator, .{
             .scene = scene,
             .model = .{
@@ -244,10 +241,12 @@ pub const Scene = struct {
             },
             .position = params.position,
             .parent = params.parent,
-            .instance_index = null,
+            .instance_index = instance_index,
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
+        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(game_object.getModelMatrix());
+        scene.instance_buffer.next_index += 1;
         scene.game_objects.appendAssumeCapacity(game_object);
 
         return game_object;
@@ -257,7 +256,11 @@ pub const Scene = struct {
     pub fn addWindowBoxObject(scene: *Scene, params: AddWindowBoxParams) !*GameObject {
         try scene.checkMaxObjectsCount();
 
+        const instance_index = scene.instance_buffer.next_index;
         const game_object = try GameObject.init(scene.allocator, .{
+            .scene = scene,
+            .parent = null,
+            .instance_index = instance_index,
             .model = .{
                 .window_box_model = params.model,
             },
@@ -265,6 +268,8 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
+        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(game_object.getModelMatrix());
+        scene.instance_buffer.next_index += 1;
         scene.game_objects.appendAssumeCapacity(game_object);
 
         return game_object;
@@ -273,7 +278,11 @@ pub const Scene = struct {
     pub fn addSkyBoxObject(scene: *Scene, params: AddSkyBoxParams) !*GameObject {
         try scene.checkMaxObjectsCount();
 
+        const instance_index = scene.instance_buffer.next_index;
         const game_object = try GameObject.init(scene.allocator, .{
+            .scene = scene,
+            .parent = null,
+            .instance_index = instance_index,
             .model = .{
                 .skybox_model = params.model,
             },
@@ -281,6 +290,8 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
+        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(game_object.getModelMatrix());
+        scene.instance_buffer.next_index += 1;
         scene.game_objects.appendAssumeCapacity(game_object);
 
         return game_object;
@@ -311,6 +322,7 @@ pub const Scene = struct {
     pub fn addPrimitiveObject(scene: *Scene, params: AddPrimitiveObjectParams) !*GameObject {
         try scene.checkMaxObjectsCount();
 
+        const instance_index = scene.instance_buffer.next_index;
         const game_object = try GameObject.init(scene.allocator, .{
             .scene = scene,
             .model = .{
@@ -318,10 +330,12 @@ pub const Scene = struct {
             },
             .position = params.position,
             .parent = null,
-            .instance_index = null,
+            .instance_index = instance_index,
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
+        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(game_object.getModelMatrix());
+        scene.instance_buffer.next_index += 1;
         scene.game_objects.appendAssumeCapacity(game_object);
 
         return game_object;

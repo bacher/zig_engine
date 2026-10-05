@@ -18,6 +18,10 @@ const debug_texture_pipeline_module = @import("./pipelines/debug_texture_pipelin
 const screen_quad_pipeline_module = @import("./pipelines/screen_quad_pipeline.zig");
 const ssao_pipeline_module = @import("./pipelines/ssao_pipeline.zig");
 
+const shadow_map_voxel_pipeline_module = @import("./pipelines/shadow_map_voxel_pipeline.zig");
+
+const shadow_map_terrain_pipeline_module = @import("./pipelines/shadow_map_terrain_pipeline.zig");
+
 pub const Pipelines = struct {
     // -- basic pipelines --
     basic: Pipeline,
@@ -30,6 +34,8 @@ pub const Pipelines = struct {
     voxel_pipeline: Pipeline,
     // -- shadow pipelines --
     shadow_map: Pipeline,
+    shadow_map_terrain: Pipeline,
+    shadow_map_voxel: Pipeline,
     shadow_map_skinned: Pipeline,
     // -- debug pipelines --
     lines: Pipeline,
@@ -120,6 +126,8 @@ pub const Pipelines = struct {
             .terrain_height_map = terrain_height_map_pipeline,
             .voxel_pipeline = voxel_pipeline,
             .shadow_map = shadow_map_pipeline,
+            .shadow_map_terrain = shadow_map_terrain_pipeline_module.createShadowMapTerrainPipeline(gctx, bind_group_layouts),
+            .shadow_map_voxel = shadow_map_voxel_pipeline_module.createShadowMapVoxelPipeline(gctx, bind_group_layouts),
             .shadow_map_skinned = shadow_map_skinned_pipeline,
             .lines = lines_pipeline,
             .debug_texture = debug_texture_pipeline,
@@ -138,6 +146,8 @@ pub const Pipelines = struct {
         pipelines.terrain_height_map.deinit(gctx);
         pipelines.voxel_pipeline.deinit(gctx);
         pipelines.shadow_map.deinit(gctx);
+        pipelines.shadow_map_terrain.deinit(gctx);
+        pipelines.shadow_map_voxel.deinit(gctx);
         pipelines.shadow_map_skinned.deinit(gctx);
         pipelines.lines.deinit(gctx);
         pipelines.debug_texture.deinit(gctx);

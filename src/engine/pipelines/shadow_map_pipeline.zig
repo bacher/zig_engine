@@ -1,7 +1,7 @@
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-const wgsl_vs = @embedFile("../shaders/shadow_map/vs.wgsl");
+const wgsl_vs = @import("../chunk_utils.zig").wgsl ++ @embedFile("../shaders/shadow_map/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/shadow_map/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;

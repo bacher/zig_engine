@@ -10,7 +10,7 @@ pub const ShadowMapBindGroupLayout = struct {
 
     pub fn init(gctx: *zgpu.GraphicsContext) ShadowMapBindGroupLayout {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
-            // object to light clip transformation matrix array
+            // Chunk-to-light-clip matrices, or precomposed object-to-light-clip matrices for terrain
             zgpu.bufferEntry(
                 0,
                 .{ .vertex = true },

@@ -9,14 +9,7 @@ const FrustumPoints = @import("./frustum.zig").FrustumPoints;
 const chunk_utils = @import("./chunk_utils.zig");
 const getChunkCoords = chunk_utils.getChunkCoords;
 
-pub const CHUNK_SIZE = 32.0;
-// TODO: dedupe
-const WORLD_ORIGIN_CHUNK = [_]i32{ 256, 128, 4 };
-const WORLD_SIZE = [_]u32{
-    std.math.pow(u32, 2, 9), //   512 chunks ( 16384 blocks)
-    std.math.pow(u32, 2, 8), //   256 chunks (  8192 blocks)
-    std.math.pow(u32, 2, 3), //     8 chunks (   256 blocks)
-};
+pub const CHUNK_SIZE = chunk_utils.CHUNK_SIZE;
 
 pub const Camera = struct {
     aspect_ratio: f32,
@@ -34,7 +27,9 @@ pub const Camera = struct {
     // derived
     view_from_camera: zmath.Mat,
     clip_from_world: zmath.Mat,
-    clip_from_world_chunked: zmath.Mat, // NEW
+    clip_from_world_chunked: zmath.Mat,
+    view_from_world_chunked: zmath.Mat,
+    world_from_clip_chunked: zmath.Mat,
     view_from_world: zmath.Mat,
     world_from_clip: zmath.Mat,
 
@@ -57,7 +52,7 @@ pub const Camera = struct {
             .aspect_ratio = aspect_ratio,
 
             .position = position,
-            .chunk = @splat(0),
+            .chunk = getChunkCoords(position),
 
             .camera_from_world = no_translation,
             .camera_from_world_chunked = no_translation,
@@ -70,6 +65,8 @@ pub const Camera = struct {
             .view_from_camera = undefined,
             .clip_from_world = undefined,
             .clip_from_world_chunked = undefined,
+            .view_from_world_chunked = undefined,
+            .world_from_clip_chunked = undefined,
             .view_from_world = undefined,
             .world_from_clip = undefined,
         };
@@ -92,7 +89,7 @@ pub const Camera = struct {
             camera.camera_from_world,
         );
 
-        const view_from_world_chunked = utils.matMul(
+        camera.view_from_world_chunked = utils.matMul(
             camera.view_from_camera,
             camera.camera_from_world_chunked,
         );
@@ -104,10 +101,11 @@ pub const Camera = struct {
 
         camera.clip_from_world_chunked = utils.matMul(
             camera.clip_from_view,
-            view_from_world_chunked,
+            camera.view_from_world_chunked,
         );
 
         camera.world_from_clip = zmath.inverse(camera.clip_from_world);
+        camera.world_from_clip_chunked = zmath.inverse(camera.clip_from_world_chunked);
     }
 
     pub fn updateTargetScreenSize(camera: *Camera, aspect_ratio: f32) void {
@@ -166,6 +164,16 @@ pub const Camera = struct {
             },
             options.depth,
         );
+    }
+
+    pub fn getLocalPosition(camera: *const Camera) zmath.Vec {
+        const local = chunk_utils.getLocalPosition(camera.position);
+        return .{ local[0], local[1], local[2], 1 };
+    }
+
+    /// Fit shadow cascades without ever reconstructing a world-space frustum.
+    pub fn getChunkFrustumPoints(camera: *const Camera, options: struct { depth: f32 = 1.0 }) FrustumPoints {
+        return FrustumPoints.initFromMatrix(camera.world_from_clip_chunked, camera.getLocalPosition(), options.depth);
     }
 
     pub fn getCameraViewBoundBox(camera: *const Camera) BoundBox(f32) {

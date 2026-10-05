@@ -23,15 +23,17 @@ const DirectLightLayer = enum(u8) {
 
 pub const DirectionalLightCascade = struct {
     layer: DirectLightLayer,
-    clip_from_world: zmath.Mat = undefined,
-    view_from_world: zmath.Mat = undefined,
-    world_from_clip: zmath.Mat = undefined,
+    clip_from_chunk: zmath.Mat = undefined,
+    // Cascades are anchored at the camera chunk. Forward and shadow passes
+    // must use this same origin when projecting their vertices.
+    chunk: @Vector(4, i32) = @splat(0),
+    chunk_from_clip: zmath.Mat = undefined,
 
     // TODO:
     // Current approach with single bounding box is not optimal, the light view
     // can be very toll, so a lot of unused space in bound box.
     pub fn getLightViewBoundBox(cascade: *const DirectionalLightCascade) BoundBox(f32) {
-        const cube_points = CubePoints.initFromMatrix(cascade.world_from_clip);
+        const cube_points = CubePoints.initFromMatrix(cascade.chunk_from_clip);
         return cube_points.getBoundingBox();
     }
 };
@@ -53,7 +55,8 @@ pub const DirectionalLight = struct {
     }
 
     pub fn applyCameraFrustum(light: *DirectionalLight, cascade: *DirectionalLightCascade, camera: *const Camera) void {
-        const frustum_points = camera.getFrustumPoints(.{
+        cascade.chunk = camera.chunk;
+        const frustum_points = camera.getChunkFrustumPoints(.{
             .depth = switch (cascade.layer) {
                 .layer_0 => 1.0,
                 .layer_1 => 0.99985,
@@ -119,14 +122,14 @@ pub const DirectionalLight = struct {
         }
         // --
 
-        cascade.clip_from_world = utils.matMul(
+        cascade.clip_from_chunk = utils.matMul(
             utils.matMul(clip_from_view, move_mat),
             look_to,
         );
 
         // --
         if (DEBUG_LIGHT) {
-            const ort_frustum_points = frustum_points.applyMatrix(cascade.clip_from_world);
+            const ort_frustum_points = frustum_points.applyMatrix(cascade.clip_from_chunk);
 
             debug.printVecAsVec3Labeled(
                 "ort camera view bound box min",
@@ -139,7 +142,7 @@ pub const DirectionalLight = struct {
         }
         // --
 
-        cascade.world_from_clip = zmath.inverse(cascade.clip_from_world);
+        cascade.chunk_from_clip = zmath.inverse(cascade.clip_from_chunk);
     }
 };
 

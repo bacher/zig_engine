@@ -243,6 +243,18 @@ pub fn build(b: *std.Build) void {
     const run_slot_buffer_manager_unit_tests = b.addRunArtifact(slot_buffer_manager_unit_tests);
 
     const test_step = b.step("test", "Run unit tests");
+    const render_coordinates_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/engine/render_coordinates_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zmath", .module = zmath.module("root") },
+                .{ .name = "debug", .module = debug_module },
+            },
+        }),
+    });
+    test_step.dependOn(&b.addRunArtifact(render_coordinates_tests).step);
     test_step.dependOn(&run_voxel_grid_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
     test_step.dependOn(&run_voxel_exe_unit_tests.step);

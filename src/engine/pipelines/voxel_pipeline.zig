@@ -1,7 +1,7 @@
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-const wgsl_vs = @embedFile("../shaders/voxel/vs.wgsl");
+const wgsl_vs = @import("../chunk_utils.zig").wgsl ++ @embedFile("../shaders/voxel/geometry.wgsl") ++ @embedFile("../shaders/voxel/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/voxel/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;

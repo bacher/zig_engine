@@ -14,7 +14,7 @@ pub const SceneBindGroupLayout = struct {
 
     pub fn init(gctx: *zgpu.GraphicsContext) SceneBindGroupLayout {
         const bind_group_layout_handle = gctx.createBindGroupLayout(&.{
-            // world to clip matrix
+            // Compatibility alias for the chunk-to-clip matrix
             zgpu.bufferEntry(
                 0,
                 .{ .vertex = true },
@@ -22,7 +22,7 @@ pub const SceneBindGroupLayout = struct {
                 true,
                 0,
             ),
-            // world to view matrix
+            // Camera chunk to view matrix
             zgpu.bufferEntry(
                 1,
                 .{ .vertex = true },
@@ -46,7 +46,7 @@ pub const SceneBindGroupLayout = struct {
                 true,
                 0,
             ),
-            // world to clip matrix (chunked)
+            // Camera/light chunk to clip matrix
             zgpu.bufferEntry(
                 4,
                 .{ .vertex = true },
@@ -54,7 +54,7 @@ pub const SceneBindGroupLayout = struct {
                 true,
                 0,
             ),
-            // camera chunk
+            // Origin chunk (camera for the main pass, cascade origin for shadows)
             zgpu.bufferEntry(
                 5,
                 .{ .vertex = true },
@@ -82,14 +82,14 @@ pub const SceneBindGroupLayout = struct {
         const bind_group_handle = gctx.createBindGroup(
             bind_group_layout.bind_group_layout_handle,
             &.{
-                // world to clip matrix
+                // Compatibility alias for the chunk-to-clip matrix
                 .{
                     .binding = 0,
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
                     .size = @sizeOf(zmath.Mat),
                 },
-                // world to view matrix
+                // Camera chunk to view matrix
                 .{
                     .binding = 1,
                     .buffer_handle = gctx.uniforms.buffer,
@@ -110,14 +110,14 @@ pub const SceneBindGroupLayout = struct {
                     .offset = 0,
                     .size = @sizeOf(SceneShaderRuntimeSettings),
                 },
-                // world to clip matrix (chunked)
+                // Camera/light chunk to clip matrix
                 .{
                     .binding = 4,
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
                     .size = @sizeOf(zmath.Mat),
                 },
-                // camera chunk
+                // Origin chunk (camera for the main pass, cascade origin for shadows)
                 .{
                     .binding = 5,
                     .buffer_handle = gctx.uniforms.buffer,

@@ -14,7 +14,6 @@ const SkyBoxCubemapModel = model_module.SkyBoxCubemapModel;
 const PrimitiveModel = model_module.PrimitiveModel;
 const TerrainHeightMapModel = model_module.TerrainHeightMapModel;
 const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;
-const SpaceTree = @import("./space_tree.zig").SpaceTree;
 const BindGroup = @import("./bind_group.zig").BindGroup;
 const bind_group_layouts = @import("./bind_group_layouts.zig");
 const SkeletalAnimation = @import("./skeletal_animation.zig");
@@ -79,6 +78,7 @@ pub const GameObject = struct {
     } = .{},
     parent: ?*GameObjectGroup,
     instance_index: ?u32,
+    skip_space_tree: bool,
     _gc: ?*GameObject,
 
     pub const AnimationContext = struct {
@@ -101,12 +101,12 @@ pub const GameObject = struct {
             .model = params.model,
             .parent = params.parent,
             .instance_index = params.instance_index,
+            .skip_space_tree = params.skip_space_tree,
             ._gc = game_object,
         };
 
         game_object.updateAggregatedMatrix(.{
             .is_initial = true,
-            .skip_space_tree = params.skip_space_tree,
         });
 
         return game_object;
@@ -220,11 +220,10 @@ pub const GameObject = struct {
 
     fn updateAggregatedMatrix(game_object: *GameObject, options: struct {
         is_initial: bool = false,
-        skip_space_tree: bool = false,
     }) void {
         const space_tree = game_object.scene.space_tree;
 
-        if (!options.is_initial and !options.skip_space_tree) {
+        if (!options.is_initial and !game_object.skip_space_tree) {
             space_tree.removeObject(game_object) catch {
                 std.debug.print("failed to remove object from space tree\n", .{});
             };
@@ -241,7 +240,7 @@ pub const GameObject = struct {
             );
         }
 
-        if (!options.skip_space_tree) {
+        if (!game_object.skip_space_tree) {
             space_tree.addObject(game_object) catch {
                 std.debug.print("failed to add object to space tree\n", .{});
             };

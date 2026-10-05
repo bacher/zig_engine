@@ -1,7 +1,7 @@
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-const wgsl_vs = @embedFile("../shaders/terrain_height_map/vs.wgsl");
+const wgsl_vs = @embedFile("../shaders/terrain_height_map/geometry.wgsl") ++ @embedFile("../shaders/terrain_height_map/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/terrain_height_map/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;

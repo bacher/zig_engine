@@ -1,19 +1,18 @@
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-const wgsl_vs = @import("../chunk_utils.zig").wgsl ++ @embedFile("../shaders/shadow_map/skinned_vs.wgsl");
+const wgsl_vs = @embedFile("../shaders/terrain_height_map/geometry.wgsl") ++ @embedFile("../shaders/shadow_map/terrain_vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/shadow_map/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
 const BindGroupLayouts = @import("../bind_group_layouts.zig").BindGroupLayouts;
 
-pub fn createShadowMapSkinnedPipeline(
+pub fn createShadowMapTerrainPipeline(
     gctx: *zgpu.GraphicsContext,
     bind_group_layouts: *const BindGroupLayouts,
 ) Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
-        bind_group_layouts.scene.bind_group_layout_handle,
-        bind_group_layouts.joints.bind_group_layout_handle,
+        bind_group_layouts.terrain_height_map.bind_group_layout_handle,
     });
     defer gctx.releaseResource(pipeline_layout_handle);
 
@@ -27,33 +26,14 @@ pub fn createShadowMapSkinnedPipeline(
         .format = .r32_float,
     }};
 
-    const vertex_buffers = [_]wgpu.VertexBufferLayout{
-        // position
-        .{
-            .array_stride = @sizeOf([3]f32),
-            .attributes = &.{.{ .format = .float32x3, .offset = 0, .shader_location = 0 }},
-            .attribute_count = 1,
-        },
-        // joints
-        .{
-            .array_stride = @sizeOf([4]u32),
-            .attributes = &.{.{ .format = .uint32x4, .offset = 0, .shader_location = 3 }},
-            .attribute_count = 1,
-        },
-        // weights
-        .{
-            .array_stride = @sizeOf([4]f32),
-            .attributes = &.{.{ .format = .float32x4, .offset = 0, .shader_location = 4 }},
-            .attribute_count = 1,
-        },
-    };
+    const vertex_buffers = [_]wgpu.VertexBufferLayout{};
 
     const pipeline_descriptor = wgpu.RenderPipelineDescriptor{
-        .label = "shadow_map_skinned_pipeline",
+        .label = "shadow_map_terrain_pipeline",
         .primitive = wgpu.PrimitiveState{
             .front_face = .ccw,
             .cull_mode = .back,
-            .topology = .triangle_list,
+            .topology = .triangle_strip,
         },
         .depth_stencil = &wgpu.DepthStencilState{
             .format = .depth32_float,
