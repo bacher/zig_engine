@@ -58,12 +58,13 @@ pub const SimulationWorker = struct {
             for (responses.items) |response| {
                 defer response.deinit(service.allocator);
                 if (response.subscription_id != token) continue;
+                if (response.data != .blocks) continue;
                 const z = response.coords[2];
                 if (!received[z]) {
                     received[z] = true;
                     count += 1;
                 }
-                surface_z = @max(surface_z, surfaceAboveChunk(response.data.blocks, z));
+                surface_z = @max(surface_z, surfaceAboveChunk(response.data.blocks.chunk, z));
             }
             responses.clearRetainingCapacity();
         }
@@ -156,7 +157,7 @@ test "simulation repeatedly pushes put remove put to a subscribed client" {
     }
     try std.testing.expect(try observer.waitResponses(&responses));
     try std.testing.expectEqual(1, responses.items.len);
-    responses.items[0].data.blocks.content.deinit(allocator);
+    responses.items[0].data.blocks.chunk.content.deinit(allocator);
     responses.clearRetainingCapacity();
 
     const started = Io.Clock.awake.now(io);
@@ -168,9 +169,9 @@ test "simulation repeatedly pushes put remove put to a subscribed client" {
         for (responses.items) |response| {
             try std.testing.expectEqual(token, response.subscription_id);
             try std.testing.expectEqual(null, response.operation);
-            try std.testing.expectEqual(changes + 1, response.data.blocks.chunk_revision);
+            try std.testing.expectEqual(changes + 1, response.data.blocks.chunk.chunk_revision);
             const expected: @import("engine").voxel_chunk.BlockType = if (changes % 2 == 0) .dirt else .none;
-            try std.testing.expectEqual(expected, response.data.blocks.content.getBlock(.{ 16, 16, 16 }));
+            try std.testing.expectEqual(expected, response.data.blocks.chunk.content.getBlock(.{ 16, 16, 16 }));
             changes += 1;
         }
         for (responses.items) |response| response.deinit(allocator);

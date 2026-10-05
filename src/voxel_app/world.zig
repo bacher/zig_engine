@@ -8,6 +8,7 @@ const world_generator = @import("./world_generator.zig");
 const ChunkPosition = @import("./consts.zig").ChunkPosition;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const WORLD_SIZE = @import("./consts.zig").WORLD_SIZE;
+const boundary_mask = @import("./boundary_mask.zig");
 
 pub fn normalizeChunkPosition(x: anytype, y: anytype, z: anytype) [3]u30 {
     var normalized_x = x;
@@ -115,6 +116,8 @@ pub const WorldChunk = struct {
     /// Authoritative revision, advanced only by the world-data service for content or flag changes.
     /// Optimistic edits never change it. 0 means no edits have been committed yet.
     chunk_revision: u32 = 0,
+    /// Cached own boundary occupancy, including optimistic edits. Never sent to the GPU.
+    boundaries: boundary_mask.BoundaryMasks = @splat(.{}),
 
     pub fn initEmpty() WorldChunk {
         return .{
@@ -126,10 +129,12 @@ pub const WorldChunk = struct {
 
     /// Takes ownership of the data.
     pub fn initBlocks(world_chunk_data: *WorldChunkData) WorldChunk {
+        const boundaries = boundary_mask.extract(world_chunk_data);
         return .{
             .content = .{ .blocks = world_chunk_data },
-            .flags = WorldChunkData.getMetaFlags(world_chunk_data),
+            .flags = boundary_mask.getFlags(&boundaries),
             .solid_block_count = world_chunk_data.countSolidBlocks(),
+            .boundaries = boundaries,
         };
     }
 
@@ -170,6 +175,7 @@ pub const WorldChunk = struct {
         const data = self.ensureData(allocator);
         const was_unreachable = self.flags.is_unreachable;
         data.blocks[local[2]][local[1]][local[0]] = block_type;
+        boundary_mask.update(&self.boundaries, local, block_type != .none);
         if (block_type == .none) {
             self.solid_block_count -= 1;
         } else {
@@ -179,9 +185,7 @@ pub const WorldChunk = struct {
             self.content.deinit(allocator);
             self.content = .empty;
             self.flags = .{};
-        } else {
-            self.flags = data.getMetaFlags();
-        }
+        } else self.flags = boundary_mask.getFlags(&self.boundaries);
         // Face flags describe our blocks; reachability describes neighboring walls.
         self.flags.is_unreachable = was_unreachable;
         return .success;
@@ -834,4 +838,35 @@ test "loading an opened wall and hidden neighbor in either order reveals the nei
         try std.testing.expect(!world.getChunk(target_coords).?.flags.is_unreachable);
         try std.testing.expectEqual(0, world.getChunk(target_coords).?.chunk_revision);
     }
+}
+
+test "cached boundary masks track generation edits clones and optimistic reconciliation" {
+    const allocator = std.testing.allocator;
+    const data = try allocator.create(WorldChunkData);
+    data.* = WorldChunkData.initSolid();
+    var chunk = WorldChunk.initBlocks(data);
+    defer chunk.content.deinit(allocator);
+    const edits = [_][3]u5{ .{ 8, 8, 8 }, .{ 0, 8, 8 }, .{ 31, 31, 8 }, .{ 0, 0, 0 }, .{ 31, 31, 31 } };
+    for (edits) |local| {
+        try std.testing.expectEqual(OperationStatus.success, chunk.apply(allocator, local, .remove));
+        try std.testing.expectEqualDeep(boundary_mask.extract(chunk.content.blocks), chunk.boundaries);
+        try std.testing.expectEqual(chunk.content.blocks.getMetaFlags(), chunk.flags);
+    }
+    const copy = chunk.clone(allocator);
+    defer copy.content.deinit(allocator);
+    try std.testing.expectEqualDeep(copy.boundaries, chunk.boundaries);
+
+    var world = World.init(allocator);
+    defer world.deinit();
+    const coords = [3]u30{ 1, 1, 1 };
+    try world.insertChunk(coords, WorldChunk.initEmpty());
+    const block = [3]u32{ CHUNK_SIZE, CHUNK_SIZE + 8, CHUNK_SIZE + 8 };
+    world.setBlock(block, .stone);
+    world.pending_operations.items[0].request_id = 1;
+    // Replaying the optimistic put over a fresh snapshot must rebuild its boundary bit.
+    try world.insertChunk(coords, WorldChunk.initEmpty());
+    try std.testing.expect(world.getChunk(coords).?.boundaries[0].contains(.left, .{ 0, 8, 8 }));
+    world.acknowledgeOperation(1);
+    try world.insertChunk(coords, WorldChunk.initEmpty());
+    try std.testing.expect(!world.getChunk(coords).?.boundaries[0].contains(.left, .{ 0, 8, 8 }));
 }
