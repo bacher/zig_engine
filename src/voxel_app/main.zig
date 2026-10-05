@@ -240,11 +240,30 @@ const Game = struct {
             if (revision < old.mesh_revision) return;
             old.mesh_revision = revision;
             if (std.meta.eql(old.masks, masks)) return;
+            const previous = old.masks;
             old.masks = masks;
+            // Keep every accepted plane for future edits and handoffs, even when no
+            // currently rendered boundary face depends on the changed occupancy.
+            if (!game.boundaryVisibilityChanged(coords, previous, masks)) return;
         } else {
             game.boundary_snapshots.put(game.allocator, id, .{ .masks = masks, .mesh_revision = revision }) catch @panic("OOM");
         }
         game.markChunkDirtyIfLoaded(coords);
+    }
+
+    fn boundaryVisibilityChanged(game: *const Game, coords: [3]u30, previous: world_engine.BoundaryMasks, updated: world_engine.BoundaryMasks) bool {
+        // A promotion can retain a service mesh before its blocks arrive. Without
+        // those blocks, keep invalidation conservative until the snapshot certifies it.
+        const chunk = game.world.?.chunks.getPtr(encodeChunkPositionArray(coords)) orelse return true;
+        if (chunk.flags.is_unreachable) return false;
+        for (std.enums.values(Side)) |side| {
+            if (game.localMeshNeighbor(coords, side) != null) continue;
+            const i = @intFromEnum(side);
+            for (chunk.boundaries[i].rows, previous[i].rows, updated[i].rows) |own, before, after| {
+                if (own & (before ^ after) != 0) return true;
+            }
+        }
+        return false;
     }
 
     fn requestChunkMode(game: *Game, coords: [3]u30, mode: world_data_service.Representation) void {
@@ -443,17 +462,20 @@ const Game = struct {
         // every plane with the blocks, including neighbors beyond the local core.
         var neighbors: world_engine.BoundaryMasks = if (cached) |snapshot| snapshot.masks else @splat(.{});
         for (std.enums.values(Side)) |side| {
-            const adjacent = world_module.adjacentChunk(coords, side) orelse continue;
-            const i = @intFromEnum(side);
-            const adjacent_id = encodeChunkPositionArray(adjacent);
-            // A demoted neighbor may retain blocks for its display, but those blocks
-            // no longer receive updates. Its authoritative fallback plane is newer.
-            if (game.chunk_modes.get(adjacent_id) == .mesh) continue;
-            if (game.world.?.chunks.getPtr(adjacent_id)) |neighbor| {
-                neighbors[i] = neighbor.boundaries[@intFromEnum(side.getOpposite())];
+            if (game.localMeshNeighbor(coords, side)) |neighbor| {
+                neighbors[@intFromEnum(side)] = neighbor.boundaries[@intFromEnum(side.getOpposite())];
             }
         }
         return neighbors;
+    }
+
+    fn localMeshNeighbor(game: *const Game, coords: [3]u30, side: Side) ?*const WorldChunk {
+        const adjacent = world_module.adjacentChunk(coords, side) orelse return null;
+        const adjacent_id = encodeChunkPositionArray(adjacent);
+        // A demoted neighbor may retain blocks for its display, but those blocks
+        // no longer receive updates. Its authoritative fallback plane is newer.
+        if (game.chunk_modes.get(adjacent_id) == .mesh) return null;
+        return game.world.?.chunks.getPtr(adjacent_id);
     }
 };
 
@@ -1627,4 +1649,84 @@ test "fresh remote masks override unsubscribed blocks retained during neighbor d
     fixture.game.rebuildDirtyChunks();
     try std.testing.expect(fixture.game.world.?.hasChunk(neighbor));
     try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
+}
+
+test "boundary changes opposite air retain masks without rebuilding and affect later optimistic placement" {
+    for (std.enums.values(Side)) |side| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        const coords = [3]u30{ 2, 2, 2 };
+        const id = encodeChunkPositionArray(coords);
+        const i = @intFromEnum(side);
+        const axis = i / 2;
+        var local = [3]u5{ 8, 11, 15 };
+        local[axis] = if (i % 2 == 0) 0 else consts.CHUNK_SIZE - 1;
+        var opposite_air = local;
+        opposite_air[(axis + 1) % 3] = 18;
+        var masks: world_engine.BoundaryMasks = @splat(.{});
+        masks[i].set(side, opposite_air, true);
+        try fixture.subscribe(coords, 1, .blocks);
+        try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .mesh_revision = 1, .data = .{ .blocks = .{ .chunk = singleTestBlock(local, 0), .neighbors = masks } } }});
+        fixture.game.rebuildDirtyChunks();
+        const original_faces = fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[i].items.ptr;
+        try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[i].items.len);
+
+        try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .mesh_revision = 2, .data = .{ .boundaries = @splat(.{}) } }});
+        try std.testing.expect(!fixture.game.dirty_chunk_ids.contains(id));
+        try std.testing.expectEqual(2, fixture.game.boundary_snapshots.get(id).?.mesh_revision);
+        try std.testing.expect(!fixture.game.boundary_snapshots.get(id).?.masks[i].contains(side, opposite_air));
+        fixture.game.rebuildDirtyChunks();
+        try std.testing.expectEqual(original_faces, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[i].items.ptr);
+
+        // This placement must use the updated plane even though no rebuild accompanied it.
+        const block = [3]u32{
+            coords[0] * consts.CHUNK_SIZE + @as(u32, opposite_air[0]),
+            coords[1] * consts.CHUNK_SIZE + @as(u32, opposite_air[1]),
+            coords[2] * consts.CHUNK_SIZE + @as(u32, opposite_air[2]),
+        };
+        fixture.game.world.?.setBlock(block, .dirt);
+        fixture.game.markChunksAroundBlockDirty(block);
+        fixture.game.rebuildDirtyChunks();
+        try std.testing.expectEqual(2, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[i].items.len);
+
+        masks[i].set(side, opposite_air, false);
+        masks[i].set(side, local, true);
+        try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .mesh_revision = 3, .data = .{ .boundaries = masks } }});
+        try std.testing.expect(fixture.game.dirty_chunk_ids.contains(id));
+        fixture.game.rebuildDirtyChunks();
+        try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[i].items.len);
+        try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .mesh_revision = 4, .data = .{ .boundaries = @splat(.{}) } }});
+        try std.testing.expect(fixture.game.dirty_chunk_ids.contains(id));
+        fixture.game.rebuildDirtyChunks();
+        try std.testing.expectEqual(2, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[i].items.len);
+    }
+}
+
+test "authoritative fallback changes do not rebuild faces supplied by an optimistic local neighbor" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const coords = [3]u30{ 1, 1, 1 };
+    const neighbor = [3]u30{ 2, 1, 1 };
+    const id = encodeChunkPositionArray(coords);
+    const i = @intFromEnum(Side.right);
+    var masks: world_engine.BoundaryMasks = @splat(.{});
+    masks[i].set(.right, .{ 31, 8, 8 }, true);
+    try fixture.subscribe(coords, 1, .blocks);
+    try fixture.subscribe(neighbor, 2, .blocks);
+    try fixture.game.world.?.insertChunk(neighbor, singleTestBlock(.{ 0, 8, 8 }, 0));
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .mesh_revision = 1, .data = .{ .blocks = .{ .chunk = singleTestBlock(.{ 31, 8, 8 }, 0), .neighbors = masks } } }});
+    fixture.game.rebuildDirtyChunks();
+    const edited = [3]u32{ 2 * consts.CHUNK_SIZE, consts.CHUNK_SIZE + 8, consts.CHUNK_SIZE + 8 };
+    fixture.game.world.?.setBlock(edited, .none);
+    fixture.game.markChunksAroundBlockDirty(edited);
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[i].items.len);
+    const original_faces = fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[i].items.ptr;
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .mesh_revision = 2, .data = .{ .boundaries = @splat(.{}) } }});
+    try std.testing.expect(!fixture.game.dirty_chunk_ids.contains(id));
+    try std.testing.expect(!fixture.game.boundary_snapshots.get(id).?.masks[i].contains(.right, .{ 31, 8, 8 }));
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expectEqual(original_faces, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[i].items.ptr);
 }
