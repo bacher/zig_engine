@@ -94,6 +94,14 @@ pub const OperationResult = struct {
 pub const Representation = enum { blocks, mesh };
 const ChunkSideData = @import("engine").voxel_chunk.ChunkSideData;
 const mesher = @import("./world_engine_glue.zig");
+pub const BoundaryMasks = @import("./boundary_mask.zig").BoundaryMasks;
+
+pub const BlockSnapshot = struct {
+    chunk: WorldChunk,
+    /// Final authoritative neighbor planes, attached when the package is published.
+    /// Absent for unsubscribed operation replies and superseded snapshots in a batch.
+    neighbors: ?BoundaryMasks = null,
+};
 
 pub const ChunkResponse = struct {
     subscription_id: ?u64,
@@ -103,7 +111,8 @@ pub const ChunkResponse = struct {
     mesh_revision: u64 = 0,
     /// Owned by the receiver. A zero-face mesh does not imply empty block contents.
     data: union(enum) {
-        blocks: WorldChunk,
+        blocks: BlockSnapshot,
+        boundaries: BoundaryMasks,
         mesh: ChunkSideData,
         /// Mesh subscription is current, but enclosure makes geometry unnecessary.
         unreachable_chunk,
@@ -112,12 +121,12 @@ pub const ChunkResponse = struct {
 
     pub fn deinit(self: ChunkResponse, allocator: std.mem.Allocator) void {
         switch (self.data) {
-            .blocks => |chunk| chunk.content.deinit(allocator),
+            .blocks => |snapshot| snapshot.chunk.content.deinit(allocator),
             .mesh => |mesh| {
                 var owned = mesh;
                 owned.deinit(allocator);
             },
-            .unreachable_chunk, .acknowledgement => {},
+            .boundaries, .unreachable_chunk, .acknowledgement => {},
         }
     }
 };
@@ -137,6 +146,7 @@ const Subscription = struct {
     id: u64,
     mode: Representation,
     mesh_pending: bool = false,
+    boundaries_pending: bool = false,
 };
 
 const Request = union(enum) {
@@ -346,7 +356,6 @@ pub const WorldDataService = struct {
         // that an operation reply follows its observer notifications.
         for ([_]bool{ false, true }) |with_acknowledgment| {
             for (self.clients.items) |client| {
-                if (client.pending.responses.items.len == 0) continue;
                 var has_acknowledgment = false;
                 for (client.pending.responses.items) |response| {
                     has_acknowledgment = has_acknowledgment or response.operation != null;
@@ -357,8 +366,29 @@ pub const WorldDataService = struct {
                     if (response.data != .blocks) continue;
                     const current = self.worker_state.modified_chunks.get(encodeChunkPositionArray(response.coords));
                     const revision = if (current) |chunk| chunk.chunk_revision else 0;
-                    if (response.chunk_revision == revision) response.mesh_revision = self.worker_state.meshRevision(response.coords);
+                    if (response.chunk_revision != revision) continue;
+                    response.mesh_revision = self.worker_state.meshRevision(response.coords);
+                    const sub = client.subscriptions.getPtr(encodeChunkPositionArray(response.coords)) orelse continue;
+                    if (sub.mode != .blocks or sub.id != response.subscription_id) continue;
+                    response.data.blocks.neighbors = self.worker_state.neighborBoundaries(self.allocator, response.coords);
+                    sub.boundaries_pending = false;
                 }
+                // Coalesce neighbor-only edits, including changes outside this client's
+                // block subscriptions, without copying the unchanged block array again.
+                var subscriptions = client.subscriptions.iterator();
+                while (subscriptions.next()) |entry| {
+                    const sub = entry.value_ptr;
+                    if (sub.mode != .blocks or !sub.boundaries_pending) continue;
+                    const coords = world_module.decodeChunkPosition(entry.key_ptr.*);
+                    client.append(.{
+                        .coords = coords,
+                        .subscription_id = sub.id,
+                        .mesh_revision = self.worker_state.meshRevision(coords),
+                        .data = .{ .boundaries = self.worker_state.neighborBoundaries(self.allocator, coords) },
+                    });
+                    sub.boundaries_pending = false;
+                }
+                if (client.pending.responses.items.len == 0) continue;
                 client.responses.push(self.io, self.allocator, client.pending);
                 client.pending = .{};
             }
@@ -366,7 +396,7 @@ pub const WorldDataService = struct {
     }
 
     fn blockResponse(self: *WorldDataService, coords: [3]u30, token: ?u64, chunk: WorldChunk) ChunkResponse {
-        return .{ .coords = coords, .subscription_id = token, .chunk_revision = chunk.chunk_revision, .mesh_revision = self.worker_state.meshRevision(coords), .data = .{ .blocks = chunk } };
+        return .{ .coords = coords, .subscription_id = token, .chunk_revision = chunk.chunk_revision, .mesh_revision = self.worker_state.meshRevision(coords), .data = .{ .blocks = .{ .chunk = chunk } } };
     }
 
     /// Builds once and fans out owned copies only to mesh subscribers awaiting this state.
@@ -387,18 +417,7 @@ pub const WorldDataService = struct {
         defer chunk.content.deinit(self.allocator);
         var mesh: ChunkSideData = .{};
         if (chunk.content == .blocks and !chunk.flags.is_unreachable) {
-            var owned: [6]?WorldChunk = @splat(null);
-            defer for (owned) |neighbor| {
-                if (neighbor) |value| value.content.deinit(self.allocator);
-            };
-            var neighbors: [6]mesher.Neighbor = @splat(.exposed);
-            for (std.enums.values(Side)) |side| {
-                const adjacent = world_module.adjacentChunk(coords, side) orelse continue;
-                const i = @intFromEnum(side);
-                owned[i] = self.worker_state.loadAt(self.allocator, adjacent);
-                neighbors[i] = .{ .content = owned[i].?.content };
-            }
-            mesh = mesher.extractChunkSideData(self.allocator, chunk.content, neighbors);
+            mesh = mesher.extractChunkSideData(self.allocator, chunk.content, self.worker_state.neighborBoundaries(self.allocator, coords));
         }
         defer mesh.deinit(self.allocator);
         for (self.clients.items) |client| {
@@ -461,6 +480,7 @@ pub const WorldDataService = struct {
                         self.dirty_meshes.put(self.allocator, changed_id, {}) catch @panic("OOM");
                         for (self.clients.items) |client| {
                             const sub = client.subscriptions.getPtr(changed_id) orelse continue;
+                            if (sub.mode == .blocks and i < 6) sub.boundaries_pending = true;
                             if (sub.mode == .mesh) {
                                 sub.mesh_pending = true;
                             } else if (i < 6 and result.revealed_neighbors[i] != null) {
@@ -494,6 +514,29 @@ const WorkerState = struct {
     /// Bounded terrain-height cache, not block or mesh storage. Neighbor meshing otherwise
     /// repeats the same noise calculations for every z coordinate in a column.
     columns: std.AutoHashMapUnmanaged(u64, ColumnGenerator) = .empty,
+    /// Bounded cache for immutable generated planes. Modified chunks keep their own
+    /// incrementally updated masks and always take precedence over this cache.
+    boundary_cache: std.AutoHashMapUnmanaged(ChunkPosition, BoundaryMasks) = .empty,
+
+    fn boundariesAt(self: *WorkerState, allocator: std.mem.Allocator, coords: [3]u30) BoundaryMasks {
+        const id = encodeChunkPositionArray(coords);
+        if (self.modified_chunks.getPtr(id)) |chunk| return chunk.boundaries;
+        if (self.boundary_cache.get(id)) |masks| return masks;
+        const chunk = self.loadAt(allocator, coords);
+        defer chunk.content.deinit(allocator);
+        if (self.boundary_cache.count() >= 512) self.boundary_cache.clearRetainingCapacity();
+        self.boundary_cache.put(allocator, id, chunk.boundaries) catch @panic("OOM");
+        return chunk.boundaries;
+    }
+
+    fn neighborBoundaries(self: *WorkerState, allocator: std.mem.Allocator, coords: [3]u30) BoundaryMasks {
+        var masks: BoundaryMasks = @splat(.{});
+        for (std.enums.values(Side)) |side| {
+            const adjacent = world_module.adjacentChunk(coords, side) orelse continue;
+            masks[@intFromEnum(side)] = self.boundariesAt(allocator, adjacent)[@intFromEnum(side.getOpposite())];
+        }
+        return masks;
+    }
 
     fn meshRevision(self: *const WorkerState, coords: [3]u30) u64 {
         return self.mesh_revisions.get(encodeChunkPositionArray(coords)) orelse 0;
@@ -515,6 +558,7 @@ const WorkerState = struct {
         self.modified_chunks.deinit(allocator);
         self.mesh_revisions.deinit(allocator);
         self.columns.deinit(allocator);
+        self.boundary_cache.deinit(allocator);
     }
 
     fn loadChunk(self: *const WorkerState, allocator: std.mem.Allocator, generator: *const ColumnGenerator, coords: [3]u30) WorldChunk {
@@ -717,9 +761,9 @@ test "loaded chunks match generation and subscribe with the load token" {
         try std.testing.expectEqual(token, response.subscription_id);
         try std.testing.expectEqual(null, response.operation);
         try std.testing.expectEqual([3]u30{ 10, 20, @intCast(z) }, response.coords);
-        try std.testing.expectEqual(expected.flags, response.data.blocks.flags);
-        try std.testing.expectEqual(expected.solid_block_count, response.data.blocks.solid_block_count);
-        try std.testing.expectEqualSlices(u8, std.mem.asBytes(&expected.content.toData()), std.mem.asBytes(&response.data.blocks.content.toData()));
+        try std.testing.expectEqual(expected.flags, response.data.blocks.chunk.flags);
+        try std.testing.expectEqual(expected.solid_block_count, response.data.blocks.chunk.solid_block_count);
+        try std.testing.expectEqualSlices(u8, std.mem.asBytes(&expected.content.toData()), std.mem.asBytes(&response.data.blocks.chunk.content.toData()));
     }
 }
 
@@ -742,13 +786,13 @@ test "commands validate against authority and return status plus independent sna
         try std.testing.expectEqual(null, response.subscription_id);
         try std.testing.expectEqual(id, response.operation.?.request_id);
         try std.testing.expectEqual(status, response.operation.?.status);
-        try std.testing.expectEqual(revision, response.data.blocks.chunk_revision);
+        try std.testing.expectEqual(revision, response.data.blocks.chunk.chunk_revision);
     }
-    try std.testing.expectEqual(.dirt, responses.items[0].data.blocks.content.getBlock(.{ 1, 2, 31 }));
-    try std.testing.expectEqual(.dirt, responses.items[1].data.blocks.content.getBlock(.{ 1, 2, 31 }));
-    try std.testing.expectEqual(1, responses.items[1].data.blocks.solid_block_count);
-    try std.testing.expect(responses.items[2].data.blocks.content == .empty);
-    try std.testing.expectEqual(WorldChunk.initEmpty().flags, responses.items[2].data.blocks.flags);
+    try std.testing.expectEqual(.dirt, responses.items[0].data.blocks.chunk.content.getBlock(.{ 1, 2, 31 }));
+    try std.testing.expectEqual(.dirt, responses.items[1].data.blocks.chunk.content.getBlock(.{ 1, 2, 31 }));
+    try std.testing.expectEqual(1, responses.items[1].data.blocks.chunk.solid_block_count);
+    try std.testing.expect(responses.items[2].data.blocks.chunk.content == .empty);
+    try std.testing.expectEqual(WorldChunk.initEmpty().flags, responses.items[2].data.blocks.chunk.flags);
 }
 
 test "successful edits push data only to subscribers and combine the origin reply" {
@@ -774,7 +818,7 @@ test "successful edits push data only to subscribers and combine the origin repl
     try std.testing.expectEqual(2, observed.items.len);
     try std.testing.expectEqual(observer_token, observed.items[1].subscription_id);
     try std.testing.expectEqual(null, observed.items[1].operation);
-    try std.testing.expectEqual(.dirt, observed.items[1].data.blocks.content.getBlock(.{ 0, 0, 0 }));
+    try std.testing.expectEqual(.dirt, observed.items[1].data.blocks.chunk.content.getBlock(.{ 0, 0, 0 }));
     try std.testing.expectEqual(origin_token, origin_responses.items[1].subscription_id);
     try std.testing.expectEqual(id, origin_responses.items[1].operation.?.request_id);
     var unrelated: std.ArrayList(ChunkResponse) = .empty;
@@ -809,10 +853,10 @@ test "eviction stops pushes and a fresh load returns committed edits with a new 
     try std.testing.expectEqual(old_token, responses.items[0].subscription_id);
     try std.testing.expectEqual(old_token, responses.items[1].subscription_id);
     try std.testing.expectEqual(new_token, responses.items[2].subscription_id);
-    try std.testing.expectEqual(2, responses.items[2].data.blocks.chunk_revision);
-    try std.testing.expect(responses.items[2].data.blocks.content == .empty);
+    try std.testing.expectEqual(2, responses.items[2].data.blocks.chunk.chunk_revision);
+    try std.testing.expect(responses.items[2].data.blocks.chunk.content == .empty);
     try std.testing.expectEqual(new_token, responses.items[3].subscription_id);
-    try std.testing.expectEqual(3, responses.items[3].data.blocks.chunk_revision);
+    try std.testing.expectEqual(3, responses.items[3].data.blocks.chunk.chunk_revision);
 }
 
 fn putFromClient(client: *Client, block: [3]u32) void {
@@ -840,8 +884,8 @@ test "concurrent clients cannot both put into the same empty block" {
     const b_status = b_responses.items[0].operation.?.status;
     try std.testing.expect((a_status == .success and b_status == .already_exists) or
         (a_status == .already_exists and b_status == .success));
-    try std.testing.expectEqual(1, a_responses.items[0].data.blocks.chunk_revision);
-    try std.testing.expectEqual(1, b_responses.items[0].data.blocks.chunk_revision);
+    try std.testing.expectEqual(1, a_responses.items[0].data.blocks.chunk.chunk_revision);
+    try std.testing.expectEqual(1, b_responses.items[0].data.blocks.chunk.chunk_revision);
 }
 
 test "service shutdown drains edits and frees unconsumed replies" {
@@ -977,13 +1021,13 @@ test "reveals notify all neighbor subscribers and survive eviction and reload" {
     var origin_responses: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&origin_responses);
     try waitForResponses(origin, &origin_responses, 3);
-    try std.testing.expect(origin_responses.items[0].data.blocks.flags.is_unreachable);
+    try std.testing.expect(origin_responses.items[0].data.blocks.chunk.flags.is_unreachable);
     const reveal = origin_responses.items[1];
     try std.testing.expectEqual(coords, reveal.coords);
     try std.testing.expectEqual(origin_token, reveal.subscription_id);
     try std.testing.expectEqual(null, reveal.operation);
-    try std.testing.expect(!reveal.data.blocks.flags.is_unreachable);
-    try std.testing.expectEqual(1, reveal.data.blocks.chunk_revision);
+    try std.testing.expect(!reveal.data.blocks.chunk.flags.is_unreachable);
+    try std.testing.expectEqual(1, reveal.data.blocks.chunk.chunk_revision);
     try std.testing.expectEqual(edit, origin_responses.items[2].operation.?.request_id);
 
     var observed: std.ArrayList(ChunkResponse) = .empty;
@@ -993,8 +1037,8 @@ test "reveals notify all neighbor subscribers and survive eviction and reload" {
     try std.testing.expectEqual(observer_token, observed.items[1].subscription_id);
     try std.testing.expectEqual(coords, observed.items[1].coords);
     try std.testing.expectEqual(null, observed.items[1].operation);
-    try std.testing.expectEqual(1, observed.items[1].data.blocks.chunk_revision);
-    try std.testing.expect(!observed.items[1].data.blocks.flags.is_unreachable);
+    try std.testing.expectEqual(1, observed.items[1].data.blocks.chunk.chunk_revision);
+    try std.testing.expect(!observed.items[1].data.blocks.chunk.flags.is_unreachable);
     var unrelated: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&unrelated);
     other.takeResponses(&unrelated);
@@ -1005,9 +1049,9 @@ test "reveals notify all neighbor subscribers and survive eviction and reload" {
     try waitForResponses(origin, &origin_responses, 4);
     const reload = origin_responses.items[3];
     try std.testing.expectEqual(reload_token, reload.subscription_id);
-    try std.testing.expectEqual(1, reload.data.blocks.chunk_revision);
-    try std.testing.expect(!reload.data.blocks.flags.is_unreachable);
-    try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, reload.data.blocks.solid_block_count);
+    try std.testing.expectEqual(1, reload.data.blocks.chunk.chunk_revision);
+    try std.testing.expect(!reload.data.blocks.chunk.flags.is_unreachable);
+    try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, reload.data.blocks.chunk.solid_block_count);
 }
 
 fn takeTestPackages(client: *Client) !std.ArrayList(ResponsePackage) {
@@ -1127,7 +1171,7 @@ test "unreachable mesh subscriptions receive only metadata until reveal while bl
     var block_responses: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&block_responses);
     try waitForResponses(block_client, &block_responses, 1);
-    const enclosed = block_responses.items[0].data.blocks;
+    const enclosed = block_responses.items[0].data.blocks.chunk;
     try std.testing.expect(enclosed.flags.is_unreachable);
     try std.testing.expect(enclosed.content == .blocks);
     try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, enclosed.solid_block_count);
@@ -1145,7 +1189,7 @@ test "unreachable mesh subscriptions receive only metadata until reveal while bl
     try std.testing.expect(revealed);
     _ = client.requestChunks(.{ 2, 2 }, 2, 3);
     try waitForResponses(client, &responses, 2);
-    try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, responses.items[1].data.blocks.solid_block_count);
+    try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, responses.items[1].data.blocks.chunk.solid_block_count);
 }
 
 test "default terrain 7x7x7 meshes fit the unchanged GPU allocator including fragmentation" {
@@ -1175,4 +1219,127 @@ test "default terrain 7x7x7 meshes fit the unchanged GPU allocator including fra
     try std.testing.expect(bytes > 0);
     try std.testing.expect(grid.hasUploadCapacity());
     std.debug.print("7x7x7 terrain: {d} KiB of mesh payload; fits 4 MiB slot allocator\n", .{bytes / 1024});
+}
+
+test "block subscriptions receive coalesced neighbor masks with mesh updates across x wrap" {
+    const allocator = std.testing.allocator;
+    const service = try WorldDataService.create(std.testing.io, allocator, .flat);
+    defer service.destroy();
+    const client = try service.createClient();
+    const coords = [3]u30{ 0, 2, 3 };
+    const remote = [3]u30{ WORLD_SIZE[0] - 1, 2, 3 };
+    const block_token = client.requestChunks(.{ coords[0], coords[1] }, 3, 4);
+    const mesh_token = client.requestChunksInMode(.{ remote[0], remote[1] }, 3, 4, .mesh);
+    var initial: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&initial);
+    try waitForResponses(client, &initial, 2);
+    const masks = initial.items[0].data.blocks.neighbors.?;
+    try std.testing.expect(masks[@intFromEnum(Side.left)].contains(.left, .{ 0, 8, 8 }));
+    try std.testing.expect(!masks[@intFromEnum(Side.left)].contains(.left, .{ 0, 8, 24 }));
+
+    service.requests.mutex.lockUncancelable(service.io);
+    for (8..10) |y| {
+        service.requests.items.append(allocator, .{ .operation = .{
+            .client = client,
+            .request_id = client.nextRequestId(),
+            .operation = .{ .block = .{ WORLD_SIZE[0] * CHUNK_SIZE - 1, 2 * CHUNK_SIZE + @as(u32, @intCast(y)), 3 * CHUNK_SIZE + 8 }, .action = .remove },
+        } }) catch @panic("OOM");
+    }
+    service.requests.not_empty.signal(service.io);
+    service.requests.mutex.unlock(service.io);
+    var packages = try takeTestPackages(client);
+    defer deinitTestPackages(&packages);
+    try std.testing.expectEqual(1, packages.items.len);
+    try std.testing.expectEqual(4, packages.items[0].responses.items.len);
+    var boundary_count: usize = 0;
+    var mesh_count: usize = 0;
+    var ack_count: usize = 0;
+    for (packages.items[0].responses.items) |response| {
+        if (response.operation != null) ack_count += 1;
+        switch (response.data) {
+            .boundaries => |updated| {
+                boundary_count += 1;
+                try std.testing.expectEqual(block_token, response.subscription_id.?);
+                try std.testing.expectEqual(coords, response.coords);
+                try std.testing.expectEqual(2, response.mesh_revision);
+                try std.testing.expect(!updated[0].contains(.left, .{ 0, 8, 8 }));
+                try std.testing.expect(!updated[0].contains(.left, .{ 0, 9, 8 }));
+                try std.testing.expect(updated[0].contains(.left, .{ 0, 10, 8 }));
+                var mesh = mesher.extractChunkSideData(allocator, initial.items[0].data.blocks.chunk.content, updated);
+                defer mesh.deinit(allocator);
+                try std.testing.expectEqual(2, mesh.blocks_grouped_by_side[0].items.len);
+            },
+            .mesh => {
+                mesh_count += 1;
+                try std.testing.expectEqual(mesh_token, response.subscription_id.?);
+                try std.testing.expectEqual(2, response.mesh_revision);
+            },
+            .acknowledgement => {},
+            else => return error.UnexpectedBlockSnapshot,
+        }
+    }
+    try std.testing.expectEqual(1, boundary_count);
+    try std.testing.expectEqual(1, mesh_count);
+    try std.testing.expectEqual(2, ack_count);
+
+    // An interior edit cannot change the dependency mask of the block subscriber.
+    _ = client.submitOperation(.{ .block = .{ remote[0] * CHUNK_SIZE + 8, 2 * CHUNK_SIZE + 8, 3 * CHUNK_SIZE + 8 }, .action = .remove });
+    var interior = try takeTestPackages(client);
+    defer deinitTestPackages(&interior);
+    for (interior.items) |package| {
+        for (package.responses.items) |response| try std.testing.expect(response.data != .boundaries);
+    }
+    // Initial planes on a new subscription use the edited masks, not generated cache data.
+    const reload_token = client.requestChunks(.{ coords[0], coords[1] }, 3, 4);
+    var reloaded: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&reloaded);
+    try waitForResponses(client, &reloaded, 1);
+    try std.testing.expectEqual(reload_token, reloaded.items[0].subscription_id.?);
+    try std.testing.expectEqual(0, reloaded.items[0].chunk_revision);
+    try std.testing.expectEqual(2, reloaded.items[0].mesh_revision);
+    try std.testing.expect(!reloaded.items[0].data.blocks.neighbors.?[0].contains(.left, .{ 0, 8, 8 }));
+}
+
+test "neighbor masks expose world edges and cache generated planes independently of blocks" {
+    var state = WorkerState{ .generator = .flat };
+    defer state.deinit(std.testing.allocator);
+    const masks = state.neighborBoundaries(std.testing.allocator, .{ 0, 0, 0 });
+    for ([_]Side{ .front, .bottom }) |side| {
+        for (masks[@intFromEnum(side)].rows) |row| try std.testing.expectEqual(0, row);
+    }
+    for ([_]Side{ .left, .right, .back, .top }) |side| {
+        for (masks[@intFromEnum(side)].rows) |row| try std.testing.expectEqual(std.math.maxInt(u32), row);
+    }
+    try std.testing.expectEqual(4, state.boundary_cache.count());
+    try std.testing.expectEqual(0, state.modified_chunks.count());
+    try std.testing.expectEqualDeep(masks, state.neighborBoundaries(std.testing.allocator, .{ 0, 0, 0 }));
+    try std.testing.expectEqual(4, state.boundary_cache.count());
+}
+
+test "boundary-only observers are notified before the edit reply without subscribing to the source chunk" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    defer service.destroy();
+    const observer = try service.createClient();
+    const editor = try service.createClient();
+    const token = observer.requestChunks(.{ 2, 2 }, 3, 4);
+    var initial: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&initial);
+    try waitForResponses(observer, &initial, 1);
+    _ = editor.submitOperation(.{ .block = .{ 3 * CHUNK_SIZE, 2 * CHUNK_SIZE + 8, 3 * CHUNK_SIZE + 8 }, .action = .remove });
+    var replies: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&replies);
+    try waitForResponses(editor, &replies, 1);
+    var observed: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&observed);
+    observer.takeResponses(&observed);
+    try std.testing.expectEqual(1, observed.items.len);
+    try std.testing.expectEqual(token, observed.items[0].subscription_id.?);
+    try std.testing.expectEqual(1, observed.items[0].mesh_revision);
+    try std.testing.expect(!observed.items[0].data.boundaries[@intFromEnum(Side.right)].contains(.right, .{ 31, 8, 8 }));
+
+    observer.evictChunk(encodeChunkPositionArray(.{ 2, 2, 3 }), token);
+    _ = editor.submitOperation(.{ .block = .{ 3 * CHUNK_SIZE, 2 * CHUNK_SIZE + 9, 3 * CHUNK_SIZE + 8 }, .action = .remove });
+    try waitForResponses(editor, &replies, 2);
+    observer.takeResponses(&observed);
+    try std.testing.expectEqual(1, observed.items.len);
 }

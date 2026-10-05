@@ -3,18 +3,12 @@ const voxel = @import("engine").voxel_chunk;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const ChunkContent = @import("./world.zig").ChunkContent;
 
-/// Missing data inside the local core is exposed temporarily. Its outside faces are
-/// suppressed explicitly; service meshes always supply actual neighboring contents.
-pub const Neighbor = union(enum) {
-    exposed,
-    suppressed,
-    content: ChunkContent,
-};
+pub const BoundaryMasks = @import("./boundary_mask.zig").BoundaryMasks;
 
 pub fn extractChunkSideData(
     allocator: std.mem.Allocator,
     content: ChunkContent,
-    neighbors: [6]Neighbor,
+    neighbors: BoundaryMasks,
 ) voxel.ChunkSideData {
     var result: voxel.ChunkSideData = .{};
     if (content == .empty) return result;
@@ -30,12 +24,7 @@ pub fn extractChunkSideData(
                     var adjacent = local;
                     const at_boundary = local[axis] == (if (positive) CHUNK_SIZE - 1 else @as(u5, 0));
                     const occluded = if (at_boundary) blk: {
-                        adjacent[axis] = if (positive) 0 else CHUNK_SIZE - 1;
-                        break :blk switch (neighbors[index]) {
-                            .exposed => false,
-                            .suppressed => true,
-                            .content => |neighbor| neighbor.getBlock(adjacent) != .none,
-                        };
+                        break :blk neighbors[index].contains(side, local);
                     } else blk: {
                         if (positive) adjacent[axis] += 1 else adjacent[axis] -= 1;
                         break :blk content.getBlock(adjacent) != .none;
@@ -51,13 +40,13 @@ pub fn extractChunkSideData(
     return result;
 }
 
-test "neighbor contents cull matching faces, suppression differs from missing data" {
+test "neighbor masks cull matching faces and retain real exterior surfaces" {
     const allocator = std.testing.allocator;
     const WorldChunkData = @import("./world_chunk_data.zig").WorldChunkData;
     var solid = WorldChunkData.initSolid();
-    var neighbors: [6]Neighbor = @splat(.exposed);
-    neighbors[@intFromEnum(voxel.Side.left)] = .{ .content = .{ .blocks = &solid } };
-    neighbors[@intFromEnum(voxel.Side.top)] = .suppressed;
+    var neighbors: BoundaryMasks = @splat(.{});
+    neighbors[@intFromEnum(voxel.Side.left)] = .{ .rows = @splat(std.math.maxInt(u32)) };
+    neighbors[@intFromEnum(voxel.Side.top)] = .{ .rows = @splat(std.math.maxInt(u32)) };
     var mesh = extractChunkSideData(allocator, .{ .blocks = &solid }, neighbors);
     defer mesh.deinit(allocator);
     for (mesh.blocks_grouped_by_side, 0..) |faces, i| {
@@ -66,7 +55,7 @@ test "neighbor contents cull matching faces, suppression differs from missing da
     }
     var neighbor = WorldChunkData.initSolid();
     neighbor.blocks[7][8][CHUNK_SIZE - 1] = .none;
-    neighbors[0] = .{ .content = .{ .blocks = &neighbor } };
+    neighbors[0] = @import("./boundary_mask.zig").extract(&neighbor)[@intFromEnum(voxel.Side.right)];
     var opened = extractChunkSideData(allocator, .{ .blocks = &solid }, neighbors);
     defer opened.deinit(allocator);
     try std.testing.expectEqual(1, opened.blocks_grouped_by_side[0].items.len);
