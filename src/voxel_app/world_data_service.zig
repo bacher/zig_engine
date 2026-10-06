@@ -332,7 +332,7 @@ pub const WorldDataService = struct {
             // Coalesce every edited mesh in this batch, including face dependencies, then
             // publish it together with all corresponding block snapshots/acknowledgments.
             var dirty = self.dirty_meshes.keyIterator();
-            while (dirty.next()) |position| self.publishMesh(world_module.decodeChunkPosition(position.*));
+            while (dirty.next()) |position| self.publishMesh(world_module.decodeChunkId(position.*));
             self.dirty_meshes.clearRetainingCapacity();
             self.flushPackages();
 
@@ -380,7 +380,7 @@ pub const WorldDataService = struct {
                 while (subscriptions.next()) |entry| {
                     const sub = entry.value_ptr;
                     if (sub.mode != .blocks or !sub.boundaries_pending) continue;
-                    const coords = world_module.decodeChunkPosition(entry.key_ptr.*);
+                    const coords = world_module.decodeChunkId(entry.key_ptr.*);
                     client.append(.{
                         .coords = coords,
                         .subscription_id = sub.id,
@@ -834,7 +834,7 @@ test "eviction stops pushes and a fresh load returns committed edits with a new 
     const main = try service.createClient();
     const npc = try service.createClient();
     const z = WORLD_SIZE[2] - 1;
-    const position = world_module.encodeChunkPosition(0, 0, z);
+    const position = world_module.encodeChunkId(0, 0, z);
     const old_token = main.requestChunks(.{ 0, 0 }, z, z + 1);
     const block = [3]u32{ 16, 16, z * CHUNK_SIZE };
     _ = npc.submitOperation(.{ .block = block, .action = .{ .put = .dirt } });
@@ -963,7 +963,7 @@ test "losing solid faces retains previously unloaded neighbors as dirty revision
         defer result.chunk.content.deinit(std.testing.allocator);
         for (result.revealed_neighbors) |neighbor| try std.testing.expectEqual(null, neighbor);
     }
-    const wrapped_neighbor = state.modified_chunks.get(world_module.encodeChunkPosition(WORLD_SIZE[0] - 1, 2, 3)).?;
+    const wrapped_neighbor = state.modified_chunks.get(world_module.encodeChunkId(WORLD_SIZE[0] - 1, 2, 3)).?;
     try std.testing.expectEqual(1, wrapped_neighbor.chunk_revision);
     try std.testing.expect(!wrapped_neighbor.flags.is_unreachable);
 }
@@ -989,7 +989,7 @@ test "interior edits expose no neighbors and a corner reveals three face neighbo
         try std.testing.expectEqual(side % 2 == 0, neighbor != null);
     }
     try std.testing.expectEqual(4, state.modified_chunks.count());
-    try std.testing.expect(!state.modified_chunks.contains(world_module.encodeChunkPosition(WORLD_SIZE[0] - 1, 1, 1)));
+    try std.testing.expect(!state.modified_chunks.contains(world_module.encodeChunkId(WORLD_SIZE[0] - 1, 1, 1)));
 
     // Revealing a previously edited chunk must preserve its blocks and advance its own
     // revision, independently of the operation that opened the neighboring wall.
@@ -999,7 +999,7 @@ test "interior edits expose no neighbors and a corner reveals three face neighbo
     });
     defer opening.chunk.content.deinit(std.testing.allocator);
     try std.testing.expectEqual(ChunkCoords{ 0, 2, 2 }, opening.revealed_neighbors[@intFromEnum(Side.left)].?);
-    const revealed = state.modified_chunks.get(world_module.encodeChunkPosition(0, 2, 2)).?;
+    const revealed = state.modified_chunks.get(world_module.encodeChunkId(0, 2, 2)).?;
     try std.testing.expectEqual(3, revealed.chunk_revision);
     try std.testing.expect(!revealed.flags.is_unreachable);
     try std.testing.expectEqual(.none, revealed.content.getBlock(.{ 8, 8, 8 }));

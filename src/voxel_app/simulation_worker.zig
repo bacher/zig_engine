@@ -47,7 +47,7 @@ pub const SimulationWorker = struct {
         }
         // Eviction also happens on cancellation during startup. The service drains it later.
         defer for (0..consts.WORLD_SIZE[2]) |z| {
-            client.evictChunk(world.encodeChunkPosition(column[0], column[1], z), token);
+            client.evictChunk(world.encodeChunkId(column[0], column[1], z), token);
         };
 
         var received: [consts.WORLD_SIZE[2]]bool = @splat(false);
@@ -70,7 +70,7 @@ pub const SimulationWorker = struct {
         }
         // Subsequent traffic consists only of operation replies, with no standing subscription.
         for (0..consts.WORLD_SIZE[2]) |z| {
-            client.evictChunk(world.encodeChunkPosition(column[0], column[1], z), token);
+            client.evictChunk(world.encodeChunkId(column[0], column[1], z), token);
         }
         if (surface_z >= consts.WORLD_SIZE_IN_BLOCKS[2]) return;
         const block = [3]u32{

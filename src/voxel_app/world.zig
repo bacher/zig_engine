@@ -21,13 +21,13 @@ pub fn normalizeChunkCoords(coords: ChunkCoords) ?ChunkCoords {
 }
 
 /// Pack validated storage coordinates; signed spatial coordinates must be normalized first.
-pub fn encodeChunkPosition(x: anytype, y: anytype, z: anytype) ChunkId {
+pub fn encodeChunkId(x: anytype, y: anytype, z: anytype) ChunkId {
     std.debug.assert(x >= 0 and x < WORLD_SIZE[0]);
     std.debug.assert(y >= 0 and y < WORLD_SIZE[1]);
     std.debug.assert(z >= 0 and z < WORLD_SIZE[2]);
 
     // make sure that shifting logic represents the correct bit position,
-    // which should be synced with decodeChunkPosition logic
+    // which should be synced with decodeChunkId logic
     // and fits WORLD_SIZE coordinates defined in chunk_utils.zig
     return @as(ChunkId, @intCast(x)) | //    first 12 bit - x
         @as(ChunkId, @intCast(y)) << 12 | // then 8 bit - y
@@ -35,11 +35,11 @@ pub fn encodeChunkPosition(x: anytype, y: anytype, z: anytype) ChunkId {
 }
 
 pub fn encodeChunkCoords(coords: ChunkCoords) ChunkId {
-    return encodeChunkPosition(coords[0], coords[1], coords[2]);
+    return encodeChunkId(coords[0], coords[1], coords[2]);
 }
 
-pub fn decodeChunkPosition(position: ChunkId) ChunkCoords {
-    // shifting logic should match encodeChunkPosition logic
+pub fn decodeChunkId(position: ChunkId) ChunkCoords {
+    // shifting logic should match encodeChunkId logic
     // and fits WORLD_SIZE coordinates defined in chunk_utils.zig
     return .{
         @as(i32, @intCast(position & 0xfff)), //      first 12 bit - x
@@ -396,7 +396,7 @@ test "normalized signed chunk coordinates preserve the packed storage ID format"
     const coords = normalizeChunkCoords(.{ -1, 20, 3 }).?;
     const id = encodeChunkCoords(coords);
     try std.testing.expectEqual(@as(u32, (WORLD_SIZE[0] - 1) | (20 << 12) | (3 << 20)), id);
-    try std.testing.expectEqual(coords, decodeChunkPosition(id));
+    try std.testing.expectEqual(coords, decodeChunkId(id));
     try std.testing.expectEqual(ChunkCoords{ 0, 20, 3 }, adjacentChunk(coords, .right).?);
     try std.testing.expectEqual(null, adjacentChunk(.{ 0, 0, 0 }, .front));
     try std.testing.expectEqual(null, adjacentChunk(.{ 0, 0, 0 }, .bottom));

@@ -26,7 +26,7 @@ const Position = @import("engine").world_math.Position;
 
 const world_module = @import("world.zig");
 const World = @import("world.zig").World;
-const encodeChunkPosition = @import("world.zig").encodeChunkPosition;
+const encodeChunkId = @import("world.zig").encodeChunkId;
 const encodeChunkCoords = @import("world.zig").encodeChunkCoords;
 const WorldChunk = @import("world.zig").WorldChunk;
 const world_generator = @import("./world_generator.zig");
@@ -302,7 +302,7 @@ const Game = struct {
 
         // Retain pending commands and their affected face neighbors even after movement.
         var pins = game.pinned_chunks.keyIterator();
-        while (pins.next()) |id| game.requestChunkMode(world_module.decodeChunkPosition(id.*), .blocks);
+        while (pins.next()) |id| game.requestChunkMode(world_module.decodeChunkId(id.*), .blocks);
         // Closest shells first: all block requests precede new distant mesh requests.
         var radius: i32 = 0;
         while (radius <= game.render_radius) : (radius += 1) {
@@ -331,7 +331,7 @@ const Game = struct {
             game.world_client.?.evictChunk(id, token);
             _ = game.chunk_modes.remove(id);
             game.removeChunkByIdIfNeeded(id);
-            const coords = world_module.decodeChunkPosition(id);
+            const coords = world_module.decodeChunkId(id);
             if (game.world.?.hasChunk(coords)) game.world.?.removeChunk(coords);
             game.markChunkAndNeighborsDirty(coords);
         }
@@ -363,7 +363,7 @@ const Game = struct {
         _ = game.boundary_snapshots.remove(chunk_id);
         if (game.loaded_chunk_ids.contains(chunk_id)) {
             _ = game.loaded_chunk_ids.remove(chunk_id);
-            game.engine.active_scene.?.voxel_grid.removeChunk(world_module.decodeChunkPosition(chunk_id));
+            game.engine.active_scene.?.voxel_grid.removeChunk(world_module.decodeChunkId(chunk_id));
         }
     }
 
@@ -435,7 +435,7 @@ const Game = struct {
 
         var iterator = game.dirty_chunk_ids.keyIterator();
         while (iterator.next()) |chunk_id| {
-            const coords = world_module.decodeChunkPosition(chunk_id.*);
+            const coords = world_module.decodeChunkId(chunk_id.*);
             const chunk = world.getChunk(coords) orelse continue;
             // Retained blocks may still receive neighbor changes during a handoff.
             _ = game.mesh_versions.remove(chunk_id.*);
@@ -522,7 +522,7 @@ fn initWorld(game: *Game) !void {
 
 /// Chebyshev distance between the chunk and the camera chunk, in chunks. The x axis wraps.
 fn getChunkDistance(chunk_id: u32, camera_chunk_coords: ChunkCoords) u64 {
-    const delta = chunk_utils.getChunkDelta(world_module.decodeChunkPosition(chunk_id), camera_chunk_coords);
+    const delta = chunk_utils.getChunkDelta(world_module.decodeChunkId(chunk_id), camera_chunk_coords);
     return @reduce(.Max, @abs(delta));
 }
 
@@ -906,8 +906,8 @@ test "boundary edits dirty only loaded face neighbors with world wrapping and li
     game.markChunksAroundBlockDirty(.{ 0, 0, 0 });
     game.markChunksAroundBlockDirty(.{ 0, 0, 0 });
     try std.testing.expectEqual(2, game.dirty_chunk_ids.count());
-    try std.testing.expect(game.dirty_chunk_ids.contains(encodeChunkPosition(0, 0, 0)));
-    try std.testing.expect(game.dirty_chunk_ids.contains(encodeChunkPosition(consts.WORLD_SIZE[0] - 1, 0, 0)));
+    try std.testing.expect(game.dirty_chunk_ids.contains(encodeChunkId(0, 0, 0)));
+    try std.testing.expect(game.dirty_chunk_ids.contains(encodeChunkId(consts.WORLD_SIZE[0] - 1, 0, 0)));
 
     game.dirty_chunk_ids.clearRetainingCapacity();
     const last = consts.CHUNK_SIZE - 1;
@@ -920,7 +920,7 @@ test "boundary edits dirty only loaded face neighbors with world wrapping and li
     // Full snapshots invalidate all loaded face neighbors, sharing the same dirty set.
     game.markChunkAndNeighborsDirty(.{ 0, 0, 0 });
     try std.testing.expectEqual(5, game.dirty_chunk_ids.count());
-    try std.testing.expect(!game.dirty_chunk_ids.contains(encodeChunkPosition(1, 1, 1)));
+    try std.testing.expect(!game.dirty_chunk_ids.contains(encodeChunkId(1, 1, 1)));
     game.markChunksAroundBlockDirty(.{ 2 * consts.CHUNK_SIZE + 1, 1, 1 });
     try std.testing.expectEqual(5, game.dirty_chunk_ids.count());
 }
@@ -929,19 +929,19 @@ test "chunk distance is the largest axis distance and wraps around x" {
     const camera = ChunkCoords{ 0, 10, 2 };
     const world_width: i32 = consts.WORLD_SIZE[0];
 
-    try std.testing.expectEqual(0, getChunkDistance(encodeChunkPosition(0, 10, 2), camera));
-    try std.testing.expectEqual(3, getChunkDistance(encodeChunkPosition(3, 10, 2), camera));
-    try std.testing.expectEqual(1, getChunkDistance(encodeChunkPosition(consts.WORLD_SIZE[0] - 1, 10, 2), camera));
-    try std.testing.expectEqual(1, getChunkDistance(encodeChunkPosition(0, 10, 2), .{ world_width - 1, 10, 2 }));
-    try std.testing.expectEqual(1, getChunkDistance(encodeChunkPosition(0, 10, 2), .{ -1, 10, 2 }));
-    try std.testing.expectEqual(world_width / 2, getChunkDistance(encodeChunkPosition(consts.WORLD_SIZE[0] / 2, 10, 2), camera));
+    try std.testing.expectEqual(0, getChunkDistance(encodeChunkId(0, 10, 2), camera));
+    try std.testing.expectEqual(3, getChunkDistance(encodeChunkId(3, 10, 2), camera));
+    try std.testing.expectEqual(1, getChunkDistance(encodeChunkId(consts.WORLD_SIZE[0] - 1, 10, 2), camera));
+    try std.testing.expectEqual(1, getChunkDistance(encodeChunkId(0, 10, 2), .{ world_width - 1, 10, 2 }));
+    try std.testing.expectEqual(1, getChunkDistance(encodeChunkId(0, 10, 2), .{ -1, 10, 2 }));
+    try std.testing.expectEqual(world_width / 2, getChunkDistance(encodeChunkId(consts.WORLD_SIZE[0] / 2, 10, 2), camera));
 
-    try std.testing.expectEqual(4, getChunkDistance(encodeChunkPosition(1, 6, 2), camera));
-    try std.testing.expectEqual(10, getChunkDistance(encodeChunkPosition(0, 0, 2), camera));
-    try std.testing.expectEqual(consts.WORLD_SIZE[1] - 1 - 10, getChunkDistance(encodeChunkPosition(0, consts.WORLD_SIZE[1] - 1, 2), camera));
-    try std.testing.expectEqual(2, getChunkDistance(encodeChunkPosition(1, 11, 0), camera));
-    try std.testing.expectEqual(consts.WORLD_SIZE[2] - 1 - 2, getChunkDistance(encodeChunkPosition(1, 11, consts.WORLD_SIZE[2] - 1), camera));
-    try std.testing.expectEqual(@as(u64, 2147483658), getChunkDistance(encodeChunkPosition(0, 10, 2), .{ 0, std.math.minInt(i32), 2 }));
+    try std.testing.expectEqual(4, getChunkDistance(encodeChunkId(1, 6, 2), camera));
+    try std.testing.expectEqual(10, getChunkDistance(encodeChunkId(0, 0, 2), camera));
+    try std.testing.expectEqual(consts.WORLD_SIZE[1] - 1 - 10, getChunkDistance(encodeChunkId(0, consts.WORLD_SIZE[1] - 1, 2), camera));
+    try std.testing.expectEqual(2, getChunkDistance(encodeChunkId(1, 11, 0), camera));
+    try std.testing.expectEqual(consts.WORLD_SIZE[2] - 1 - 2, getChunkDistance(encodeChunkId(1, 11, consts.WORLD_SIZE[2] - 1), camera));
+    try std.testing.expectEqual(@as(u64, 2147483658), getChunkDistance(encodeChunkId(0, 10, 2), .{ 0, std.math.minInt(i32), 2 }));
 }
 
 test "chunk coords wrap around x and are out of the world beyond y and z" {
@@ -1248,7 +1248,7 @@ const StreamingTest = struct {
         if (self.game.world.?.pending_operations.items.len != 0) return false;
         var iterator = self.game.chunk_modes.iterator();
         while (iterator.next()) |entry| {
-            const coords = world_module.decodeChunkPosition(entry.key_ptr.*);
+            const coords = world_module.decodeChunkId(entry.key_ptr.*);
             if (!self.game.loaded_chunk_ids.contains(entry.key_ptr.*)) return false;
             if ((entry.value_ptr.* == .blocks) != self.game.world.?.hasChunk(coords)) return false;
         }
