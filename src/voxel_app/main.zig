@@ -21,6 +21,7 @@ const tube = @import("engine").tube;
 const utils = @import("engine").utils;
 const zgui_utils = @import("engine").zgui_utils;
 const chunk_utils = @import("engine").chunk_utils;
+const Position = @import("engine").world_math.Position;
 
 const world_module = @import("world.zig");
 const World = @import("world.zig").World;
@@ -503,12 +504,10 @@ const BlockAction = enum {
 
 /// Returns the block containing `position`, clamped to the top of the world.
 /// Returns null if the position is outside of the world (or below its bottom).
-fn getColumnTopUnderPosition(position: [3]f64) ?[3]u32 {
-    var block: [3]i64 = undefined;
-    for (0..3) |axis| {
-        block[axis] = @as(i64, @intFromFloat(@floor(position[axis]))) +
-            @as(i64, consts.WORLD_ORIGIN[axis]) * consts.CHUNK_SIZE;
-    }
+fn getColumnTopUnderPosition(position: Position) ?[3]u32 {
+    const origin: @Vector(3, i64) = .{ consts.WORLD_ORIGIN[0], consts.WORLD_ORIGIN[1], consts.WORLD_ORIGIN[2] };
+    const block = @as(@Vector(3, i64), @intFromFloat(@floor(position))) +
+        origin * @as(@Vector(3, i64), @splat(consts.CHUNK_SIZE));
 
     const world_size = consts.WORLD_SIZE_IN_BLOCKS;
 

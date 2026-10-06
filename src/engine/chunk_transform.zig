@@ -9,7 +9,7 @@ pub const ChunkTransform = extern struct {
     chunk: @Vector(4, i32),
 
     pub fn init(world_from_model: world_math.Mat) ChunkTransform {
-        const position = @as([4]f64, world_from_model[3])[0..3].*;
+        const position: world_math.Position = @shuffle(f64, world_from_model[3], undefined, @Vector(3, i32){ 0, 1, 2 });
         const local = chunks.getLocalPosition(position);
         // Narrow only the rotation/scale columns. The absolute translation must
         // never pass through f32; getLocalPosition rebases it first, in f64.

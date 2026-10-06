@@ -6,13 +6,14 @@ const utils = @import("./utils.zig");
 const FrustumPoints = @import("./frustum.zig").FrustumPoints;
 const chunk_utils = @import("./chunk_utils.zig");
 const getChunkCoords = chunk_utils.getChunkCoords;
+const Position = @import("world_math.zig").Position;
 
 pub const CHUNK_SIZE = chunk_utils.CHUNK_SIZE;
 
 pub const Camera = struct {
     aspect_ratio: f32,
 
-    position: [3]f64,
+    position: Position,
     chunk: @Vector(4, i32),
 
     camera_from_world_chunked: zmath.Mat,
@@ -28,7 +29,7 @@ pub const Camera = struct {
     world_from_clip_chunked: zmath.Mat,
 
     pub fn init(aspect_ratio: f32) Camera {
-        const position: [3]f64 = .{ 0, 0, 0 };
+        const position: Position = @splat(0);
 
         const no_translation = zmath.translation(0, 0, 0);
 
@@ -98,18 +99,18 @@ pub const Camera = struct {
         camera.updateDerivedMatrices();
     }
 
-    pub fn updatePosition(camera: *Camera, position: [3]f64) void {
+    pub fn updatePosition(camera: *Camera, position: Position) void {
         camera.position = position;
         camera.chunk = getChunkCoords(position);
         // Narrow only after removing the chunk origin in f64.
-        const local = chunk_utils.getLocalPosition(position);
-        camera.camera_from_world_chunked = zmath.translation(-local[0], -local[1], -local[2]);
+        const local = -chunk_utils.getLocalPosition(position);
+        camera.camera_from_world_chunked = zmath.translation(local[0], local[1], local[2]);
         camera.updateDerivedMatrices();
     }
 
     /// Movement deltas are local distances; accumulate them into the f64 position.
-    pub fn translate(camera: *Camera, delta: [3]f64) void {
-        camera.updatePosition(.{ camera.position[0] + delta[0], camera.position[1] + delta[1], camera.position[2] + delta[2] });
+    pub fn translate(camera: *Camera, delta: Position) void {
+        camera.updatePosition(camera.position + delta);
     }
 
     pub fn updateView(camera: *Camera, view_mat: zmath.Mat) void {
