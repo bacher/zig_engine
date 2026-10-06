@@ -10,6 +10,11 @@ const ChunkId = @import("./consts.zig").ChunkId;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const WORLD_SIZE = @import("./consts.zig").WORLD_SIZE;
 const boundary_mask = @import("./boundary_mask.zig");
+const chunk_utils = @import("engine").chunk_utils;
+
+pub const encodeChunkId = chunk_utils.encodeChunkId;
+pub const encodeChunkCoords = chunk_utils.encodeChunkCoords;
+pub const decodeChunkId = chunk_utils.decodeChunkId;
 
 /// Map a spatial coordinate to stored terrain: x wraps, y/z are bounded.
 pub fn normalizeChunkCoords(coords: ChunkCoords) ?ChunkCoords {
@@ -18,34 +23,6 @@ pub fn normalizeChunkCoords(coords: ChunkCoords) ?ChunkCoords {
     var normalized = coords;
     normalized[0] = @mod(coords[0], WORLD_SIZE[0]);
     return normalized;
-}
-
-/// Pack validated storage coordinates; signed spatial coordinates must be normalized first.
-pub fn encodeChunkId(x: anytype, y: anytype, z: anytype) ChunkId {
-    std.debug.assert(x >= 0 and x < WORLD_SIZE[0]);
-    std.debug.assert(y >= 0 and y < WORLD_SIZE[1]);
-    std.debug.assert(z >= 0 and z < WORLD_SIZE[2]);
-
-    // make sure that shifting logic represents the correct bit position,
-    // which should be synced with decodeChunkId logic
-    // and fits WORLD_SIZE coordinates defined in chunk_utils.zig
-    return @as(ChunkId, @intCast(x)) | //    first 12 bit - x
-        @as(ChunkId, @intCast(y)) << 12 | // then 8 bit - y
-        @as(ChunkId, @intCast(z)) << 20; //  and rest - z
-}
-
-pub fn encodeChunkCoords(coords: ChunkCoords) ChunkId {
-    return encodeChunkId(coords[0], coords[1], coords[2]);
-}
-
-pub fn decodeChunkId(position: ChunkId) ChunkCoords {
-    // shifting logic should match encodeChunkId logic
-    // and fits WORLD_SIZE coordinates defined in chunk_utils.zig
-    return .{
-        @as(i32, @intCast(position & 0xfff)), //      first 12 bit - x
-        @as(i32, @intCast(position >> 12 & 0xff)), // then 8 bit - y
-        @as(i32, @intCast(position >> 20)), //        and rest - z
-    };
 }
 
 /// Face neighbors wrap around x; missing neighbors beyond y/z leave the world exposed.
@@ -392,10 +369,10 @@ fn insertGeneratedChunks(
     }
 }
 
-test "normalized signed chunk coordinates preserve the packed storage ID format" {
+test "normalized signed chunk coordinates round-trip through the shared storage ID" {
     const coords = normalizeChunkCoords(.{ -1, 20, 3 }).?;
     const id = encodeChunkCoords(coords);
-    try std.testing.expectEqual(@as(u32, (WORLD_SIZE[0] - 1) | (20 << 12) | (3 << 20)), id);
+    try std.testing.expectEqual(encodeChunkId(WORLD_SIZE[0] - 1, 20, 3), id);
     try std.testing.expectEqual(coords, decodeChunkId(id));
     try std.testing.expectEqual(ChunkCoords{ 0, 20, 3 }, adjacentChunk(coords, .right).?);
     try std.testing.expectEqual(null, adjacentChunk(.{ 0, 0, 0 }, .front));

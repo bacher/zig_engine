@@ -6,7 +6,7 @@ The voxel application combines deterministic terrain generation with an in-memor
 
 Shared engine constants define 32-by-32-by-32-block chunks and a stored world of 512 by 256 by 8 chunks: 16384 by 8192 by 256 blocks. Each block occupies one world-coordinate unit. Only x wraps. Positions beyond y/z storage boundaries cannot index terrain; outer faces at those boundaries remain exposed.
 
-World coordinates are centered using `WORLD_ORIGIN_CHUNK = WORLD_SIZE / 2`. World position zero corresponds to stored block coordinates (8192, 4096, 128). Spatial chunk coordinates are signed vectors; normalize x and validate y/z before encoding a storage ID. Packed IDs retain 12 bits for x, 8 for y, and the remaining upper field for z. [Coordinates](coordinates.md) covers rendering origins and signed range handling in detail.
+World coordinates are centered using `WORLD_ORIGIN_CHUNK = WORLD_SIZE / 2`. World position zero corresponds to stored block coordinates (8192, 4096, 128). Spatial chunk coordinates are signed vectors; normalize x and validate y/z before encoding a storage ID. `chunk_utils.WORLD_SIZE_LOG2` defines both world dimensions and packed ID field widths: currently 9 bits for x, 8 for y, and 3 for z, using 20 of the available 32 bits. [Coordinates](coordinates.md) covers rendering origins and signed range handling in detail.
 
 `WorldChunkData.blocks` is indexed `[z][y][x]` and contains one `BlockType` per block. Types are air (`none`), stone, dirt, grass, water, sand, and snow. Current occupancy tests treat every non-air type as solid; water does not have a separate transparent/fluid occupancy rule.
 
