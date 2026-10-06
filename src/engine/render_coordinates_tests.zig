@@ -28,11 +28,11 @@ test "small camera movements accumulate in f64 across distant chunk boundaries" 
     var camera = Camera.init(1.5);
     camera.updatePosition(.{ 1e9 + 31.5, -1e9 + 31.5, 1e9 + 31.5 });
     const before_chunk = camera.chunk;
-    for (0..1024) |_| camera.translate(.{ 1.0 / 1024.0, 1.0 / 1024.0, 1.0 / 1024.0 });
-    try std.testing.expectEqual([3]f64{ 1e9 + 32.5, -1e9 + 32.5, 1e9 + 32.5 }, camera.position);
-    try std.testing.expectEqual(@Vector(4, i32){ 1, 1, 1, 0 }, chunks.getChunkDelta(camera.chunk, before_chunk));
-    try expectVector(.{ 0.5, 0.5, 0.5, 1 }, camera.getLocalPosition(), 0.000001);
-    try expectVector(.{ -0.5, -0.5, -0.5, 1 }, camera.camera_from_world_chunked[3], 0.000001);
+    for (0..1024) |_| camera.translate(.{ 1.0 / 1024.0, -2.0 / 1024.0, 3.0 / 1024.0 });
+    try std.testing.expectEqual(world_math.Position{ 1e9 + 32.5, -1e9 + 29.5, 1e9 + 34.5 }, camera.position);
+    try std.testing.expectEqual(@Vector(4, i32){ 1, 0, 1, 0 }, chunks.getChunkDelta(camera.chunk, before_chunk));
+    try expectVector(.{ 0.5, 29.5, 2.5, 1 }, camera.getLocalPosition(), 0.000001);
+    try expectVector(.{ -0.5, -29.5, -2.5, 1 }, camera.camera_from_world_chunked[3], 0.000001);
 }
 
 test "x wraps before conversion to the GPU integer chunk range" {

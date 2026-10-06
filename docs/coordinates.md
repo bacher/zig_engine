@@ -4,7 +4,9 @@ CPU world positions use `f64`. GPU positions use `f32` after removing a chunk or
 
 ## CPU positions and parent transforms
 
-`world_math.Position` is `[3]f64`. Cameras, game objects, groups, and scene object-creation parameters use this type. `world_math.Mat` contains four `@Vector(4, f64)` columns, using the same column convention as WGSL and zmath.
+`world_math.Position` is `@Vector(3, f64)`. Cameras, game objects, groups, and scene object-creation parameters use this type. `world_math.Mat` contains four `@Vector(4, f64)` columns, using the same column convention as WGSL and zmath.
+
+Coordinate operations use elementwise vector arithmetic, including camera movement (`position + delta`), chunk division/modulo, and voxel lookup. Use `@as(world_math.Position, @splat(value))` to broadcast a scalar across all three axes. Matrix composition already uses four-component vector arithmetic. These expressions let Zig lower operations to SIMD where the target supports it; they do not imply a measured speedup, and a three-component vector may use multiple instructions. The special x-axis wrapping remains separate from y/z bounds handling.
 
 An object's or group's `position`, `rotation`, and `scale` describe its transform relative to its parent. A root's position is in world space. Its `aggregated_matrix` is the accumulated world transform:
 
@@ -42,7 +44,7 @@ The fields ending in `_world_chunked` refer to coordinates relative to the camer
 
 ## API and range notes
 
-- Position setters and object-creation parameters accept `[3]f64`; group setters previously accepted four-component zmath vectors and now accept three components.
+- Position setters and object-creation parameters accept `world_math.Position` (`@Vector(3, f64)`). Three-component literals such as `.{ 1, 2, 3 }` still work; use the shared type for named positions and movement deltas. `getLocalPosition` in `chunk_utils` returns `@Vector(3, f32)` after removing the origin.
 - `GameObject.getModelMatrix` and `aggregated_matrix` return f64 matrices. Use `ChunkTransform.init` to prepare one for rendering. `world_math.fromFloat32` widens asset-local matrices before CPU composition.
 - The GPU chunk encoding remains signed `i32`, and unwrapped y/z chunks must fit it. This migration does not make the world unbounded. The voxel world still wraps only x.
 - Scenes still use the temporary ArrayList visibility index. It returns all registered objects and needs no absolute-world f32 bounding boxes. The retained, unused original SpaceTree still assumes f32 matrices and requires migration before it can index these objects again.

@@ -2,7 +2,7 @@ const zmath = @import("zmath");
 
 /// CPU positions and accumulated transforms. Matrices use the same column
 /// convention as WGSL/zmath; no narrowing conversion is provided here.
-pub const Position = [3]f64;
+pub const Position = @Vector(3, f64);
 pub const Vec = @Vector(4, f64);
 pub const Mat = [4]Vec;
 

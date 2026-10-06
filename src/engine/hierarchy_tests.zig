@@ -9,7 +9,7 @@ const ChunkTransform = @import("chunk_transform.zig").ChunkTransform;
 const chunks = @import("chunk_utils.zig");
 const world_math = @import("world_math.zig");
 
-fn expectPosition(expected: [3]f64, matrix: world_math.Mat) !void {
+fn expectPosition(expected: world_math.Position, matrix: world_math.Mat) !void {
     inline for (0..3) |i| try std.testing.expectApproxEqAbs(expected[i], matrix[3][i], 0.000001);
 }
 
@@ -30,8 +30,8 @@ test "nested groups inherit f64 translation rotation and scale without changing 
     try expectPosition(.{ 1e9 - 0.375, -1e9 + 0.5, 1e9 + 1.5 }, grandchild.aggregated_matrix);
     root.setPosition(.{ 1e9 + 0.03125, -1e9, 1e9 });
     try expectPosition(.{ 1e9 - 0.34375, -1e9 + 0.5, 1e9 + 1.5 }, grandchild.aggregated_matrix);
-    try std.testing.expectEqual([3]f64{ 0.125, 0.25, 0.5 }, child.position);
-    try std.testing.expectEqual([3]f64{ 0.25, -0.125, 0.5 }, grandchild.position);
+    try std.testing.expectEqual(world_math.Position{ 0.125, 0.25, 0.5 }, child.position);
+    try std.testing.expectEqual(world_math.Position{ 0.25, -0.125, 0.5 }, grandchild.position);
 }
 
 test "objects supplied a parent receive updates and retain sub-f32-world offsets on upload" {
@@ -66,7 +66,7 @@ test "objects supplied a parent receive updates and retain sub-f32-world offsets
     const upload = ChunkTransform.init(object.getModelMatrix());
     const relative = upload.relativeTo(chunks.getChunkCoords(.{ 1e9, -1e9, 1e9 }));
     inline for (0..3) |i| try std.testing.expectApproxEqAbs((@as([3]f32, .{ 0.640625, 0.28125, 0.5625 }))[i], relative[3][i], 0.000001);
-    try std.testing.expectEqual([3]f64{ 0.015625, 0.03125, 0.0625 }, object.position);
+    try std.testing.expectEqual(world_math.Position{ 0.015625, 0.03125, 0.0625 }, object.position);
 
     object.setParent(root);
     try std.testing.expectEqual(0, child.children.items.len);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const Position = @import("world_math.zig").Position;
 
 pub const CHUNK_SIZE = 32.0;
 // TODO: dedupe
@@ -9,20 +10,21 @@ pub const WORLD_SIZE = [_]u32{
     std.math.pow(u32, 2, 3), //     8 chunks (   256 blocks)
 };
 
-pub fn getChunkCoords(position: [3]f64) @Vector(4, i32) {
+pub fn getChunkCoords(position: Position) @Vector(4, i32) {
+    const chunk = @divFloor(position, @as(Position, @splat(CHUNK_SIZE)));
     // Wrap x before narrowing to i32, so repeated trips around the world do not
     // overflow the GPU chunk coordinate. Unwrapped y/z must fit signed i32.
     return .{
-        @intFromFloat(@mod(@divFloor(position[0], CHUNK_SIZE) + WORLD_ORIGIN_CHUNK[0], WORLD_SIZE[0])),
-        @as(i32, @intFromFloat(@divFloor(position[1], CHUNK_SIZE))) + WORLD_ORIGIN_CHUNK[1],
-        @as(i32, @intFromFloat(@divFloor(position[2], CHUNK_SIZE))) + WORLD_ORIGIN_CHUNK[2],
+        @intFromFloat(@mod(chunk[0] + WORLD_ORIGIN_CHUNK[0], WORLD_SIZE[0])),
+        @as(i32, @intFromFloat(chunk[1])) + WORLD_ORIGIN_CHUNK[1],
+        @as(i32, @intFromFloat(chunk[2])) + WORLD_ORIGIN_CHUNK[2],
         0,
     };
 }
 
 /// Remove the chunk origin in f64, then narrow the bounded local coordinates.
-pub fn getLocalPosition(position: [3]f64) [3]f32 {
-    return .{ @floatCast(@mod(position[0], CHUNK_SIZE)), @floatCast(@mod(position[1], CHUNK_SIZE)), @floatCast(@mod(position[2], CHUNK_SIZE)) };
+pub fn getLocalPosition(position: Position) @Vector(3, f32) {
+    return @floatCast(@mod(position, @as(Position, @splat(CHUNK_SIZE))));
 }
 
 /// Subtract integer coordinates before converting to meters. Only x wraps.
