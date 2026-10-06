@@ -42,7 +42,7 @@ Directional shadow cascades are fitted from the camera's chunk-local frustum and
 
 Scenes temporarily use `naive_space_tree.zig`, an ArrayList-backed visibility index that returns every registered object for camera and shadow queries. It has no world bounds and performs no spatial culling, so large scenes will submit more draw calls. The original SpaceTree is retained for future work.
 
-CPU positions and group transforms still use `f32`. Chunk-relative rendering preserves vertex precision but cannot recover precision already lost while storing or composing absolute CPU positions. `zig build test` includes regressions for distant translations, negative boundaries, x wrapping, cascade consistency, and the unbounded visibility index.
+CPU positions and accumulated parent-child transforms use `f64`. Camera and object translations have their chunk origin removed in `f64` before conversion to GPU `f32` coordinates. Parent changes propagate through registered children while preserving their local transforms. Camera and shadow matrices are built from local coordinates. See [Coordinates and rendering precision](docs/coordinates.md) for the conversion rules, API changes, range limits, and regression coverage.
 
 ## Versions
 

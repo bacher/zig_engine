@@ -81,10 +81,10 @@ pub const SpectatorCamera = struct {
         aligned_direction[2] += vertical_shift;
 
         if (!zmath.all(aligned_direction == zero_vec, 3)) {
-            camera.updatePosition(.{
-                camera.position[0] + aligned_direction[0],
-                camera.position[1] + aligned_direction[1],
-                camera.position[2] + aligned_direction[2],
+            camera.translate(.{
+                aligned_direction[0],
+                aligned_direction[1],
+                aligned_direction[2],
             });
         }
     }

@@ -4,7 +4,7 @@ const zmath = @import("zmath");
 const zgpu = @import("zgpu");
 
 const GeometryBounds = @import("./types.zig").GeometryBounds;
-const utils = @import("./utils.zig");
+const world_math = @import("world_math.zig");
 const Scene = @import("./scene.zig").Scene;
 const model_module = @import("./model.zig");
 const Model = model_module.Model;
@@ -54,7 +54,7 @@ const ModelUnion = union(enum) {
 
 pub const GameObjectInitParams = struct {
     scene: *Scene,
-    position: [3]f32,
+    position: world_math.Position,
     rotation: zmath.Quat = zmath.quatFromRollPitchYaw(0, 0, 0),
     scale: f32 = 1.0,
     model: ModelUnion,
@@ -66,10 +66,10 @@ pub const GameObjectInitParams = struct {
 pub const GameObject = struct {
     scene: *Scene,
     allocator: std.mem.Allocator,
-    position: [3]f32,
+    position: world_math.Position,
     rotation: zmath.Quat,
     scale: f32,
-    aggregated_matrix: zmath.Mat = zmath.identity(),
+    aggregated_matrix: world_math.Mat = world_math.identity(),
     model: ModelUnion,
     animation: ?SkeletalAnimation = null,
     joints_bind_group: ?BindGroup = null,
@@ -105,6 +105,8 @@ pub const GameObject = struct {
             ._gc = game_object,
         };
 
+        if (params.parent) |parent| try parent.attachChild(.{ .game_object = game_object });
+
         game_object.updateAggregatedMatrix(.{
             .is_initial = true,
         });
@@ -113,6 +115,8 @@ pub const GameObject = struct {
     }
 
     pub fn deinit(game_object: *GameObject, gctx: *zgpu.GraphicsContext) void {
+        if (game_object.parent) |parent| parent.detachChild(.{ .game_object = game_object });
+        if (!game_object.skip_space_tree) game_object.scene.space_tree.removeObject(game_object) catch {};
         game_object.stopAnimation(gctx);
 
         switch (game_object.model) {
@@ -128,7 +132,7 @@ pub const GameObject = struct {
         }
     }
 
-    pub fn getModelMatrix(game_object: *const GameObject) zmath.Mat {
+    pub fn getModelMatrix(game_object: *const GameObject) world_math.Mat {
         const flip_yz = switch (game_object.model) {
             .regular_model => |model| model.model_descriptor.options.mesh_y_up,
             else => false,
@@ -136,7 +140,7 @@ pub const GameObject = struct {
         if (flip_yz) {
             // NOTE: converting from Y-up to Z-up coordinate system,
             // should be done only for models which is made with Y-up logic.
-            return utils.matMul(game_object.aggregated_matrix, xRotate);
+            return world_math.matMul(game_object.aggregated_matrix, world_math.fromFloat32(xRotate));
         }
         return game_object.aggregated_matrix;
     }
@@ -204,13 +208,17 @@ pub const GameObject = struct {
         game_object.updateAggregatedMatrix(.{});
     }
 
-    pub fn setPosition(game_object: *GameObject, position: [3]f32) void {
+    pub fn setPosition(game_object: *GameObject, position: world_math.Position) void {
         game_object.position = position;
         game_object.updateAggregatedMatrix(.{});
     }
 
     pub fn setParent(game_object: *GameObject, parent: ?*GameObjectGroup) void {
-        game_object.parent = parent;
+        if (game_object.parent != parent) {
+            if (parent) |new_parent| new_parent.attachChild(.{ .game_object = game_object }) catch @panic("Failed to attach object");
+            if (game_object.parent) |old_parent| old_parent.detachChild(.{ .game_object = game_object });
+            game_object.parent = parent;
+        }
         game_object.updateAggregatedMatrix(.{});
     }
 
@@ -229,12 +237,12 @@ pub const GameObject = struct {
             };
         }
 
-        utils.updateAggregatedMatrix_abstract(GameObject, game_object);
+        game_object.aggregated_matrix = world_math.fromSRT(game_object.position, game_object.rotation, game_object.scale);
 
         // if game object has parent, multiply its aggregated matrix by parent's
         // aggregated matrix on each update
         if (game_object.parent) |parent| {
-            game_object.aggregated_matrix = utils.matMul(
+            game_object.aggregated_matrix = world_math.matMul(
                 parent.aggregated_matrix,
                 game_object.aggregated_matrix,
             );

@@ -1,10 +1,8 @@
 const std = @import("std");
 const math = std.math;
 const zmath = @import("zmath");
-const debug = @import("debug");
 
 const utils = @import("./utils.zig");
-const BoundBox = @import("./bound_box.zig").BoundBox;
 const FrustumPoints = @import("./frustum.zig").FrustumPoints;
 const chunk_utils = @import("./chunk_utils.zig");
 const getChunkCoords = chunk_utils.getChunkCoords;
@@ -14,10 +12,9 @@ pub const CHUNK_SIZE = chunk_utils.CHUNK_SIZE;
 pub const Camera = struct {
     aspect_ratio: f32,
 
-    position: [3]f32,
+    position: [3]f64,
     chunk: @Vector(4, i32),
 
-    camera_from_world: zmath.Mat,
     camera_from_world_chunked: zmath.Mat,
     normalized_view_from_camera: zmath.Mat,
     view_from_normalized_view: zmath.Mat,
@@ -26,15 +23,12 @@ pub const Camera = struct {
 
     // derived
     view_from_camera: zmath.Mat,
-    clip_from_world: zmath.Mat,
     clip_from_world_chunked: zmath.Mat,
     view_from_world_chunked: zmath.Mat,
     world_from_clip_chunked: zmath.Mat,
-    view_from_world: zmath.Mat,
-    world_from_clip: zmath.Mat,
 
     pub fn init(aspect_ratio: f32) Camera {
-        const position: [3]f32 = .{ 0, 0, 0 };
+        const position: [3]f64 = .{ 0, 0, 0 };
 
         const no_translation = zmath.translation(0, 0, 0);
 
@@ -54,7 +48,6 @@ pub const Camera = struct {
             .position = position,
             .chunk = getChunkCoords(position),
 
-            .camera_from_world = no_translation,
             .camera_from_world_chunked = no_translation,
             .normalized_view_from_camera = normalized_view_from_camera,
             .view_from_normalized_view = zmath.identity(),
@@ -63,12 +56,9 @@ pub const Camera = struct {
 
             // derived:
             .view_from_camera = undefined,
-            .clip_from_world = undefined,
             .clip_from_world_chunked = undefined,
             .view_from_world_chunked = undefined,
             .world_from_clip_chunked = undefined,
-            .view_from_world = undefined,
-            .world_from_clip = undefined,
         };
 
         camera.updateDerivedMatrices();
@@ -84,19 +74,9 @@ pub const Camera = struct {
             camera.normalized_view_from_camera,
         );
 
-        camera.view_from_world = utils.matMul(
-            camera.view_from_camera,
-            camera.camera_from_world,
-        );
-
         camera.view_from_world_chunked = utils.matMul(
             camera.view_from_camera,
             camera.camera_from_world_chunked,
-        );
-
-        camera.clip_from_world = utils.matMul(
-            camera.clip_from_view,
-            camera.view_from_world,
         );
 
         camera.clip_from_world_chunked = utils.matMul(
@@ -104,7 +84,6 @@ pub const Camera = struct {
             camera.view_from_world_chunked,
         );
 
-        camera.world_from_clip = zmath.inverse(camera.clip_from_world);
         camera.world_from_clip_chunked = zmath.inverse(camera.clip_from_world_chunked);
     }
 
@@ -119,24 +98,18 @@ pub const Camera = struct {
         camera.updateDerivedMatrices();
     }
 
-    pub fn updatePosition(camera: *Camera, position: [3]f32) void {
+    pub fn updatePosition(camera: *Camera, position: [3]f64) void {
         camera.position = position;
         camera.chunk = getChunkCoords(position);
-        // debug.printVec3Labeled("camera position", position);
-
-        // NOTE: inverting position because moving of camera is effectively moving
-        //       of the world in oposite direction.
-        camera.camera_from_world = zmath.translation(
-            -position[0],
-            -position[1],
-            -position[2],
-        );
-        camera.camera_from_world_chunked = zmath.translation(
-            -@mod(position[0], CHUNK_SIZE),
-            -@mod(position[1], CHUNK_SIZE),
-            -@mod(position[2], CHUNK_SIZE),
-        );
+        // Narrow only after removing the chunk origin in f64.
+        const local = chunk_utils.getLocalPosition(position);
+        camera.camera_from_world_chunked = zmath.translation(-local[0], -local[1], -local[2]);
         camera.updateDerivedMatrices();
+    }
+
+    /// Movement deltas are local distances; accumulate them into the f64 position.
+    pub fn translate(camera: *Camera, delta: [3]f64) void {
+        camera.updatePosition(.{ camera.position[0] + delta[0], camera.position[1] + delta[1], camera.position[2] + delta[2] });
     }
 
     pub fn updateView(camera: *Camera, view_mat: zmath.Mat) void {
@@ -153,19 +126,6 @@ pub const Camera = struct {
         );
     }
 
-    pub fn getFrustumPoints(camera: *const Camera, options: struct { depth: f32 = 1.0 }) FrustumPoints {
-        return FrustumPoints.initFromMatrix(
-            camera.world_from_clip,
-            zmath.Vec{
-                camera.position[0],
-                camera.position[1],
-                camera.position[2],
-                1,
-            },
-            options.depth,
-        );
-    }
-
     pub fn getLocalPosition(camera: *const Camera) zmath.Vec {
         const local = chunk_utils.getLocalPosition(camera.position);
         return .{ local[0], local[1], local[2], 1 };
@@ -174,10 +134,5 @@ pub const Camera = struct {
     /// Fit shadow cascades without ever reconstructing a world-space frustum.
     pub fn getChunkFrustumPoints(camera: *const Camera, options: struct { depth: f32 = 1.0 }) FrustumPoints {
         return FrustumPoints.initFromMatrix(camera.world_from_clip_chunked, camera.getLocalPosition(), options.depth);
-    }
-
-    pub fn getCameraViewBoundBox(camera: *const Camera) BoundBox(f32) {
-        const frustum_points = camera.getFrustumPoints(.{});
-        return frustum_points.getBoundingBox();
     }
 };

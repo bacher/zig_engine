@@ -1155,7 +1155,7 @@ pub const Engine = struct {
         const bounds = game_object.model.getBounds();
         const relative_model = ChunkTransform.init(game_object.aggregated_matrix).relativeTo(scene.camera.chunk);
         const bound_center = utils.matApply1(relative_model, bounds.offset);
-        const scale = zmath.util.getScaleVec(game_object.aggregated_matrix);
+        const scale = zmath.util.getScaleVec(relative_model);
         const radius = bounds.radius * scale[0];
 
         const camera_chunk_from_model =
@@ -1580,7 +1580,7 @@ fn getRenderTransform(game_object: *const GameObject, camera: *const @import("ca
     var chunk_from_model = transform.chunk_from_model;
 
     if (billboard_mode != .none) {
-        const scale_vec = zmath.util.getScaleVec(game_object.aggregated_matrix);
+        const scale_vec = zmath.util.getScaleVec(transform.chunk_from_model);
         const position = transform.chunk_from_model[3];
         const direction = camera.getLocalPosition() - transform.relativeTo(camera.chunk)[3];
 

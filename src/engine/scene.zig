@@ -12,6 +12,7 @@ const SkyBoxModel = @import("./model.zig").SkyBoxModel;
 const SkyBoxCubemapModel = @import("./model.zig").SkyBoxCubemapModel;
 const PrimitiveModel = @import("./model.zig").PrimitiveModel;
 const Camera = @import("./camera.zig").Camera;
+const Position = @import("world_math.zig").Position;
 const SpaceTree = @import("./naive_space_tree.zig").SpaceTree;
 const SpectatorCamera = @import("./spectator_camera.zig").SpectatorCamera;
 const light_module = @import("./light.zig");
@@ -135,6 +136,10 @@ pub const Scene = struct {
     pub fn deinit(scene: *Scene) void {
         const gctx = scene.engine.gctx;
 
+        // Objects detach from their parent during deinit, while groups and the
+        // visibility index are still alive.
+        if (scene.skybox_object) |skybox_object| skybox_object.deinit(gctx);
+
         scene.scene_bind_group.deinit(gctx);
 
         for (scene.lights.items) |light| {
@@ -162,7 +167,6 @@ pub const Scene = struct {
 
         scene.spectator_camera.deinit();
         scene.camera.deinit();
-        if (scene.skybox_object) |skybox_object| skybox_object.deinit(gctx);
         scene.allocator.destroy(scene.camera);
         scene.allocator.destroy(scene.spectator_camera);
         scene.allocator.destroy(scene);
@@ -386,20 +390,20 @@ pub const Scene = struct {
 
 pub const AddObjectParams = struct {
     model_id: Engine.LoadedModelId,
-    position: [3]f32,
+    position: Position,
     parent: ?*GameObjectGroup,
     animation_name: ?[]const u8 = null,
 };
 
 pub const AddTerrainHeightMapObjectParams = struct {
     model: *TerrainHeightMapModel,
-    position: [3]f32,
+    position: Position,
     parent: ?*GameObjectGroup = null,
 };
 
 pub const AddWindowBoxParams = struct {
     model: *WindowBoxModel,
-    position: [3]f32,
+    position: Position,
 };
 
 pub const AddSkyBoxParams = struct {
@@ -412,5 +416,5 @@ pub const AddSkyBoxCubemapParams = struct {
 
 pub const AddPrimitiveObjectParams = struct {
     model: *PrimitiveModel,
-    position: [3]f32,
+    position: Position,
 };

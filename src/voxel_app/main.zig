@@ -40,7 +40,7 @@ const DEBUG = true;
 /// Chunks within this distance are requested; reachable chunks are uploaded to the GPU.
 const CHUNK_LOAD_RADIUS = 3;
 const BLOCK_LOAD_RADIUS = 1;
-const TOOL_REACH: f32 = 20;
+const TOOL_REACH: f64 = 20;
 
 const Game = struct {
     const MeshVersion = struct { chunk_revision: u32, mesh_revision: u64 };
@@ -371,8 +371,8 @@ const Game = struct {
         const camera_position = game.engine.active_scene.?.camera.position;
         const top = getColumnTopUnderPosition(camera_position) orelse return;
 
-        const camera_z = camera_position[2] + @as(f32, @floatFromInt(consts.WORLD_ORIGIN[2] * consts.CHUNK_SIZE));
-        if (camera_z - @as(f32, @floatFromInt(top[2] + 1)) > TOOL_REACH) return;
+        const camera_z = camera_position[2] + @as(f64, @floatFromInt(consts.WORLD_ORIGIN[2] * consts.CHUNK_SIZE));
+        if (camera_z - @as(f64, @floatFromInt(top[2] + 1)) > TOOL_REACH) return;
         const minimum_z: u32 = @intFromFloat(@max(0, @floor(camera_z - TOOL_REACH)));
         const edit_result = switch (action) {
             .remove => world.removeTopBlockInColumn(top, minimum_z),
@@ -503,7 +503,7 @@ const BlockAction = enum {
 
 /// Returns the block containing `position`, clamped to the top of the world.
 /// Returns null if the position is outside of the world (or below its bottom).
-fn getColumnTopUnderPosition(position: [3]f32) ?[3]u32 {
+fn getColumnTopUnderPosition(position: [3]f64) ?[3]u32 {
     var block: [3]i64 = undefined;
     for (0..3) |axis| {
         block[axis] = @as(i64, @intFromFloat(@floor(position[axis]))) +
@@ -778,7 +778,7 @@ pub fn main(init: std.process.Init) !void {
 
         try game.saved_game_object_groups.put(allocator, "coordinates", group);
 
-        group.setPosition(.{ 0, 0, 0, 0 });
+        group.setPosition(.{ 0, 0, 0 });
 
         const tube_x = try scene.addPrimitiveObject(.{
             .model = tube_model,
@@ -833,7 +833,7 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
         obj.setRotation(zmath.quatFromRollPitchYaw(0, 0, @floatCast(-engine.time)));
     }
     // if (game.saved_game_object_groups.get("coordinates")) |group| {
-    //     group.setPosition(.{ 0, 0, @floatCast(math.sin(engine.time) * 10), 0 });
+    //     group.setPosition(.{ 0, 0, math.sin(engine.time) * 10 });
     // }
 
     game.updateWorld();
