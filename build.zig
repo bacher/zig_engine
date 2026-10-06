@@ -255,6 +255,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
     test_step.dependOn(&b.addRunArtifact(render_coordinates_tests).step);
+    const hierarchy_tests = b.addTest(.{ .root_module = engine_lib.root_module });
+    test_step.dependOn(&b.addRunArtifact(hierarchy_tests).step);
     test_step.dependOn(&run_voxel_grid_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
     test_step.dependOn(&run_voxel_exe_unit_tests.step);

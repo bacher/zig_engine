@@ -18,6 +18,7 @@ const GameObjectGroup = @import("engine").GameObjectGroup;
 const Scene = @import("engine").Scene;
 const tube = @import("engine").tube;
 const utils = @import("engine").utils;
+const world_math = @import("engine").world_math;
 const zgui_utils = @import("engine").zgui_utils;
 
 const Game = struct {
@@ -260,7 +261,7 @@ pub fn main(init: std.process.Init) !void {
 
         try game.saved_game_object_groups.put(allocator, "coordinates", group);
 
-        group.setPosition(.{ 0, 0, 0, 0 });
+        group.setPosition(.{ 0, 0, 0 });
 
         const tube_x = try scene.addPrimitiveObject(.{
             .model = tube_model,
@@ -315,7 +316,7 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
         obj.setRotation(zmath.quatFromRollPitchYaw(0, 0, @floatCast(-engine.time)));
     }
     // if (game.saved_game_object_groups.get("coordinates")) |group| {
-    //     group.setPosition(.{ 0, 0, @floatCast(math.sin(engine.time) * 10), 0 });
+    //     group.setPosition(.{ 0, 0, math.sin(engine.time) * 10 });
     // }
 }
 
@@ -398,18 +399,20 @@ fn traverseGroup(
             const matrix_params = utils.parseTransformMatrix(&normalized);
 
             group.setSRT(
-                matrix_params.position,
+                .{ matrix_params.position[0], matrix_params.position[1], matrix_params.position[2] },
                 matrix_params.rotation,
                 matrix_params.scale_scalar,
                 parent_group,
             );
 
-            const aggregated_matrix = utils.matMul(
-                normalized,
+            const aggregated_matrix = world_math.matMul(
                 parent_group.aggregated_matrix,
+                world_math.fromFloat32(normalized),
             );
 
-            utils.assertMatricesEqual(&aggregated_matrix, &group.aggregated_matrix);
+            for (aggregated_matrix, group.aggregated_matrix) |expected, actual| {
+                std.debug.assert(@reduce(.And, @abs(expected - actual) < @as(world_math.Vec, @splat(0.001))));
+            }
         } else {
             group.setParent(parent_group);
         }

@@ -108,26 +108,6 @@ pub inline fn length3(vec: zmath.Vec) f32 {
     return @sqrt(dot[0] + dot[1] + dot[2]);
 }
 
-pub fn updateAggregatedMatrix_abstract(T: anytype, game_object: *T) void {
-    game_object.aggregated_matrix = matMul(
-        matMul(
-            zmath.translation(
-                game_object.position[0],
-                game_object.position[1],
-                game_object.position[2],
-            ),
-            // TODO: the order is broken here, probably should be SRT order?
-            // TODO: since scaling is uniform, can we just multiply by scale scalar instead?
-            zmath.scaling(
-                game_object.scale,
-                game_object.scale,
-                game_object.scale,
-            ),
-        ),
-        zmath.matFromQuat(game_object.rotation),
-    );
-}
-
 pub fn debugMatrixDetailed(mat: *const zmath.Mat) void {
     std.debug.print("Matrix:\n", .{});
     debugPrintMatrix(mat);

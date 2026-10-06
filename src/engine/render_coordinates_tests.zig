@@ -5,6 +5,7 @@ const ChunkTransform = @import("chunk_transform.zig").ChunkTransform;
 const Camera = @import("camera.zig").Camera;
 const DirectionalLight = @import("light.zig").DirectionalLight;
 const utils = @import("utils.zig");
+const world_math = @import("world_math.zig");
 
 test {
     _ = @import("naive_space_tree.zig");
@@ -12,6 +13,34 @@ test {
 
 fn expectVector(expected: zmath.Vec, actual: zmath.Vec, tolerance: f32) !void {
     inline for (0..4) |i| try std.testing.expectApproxEqAbs(expected[i], actual[i], tolerance);
+}
+
+test "f64 world translations are rebased before narrowing to the GPU matrix" {
+    const object = ChunkTransform.init(world_math.translation(1e9 + 0.125, -1e9 - 0.25, 1e9 + 31.875));
+    try expectVector(.{ 0.125, 31.75, 31.875, 1 }, object.chunk_from_model[3], 0.000001);
+    try expectVector(.{ 0.125, -0.25, 31.875, 1 }, object.relativeTo(chunks.getChunkCoords(.{ 1e9, -1e9, 1e9 }))[3], 0.000001);
+    // The lost offset is observable if a caller narrows the absolute position first.
+    const rounded_world: f32 = @floatCast(@as(f64, 1e9 + 0.125));
+    try std.testing.expectEqual(@as(f32, 1e9), rounded_world);
+}
+
+test "small camera movements accumulate in f64 across distant chunk boundaries" {
+    var camera = Camera.init(1.5);
+    camera.updatePosition(.{ 1e9 + 31.5, -1e9 + 31.5, 1e9 + 31.5 });
+    const before_chunk = camera.chunk;
+    for (0..1024) |_| camera.translate(.{ 1.0 / 1024.0, 1.0 / 1024.0, 1.0 / 1024.0 });
+    try std.testing.expectEqual([3]f64{ 1e9 + 32.5, -1e9 + 32.5, 1e9 + 32.5 }, camera.position);
+    try std.testing.expectEqual(@Vector(4, i32){ 1, 1, 1, 0 }, chunks.getChunkDelta(camera.chunk, before_chunk));
+    try expectVector(.{ 0.5, 0.5, 0.5, 1 }, camera.getLocalPosition(), 0.000001);
+    try expectVector(.{ -0.5, -0.5, -0.5, 1 }, camera.camera_from_world_chunked[3], 0.000001);
+}
+
+test "x wraps before conversion to the GPU integer chunk range" {
+    const repeated_worlds: f64 = 16384.0 * 100000000.0;
+    try std.testing.expectEqual(chunks.getChunkCoords(.{ 0.125, 0, 0 }), chunks.getChunkCoords(.{ repeated_worlds + 0.125, 0, 0 }));
+    try std.testing.expectEqual(chunks.getChunkCoords(.{ -0.125, 0, 0 }), chunks.getChunkCoords(.{ -repeated_worlds - 0.125, 0, 0 }));
+    const transform = ChunkTransform.init(world_math.translation(repeated_worlds + 0.125, 0, 0));
+    try expectVector(.{ 0.125, 0, 0, 1 }, transform.chunk_from_model[3], 0.000001);
 }
 
 test "chunk-local transforms preserve tiny vertices in far neighboring chunks" {
@@ -29,13 +58,13 @@ test "chunk-local transforms preserve tiny vertices in far neighboring chunks" {
 }
 
 test "negative boundaries and the x seam use the same local frame" {
-    const negative = ChunkTransform.init(zmath.translation(-0.25, -32.25, -64));
+    const negative = ChunkTransform.init(world_math.translation(-0.25, -32.25, -64));
     try std.testing.expectEqual(@Vector(4, i32){ 255, 126, 2, 0 }, negative.chunk);
     try expectVector(.{ 31.75, 31.75, 0, 1 }, negative.chunk_from_model[3], 0.00001);
-    const across_seam = ChunkTransform.init(zmath.translation(-8191.75, 0, 0));
+    const across_seam = ChunkTransform.init(world_math.translation(-8191.75, 0, 0));
     const camera_chunk = chunks.getChunkCoords(.{ 8191.75, 0, 0 });
     try expectVector(.{ 32.25, 0, 0, 1 }, across_seam.relativeTo(camera_chunk)[3], 0.00001);
-    const reverse = ChunkTransform.init(zmath.translation(8191.75, 0, 0));
+    const reverse = ChunkTransform.init(world_math.translation(8191.75, 0, 0));
     try expectVector(.{ -0.25, 0, 0, 1 }, reverse.relativeTo(across_seam.chunk)[3], 0.00001);
 }
 
@@ -53,11 +82,11 @@ test "camera and all shadow cascades are invariant under a distant chunk transla
     near.updatePosition(.{ 3.25, -2.5, 6.125 });
     near.updateView(zmath.rotationZ(0.3));
     var far = Camera.init(1.5);
-    far.updatePosition(.{ 3.25 + 32000, -2.5 + 320000, 6.125 - 32000 });
+    far.updatePosition(.{ 3.25 + 1e9, -2.5 + 1e9, 6.125 - 1e9 });
     far.updateView(zmath.rotationZ(0.3));
 
-    const near_object = ChunkTransform.init(utils.matMul(zmath.translation(5.25, 40.5, 8.125), zmath.rotationX(0.4)));
-    const far_object = ChunkTransform.init(utils.matMul(zmath.translation(32005.25, 320040.5, -31991.875), zmath.rotationX(0.4)));
+    const near_object = ChunkTransform.init(world_math.fromSRT(.{ 5.25, 40.5, 8.125 }, zmath.quatFromRollPitchYaw(0.4, 0, 0), 1));
+    const far_object = ChunkTransform.init(world_math.fromSRT(.{ 5.25 + 1e9, 40.5 + 1e9, 8.125 - 1e9 }, zmath.quatFromRollPitchYaw(0.4, 0, 0), 1));
     const near_model = near_object.relativeTo(near.chunk);
     const far_model = far_object.relativeTo(far.chunk);
     const vertex: zmath.Vec = .{ 0.001, 0.002, 0.003, 1 };
@@ -84,10 +113,10 @@ test "camera and all shadow cascades are invariant under a distant chunk transla
 
 test "crossing a chunk boundary moves camera-space geometry continuously" {
     var before = Camera.init(1);
-    before.updatePosition(.{ 31.875, 100000, 10 });
+    before.updatePosition(.{ 31.875, 1000000000, 10 });
     var after = Camera.init(1);
-    after.updatePosition(.{ 32.125, 100000, 10 });
-    const object = ChunkTransform.init(zmath.translation(33, 100010, 11));
+    after.updatePosition(.{ 32.125, 1000000000, 10 });
+    const object = ChunkTransform.init(world_math.translation(33, 100010, 11));
     const before_position = utils.matApply(before.view_from_world_chunked, object.relativeTo(before.chunk)[3]);
     const after_position = utils.matApply(after.view_from_world_chunked, object.relativeTo(after.chunk)[3]);
     try expectVector(.{ -0.25, 0, 0, 0 }, after_position - before_position, 0.00001);
