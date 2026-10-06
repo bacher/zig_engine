@@ -6,7 +6,7 @@ const Side = @import("engine").voxel_chunk.Side;
 const WorldChunkData = @import("./world_chunk_data.zig").WorldChunkData;
 const ChunkFlags = @import("./world_chunk_data.zig").ChunkFlags;
 const world_generator = @import("./world_generator.zig");
-const ChunkPosition = @import("./consts.zig").ChunkPosition;
+const ChunkId = @import("./consts.zig").ChunkId;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const WORLD_SIZE = @import("./consts.zig").WORLD_SIZE;
 const boundary_mask = @import("./boundary_mask.zig");
@@ -21,17 +21,31 @@ pub fn normalizeChunkCoords(coords: ChunkCoords) ?ChunkCoords {
 }
 
 /// Pack validated storage coordinates; signed spatial coordinates must be normalized first.
-pub fn encodeChunkPosition(x: anytype, y: anytype, z: anytype) ChunkPosition {
+pub fn encodeChunkPosition(x: anytype, y: anytype, z: anytype) ChunkId {
     std.debug.assert(x >= 0 and x < WORLD_SIZE[0]);
     std.debug.assert(y >= 0 and y < WORLD_SIZE[1]);
     std.debug.assert(z >= 0 and z < WORLD_SIZE[2]);
-    return @as(ChunkPosition, @intCast(x)) |
-        @as(ChunkPosition, @intCast(y)) << 12 |
-        @as(ChunkPosition, @intCast(z)) << 20;
+
+    // make sure that shifting logic represents the correct bit position,
+    // which should be synced with decodeChunkPosition logic
+    // and fits WORLD_SIZE coordinates defined in chunk_utils.zig
+    return @as(ChunkId, @intCast(x)) | //    first 12 bit - x
+        @as(ChunkId, @intCast(y)) << 12 | // then 8 bit - y
+        @as(ChunkId, @intCast(z)) << 20; //  and rest - z
 }
 
-pub fn encodeChunkCoords(coords: ChunkCoords) ChunkPosition {
+pub fn encodeChunkCoords(coords: ChunkCoords) ChunkId {
     return encodeChunkPosition(coords[0], coords[1], coords[2]);
+}
+
+pub fn decodeChunkPosition(position: ChunkId) ChunkCoords {
+    // shifting logic should match encodeChunkPosition logic
+    // and fits WORLD_SIZE coordinates defined in chunk_utils.zig
+    return .{
+        @as(i32, @intCast(position & 0xfff)), //      first 12 bit - x
+        @as(i32, @intCast(position >> 12 & 0xff)), // then 8 bit - y
+        @as(i32, @intCast(position >> 20)), //        and rest - z
+    };
 }
 
 /// Face neighbors wrap around x; missing neighbors beyond y/z leave the world exposed.
@@ -39,14 +53,6 @@ pub fn adjacentChunk(coords: ChunkCoords, side: Side) ?ChunkCoords {
     std.debug.assert(@reduce(.And, coords >= @as(ChunkCoords, @splat(0))));
     std.debug.assert(@reduce(.And, coords < WORLD_SIZE));
     return normalizeChunkCoords(coords + side.getOffset());
-}
-
-pub fn decodeChunkPosition(position: ChunkPosition) ChunkCoords {
-    return .{
-        @as(i32, @intCast(position & 0xfff)), //      first 12 bit
-        @as(i32, @intCast(position >> 12 & 0xff)), // then 8 bit
-        @as(i32, @intCast(position >> 20)), //        and rest (3/4 bit)
-    };
 }
 
 /// What the chunk consists of. Empty chunks don't store their blocks, so the air above the
@@ -185,7 +191,7 @@ pub fn splitBlockCoords(block: [3]u32) struct { ChunkCoords, [3]u5 } {
     };
 }
 
-pub const ChunksHashMap = std.AutoHashMapUnmanaged(ChunkPosition, WorldChunk);
+pub const ChunksHashMap = std.AutoHashMapUnmanaged(ChunkId, WorldChunk);
 
 pub const ChunkNotReceivedError = error{ChunkNotReceived};
 

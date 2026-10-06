@@ -9,7 +9,7 @@ const encodeChunkCoords = world_module.encodeChunkCoords;
 const world_generator = @import("./world_generator.zig");
 const WorldGenerator = world_generator.WorldGenerator;
 const ColumnGenerator = world_generator.ColumnGenerator;
-const ChunkPosition = @import("./consts.zig").ChunkPosition;
+const ChunkId = @import("./consts.zig").ChunkId;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const WORLD_SIZE = @import("./consts.zig").WORLD_SIZE;
 const Side = @import("engine").voxel_chunk.Side;
@@ -160,7 +160,7 @@ const Request = union(enum) {
         z_end: i32,
         mode: Representation,
     },
-    evict_chunk: struct { client: *Client, position: ChunkPosition, subscription_id: u64 },
+    evict_chunk: struct { client: *Client, position: ChunkId, subscription_id: u64 },
     operation: struct { client: *Client, request_id: u64, operation: BlockOperation },
 };
 
@@ -173,7 +173,7 @@ pub const Client = struct {
     pending: ResponsePackage = .{},
     next_request_id: u64 = 1,
     /// Only accessed by the service worker. Values identify subscription generations.
-    subscriptions: std.AutoHashMapUnmanaged(ChunkPosition, Subscription) = .empty,
+    subscriptions: std.AutoHashMapUnmanaged(ChunkId, Subscription) = .empty,
 
     fn nextRequestId(self: *Client) u64 {
         const id = self.next_request_id;
@@ -201,7 +201,7 @@ pub const Client = struct {
         return id;
     }
 
-    pub fn evictChunk(self: *Client, position: ChunkPosition, subscription_id: u64) void {
+    pub fn evictChunk(self: *Client, position: ChunkId, subscription_id: u64) void {
         self.service.requests.push(self.service.io, self.service.allocator, .{ .evict_chunk = .{
             .client = self,
             .position = position,
@@ -273,7 +273,7 @@ pub const WorldDataService = struct {
     worker_state: WorkerState,
     mesh_loads: std.ArrayList(MeshLoad) = .empty,
     next_mesh_load: usize = 0,
-    dirty_meshes: std.AutoHashMapUnmanaged(ChunkPosition, void) = .empty,
+    dirty_meshes: std.AutoHashMapUnmanaged(ChunkId, void) = .empty,
 
     /// The allocator must be thread-safe; messages transfer ownership between tasks.
     pub fn create(io: Io, allocator: std.mem.Allocator, generator: WorldGenerator) !*WorldDataService {
@@ -507,17 +507,17 @@ pub const WorldDataService = struct {
 const WorkerState = struct {
     generator: WorldGenerator,
     /// Committed edits survive cache eviction. Untouched chunks are regenerated on demand.
-    modified_chunks: std.AutoHashMapUnmanaged(ChunkPosition, WorldChunk) = .empty,
+    modified_chunks: std.AutoHashMapUnmanaged(ChunkId, WorldChunk) = .empty,
     /// Retained independently of mesh allocation/subscription lifetime. Untouched inputs
     /// have revision zero; a neighboring edit may advance it without a chunk revision change.
-    mesh_revisions: std.AutoHashMapUnmanaged(ChunkPosition, u64) = .empty,
+    mesh_revisions: std.AutoHashMapUnmanaged(ChunkId, u64) = .empty,
     next_mesh_revision: u64 = 0,
     /// Bounded terrain-height cache, not block or mesh storage. Neighbor meshing otherwise
     /// repeats the same noise calculations for every z coordinate in a column.
     columns: std.AutoHashMapUnmanaged(u64, ColumnGenerator) = .empty,
     /// Bounded cache for immutable generated planes. Modified chunks keep their own
     /// incrementally updated masks and always take precedence over this cache.
-    boundary_cache: std.AutoHashMapUnmanaged(ChunkPosition, BoundaryMasks) = .empty,
+    boundary_cache: std.AutoHashMapUnmanaged(ChunkId, BoundaryMasks) = .empty,
 
     fn boundariesAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) BoundaryMasks {
         const id = encodeChunkCoords(coords);
