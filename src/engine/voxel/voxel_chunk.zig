@@ -1,6 +1,7 @@
+const ChunkCoords = @import("../world_math.zig").ChunkCoords;
 const std = @import("std");
 
-pub const CHUNK_SIZE = 32;
+pub const CHUNK_SIZE = @import("../chunk_utils.zig").CHUNK_SIZE;
 
 pub const Side = enum(u8) {
     left = 0, //   -x
@@ -9,6 +10,17 @@ pub const Side = enum(u8) {
     back = 3, //   +y
     bottom = 4, // -z
     top = 5, //    +z
+
+    pub fn getOffset(self: Side) ChunkCoords {
+        return switch (self) {
+            .left => .{ -1, 0, 0 },
+            .right => .{ 1, 0, 0 },
+            .front => .{ 0, -1, 0 },
+            .back => .{ 0, 1, 0 },
+            .bottom => .{ 0, 0, -1 },
+            .top => .{ 0, 0, 1 },
+        };
+    }
 
     pub fn getOpposite(self: Side) Side {
         switch (self) {
@@ -61,7 +73,7 @@ pub const GPU_ChunkInfo = extern struct {
     // TODO: can we hold all needed info in [8]u32 -> [8][u10,u10,u10,u2], 10 bits per coord
     // [2]u16 = {count, index}
     view_side_data_indices: [8][3][2]u16, // 96 bytes
-    chunk_origin: [3]u32, // 12 bytes
+    chunk_origin: [3]i32, // 12 bytes; explicit layout, not a padded CPU vector
     data_slot_index: u32, // 4 bytes
     // total: 112 bytes
 };
@@ -69,18 +81,20 @@ pub const GPU_ChunkInfo = extern struct {
 comptime {
     // @compileLog("GPU_ChunkInfo size", @sizeOf(GPU_ChunkInfo));
     std.debug.assert(@sizeOf(GPU_ChunkInfo) == 112);
+    std.debug.assert(@offsetOf(GPU_ChunkInfo, "chunk_origin") == 96);
+    std.debug.assert(@offsetOf(GPU_ChunkInfo, "data_slot_index") == 108);
 }
 
 pub const VoxelChunk = struct {
     pub const Self = @This();
 
     // TODO: should we add chunk_id here?
-    chunk_origin: [3]u30,
+    chunk_origin: ChunkCoords,
 
     // if null, then it means that the chunk is not resident on the GPU most likely because does not have visible faces
     gpu_residence_info: ?GpuResidenceInfo = null,
 
-    pub fn init(chunk_origin: [3]u30) Self {
+    pub fn init(chunk_origin: ChunkCoords) Self {
         return .{
             .chunk_origin = chunk_origin,
         };
@@ -133,6 +147,6 @@ pub const ChunkSideData = struct {
 };
 
 pub const VoxelChunkUpload = struct {
-    chunk_coords: [3]u30,
+    chunk_coords: ChunkCoords,
     chunk_side_data: ChunkSideData,
 };

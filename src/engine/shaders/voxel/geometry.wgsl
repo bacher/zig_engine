@@ -1,6 +1,6 @@
 struct GPU_ChunkInfo {
     view_side_data_indices: array<array<u32, 3>, 8>,
-    chunk_origin: vec3u,
+    chunk_origin: vec3i,
     slot_index: u32,
 }
 
@@ -160,7 +160,7 @@ fn voxelVertex(
         chunk_side = 4 + (view_index & 0x1u);
     }
 
-    let chunk_origin = chunkOffset(vec3i(chunk_info.chunk_origin), origin_chunk);
+    let chunk_origin = chunkOffset(chunk_info.chunk_origin, origin_chunk);
 
     let global_block_index =
         chunk_info.slot_index * BLOCKS_PER_SLOT +

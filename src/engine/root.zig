@@ -15,6 +15,7 @@ pub const tube = @import("./shape_generation/tube.zig");
 pub const utils = @import("./utils.zig");
 pub const chunk_utils = @import("./chunk_utils.zig");
 pub const world_math = @import("./world_math.zig");
+pub const ChunkCoords = world_math.ChunkCoords;
 pub const zgui_utils = @import("./zgui_utils.zig");
 
 test {

@@ -1,3 +1,4 @@
+const ChunkCoords = @import("engine").ChunkCoords;
 const std = @import("std");
 
 const BlockType = @import("engine").voxel_chunk.BlockType;
@@ -10,70 +11,41 @@ const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const WORLD_SIZE = @import("./consts.zig").WORLD_SIZE;
 const boundary_mask = @import("./boundary_mask.zig");
 
-pub fn normalizeChunkPosition(x: anytype, y: anytype, z: anytype) [3]u30 {
-    var normalized_x = x;
-
-    // only x wraps, y and z are not wrapped
-    if (x >= WORLD_SIZE[0]) {
-        normalized_x = x - WORLD_SIZE[0];
-    } else if (x < 0) {
-        normalized_x = x + WORLD_SIZE[0];
-    }
-    // if (y >= WORLD_SIZE[1]) {
-    //     normalized_y = y - WORLD_SIZE[1];
-    // } else if (y < 0) {
-    //     normalized_y = y + WORLD_SIZE[1];
-    // }
-    // if (z >= WORLD_SIZE[2]) {
-    //     normalized_z = z - WORLD_SIZE[2];
-    // } else if (z < 0) {
-    //     normalized_z = z + WORLD_SIZE[2];
-    // }
-
-    std.debug.assert(y >= 0 and y < WORLD_SIZE[1]);
-    std.debug.assert(z >= 0 and z < WORLD_SIZE[2]);
-
-    return .{
-        @intCast(normalized_x),
-        @intCast(y),
-        @intCast(z),
-    };
+/// Map a spatial coordinate to stored terrain: x wraps, y/z are bounded.
+pub fn normalizeChunkCoords(coords: ChunkCoords) ?ChunkCoords {
+    if (coords[1] < 0 or coords[1] >= WORLD_SIZE[1] or
+        coords[2] < 0 or coords[2] >= WORLD_SIZE[2]) return null;
+    var normalized = coords;
+    normalized[0] = @mod(coords[0], WORLD_SIZE[0]);
+    return normalized;
 }
 
+/// Pack validated storage coordinates; signed spatial coordinates must be normalized first.
 pub fn encodeChunkPosition(x: anytype, y: anytype, z: anytype) ChunkPosition {
+    std.debug.assert(x >= 0 and x < WORLD_SIZE[0]);
+    std.debug.assert(y >= 0 and y < WORLD_SIZE[1]);
+    std.debug.assert(z >= 0 and z < WORLD_SIZE[2]);
     return @as(ChunkPosition, @intCast(x)) |
         @as(ChunkPosition, @intCast(y)) << 12 |
         @as(ChunkPosition, @intCast(z)) << 20;
 }
 
-pub fn encodeChunkPositionArray(coords: anytype) ChunkPosition {
+pub fn encodeChunkCoords(coords: ChunkCoords) ChunkPosition {
     return encodeChunkPosition(coords[0], coords[1], coords[2]);
 }
 
 /// Face neighbors wrap around x; missing neighbors beyond y/z leave the world exposed.
-pub fn adjacentChunk(coords: [3]u30, side: Side) ?[3]u30 {
-    const axis = @intFromEnum(side) / 2;
-    var neighbor = [3]i32{ coords[0], coords[1], coords[2] };
-    neighbor[axis] += if (@intFromEnum(side) % 2 == 0) @as(i32, -1) else 1;
-    if (neighbor[1] < 0 or neighbor[1] >= WORLD_SIZE[1] or
-        neighbor[2] < 0 or neighbor[2] >= WORLD_SIZE[2]) return null;
-    return normalizeChunkPosition(neighbor[0], neighbor[1], neighbor[2]);
+pub fn adjacentChunk(coords: ChunkCoords, side: Side) ?ChunkCoords {
+    std.debug.assert(@reduce(.And, coords >= @as(ChunkCoords, @splat(0))));
+    std.debug.assert(@reduce(.And, coords < WORLD_SIZE));
+    return normalizeChunkCoords(coords + side.getOffset());
 }
 
-pub fn decodeChunkPosition(position: ChunkPosition) [3]u30 {
-    return .{
-        @as(u30, @intCast(position & 0xfff)), //      first 12 bit
-        @as(u30, @intCast(position >> 12 & 0xff)), // then 8 bit
-        @as(u30, @intCast(position >> 20)), //        and rest (3/4 bit)
-    };
-}
-
-pub fn decodeChunkPositionVec(position: ChunkPosition) @Vector(4, i32) {
+pub fn decodeChunkPosition(position: ChunkPosition) ChunkCoords {
     return .{
         @as(i32, @intCast(position & 0xfff)), //      first 12 bit
         @as(i32, @intCast(position >> 12 & 0xff)), // then 8 bit
         @as(i32, @intCast(position >> 20)), //        and rest (3/4 bit)
-        0,
     };
 }
 
@@ -198,7 +170,7 @@ pub const WorldChunk = struct {
 };
 
 /// Splits global block coordinates into chunk coordinates and coordinates inside of the chunk.
-pub fn splitBlockCoords(block: [3]u32) struct { [3]u30, [3]u5 } {
+pub fn splitBlockCoords(block: [3]u32) struct { ChunkCoords, [3]u5 } {
     return .{
         .{
             @intCast(block[0] / CHUNK_SIZE),
@@ -259,14 +231,14 @@ pub const World = struct {
         self.pending_operations.deinit(self.allocator);
     }
 
-    pub fn hasChunk(self: *const World, coords: [3]u30) bool {
-        return self.chunks.contains(encodeChunkPositionArray(coords));
+    pub fn hasChunk(self: *const World, coords: ChunkCoords) bool {
+        return self.chunks.contains(encodeChunkCoords(coords));
     }
 
     /// Takes ownership on success. Subscription tokens must be checked by the caller first.
     /// Replaces the cache with authoritative data, then replays pending commands in order.
-    pub fn insertChunk(self: *World, coords: [3]u30, chunk: WorldChunk) error{StaleChunk}!void {
-        const position = encodeChunkPositionArray(coords);
+    pub fn insertChunk(self: *World, coords: ChunkCoords, chunk: WorldChunk) error{StaleChunk}!void {
+        const position = encodeChunkCoords(coords);
         var updated = chunk;
         if (self.chunks.getPtr(position)) |previous| {
             if (chunk.chunk_revision < previous.chunk_revision) return error.StaleChunk;
@@ -276,7 +248,7 @@ pub const World = struct {
         }
         for (self.pending_operations.items) |pending| {
             const pending_coords, const local = splitBlockCoords(pending.operation.block);
-            if (encodeChunkPositionArray(pending_coords) == position) {
+            if (encodeChunkCoords(pending_coords) == position) {
                 _ = updated.apply(self.allocator, local, pending.operation.action);
             }
         }
@@ -293,11 +265,11 @@ pub const World = struct {
 
     /// Only a performance hint changes locally. No command or revision is needed: the
     /// service independently reveals these neighbors when it commits the block operation.
-    fn revealNeighbors(self: *World, coords: [3]u30, flags: ChunkFlags) void {
+    fn revealNeighbors(self: *World, coords: ChunkCoords, flags: ChunkFlags) void {
         for (std.enums.values(Side)) |side| {
             if (flags.getSideSolidness(side)) continue;
             const neighbor_coords = adjacentChunk(coords, side) orelse continue;
-            if (self.chunks.getPtr(encodeChunkPositionArray(neighbor_coords))) |neighbor| {
+            if (self.chunks.getPtr(encodeChunkCoords(neighbor_coords))) |neighbor| {
                 neighbor.flags.is_unreachable = false;
             }
         }
@@ -315,17 +287,17 @@ pub const World = struct {
 
     /// Submitted operations survive eviction until acknowledged. Their results must never
     /// resurrect an evicted chunk; the subscription token decides whether to accept the data.
-    pub fn removeChunk(self: *World, coords: [3]u30) void {
-        self.chunks.fetchRemove(encodeChunkPositionArray(coords)).?.value.content.deinit(self.allocator);
+    pub fn removeChunk(self: *World, coords: ChunkCoords) void {
+        self.chunks.fetchRemove(encodeChunkCoords(coords)).?.value.content.deinit(self.allocator);
     }
 
-    pub fn getChunk(self: *const World, coords: [3]u30) ?WorldChunk {
-        for (0..3) |axis| std.debug.assert(coords[axis] < WORLD_SIZE[axis]);
-        return self.chunks.get(encodeChunkPositionArray(coords));
+    pub fn getChunk(self: *const World, coords: ChunkCoords) ?WorldChunk {
+        inline for (0..3) |axis| std.debug.assert(coords[axis] >= 0 and coords[axis] < WORLD_SIZE[axis]);
+        return self.chunks.get(encodeChunkCoords(coords));
     }
 
-    pub fn ensureChunkData(self: *World, coords: [3]u30) *WorldChunkData {
-        return self.chunks.getPtr(encodeChunkPositionArray(coords)).?.ensureData(self.allocator);
+    pub fn ensureChunkData(self: *World, coords: ChunkCoords) *WorldChunkData {
+        return self.chunks.getPtr(encodeChunkCoords(coords)).?.ensureData(self.allocator);
     }
 
     pub fn isBlockSolid(self: *const World, block: [3]u32) ChunkNotReceivedError!bool {
@@ -334,15 +306,15 @@ pub const World = struct {
         return chunk.content.getBlock(local) != .none;
     }
 
-    pub fn hasPendingMeshDependency(self: *const World, coords: [3]u30) bool {
+    pub fn hasPendingMeshDependency(self: *const World, coords: ChunkCoords) bool {
         for (self.pending_operations.items) |pending| {
             const changed, const local = splitBlockCoords(pending.operation.block);
-            if (std.mem.eql(u30, &changed, &coords)) return true;
+            if (@reduce(.And, changed == coords)) return true;
             for (std.enums.values(Side)) |side| {
                 const i = @intFromEnum(side);
                 if (local[i / 2] != (if (i % 2 == 0) @as(u5, 0) else CHUNK_SIZE - 1)) continue;
                 const neighbor = adjacentChunk(changed, side) orelse continue;
-                if (std.mem.eql(u30, &neighbor, &coords)) return true;
+                if (@reduce(.And, neighbor == coords)) return true;
             }
         }
         return false;
@@ -357,7 +329,7 @@ pub const World = struct {
         };
         operation.validate();
         const coords, const local = splitBlockCoords(block);
-        const chunk = self.chunks.getPtr(encodeChunkPositionArray(coords)).?;
+        const chunk = self.chunks.getPtr(encodeChunkCoords(coords)).?;
         if (chunk.apply(self.allocator, local, operation.action) != .success) return;
         self.revealNeighbors(coords, chunk.flags);
         self.pending_operations.append(self.allocator, .{ .operation = operation }) catch @panic("OOM");
@@ -403,15 +375,25 @@ pub const World = struct {
 fn insertGeneratedChunks(
     world: *World,
     generator: world_generator.WorldGenerator,
-    column: [2]u30,
-    z_start: u30,
-    z_end: u30,
+    column: @Vector(2, i32),
+    z_start: i32,
+    z_end: i32,
 ) !void {
     const column_generator = world_generator.ColumnGenerator.init(generator, column);
     var z = z_start;
     while (z < z_end) : (z += 1) {
         try world.insertChunk(.{ column[0], column[1], z }, column_generator.generateChunk(world.allocator, z));
     }
+}
+
+test "normalized signed chunk coordinates preserve the packed storage ID format" {
+    const coords = normalizeChunkCoords(.{ -1, 20, 3 }).?;
+    const id = encodeChunkCoords(coords);
+    try std.testing.expectEqual(@as(u32, (WORLD_SIZE[0] - 1) | (20 << 12) | (3 << 20)), id);
+    try std.testing.expectEqual(coords, decodeChunkPosition(id));
+    try std.testing.expectEqual(ChunkCoords{ 0, 20, 3 }, adjacentChunk(coords, .right).?);
+    try std.testing.expectEqual(null, adjacentChunk(.{ 0, 0, 0 }, .front));
+    try std.testing.expectEqual(null, adjacentChunk(.{ 0, 0, 0 }, .bottom));
 }
 
 test "chunks are available only after they are inserted" {
@@ -532,7 +514,7 @@ test "materializing an empty chunk fills it with air and isn't a modification" {
     var world = World.init(std.testing.allocator);
     defer world.deinit();
 
-    const coords = [3]u30{ 0, 0, 0 };
+    const coords = ChunkCoords{ 0, 0, 0 };
     try world.insertChunk(coords, WorldChunk.initEmpty());
 
     const world_chunk_data = world.ensureChunkData(coords);
@@ -556,8 +538,8 @@ test "column operations modify the chunk below when they cross a chunk border" {
     var world = World.init(std.testing.allocator);
     defer world.deinit();
 
-    const lower = [3]u30{ 0, 0, WORLD_SIZE[2] - 2 };
-    const upper = [3]u30{ 0, 0, WORLD_SIZE[2] - 1 };
+    const lower = ChunkCoords{ 0, 0, WORLD_SIZE[2] - 2 };
+    const upper = ChunkCoords{ 0, 0, WORLD_SIZE[2] - 1 };
     try world.insertChunk(lower, createSolidChunk(0));
     try world.insertChunk(upper, WorldChunk.initEmpty());
 
@@ -606,7 +588,7 @@ test "solid block count follows block edits" {
     var world = World.init(std.testing.allocator);
     defer world.deinit();
 
-    const coords = [3]u30{ 0, 0, 0 };
+    const coords = ChunkCoords{ 0, 0, 0 };
     const full_count = CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE;
     try world.insertChunk(coords, createSolidChunk(0));
     try std.testing.expectEqual(full_count, world.getChunk(coords).?.solid_block_count);
@@ -629,7 +611,7 @@ test "removing the last solid block turns the chunk back into empty" {
     var world = World.init(std.testing.allocator);
     defer world.deinit();
 
-    const coords = [3]u30{ 0, 0, 0 };
+    const coords = ChunkCoords{ 0, 0, 0 };
     try world.insertChunk(coords, WorldChunk.initEmpty());
     world.setBlock(.{ 1, 2, 3 }, .dirt);
     world.setBlock(.{ 4, 5, 6 }, .stone);
@@ -650,7 +632,7 @@ test "setting air into an empty chunk keeps it empty" {
     var world = World.init(std.testing.allocator);
     defer world.deinit();
 
-    const coords = [3]u30{ 0, 0, 0 };
+    const coords = ChunkCoords{ 0, 0, 0 };
     try world.insertChunk(coords, WorldChunk.initEmpty());
     world.setBlock(.{ 1, 2, 3 }, .none);
 
@@ -662,7 +644,7 @@ test "setting air into an empty chunk keeps it empty" {
 test "failed optimistic put restores authority while preserving later edits" {
     var world = World.init(std.testing.allocator);
     defer world.deinit();
-    const coords = [3]u30{ 0, 0, 0 };
+    const coords = ChunkCoords{ 0, 0, 0 };
     try world.insertChunk(coords, WorldChunk.initEmpty());
     world.setBlock(.{ 1, 2, 3 }, .dirt);
     world.pending_operations.items[0].request_id = 10;
@@ -690,7 +672,7 @@ test "failed optimistic put restores authority while preserving later edits" {
 test "acknowledging edits in order preserves pending remove and put on the same block" {
     var world = World.init(std.testing.allocator);
     defer world.deinit();
-    const coords = [3]u30{ 0, 0, 0 };
+    const coords = ChunkCoords{ 0, 0, 0 };
     try world.insertChunk(coords, WorldChunk.initEmpty());
     world.setBlock(.{ 1, 2, 3 }, .dirt);
     world.setBlock(.{ 1, 2, 3 }, .none);
@@ -712,7 +694,7 @@ test "acknowledging edits in order preserves pending remove and put on the same 
 test "failed remove and unrelated worker edits survive reconciliation" {
     var world = World.init(std.testing.allocator);
     defer world.deinit();
-    const coords = [3]u30{ 0, 0, 0 };
+    const coords = ChunkCoords{ 0, 0, 0 };
     var initial = WorldChunk.initEmpty();
     _ = initial.apply(std.testing.allocator, .{ 1, 2, 3 }, .{ .put = .dirt });
     try world.insertChunk(coords, initial);
@@ -735,7 +717,7 @@ test "failed remove and unrelated worker edits survive reconciliation" {
 test "older authoritative snapshots cannot undo a newer revision" {
     var world = World.init(std.testing.allocator);
     defer world.deinit();
-    const coords = [3]u30{ 0, 0, 0 };
+    const coords = ChunkCoords{ 0, 0, 0 };
     try world.insertChunk(coords, createSolidChunk(3));
     const older = createSolidChunk(2);
     defer older.content.deinit(std.testing.allocator);
@@ -761,7 +743,7 @@ test "local conflicts queue no command and do not change metadata" {
 test "opening each solid face reveals only its cached neighbor without queuing metadata edits" {
     var world = World.init(std.testing.allocator);
     defer world.deinit();
-    const coords = [3]u30{ 0, 3, 2 };
+    const coords = ChunkCoords{ 0, 3, 2 };
     var source = createSolidChunk(3);
     source.flags.is_unreachable = true;
     try world.insertChunk(coords, source);
@@ -779,7 +761,7 @@ test "opening each solid face reveals only its cached neighbor without queuing m
     for (std.enums.values(Side), 0..) |side, index| {
         var local = [3]u32{ 8, 8, 8 };
         local[index / 2] = if (index % 2 == 0) 0 else CHUNK_SIZE - 1;
-        world.setBlock(.{ coords[0] * CHUNK_SIZE + local[0], coords[1] * CHUNK_SIZE + local[1], coords[2] * CHUNK_SIZE + local[2] }, .none);
+        world.setBlock(.{ @as(u32, @intCast(coords[0])) * CHUNK_SIZE + local[0], @as(u32, @intCast(coords[1])) * CHUNK_SIZE + local[1], @as(u32, @intCast(coords[2])) * CHUNK_SIZE + local[2] }, .none);
         for (std.enums.values(Side), 0..) |other_side, other_index| {
             const neighbor = world.getChunk(adjacentChunk(coords, other_side).?).?;
             try std.testing.expectEqual(other_index > index, neighbor.flags.is_unreachable);
@@ -795,8 +777,8 @@ test "opening each solid face reveals only its cached neighbor without queuing m
 test "optimistic reveals survive in-flight snapshots and failed-edit rollback" {
     var world = World.init(std.testing.allocator);
     defer world.deinit();
-    const source_coords = [3]u30{ 1, 1, 2 };
-    const target_coords = [3]u30{ 1, 1, 1 };
+    const source_coords = ChunkCoords{ 1, 1, 2 };
+    const target_coords = ChunkCoords{ 1, 1, 1 };
     const authority = createSolidChunk(0);
     defer authority.content.deinit(std.testing.allocator);
     var hidden = createSolidChunk(0);
@@ -827,7 +809,7 @@ test "loading an opened wall and hidden neighbor in either order reveals the nei
         _ = wall.apply(std.testing.allocator, .{ 0, 8, 8 }, .remove);
         var hidden = createSolidChunk(0);
         hidden.flags.is_unreachable = true;
-        const target_coords = [3]u30{ WORLD_SIZE[0] - 1, 2, 1 };
+        const target_coords = ChunkCoords{ WORLD_SIZE[0] - 1, 2, 1 };
         if (wall_first) {
             try world.insertChunk(.{ 0, 2, 1 }, wall);
             try world.insertChunk(target_coords, hidden);
@@ -858,7 +840,7 @@ test "cached boundary masks track generation edits clones and optimistic reconci
 
     var world = World.init(allocator);
     defer world.deinit();
-    const coords = [3]u30{ 1, 1, 1 };
+    const coords = ChunkCoords{ 1, 1, 1 };
     try world.insertChunk(coords, WorldChunk.initEmpty());
     const block = [3]u32{ CHUNK_SIZE, CHUNK_SIZE + 8, CHUNK_SIZE + 8 };
     world.setBlock(block, .stone);

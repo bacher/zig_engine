@@ -14,7 +14,7 @@ pub const Camera = struct {
     aspect_ratio: f32,
 
     position: Position,
-    chunk: @Vector(4, i32),
+    chunk: @import("world_math.zig").ChunkCoords,
 
     camera_from_world_chunked: zmath.Mat,
     normalized_view_from_camera: zmath.Mat,

@@ -16,13 +16,19 @@ pub const ChunkTransform = extern struct {
         var matrix: zmath.Mat = undefined;
         inline for (0..3) |i| matrix[i] = @floatCast(world_from_model[i]);
         matrix[3] = .{ local[0], local[1], local[2], 1 };
-        return .{ .chunk_from_model = matrix, .chunk = chunks.getChunkCoords(position) };
+        const chunk = chunks.getChunkCoords(position);
+        return .{ .chunk_from_model = matrix, .chunk = .{ chunk[0], chunk[1], chunk[2], 0 } };
     }
 
-    pub fn relativeTo(self: ChunkTransform, origin: @Vector(4, i32)) zmath.Mat {
+    pub fn getChunkCoords(self: ChunkTransform) world_math.ChunkCoords {
+        return @shuffle(i32, self.chunk, undefined, @Vector(3, i32){ 0, 1, 2 });
+    }
+
+    pub fn relativeTo(self: ChunkTransform, origin: world_math.ChunkCoords) zmath.Mat {
         var matrix = self.chunk_from_model;
-        const delta: zmath.Vec = @floatFromInt(chunks.getChunkDelta(self.chunk, origin));
-        matrix[3] += delta * @as(zmath.Vec, @splat(chunks.CHUNK_SIZE));
+        const delta: @Vector(3, f32) = @floatFromInt(chunks.getChunkDelta(self.getChunkCoords(), origin));
+        const offset = delta * @as(@Vector(3, f32), @splat(chunks.CHUNK_SIZE));
+        matrix[3] += zmath.Vec{ offset[0], offset[1], offset[2], 0 };
         return matrix;
     }
 };

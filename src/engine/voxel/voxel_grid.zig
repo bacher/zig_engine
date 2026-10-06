@@ -1,3 +1,4 @@
+const ChunkCoords = @import("../world_math.zig").ChunkCoords;
 const std = @import("std");
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
@@ -136,21 +137,18 @@ pub const VoxelGrid = struct {
     }
 
     /// Removes a chunk (if it's loaded) from the voxel grid and releases the GPU memory slot.
-    pub fn removeChunk(self: *Self, chunk_coords: [3]u30) void {
+    pub fn removeChunk(self: *Self, chunk_coords: ChunkCoords) void {
         // Multiple packages can replace a mesh before the frame's upload. Cancel the
         // previous queued ownership as well as any resident geometry.
         var queued: usize = 0;
         while (queued < self.chunks_to_upload.items.len) {
-            if (std.mem.eql(u30, &self.chunks_to_upload.items[queued].chunk_coords, &chunk_coords)) {
+            if (@reduce(.And, self.chunks_to_upload.items[queued].chunk_coords == chunk_coords)) {
                 var obsolete = self.chunks_to_upload.orderedRemove(queued);
                 obsolete.chunk_side_data.deinit(self.allocator);
             } else queued += 1;
         }
         for (self.chunks.items, 0..) |*chunk, i| {
-            if (chunk.chunk_origin[0] == chunk_coords[0] and
-                chunk.chunk_origin[1] == chunk_coords[1] and
-                chunk.chunk_origin[2] == chunk_coords[2])
-            {
+            if (@reduce(.And, chunk.chunk_origin == chunk_coords)) {
                 if (chunk.gpu_residence_info) |info| {
                     self.gpu_chunk_info_buffer_manager.freeBlock(info.chunk_index);
                     self.gpu_block_buffer_manager.freeBlock(info.data_slot_index);
@@ -211,11 +209,7 @@ pub const VoxelGrid = struct {
 
             var chunk_info: GPU_ChunkInfo = .{
                 .view_side_data_indices = undefined,
-                .chunk_origin = .{
-                    upload_chunk.chunk_coords[0],
-                    upload_chunk.chunk_coords[1],
-                    upload_chunk.chunk_coords[2],
-                },
+                .chunk_origin = upload_chunk.chunk_coords,
                 .data_slot_index = data_slot_index,
             };
 

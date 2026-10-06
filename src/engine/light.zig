@@ -26,7 +26,7 @@ pub const DirectionalLightCascade = struct {
     clip_from_chunk: zmath.Mat = undefined,
     // Cascades are anchored at the camera chunk. Forward and shadow passes
     // must use this same origin when projecting their vertices.
-    chunk: @Vector(4, i32) = @splat(0),
+    chunk: @import("world_math.zig").ChunkCoords = @splat(0),
     chunk_from_clip: zmath.Mat = undefined,
 
     // TODO:

@@ -30,7 +30,7 @@ test "small camera movements accumulate in f64 across distant chunk boundaries" 
     const before_chunk = camera.chunk;
     for (0..1024) |_| camera.translate(.{ 1.0 / 1024.0, -2.0 / 1024.0, 3.0 / 1024.0 });
     try std.testing.expectEqual(world_math.Position{ 1e9 + 32.5, -1e9 + 29.5, 1e9 + 34.5 }, camera.position);
-    try std.testing.expectEqual(@Vector(4, i32){ 1, 0, 1, 0 }, chunks.getChunkDelta(camera.chunk, before_chunk));
+    try std.testing.expectEqual(@Vector(3, i64){ 1, 0, 1 }, chunks.getChunkDelta(camera.chunk, before_chunk));
     try expectVector(.{ 0.5, 29.5, 2.5, 1 }, camera.getLocalPosition(), 0.000001);
     try expectVector(.{ -0.5, -29.5, -2.5, 1 }, camera.camera_from_world_chunked[3], 0.000001);
 }
@@ -52,9 +52,39 @@ test "chunk-local transforms preserve tiny vertices in far neighboring chunks" {
         .chunk = .{ 301, 16777219, -16777219, 0 },
         .chunk_from_model = zmath.translation(0.125, 0.25, 0.5),
     };
-    const relative = object.relativeTo(.{ 300, 16777218, -16777220, 0 });
+    const relative = object.relativeTo(.{ 300, 16777218, -16777220 });
     try expectVector(.{ 32.125, 32.25, 32.5, 1 }, relative[3], 0.00001);
     try expectVector(.{ 32.126, 32.252, 32.503, 1 }, utils.matApply(relative, .{ 0.001, 0.002, 0.003, 1 }), 0.00001);
+}
+
+test "signed chunk differences span the full i32 range and wrap repeated x worlds" {
+    const low = std.math.minInt(i32);
+    const high = std.math.maxInt(i32);
+    const a: world_math.ChunkCoords = .{ low, high, low };
+    const b: world_math.ChunkCoords = .{ high, low, high };
+    const expected: @Vector(3, i64) = .{ 1, 4294967295, -4294967295 };
+    try std.testing.expectEqual(expected, chunks.getChunkDelta(a, b));
+    try std.testing.expectEqual(-expected, chunks.getChunkDelta(b, a));
+
+    const object: ChunkTransform = .{
+        .chunk = .{ -513, high, low, 0 },
+        .chunk_from_model = zmath.translation(0.125, 0.25, 0.5),
+    };
+    try expectVector(.{ -31.875, 32.25, -31.5, 1 }, object.relativeTo(.{ 0, high - 1, low + 1 })[3], 0.00001);
+}
+
+test "camera supports the signed chunk limits after applying the world offset" {
+    const low = std.math.minInt(i32);
+    const high = std.math.maxInt(i32);
+    var camera = Camera.init(1);
+    camera.updatePosition(.{
+        0.125,
+        (@as(f64, low) - chunks.WORLD_ORIGIN_CHUNK[1]) * chunks.CHUNK_SIZE + 0.25,
+        (@as(f64, high) - chunks.WORLD_ORIGIN_CHUNK[2]) * chunks.CHUNK_SIZE + 0.5,
+    });
+    try std.testing.expectEqual(world_math.ChunkCoords{ chunks.WORLD_ORIGIN_CHUNK[0], low, high }, camera.chunk);
+    try expectVector(.{ 0.125, 0.25, 0.5, 1 }, camera.getLocalPosition(), 0.00001);
+    try expectVector(.{ -0.125, -0.25, -0.5, 1 }, camera.camera_from_world_chunked[3], 0.00001);
 }
 
 test "negative boundaries and the x seam use the same local frame" {
@@ -65,7 +95,7 @@ test "negative boundaries and the x seam use the same local frame" {
     const camera_chunk = chunks.getChunkCoords(.{ 8191.75, 0, 0 });
     try expectVector(.{ 32.25, 0, 0, 1 }, across_seam.relativeTo(camera_chunk)[3], 0.00001);
     const reverse = ChunkTransform.init(world_math.translation(8191.75, 0, 0));
-    try expectVector(.{ -0.25, 0, 0, 1 }, reverse.relativeTo(across_seam.chunk)[3], 0.00001);
+    try expectVector(.{ -0.25, 0, 0, 1 }, reverse.relativeTo(across_seam.getChunkCoords())[3], 0.00001);
 }
 
 test "camera initialization agrees with updating its initial position" {

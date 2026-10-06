@@ -21,6 +21,18 @@ Creating a child group attaches it to its parent immediately. Creating an object
 
 Use setters to update transforms. Directly modifying `position` bypasses matrix updates and GPU invalidation. `Camera.translate` accumulates movement into its `f64` position; the spectator controller uses this path.
 
+## Signed chunk coordinates and storage
+
+`world_math.ChunkCoords`, also exported as `engine.ChunkCoords`, is `@Vector(3, i32)`. Camera and light origins, voxel chunks, streaming messages, and terrain chunk APIs use this shared spatial type. Negative coordinates are valid outside the stored terrain zone. Two-dimensional terrain columns use `@Vector(2, i32)`, and chunk height ranges use `i32` endpoints. Neighbor offsets and comparisons use vector arithmetic.
+
+The engine's `chunk_utils` module defines the shared limits. `WORLD_SIZE` is a `ChunkCoords` vector (`@Vector(3, i32)`) measured in chunks, with positive dimensions checked at compile time. `WORLD_ORIGIN_CHUNK` is derived by halving that vector, and `WORLD_SIZE_IN_BLOCKS` contains unsigned storage extents derived from the chunk dimensions and `CHUNK_SIZE`. The voxel application imports these constants from the engine. The engine's voxel code and generated WGSL also use this source, so chunk size and world width agree across game logic and rendering.
+
+Packed chunk IDs remain unsigned. `world.normalizeChunkCoords` wraps x with modulo (including repeated trips around the world) and rejects y/z outside the stored dimensions. Normalize spatial coordinates before calling `encodeChunkCoords`; packing asserts that all axes are inside the stored world before converting them to unsigned fields. The existing 12/8/3-bit chunk ID format is unchanged. Block-operation coordinates and local block coordinates remain unsigned storage addresses; negative spatial chunks cannot be used to index stored blocks directly.
+
+`chunk_utils.getChunkDelta` widens both inputs before subtracting and returns `@Vector(3, i64)`: the difference of two valid `i32` coordinates need not fit in `i32`. It normalizes x before choosing the shortest wrapped displacement. Streaming distances use these wide deltas; bounded neighborhood queries saturate at the signed coordinate limits. On the GPU, x is normalized separately, while y/z distances are computed as unsigned magnitudes with their signs restored after conversion. This supports the full signed range while preserving small integer differences before converting to `f32`.
+
+CPU vectors are not serialized as raw bytes: three-component vectors may have padding. GPU instances retain their padded `@Vector(4, i32)` chunk field and 80-byte stride. Voxel GPU records use an explicit `[3]i32` field matching WGSL `vec3i`, retaining their 112-byte stride and existing field offsets. Camera/light chunk uniforms retain their explicit 12-byte `[3]i32` layout.
+
 ## Conversion to GPU coordinates
 
 `ChunkTransform.init` is the boundary between an accumulated CPU world matrix and GPU instance data:
@@ -51,4 +63,4 @@ The fields ending in `_world_chunked` refer to coordinates relative to the camer
 
 ## Verification
 
-Run `zig build` and `zig build test`. The hierarchy tests exercise nested translation, rotation, scale, later parent updates, reparenting, GPU invalidation, and local-position preservation around ±1 billion meters. Coordinate tests verify small accumulated camera movements, negative boundaries, repeated x wrapping, origin removal before f32 conversion, and identical camera/shadow projections before and after translating a scene by a billion meters. All three shadow cascades are checked, including agreement between the per-object CPU and per-vertex GPU-style projection paths.
+Run `zig build` and `zig build test`. The hierarchy tests exercise nested translation, rotation, scale, later parent updates, reparenting, GPU invalidation, and local-position preservation around ±1 billion meters. Coordinate tests verify small accumulated camera movements, negative boundaries, repeated x wrapping, origin removal before f32 conversion, and identical camera/shadow projections before and after translating a scene by a billion meters. All three shadow cascades are checked, including agreement between the per-object CPU and per-vertex GPU-style projection paths. Signed-coordinate tests cover deltas across both `i32` limits, local camera matrices at those limits, negative voxel upload coordinates, terrain bounds, and packed-ID compatibility.

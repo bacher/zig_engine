@@ -1,3 +1,4 @@
+const ChunkCoords = @import("engine").ChunkCoords;
 const std = @import("std");
 
 const BlockType = @import("engine").voxel_chunk.BlockType;
@@ -52,15 +53,15 @@ const ColumnHeights = [CHUNK_SIZE][CHUNK_SIZE]u32;
 /// from any thread. The column-wide part of the work (terrain heights) is done once in `init`,
 /// so it's cheaper to generate several chunks of the same column with one generator.
 pub const ColumnGenerator = struct {
-    coords: [2]u30,
+    coords: @Vector(2, i32),
     column: union(enum) {
         flat,
         terrain: TerrainColumn,
     },
 
-    pub fn init(generator: WorldGenerator, coords: [2]u30) ColumnGenerator {
-        std.debug.assert(coords[0] < WORLD_SIZE[0]);
-        std.debug.assert(coords[1] < WORLD_SIZE[1]);
+    pub fn init(generator: WorldGenerator, coords: @Vector(2, i32)) ColumnGenerator {
+        std.debug.assert(coords[0] >= 0 and coords[0] < WORLD_SIZE[0]);
+        std.debug.assert(coords[1] >= 0 and coords[1] < WORLD_SIZE[1]);
 
         return .{
             .coords = coords,
@@ -72,8 +73,8 @@ pub const ColumnGenerator = struct {
     }
 
     /// The caller owns the block data of the returned chunk.
-    pub fn generateChunk(self: *const ColumnGenerator, allocator: std.mem.Allocator, chunk_z: u30) WorldChunk {
-        std.debug.assert(chunk_z < WORLD_SIZE[2]);
+    pub fn generateChunk(self: *const ColumnGenerator, allocator: std.mem.Allocator, chunk_z: i32) WorldChunk {
+        std.debug.assert(chunk_z >= 0 and chunk_z < WORLD_SIZE[2]);
 
         var chunk = switch (self.column) {
             .flat => generateFlatChunk(allocator, chunk_z),
@@ -83,7 +84,7 @@ pub const ColumnGenerator = struct {
         if (self.coords[1] > 0 and self.coords[1] + 1 < WORLD_SIZE[1] and
             chunk_z > 0 and chunk_z + 1 < WORLD_SIZE[2])
         {
-            const chunk_top = (@as(u32, chunk_z) + 1) * CHUNK_SIZE;
+            const chunk_top = (@as(u32, @intCast(chunk_z)) + 1) * CHUNK_SIZE;
             chunk.flags.is_unreachable = switch (self.column) {
                 .flat => chunk_top < (WORLD_SIZE[2] / 2 - 1) * CHUNK_SIZE + CHUNK_SIZE / 2,
                 // The block immediately above the chunk must exist, whereas the four
@@ -96,7 +97,7 @@ pub const ColumnGenerator = struct {
     }
 };
 
-fn generateFlatChunk(allocator: std.mem.Allocator, chunk_z: u30) WorldChunk {
+fn generateFlatChunk(allocator: std.mem.Allocator, chunk_z: i32) WorldChunk {
     const center_z = WORLD_SIZE[2] / 2;
 
     if (chunk_z + 1 == center_z) {
@@ -115,7 +116,7 @@ const TerrainColumn = struct {
     minimum_adjacent_height: u32,
     dirt_depth: u8,
 
-    fn init(coords: [2]u30, seed: u64, params: WorldGenerationParams) TerrainColumn {
+    fn init(coords: @Vector(2, i32), seed: u64, params: WorldGenerationParams) TerrainColumn {
         const heights = terrainColumnHeights(coords[0], coords[1], seed, params);
 
         var minimum_height: u32 = WORLD_SIZE[2] * CHUNK_SIZE;
@@ -136,8 +137,8 @@ const TerrainColumn = struct {
         };
     }
 
-    fn generateChunk(self: *const TerrainColumn, allocator: std.mem.Allocator, chunk_z: u30) WorldChunk {
-        const chunk_bottom = @as(u32, chunk_z) * CHUNK_SIZE;
+    fn generateChunk(self: *const TerrainColumn, allocator: std.mem.Allocator, chunk_z: i32) WorldChunk {
+        const chunk_bottom = @as(u32, @intCast(chunk_z)) * CHUNK_SIZE;
         const chunk_top = chunk_bottom + CHUNK_SIZE;
 
         // Entirely above the surface.
@@ -155,11 +156,11 @@ const TerrainColumn = struct {
 
 /// One block beyond each horizontal face is enough to certify the neighboring wall.
 /// Diagonal corner columns do not touch a face and need not be sampled.
-fn terrainAdjacentMinimumHeight(coords: [2]u30, seed: u64, params: WorldGenerationParams) u32 {
+fn terrainAdjacentMinimumHeight(coords: @Vector(2, i32), seed: u64, params: WorldGenerationParams) u32 {
     if (coords[1] == 0 or coords[1] + 1 == WORLD_SIZE[1]) return 0;
     const noise = PerlinNoise.init(seed);
     const x = @as(i32, coords[0]) * CHUNK_SIZE;
-    const y = @as(u32, coords[1]) * CHUNK_SIZE;
+    const y = @as(u32, @intCast(coords[1])) * CHUNK_SIZE;
     const left: u32 = @intCast(@mod(x - 1, WORLD_SIZE[0] * CHUNK_SIZE));
     const right: u32 = @intCast(@mod(x + CHUNK_SIZE, WORLD_SIZE[0] * CHUNK_SIZE));
     var minimum: u32 = WORLD_SIZE[2] * CHUNK_SIZE;
@@ -181,8 +182,8 @@ fn allocateChunk(allocator: std.mem.Allocator, data: WorldChunkData) WorldChunk 
 }
 
 fn terrainColumnHeights(
-    chunk_x: u30,
-    chunk_y: u30,
+    chunk_x: i32,
+    chunk_y: i32,
     seed: u64,
     params: WorldGenerationParams,
 ) ColumnHeights {
@@ -191,8 +192,8 @@ fn terrainColumnHeights(
     var heights: ColumnHeights = undefined;
     for (0..CHUNK_SIZE) |local_y| {
         for (0..CHUNK_SIZE) |local_x| {
-            const block_x = @as(usize, chunk_x) * CHUNK_SIZE + local_x;
-            const block_y = @as(usize, chunk_y) * CHUNK_SIZE + local_y;
+            const block_x = @as(usize, @intCast(chunk_x)) * CHUNK_SIZE + local_x;
+            const block_y = @as(usize, @intCast(chunk_y)) * CHUNK_SIZE + local_y;
             heights[local_y][local_x] = terrainHeight(noise, block_x, block_y, params);
         }
     }
@@ -347,7 +348,7 @@ test "flat world has the surface chunk in the middle, stone below and air above"
 
 test "shortcut terrain chunks match the full generation, only chunks without blocks are empty" {
     const params = WorldGenerationParams{};
-    const coords = [2]u30{ 7, 3 };
+    const coords = @Vector(2, i32){ 7, 3 };
     const column_generator = ColumnGenerator.init(.{ .terrain = .{ .seed = 12345, .params = params } }, coords);
     const heights = terrainColumnHeights(coords[0], coords[1], 12345, params);
 
@@ -411,7 +412,7 @@ test "generated unreachable flags agree with all six actual neighboring walls" {
         .{ .terrain = .{ .seed = 12345 } },
         .{ .terrain = .{ .seed = 87, .params = .{ .noise_scale = 24, .height_amplitude = 96 } } },
     };
-    const columns = [_][2]u30{
+    const columns = [_]@Vector(2, i32){
         .{ 0, 1 }, .{ WORLD_SIZE[0] - 1, 1 }, .{ 7, 3 }, .{ 5, 0 }, .{ 5, WORLD_SIZE[1] - 1 },
     };
     var unreachable_count: usize = 0;
@@ -419,7 +420,7 @@ test "generated unreachable flags agree with all six actual neighboring walls" {
         for (columns) |coords| {
             const column = ColumnGenerator.init(generator, coords);
             for (0..WORLD_SIZE[2]) |z| {
-                const chunk_coords = [3]u30{ coords[0], coords[1], @intCast(z) };
+                const chunk_coords = ChunkCoords{ coords[0], coords[1], @intCast(z) };
                 const chunk = column.generateChunk(std.testing.allocator, @intCast(z));
                 defer chunk.content.deinit(std.testing.allocator);
                 var enclosed = true;

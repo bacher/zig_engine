@@ -3,6 +3,8 @@ const zmath = @import("zmath");
 /// CPU positions and accumulated transforms. Matrices use the same column
 /// convention as WGSL/zmath; no narrowing conversion is provided here.
 pub const Position = @Vector(3, f64);
+/// Signed spatial chunk coordinates. Convert explicitly at storage/GPU boundaries.
+pub const ChunkCoords = @Vector(3, i32);
 pub const Vec = @Vector(4, f64);
 pub const Mat = [4]Vec;
 

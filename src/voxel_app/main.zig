@@ -1,3 +1,4 @@
+const ChunkCoords = @import("engine").ChunkCoords;
 const std = @import("std");
 const math = std.math;
 const zgpu = @import("engine").zgpu;
@@ -26,7 +27,7 @@ const Position = @import("engine").world_math.Position;
 const world_module = @import("world.zig");
 const World = @import("world.zig").World;
 const encodeChunkPosition = @import("world.zig").encodeChunkPosition;
-const encodeChunkPositionArray = @import("world.zig").encodeChunkPositionArray;
+const encodeChunkCoords = @import("world.zig").encodeChunkCoords;
 const WorldChunk = @import("world.zig").WorldChunk;
 const world_generator = @import("./world_generator.zig");
 const world_data_service = @import("./world_data_service.zig");
@@ -67,7 +68,7 @@ const Game = struct {
     loaded_chunk_ids: std.AutoHashMapUnmanaged(u32, void) = .empty,
     /// Loaded chunks whose meshes must be rebuilt at the end of this frame's world update.
     dirty_chunk_ids: std.AutoHashMapUnmanaged(u32, void) = .empty,
-    last_camera_chunk_coords: ?@Vector(4, i32) = null,
+    last_camera_chunk_coords: ?ChunkCoords = null,
     saved_game_objects: std.StringHashMapUnmanaged(*GameObject) = .empty,
     saved_game_object_groups: std.StringHashMapUnmanaged(*GameObjectGroup) = .empty,
 
@@ -164,7 +165,7 @@ const Game = struct {
             }
         }
         for (package.responses.items) |response| {
-            const id = encodeChunkPositionArray(response.coords);
+            const id = encodeChunkCoords(response.coords);
             const token = game.chunk_subscriptions.get(id);
             if (token == null or token != response.subscription_id) {
                 response.deinit(game.allocator);
@@ -220,7 +221,7 @@ const Game = struct {
         // no outstanding local edit in any of its face dependencies.
         for (package.responses.items) |response| {
             if (response.data != .blocks) continue;
-            const id = encodeChunkPositionArray(response.coords);
+            const id = encodeChunkCoords(response.coords);
             const token = game.chunk_subscriptions.get(id);
             if (token == null or token != response.subscription_id or (game.chunk_modes.get(id) orelse .blocks) != .blocks) continue;
             const chunk = world.getChunk(response.coords) orelse continue;
@@ -235,8 +236,8 @@ const Game = struct {
         }
     }
 
-    fn installBoundaries(game: *Game, coords: [3]u30, masks: world_engine.BoundaryMasks, revision: u64) void {
-        const id = encodeChunkPositionArray(coords);
+    fn installBoundaries(game: *Game, coords: ChunkCoords, masks: world_engine.BoundaryMasks, revision: u64) void {
+        const id = encodeChunkCoords(coords);
         if (game.boundary_snapshots.getPtr(id)) |old| {
             if (revision < old.mesh_revision) return;
             old.mesh_revision = revision;
@@ -252,10 +253,10 @@ const Game = struct {
         game.markChunkDirtyIfLoaded(coords);
     }
 
-    fn boundaryVisibilityChanged(game: *const Game, coords: [3]u30, previous: world_engine.BoundaryMasks, updated: world_engine.BoundaryMasks) bool {
+    fn boundaryVisibilityChanged(game: *const Game, coords: ChunkCoords, previous: world_engine.BoundaryMasks, updated: world_engine.BoundaryMasks) bool {
         // A promotion can retain a service mesh before its blocks arrive. Without
         // those blocks, keep invalidation conservative until the snapshot certifies it.
-        const chunk = game.world.?.chunks.getPtr(encodeChunkPositionArray(coords)) orelse return true;
+        const chunk = game.world.?.chunks.getPtr(encodeChunkCoords(coords)) orelse return true;
         if (chunk.flags.is_unreachable) return false;
         for (std.enums.values(Side)) |side| {
             if (game.localMeshNeighbor(coords, side) != null) continue;
@@ -267,16 +268,16 @@ const Game = struct {
         return false;
     }
 
-    fn requestChunkMode(game: *Game, coords: [3]u30, mode: world_data_service.Representation) void {
-        const id = encodeChunkPositionArray(coords);
+    fn requestChunkMode(game: *Game, coords: ChunkCoords, mode: world_data_service.Representation) void {
+        const id = encodeChunkCoords(coords);
         if (game.chunk_subscriptions.contains(id) and game.chunk_modes.get(id) == mode) return;
         const token = game.world_client.?.requestChunksInMode(.{ coords[0], coords[1] }, coords[2], coords[2] + 1, mode);
         game.chunk_subscriptions.put(game.allocator, id, token) catch @panic("OOM");
         game.chunk_modes.put(game.allocator, id, mode) catch @panic("OOM");
     }
 
-    fn wantsBlocks(game: *const Game, coords: [3]u30) bool {
-        const id = encodeChunkPositionArray(coords);
+    fn wantsBlocks(game: *const Game, coords: ChunkCoords) bool {
+        const id = encodeChunkCoords(coords);
         return game.pinned_chunks.contains(id) or if (game.last_camera_chunk_coords) |camera| getChunkDistance(id, camera) <= BLOCK_LOAD_RADIUS else true;
     }
 
@@ -284,12 +285,12 @@ const Game = struct {
         game.pinned_chunks.clearRetainingCapacity();
         for (game.world.?.pending_operations.items) |pending| {
             const coords, const local = world_module.splitBlockCoords(pending.operation.block);
-            game.pinned_chunks.put(game.allocator, encodeChunkPositionArray(coords), {}) catch @panic("OOM");
+            game.pinned_chunks.put(game.allocator, encodeChunkCoords(coords), {}) catch @panic("OOM");
             for (std.enums.values(Side)) |side| {
                 const i = @intFromEnum(side);
                 if (local[i / 2] != (if (i % 2 == 0) @as(u5, 0) else consts.CHUNK_SIZE - 1)) continue;
                 const neighbor = world_module.adjacentChunk(coords, side) orelse continue;
-                game.pinned_chunks.put(game.allocator, encodeChunkPositionArray(neighbor), {}) catch @panic("OOM");
+                game.pinned_chunks.put(game.allocator, encodeChunkCoords(neighbor), {}) catch @panic("OOM");
             }
         }
     }
@@ -312,7 +313,7 @@ const Game = struct {
                     var dx = -radius;
                     while (dx <= radius) : (dx += 1) {
                         if (@max(@abs(dx), @abs(dy), @abs(dz)) != radius) continue;
-                        const coords = normalizeChunkCoords(.{ camera[0] + dx, camera[1] + dy, camera[2] + dz }) orelse continue;
+                        const coords = normalizeChunkCoords(camera +| @as(ChunkCoords, .{ dx, dy, dz })) orelse continue;
                         game.requestChunkMode(coords, if (game.wantsBlocks(coords)) .blocks else .mesh);
                     }
                 }
@@ -339,8 +340,8 @@ const Game = struct {
     fn loadChunkIfNeeded(game: *Game, chunk_x: i32, chunk_y: i32, chunk_z: i32) void {
         const world = &game.world.?;
 
-        const chunk_coords = world_module.normalizeChunkPosition(chunk_x, chunk_y, chunk_z);
-        const chunk_id = encodeChunkPositionArray(chunk_coords);
+        const chunk_coords = normalizeChunkCoords(.{ chunk_x, chunk_y, chunk_z }) orelse return;
+        const chunk_id = encodeChunkCoords(chunk_coords);
 
         if (game.loaded_chunk_ids.contains(chunk_id)) {
             return;
@@ -352,8 +353,8 @@ const Game = struct {
         game.markChunkDirtyIfLoaded(chunk_coords);
     }
 
-    fn removeChunkIfNeeded(game: *Game, chunk_coords: [3]u30) void {
-        game.removeChunkByIdIfNeeded(encodeChunkPositionArray(chunk_coords));
+    fn removeChunkIfNeeded(game: *Game, chunk_coords: ChunkCoords) void {
+        game.removeChunkByIdIfNeeded(encodeChunkCoords(chunk_coords));
     }
 
     fn removeChunkByIdIfNeeded(game: *Game, chunk_id: u32) void {
@@ -372,7 +373,7 @@ const Game = struct {
         const camera_position = game.engine.active_scene.?.camera.position;
         const top = getColumnTopUnderPosition(camera_position) orelse return;
 
-        const camera_z = camera_position[2] + @as(f64, @floatFromInt(consts.WORLD_ORIGIN[2] * consts.CHUNK_SIZE));
+        const camera_z = camera_position[2] + @as(f64, @floatFromInt(consts.WORLD_ORIGIN_CHUNK[2] * consts.CHUNK_SIZE));
         if (camera_z - @as(f64, @floatFromInt(top[2] + 1)) > TOOL_REACH) return;
         const minimum_z: u32 = @intFromFloat(@max(0, @floor(camera_z - TOOL_REACH)));
         const edit_result = switch (action) {
@@ -403,34 +404,24 @@ const Game = struct {
 
         game.markChunkDirtyIfLoaded(chunk_coords);
 
-        for (0..3) |axis| {
-            const offset: i32 = switch (local[axis]) {
-                0 => -1,
-                consts.CHUNK_SIZE - 1 => 1,
-                else => continue,
-            };
-
-            var neighbor_coords_i = [3]i32{ chunk_coords[0], chunk_coords[1], chunk_coords[2] };
-            neighbor_coords_i[axis] += offset;
-            const neighbor_coords = normalizeChunkCoords(neighbor_coords_i) orelse continue;
-            game.markChunkDirtyIfLoaded(neighbor_coords);
+        for (std.enums.values(Side)) |side| {
+            const i = @intFromEnum(side);
+            if (local[i / 2] != (if (i % 2 == 0) @as(u5, 0) else consts.CHUNK_SIZE - 1)) continue;
+            const neighbor = world_module.adjacentChunk(chunk_coords, side) orelse continue;
+            game.markChunkDirtyIfLoaded(neighbor);
         }
     }
 
     /// Snapshots don't identify the edited block, so invalidate all face neighbors.
-    fn markChunkAndNeighborsDirty(game: *Game, chunk_coords: [3]u30) void {
+    fn markChunkAndNeighborsDirty(game: *Game, chunk_coords: ChunkCoords) void {
         game.markChunkDirtyIfLoaded(chunk_coords);
-        for (0..3) |axis| {
-            for ([_]i32{ -1, 1 }) |offset| {
-                var neighbor = [3]i32{ chunk_coords[0], chunk_coords[1], chunk_coords[2] };
-                neighbor[axis] += offset;
-                if (normalizeChunkCoords(neighbor)) |coords| game.markChunkDirtyIfLoaded(coords);
-            }
+        for (std.enums.values(Side)) |side| {
+            if (world_module.adjacentChunk(chunk_coords, side)) |coords| game.markChunkDirtyIfLoaded(coords);
         }
     }
 
-    fn markChunkDirtyIfLoaded(game: *Game, chunk_coords: [3]u30) void {
-        const chunk_id = encodeChunkPositionArray(chunk_coords);
+    fn markChunkDirtyIfLoaded(game: *Game, chunk_coords: ChunkCoords) void {
+        const chunk_id = encodeChunkCoords(chunk_coords);
         if (game.loaded_chunk_ids.contains(chunk_id)) {
             game.dirty_chunk_ids.put(game.allocator, chunk_id, {}) catch @panic("OOM");
         }
@@ -457,8 +448,8 @@ const Game = struct {
             }
         }
     }
-    fn meshNeighbors(game: *const Game, coords: [3]u30) world_engine.BoundaryMasks {
-        const cached = game.boundary_snapshots.get(encodeChunkPositionArray(coords));
+    fn meshNeighbors(game: *const Game, coords: ChunkCoords) world_engine.BoundaryMasks {
+        const cached = game.boundary_snapshots.get(encodeChunkCoords(coords));
         // A missing dependency is temporarily air. Service snapshots normally supply
         // every plane with the blocks, including neighbors beyond the local core.
         var neighbors: world_engine.BoundaryMasks = if (cached) |snapshot| snapshot.masks else @splat(.{});
@@ -470,9 +461,9 @@ const Game = struct {
         return neighbors;
     }
 
-    fn localMeshNeighbor(game: *const Game, coords: [3]u30, side: Side) ?*const WorldChunk {
+    fn localMeshNeighbor(game: *const Game, coords: ChunkCoords, side: Side) ?*const WorldChunk {
         const adjacent = world_module.adjacentChunk(coords, side) orelse return null;
-        const adjacent_id = encodeChunkPositionArray(adjacent);
+        const adjacent_id = encodeChunkCoords(adjacent);
         // A demoted neighbor may retain blocks for its display, but those blocks
         // no longer receive updates. Its authoritative fallback plane is newer.
         if (game.chunk_modes.get(adjacent_id) == .mesh) return null;
@@ -484,7 +475,7 @@ const Game = struct {
 /// independent of subscription lifetime so pending edits can always be retired.
 fn applyChunkResponse(world: *World, subscriptions: *const std.AutoHashMapUnmanaged(u32, u64), response: ChunkResponse) bool {
     if (response.operation) |result| world.acknowledgeOperation(result.request_id);
-    const token = subscriptions.get(encodeChunkPositionArray(response.coords));
+    const token = subscriptions.get(encodeChunkCoords(response.coords));
     if (token == null or token != response.subscription_id) {
         response.deinit(world.allocator);
         return false;
@@ -505,7 +496,7 @@ const BlockAction = enum {
 /// Returns the block containing `position`, clamped to the top of the world.
 /// Returns null if the position is outside of the world (or below its bottom).
 fn getColumnTopUnderPosition(position: Position) ?[3]u32 {
-    const origin: @Vector(3, i64) = .{ consts.WORLD_ORIGIN[0], consts.WORLD_ORIGIN[1], consts.WORLD_ORIGIN[2] };
+    const origin: @Vector(3, i64) = consts.WORLD_ORIGIN_CHUNK;
     const block = @as(@Vector(3, i64), @intFromFloat(@floor(position))) +
         origin * @as(@Vector(3, i64), @splat(consts.CHUNK_SIZE));
 
@@ -530,21 +521,15 @@ fn initWorld(game: *Game) !void {
 }
 
 /// Chebyshev distance between the chunk and the camera chunk, in chunks. The x axis wraps.
-fn getChunkDistance(chunk_id: u32, camera_chunk_coords: @Vector(4, i32)) i32 {
-    const coords = world_module.decodeChunkPosition(chunk_id);
-    const world_width: i32 = consts.WORLD_SIZE[0];
-
-    const dx = @mod(@as(i32, coords[0]) - camera_chunk_coords[0], world_width);
-    const dy: i32 = @intCast(@abs(@as(i32, coords[1]) - camera_chunk_coords[1]));
-    const dz: i32 = @intCast(@abs(@as(i32, coords[2]) - camera_chunk_coords[2]));
-
-    return @max(@min(dx, world_width - dx), dy, dz);
+fn getChunkDistance(chunk_id: u32, camera_chunk_coords: ChunkCoords) u64 {
+    const delta = chunk_utils.getChunkDelta(world_module.decodeChunkPosition(chunk_id), camera_chunk_coords);
+    return @reduce(.Max, @abs(delta));
 }
 
 /// Calls `context.onRange(z_start, z_end)` for every range [z_start, z_end) of consecutive z
 /// in [z_min, z_max] for which `context.isMissing(z)` is true. Does nothing if z_min > z_max.
 fn forEachMissingChunkRange(z_min: i32, z_max: i32, context: anytype) void {
-    var range_start: ?u30 = null;
+    var range_start: ?i32 = null;
     var z = z_min;
     while (z <= z_max + 1) : (z += 1) {
         const is_missing = z <= z_max and context.isMissing(@intCast(z));
@@ -557,95 +542,44 @@ fn forEachMissingChunkRange(z_min: i32, z_max: i32, context: anytype) void {
     }
 }
 
-pub fn normalizeChunkCoords(coords_in: [3]i32) ?[3]u30 {
-    var coords = coords_in;
+pub const normalizeChunkCoords = world_module.normalizeChunkCoords;
 
-    if (coords[0] < 0) {
-        coords[0] += consts.WORLD_SIZE[0];
-    } else if (coords[0] >= consts.WORLD_SIZE[0]) {
-        coords[0] -= consts.WORLD_SIZE[0];
+/// Returns neighbors indexed by Side; null items are outside the stored world.
+/// Returns null if a neighbor has not been received from the world-data thread yet.
+fn getSurroundingChunks(world: *const World, coords: ChunkCoords) ?[6]?WorldChunk {
+    var result: [6]?WorldChunk = @splat(null);
+    for (std.enums.values(Side)) |side| {
+        const neighbor = world_module.adjacentChunk(coords, side) orelse continue;
+        result[@intFromEnum(side)] = world.getChunk(neighbor) orelse return null;
     }
-
-    if (coords[1] < 0 or coords[1] >= consts.WORLD_SIZE[1]) {
-        return null;
-    }
-
-    if (coords[2] < 0 or coords[2] >= consts.WORLD_SIZE[2]) {
-        return null;
-    }
-
-    return .{
-        @intCast(coords[0]),
-        @intCast(coords[1]),
-        @intCast(coords[2]),
-    };
-}
-
-/// Returns neighbors indexed by `Side`, `null` items are out of world bounds.
-/// Returns null if any of the neighbors isn't received from the world-data thread yet.
-fn getSurroundingChunks(world: *const World, coords: [3]u30) ?[6]?WorldChunk {
-    const coords_i = [3]i32{ @intCast(coords[0]), @intCast(coords[1]), @intCast(coords[2]) };
-
-    const neighbors = [_]struct { Side, [3]i32 }{
-        .{ .left, .{ coords_i[0] - 1, coords_i[1], coords_i[2] } },
-        .{ .right, .{ coords_i[0] + 1, coords_i[1], coords_i[2] } },
-        .{ .back, .{ coords_i[0], coords_i[1] + 1, coords_i[2] } },
-        .{ .front, .{ coords_i[0], coords_i[1] - 1, coords_i[2] } },
-        .{ .bottom, .{ coords_i[0], coords_i[1], coords_i[2] - 1 } },
-        .{ .top, .{ coords_i[0], coords_i[1], coords_i[2] + 1 } },
-    };
-
-    var resulting_chunks: [6]?WorldChunk = @splat(null);
-    for (neighbors) |neighbor| {
-        const side, const neighbor_coords = neighbor;
-        if (normalizeChunkCoords(neighbor_coords)) |normalized_coords| {
-            resulting_chunks[@intFromEnum(side)] = world.getChunk(normalized_coords) orelse return null;
-        }
-    }
-
-    return resulting_chunks;
+    return result;
 }
 
 const ChunkBox = struct {
-    start: @Vector(4, i32),
-    end: @Vector(4, i32), // end is inclusive
+    start: ChunkCoords,
+    end: ChunkCoords, // end is inclusive
 
-    pub fn isContainingChunk(self: *const ChunkBox, chunk: @Vector(4, i32)) bool {
+    pub fn isContainingChunk(self: *const ChunkBox, chunk: ChunkCoords) bool {
         return @reduce(.And, chunk >= self.start) and
             @reduce(.And, chunk <= self.end);
     }
 };
 
-fn getBoxAroundChunk(chunk_coords: @Vector(4, i32), radius: i32) ChunkBox {
-    const delta = @Vector(4, i32){ radius, radius, radius, 0 };
+fn getBoxAroundChunk(chunk_coords: ChunkCoords, radius: i32) ChunkBox {
+    std.debug.assert(radius >= 0);
+    const delta: ChunkCoords = @splat(radius);
+    // Query only representable coordinates when the camera reaches a signed limit.
     return .{
-        .start = chunk_coords - delta,
-        .end = chunk_coords + delta,
+        .start = chunk_coords -| delta,
+        .end = chunk_coords +| delta,
     };
 }
 
 fn fitBoxIntoWorld(box: ChunkBox) ChunkBox {
+    // X wraps, so only y/z are clipped to the stored world.
     return .{
-        // x-axis wraps around the world (so no min/max needed)
-        // box.start[0] = box.start[0];
-        // box.start[1] = @max(0, box.start[1]);
-        // box.start[2] = @max(0, box.start[2]);
-        .start = @max(box.start, @Vector(4, i32){
-            std.math.minInt(i32),
-            0,
-            0,
-            0,
-        }),
-        // x-axis wraps around the world (so no min/max needed)
-        // box.end[0] = box.end[0];
-        // box.end[1] = @min(consts.WORLD_SIZE[1], box.end[1]);
-        // box.end[2] = @min(consts.WORLD_SIZE[2], box.end[2]);
-        .end = @min(box.end, @Vector(4, i32){
-            std.math.maxInt(i32),
-            consts.WORLD_SIZE[1] - 1,
-            consts.WORLD_SIZE[2] - 1,
-            0,
-        }),
+        .start = @max(box.start, ChunkCoords{ std.math.minInt(i32), 0, 0 }),
+        .end = @min(box.end, ChunkCoords{ std.math.maxInt(i32), consts.WORLD_SIZE[1] - 1, consts.WORLD_SIZE[2] - 1 }),
     };
 }
 
@@ -885,8 +819,8 @@ test "chunk loads, edits, and snapshots share one rebuild using the final conten
     defer game.dirty_chunk_ids.deinit(allocator);
     defer game.chunk_subscriptions.deinit(allocator);
 
-    const coords = [3]u30{ 1, 1, 1 };
-    const chunk_id = encodeChunkPositionArray(coords);
+    const coords = ChunkCoords{ 1, 1, 1 };
+    const chunk_id = encodeChunkCoords(coords);
     const block = [3]u32{ consts.CHUNK_SIZE + 2, consts.CHUNK_SIZE + 3, consts.CHUNK_SIZE + 4 };
     var initial = WorldChunk.initEmpty();
     _ = initial.apply(allocator, .{ 2, 3, 4 }, .{ .put = .dirt });
@@ -957,7 +891,7 @@ test "boundary edits dirty only loaded face neighbors with world wrapping and li
     var game: Game = .{ .allocator = std.testing.allocator, .engine = undefined };
     defer game.loaded_chunk_ids.deinit(game.allocator);
     defer game.dirty_chunk_ids.deinit(game.allocator);
-    const neighbors = [_][3]u30{
+    const neighbors = [_]ChunkCoords{
         .{ 0, 0, 0 },
         .{ consts.WORLD_SIZE[0] - 1, 0, 0 },
         .{ 1, 0, 0 },
@@ -966,7 +900,7 @@ test "boundary edits dirty only loaded face neighbors with world wrapping and li
         .{ 1, 1, 1 }, // A diagonal neighbor never needs rebuilding.
     };
     for (neighbors) |coords| {
-        try game.loaded_chunk_ids.put(game.allocator, encodeChunkPositionArray(coords), {});
+        try game.loaded_chunk_ids.put(game.allocator, encodeChunkCoords(coords), {});
     }
 
     game.markChunksAroundBlockDirty(.{ 0, 0, 0 });
@@ -980,7 +914,7 @@ test "boundary edits dirty only loaded face neighbors with world wrapping and li
     game.markChunksAroundBlockDirty(.{ last, last, last });
     try std.testing.expectEqual(4, game.dirty_chunk_ids.count());
     for ([_]usize{ 0, 2, 3, 4 }) |i| {
-        try std.testing.expect(game.dirty_chunk_ids.contains(encodeChunkPositionArray(neighbors[i])));
+        try std.testing.expect(game.dirty_chunk_ids.contains(encodeChunkCoords(neighbors[i])));
     }
 
     // Full snapshots invalidate all loaded face neighbors, sharing the same dirty set.
@@ -992,14 +926,14 @@ test "boundary edits dirty only loaded face neighbors with world wrapping and li
 }
 
 test "chunk distance is the largest axis distance and wraps around x" {
-    const camera = @Vector(4, i32){ 0, 10, 2, 0 };
+    const camera = ChunkCoords{ 0, 10, 2 };
     const world_width: i32 = consts.WORLD_SIZE[0];
 
     try std.testing.expectEqual(0, getChunkDistance(encodeChunkPosition(0, 10, 2), camera));
     try std.testing.expectEqual(3, getChunkDistance(encodeChunkPosition(3, 10, 2), camera));
     try std.testing.expectEqual(1, getChunkDistance(encodeChunkPosition(consts.WORLD_SIZE[0] - 1, 10, 2), camera));
-    try std.testing.expectEqual(1, getChunkDistance(encodeChunkPosition(0, 10, 2), .{ world_width - 1, 10, 2, 0 }));
-    try std.testing.expectEqual(1, getChunkDistance(encodeChunkPosition(0, 10, 2), .{ -1, 10, 2, 0 }));
+    try std.testing.expectEqual(1, getChunkDistance(encodeChunkPosition(0, 10, 2), .{ world_width - 1, 10, 2 }));
+    try std.testing.expectEqual(1, getChunkDistance(encodeChunkPosition(0, 10, 2), .{ -1, 10, 2 }));
     try std.testing.expectEqual(world_width / 2, getChunkDistance(encodeChunkPosition(consts.WORLD_SIZE[0] / 2, 10, 2), camera));
 
     try std.testing.expectEqual(4, getChunkDistance(encodeChunkPosition(1, 6, 2), camera));
@@ -1007,6 +941,7 @@ test "chunk distance is the largest axis distance and wraps around x" {
     try std.testing.expectEqual(consts.WORLD_SIZE[1] - 1 - 10, getChunkDistance(encodeChunkPosition(0, consts.WORLD_SIZE[1] - 1, 2), camera));
     try std.testing.expectEqual(2, getChunkDistance(encodeChunkPosition(1, 11, 0), camera));
     try std.testing.expectEqual(consts.WORLD_SIZE[2] - 1 - 2, getChunkDistance(encodeChunkPosition(1, 11, consts.WORLD_SIZE[2] - 1), camera));
+    try std.testing.expectEqual(@as(u64, 2147483658), getChunkDistance(encodeChunkPosition(0, 10, 2), .{ 0, std.math.minInt(i32), 2 }));
 }
 
 test "chunk coords wrap around x and are out of the world beyond y and z" {
@@ -1014,9 +949,11 @@ test "chunk coords wrap around x and are out of the world beyond y and z" {
     const depth: i32 = consts.WORLD_SIZE[1];
     const height: i32 = consts.WORLD_SIZE[2];
 
-    try std.testing.expectEqual([3]u30{ 1, 2, 3 }, normalizeChunkCoords(.{ 1, 2, 3 }).?);
-    try std.testing.expectEqual([3]u30{ consts.WORLD_SIZE[0] - 1, 0, 0 }, normalizeChunkCoords(.{ -1, 0, 0 }).?);
-    try std.testing.expectEqual([3]u30{ 0, consts.WORLD_SIZE[1] - 1, consts.WORLD_SIZE[2] - 1 }, normalizeChunkCoords(.{ width, depth - 1, height - 1 }).?);
+    try std.testing.expectEqual(ChunkCoords{ 1, 2, 3 }, normalizeChunkCoords(.{ 1, 2, 3 }).?);
+    try std.testing.expectEqual(ChunkCoords{ consts.WORLD_SIZE[0] - 1, 0, 0 }, normalizeChunkCoords(.{ -1, 0, 0 }).?);
+    try std.testing.expectEqual(ChunkCoords{ 0, consts.WORLD_SIZE[1] - 1, consts.WORLD_SIZE[2] - 1 }, normalizeChunkCoords(.{ width, depth - 1, height - 1 }).?);
+    try std.testing.expectEqual(ChunkCoords{ width - 1, 2, 3 }, normalizeChunkCoords(.{ -3 * width - 1, 2, 3 }).?);
+    try std.testing.expectEqual(ChunkCoords{ 1, 2, 3 }, normalizeChunkCoords(.{ 4 * width + 1, 2, 3 }).?);
     try std.testing.expectEqual(null, normalizeChunkCoords(.{ 0, -1, 0 }));
     try std.testing.expectEqual(null, normalizeChunkCoords(.{ 0, depth, 0 }));
     try std.testing.expectEqual(null, normalizeChunkCoords(.{ 0, 0, -1 }));
@@ -1024,18 +961,44 @@ test "chunk coords wrap around x and are out of the world beyond y and z" {
 }
 
 test "box around a chunk is clamped to the world along y and z only" {
-    const box = fitBoxIntoWorld(getBoxAroundChunk(.{ 0, 1, consts.WORLD_SIZE[2] - 1, 0 }, 2));
-    try std.testing.expectEqual(@Vector(4, i32){ -2, 0, consts.WORLD_SIZE[2] - 3, 0 }, box.start);
-    try std.testing.expectEqual(@Vector(4, i32){ 2, 3, consts.WORLD_SIZE[2] - 1, 0 }, box.end);
-    try std.testing.expect(box.isContainingChunk(.{ -2, 0, consts.WORLD_SIZE[2] - 1, 0 }));
-    try std.testing.expect(!box.isContainingChunk(.{ 3, 0, consts.WORLD_SIZE[2] - 1, 0 }));
+    const box = fitBoxIntoWorld(getBoxAroundChunk(.{ 0, 1, consts.WORLD_SIZE[2] - 1 }, 2));
+    try std.testing.expectEqual(ChunkCoords{ -2, 0, consts.WORLD_SIZE[2] - 3 }, box.start);
+    try std.testing.expectEqual(ChunkCoords{ 2, 3, consts.WORLD_SIZE[2] - 1 }, box.end);
+    try std.testing.expect(box.isContainingChunk(.{ -2, 0, consts.WORLD_SIZE[2] - 1 }));
+    try std.testing.expect(!box.isContainingChunk(.{ 3, 0, consts.WORLD_SIZE[2] - 1 }));
+}
+
+test "camera at signed chunk limits requests no terrain and does not overflow" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    // No request can be issued: the service pointer is deliberately absent.
+    fixture.camera.position = .{ 0, (@as(f64, std.math.minInt(i32)) - consts.WORLD_ORIGIN_CHUNK[1]) * consts.CHUNK_SIZE, 0 };
+    fixture.game.updateChunksAroundCamera(true);
+    try std.testing.expectEqual(0, fixture.game.chunk_subscriptions.count());
+    const box = getBoxAroundChunk(.{ 0, std.math.minInt(i32), std.math.maxInt(i32) }, 3);
+    try std.testing.expectEqual(std.math.minInt(i32), box.start[1]);
+    try std.testing.expectEqual(std.math.maxInt(i32), box.end[2]);
+}
+
+test "voxel upload queue retains negative spatial chunks and removes only matching coordinates" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const coords: ChunkCoords = .{ -1, -2, -3 };
+    fixture.grid.appendChunk(.{ .chunk_coords = coords, .chunk_side_data = .{} });
+    fixture.grid.appendChunk(.{ .chunk_coords = .{ -1, -2, -4 }, .chunk_side_data = .{} });
+    try std.testing.expectEqual(coords, fixture.grid.chunks_to_upload.items[0].chunk_coords);
+    fixture.grid.removeChunk(coords);
+    try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(ChunkCoords{ -1, -2, -4 }, fixture.grid.chunks_to_upload.items[0].chunk_coords);
 }
 
 test "column top under a position is clamped to the top of the world" {
     const origin = [3]u32{
-        consts.WORLD_ORIGIN[0] * consts.CHUNK_SIZE,
-        consts.WORLD_ORIGIN[1] * consts.CHUNK_SIZE,
-        consts.WORLD_ORIGIN[2] * consts.CHUNK_SIZE,
+        consts.WORLD_ORIGIN_CHUNK[0] * consts.CHUNK_SIZE,
+        consts.WORLD_ORIGIN_CHUNK[1] * consts.CHUNK_SIZE,
+        consts.WORLD_ORIGIN_CHUNK[2] * consts.CHUNK_SIZE,
     };
     const world_size = consts.WORLD_SIZE_IN_BLOCKS;
 
@@ -1049,23 +1012,23 @@ test "column top under a position is clamped to the top of the world" {
 
 const TestColumn = struct {
     is_missing: []const bool,
-    ranges: std.ArrayList([2]u30) = .empty,
+    ranges: std.ArrayList([2]i32) = .empty,
 
-    fn isMissing(self: *const TestColumn, z: u30) bool {
-        return self.is_missing[z];
+    fn isMissing(self: *const TestColumn, z: i32) bool {
+        return self.is_missing[@intCast(z)];
     }
 
-    fn onRange(self: *TestColumn, z_start: u30, z_end: u30) void {
+    fn onRange(self: *TestColumn, z_start: i32, z_end: i32) void {
         self.ranges.append(std.testing.allocator, .{ z_start, z_end }) catch @panic("OOM");
     }
 };
 
-fn expectMissingChunkRanges(expected: []const [2]u30, z_min: i32, z_max: i32, is_missing: []const bool) !void {
+fn expectMissingChunkRanges(expected: []const [2]i32, z_min: i32, z_max: i32, is_missing: []const bool) !void {
     var column = TestColumn{ .is_missing = is_missing };
     defer column.ranges.deinit(std.testing.allocator);
 
     forEachMissingChunkRange(z_min, z_max, &column);
-    try std.testing.expectEqualSlices([2]u30, expected, column.ranges.items);
+    try std.testing.expectEqualSlices([2]i32, expected, column.ranges.items);
 }
 
 test "missing chunks of a column are split into ranges of consecutive chunks" {
@@ -1101,7 +1064,7 @@ test "evicted edit replies retire pending work without restoring chunks" {
     defer world.deinit();
     var subscriptions: std.AutoHashMapUnmanaged(u32, u64) = .empty;
     defer subscriptions.deinit(std.testing.allocator);
-    const coords = [3]u30{ 0, 0, 0 };
+    const coords = ChunkCoords{ 0, 0, 0 };
     try world.insertChunk(coords, WorldChunk.initEmpty());
     world.setBlock(.{ 0, 0, 0 }, .dirt);
     world.pending_operations.items[0].request_id = 7;
@@ -1127,8 +1090,8 @@ test "new subscription rejects queued snapshots from an evicted generation" {
     defer world.deinit();
     var subscriptions: std.AutoHashMapUnmanaged(u32, u64) = .empty;
     defer subscriptions.deinit(std.testing.allocator);
-    const coords = [3]u30{ 0, 0, 0 };
-    try subscriptions.put(std.testing.allocator, encodeChunkPositionArray(coords), 2);
+    const coords = ChunkCoords{ 0, 0, 0 };
+    try subscriptions.put(std.testing.allocator, encodeChunkCoords(coords), 2);
     try std.testing.expect(!applyChunkResponse(&world, &subscriptions, .{
         .coords = coords,
         .subscription_id = 1,
@@ -1148,7 +1111,7 @@ test "new subscription rejects queued snapshots from an evicted generation" {
         .data = .{ .blocks = .{ .chunk = update } },
     }));
     try std.testing.expect(try world.isBlockSolid(.{ 1, 2, 3 }));
-    try std.testing.expectEqual(2, subscriptions.get(encodeChunkPositionArray(coords)));
+    try std.testing.expectEqual(2, subscriptions.get(encodeChunkCoords(coords)));
 }
 
 test "unreachable chunks keep CPU blocks and queue a mesh immediately after a local reveal" {
@@ -1172,14 +1135,14 @@ test "unreachable chunks keep CPU blocks and queue a mesh immediately after a lo
     defer game.loaded_chunk_ids.deinit(allocator);
     defer game.dirty_chunk_ids.deinit(allocator);
     defer game.chunk_subscriptions.deinit(allocator);
-    const coords = [3]u30{ 1, 1, 2 };
+    const coords = ChunkCoords{ 1, 1, 2 };
     const column = world_generator.ColumnGenerator.init(.flat, .{ 1, 1 });
     try game.world.?.insertChunk(coords, column.generateChunk(allocator, 2));
     try game.world.?.insertChunk(.{ 1, 1, 3 }, column.generateChunk(allocator, 3));
     game.loadChunkIfNeeded(1, 1, 2);
     game.rebuildDirtyChunks();
     try std.testing.expectEqual(0, grid.chunks_to_upload.items.len);
-    try std.testing.expect(game.loaded_chunk_ids.contains(encodeChunkPositionArray(coords)));
+    try std.testing.expect(game.loaded_chunk_ids.contains(encodeChunkCoords(coords)));
     try std.testing.expect(game.world.?.getChunk(coords).?.flags.is_unreachable);
     try std.testing.expect(try game.world.?.isBlockSolid(.{ consts.CHUNK_SIZE + 8, consts.CHUNK_SIZE + 8, 2 * consts.CHUNK_SIZE + 31 }));
 
@@ -1201,7 +1164,7 @@ test "unreachable chunks keep CPU blocks and queue a mesh immediately after a lo
     grid.clearChunks();
 
     // An older in-flight load cannot hide the chunk while the wall edit is outstanding.
-    try game.chunk_subscriptions.put(allocator, encodeChunkPositionArray(coords), 1);
+    try game.chunk_subscriptions.put(allocator, encodeChunkCoords(coords), 1);
     try std.testing.expect(applyChunkResponse(&game.world.?, &game.chunk_subscriptions, .{
         .coords = coords,
         .subscription_id = 1,
@@ -1214,13 +1177,13 @@ test "unreachable chunks keep CPU blocks and queue a mesh immediately after a lo
     grid.clearChunks();
 
     // A service-only metadata change also invalidates a hidden chunk's GPU state.
-    const remote_coords = [3]u30{ 5, 5, 2 };
+    const remote_coords = ChunkCoords{ 5, 5, 2 };
     const remote_column = world_generator.ColumnGenerator.init(.flat, .{ 5, 5 });
     try game.world.?.insertChunk(remote_coords, remote_column.generateChunk(allocator, 2));
     game.loadChunkIfNeeded(5, 5, 2);
     game.rebuildDirtyChunks();
     try std.testing.expectEqual(0, grid.chunks_to_upload.items.len);
-    try game.chunk_subscriptions.put(allocator, encodeChunkPositionArray(remote_coords), 2);
+    try game.chunk_subscriptions.put(allocator, encodeChunkCoords(remote_coords), 2);
     var reveal = remote_column.generateChunk(allocator, 2);
     reveal.flags.is_unreachable = false;
     reveal.chunk_revision = 1;
@@ -1269,9 +1232,9 @@ const StreamingTest = struct {
         self.grid.chunks_to_upload.deinit(allocator);
     }
 
-    fn subscribe(self: *StreamingTest, coords: [3]u30, token: u64, mode: world_data_service.Representation) !void {
-        try self.game.chunk_subscriptions.put(self.game.allocator, encodeChunkPositionArray(coords), token);
-        try self.game.chunk_modes.put(self.game.allocator, encodeChunkPositionArray(coords), mode);
+    fn subscribe(self: *StreamingTest, coords: ChunkCoords, token: u64, mode: world_data_service.Representation) !void {
+        try self.game.chunk_subscriptions.put(self.game.allocator, encodeChunkCoords(coords), token);
+        try self.game.chunk_modes.put(self.game.allocator, encodeChunkCoords(coords), mode);
     }
 
     fn apply(self: *StreamingTest, responses: []const ChunkResponse) !void {
@@ -1318,8 +1281,8 @@ test "promotion reuses matching authoritative mesh but rejects a neighbor-only r
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    const coords = [3]u30{ 1, 1, 1 };
-    const id = encodeChunkPositionArray(coords);
+    const coords = ChunkCoords{ 1, 1, 1 };
+    const id = encodeChunkCoords(coords);
     const chunk = singleTestBlock(.{ 31, 8, 8 }, 12);
     defer chunk.content.deinit(std.testing.allocator);
     try fixture.subscribe(coords, 1, .mesh);
@@ -1346,8 +1309,8 @@ test "pending neighboring edit prevents canonical mesh reuse and mode tokens rej
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    const coords = [3]u30{ 1, 1, 1 };
-    const neighbor = [3]u30{ 2, 1, 1 };
+    const coords = ChunkCoords{ 1, 1, 1 };
+    const neighbor = ChunkCoords{ 2, 1, 1 };
     const chunk = singleTestBlock(.{ 31, 8, 8 }, 1);
     defer chunk.content.deinit(std.testing.allocator);
     try fixture.game.world.?.insertChunk(neighbor, singleTestBlock(.{ 0, 8, 8 }, 1));
@@ -1362,15 +1325,15 @@ test "pending neighboring edit prevents canonical mesh reuse and mode tokens rej
     try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .chunk_revision = 100, .mesh_revision = 100, .data = .{ .mesh = .{} } }});
     try std.testing.expect(fixture.game.world.?.hasChunk(coords));
     try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items.len);
-    try std.testing.expect(!fixture.game.mesh_versions.contains(encodeChunkPositionArray(coords)));
+    try std.testing.expect(!fixture.game.mesh_versions.contains(encodeChunkCoords(coords)));
 }
 
 test "outward faces follow remote masks while local optimistic neighbors take precedence" {
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    const coords = [3]u30{ 2, 1, 1 };
-    fixture.game.last_camera_chunk_coords = .{ 1, 1, 1, 0 };
+    const coords = ChunkCoords{ 2, 1, 1 };
+    fixture.game.last_camera_chunk_coords = .{ 1, 1, 1 };
     var masks: world_engine.BoundaryMasks = @splat(.{});
     masks[@intFromEnum(Side.right)] = .{ .rows = @splat(std.math.maxInt(u32)) };
     try fixture.subscribe(coords, 1, .blocks);
@@ -1399,7 +1362,7 @@ test "mixed packages retire all commands and produce one final optimistic mesh" 
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    const coords = [3]u30{ 1, 1, 1 };
+    const coords = ChunkCoords{ 1, 1, 1 };
     const block = [3]u32{ consts.CHUNK_SIZE + 8, consts.CHUNK_SIZE + 8, consts.CHUNK_SIZE + 8 };
     try fixture.subscribe(coords, 1, .blocks);
     try fixture.game.world.?.insertChunk(coords, singleTestBlock(.{ 8, 8, 8 }, 0));
@@ -1432,7 +1395,7 @@ test "streaming holds 27 block chunks, pins edits across movement, and completes
     try fixture.drainUntilSettled();
     try std.testing.expectEqual(343, fixture.game.chunk_subscriptions.count());
     try std.testing.expectEqual(27, fixture.game.world.?.chunks.count());
-    const origin = consts.WORLD_ORIGIN;
+    const origin = consts.WORLD_ORIGIN_CHUNK;
     const block = [3]u32{ origin[0] * consts.CHUNK_SIZE, origin[1] * consts.CHUNK_SIZE + 8, origin[2] * consts.CHUNK_SIZE + 8 };
     fixture.game.world.?.setBlock(block, .dirt);
     fixture.game.markChunksAroundBlockDirty(block);
@@ -1440,13 +1403,13 @@ test "streaming holds 27 block chunks, pins edits across movement, and completes
     fixture.camera.position[0] = 64;
     fixture.game.updateChunksAroundCamera(false);
     try std.testing.expectEqual(2, fixture.game.pinned_chunks.count());
-    try std.testing.expectEqual(world_data_service.Representation.blocks, fixture.game.chunk_modes.get(encodeChunkPositionArray(origin)).?);
+    try std.testing.expectEqual(world_data_service.Representation.blocks, fixture.game.chunk_modes.get(encodeChunkCoords(origin)).?);
     try fixture.drainUntilSettled();
     try std.testing.expectEqual(27, fixture.game.world.?.chunks.count());
     try std.testing.expectEqual(343, fixture.game.chunk_subscriptions.count());
     try std.testing.expectEqual(0, fixture.game.pinned_chunks.count());
     try std.testing.expect(!fixture.game.world.?.hasChunk(origin));
-    try std.testing.expect(fixture.game.mesh_versions.contains(encodeChunkPositionArray(origin)));
+    try std.testing.expect(fixture.game.mesh_versions.contains(encodeChunkCoords(origin)));
     try std.testing.expect(fixture.grid.hasUploadCapacity());
 
     // Reverse while mesh and block requests are still in flight; obsolete tokens must drain.
@@ -1464,7 +1427,7 @@ test "column tools stop within 20 blocks of the actual camera and never place at
     fixture.init();
     defer fixture.deinit();
     fixture.camera.position = .{ 0.5, 0.5, 20.5 };
-    const origin = consts.WORLD_ORIGIN;
+    const origin = consts.WORLD_ORIGIN_CHUNK;
     try fixture.game.world.?.insertChunk(origin, WorldChunk.initEmpty());
     // This surface is 19.5 blocks below the camera, so removal is allowed.
     fixture.game.world.?.setBlock(.{ origin[0] * consts.CHUNK_SIZE, origin[1] * consts.CHUNK_SIZE, origin[2] * consts.CHUNK_SIZE }, .stone);
@@ -1491,24 +1454,24 @@ test "demotion retains complete local geometry and masks until the service mesh 
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    const coords = [3]u30{ 2, 2, 2 };
-    fixture.game.last_camera_chunk_coords = .{ 3, 2, 2, 0 };
+    const coords = ChunkCoords{ 2, 2, 2 };
+    fixture.game.last_camera_chunk_coords = .{ 3, 2, 2 };
     try fixture.game.world.?.insertChunk(coords, singleTestBlock(.{ 0, 8, 8 }, 0));
     fixture.game.loadChunkIfNeeded(2, 2, 2);
     fixture.game.installBoundaries(coords, @splat(.{}), 0);
     fixture.game.rebuildDirtyChunks();
     try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.left)].items.len);
     const original_faces = fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[0].items.ptr;
-    fixture.game.last_camera_chunk_coords = .{ 0, 2, 2, 0 };
+    fixture.game.last_camera_chunk_coords = .{ 0, 2, 2 };
     try fixture.subscribe(coords, 2, .mesh);
     fixture.game.rebuildDirtyChunks();
     try std.testing.expectEqual(original_faces, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[0].items.ptr);
-    try std.testing.expect(fixture.game.boundary_snapshots.contains(encodeChunkPositionArray(coords)));
+    try std.testing.expect(fixture.game.boundary_snapshots.contains(encodeChunkCoords(coords)));
     try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.left)].items.len);
     try std.testing.expect(fixture.game.world.?.hasChunk(coords));
     try fixture.apply(&.{.{ .coords = coords, .subscription_id = 2, .data = .{ .mesh = .{} } }});
     try std.testing.expect(!fixture.game.world.?.hasChunk(coords));
-    try std.testing.expect(!fixture.game.boundary_snapshots.contains(encodeChunkPositionArray(coords)));
+    try std.testing.expect(!fixture.game.boundary_snapshots.contains(encodeChunkCoords(coords)));
     try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items.len);
     for (fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side) |side| try std.testing.expectEqual(0, side.items.len);
 }
@@ -1517,8 +1480,8 @@ test "unreachable status completes demotion without uploading and cannot hide a 
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    const coords = [3]u30{ 2, 2, 2 };
-    const id = encodeChunkPositionArray(coords);
+    const coords = ChunkCoords{ 2, 2, 2 };
+    const id = encodeChunkCoords(coords);
     const chunk = singleTestBlock(.{ 8, 8, 8 }, 0);
     defer chunk.content.deinit(std.testing.allocator);
     try fixture.game.world.?.insertChunk(coords, chunk.clone(std.testing.allocator));
@@ -1575,9 +1538,9 @@ test "movement retains certified meshes and remote boundary changes invalidate t
     fixture.init();
     defer fixture.deinit();
     fixture.game.world_client = try service.createClient();
-    const origin = consts.WORLD_ORIGIN;
-    const coords = [3]u30{ origin[0] + 1, origin[1], origin[2] };
-    const id = encodeChunkPositionArray(coords);
+    const origin = consts.WORLD_ORIGIN_CHUNK;
+    const coords = ChunkCoords{ origin[0] + 1, origin[1], origin[2] };
+    const id = encodeChunkCoords(coords);
     const chunk = singleTestBlock(.{ 31, 8, 8 }, 1);
     defer chunk.content.deinit(std.testing.allocator);
     var neighbors: world_engine.BoundaryMasks = @splat(.{});
@@ -1587,7 +1550,7 @@ test "movement retains certified meshes and remote boundary changes invalidate t
     try fixture.subscribe(coords, 2, .blocks);
     try fixture.apply(&.{.{ .coords = coords, .subscription_id = 2, .chunk_revision = 1, .mesh_revision = 1, .data = .{ .blocks = .{ .chunk = chunk.clone(std.testing.allocator), .neighbors = neighbors } } }});
     try std.testing.expect(!fixture.game.dirty_chunk_ids.contains(id));
-    fixture.game.last_camera_chunk_coords = .{ origin[0], origin[1], origin[2], 0 };
+    fixture.game.last_camera_chunk_coords = origin;
     fixture.camera.position[0] = 32;
     fixture.game.updateChunksAroundCamera(false);
     try std.testing.expect(!fixture.game.dirty_chunk_ids.contains(id));
@@ -1603,8 +1566,8 @@ test "newer boundary inputs prevent promotion reuse in either package order and 
         var fixture: StreamingTest = .{};
         fixture.init();
         defer fixture.deinit();
-        const coords = [3]u30{ 1, 1, 1 };
-        const id = encodeChunkPositionArray(coords);
+        const coords = ChunkCoords{ 1, 1, 1 };
+        const id = encodeChunkCoords(coords);
         const chunk = singleTestBlock(.{ 31, 8, 8 }, 1);
         defer chunk.content.deinit(std.testing.allocator);
         try fixture.subscribe(coords, 1, .mesh);
@@ -1634,8 +1597,8 @@ test "fresh remote masks override unsubscribed blocks retained during neighbor d
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    const coords = [3]u30{ 1, 1, 1 };
-    const neighbor = [3]u30{ 2, 1, 1 };
+    const coords = ChunkCoords{ 1, 1, 1 };
+    const neighbor = ChunkCoords{ 2, 1, 1 };
     try fixture.subscribe(coords, 1, .blocks);
     try fixture.subscribe(neighbor, 2, .blocks);
     try fixture.game.world.?.insertChunk(coords, singleTestBlock(.{ 31, 8, 8 }, 0));
@@ -1655,8 +1618,8 @@ test "boundary changes opposite air retain masks without rebuilding and affect l
         var fixture: StreamingTest = .{};
         fixture.init();
         defer fixture.deinit();
-        const coords = [3]u30{ 2, 2, 2 };
-        const id = encodeChunkPositionArray(coords);
+        const coords = ChunkCoords{ 2, 2, 2 };
+        const id = encodeChunkCoords(coords);
         const i = @intFromEnum(side);
         const axis = i / 2;
         var local = [3]u5{ 8, 11, 15 };
@@ -1680,9 +1643,9 @@ test "boundary changes opposite air retain masks without rebuilding and affect l
 
         // This placement must use the updated plane even though no rebuild accompanied it.
         const block = [3]u32{
-            coords[0] * consts.CHUNK_SIZE + @as(u32, opposite_air[0]),
-            coords[1] * consts.CHUNK_SIZE + @as(u32, opposite_air[1]),
-            coords[2] * consts.CHUNK_SIZE + @as(u32, opposite_air[2]),
+            @as(u32, @intCast(coords[0])) * consts.CHUNK_SIZE + opposite_air[0],
+            @as(u32, @intCast(coords[1])) * consts.CHUNK_SIZE + opposite_air[1],
+            @as(u32, @intCast(coords[2])) * consts.CHUNK_SIZE + opposite_air[2],
         };
         fixture.game.world.?.setBlock(block, .dirt);
         fixture.game.markChunksAroundBlockDirty(block);
@@ -1706,9 +1669,9 @@ test "authoritative fallback changes do not rebuild faces supplied by an optimis
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    const coords = [3]u30{ 1, 1, 1 };
-    const neighbor = [3]u30{ 2, 1, 1 };
-    const id = encodeChunkPositionArray(coords);
+    const coords = ChunkCoords{ 1, 1, 1 };
+    const neighbor = ChunkCoords{ 2, 1, 1 };
+    const id = encodeChunkCoords(coords);
     const i = @intFromEnum(Side.right);
     var masks: world_engine.BoundaryMasks = @splat(.{});
     masks[i].set(.right, .{ 31, 8, 8 }, true);

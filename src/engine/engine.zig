@@ -632,7 +632,7 @@ pub const Engine = struct {
                                 .ssao_enabled = engine.state.ssao_enabled,
                             };
                             const camera_chunk_uniform = engine.gctx.uniformsAllocate([3]i32, 1);
-                            camera_chunk_uniform.slice[0] = @as([4]i32, cascade.chunk)[0..3].*;
+                            camera_chunk_uniform.slice[0] = cascade.chunk;
 
                             shadow_map_pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
                                 clip_from_chunk_uniform.offset,
@@ -739,7 +739,7 @@ pub const Engine = struct {
                         .ssao_enabled = engine.state.ssao_enabled,
                     };
                     const camera_chunk_uniform = engine.gctx.uniformsAllocate([3]i32, 1);
-                    camera_chunk_uniform.slice[0] = @as([4]i32, scene.camera.chunk)[0..3].*;
+                    camera_chunk_uniform.slice[0] = scene.camera.chunk;
 
                     pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
                         clip_from_chunk_uniform.offset,
@@ -770,12 +770,7 @@ pub const Engine = struct {
                         }
                         const info = chunk.gpu_residence_info.?;
 
-                        const view_direction = chunk_utils.getChunkDelta(.{
-                            chunk.chunk_origin[0],
-                            chunk.chunk_origin[1],
-                            chunk.chunk_origin[2],
-                            0,
-                        }, scene.camera.chunk);
+                        const view_direction = chunk_utils.getChunkDelta(chunk.chunk_origin, scene.camera.chunk);
 
                         const dx = view_direction[0];
                         const dy = view_direction[1];

@@ -38,7 +38,7 @@ pub const SimulationWorker = struct {
     fn simulate(self: *SimulationWorker) Io.Cancelable!void {
         const client = self.client;
         const service = client.service;
-        const column = [2]u30{ consts.WORLD_ORIGIN[0], consts.WORLD_ORIGIN[1] };
+        const column = @Vector(2, i32){ consts.WORLD_ORIGIN_CHUNK[0], consts.WORLD_ORIGIN_CHUNK[1] };
         const token = client.requestChunks(column, 0, consts.WORLD_SIZE[2]);
         var responses: std.ArrayList(ChunkResponse) = .empty;
         defer {
@@ -60,8 +60,8 @@ pub const SimulationWorker = struct {
                 if (response.subscription_id != token) continue;
                 if (response.data != .blocks) continue;
                 const z = response.coords[2];
-                if (!received[z]) {
-                    received[z] = true;
+                if (!received[@intCast(z)]) {
+                    received[@intCast(z)] = true;
                     count += 1;
                 }
                 surface_z = @max(surface_z, surfaceAboveChunk(response.data.blocks.chunk, z));
@@ -74,8 +74,8 @@ pub const SimulationWorker = struct {
         }
         if (surface_z >= consts.WORLD_SIZE_IN_BLOCKS[2]) return;
         const block = [3]u32{
-            column[0] * consts.CHUNK_SIZE + consts.CHUNK_SIZE / 2,
-            column[1] * consts.CHUNK_SIZE + consts.CHUNK_SIZE / 2,
+            @as(u32, @intCast(column[0])) * consts.CHUNK_SIZE + consts.CHUNK_SIZE / 2,
+            @as(u32, @intCast(column[1])) * consts.CHUNK_SIZE + consts.CHUNK_SIZE / 2,
             surface_z,
         };
         var action: world.BlockAction = .{ .put = .dirt };
@@ -103,12 +103,12 @@ pub const SimulationWorker = struct {
     }
 };
 
-fn surfaceAboveChunk(chunk: world.WorldChunk, chunk_z: u30) u32 {
+fn surfaceAboveChunk(chunk: world.WorldChunk, chunk_z: i32) u32 {
     var z: u32 = consts.CHUNK_SIZE;
     while (z > 0) {
         z -= 1;
         if (chunk.content.getBlock(.{ consts.CHUNK_SIZE / 2, consts.CHUNK_SIZE / 2, @intCast(z) }) != .none) {
-            return chunk_z * consts.CHUNK_SIZE + z + 1;
+            return @as(u32, @intCast(chunk_z)) * consts.CHUNK_SIZE + z + 1;
         }
     }
     return 0;
@@ -149,7 +149,11 @@ test "simulation repeatedly pushes put remove put to a subscribed client" {
     defer service.destroy();
     const observer = try service.createClient();
     const surface_chunk_z = consts.WORLD_SIZE[2] / 2 - 1;
-    const token = observer.requestChunks(.{ consts.WORLD_ORIGIN[0], consts.WORLD_ORIGIN[1] }, surface_chunk_z, surface_chunk_z + 1);
+    const token = observer.requestChunks(
+        .{ consts.WORLD_ORIGIN_CHUNK[0], consts.WORLD_ORIGIN_CHUNK[1] },
+        surface_chunk_z,
+        surface_chunk_z + 1,
+    );
     var responses: std.ArrayList(ChunkResponse) = .empty;
     defer {
         for (responses.items) |response| response.deinit(allocator);
