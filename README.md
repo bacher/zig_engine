@@ -1,48 +1,54 @@
 # zig-engine
 
-## Build and Run
+A Zig 3D engine with a demo application and a voxel-world application. The engine renders scene objects, animated meshes, terrain, skyboxes, and voxels through WebGPU, with cascaded directional shadows and screen-space ambient occlusion (SSAO).
+
+## Build and run
+
+The package declares Zig 0.16.0 as its minimum version. External dependencies are pinned in `build.zig.zon`; the glTF loader is a local package.
 
 ```shell
-zig build run
+zig build             # Build/install the library, both applications, and content
+zig build run         # Run the demo application
+zig build run_voxel   # Run the voxel application
+zig build test        # Run registered unit/regression tests
 ```
+
+The applications load installed content relative to the executable directory. See [architecture](docs/architecture.md) for the build and startup flow.
+
+## Documentation
+
+These documents describe the current implementation, extracted from existing docs and source. The initial extraction is for review; it does not establish that every implementation choice is intended behavior.
+
+| Document | Contents |
+| --- | --- |
+| [Architecture and review points](docs/architecture.md) | Subsystem map, engine/application boundaries, state ownership, concurrency, startup, and frame order. Start here. |
+| [Scenes, objects, and input](docs/scenes.md) | Scene contents, transform hierarchy, instance updates, current visibility index, controls, and lifetime. |
+| [Rendering](docs/rendering.md) | Pass sequence, geometry paths, shadows, SSAO, GPU layouts, and current rendering limitations. |
+| [Assets and animation](docs/assets-animation.md) | glTF subset, shared models, textures, per-object playback, and resource ownership caveats. |
+| [Voxel world](docs/voxel-world.md) | Generation, service protocol, optimistic edits, streaming, masks, revisions, persistence, and capacity. |
+| [Coordinates and rendering precision](docs/coordinates.md) | f64 CPU positions, signed chunks, camera-relative GPU coordinates, wrapping, and regression coverage. |
+
+The subsystem docs link to implementing modules and existing tests. [TODO.md](TODO.md) is a task list. [Agent session logs](agent-sessions/README.md) are historical records.
+
+## Controls
+
+W/A/S/D move the spectator camera; Space/C move up/down. Hold the left mouse button to look around. Escape exits. E toggles SSAO, R toggles its debug view, and B toggles blur.
+
+In the voxel app, Z places dirt and X removes the top solid block in the column below the camera, within 20 blocks of reach. These are vertical column tools. See [scenes and input](docs/scenes.md) and [voxel tools](docs/voxel-world.md#tools-and-simulation-example).
 
 ## Voxel app
 
-Run `zig build run_voxel`. Press `Z` to drop a dirt block under the camera and `X` to remove the top block below it.
+The world-data service owns authoritative blocks and revisions. The main thread applies edits optimistically and reconciles them against subscribed snapshots. The normal neighborhood retains blocks in a 3×3×3 core and requests surrounding geometry within a 7×7×7 box; outstanding edits pin chunks during reconciliation. Both local and service meshes use neighbor boundary masks and the same exposed-face extractor.
 
-The world-data service owns block contents and revisions. Each worker uses its own client endpoint to submit one `put` or `remove` operation with global block coordinates. A put fails if the block is occupied; a remove fails if it is already empty. The main thread applies edits optimistically and replays outstanding commands over received snapshots to reconcile failures and concurrent changes. The column tools search at most 20 blocks below the camera and do nothing when no supporting surface is in range.
+The fixed GPU face buffer is 4 MiB. Capacity pressure reduces the outer box to 5×5×5; uploads remain pending if that still cannot fit. Modified blocks and permanent reveal flags survive subscription eviction in service memory. Disk persistence is not implemented. A separate simulation worker edits one surface block through its own service endpoint.
 
-The camera requests the nearest 3×3×3 chunks as blocks and the surrounding chunks within a 7×7×7 box as meshes. A load subscribes to that representation until eviction or a mode change. Fresh subscription tokens reject obsolete replies, including replies from an earlier mode. Mesh responses carry both `chunk_revision` (blocks and flags) and `mesh_revision` (all meshing inputs). Block responses include the current mesh revision so promotion can reuse matching authoritative GPU geometry when no local edits affect its inputs.
-
-Both representations use the same face extractor with neighbor boundary masks. Each mask holds one occlusion bit per boundary block: 128 bytes per plane, 768 bytes for all six neighbors. Block subscriptions receive those planes with their initial snapshot and receive coalesced updates when neighboring boundary occupancy changes, even outside the subscribed box. Local meshes prefer cached masks from loaded block-mode neighbors, including optimistic edits, and use the authoritative planes for other neighbors. Blocks retained during a neighbor's demotion cannot override newer planes. Missing planes temporarily expose faces. Only x wraps, while faces beyond the y/z world edges remain exposed. A zero-face mesh still has a live subscription and can represent solid blocks.
-
-Each block chunk caches its own six masks, updating at most three bits per edit; solid-face flags also use these masks. The service keeps a bounded cache of generated masks to reuse across mesh builds and block subscribers. Masks stay on the CPU. Outward faces are emitted wherever the neighbor is air, so geometry no longer depends on the camera's position within the core and is shared by the visible and shadow passes. Voxel shadows draw all six face directions from the resident meshes.
-
-Successful edits invalidate their own mesh and, for boundary edits, the touched face neighbors. The service coalesces those mesh builds within each request batch, shares the result across subscribers, and sends related block snapshots, boundary masks, meshes, and acknowledgments in one indivisible package per client. Neighbor-only mask updates carry the receiving chunk's mesh revision and subscription token; unchanged block arrays are not resent unless the update also reveals the chunk and changes its unreachable flag. The main thread retains every accepted mask update but rebuilds only when changed occupancy affects one of its solid boundary blocks; planes overridden by a loaded optimistic neighbor do not trigger a rebuild. It retires acknowledgments, applies the entire package, then rebuilds local meshes once before uploading. Distant initial mesh loads run one at a time between request batches so edits and block loads take priority. Terrain column generation uses a bounded height cache; full neighbor blocks and service mesh arrays are temporary.
-
-The 27-chunk block count is a steady-state target. Blocks, masks, and the existing display remain available during a demotion until its mesh or unreachable status arrives; outstanding edits pin their chunks and affected face neighbors until reconciliation completes. A promotion retains its previous display until blocks and neighbor masks arrive, reusing it when both revisions match. Received face arrays transfer into the GPU upload queue and are freed after upload, leaving only mesh revision metadata for mesh-mode chunks on the main thread.
-
-The GPU face buffer remains 4 MiB. Upload preflight simulates the actual slot allocator, including rounding and fragmentation. Capacity pressure reduces the outer box to 5×5×5. If even that cannot fit (including a mesh exceeding the existing per-chunk allocation limit), uploads remain pending and a diagnostic is printed; buffer expansion is not implemented.
-
-An **unreachable chunk** is enclosed by fully solid adjacent faces of its six neighbors. Generation certifies enclosure using the heightmap plus a one-block strip beyond each horizontal face. Outer y/z boundary chunks remain reachable. This optimization assumes generated terrain has no caves or transparent blocks; a noclip camera inside an enclosed chunk would need a rendering exception. Opening a neighboring wall reveals the chunk immediately in the local cache and authoritatively in the service. Reveals are permanent even if walls are rebuilt, advance the chunk revision, and notify subscribers in their requested representation.
-
-Unreachable chunks in mesh mode receive only status and revision metadata, with no mesh payload or GPU upload. Their subscriptions remain active and receive meshes when revealed. In block mode, unreachable chunks still receive their full block data and skip rendering.
-
-Modified blocks, reveal flags, and mesh invalidation revisions survive subscription eviction in service memory. Disk persistence is not implemented. Stop all client workers before destroying the service, which drains submitted edits and frees its endpoint queues.
-
-A simulation worker places a dirt block at the surface midpoint of the central chunk column, removes it after two seconds, and places it again two seconds later. It communicates only with the world-data service, so the main thread receives these changes through the same subscription mechanism.
-
-Run `zig build test` for the protocol, cache reconciliation, and simulation tests.
+See [voxel world, streaming, and editing](docs/voxel-world.md) for the full protocol, handoff, meshing, and shutdown behavior.
 
 ## Large-world rendering
 
-Meshes (including skinned models and billboards), primitives, window boxes, height-map terrain, and debug wireframes render relative to the camera chunk. Instance buffers contain a chunk-local model matrix and integer chunk coordinates. The chunk delta is computed before conversion to meters; x wrapping matches the voxel world. Skyboxes continue to use camera rotation only.
+CPU positions and accumulated parent/child transforms use f64. GPU transforms remove a chunk origin before narrowing translation to f32. Camera and directional-shadow matrices use the same local frame; x wrapping matches the voxel world. Skyboxes use camera rotation only.
 
-Directional shadow cascades are fitted from the camera's chunk-local frustum and share its origin. Shadow casting and sampling use this same frame for meshes, primitives, window boxes, terrain, and resident voxel meshes. Terrain and voxel shadow passes share geometry generation with their visible passes. Shadows can only include voxel chunks currently loaded on the GPU.
-
-Scenes temporarily use `naive_space_tree.zig`, an ArrayList-backed visibility index that returns every registered object for camera and shadow queries. It has no world bounds and performs no spatial culling, so large scenes will submit more draw calls. The original SpaceTree is retained for future work.
-
-CPU positions and accumulated parent-child transforms use `f64`. Camera and object translations have their chunk origin removed in `f64` before conversion to GPU `f32` coordinates. Parent changes propagate through registered children while preserving their local transforms. Camera and shadow matrices are built from local coordinates. See [Coordinates and rendering precision](docs/coordinates.md) for the conversion rules, API changes, range limits, and regression coverage.
+The active scene visibility index currently returns every registered object, without spatial culling. Voxel shadows include only resident GPU geometry. See [coordinates](docs/coordinates.md), [scenes](docs/scenes.md#visibility-behavior), and [rendering](docs/rendering.md).
 
 ## Versions
 
