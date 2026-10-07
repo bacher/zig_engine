@@ -38,7 +38,7 @@ Colorized primitives and window boxes use their own pipeline/bindings. A window 
 
 Skyboxes use camera rotation and projection, omitting translation. The dedicated cubemap skybox is drawn separately before voxels and the queried ordinary objects. Skyboxes are excluded from shadow casting.
 
-CPU world transforms remain in `f64`. GPU paths use chunk-local matrices plus integer chunk coordinates, with a camera/cascade chunk origin. Integer chunk subtraction and optional x wrapping happen before conversion to meters. Scenes own six pipelines specialized for their immutable layout; common pipelines stay engine-owned. See [world configuration](world-configuration.md). See [coordinates](coordinates.md); using an absolute-world `f32` matrix would break the large-position guarantees.
+CPU world transforms remain in `f64`. GPU paths use chunk-local matrices plus integer chunk coordinates, with a camera/cascade chunk origin. Integer chunk subtraction and optional x wrapping happen before conversion to meters. The application selects wrapping at compile time; scenes own six pipelines specialized for their immutable runtime dimensions. Unwrapped shaders omit periodic arithmetic and width/mask constants. Common pipelines stay engine-owned. See [world configuration](world-configuration.md) and [coordinates](coordinates.md); using an absolute-world `f32` matrix would break the large-position guarantees.
 
 ## Voxel rendering
 
@@ -89,4 +89,4 @@ Frame statistics include candidate object count, uploaded instance-range size, v
 - [`render_coordinates_tests.zig`](../src/engine/render_coordinates_tests.zig): agreement of camera/shadow projections and translation invariance across all cascades.
 - [`voxel_tests.zig`](../src/engine/voxel_tests.zig): face/upload data and allocator behavior without creating a GPU device.
 
-`zig build test` exercises the registered CPU tests. `zig build test-gpu` separately validates the six specialized pipelines with headless Dawn at two sizes and both wrapping modes. These checks do not replace a runtime visual check of pipelines, alpha/shadow agreement, SSAO, resize, or GPU resource lifetime.
+`zig build test` exercises the registered CPU tests under both application wrapping configurations. `zig build test-gpu` separately validates the six specialized pipelines with headless Dawn at two sizes in each compiled wrapping mode. These checks do not replace a runtime visual check of pipelines, alpha/shadow agreement, SSAO, resize, or GPU resource lifetime.

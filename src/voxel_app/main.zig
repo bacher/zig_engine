@@ -1703,8 +1703,8 @@ test "authoritative fallback changes do not rebuild faces supplied by an optimis
 
 test "different runtime layouts stream, edit, and evict across their own x seams" {
     const layouts = [_]WorldLayout{
-        try WorldLayout.init(.{ .size_in_chunks = .{ 128, 64, 16 }, .wrap_x = true }),
-        try WorldLayout.init(.{ .size_in_chunks = .{ 256, 128, 4 }, .wrap_x = true }),
+        try WorldLayout.init(.{ .size_in_chunks = .{ 128, 64, 16 } }),
+        try WorldLayout.init(.{ .size_in_chunks = .{ 256, 128, 4 } }),
     };
     const first_service = try WorldDataService.create(std.testing.io, std.testing.allocator, &layouts[0], .flat);
     defer first_service.destroy();

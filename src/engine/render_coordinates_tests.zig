@@ -1,4 +1,5 @@
 const layout = @import("test_world.zig").layout;
+const WorldLayout = @import("world_layout.zig").WorldLayout;
 const std = @import("std");
 const zmath = @import("zmath");
 const chunks = @import("chunk_utils.zig");
@@ -37,6 +38,7 @@ test "small camera movements accumulate in f64 across distant chunk boundaries" 
 }
 
 test "x wraps before conversion to the GPU integer chunk range" {
+    if (comptime !WorldLayout.wrap_x) return error.SkipZigTest;
     const repeated_worlds: f64 = 16384.0 * 100000000.0;
     try std.testing.expectEqual(layout.getChunkCoords(.{ 0.125, 0, 0 }), layout.getChunkCoords(.{ repeated_worlds + 0.125, 0, 0 }));
     try std.testing.expectEqual(layout.getChunkCoords(.{ -0.125, 0, 0 }), layout.getChunkCoords(.{ -repeated_worlds - 0.125, 0, 0 }));
@@ -63,7 +65,7 @@ test "signed chunk differences span the full i32 range and wrap repeated x world
     const high = std.math.maxInt(i32);
     const a: world_math.ChunkCoords = .{ low, high, low };
     const b: world_math.ChunkCoords = .{ high, low, high };
-    const expected: @Vector(3, i64) = .{ 1, 4294967295, -4294967295 };
+    const expected: @Vector(3, i64) = .{ if (WorldLayout.wrap_x) 1 else -4294967295, 4294967295, -4294967295 };
     try std.testing.expectEqual(expected, layout.getChunkDelta(a, b));
     try std.testing.expectEqual(-expected, layout.getChunkDelta(b, a));
 
@@ -71,7 +73,7 @@ test "signed chunk differences span the full i32 range and wrap repeated x world
         .chunk = .{ -513, high, low, 0 },
         .chunk_from_model = zmath.translation(0.125, 0.25, 0.5),
     };
-    try expectVector(.{ -31.875, 32.25, -31.5, 1 }, object.relativeTo(&layout, .{ 0, high - 1, low + 1 })[3], 0.00001);
+    try expectVector(.{ if (WorldLayout.wrap_x) -31.875 else -16415.875, 32.25, -31.5, 1 }, object.relativeTo(&layout, .{ 0, high - 1, low + 1 })[3], 0.00001);
 }
 
 test "camera supports the signed chunk limits after applying the world offset" {
@@ -94,9 +96,9 @@ test "negative boundaries and the x seam use the same local frame" {
     try expectVector(.{ 31.75, 31.75, 0, 1 }, negative.chunk_from_model[3], 0.00001);
     const across_seam = ChunkTransform.init(&layout, world_math.translation(-8191.75, 0, 0));
     const camera_chunk = layout.getChunkCoords(.{ 8191.75, 0, 0 });
-    try expectVector(.{ 32.25, 0, 0, 1 }, across_seam.relativeTo(&layout, camera_chunk)[3], 0.00001);
+    try expectVector(.{ if (WorldLayout.wrap_x) 32.25 else -16351.75, 0, 0, 1 }, across_seam.relativeTo(&layout, camera_chunk)[3], 0.00001);
     const reverse = ChunkTransform.init(&layout, world_math.translation(8191.75, 0, 0));
-    try expectVector(.{ -0.25, 0, 0, 1 }, reverse.relativeTo(&layout, across_seam.getChunkCoords())[3], 0.00001);
+    try expectVector(.{ if (WorldLayout.wrap_x) -0.25 else 16383.75, 0, 0, 1 }, reverse.relativeTo(&layout, across_seam.getChunkCoords())[3], 0.00001);
 }
 
 test "camera initialization agrees with updating its initial position" {
@@ -153,38 +155,29 @@ test "crossing a chunk boundary moves camera-space geometry continuously" {
     try expectVector(.{ -0.25, 0, 0, 0 }, after_position - before_position, 0.00001);
 }
 
-test "wrapped and unwrapped cameras and object projections coexist" {
-    const WorldLayout = @import("world_layout.zig").WorldLayout;
-    const wrapped = try WorldLayout.init(.{ .size_in_chunks = .{ 128, 64, 16 }, .wrap_x = true });
-    const ordinary = try WorldLayout.init(.{ .size_in_chunks = .{ 128, 64, 16 }, .wrap_x = false });
-    var wrapped_camera = Camera.init(&wrapped, 1);
-    var ordinary_camera = Camera.init(&ordinary, 1);
-    wrapped_camera.updatePosition(.{ 2047.75, 0, 0 });
-    ordinary_camera.updatePosition(.{ 2047.75, 0, 0 });
-    const matrix = world_math.translation(-2047.75, 0, 0);
-    const wrapped_object = ChunkTransform.init(&wrapped, matrix);
-    const ordinary_object = ChunkTransform.init(&ordinary, matrix);
-    const wrapped_relative = wrapped_object.relativeTo(&wrapped, wrapped_camera.chunk);
-    const ordinary_relative = ordinary_object.relativeTo(&ordinary, ordinary_camera.chunk);
-    const wrapped_view = utils.matApply(wrapped_camera.view_from_world_chunked, wrapped_relative[3]);
-    const ordinary_view = utils.matApply(ordinary_camera.view_from_world_chunked, ordinary_relative[3]);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.5), wrapped_view[0], 0.00001);
-    try std.testing.expectApproxEqAbs(@as(f32, -4095.5), ordinary_view[0], 0.00001);
-    wrapped_camera.translate(.{ 0.5, 0, 0 });
-    ordinary_camera.translate(.{ 0.5, 0, 0 });
-    try std.testing.expectEqual(@as(i32, 0), wrapped_camera.chunk[0]);
-    try std.testing.expectEqual(@as(i32, 128), ordinary_camera.chunk[0]);
+test "camera and object projections use the application topology at runtime-selected dimensions" {
+    const small = try WorldLayout.init(.{ .size_in_chunks = .{ 128, 64, 16 } });
+    var camera = Camera.init(&small, 1);
+    camera.updatePosition(.{ 2047.75, 0, 0 });
+    const object = ChunkTransform.init(&small, world_math.translation(-2047.75, 0, 0));
+    const relative = object.relativeTo(&small, camera.chunk);
+    const view = utils.matApply(camera.view_from_world_chunked, relative[3]);
+    try std.testing.expectApproxEqAbs(@as(f32, if (WorldLayout.wrap_x) 0.5 else -4095.5), view[0], 0.00001);
+    camera.translate(.{ 0.5, 0, 0 });
+    try std.testing.expectEqual(@as(i32, if (WorldLayout.wrap_x) 0 else 128), camera.chunk[0]);
 
-    const low = std.math.minInt(i32);
-    const high = std.math.maxInt(i32);
-    const delta = ordinary.getChunkDelta(.{ high, low, high }, .{ low, high, low });
-    try std.testing.expectEqual(@Vector(3, i64){ 4294967295, -4294967295, 4294967295 }, delta);
-    const adjacent = ChunkTransform{
-        .chunk_from_model = zmath.translation(0.125, 0.25, 0.5),
-        .chunk = .{ high, low, high, 0 },
-    };
-    try expectVector(.{ 32.125, -31.75, 32.5, 1 }, adjacent.relativeTo(&ordinary, .{ high - 1, low + 1, high - 1 })[3], 0.00001);
-    ordinary_camera.updatePosition(.{ (@as(f64, low) - ordinary.origin_chunk[0]) * chunks.CHUNK_SIZE + 0.125, 0, 0 });
-    try std.testing.expectEqual(@as(i32, low), ordinary_camera.chunk[0]);
-    try expectVector(.{ 0.125, 0, 0, 1 }, ordinary_camera.getLocalPosition(), 0.00001);
+    if (comptime !WorldLayout.wrap_x) {
+        const low = std.math.minInt(i32);
+        const high = std.math.maxInt(i32);
+        const delta = small.getChunkDelta(.{ high, low, high }, .{ low, high, low });
+        try std.testing.expectEqual(@Vector(3, i64){ 4294967295, -4294967295, 4294967295 }, delta);
+        const adjacent = ChunkTransform{
+            .chunk_from_model = zmath.translation(0.125, 0.25, 0.5),
+            .chunk = .{ high, low, high, 0 },
+        };
+        try expectVector(.{ 32.125, -31.75, 32.5, 1 }, adjacent.relativeTo(&small, .{ high - 1, low + 1, high - 1 })[3], 0.00001);
+        camera.updatePosition(.{ (@as(f64, low) - small.origin_chunk[0]) * chunks.CHUNK_SIZE + 0.125, 0, 0 });
+        try std.testing.expectEqual(@as(i32, low), camera.chunk[0]);
+        try expectVector(.{ 0.125, 0, 0, 1 }, camera.getLocalPosition(), 0.00001);
+    }
 }

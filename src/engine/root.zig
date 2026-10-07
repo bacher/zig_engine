@@ -13,6 +13,8 @@ pub const VoxelGrid = @import("./voxel/voxel_grid.zig").VoxelGrid;
 pub const voxel_chunk = @import("./voxel/voxel_chunk.zig");
 pub const tube = @import("./shape_generation/tube.zig");
 pub const utils = @import("./utils.zig");
+/// Compile-time options injected by the application build.
+pub const config = @import("engine_config");
 pub const WorldSettings = @import("world_layout.zig").WorldSettings;
 pub const WorldLayout = @import("world_layout.zig").WorldLayout;
 pub const chunk_utils = @import("./chunk_utils.zig");

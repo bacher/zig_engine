@@ -193,7 +193,6 @@ pub const World = struct {
     pending_operations: std.ArrayList(PendingOperation) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, layout: *const WorldLayout) !World {
-        if (!layout.wrap_x) return error.XWrappingRequired;
         const owned_layout = try allocator.create(WorldLayout);
         owned_layout.* = layout.*;
         return .{ .allocator = allocator, .layout = owned_layout };

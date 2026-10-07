@@ -279,7 +279,6 @@ pub const WorldDataService = struct {
 
     /// The allocator must be thread-safe; messages transfer ownership between tasks.
     pub fn create(io: Io, allocator: std.mem.Allocator, layout: *const WorldLayout, generator: WorldGenerator) !*WorldDataService {
-        if (!layout.wrap_x) return error.XWrappingRequired;
         generator.validate();
         const owned_layout = try allocator.create(WorldLayout);
         errdefer allocator.destroy(owned_layout);
@@ -1353,10 +1352,4 @@ test "boundary-only observers are notified before the edit reply without subscri
     try waitForResponses(editor, &replies, 2);
     observer.takeResponses(&observed);
     try std.testing.expectEqual(1, observed.items.len);
-}
-
-test "voxel cache and service require x wrapping" {
-    const ordinary = try WorldLayout.init(.{ .size_in_chunks = .{ 128, 64, 16 }, .wrap_x = false });
-    try std.testing.expectError(error.XWrappingRequired, world_module.World.init(std.testing.allocator, &ordinary));
-    try std.testing.expectError(error.XWrappingRequired, WorldDataService.create(std.testing.io, std.testing.allocator, &ordinary, .flat));
 }

@@ -63,7 +63,6 @@ pub const ColumnGenerator = struct {
     },
 
     pub fn init(layout: *const WorldLayout, generator: WorldGenerator, coords: @Vector(2, i32)) ColumnGenerator {
-        std.debug.assert(layout.wrap_x);
         std.debug.assert(coords[0] >= 0 and coords[0] < layout.size_in_chunks[0]);
         std.debug.assert(coords[1] >= 0 and coords[1] < layout.size_in_chunks[1]);
 
@@ -451,7 +450,7 @@ test "generated unreachable flags agree with all six actual neighboring walls" {
 
 test "terrain midpoint, height bounds, and periodic x use each world's dimensions" {
     for ([_][3]u32{ .{ 128, 64, 16 }, .{ 256, 128, 4 } }) |size| {
-        const layout = try WorldLayout.init(.{ .size_in_chunks = size, .wrap_x = true });
+        const layout = try WorldLayout.init(.{ .size_in_chunks = size });
         const noise = PerlinNoise.init(12345);
         const params = WorldGenerationParams{ .height_amplitude = 0 };
         try std.testing.expectEqual(layout.size_in_blocks[2] / 2, terrainHeight(&layout, noise, 0, 0, params));

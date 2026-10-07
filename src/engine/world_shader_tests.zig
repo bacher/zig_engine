@@ -49,7 +49,7 @@ const ValidationResponse = struct {
     }
 };
 
-test "Dawn validates all six world pipelines for wrapped and unwrapped layouts" {
+test "Dawn validates all six world pipelines for the compiled wrapping mode" {
     const allocator = std.testing.allocator;
     dawnProcSetProcs(dnGetProcs());
     const native = dniCreate() orelse return error.NoGraphicsInstance;
@@ -93,20 +93,18 @@ test "Dawn validates all six world pipelines for wrapped and unwrapped layouts" 
     defer layouts.voxel.deinit(&gctx);
 
     for ([_][3]u32{ .{ 512, 256, 8 }, .{ 128, 64, 16 } }) |size| {
-        for ([_]bool{ true, false }) |wrap_x| {
-            const layout = try WorldLayout.init(.{ .size_in_chunks = size, .wrap_x = wrap_x });
-            device.pushErrorScope(.validation);
-            var pipelines = try WorldPipelines.init(allocator, &gctx, &layouts, &layout);
-            defer pipelines.deinit(&gctx);
-            var response: ValidationResponse = .{};
-            _ = device.popErrorScope(ValidationResponse.callback, &response);
-            for (0..10000) |_| {
-                if (response.done) break;
-                device.tick();
-            }
-            try std.testing.expect(response.done);
-            try std.testing.expectEqual(@as(usize, 0), response.errors);
+        const layout = try WorldLayout.init(.{ .size_in_chunks = size });
+        device.pushErrorScope(.validation);
+        var pipelines = try WorldPipelines.init(allocator, &gctx, &layouts, &layout);
+        defer pipelines.deinit(&gctx);
+        var response: ValidationResponse = .{};
+        _ = device.popErrorScope(ValidationResponse.callback, &response);
+        for (0..10000) |_| {
+            if (response.done) break;
+            device.tick();
         }
+        try std.testing.expect(response.done);
+        try std.testing.expectEqual(@as(usize, 0), response.errors);
     }
     try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
 }

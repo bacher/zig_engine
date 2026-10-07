@@ -1,13 +1,24 @@
 # World configuration
 
-Applications choose world dimensions and whether x wraps when creating a scene. Settings stay fixed for that scene's lifetime. The engine supports ordinary space or periodic x; y and z never wrap. The voxel application always enables x wrapping, and its terrain, neighbors, streaming, and tools assume that topology.
+Applications choose x wrapping at compile time and world dimensions at scene creation. Dimensions stay fixed for that scene's lifetime. The engine supports ordinary space or periodic x; y and z never wrap. The voxel application always enables x wrapping, and its terrain, neighbors, streaming, and tools assume that topology.
+
+## Application configuration
+
+Each application provides an `engine_config.zig` module:
+
+```zig
+pub const wrap_x = true;
+```
+
+[`build.zig`](../build.zig) injects this module into that application's engine module and static library. The demo's [configuration](../src/demo_app/engine_config.zig) sets `wrap_x = false`; the voxel app's [configuration](../src/voxel_app/engine_config.zig) sets it to `true`. Both use the same engine sources and dependency modules. The engine exports the configuration as `engine.config`.
+
+All worlds in one application share its compiled wrapping mode, but may have different dimensions. Changing the wrapping mode requires rebuilding the application. `voxel_app` has a compile-time guard in [`consts.zig`](../src/voxel_app/consts.zig) that rejects an engine configuration with wrapping disabled.
 
 ## Creating a world
 
 ```zig
 const scene = try engine.createScene(.{
     .size_in_chunks = .{ 128, 64, 16 },
-    .wrap_x = true,
 });
 defer scene.deinit();
 ```
@@ -22,7 +33,7 @@ Validation requires:
 
 Invalid settings return `InvalidWorldDimension`, `WorldDimensionTooLarge`, or `TooManyChunkIdBits`. Chunk size remains fixed at 32³; block formats, voxel face formats, GPU buffer capacities, and instance strides remain fixed too.
 
-The voxel app's current preset is in [`consts.zig`](../src/voxel_app/consts.zig): 512×256×8 chunks with `wrap_x = true`. The demo selects the same dimensions with wrapping disabled. The engine has no implicit dimension or wrapping defaults.
+The voxel app's current dimension preset is in [`consts.zig`](../src/voxel_app/consts.zig): 512×256×8 chunks. The demo selects the same dimensions. `WorldSettings` contains only dimensions; wrapping is supplied by the application's engine configuration. Neither has an implicit engine default.
 
 ## Coordinates and IDs
 
@@ -46,22 +57,53 @@ A wrapped period is assumed to be much larger than camera render distance. Rende
 
 ## Rendering and ownership
 
-Each scene owns six pipelines specialized when the scene is created: regular and skinned meshes, voxels, and their three shadow variants. `WorldLayout.shaderSource` writes literal chunk-size/width/mask constants and includes either the wrapped or unwrapped coordinate helper. Wrapped WGSL normalizes x with a bit mask. Unwrapped WGSL omits periodic arithmetic. Both subtract unwrapped integer coordinates safely across the full signed i32 range before converting distances to f32.
+Each scene owns six pipelines specialized when the scene is created: regular and skinned meshes, voxels, and their three shadow variants. `WorldLayout.shaderSource` selects the wrapped or unwrapped coordinate helper at Zig compile time. It writes literal chunk-size constants and, for wrapped builds, width/mask constants from the runtime-selected layout. Wrapped WGSL normalizes x with a bit mask. Unwrapped WGSL omits periodic arithmetic and width/mask declarations. Both subtract unwrapped integer coordinates safely across the full signed i32 range before converting distances to f32.
 
 Cameras, transforms, billboards, voxel face selection, visible projections, and shadows use the same scene layout. Other pipelines remain engine-owned because their input transforms are already rebased on the CPU or independent of world topology. Scene destruction releases its specialized pipelines and layout. Pipeline compilation occurs at scene creation, not during frames; switching the active scene selects its existing pipelines.
 
-`World.init(allocator, layout)` and `WorldDataService.create(io, allocator, layout, generator)` take validated layouts and retain their own immutable copies. They return `XWrappingRequired` when wrapping is disabled. The service's worker and generated columns use its copy; the main-thread cache uses the equivalent scene configuration. Each service has its own subscriptions, IDs, and caches. `ColumnGenerator` borrows a const layout which must outlive the column.
+`World.init(allocator, layout)` and `WorldDataService.create(io, allocator, layout, generator)` take validated layouts and retain their own immutable copies. The service's worker and generated columns use its copy; the main-thread cache uses the equivalent scene configuration. Each service has its own subscriptions, IDs, and caches. `ColumnGenerator` borrows a const layout which must outlive the column. Their x-periodic behavior is guaranteed by the application's compile-time guard.
 
 Terrain remains periodic in x. Its default base height is half the selected block height (`base_height = null`); an explicit base height is still supported. Height bounds, flat surface placement, enclosure certification, and neighbor strips use the selected dimensions. Simulation startup allocates its received-chunk bookkeeping using the selected height.
 
-Changing dimensions or topology requires creating a new scene/world and fresh caches/services. Existing IDs, geometry, pending responses, and generated terrain cannot be reinterpreted under a different layout. The same seed may produce different terrain when dimensions change; eventual save metadata needs to retain the layout alongside generator settings.
+Changing dimensions requires creating a new scene/world and fresh caches/services. Existing IDs, geometry, pending responses, and generated terrain cannot be reinterpreted under a different layout. Changing topology also requires rebuilding the application. The same seed may produce different terrain when dimensions change; eventual save metadata needs to retain dimensions and topology alongside generator settings.
+
+## Compile-time optimization
+
+Wrapping decisions are centralized in `WorldLayout`. `wrap_x` is a compile-time declaration, with no runtime flag in `WorldSettings` or layout storage. The coordinate helpers use explicit `comptime` branches; callers such as cameras, object transforms, billboards, voxel face selection, and shadows inherit the selected implementation.
+
+| Operation | Unwrapped build | Wrapped build |
+| --- | --- | --- |
+| Layout creation | No reciprocal calculation or storage (`inverse_width` has type `void`). | Precompute an exact power-of-two width reciprocal. |
+| Storage normalization | Check storage bounds. | Mask x, then check bounds. |
+| Position to chunk | Floor/divide by fixed chunk size and add the runtime origin. | Also normalize x before narrowing to i32. |
+| Relative chunk delta | Widen signed inputs and subtract. | Mask x and select its nearest image using the runtime width. |
+| Shader generation | Include ordinary-space helper. | Include periodic-x helper and literal width/mask. |
+| Voxel terrain, neighbors, and streaming | Not supported by `voxel_app`'s configuration. | Unconditional periodic-x behavior; no topology flag checks. |
+
+An [assembly probe](research/compile-time-wrapping-kernels.zig) imports the production `WorldLayout` and keeps its dimensions and coordinates runtime. Zig 0.16.0 ReleaseFast output on AArch64 macOS confirms that unwrapped `delta_x` contains widening/subtraction with no layout loads, masks, or comparisons. Unwrapped `chunk_x` omits width/reciprocal loads and periodic floor/multiply/subtract; unwrapped normalization omits the x mask. Wrapped deltas use register masks and conditional selects without division or a runtime topology branch. Wrapped position conversion uses inline floating arithmetic without remainder library calls. This is code-generation evidence; application frame-time performance has not been measured.
+
+Reproduce from the repository root, first with the demo configuration, then with the voxel configuration:
+
+```sh
+zig build-obj -O ReleaseFast --dep world_layout \
+  -Mroot=docs/research/compile-time-wrapping-kernels.zig \
+  --dep engine_config -Mworld_layout=src/engine/world_layout.zig \
+  -Mengine_config=src/demo_app/engine_config.zig \
+  -femit-asm=/tmp/unwrapped.s -femit-bin=/tmp/unwrapped.o
+
+zig build-obj -O ReleaseFast --dep world_layout \
+  -Mroot=docs/research/compile-time-wrapping-kernels.zig \
+  --dep engine_config -Mworld_layout=src/engine/world_layout.zig \
+  -Mengine_config=src/voxel_app/engine_config.zig \
+  -femit-asm=/tmp/wrapped.s -femit-bin=/tmp/wrapped.o
+```
 
 ## Verification
 
-`zig build` builds both applications. `zig build test` covers dimension validation, 32-bit ID packing, several simultaneous layouts, modulo equivalence at seams and signed limits, repeated wrapped positions, wrapped/unwrapped camera and object coordinates, dimension-dependent generation, and live streaming/edit/eviction across two differently sized x seams. Existing camera/shadow precision and voxel protocol regressions remain registered.
+`zig build` builds both configured engine libraries and applications. `zig build test` runs coordinate and hierarchy tests separately under both compiled wrapping modes. It covers dimension validation, 32-bit ID packing, several simultaneous layouts, modulo equivalence at seams and signed limits, repeated wrapped positions, wrapped/unwrapped camera and object coordinates, dimension-dependent generation, and live streaming/edit/eviction across two differently sized x seams. Existing camera/shadow precision and voxel protocol regressions remain registered.
 
-`zig build test-gpu` is an optional headless Dawn check requiring a graphics adapter. It creates all six production world pipelines for both wrapped and unwrapped layouts at two sizes, with Dawn validation enabled. It does not replace visual checks or measure performance.
+`zig build test-gpu` is an optional headless Dawn check requiring a graphics adapter. It runs two separately compiled test executables, creating all six production world pipelines at two sizes in each wrapping mode, with Dawn validation enabled. It does not replace visual checks or measure performance.
 
 The [configuration research](world-configuration-options.md) records the original alternatives and isolated compiler measurements. It is historical context; this document describes the accepted implementation.
 
-Implementation checks on 2026-10-07: both applications built; all 141 registered CPU tests passed; the four isolated layout tests also passed in ReleaseSafe. The optional Dawn suite passed on Apple M4 Max/Metal, creating 24 production pipelines (six pipelines × two sizes × two wrapping modes). The windowed applications did not reach graphics initialization in the sandbox, so rendered appearance was not verified.
+Implementation checks on 2026-10-07: both applications built; 167 registered CPU tests passed, with one wrapping-only test skipped in the unwrapped build. All four isolated layout tests also passed in ReleaseSafe under each configuration. The optional Dawn suite passed on Apple M4 Max/Metal, creating 24 production pipelines (six pipelines × two sizes × two compiled wrapping modes). The windowed applications did not reach graphics initialization in the sandbox during the earlier runtime-layout checks, so rendered appearance remains unverified.
