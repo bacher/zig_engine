@@ -12,19 +12,11 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
-    const engine_lib = b.addLibrary(.{
-        .linkage = .static,
-        .name = "engine",
-        .root_module = b.createModule(.{
-            // In this case the main source file is merely a path, however, in more
-            // complicated build scripts, this could be a generated file.
-            .root_source_file = b.path("src/engine/root.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
-    });
-
-    b.installArtifact(engine_lib);
+    // Each application compiles an engine module with its own static topology.
+    const engine_lib = createEngineLibrary(b, target, optimize, "engine", "src/demo_app/engine_config.zig");
+    const voxel_engine_lib = createEngineLibrary(b, target, optimize, "engine_wrapped", "src/voxel_app/engine_config.zig");
+    const engines = [_]*std.Build.Step.Compile{ engine_lib, voxel_engine_lib };
+    for (engines) |library| b.installArtifact(library);
 
     // debug app
 
@@ -51,8 +43,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    voxel_exe.root_module.linkLibrary(engine_lib);
-    voxel_exe.root_module.addImport("engine", engine_lib.root_module);
+    voxel_exe.root_module.linkLibrary(voxel_engine_lib);
+    voxel_exe.root_module.addImport("engine", voxel_engine_lib.root_module);
 
     // Deps start
 
@@ -60,30 +52,30 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    engine_lib.root_module.addImport("zglfw", zglfw.module("root"));
-    engine_lib.root_module.linkLibrary(zglfw.artifact("glfw"));
+    for (engines) |library| library.root_module.addImport("zglfw", zglfw.module("root"));
+    for (engines) |library| library.root_module.linkLibrary(zglfw.artifact("glfw"));
 
-    @import("zgpu").addLibraryPathsTo(engine_lib);
+    for (engines) |library| @import("zgpu").addLibraryPathsTo(library);
     const zgpu = b.dependency("zgpu", .{
         .target = target,
         .optimize = optimize,
     });
-    engine_lib.root_module.addImport("zgpu", zgpu.module("root"));
-    engine_lib.root_module.linkLibrary(zgpu.artifact("zdawn"));
+    for (engines) |library| library.root_module.addImport("zgpu", zgpu.module("root"));
+    for (engines) |library| library.root_module.linkLibrary(zgpu.artifact("zdawn"));
 
     const zgui = b.dependency("zgui", .{
         .target = target,
         .optimize = optimize,
         .backend = .glfw_wgpu,
     });
-    engine_lib.root_module.addImport("zgui", zgui.module("root"));
-    engine_lib.root_module.linkLibrary(zgui.artifact("imgui"));
+    for (engines) |library| library.root_module.addImport("zgui", zgui.module("root"));
+    for (engines) |library| library.root_module.linkLibrary(zgui.artifact("imgui"));
 
     const zmath = b.dependency("zmath", .{
         .target = target,
         .optimize = optimize,
     });
-    engine_lib.root_module.addImport("zmath", zmath.module("root"));
+    for (engines) |library| library.root_module.addImport("zmath", zmath.module("root"));
     demo_exe.root_module.addImport("zmath", zmath.module("root"));
     voxel_exe.root_module.addImport("zmath", zmath.module("root"));
 
@@ -91,7 +83,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    engine_lib.root_module.addImport("zstbi", zstbi.module("root"));
+    for (engines) |library| library.root_module.addImport("zstbi", zstbi.module("root"));
 
     // GLTF loader
     const gltf_loader_module = b.dependency("gltf_loader", .{
@@ -100,7 +92,7 @@ pub fn build(b: *std.Build) void {
     }).module("root");
     gltf_loader_module.addImport("zstbi", zstbi.module("root"));
 
-    engine_lib.root_module.addImport("gltf_loader", gltf_loader_module);
+    for (engines) |library| library.root_module.addImport("gltf_loader", gltf_loader_module);
     demo_exe.root_module.addImport("gltf_loader", gltf_loader_module);
     voxel_exe.root_module.addImport("gltf_loader", gltf_loader_module);
 
@@ -242,39 +234,44 @@ pub fn build(b: *std.Build) void {
     const run_voxel_utils_unit_tests = b.addRunArtifact(voxel_utils_unit_tests);
     const run_slot_buffer_manager_unit_tests = b.addRunArtifact(slot_buffer_manager_unit_tests);
 
-    // Explicit GPU check: regular unit tests stay usable without a graphics adapter.
-    const world_shader_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/engine/world_shader_tests.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zgpu", .module = zgpu.module("root") },
-                .{ .name = "zmath", .module = zmath.module("root") },
-                .{ .name = "debug", .module = debug_module },
-            },
-        }),
-    });
-    @import("zgpu").addLibraryPathsTo(world_shader_tests);
-    world_shader_tests.root_module.linkLibrary(engine_lib);
-    const gpu_test_step = b.step("test-gpu", "Validate world-specialized pipelines with headless Dawn");
-    gpu_test_step.dependOn(&b.addRunArtifact(world_shader_tests).step);
+    const test_step = b.step("test", "Run unit tests for both application wrapping modes");
+    const gpu_test_step = b.step("test-gpu", "Validate world pipelines for both compiled wrapping modes with headless Dawn");
+    for (engines) |library| {
+        const engine_config = library.root_module.import_table.get("engine_config").?;
+        const render_coordinates_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/engine/render_coordinates_tests.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "engine_config", .module = engine_config },
+                    .{ .name = "zmath", .module = zmath.module("root") },
+                    .{ .name = "debug", .module = debug_module },
+                },
+            }),
+        });
+        test_step.dependOn(&b.addRunArtifact(render_coordinates_tests).step);
+        const hierarchy_tests = b.addTest(.{ .root_module = library.root_module });
+        test_step.dependOn(&b.addRunArtifact(hierarchy_tests).step);
 
-    const test_step = b.step("test", "Run unit tests");
-    const render_coordinates_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/engine/render_coordinates_tests.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zmath", .module = zmath.module("root") },
-                .{ .name = "debug", .module = debug_module },
-            },
-        }),
-    });
-    test_step.dependOn(&b.addRunArtifact(render_coordinates_tests).step);
-    const hierarchy_tests = b.addTest(.{ .root_module = engine_lib.root_module });
-    test_step.dependOn(&b.addRunArtifact(hierarchy_tests).step);
+        // GPU checks are explicit so CPU tests work without a graphics adapter.
+        const world_shader_tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/engine/world_shader_tests.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "engine_config", .module = engine_config },
+                    .{ .name = "zgpu", .module = zgpu.module("root") },
+                    .{ .name = "zmath", .module = zmath.module("root") },
+                    .{ .name = "debug", .module = debug_module },
+                },
+            }),
+        });
+        @import("zgpu").addLibraryPathsTo(world_shader_tests);
+        world_shader_tests.root_module.linkLibrary(library);
+        gpu_test_step.dependOn(&b.addRunArtifact(world_shader_tests).step);
+    }
     test_step.dependOn(&run_voxel_grid_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
     test_step.dependOn(&run_voxel_exe_unit_tests.step);
@@ -283,4 +280,25 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_dynamic_slot_buffer_manager_unit_tests.step);
     test_step.dependOn(&run_voxel_utils_unit_tests.step);
     test_step.dependOn(&run_slot_buffer_manager_unit_tests.step);
+}
+
+/// Inject application topology into the engine itself, including its library/test roots.
+fn createEngineLibrary(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+    name: []const u8,
+    config_path: []const u8,
+) *std.Build.Step.Compile {
+    const engine_config = b.createModule(.{ .root_source_file = b.path(config_path) });
+    return b.addLibrary(.{
+        .linkage = .static,
+        .name = name,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/engine/root.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "engine_config", .module = engine_config }},
+        }),
+    });
 }

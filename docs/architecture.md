@@ -38,11 +38,11 @@ The arrows show responsibilities and data flow, not separate processes. The serv
 
 | Location | Responsibility |
 | --- | --- |
-| [`build.zig`](../build.zig) | Static engine library, demo and voxel executables, content installation, run steps, and test aggregation. |
+| [`build.zig`](../build.zig) | Per-application configured engine libraries, demo and voxel executables, content installation, run steps, and test aggregation. |
 | [`src/engine/root.zig`](../src/engine/root.zig) | Public engine exports and selected third-party library exports. |
 | [`engine.zig`](../src/engine/engine.zig) | Initialization, model registry, active scene, callbacks, render passes, and main loop. |
 | [`scene.zig`](../src/engine/scene.zig) | Immutable world layout, specialized pipelines, objects, groups, lights, camera/controller, instance buffer, and voxel grid. |
-| [`world_layout.zig`](../src/engine/world_layout.zig) | Runtime setting validation, coordinates, storage IDs, wrapping, and shader specialization. |
+| [`world_layout.zig`](../src/engine/world_layout.zig) | Runtime dimension validation, coordinates, storage IDs, compile-time wrapping, and shader specialization. |
 | [`game_object.zig`](../src/engine/game_object.zig), [`game_object_group.zig`](../src/engine/game_object_group.zig) | Transform hierarchy and per-object animation state. |
 | [`pipelines/`](../src/engine/pipelines), [`bind_group_layouts/`](../src/engine/bind_group_layouts), [`shaders/`](../src/engine/shaders) | GPU pipeline construction, binding layouts, and WGSL behavior. |
 | [`voxel/`](../src/engine/voxel) | Face records, upload queues, GPU residency, and slot allocation. |
@@ -58,12 +58,15 @@ The arrows show responsibilities and data flow, not separate processes. The serv
 
 `build.zig.zon` declares Zig 0.16.0 as the minimum version and pins the external dependencies. `zglfw` supplies window/input integration; `zgpu` supplies WebGPU/Dawn; `zgui` supplies the GLFW/WebGPU GUI backend; `zmath` supplies float matrix/vector operations; and `zstbi` supplies image decoding. The glTF loader is a local package.
 
+Each application owns an `engine_config.zig` module injected into its engine build. X wrapping is enabled for the voxel app and disabled for the demo, with coordinate choices evaluated at compile time. The two engine libraries share dependency modules and artifacts. World dimensions remain runtime settings selected at scene creation.
+
 | Command | Build step |
 | --- | --- |
-| `zig build` | Install the engine library, both applications, and content. |
+| `zig build` | Install both configured engine libraries, applications, and content. |
 | `zig build run` | Build/install, then run the demo. |
 | `zig build run_voxel` | Build/install, then run the voxel application. |
-| `zig build test` | Run the test targets registered in the root build. |
+| `zig build test` | Run registered CPU tests, including coordinates/hierarchy under both wrapping configurations. |
+| `zig build test-gpu` | Validate all six world pipelines at two sizes under both configurations with headless Dawn. |
 
 Both applications change their working directory to the executable directory before loading assets. The build installs `content/` alongside the binaries. Asset lookup still mixes paths relative to the configured content directory with explicit `content/...` paths.
 
@@ -109,13 +112,13 @@ The voxel app stops the simulation worker, submits any remaining local commands,
 - [Assets and animation](assets-animation.md): asset import, model instances, playback, and resource limitations.
 - [Voxel world](voxel-world.md): generation, protocol, cache reconciliation, streaming, and GPU capacity.
 - [Coordinates and rendering precision](coordinates.md): CPU/GPU conversion rules and range guarantees.
-- [World configuration](world-configuration.md): runtime settings, validation, immutable ownership, and specialized pipelines.
+- [World configuration](world-configuration.md): runtime dimensions, compile-time topology, validation, immutable ownership, and specialized pipelines.
 
 ## Review points
 
 These are questions raised by the current implementation, not proposed changes:
 
-1. **Engine/application boundary (resolved).** Applications now choose runtime dimensions and optional x wrapping at scene creation. The layout remains immutable, chunks stay fixed at 32³, and the scene owns specialized GPU pipelines. The voxel app always wraps x. See [world configuration](world-configuration.md) and the [original research](world-configuration-options.md).
+1. **Engine/application boundary (resolved).** Applications choose runtime dimensions at scene creation and optional x wrapping at compile time. The layout remains immutable, chunks stay fixed at 32³, and the scene owns specialized GPU pipelines. The voxel app always wraps x. See [world configuration](world-configuration.md) and the [original research](world-configuration-options.md).
 2. **Scene lifetime.** Applications own scenes and special models, while the engine owns registered regular models. Is that split intentional? The cleanup paths do not yet express one consistent resource-ownership policy.
 3. **Scene mutation.** Creation and transform updates are clear, but there is no complete public scene-object removal/index-reuse path. Is the current scene model intended mainly for setup followed by transform changes?
 4. **Lighting.** Examples use one directional light. The API accepts several, but forward rendering reads the first light and all lights write the same shadow layers. What lighting contract should be supported?

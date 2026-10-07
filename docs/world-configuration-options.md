@@ -1,8 +1,8 @@
 # World dimensions and wrapping: configuration options
 
-Research on 2026-10-07 against commit `aaa3e58`, following the engine/application-boundary review point. This records the comparison before implementation. The runtime direction was subsequently accepted with optional **x-only** wrapping, wrapping always enabled in `voxel_app`, and a period assumed much larger than render distance. [World configuration](world-configuration.md) describes the implemented API and ownership. Axis-capable sketches below belong to the original exploration.
+Research on 2026-10-07 against commit `aaa3e58`, following the engine/application-boundary review point. This records the comparison before implementation. The accepted contract was subsequently revised to **runtime immutable dimensions and compile-time per-application x wrapping**, always enabled in `voxel_app`, with a period assumed much larger than render distance. [World configuration](world-configuration.md) describes the implemented API, ownership, and production code-generation checks. The recommendation and axis-capable sketches below belong to the original exploration.
 
-## Recommendation
+## Original recommendation
 
 Make world dimensions and an optional single wrapped axis runtime settings chosen by the application when creating a world. Keep them immutable for that world's lifetime. Retain fixed 32³ chunks and power-of-two world dimensions initially. Derive and validate one world layout, then specialize the relevant GPU pipelines for that layout at creation time.
 
@@ -149,4 +149,4 @@ If the runtime direction is accepted:
 5. Test two layouts in the same process to catch leaked global settings, stale replies, and world-switch cleanup.
 6. Compare optimized CPU kernels, generation/streaming latency, world-load pipeline compilation time, and GPU frame time on the same scene/workload. Expand arbitrary-size or vertical-wrap support only when the need and semantics are clear.
 
-The research itself added this note and an isolated compiler experiment. The later implementation adds validated runtime layouts, x-only wrapping, scene-owned specialized pipelines, and regression coverage; see [world configuration](world-configuration.md). Full workload performance remains unmeasured.
+The research itself added this note and an isolated compiler experiment. The later implementation combines validated runtime dimensions with compile-time per-application x wrapping, scene-owned specialized pipelines, and regression coverage; see [world configuration](world-configuration.md). Full workload performance remains unmeasured.
