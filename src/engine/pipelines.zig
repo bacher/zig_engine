@@ -1,3 +1,5 @@
+const std = @import("std");
+const WorldLayout = @import("world_layout.zig").WorldLayout;
 const zgpu = @import("zgpu");
 
 const Pipeline = @import("./pipeline.zig").Pipeline;
@@ -24,19 +26,13 @@ const shadow_map_terrain_pipeline_module = @import("./pipelines/shadow_map_terra
 
 pub const Pipelines = struct {
     // -- basic pipelines --
-    basic: Pipeline,
-    basic_skinned: Pipeline,
     skybox: Pipeline,
     skybox_cubemap: Pipeline,
     window_box: Pipeline,
     primitive_colorized: Pipeline,
     terrain_height_map: Pipeline,
-    voxel_pipeline: Pipeline,
     // -- shadow pipelines --
-    shadow_map: Pipeline,
     shadow_map_terrain: Pipeline,
-    shadow_map_voxel: Pipeline,
-    shadow_map_skinned: Pipeline,
     // -- debug pipelines --
     lines: Pipeline,
     debug_texture: Pipeline,
@@ -45,16 +41,6 @@ pub const Pipelines = struct {
     screen_quad_pipeline: Pipeline,
 
     pub fn init(gctx: *zgpu.GraphicsContext, bind_group_layouts: *const BindGroupLayouts) Pipelines {
-        const basic_pipeline = basic_pipeline_module.createBasicPipeline(
-            gctx,
-            bind_group_layouts,
-        );
-
-        const basic_skinned_pipeline = basic_skinned_pipeline_module.createBasicSkinnedPipeline(
-            gctx,
-            bind_group_layouts,
-        );
-
         const skybox_pipeline = skybox_pipeline_module.createSkyboxPipeline(
             gctx,
             bind_group_layouts,
@@ -76,21 +62,6 @@ pub const Pipelines = struct {
         );
 
         const terrain_height_map_pipeline = terrain_height_map_pipeline_module.createTerrainHeightMapPipeline(
-            gctx,
-            bind_group_layouts,
-        );
-
-        const voxel_pipeline = voxel_pipeline_module.createVoxelPipeline(
-            gctx,
-            bind_group_layouts,
-        );
-
-        const shadow_map_pipeline = shadow_map_pipeline_module.createShadowMapPipeline(
-            gctx,
-            bind_group_layouts,
-        );
-
-        const shadow_map_skinned_pipeline = shadow_map_skinned_pipeline_module.createShadowMapSkinnedPipeline(
             gctx,
             bind_group_layouts,
         );
@@ -117,18 +88,12 @@ pub const Pipelines = struct {
         );
 
         return .{
-            .basic = basic_pipeline,
-            .basic_skinned = basic_skinned_pipeline,
             .skybox = skybox_pipeline,
             .skybox_cubemap = skybox_cubemap_pipeline,
             .window_box = window_box_pipeline,
             .primitive_colorized = primitive_colorized_pipeline,
             .terrain_height_map = terrain_height_map_pipeline,
-            .voxel_pipeline = voxel_pipeline,
-            .shadow_map = shadow_map_pipeline,
             .shadow_map_terrain = shadow_map_terrain_pipeline_module.createShadowMapTerrainPipeline(gctx, bind_group_layouts),
-            .shadow_map_voxel = shadow_map_voxel_pipeline_module.createShadowMapVoxelPipeline(gctx, bind_group_layouts),
-            .shadow_map_skinned = shadow_map_skinned_pipeline,
             .lines = lines_pipeline,
             .debug_texture = debug_texture_pipeline,
             .ssao_pipeline = ssao_pipeline,
@@ -137,21 +102,69 @@ pub const Pipelines = struct {
     }
 
     pub fn deinit(pipelines: *Pipelines, gctx: *zgpu.GraphicsContext) void {
-        pipelines.basic.deinit(gctx);
-        pipelines.basic_skinned.deinit(gctx);
         pipelines.skybox.deinit(gctx);
         pipelines.skybox_cubemap.deinit(gctx);
         pipelines.window_box.deinit(gctx);
         pipelines.primitive_colorized.deinit(gctx);
         pipelines.terrain_height_map.deinit(gctx);
-        pipelines.voxel_pipeline.deinit(gctx);
-        pipelines.shadow_map.deinit(gctx);
         pipelines.shadow_map_terrain.deinit(gctx);
-        pipelines.shadow_map_voxel.deinit(gctx);
-        pipelines.shadow_map_skinned.deinit(gctx);
         pipelines.lines.deinit(gctx);
         pipelines.debug_texture.deinit(gctx);
         pipelines.ssao_pipeline.deinit(gctx);
         pipelines.screen_quad_pipeline.deinit(gctx);
+    }
+};
+
+/// Scene-owned pipelines compiled from its immutable layout.
+pub const WorldPipelines = struct {
+    basic: Pipeline,
+    basic_skinned: Pipeline,
+    voxel_pipeline: Pipeline,
+    shadow_map: Pipeline,
+    shadow_map_skinned: Pipeline,
+    shadow_map_voxel: Pipeline,
+
+    pub fn init(allocator: std.mem.Allocator, gctx: *zgpu.GraphicsContext, bind_group_layouts: *const BindGroupLayouts, layout: *const WorldLayout) !WorldPipelines {
+        const basic_source = try layout.shaderSource(allocator, basic_pipeline_module.shader_body);
+        defer allocator.free(basic_source);
+        var basic = basic_pipeline_module.createBasicPipeline(gctx, bind_group_layouts, basic_source);
+        errdefer basic.deinit(gctx);
+        const basic_skinned_source = try layout.shaderSource(allocator, basic_skinned_pipeline_module.shader_body);
+        defer allocator.free(basic_skinned_source);
+        var basic_skinned = basic_skinned_pipeline_module.createBasicSkinnedPipeline(gctx, bind_group_layouts, basic_skinned_source);
+        errdefer basic_skinned.deinit(gctx);
+        const voxel_source = try layout.shaderSource(allocator, voxel_pipeline_module.shader_body);
+        defer allocator.free(voxel_source);
+        var voxel = voxel_pipeline_module.createVoxelPipeline(gctx, bind_group_layouts, voxel_source);
+        errdefer voxel.deinit(gctx);
+        const shadow_map_source = try layout.shaderSource(allocator, shadow_map_pipeline_module.shader_body);
+        defer allocator.free(shadow_map_source);
+        var shadow_map = shadow_map_pipeline_module.createShadowMapPipeline(gctx, bind_group_layouts, shadow_map_source);
+        errdefer shadow_map.deinit(gctx);
+        const shadow_map_skinned_source = try layout.shaderSource(allocator, shadow_map_skinned_pipeline_module.shader_body);
+        defer allocator.free(shadow_map_skinned_source);
+        var shadow_map_skinned = shadow_map_skinned_pipeline_module.createShadowMapSkinnedPipeline(gctx, bind_group_layouts, shadow_map_skinned_source);
+        errdefer shadow_map_skinned.deinit(gctx);
+        const shadow_map_voxel_source = try layout.shaderSource(allocator, shadow_map_voxel_pipeline_module.shader_body);
+        defer allocator.free(shadow_map_voxel_source);
+        var shadow_map_voxel = shadow_map_voxel_pipeline_module.createShadowMapVoxelPipeline(gctx, bind_group_layouts, shadow_map_voxel_source);
+        errdefer shadow_map_voxel.deinit(gctx);
+        return .{
+            .basic = basic,
+            .basic_skinned = basic_skinned,
+            .voxel_pipeline = voxel,
+            .shadow_map = shadow_map,
+            .shadow_map_skinned = shadow_map_skinned,
+            .shadow_map_voxel = shadow_map_voxel,
+        };
+    }
+
+    pub fn deinit(self: *WorldPipelines, gctx: *zgpu.GraphicsContext) void {
+        self.basic.deinit(gctx);
+        self.basic_skinned.deinit(gctx);
+        self.voxel_pipeline.deinit(gctx);
+        self.shadow_map.deinit(gctx);
+        self.shadow_map_skinned.deinit(gctx);
+        self.shadow_map_voxel.deinit(gctx);
     }
 };

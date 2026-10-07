@@ -1,7 +1,7 @@
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-const wgsl_vs = @import("../chunk_utils.zig").wgsl ++ @embedFile("../shaders/shadow_map/skinned_vs.wgsl");
+pub const shader_body = @embedFile("../shaders/shadow_map/skinned_vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/shadow_map/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
@@ -10,6 +10,7 @@ const BindGroupLayouts = @import("../bind_group_layouts.zig").BindGroupLayouts;
 pub fn createShadowMapSkinnedPipeline(
     gctx: *zgpu.GraphicsContext,
     bind_group_layouts: *const BindGroupLayouts,
+    wgsl_vs: [:0]const u8,
 ) Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
         bind_group_layouts.scene.bind_group_layout_handle,

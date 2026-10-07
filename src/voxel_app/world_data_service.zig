@@ -5,13 +5,14 @@ const world_module = @import("./world.zig");
 const WorldChunk = world_module.WorldChunk;
 const BlockOperation = world_module.BlockOperation;
 const OperationStatus = world_module.OperationStatus;
-const encodeChunkCoords = world_module.encodeChunkCoords;
+const WorldLayout = @import("engine").WorldLayout;
+const test_layout = @import("test_world.zig").layout;
 const world_generator = @import("./world_generator.zig");
 const WorldGenerator = world_generator.WorldGenerator;
 const ColumnGenerator = world_generator.ColumnGenerator;
 const ChunkId = @import("./consts.zig").ChunkId;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
-const WORLD_SIZE = @import("./consts.zig").WORLD_SIZE;
+const WORLD_SIZE = test_layout.size_in_chunks;
 const Side = @import("engine").voxel_chunk.Side;
 
 /// Unbounded multi-producer queue. Pushing never waits for the consumer (only for the short
@@ -187,8 +188,8 @@ pub const Client = struct {
     }
 
     pub fn requestChunksInMode(self: *Client, column: @Vector(2, i32), z_start: i32, z_end: i32, mode: Representation) u64 {
-        std.debug.assert(column[0] >= 0 and column[0] < WORLD_SIZE[0] and column[1] >= 0 and column[1] < WORLD_SIZE[1]);
-        std.debug.assert(z_start >= 0 and z_start < z_end and z_end <= WORLD_SIZE[2]);
+        std.debug.assert(column[0] >= 0 and column[0] < self.service.layout.size_in_chunks[0] and column[1] >= 0 and column[1] < self.service.layout.size_in_chunks[1]);
+        std.debug.assert(z_start >= 0 and z_start < z_end and z_end <= self.service.layout.size_in_chunks[2]);
         const id = self.nextRequestId();
         self.service.requests.push(self.service.io, self.service.allocator, .{ .load_chunks = .{
             .client = self,
@@ -213,7 +214,7 @@ pub const Client = struct {
     /// a snapshot, including failures. Mesh-mode results share packages with mesh changes.
     /// Commands from this endpoint are processed in submission order.
     pub fn submitOperation(self: *Client, operation: BlockOperation) u64 {
-        operation.validate();
+        operation.validate(self.service.layout);
         const id = self.nextRequestId();
         self.service.requests.push(self.service.io, self.service.allocator, .{ .operation = .{
             .client = self,
@@ -263,6 +264,7 @@ pub const Client = struct {
 /// related snapshots, neighbor meshes, and command results share one update package.
 pub const WorldDataService = struct {
     const MeshLoad = struct { client: *Client, coords: ChunkCoords, token: u64 };
+    layout: *const WorldLayout,
     io: Io,
     allocator: std.mem.Allocator,
     requests: Mailbox(Request) = .{},
@@ -276,15 +278,20 @@ pub const WorldDataService = struct {
     dirty_meshes: std.AutoHashMapUnmanaged(ChunkId, void) = .empty,
 
     /// The allocator must be thread-safe; messages transfer ownership between tasks.
-    pub fn create(io: Io, allocator: std.mem.Allocator, generator: WorldGenerator) !*WorldDataService {
+    pub fn create(io: Io, allocator: std.mem.Allocator, layout: *const WorldLayout, generator: WorldGenerator) !*WorldDataService {
+        if (!layout.wrap_x) return error.XWrappingRequired;
         generator.validate();
+        const owned_layout = try allocator.create(WorldLayout);
+        errdefer allocator.destroy(owned_layout);
+        owned_layout.* = layout.*;
         const self = try allocator.create(WorldDataService);
         errdefer allocator.destroy(self);
         self.* = .{
+            .layout = owned_layout,
             .io = io,
             .allocator = allocator,
             .worker = undefined,
-            .worker_state = .{ .generator = generator },
+            .worker_state = .{ .layout = owned_layout, .generator = generator },
         };
         self.worker = try io.concurrent(runWorker, .{self});
         return self;
@@ -315,6 +322,7 @@ pub const WorldDataService = struct {
         self.clients.deinit(self.allocator);
         self.requests.deinit(self.allocator);
         self.worker_state.deinit(self.allocator);
+        self.allocator.destroy(@constCast(self.layout));
         self.allocator.destroy(self);
     }
 
@@ -332,7 +340,7 @@ pub const WorldDataService = struct {
             // Coalesce every edited mesh in this batch, including face dependencies, then
             // publish it together with all corresponding block snapshots/acknowledgments.
             var dirty = self.dirty_meshes.keyIterator();
-            while (dirty.next()) |position| self.publishMesh(world_module.decodeChunkId(position.*));
+            while (dirty.next()) |position| self.publishMesh(self.layout.decodeChunkId(position.*));
             self.dirty_meshes.clearRetainingCapacity();
             self.flushPackages();
 
@@ -340,7 +348,7 @@ pub const WorldDataService = struct {
             if (self.next_mesh_load < self.mesh_loads.items.len) {
                 const load = self.mesh_loads.items[self.next_mesh_load];
                 self.next_mesh_load += 1;
-                if (load.client.subscriptions.get(encodeChunkCoords(load.coords))) |sub| {
+                if (load.client.subscriptions.get(self.layout.encodeChunkCoords(load.coords))) |sub| {
                     if (sub.id == load.token and sub.mode == .mesh and sub.mesh_pending) self.publishMesh(load.coords);
                 }
                 if (self.next_mesh_load == self.mesh_loads.items.len) {
@@ -365,11 +373,11 @@ pub const WorldDataService = struct {
                 // Certify final block snapshots against the final neighboring inputs too.
                 for (client.pending.responses.items) |*response| {
                     if (response.data != .blocks) continue;
-                    const current = self.worker_state.modified_chunks.get(encodeChunkCoords(response.coords));
+                    const current = self.worker_state.modified_chunks.get(self.layout.encodeChunkCoords(response.coords));
                     const revision = if (current) |chunk| chunk.chunk_revision else 0;
                     if (response.chunk_revision != revision) continue;
                     response.mesh_revision = self.worker_state.meshRevision(response.coords);
-                    const sub = client.subscriptions.getPtr(encodeChunkCoords(response.coords)) orelse continue;
+                    const sub = client.subscriptions.getPtr(self.layout.encodeChunkCoords(response.coords)) orelse continue;
                     if (sub.mode != .blocks or sub.id != response.subscription_id) continue;
                     response.data.blocks.neighbors = self.worker_state.neighborBoundaries(self.allocator, response.coords);
                     sub.boundaries_pending = false;
@@ -380,7 +388,7 @@ pub const WorldDataService = struct {
                 while (subscriptions.next()) |entry| {
                     const sub = entry.value_ptr;
                     if (sub.mode != .blocks or !sub.boundaries_pending) continue;
-                    const coords = world_module.decodeChunkId(entry.key_ptr.*);
+                    const coords = self.layout.decodeChunkId(entry.key_ptr.*);
                     client.append(.{
                         .coords = coords,
                         .subscription_id = sub.id,
@@ -403,7 +411,7 @@ pub const WorldDataService = struct {
     /// Builds once and fans out owned copies only to mesh subscribers awaiting this state.
     /// Neighbor blocks are temporary dependencies, independent of player subscriptions.
     fn publishMesh(self: *WorldDataService, coords: ChunkCoords) void {
-        const position = encodeChunkCoords(coords);
+        const position = self.layout.encodeChunkCoords(coords);
         var needed = false;
         for (self.clients.items) |client| {
             if (client.subscriptions.get(position)) |sub| {
@@ -445,11 +453,11 @@ pub const WorldDataService = struct {
             },
             .load_chunks => |load| {
                 if (self.is_shutting_down.load(.monotonic)) return;
-                const generator = if (load.mode == .blocks) ColumnGenerator.init(self.worker_state.generator, load.column) else null;
+                const generator = if (load.mode == .blocks) ColumnGenerator.init(self.layout, self.worker_state.generator, load.column) else null;
                 var z = load.z_start;
                 while (z < load.z_end) : (z += 1) {
                     const coords = ChunkCoords{ load.column[0], load.column[1], z };
-                    load.client.subscriptions.put(self.allocator, encodeChunkCoords(coords), .{
+                    load.client.subscriptions.put(self.allocator, self.layout.encodeChunkCoords(coords), .{
                         .id = load.request_id,
                         .mode = load.mode,
                         .mesh_pending = load.mode == .mesh,
@@ -463,7 +471,7 @@ pub const WorldDataService = struct {
             },
             .operation => |edit| {
                 const coords, const local = world_module.splitBlockCoords(edit.operation.block);
-                const position = encodeChunkCoords(coords);
+                const position = self.layout.encodeChunkCoords(coords);
                 const result = self.worker_state.applyOperation(self.allocator, edit.operation);
                 defer result.chunk.content.deinit(self.allocator);
                 if (self.is_shutting_down.load(.monotonic)) return;
@@ -473,11 +481,11 @@ pub const WorldDataService = struct {
                     for (std.enums.values(Side)) |side| {
                         const i = @intFromEnum(side);
                         if (local[i / 2] == (if (i % 2 == 0) @as(u5, 0) else CHUNK_SIZE - 1))
-                            affected[i] = world_module.adjacentChunk(coords, side);
+                            affected[i] = world_module.adjacentChunk(self.layout, coords, side);
                     }
                     for (affected, 0..) |entry, i| {
                         const changed = entry orelse continue;
-                        const changed_id = encodeChunkCoords(changed);
+                        const changed_id = self.layout.encodeChunkCoords(changed);
                         self.dirty_meshes.put(self.allocator, changed_id, {}) catch @panic("OOM");
                         for (self.clients.items) |client| {
                             const sub = client.subscriptions.getPtr(changed_id) orelse continue;
@@ -505,6 +513,7 @@ pub const WorldDataService = struct {
 };
 
 const WorkerState = struct {
+    layout: *const WorldLayout,
     generator: WorldGenerator,
     /// Committed edits survive cache eviction. Untouched chunks are regenerated on demand.
     modified_chunks: std.AutoHashMapUnmanaged(ChunkId, WorldChunk) = .empty,
@@ -520,7 +529,7 @@ const WorkerState = struct {
     boundary_cache: std.AutoHashMapUnmanaged(ChunkId, BoundaryMasks) = .empty,
 
     fn boundariesAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) BoundaryMasks {
-        const id = encodeChunkCoords(coords);
+        const id = self.layout.encodeChunkCoords(coords);
         if (self.modified_chunks.getPtr(id)) |chunk| return chunk.boundaries;
         if (self.boundary_cache.get(id)) |masks| return masks;
         const chunk = self.loadAt(allocator, coords);
@@ -533,22 +542,22 @@ const WorkerState = struct {
     fn neighborBoundaries(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) BoundaryMasks {
         var masks: BoundaryMasks = @splat(.{});
         for (std.enums.values(Side)) |side| {
-            const adjacent = world_module.adjacentChunk(coords, side) orelse continue;
+            const adjacent = world_module.adjacentChunk(self.layout, coords, side) orelse continue;
             masks[@intFromEnum(side)] = self.boundariesAt(allocator, adjacent)[@intFromEnum(side.getOpposite())];
         }
         return masks;
     }
 
     fn meshRevision(self: *const WorkerState, coords: ChunkCoords) u64 {
-        return self.mesh_revisions.get(encodeChunkCoords(coords)) orelse 0;
+        return self.mesh_revisions.get(self.layout.encodeChunkCoords(coords)) orelse 0;
     }
 
     fn loadAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) WorldChunk {
-        if (self.modified_chunks.get(encodeChunkCoords(coords))) |chunk| return chunk.clone(allocator);
+        if (self.modified_chunks.get(self.layout.encodeChunkCoords(coords))) |chunk| return chunk.clone(allocator);
         const key = @as(u64, @intCast(coords[0])) << 32 | @as(u64, @intCast(coords[1]));
         if (!self.columns.contains(key)) {
             if (self.columns.count() >= 64) self.columns.clearRetainingCapacity();
-            self.columns.put(allocator, key, ColumnGenerator.init(self.generator, .{ coords[0], coords[1] })) catch @panic("OOM");
+            self.columns.put(allocator, key, ColumnGenerator.init(self.layout, self.generator, .{ coords[0], coords[1] })) catch @panic("OOM");
         }
         return self.columns.getPtr(key).?.generateChunk(allocator, coords[2]);
     }
@@ -563,7 +572,7 @@ const WorkerState = struct {
     }
 
     fn loadChunk(self: *const WorkerState, allocator: std.mem.Allocator, generator: *const ColumnGenerator, coords: ChunkCoords) WorldChunk {
-        if (self.modified_chunks.get(encodeChunkCoords(coords))) |chunk| return chunk.clone(allocator);
+        if (self.modified_chunks.get(self.layout.encodeChunkCoords(coords))) |chunk| return chunk.clone(allocator);
         return generator.generateChunk(allocator, coords[2]);
     }
 
@@ -573,9 +582,9 @@ const WorkerState = struct {
         revealed_neighbors: [6]?ChunkCoords,
     } {
         const coords, const local = world_module.splitBlockCoords(operation.block);
-        const position = encodeChunkCoords(coords);
+        const position = self.layout.encodeChunkCoords(coords);
         var chunk = if (self.modified_chunks.get(position)) |stored| stored.clone(allocator) else blk: {
-            const generator = ColumnGenerator.init(self.generator, .{ coords[0], coords[1] });
+            const generator = ColumnGenerator.init(self.layout, self.generator, .{ coords[0], coords[1] });
             break :blk generator.generateChunk(allocator, coords[2]);
         };
         const previous_flags = chunk.flags;
@@ -588,15 +597,15 @@ const WorkerState = struct {
             for (std.enums.values(Side)) |side| {
                 const i = @intFromEnum(side);
                 if (local[i / 2] != (if (i % 2 == 0) @as(u5, 0) else CHUNK_SIZE - 1)) continue;
-                const neighbor = world_module.adjacentChunk(coords, side) orelse continue;
-                self.mesh_revisions.put(allocator, encodeChunkCoords(neighbor), self.next_mesh_revision) catch @panic("OOM");
+                const neighbor = world_module.adjacentChunk(self.layout, coords, side) orelse continue;
+                self.mesh_revisions.put(allocator, self.layout.encodeChunkCoords(neighbor), self.next_mesh_revision) catch @panic("OOM");
             }
             const entry = self.modified_chunks.getOrPut(allocator, position) catch @panic("OOM");
             if (entry.found_existing) entry.value_ptr.content.deinit(allocator);
             entry.value_ptr.* = chunk.clone(allocator);
             for (std.enums.values(Side)) |side| {
                 if (!previous_flags.getSideSolidness(side) or chunk.flags.getSideSolidness(side)) continue;
-                const neighbor = world_module.adjacentChunk(coords, side) orelse continue;
+                const neighbor = world_module.adjacentChunk(self.layout, coords, side) orelse continue;
                 if (self.revealChunk(allocator, neighbor)) revealed_neighbors[@intFromEnum(side)] = neighbor;
             }
         }
@@ -606,14 +615,14 @@ const WorkerState = struct {
     /// Reveals even an unsubscribed chunk. Its revision makes it dirty, so later loads
     /// use this retained state instead of regenerating the original unreachable flag.
     fn revealChunk(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) bool {
-        const position = encodeChunkCoords(coords);
+        const position = self.layout.encodeChunkCoords(coords);
         if (self.modified_chunks.getPtr(position)) |chunk| {
             if (!chunk.flags.is_unreachable) return false;
             chunk.flags.is_unreachable = false;
             chunk.chunk_revision += 1;
             return true;
         }
-        const generator = ColumnGenerator.init(self.generator, .{ coords[0], coords[1] });
+        const generator = ColumnGenerator.init(self.layout, self.generator, .{ coords[0], coords[1] });
         var chunk = generator.generateChunk(allocator, coords[2]);
         if (!chunk.flags.is_unreachable) {
             chunk.content.deinit(allocator);
@@ -748,14 +757,14 @@ test "items pushed by concurrent producers are received exactly once and in orde
 
 test "loaded chunks match generation and subscribe with the load token" {
     const generator = WorldGenerator{ .terrain = .{ .seed = 12345 } };
-    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, generator);
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, generator);
     defer service.destroy();
     const client = try service.createClient();
     const token = client.requestChunks(.{ 10, 20 }, 2, 6);
     var responses: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&responses);
     try waitForResponses(client, &responses, 4);
-    const column = ColumnGenerator.init(generator, .{ 10, 20 });
+    const column = ColumnGenerator.init(&test_layout, generator, .{ 10, 20 });
     for (responses.items, 2..) |response, z| {
         const expected = column.generateChunk(std.testing.allocator, @intCast(z));
         defer expected.content.deinit(std.testing.allocator);
@@ -769,7 +778,7 @@ test "loaded chunks match generation and subscribe with the load token" {
 }
 
 test "commands validate against authority and return status plus independent snapshots" {
-    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
     defer service.destroy();
     const client = try service.createClient();
     const block = [3]u32{ 1, 2, WORLD_SIZE[2] * CHUNK_SIZE - 1 };
@@ -797,7 +806,7 @@ test "commands validate against authority and return status plus independent sna
 }
 
 test "successful edits push data only to subscribers and combine the origin reply" {
-    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
     defer service.destroy();
     const origin = try service.createClient();
     const observer = try service.createClient();
@@ -829,12 +838,12 @@ test "successful edits push data only to subscribers and combine the origin repl
 }
 
 test "eviction stops pushes and a fresh load returns committed edits with a new token" {
-    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
     defer service.destroy();
     const main = try service.createClient();
     const npc = try service.createClient();
     const z = WORLD_SIZE[2] - 1;
-    const position = world_module.encodeChunkId(0, 0, z);
+    const position = test_layout.encodeChunkId(0, 0, z);
     const old_token = main.requestChunks(.{ 0, 0 }, z, z + 1);
     const block = [3]u32{ 16, 16, z * CHUNK_SIZE };
     _ = npc.submitOperation(.{ .block = block, .action = .{ .put = .dirt } });
@@ -866,7 +875,7 @@ fn putFromClient(client: *Client, block: [3]u32) void {
 
 test "concurrent clients cannot both put into the same empty block" {
     const io = std.testing.io;
-    const service = try WorldDataService.create(io, std.testing.allocator, .flat);
+    const service = try WorldDataService.create(io, std.testing.allocator, &test_layout, .flat);
     defer service.destroy();
     const a = try service.createClient();
     const b = try service.createClient();
@@ -890,7 +899,7 @@ test "concurrent clients cannot both put into the same empty block" {
 }
 
 test "service shutdown drains edits and frees unconsumed replies" {
-    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
     const client = try service.createClient();
     for (0..4) |x| _ = client.requestChunks(.{ @intCast(x), 0 }, 0, WORLD_SIZE[2]);
     _ = client.submitOperation(.{ .block = .{ 0, 0, 0 }, .action = .remove });
@@ -899,10 +908,11 @@ test "service shutdown drains edits and frees unconsumed replies" {
 
 test "shutdown skips generation requests but still commits commands" {
     var service = WorldDataService{
+        .layout = &test_layout,
         .io = std.testing.io,
         .allocator = std.testing.allocator,
         .worker = undefined,
-        .worker_state = .{ .generator = .flat },
+        .worker_state = .{ .layout = &test_layout, .generator = .flat },
     };
     var client = Client{ .service = &service };
     defer service.requests.deinit(std.testing.allocator);
@@ -920,7 +930,7 @@ test "shutdown skips generation requests but still commits commands" {
 }
 
 test "losing solid faces retains previously unloaded neighbors as dirty revisions" {
-    var state = WorkerState{ .generator = .{ .terrain = .{ .seed = 1, .params = .{ .base_height = 200, .height_amplitude = 0 } } } };
+    var state = WorkerState{ .layout = &test_layout, .generator = .{ .terrain = .{ .seed = 1, .params = .{ .base_height = 200, .height_amplitude = 0 } } } };
     defer state.deinit(std.testing.allocator);
     const coords = ChunkCoords{ 0, 2, 3 };
     for (std.enums.values(Side), 0..) |side, index| {
@@ -935,14 +945,14 @@ test "losing solid faces retains previously unloaded neighbors as dirty revision
         try std.testing.expectEqual(index + 1, result.chunk.chunk_revision);
         for (result.revealed_neighbors, 0..) |neighbor_opt, neighbor_index| {
             if (neighbor_index == index) {
-                const neighbor_coords = world_module.adjacentChunk(coords, side).?;
+                const neighbor_coords = world_module.adjacentChunk(&test_layout, coords, side).?;
                 try std.testing.expectEqual(neighbor_coords, neighbor_opt.?);
-                const retained = state.modified_chunks.get(encodeChunkCoords(neighbor_coords)).?;
+                const retained = state.modified_chunks.get(test_layout.encodeChunkCoords(neighbor_coords)).?;
                 try std.testing.expect(!retained.flags.is_unreachable);
                 try std.testing.expect(retained.isDirty());
                 try std.testing.expectEqual(1, retained.chunk_revision);
                 try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, retained.solid_block_count);
-                const generator = ColumnGenerator.init(state.generator, .{ neighbor_coords[0], neighbor_coords[1] });
+                const generator = ColumnGenerator.init(&test_layout, state.generator, .{ neighbor_coords[0], neighbor_coords[1] });
                 const reloaded = state.loadChunk(std.testing.allocator, &generator, neighbor_coords);
                 defer reloaded.content.deinit(std.testing.allocator);
                 try std.testing.expectEqual(retained.flags, reloaded.flags);
@@ -963,13 +973,13 @@ test "losing solid faces retains previously unloaded neighbors as dirty revision
         defer result.chunk.content.deinit(std.testing.allocator);
         for (result.revealed_neighbors) |neighbor| try std.testing.expectEqual(null, neighbor);
     }
-    const wrapped_neighbor = state.modified_chunks.get(world_module.encodeChunkId(WORLD_SIZE[0] - 1, 2, 3)).?;
+    const wrapped_neighbor = state.modified_chunks.get(test_layout.encodeChunkId(WORLD_SIZE[0] - 1, 2, 3)).?;
     try std.testing.expectEqual(1, wrapped_neighbor.chunk_revision);
     try std.testing.expect(!wrapped_neighbor.flags.is_unreachable);
 }
 
 test "interior edits expose no neighbors and a corner reveals three face neighbors" {
-    var state = WorkerState{ .generator = .flat };
+    var state = WorkerState{ .layout = &test_layout, .generator = .flat };
     defer state.deinit(std.testing.allocator);
     const interior = state.applyOperation(std.testing.allocator, .{
         .block = .{ 8, 2 * CHUNK_SIZE + 8, 2 * CHUNK_SIZE + 8 },
@@ -989,7 +999,7 @@ test "interior edits expose no neighbors and a corner reveals three face neighbo
         try std.testing.expectEqual(side % 2 == 0, neighbor != null);
     }
     try std.testing.expectEqual(4, state.modified_chunks.count());
-    try std.testing.expect(!state.modified_chunks.contains(world_module.encodeChunkId(WORLD_SIZE[0] - 1, 1, 1)));
+    try std.testing.expect(!state.modified_chunks.contains(test_layout.encodeChunkId(WORLD_SIZE[0] - 1, 1, 1)));
 
     // Revealing a previously edited chunk must preserve its blocks and advance its own
     // revision, independently of the operation that opened the neighboring wall.
@@ -999,7 +1009,7 @@ test "interior edits expose no neighbors and a corner reveals three face neighbo
     });
     defer opening.chunk.content.deinit(std.testing.allocator);
     try std.testing.expectEqual(ChunkCoords{ 0, 2, 2 }, opening.revealed_neighbors[@intFromEnum(Side.left)].?);
-    const revealed = state.modified_chunks.get(world_module.encodeChunkId(0, 2, 2)).?;
+    const revealed = state.modified_chunks.get(test_layout.encodeChunkId(0, 2, 2)).?;
     try std.testing.expectEqual(3, revealed.chunk_revision);
     try std.testing.expect(!revealed.flags.is_unreachable);
     try std.testing.expectEqual(.none, revealed.content.getBlock(.{ 8, 8, 8 }));
@@ -1008,13 +1018,13 @@ test "interior edits expose no neighbors and a corner reveals three face neighbo
 }
 
 test "reveals notify all neighbor subscribers and survive eviction and reload" {
-    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
     defer service.destroy();
     const origin = try service.createClient();
     const observer = try service.createClient();
     const other = try service.createClient();
     const coords = ChunkCoords{ 1, 1, 2 };
-    const position = encodeChunkCoords(coords);
+    const position = test_layout.encodeChunkCoords(coords);
     const origin_token = origin.requestChunks(.{ 1, 1 }, 2, 3);
     const observer_token = observer.requestChunks(.{ 1, 1 }, 2, 3);
     _ = other.requestChunks(.{ 5, 5 }, 2, 3);
@@ -1068,7 +1078,7 @@ fn deinitTestPackages(packages: *std.ArrayList(ResponsePackage)) void {
 
 test "boundary edits bundle blocks and neighbor meshes with independent revisions across x wrap" {
     const allocator = std.testing.allocator;
-    const service = try WorldDataService.create(std.testing.io, allocator, .flat);
+    const service = try WorldDataService.create(std.testing.io, allocator, &test_layout, .flat);
     defer service.destroy();
     const client = try service.createClient();
     _ = client.requestChunks(.{ 0, 2 }, 3, 4);
@@ -1097,7 +1107,7 @@ test "boundary edits bundle blocks and neighbor meshes with independent revision
     try std.testing.expectEqual([3]u8{ 31, 8, 8 }, updates[1].data.mesh.blocks_grouped_by_side[@intFromEnum(Side.right)].items[0].coords);
 
     const block_token = client.requestChunks(.{ neighbor[0], neighbor[1] }, 3, 4);
-    client.evictChunk(encodeChunkCoords(neighbor), mesh_token);
+    client.evictChunk(test_layout.encodeChunkCoords(neighbor), mesh_token);
     var promoted: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&promoted);
     try waitForResponses(client, &promoted, 1);
@@ -1105,7 +1115,7 @@ test "boundary edits bundle blocks and neighbor meshes with independent revision
     try std.testing.expectEqual(updates[1].mesh_revision, promoted.items[0].mesh_revision);
     try std.testing.expectEqual(updates[1].chunk_revision, promoted.items[0].chunk_revision);
 
-    client.evictChunk(encodeChunkCoords(neighbor), block_token);
+    client.evictChunk(test_layout.encodeChunkCoords(neighbor), block_token);
     _ = client.submitOperation(.{ .block = .{ 0, 2 * CHUNK_SIZE + 9, 3 * CHUNK_SIZE + 8 }, .action = .remove });
     var acknowledgments: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&acknowledgments);
@@ -1121,7 +1131,7 @@ test "boundary edits bundle blocks and neighbor meshes with independent revision
 
 test "worker coalesces boundary meshes while preserving all operation acknowledgments" {
     const allocator = std.testing.allocator;
-    const service = try WorldDataService.create(std.testing.io, allocator, .flat);
+    const service = try WorldDataService.create(std.testing.io, allocator, &test_layout, .flat);
     defer service.destroy();
     const client = try service.createClient();
     _ = client.requestChunks(.{ 2, 2 }, 3, 4);
@@ -1156,7 +1166,7 @@ test "worker coalesces boundary meshes while preserving all operation acknowledg
 
 test "unreachable mesh subscriptions receive only metadata until reveal while block subscriptions receive blocks" {
     const allocator = std.testing.allocator;
-    const service = try WorldDataService.create(std.testing.io, allocator, .flat);
+    const service = try WorldDataService.create(std.testing.io, allocator, &test_layout, .flat);
     defer service.destroy();
     const client = try service.createClient();
     const token = client.requestChunksInMode(.{ 2, 2 }, 2, 3, .mesh);
@@ -1195,10 +1205,10 @@ test "unreachable mesh subscriptions receive only metadata until reveal while bl
 
 test "default terrain 7x7x7 meshes fit the unchanged GPU allocator including fragmentation" {
     const allocator = std.testing.allocator;
-    const service = try WorldDataService.create(std.testing.io, allocator, .{ .terrain = .{ .seed = 12345 } });
+    const service = try WorldDataService.create(std.testing.io, allocator, &test_layout, .{ .terrain = .{ .seed = 12345 } });
     defer service.destroy();
     const client = try service.createClient();
-    const origin = @import("./consts.zig").WORLD_ORIGIN_CHUNK;
+    const origin = test_layout.origin_chunk;
     for (origin[0] - 3..origin[0] + 4) |x| {
         for (origin[1] - 3..origin[1] + 4) |y| _ = client.requestChunksInMode(.{ @intCast(x), @intCast(y) }, 1, 8, .mesh);
     }
@@ -1224,7 +1234,7 @@ test "default terrain 7x7x7 meshes fit the unchanged GPU allocator including fra
 
 test "block subscriptions receive coalesced neighbor masks with mesh updates across x wrap" {
     const allocator = std.testing.allocator;
-    const service = try WorldDataService.create(std.testing.io, allocator, .flat);
+    const service = try WorldDataService.create(std.testing.io, allocator, &test_layout, .flat);
     defer service.destroy();
     const client = try service.createClient();
     const coords = ChunkCoords{ 0, 2, 3 };
@@ -1302,7 +1312,7 @@ test "block subscriptions receive coalesced neighbor masks with mesh updates acr
 }
 
 test "neighbor masks expose world edges and cache generated planes independently of blocks" {
-    var state = WorkerState{ .generator = .flat };
+    var state = WorkerState{ .layout = &test_layout, .generator = .flat };
     defer state.deinit(std.testing.allocator);
     const masks = state.neighborBoundaries(std.testing.allocator, .{ 0, 0, 0 });
     for ([_]Side{ .front, .bottom }) |side| {
@@ -1318,7 +1328,7 @@ test "neighbor masks expose world edges and cache generated planes independently
 }
 
 test "boundary-only observers are notified before the edit reply without subscribing to the source chunk" {
-    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
     defer service.destroy();
     const observer = try service.createClient();
     const editor = try service.createClient();
@@ -1338,9 +1348,15 @@ test "boundary-only observers are notified before the edit reply without subscri
     try std.testing.expectEqual(1, observed.items[0].mesh_revision);
     try std.testing.expect(!observed.items[0].data.boundaries[@intFromEnum(Side.right)].contains(.right, .{ 31, 8, 8 }));
 
-    observer.evictChunk(encodeChunkCoords(.{ 2, 2, 3 }), token);
+    observer.evictChunk(test_layout.encodeChunkCoords(.{ 2, 2, 3 }), token);
     _ = editor.submitOperation(.{ .block = .{ 3 * CHUNK_SIZE, 2 * CHUNK_SIZE + 9, 3 * CHUNK_SIZE + 8 }, .action = .remove });
     try waitForResponses(editor, &replies, 2);
     observer.takeResponses(&observed);
     try std.testing.expectEqual(1, observed.items.len);
+}
+
+test "voxel cache and service require x wrapping" {
+    const ordinary = try WorldLayout.init(.{ .size_in_chunks = .{ 128, 64, 16 }, .wrap_x = false });
+    try std.testing.expectError(error.XWrappingRequired, world_module.World.init(std.testing.allocator, &ordinary));
+    try std.testing.expectError(error.XWrappingRequired, WorldDataService.create(std.testing.io, std.testing.allocator, &ordinary, .flat));
 }

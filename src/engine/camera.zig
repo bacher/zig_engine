@@ -5,12 +5,13 @@ const zmath = @import("zmath");
 const utils = @import("./utils.zig");
 const FrustumPoints = @import("./frustum.zig").FrustumPoints;
 const chunk_utils = @import("./chunk_utils.zig");
-const getChunkCoords = chunk_utils.getChunkCoords;
+const WorldLayout = @import("world_layout.zig").WorldLayout;
 const Position = @import("world_math.zig").Position;
 
 pub const CHUNK_SIZE = chunk_utils.CHUNK_SIZE;
 
 pub const Camera = struct {
+    layout: *const WorldLayout,
     aspect_ratio: f32,
 
     position: Position,
@@ -28,7 +29,7 @@ pub const Camera = struct {
     view_from_world_chunked: zmath.Mat,
     world_from_clip_chunked: zmath.Mat,
 
-    pub fn init(aspect_ratio: f32) Camera {
+    pub fn init(layout: *const WorldLayout, aspect_ratio: f32) Camera {
         const position: Position = @splat(0);
 
         const no_translation = zmath.translation(0, 0, 0);
@@ -44,10 +45,11 @@ pub const Camera = struct {
         const clip_from_view = createProjectionMatrix(aspect_ratio);
 
         var camera = Camera{
+            .layout = layout,
             .aspect_ratio = aspect_ratio,
 
             .position = position,
-            .chunk = getChunkCoords(position),
+            .chunk = layout.getChunkCoords(position),
 
             .camera_from_world_chunked = no_translation,
             .normalized_view_from_camera = normalized_view_from_camera,
@@ -101,7 +103,7 @@ pub const Camera = struct {
 
     pub fn updatePosition(camera: *Camera, position: Position) void {
         camera.position = position;
-        camera.chunk = getChunkCoords(position);
+        camera.chunk = camera.layout.getChunkCoords(position);
         // Narrow only after removing the chunk origin in f64.
         const local = -chunk_utils.getLocalPosition(position);
         camera.camera_from_world_chunked = zmath.translation(local[0], local[1], local[2]);
