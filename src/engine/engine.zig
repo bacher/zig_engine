@@ -1,5 +1,6 @@
 const std = @import("std");
-const chunk_utils = @import("chunk_utils.zig");
+const WorldSettings = @import("world_layout.zig").WorldSettings;
+const WorldLayout = @import("world_layout.zig").WorldLayout;
 const ChunkTransform = @import("chunk_transform.zig").ChunkTransform;
 const math = std.math;
 const zgpu = @import("zgpu");
@@ -468,10 +469,11 @@ pub const Engine = struct {
         }
     }
 
-    pub fn createScene(engine: *Engine) !*Scene {
+    pub fn createScene(engine: *Engine, settings: WorldSettings) !*Scene {
         const scene = try Scene.init(
             engine,
             engine.allocator,
+            settings,
         );
 
         if (engine.active_scene == null) {
@@ -620,7 +622,7 @@ pub const Engine = struct {
                                 shadow_map_pass.release();
                             }
 
-                            shadow_map_pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
+                            shadow_map_pass.setPipeline(scene.pipelines.shadow_map.pipeline_gpu);
 
                             const potentially_visible_game_objects = engine.temp_buffers.getNextVisibleObjectsChunk();
 
@@ -656,20 +658,20 @@ pub const Engine = struct {
                                 target_buffer.append(allocator, game_object) catch @panic("Failed to grow draw buffer");
                             }
 
-                            shadow_map_pass.setPipeline(engine.pipelines.shadow_map.pipeline_gpu);
+                            shadow_map_pass.setPipeline(scene.pipelines.shadow_map.pipeline_gpu);
 
                             for (engine.temp_buffers.regular_objects.items) |game_object| {
                                 engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, cascade, game_object);
                             }
 
                             if (engine.temp_buffers.skinned_objects.items.len > 0) {
-                                shadow_map_pass.setPipeline(engine.pipelines.shadow_map_skinned.pipeline_gpu);
+                                shadow_map_pass.setPipeline(scene.pipelines.shadow_map_skinned.pipeline_gpu);
                                 for (engine.temp_buffers.skinned_objects.items) |game_object| {
                                     engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, cascade, game_object);
                                 }
                             }
 
-                            shadow_map_pass.setPipeline(engine.pipelines.shadow_map_voxel.pipeline_gpu);
+                            shadow_map_pass.setPipeline(scene.pipelines.shadow_map_voxel.pipeline_gpu);
                             shadow_map_pass.setBindGroup(1, scene.voxel_bind_group.wgpu_bind_group, &.{});
                             for (scene.voxel_grid.chunks.items) |chunk| {
                                 const info = chunk.gpu_residence_info orelse continue;
@@ -754,7 +756,7 @@ pub const Engine = struct {
                         engine.drawGameObject(pass, scene, skybox_object);
                     }
 
-                    pass.setPipeline(engine.pipelines.voxel_pipeline.pipeline_gpu);
+                    pass.setPipeline(scene.pipelines.voxel_pipeline.pipeline_gpu);
                     pass.setBindGroup(1, engine.bind_group_minecraft_texture.wgpu_bind_group, &.{});
 
                     const global_light_clip_matrix_array = getGlobalLightClipMatrixArray(gctx, scene.lights.items[0]);
@@ -770,7 +772,7 @@ pub const Engine = struct {
                         }
                         const info = chunk.gpu_residence_info.?;
 
-                        const view_direction = chunk_utils.getChunkDelta(chunk.chunk_origin, scene.camera.chunk);
+                        const view_direction = scene.layout.getChunkDelta(chunk.chunk_origin, scene.camera.chunk);
 
                         const dx = view_direction[0];
                         const dy = view_direction[1];
@@ -820,13 +822,13 @@ pub const Engine = struct {
                         }
                     }
 
-                    pass.setPipeline(engine.pipelines.basic.pipeline_gpu);
+                    pass.setPipeline(scene.pipelines.basic.pipeline_gpu);
                     for (engine.temp_buffers.regular_objects.items) |game_object| {
                         engine.drawGameObject(pass, scene, game_object);
                     }
 
                     if (engine.temp_buffers.skinned_objects.items.len > 0) {
-                        pass.setPipeline(engine.pipelines.basic_skinned.pipeline_gpu);
+                        pass.setPipeline(scene.pipelines.basic_skinned.pipeline_gpu);
                         for (engine.temp_buffers.skinned_objects.items) |game_object| {
                             engine.drawGameObject(pass, scene, game_object);
                         }
@@ -1038,7 +1040,7 @@ pub const Engine = struct {
         }
 
         const transform = getRenderTransform(game_object, scene.camera);
-        const camera_chunk_from_model = transform.relativeTo(scene.camera.chunk);
+        const camera_chunk_from_model = transform.relativeTo(scene.layout, scene.camera.chunk);
 
         var clip_from_object = utils.matMul(scene.camera.clip_from_world_chunked, camera_chunk_from_model);
         if (game_object.model == .skybox_model or game_object.model == .skybox_cubemap_model) {
@@ -1072,7 +1074,7 @@ pub const Engine = struct {
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index orelse 0);
             },
             .terrain_height_map_model => |model| {
-                const light_clip_from_object_array_uniform = getLightClipMatrixArray(engine.gctx, scene.lights.items[0], transform);
+                const light_clip_from_object_array_uniform = getLightClipMatrixArray(scene.layout, engine.gctx, scene.lights.items[0], transform);
                 const time_uniform = engine.gctx.uniformsAllocate(u32, 1);
                 time_uniform.slice[0] = @intFromFloat(engine.time * 1000);
 
@@ -1148,7 +1150,7 @@ pub const Engine = struct {
         model_descriptor.position.applyVertexBuffer(pass, 0);
 
         const bounds = game_object.model.getBounds();
-        const relative_model = ChunkTransform.init(game_object.aggregated_matrix).relativeTo(scene.camera.chunk);
+        const relative_model = ChunkTransform.init(scene.layout, game_object.aggregated_matrix).relativeTo(scene.layout, scene.camera.chunk);
         const bound_center = utils.matApply1(relative_model, bounds.offset);
         const scale = zmath.util.getScaleVec(relative_model);
         const radius = bounds.radius * scale[0];
@@ -1204,7 +1206,7 @@ pub const Engine = struct {
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index orelse 0);
             },
             .terrain_height_map_model => |model| {
-                const relative_model = getRenderTransform(game_object, scene.camera).relativeTo(cascade.chunk);
+                const relative_model = getRenderTransform(game_object, scene.camera).relativeTo(scene.layout, cascade.chunk);
                 const clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                 clip_uniform.slice[0] = utils.matMul(cascade.clip_from_chunk, relative_model);
                 const time_uniform = engine.gctx.uniformsAllocate(u32, 1);
@@ -1571,13 +1573,13 @@ fn getRenderTransform(game_object: *const GameObject, camera: *const @import("ca
         else => .none,
     };
 
-    var transform = ChunkTransform.init(game_object.aggregated_matrix);
+    var transform = ChunkTransform.init(camera.layout, game_object.aggregated_matrix);
     var chunk_from_model = transform.chunk_from_model;
 
     if (billboard_mode != .none) {
         const scale_vec = zmath.util.getScaleVec(transform.chunk_from_model);
         const position = transform.chunk_from_model[3];
-        const direction = camera.getLocalPosition() - transform.relativeTo(camera.chunk)[3];
+        const direction = camera.getLocalPosition() - transform.relativeTo(camera.layout, camera.chunk)[3];
 
         const billboard_rotation_matrix = if (billboard_mode == .spherical) utils.matMul(
             // inverse is needed because lookAtRh returns matrix which rotates world to camera,
@@ -1624,6 +1626,7 @@ fn getRenderTransform(game_object: *const GameObject, camera: *const @import("ca
 }
 
 fn getLightClipMatrixArray(
+    layout: *const WorldLayout,
     gctx: *zgpu.GraphicsContext,
     light: *const DirectionalLight,
     transform: ChunkTransform,
@@ -1633,7 +1636,7 @@ fn getLightClipMatrixArray(
     for (&light.cascades, 0..) |*cascade, i| {
         const light_clip_from_object = utils.matMul(
             cascade.clip_from_chunk,
-            transform.relativeTo(cascade.chunk),
+            transform.relativeTo(layout, cascade.chunk),
         );
         uniform.slice[i] = light_clip_from_object;
     }

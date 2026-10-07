@@ -41,7 +41,8 @@ The arrows show responsibilities and data flow, not separate processes. The serv
 | [`build.zig`](../build.zig) | Static engine library, demo and voxel executables, content installation, run steps, and test aggregation. |
 | [`src/engine/root.zig`](../src/engine/root.zig) | Public engine exports and selected third-party library exports. |
 | [`engine.zig`](../src/engine/engine.zig) | Initialization, model registry, active scene, callbacks, render passes, and main loop. |
-| [`scene.zig`](../src/engine/scene.zig) | Objects, groups, lights, camera/controller, instance buffer, and voxel grid. |
+| [`scene.zig`](../src/engine/scene.zig) | Immutable world layout, specialized pipelines, objects, groups, lights, camera/controller, instance buffer, and voxel grid. |
+| [`world_layout.zig`](../src/engine/world_layout.zig) | Runtime setting validation, coordinates, storage IDs, wrapping, and shader specialization. |
 | [`game_object.zig`](../src/engine/game_object.zig), [`game_object_group.zig`](../src/engine/game_object_group.zig) | Transform hierarchy and per-object animation state. |
 | [`pipelines/`](../src/engine/pipelines), [`bind_group_layouts/`](../src/engine/bind_group_layouts), [`shaders/`](../src/engine/shaders) | GPU pipeline construction, binding layouts, and WGSL behavior. |
 | [`voxel/`](../src/engine/voxel) | Face records, upload queues, GPU residency, and slot allocation. |
@@ -68,7 +69,7 @@ Both applications change their working directory to the executable directory bef
 
 ## Initialization and frame order
 
-The application creates `WindowContext`, its own game state, and `Engine`, then loads models and creates a scene. The first scene created becomes active. Other scenes can be allocated, but update and draw use only `engine.active_scene`. Scenes are cleaned up by the caller, not by `Engine.deinit`.
+The application creates `WindowContext`, its own game state, and `Engine`, then loads models and creates a scene with explicit `WorldSettings`. The scene owns a validated immutable layout and world-specific pipelines. The first scene created becomes active. Other scenes can be allocated, but update and draw use only `engine.active_scene`. Scenes are cleaned up by the caller, not by `Engine.deinit`.
 
 `Engine.init` enforces one live engine instance. It uses the graphics context supplied by `WindowContext`, creates pipelines and shared GPU resources, initializes image loading, and installs an input controller. Both example applications separately initialize and deinitialize the GUI backend.
 
@@ -90,8 +91,8 @@ There is no fixed simulation timestep in this loop. Camera movement uses frame e
 | State/resource | Current controlling owner |
 | --- | --- |
 | Window and graphics context | Application's `WindowContext`. |
-| Pipelines, engine input controller, registered regular models | `Engine`. Explicit GPU cleanup is incomplete in some paths; see [assets and animation](assets-animation.md). |
-| Scene object allocations, cameras, groups, lights, instance buffer, voxel grid | `Scene`, which the application must destroy. |
+| Common pipelines, engine input controller, registered regular models | `Engine`. Explicit GPU cleanup is incomplete in some paths; see [assets and animation](assets-animation.md). |
+| World layout and specialized pipelines, scene objects, cameras, groups, lights, instance buffer, voxel grid | `Scene`, which the application must destroy. |
 | Special model pointers returned by loading helpers | Usually the application; they are outside the regular-model registry. |
 | Authoritative world state, client endpoints, request/reply queues | `WorldDataService`. Only its worker accesses authoritative state while running. |
 | Local block cache, outstanding commands, streaming state | Voxel application's main thread. |
@@ -108,12 +109,13 @@ The voxel app stops the simulation worker, submits any remaining local commands,
 - [Assets and animation](assets-animation.md): asset import, model instances, playback, and resource limitations.
 - [Voxel world](voxel-world.md): generation, protocol, cache reconciliation, streaming, and GPU capacity.
 - [Coordinates and rendering precision](coordinates.md): CPU/GPU conversion rules and range guarantees.
+- [World configuration](world-configuration.md): runtime settings, validation, immutable ownership, and specialized pipelines.
 
 ## Review points
 
 These are questions raised by the current implementation, not proposed changes:
 
-1. **Engine/application boundary.** World dimensions and x wrapping live in engine coordinate utilities and apply to ordinary object rendering too. Is this wrapped world a defining property of the engine, or should it eventually be configured by an application?
+1. **Engine/application boundary (resolved).** Applications now choose runtime dimensions and optional x wrapping at scene creation. The layout remains immutable, chunks stay fixed at 32³, and the scene owns specialized GPU pipelines. The voxel app always wraps x. See [world configuration](world-configuration.md) and the [original research](world-configuration-options.md).
 2. **Scene lifetime.** Applications own scenes and special models, while the engine owns registered regular models. Is that split intentional? The cleanup paths do not yet express one consistent resource-ownership policy.
 3. **Scene mutation.** Creation and transform updates are clear, but there is no complete public scene-object removal/index-reuse path. Is the current scene model intended mainly for setup followed by transform changes?
 4. **Lighting.** Examples use one directional light. The API accepts several, but forward rendering reads the first light and all lights write the same shadow layers. What lighting contract should be supported?

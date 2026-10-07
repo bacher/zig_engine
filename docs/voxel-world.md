@@ -4,9 +4,9 @@ The voxel application combines deterministic terrain generation with an in-memor
 
 ## Space and contents
 
-Shared engine constants define 32-by-32-by-32-block chunks and a stored world of 512 by 256 by 8 chunks: 16384 by 8192 by 256 blocks. Each block occupies one world-coordinate unit. Only x wraps. Positions beyond y/z storage boundaries cannot index terrain; outer faces at those boundaries remain exposed.
+Chunks remain fixed at 32 by 32 by 32 blocks. The application chooses world dimensions at scene creation; its current preset is 512 by 256 by 8 chunks: 16384 by 8192 by 256 blocks. Each block occupies one world-coordinate unit. Only x wraps. Positions beyond y/z storage boundaries cannot index terrain; outer faces at those boundaries remain exposed.
 
-World coordinates are centered using `WORLD_ORIGIN_CHUNK = WORLD_SIZE / 2`. World position zero corresponds to stored block coordinates (8192, 4096, 128). Spatial chunk coordinates are signed vectors; normalize x and validate y/z before encoding a storage ID. `chunk_utils.WORLD_SIZE_LOG2` defines both world dimensions and packed ID field widths: currently 9 bits for x, 8 for y, and 3 for z, using 20 of the available 32 bits. [Coordinates](coordinates.md) covers rendering origins and signed range handling in detail.
+World coordinates are centered using the immutable layout's half-dimension `origin_chunk`. With the current preset, world position zero corresponds to stored block coordinates (8192, 4096, 128). Spatial chunk coordinates are signed vectors; normalize x and validate y/z before encoding a storage ID through that world's layout. Its dimension exponents determine the packed ID widths: the current preset uses 9/8/3 bits, or 20 of the available 32 bits. The cache and service retain immutable copies of the scene's validated layout and reject unwrapped x. See [world configuration](world-configuration.md) and [coordinates](coordinates.md).
 
 `WorldChunkData.blocks` is indexed `[z][y][x]` and contains one `BlockType` per block. Types are air (`none`), stone, dirt, grass, water, sand, and snow. Current occupancy tests treat every non-air type as solid; water does not have a separate transparent/fluid occupancy rule.
 
@@ -18,11 +18,11 @@ The six solid-face flags describe whether every block of one of the chunk's own 
 
 `WorldGenerator` supports a flat world and seeded heightmap terrain. The running voxel app selects terrain with seed 12345. A column generator computes heights for one horizontal chunk column and reuses them across its vertical chunks.
 
-Terrain height combines periodic-x Perlin noise octaves, rounds the result, and clamps it between 1 and the world's block height. X periods use whole numbers of noise cells so both height values and slopes meet at the wrap seam. Default settings use noise scale 192, four octaves, frequency multiplier 2, amplitude multiplier 0.5, base height 128, height amplitude 48, and four dirt blocks below the surface.
+Terrain height combines periodic-x Perlin noise octaves, rounds the result, and clamps it between 1 and the world's block height. X periods use whole numbers of noise cells so both height values and slopes meet at the wrap seam. Default settings use noise scale 192, four octaves, frequency multiplier 2, amplitude multiplier 0.5, base height at half the selected world height (128 with the preset), height amplitude 48, and four dirt blocks below the surface.
 
 The generated column has grass at the surface, dirt immediately below, stone deeper down, and air above. There are no generated caves. Fully above-surface chunks are empty; sufficiently deep chunks use a shortcut to fill stone. The flat generator supplies solid lower chunks and a half-filled surface chunk near the world midpoint.
 
-Generation is deterministic for the same coordinates, seed, and parameters. Untouched chunks can therefore be discarded and regenerated. Committed modifications override generated data.
+Generation is deterministic for the same layout, coordinates, seed, and parameters. Untouched chunks can therefore be discarded and regenerated. Committed modifications override generated data.
 
 ## Authoritative service and client protocol
 
@@ -146,4 +146,4 @@ The simulation worker initially loads the central chunk column, finds the surfac
 | [`simulation_worker.zig`](../src/voxel_app/simulation_worker.zig) | Surface selection, result-dependent action changes, cancellation, and subscription updates. |
 | [`voxel_tests.zig`](../src/engine/voxel_tests.zig), [`voxel_grid.zig`](../src/engine/voxel/voxel_grid.zig), [`voxel/`](../src/engine/voxel) | GPU data preparation, slot allocation/reuse, exact preflight, and fixed limits. |
 
-Run `zig build test` for the root build's registered tests. The descriptions here are based on current implementations and existing regression cases; no new test run was part of this documentation extraction. Rendering appearance and real GPU execution require separate runtime validation.
+Run `zig build test` for the root build's registered tests. The descriptions here are based on current implementations and existing regression cases; no new test run was part of this documentation extraction. Runtime-layout regressions additionally cover two differently sized services, periodic terrain, and streaming/edits across each x seam. Rendering appearance requires separate visual validation.

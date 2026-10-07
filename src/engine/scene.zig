@@ -3,6 +3,9 @@ const zmath = @import("zmath");
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
+const WorldSettings = @import("world_layout.zig").WorldSettings;
+const WorldLayout = @import("world_layout.zig").WorldLayout;
+const WorldPipelines = @import("pipelines.zig").WorldPipelines;
 const Engine = @import("./engine.zig").Engine;
 const GameObject = @import("./game_object.zig").GameObject;
 const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;
@@ -27,6 +30,9 @@ const MAX_OBJECTS_COUNT = 4096;
 pub const InstanceBufferEntry = @import("chunk_transform.zig").ChunkTransform;
 
 pub const Scene = struct {
+    /// Immutable after creation; all scene coordinate consumers share this layout.
+    layout: *const WorldLayout,
+    pipelines: WorldPipelines,
     engine: *Engine,
     allocator: std.mem.Allocator,
     game_objects: std.ArrayList(*GameObject) = undefined,
@@ -56,16 +62,25 @@ pub const Scene = struct {
     pub fn init(
         engine: *Engine,
         allocator: std.mem.Allocator,
+        settings: WorldSettings,
     ) !*Scene {
+        const validated_layout = try WorldLayout.init(settings);
+        const layout = try allocator.create(WorldLayout);
+        errdefer allocator.destroy(layout);
+        layout.* = validated_layout;
         const scene = try allocator.create(Scene);
         errdefer allocator.destroy(scene);
+
+        scene.layout = layout;
+        var pipelines = try WorldPipelines.init(allocator, engine.gctx, &engine.bind_group_layouts, scene.layout);
+        errdefer pipelines.deinit(engine.gctx);
 
         const space_tree = try SpaceTree(GameObject).init(allocator);
         errdefer space_tree.deinit();
 
         const camera = try allocator.create(Camera);
         errdefer allocator.destroy(camera);
-        camera.* = Camera.init(engine.aspect_ratio);
+        camera.* = Camera.init(scene.layout, engine.aspect_ratio);
 
         const spectator_camera = try allocator.create(SpectatorCamera);
         errdefer allocator.destroy(spectator_camera);
@@ -110,6 +125,8 @@ pub const Scene = struct {
         errdefer voxel_bind_group.deinit(engine.gctx);
 
         scene.* = .{
+            .layout = layout,
+            .pipelines = pipelines,
             .engine = engine,
             .allocator = allocator,
             .game_objects = std.ArrayList(*GameObject).initCapacity(allocator, MAX_OBJECTS_COUNT) catch @panic("Failed to initialize game objects buffer"),
@@ -135,6 +152,7 @@ pub const Scene = struct {
 
     pub fn deinit(scene: *Scene) void {
         const gctx = scene.engine.gctx;
+        scene.pipelines.deinit(gctx);
 
         // Objects detach from their parent during deinit, while groups and the
         // visibility index are still alive.
@@ -169,6 +187,7 @@ pub const Scene = struct {
         scene.camera.deinit();
         scene.allocator.destroy(scene.camera);
         scene.allocator.destroy(scene.spectator_camera);
+        scene.allocator.destroy(@constCast(scene.layout));
         scene.allocator.destroy(scene);
     }
 
@@ -216,7 +235,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(game_object.getModelMatrix());
+        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
 
         if (params.animation_name) |animation_name| {
             try game_object.playAnimation(scene.animationContext(), animation_name);
@@ -249,7 +268,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(game_object.getModelMatrix());
+        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
         scene.instance_buffer.next_index += 1;
         scene.game_objects.appendAssumeCapacity(game_object);
 
@@ -272,7 +291,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(game_object.getModelMatrix());
+        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
         scene.instance_buffer.next_index += 1;
         scene.game_objects.appendAssumeCapacity(game_object);
 
@@ -294,7 +313,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(game_object.getModelMatrix());
+        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
         scene.instance_buffer.next_index += 1;
         scene.game_objects.appendAssumeCapacity(game_object);
 
@@ -338,7 +357,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(game_object.getModelMatrix());
+        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
         scene.instance_buffer.next_index += 1;
         scene.game_objects.appendAssumeCapacity(game_object);
 

@@ -1,3 +1,4 @@
+const test_layout = @import("test_world.zig").layout;
 const std = @import("std");
 const Io = std.Io;
 const service_module = @import("./world_data_service.zig");
@@ -38,19 +39,22 @@ pub const SimulationWorker = struct {
     fn simulate(self: *SimulationWorker) Io.Cancelable!void {
         const client = self.client;
         const service = client.service;
-        const column = @Vector(2, i32){ consts.WORLD_ORIGIN_CHUNK[0], consts.WORLD_ORIGIN_CHUNK[1] };
-        const token = client.requestChunks(column, 0, consts.WORLD_SIZE[2]);
+        const layout = service.layout;
+        const column = @Vector(2, i32){ layout.origin_chunk[0], layout.origin_chunk[1] };
+        const token = client.requestChunks(column, 0, layout.size_in_chunks[2]);
         var responses: std.ArrayList(ChunkResponse) = .empty;
         defer {
             for (responses.items) |response| response.deinit(service.allocator);
             responses.deinit(service.allocator);
         }
         // Eviction also happens on cancellation during startup. The service drains it later.
-        defer for (0..consts.WORLD_SIZE[2]) |z| {
-            client.evictChunk(world.encodeChunkId(column[0], column[1], z), token);
+        defer for (0..@as(usize, @intCast(layout.size_in_chunks[2]))) |z| {
+            client.evictChunk(layout.encodeChunkId(column[0], column[1], z), token);
         };
 
-        var received: [consts.WORLD_SIZE[2]]bool = @splat(false);
+        const received = service.allocator.alloc(bool, @intCast(layout.size_in_chunks[2])) catch @panic("OOM");
+        defer service.allocator.free(received);
+        @memset(received, false);
         var count: usize = 0;
         var surface_z: u32 = 0;
         while (count < received.len) {
@@ -69,10 +73,10 @@ pub const SimulationWorker = struct {
             responses.clearRetainingCapacity();
         }
         // Subsequent traffic consists only of operation replies, with no standing subscription.
-        for (0..consts.WORLD_SIZE[2]) |z| {
-            client.evictChunk(world.encodeChunkId(column[0], column[1], z), token);
+        for (0..@as(usize, @intCast(layout.size_in_chunks[2]))) |z| {
+            client.evictChunk(layout.encodeChunkId(column[0], column[1], z), token);
         }
-        if (surface_z >= consts.WORLD_SIZE_IN_BLOCKS[2]) return;
+        if (surface_z >= layout.size_in_blocks[2]) return;
         const block = [3]u32{
             @as(u32, @intCast(column[0])) * consts.CHUNK_SIZE + consts.CHUNK_SIZE / 2,
             @as(u32, @intCast(column[1])) * consts.CHUNK_SIZE + consts.CHUNK_SIZE / 2,
@@ -136,7 +140,7 @@ test "simulation surface is above the center block, including at chunk boundarie
 }
 
 test "simulation can be canceled during startup" {
-    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, .flat);
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
     defer service.destroy();
     const simulation = try SimulationWorker.create(service);
     simulation.destroy();
@@ -145,12 +149,12 @@ test "simulation can be canceled during startup" {
 test "simulation repeatedly pushes put remove put to a subscribed client" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
-    const service = try WorldDataService.create(io, allocator, .flat);
+    const service = try WorldDataService.create(io, allocator, &test_layout, .flat);
     defer service.destroy();
     const observer = try service.createClient();
-    const surface_chunk_z = consts.WORLD_SIZE[2] / 2 - 1;
+    const surface_chunk_z = test_layout.size_in_chunks[2] / 2 - 1;
     const token = observer.requestChunks(
-        .{ consts.WORLD_ORIGIN_CHUNK[0], consts.WORLD_ORIGIN_CHUNK[1] },
+        .{ test_layout.origin_chunk[0], test_layout.origin_chunk[1] },
         surface_chunk_z,
         surface_chunk_z + 1,
     );

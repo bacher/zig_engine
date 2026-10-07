@@ -1,7 +1,7 @@
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
-const wgsl_vs = @import("../chunk_utils.zig").wgsl ++ @embedFile("../shaders/voxel/geometry.wgsl") ++ @embedFile("../shaders/voxel/vs.wgsl");
+pub const shader_body = @embedFile("../shaders/voxel/geometry.wgsl") ++ @embedFile("../shaders/voxel/vs.wgsl");
 const wgsl_fs = @embedFile("../shaders/voxel/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
@@ -11,6 +11,7 @@ const first_pass_color_with_normals_targets = @import("./_first_pass_color_targe
 pub fn createVoxelPipeline(
     gctx: *zgpu.GraphicsContext,
     bind_group_layouts: *const BindGroupLayouts,
+    wgsl_vs: [:0]const u8,
 ) Pipeline {
     const pipeline_layout_handle = gctx.createPipelineLayout(&.{
         bind_group_layouts.scene.bind_group_layout_handle,

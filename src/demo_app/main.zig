@@ -103,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
     //     break :ids .{gazebo_model_id};
     // };
 
-    const scene = try engine.createScene();
+    const scene = try engine.createScene(.{ .size_in_chunks = .{ 512, 256, 8 }, .wrap_x = false });
     defer scene.deinit();
 
     scene.camera.updatePosition(.{ -2.06, -2.96, 8.45 });

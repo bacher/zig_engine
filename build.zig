@@ -242,6 +242,24 @@ pub fn build(b: *std.Build) void {
     const run_voxel_utils_unit_tests = b.addRunArtifact(voxel_utils_unit_tests);
     const run_slot_buffer_manager_unit_tests = b.addRunArtifact(slot_buffer_manager_unit_tests);
 
+    // Explicit GPU check: regular unit tests stay usable without a graphics adapter.
+    const world_shader_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/engine/world_shader_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zgpu", .module = zgpu.module("root") },
+                .{ .name = "zmath", .module = zmath.module("root") },
+                .{ .name = "debug", .module = debug_module },
+            },
+        }),
+    });
+    @import("zgpu").addLibraryPathsTo(world_shader_tests);
+    world_shader_tests.root_module.linkLibrary(engine_lib);
+    const gpu_test_step = b.step("test-gpu", "Validate world-specialized pipelines with headless Dawn");
+    gpu_test_step.dependOn(&b.addRunArtifact(world_shader_tests).step);
+
     const test_step = b.step("test", "Run unit tests");
     const render_coordinates_tests = b.addTest(.{
         .root_module = b.createModule(.{

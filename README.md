@@ -11,6 +11,7 @@ zig build             # Build/install the library, both applications, and conten
 zig build run         # Run the demo application
 zig build run_voxel   # Run the voxel application
 zig build test        # Run registered unit/regression tests
+zig build test-gpu    # Optional headless Dawn pipeline validation (requires graphics adapter)
 ```
 
 The applications load installed content relative to the executable directory. See [architecture](docs/architecture.md) for the build and startup flow.
@@ -27,6 +28,8 @@ These documents describe the current implementation, extracted from existing doc
 | [Assets and animation](docs/assets-animation.md) | glTF subset, shared models, textures, per-object playback, and resource ownership caveats. |
 | [Voxel world](docs/voxel-world.md) | Generation, service protocol, optimistic edits, streaming, masks, revisions, persistence, and capacity. |
 | [Coordinates and rendering precision](docs/coordinates.md) | f64 CPU positions, signed chunks, camera-relative GPU coordinates, wrapping, and regression coverage. |
+| [World configuration](docs/world-configuration.md) | Runtime dimensions, optional x wrapping, immutable layouts, shader specialization, and validation. |
+| [World configuration research](docs/world-configuration-options.md) | Original tradeoff analysis and isolated compiler measurements. |
 
 The subsystem docs link to implementing modules and existing tests. [TODO.md](TODO.md) is a task list. [Agent session logs](agent-sessions/README.md) are historical records.
 
@@ -46,7 +49,7 @@ See [voxel world, streaming, and editing](docs/voxel-world.md) for the full prot
 
 ## Large-world rendering
 
-CPU positions and accumulated parent/child transforms use f64. GPU transforms remove a chunk origin before narrowing translation to f32. Camera and directional-shadow matrices use the same local frame; x wrapping matches the voxel world. Skyboxes use camera rotation only.
+CPU positions and accumulated parent/child transforms use f64. GPU transforms remove a chunk origin before narrowing translation to f32. Camera and directional-shadow matrices use the same local frame. Applications choose immutable world dimensions and optional x wrapping per scene; the voxel app always wraps x. Skyboxes use camera rotation only.
 
 The active scene visibility index currently returns every registered object, without spatial culling. Voxel shadows include only resident GPU geometry. See [coordinates](docs/coordinates.md), [scenes](docs/scenes.md#visibility-behavior), and [rendering](docs/rendering.md).
 
