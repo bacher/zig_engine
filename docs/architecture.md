@@ -67,7 +67,7 @@ Each application owns an `engine_config.zig` module injected into its engine bui
 | `zig build run` | Build/install, then run the demo. |
 | `zig build run_voxel` | Build/install, then run the voxel application. |
 | `zig build test` | Run registered CPU tests, including coordinates/hierarchy under both wrapping configurations. |
-| `zig build test-gpu` | Validate world pipelines, cache sharing, lifetimes, and allocation cleanup under both configurations with headless Dawn. |
+| `zig build test-gpu` | Validate world pipelines, cache sharing/lifetimes, allocation cleanup, and GPU coordinate arithmetic through readback under both configurations with headless Dawn. |
 
 Both applications change their working directory to the executable directory before loading assets. The build installs `content/` alongside the binaries. Asset lookup still mixes paths relative to the configured content directory with explicit `content/...` paths.
 
