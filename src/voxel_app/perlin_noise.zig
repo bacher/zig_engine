@@ -13,10 +13,12 @@ pub const PerlinNoise = struct {
         return self.sample2DInternal(x, y, null);
     }
 
-    /// Returns noise that repeats after `period` lattice cells on the x-axis.
-    pub fn sample2DPeriodicX(self: PerlinNoise, x: f64, y: f64, period: u32) f64 {
+    /// Returns noise that repeats after a positive `period` of lattice cells.
+    /// The floors of x/y and their +1 neighbors must fit i64; world generation
+    /// validates that range once when preparing its octave settings.
+    pub fn sample2DPeriodicX(self: PerlinNoise, x: f64, y: f64, period: i64) f64 {
         std.debug.assert(period > 0);
-        return self.sample2DInternal(x, y, @intCast(period));
+        return self.sample2DInternal(x, y, period);
     }
 
     fn sample2DInternal(self: PerlinNoise, x: f64, y: f64, x_period: ?i64) f64 {
@@ -109,10 +111,27 @@ test "noise is continuous and bounded" {
 
 test "periodic noise repeats on the x-axis" {
     const noise = PerlinNoise.init(42);
-    const period: u32 = 16;
+    const period: i64 = 16;
 
     const first = noise.sample2DPeriodicX(1.25, 7.75, period);
     const repeated = noise.sample2DPeriodicX(17.25, 7.75, period);
 
     try std.testing.expectEqual(first, repeated);
+}
+
+test "periodic noise supports positive i64 periods beyond u32" {
+    const noise = PerlinNoise.init(42);
+    const period: i64 = 1 << 32;
+    const width: f64 = @floatFromInt(period);
+    for ([_]f64{ -0.25, 0, 1.25, 31.5, width - 0.25 }) |x| {
+        const first = noise.sample2DPeriodicX(x, 7.75, period);
+        try std.testing.expectEqual(first, noise.sample2DPeriodicX(x + width, 7.75, period));
+        try std.testing.expect(first >= -1 and first <= 1);
+    }
+    // Values and slopes agree across the seam at representable sample offsets.
+    const left = noise.sample2DPeriodicX(-0.125, 7.75, period);
+    const right = noise.sample2DPeriodicX(0.125, 7.75, period);
+    const seam_left = noise.sample2DPeriodicX(width - 0.125, 7.75, period);
+    const seam_right = noise.sample2DPeriodicX(width + 0.125, 7.75, period);
+    try std.testing.expectEqual(right - left, seam_right - seam_left);
 }

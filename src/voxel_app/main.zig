@@ -1138,7 +1138,9 @@ test "unreachable chunks keep CPU blocks and queue a mesh immediately after a lo
     defer game.dirty_chunk_ids.deinit(allocator);
     defer game.chunk_subscriptions.deinit(allocator);
     const coords = ChunkCoords{ 1, 1, 2 };
-    const column = world_generator.ColumnGenerator.init(&test_layout, .flat, .{ 1, 1 });
+    var prepared = try world_generator.WorldGenerator.prepare(.flat, std.testing.allocator, &test_layout);
+    defer prepared.deinit(std.testing.allocator);
+    const column = world_generator.ColumnGenerator.init(&prepared, .{ 1, 1 });
     try game.world.?.insertChunk(coords, column.generateChunk(allocator, 2));
     try game.world.?.insertChunk(.{ 1, 1, 3 }, column.generateChunk(allocator, 3));
     game.loadChunkIfNeeded(1, 1, 2);
@@ -1180,7 +1182,7 @@ test "unreachable chunks keep CPU blocks and queue a mesh immediately after a lo
 
     // A service-only metadata change also invalidates a hidden chunk's GPU state.
     const remote_coords = ChunkCoords{ 5, 5, 2 };
-    const remote_column = world_generator.ColumnGenerator.init(&test_layout, .flat, .{ 5, 5 });
+    const remote_column = world_generator.ColumnGenerator.init(&prepared, .{ 5, 5 });
     try game.world.?.insertChunk(remote_coords, remote_column.generateChunk(allocator, 2));
     game.loadChunkIfNeeded(5, 5, 2);
     game.rebuildDirtyChunks();

@@ -18,11 +18,35 @@ The six solid-face flags describe whether every block of one of the chunk's own 
 
 `WorldGenerator` supports a flat world and seeded heightmap terrain. The running voxel app selects terrain with seed 12345. A column generator computes heights for one horizontal chunk column and reuses them across its vertical chunks.
 
+`WorldDataService.create` calls `generator.prepare(allocator, layout)` before starting its worker. The resulting `PreparedWorldGenerator` belongs to that service and holds an immutable table of octave frequencies, positive `i64` x periods, x sampling frequencies, and amplitudes, plus the amplitude sum. All columns and neighbor-strip samples reuse this table, including after cache eviction. Flat worlds need no octave allocation. Service destruction and failed startup release the table.
+
+Preparation checks the layout and generator settings together. Scalar settings must be finite with positive noise scale/lacunarity, at least one octave, and nonnegative persistence/height amplitude. Used octave frequencies must remain positive and finite; amplitudes and their sum must remain finite. Rounded periods and sampled lattice coordinates must be below 2⁶³, preserving room for Perlin's `+1` neighbors. X block coordinates are normalized with the world's power-of-two mask before sampling. These checks return errors in every build mode:
+
+| Error | Meaning |
+| --- | --- |
+| `InvalidGenerationParameters` | A requested scalar setting is invalid. |
+| `NoiseFrequencyOutOfRange` | A used frequency overflows, underflows to zero, or is nonfinite. |
+| `NoisePeriodOutOfRange` | A derived period cannot be represented safely. |
+| `NoiseCoordinateOutOfRange` | The layout/frequency combination exceeds the sampler's lattice range, including y. |
+| `NoiseAmplitudeOutOfRange` | A used amplitude or amplitude sum overflows. |
+
+For example, `{ 1 << 26, 2, 2 }` chunks with `noise_scale = 4` and four octaves produces a final x period of 2³² lattice cells. This is supported by the widened representation. Enlarging a period does not remove the coordinate or floating-point limits.
+
+For direct generation outside the service, prepare once and reuse the result:
+
+```zig
+var prepared = try generator.prepare(allocator, layout);
+defer prepared.deinit(allocator);
+const column = ColumnGenerator.init(&prepared, .{ chunk_x, chunk_y });
+```
+
+The prepared generator borrows its layout. Columns retain that layout and materialized heights, so the layout must outlive them. Changing dimensions or generator settings requires preparing a new generator.
+
 Terrain height combines periodic-x Perlin noise octaves, rounds the result, and clamps it between 1 and the world's block height. X periods use whole numbers of noise cells so both height values and slopes meet at the wrap seam. Default settings use noise scale 192, four octaves, frequency multiplier 2, amplitude multiplier 0.5, base height at half the selected world height (128 with the preset), height amplitude 48, and four dirt blocks below the surface.
 
 The generated column has grass at the surface, dirt immediately below, stone deeper down, and air above. There are no generated caves. Fully above-surface chunks are empty; sufficiently deep chunks use a shortcut to fill stone. The flat generator supplies solid lower chunks and a half-filled surface chunk near the world midpoint.
 
-Generation is deterministic for the same layout, coordinates, seed, and parameters. Untouched chunks can therefore be discarded and regenerated. Committed modifications override generated data.
+Generation is deterministic for the same layout, coordinates, seed, and parameters. Regression snapshots from before octave preparation retain the same default/custom heights and enclosure bounds at seams and world edges. Untouched chunks can therefore be discarded and regenerated. Committed modifications override generated data.
 
 ## Authoritative service and client protocol
 

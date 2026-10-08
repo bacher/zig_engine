@@ -9,6 +9,7 @@ const WorldLayout = @import("engine").WorldLayout;
 const test_layout = @import("test_world.zig").layout;
 const world_generator = @import("./world_generator.zig");
 const WorldGenerator = world_generator.WorldGenerator;
+const PreparedWorldGenerator = world_generator.PreparedWorldGenerator;
 const ColumnGenerator = world_generator.ColumnGenerator;
 const ChunkId = @import("./consts.zig").ChunkId;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
@@ -277,12 +278,14 @@ pub const WorldDataService = struct {
     next_mesh_load: usize = 0,
     dirty_meshes: std.AutoHashMapUnmanaged(ChunkId, void) = .empty,
 
-    /// The allocator must be thread-safe; messages transfer ownership between tasks.
+    /// Validate/prepare generation before starting the worker. The allocator must
+    /// be thread-safe; messages transfer ownership between tasks.
     pub fn create(io: Io, allocator: std.mem.Allocator, layout: *const WorldLayout, generator: WorldGenerator) !*WorldDataService {
-        generator.validate();
         const owned_layout = try allocator.create(WorldLayout);
         errdefer allocator.destroy(owned_layout);
         owned_layout.* = layout.*;
+        var prepared = try generator.prepare(allocator, owned_layout);
+        errdefer prepared.deinit(allocator);
         const self = try allocator.create(WorldDataService);
         errdefer allocator.destroy(self);
         self.* = .{
@@ -290,7 +293,7 @@ pub const WorldDataService = struct {
             .io = io,
             .allocator = allocator,
             .worker = undefined,
-            .worker_state = .{ .layout = owned_layout, .generator = generator },
+            .worker_state = .{ .layout = owned_layout, .generator = prepared },
         };
         self.worker = try io.concurrent(runWorker, .{self});
         return self;
@@ -452,7 +455,7 @@ pub const WorldDataService = struct {
             },
             .load_chunks => |load| {
                 if (self.is_shutting_down.load(.monotonic)) return;
-                const generator = if (load.mode == .blocks) ColumnGenerator.init(self.layout, self.worker_state.generator, load.column) else null;
+                const generator = if (load.mode == .blocks) ColumnGenerator.init(&self.worker_state.generator, load.column) else null;
                 var z = load.z_start;
                 while (z < load.z_end) : (z += 1) {
                     const coords = ChunkCoords{ load.column[0], load.column[1], z };
@@ -513,7 +516,7 @@ pub const WorldDataService = struct {
 
 const WorkerState = struct {
     layout: *const WorldLayout,
-    generator: WorldGenerator,
+    generator: PreparedWorldGenerator,
     /// Committed edits survive cache eviction. Untouched chunks are regenerated on demand.
     modified_chunks: std.AutoHashMapUnmanaged(ChunkId, WorldChunk) = .empty,
     /// Retained independently of mesh allocation/subscription lifetime. Untouched inputs
@@ -556,7 +559,7 @@ const WorkerState = struct {
         const key = @as(u64, @intCast(coords[0])) << 32 | @as(u64, @intCast(coords[1]));
         if (!self.columns.contains(key)) {
             if (self.columns.count() >= 64) self.columns.clearRetainingCapacity();
-            self.columns.put(allocator, key, ColumnGenerator.init(self.layout, self.generator, .{ coords[0], coords[1] })) catch @panic("OOM");
+            self.columns.put(allocator, key, ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] })) catch @panic("OOM");
         }
         return self.columns.getPtr(key).?.generateChunk(allocator, coords[2]);
     }
@@ -568,6 +571,7 @@ const WorkerState = struct {
         self.mesh_revisions.deinit(allocator);
         self.columns.deinit(allocator);
         self.boundary_cache.deinit(allocator);
+        self.generator.deinit(allocator);
     }
 
     fn loadChunk(self: *const WorkerState, allocator: std.mem.Allocator, generator: *const ColumnGenerator, coords: ChunkCoords) WorldChunk {
@@ -583,7 +587,7 @@ const WorkerState = struct {
         const coords, const local = world_module.splitBlockCoords(operation.block);
         const position = self.layout.encodeChunkCoords(coords);
         var chunk = if (self.modified_chunks.get(position)) |stored| stored.clone(allocator) else blk: {
-            const generator = ColumnGenerator.init(self.layout, self.generator, .{ coords[0], coords[1] });
+            const generator = ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] });
             break :blk generator.generateChunk(allocator, coords[2]);
         };
         const previous_flags = chunk.flags;
@@ -621,7 +625,7 @@ const WorkerState = struct {
             chunk.chunk_revision += 1;
             return true;
         }
-        const generator = ColumnGenerator.init(self.layout, self.generator, .{ coords[0], coords[1] });
+        const generator = ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] });
         var chunk = generator.generateChunk(allocator, coords[2]);
         if (!chunk.flags.is_unreachable) {
             chunk.content.deinit(allocator);
@@ -763,7 +767,7 @@ test "loaded chunks match generation and subscribe with the load token" {
     var responses: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&responses);
     try waitForResponses(client, &responses, 4);
-    const column = ColumnGenerator.init(&test_layout, generator, .{ 10, 20 });
+    const column = ColumnGenerator.init(&service.worker_state.generator, .{ 10, 20 });
     for (responses.items, 2..) |response, z| {
         const expected = column.generateChunk(std.testing.allocator, @intCast(z));
         defer expected.content.deinit(std.testing.allocator);
@@ -774,6 +778,39 @@ test "loaded chunks match generation and subscribe with the load token" {
         try std.testing.expectEqual(expected.solid_block_count, response.data.blocks.chunk.solid_block_count);
         try std.testing.expectEqualSlices(u8, std.mem.asBytes(&expected.content.toData()), std.mem.asBytes(&response.data.blocks.chunk.content.toData()));
     }
+}
+
+test "service validates generator settings before startup and supports wide periods" {
+    const small = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    try std.testing.expectError(error.NoisePeriodOutOfRange, WorldDataService.create(std.testing.io, std.testing.allocator, &small, .{ .terrain = .{ .seed = 1, .params = .{ .noise_scale = 0x1p-57, .octaves = 1 } } }));
+    try std.testing.expectError(error.NoiseAmplitudeOutOfRange, WorldDataService.create(std.testing.io, std.testing.allocator, &small, .{ .terrain = .{ .seed = 1, .params = .{ .persistence = 1e308, .octaves = 3 } } }));
+    const tall = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 1 << 26, 2 } });
+    try std.testing.expectError(error.NoiseCoordinateOutOfRange, WorldDataService.create(std.testing.io, std.testing.allocator, &tall, .{ .terrain = .{ .seed = 1, .params = .{ .noise_scale = 0x1p-33, .octaves = 1 } } }));
+
+    const wide = try WorldLayout.init(.{ .size_in_chunks = .{ 1 << 26, 2, 2 } });
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &wide, .{ .terrain = .{ .seed = 12345, .params = .{ .noise_scale = 4 } } });
+    defer service.destroy();
+    try std.testing.expectEqual(@as(i64, 1) << 32, service.worker_state.generator.kind.terrain.octaves[3].x_period);
+    // Requests exercise generation on the worker, including the far x seam.
+    const client = try service.createClient();
+    _ = client.requestChunks(.{ wide.size_in_chunks[0] - 1, 1 }, 0, 2);
+    var responses: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&responses);
+    try waitForResponses(client, &responses, 2);
+    for (responses.items) |response| {
+        try std.testing.expectEqual(wide.size_in_chunks[0] - 1, response.coords[0]);
+        try std.testing.expect(response.data == .blocks);
+    }
+}
+
+test "service startup frees prepared octaves on allocation failure" {
+    const Fixture = struct {
+        fn createAndDestroy(allocator: std.mem.Allocator) !void {
+            const service = try WorldDataService.create(std.testing.io, allocator, &test_layout, .{ .terrain = .{ .seed = 12345 } });
+            defer service.destroy();
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Fixture.createAndDestroy, .{});
 }
 
 test "commands validate against authority and return status plus independent snapshots" {
@@ -911,7 +948,7 @@ test "shutdown skips generation requests but still commits commands" {
         .io = std.testing.io,
         .allocator = std.testing.allocator,
         .worker = undefined,
-        .worker_state = .{ .layout = &test_layout, .generator = .flat },
+        .worker_state = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, std.testing.allocator, &test_layout) },
     };
     var client = Client{ .service = &service };
     defer service.requests.deinit(std.testing.allocator);
@@ -929,7 +966,7 @@ test "shutdown skips generation requests but still commits commands" {
 }
 
 test "losing solid faces retains previously unloaded neighbors as dirty revisions" {
-    var state = WorkerState{ .layout = &test_layout, .generator = .{ .terrain = .{ .seed = 1, .params = .{ .base_height = 200, .height_amplitude = 0 } } } };
+    var state = WorkerState{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.{ .terrain = .{ .seed = 1, .params = .{ .base_height = 200, .height_amplitude = 0 } } }, std.testing.allocator, &test_layout) };
     defer state.deinit(std.testing.allocator);
     const coords = ChunkCoords{ 0, 2, 3 };
     for (std.enums.values(Side), 0..) |side, index| {
@@ -951,7 +988,7 @@ test "losing solid faces retains previously unloaded neighbors as dirty revision
                 try std.testing.expect(retained.isDirty());
                 try std.testing.expectEqual(1, retained.chunk_revision);
                 try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, retained.solid_block_count);
-                const generator = ColumnGenerator.init(&test_layout, state.generator, .{ neighbor_coords[0], neighbor_coords[1] });
+                const generator = ColumnGenerator.init(&state.generator, .{ neighbor_coords[0], neighbor_coords[1] });
                 const reloaded = state.loadChunk(std.testing.allocator, &generator, neighbor_coords);
                 defer reloaded.content.deinit(std.testing.allocator);
                 try std.testing.expectEqual(retained.flags, reloaded.flags);
@@ -978,7 +1015,7 @@ test "losing solid faces retains previously unloaded neighbors as dirty revision
 }
 
 test "interior edits expose no neighbors and a corner reveals three face neighbors" {
-    var state = WorkerState{ .layout = &test_layout, .generator = .flat };
+    var state = WorkerState{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, std.testing.allocator, &test_layout) };
     defer state.deinit(std.testing.allocator);
     const interior = state.applyOperation(std.testing.allocator, .{
         .block = .{ 8, 2 * CHUNK_SIZE + 8, 2 * CHUNK_SIZE + 8 },
@@ -1311,7 +1348,7 @@ test "block subscriptions receive coalesced neighbor masks with mesh updates acr
 }
 
 test "neighbor masks expose world edges and cache generated planes independently of blocks" {
-    var state = WorkerState{ .layout = &test_layout, .generator = .flat };
+    var state = WorkerState{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, std.testing.allocator, &test_layout) };
     defer state.deinit(std.testing.allocator);
     const masks = state.neighborBoundaries(std.testing.allocator, .{ 0, 0, 0 });
     for ([_]Side{ .front, .bottom }) |side| {
