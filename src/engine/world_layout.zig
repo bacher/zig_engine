@@ -169,6 +169,16 @@ test "wrapping is compile-time configuration and specializes shader source" {
     try std.testing.expectEqual(WorldLayout.wrap_x, std.mem.indexOf(u8, source, "& WORLD_X_MASK") != null);
     try std.testing.expect(std.mem.endsWith(u8, source, "// shader body"));
     if (comptime !WorldLayout.wrap_x) try std.testing.expectEqual(@as(usize, 0), @sizeOf(@FieldType(WorldLayout, "inverse_width")));
+
+    // Guard the dimension compatibility used by WorldPipelineCache against
+    // future changes to shader specialization, without requiring a GPU.
+    for ([_][3]u32{ .{ 128, 8, 32 }, .{ 512, 16, 2 } }) |size| {
+        const other = try WorldLayout.init(.{ .size_in_chunks = size });
+        const other_source = try other.shaderSource(std.testing.allocator, "// shader body");
+        defer std.testing.allocator.free(other_source);
+        const compatible = !WorldLayout.wrap_x or layout.size_in_chunks[0] == other.size_in_chunks[0];
+        try std.testing.expectEqual(compatible, std.mem.eql(u8, source, other_source));
+    }
 }
 
 test "runtime dimensions match reference coordinate math at seams and signed limits" {

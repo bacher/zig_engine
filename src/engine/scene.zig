@@ -32,7 +32,8 @@ pub const InstanceBufferEntry = @import("chunk_transform.zig").ChunkTransform;
 pub const Scene = struct {
     /// Immutable after creation; all scene coordinate consumers share this layout.
     layout: *const WorldLayout,
-    pipelines: WorldPipelines,
+    /// Borrowed from the engine cache; one reference for this scene's lifetime.
+    pipelines: *const WorldPipelines,
     engine: *Engine,
     allocator: std.mem.Allocator,
     game_objects: std.ArrayList(*GameObject) = undefined,
@@ -72,8 +73,8 @@ pub const Scene = struct {
         errdefer allocator.destroy(scene);
 
         scene.layout = layout;
-        var pipelines = try WorldPipelines.init(allocator, engine.gctx, &engine.bind_group_layouts, scene.layout);
-        errdefer pipelines.deinit(engine.gctx);
+        const pipelines = try engine.world_pipeline_cache.acquire(&engine.bind_group_layouts, scene.layout);
+        errdefer engine.world_pipeline_cache.release(pipelines);
 
         const space_tree = try SpaceTree(GameObject).init(allocator);
         errdefer space_tree.deinit();
@@ -152,7 +153,7 @@ pub const Scene = struct {
 
     pub fn deinit(scene: *Scene) void {
         const gctx = scene.engine.gctx;
-        scene.pipelines.deinit(gctx);
+        scene.engine.world_pipeline_cache.release(scene.pipelines);
 
         // Objects detach from their parent during deinit, while groups and the
         // visibility index are still alive.
