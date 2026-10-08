@@ -86,7 +86,7 @@ Movement uses a base speed of 5 world units per second and elapsed frame time. T
 
 ## Lifetime caveats
 
-`Scene.deinit` destroys the dedicated skybox, scene-owned collections, voxel GPU buffers, instance buffer, cameras, groups, and ordinary object allocations. For ordinary objects it stops animations and destroys their allocations directly rather than invoking the entire `GameObject.deinit` path. Models referenced by those objects are managed separately.
+`Scene.deinit` releases its reference to the engine's world pipeline cache and destroys its layout, dedicated skybox, scene-owned collections, voxel GPU buffers, instance buffer, cameras, groups, and ordinary object allocations. The final scene reference releases its shared pipeline set. All scenes must be destroyed before their engine. For ordinary objects it stops animations and destroys their allocations directly rather than invoking the entire `GameObject.deinit` path. Models referenced by those objects are managed separately.
 
 This distinction matters for special cases: `GameObject.deinit` contains a terrain-model allocation-destruction branch, while normal scene destruction does not take that branch. Resource cleanup and manual object destruction should be reviewed together; the current code does not provide a complete object-removal lifecycle.
 

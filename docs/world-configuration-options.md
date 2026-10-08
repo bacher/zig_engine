@@ -149,4 +149,4 @@ If the runtime direction is accepted:
 5. Test two layouts in the same process to catch leaked global settings, stale replies, and world-switch cleanup.
 6. Compare optimized CPU kernels, generation/streaming latency, world-load pipeline compilation time, and GPU frame time on the same scene/workload. Expand arbitrary-size or vertical-wrap support only when the need and semantics are clear.
 
-The research itself added this note and an isolated compiler experiment. The later implementation combines validated runtime dimensions with compile-time per-application x wrapping, scene-owned specialized pipelines, and regression coverage; see [world configuration](world-configuration.md). Full workload performance remains unmeasured.
+The research itself added this note and an isolated compiler experiment. The later implementation combines validated runtime dimensions with compile-time per-application x wrapping, an engine-owned reference-counted cache of specialized pipelines, and regression coverage; see [world configuration](world-configuration.md). Full workload performance remains unmeasured.

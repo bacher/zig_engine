@@ -115,7 +115,7 @@ pub const Pipelines = struct {
     }
 };
 
-/// Scene-owned pipelines compiled from its immutable layout.
+/// Six specialized pipelines shared through the engine's WorldPipelineCache.
 pub const WorldPipelines = struct {
     basic: Pipeline,
     basic_skinned: Pipeline,

@@ -19,6 +19,7 @@ const WindowContext = @import("./glue.zig").WindowContext;
 const utils = @import("./utils.zig");
 // -- pipelines --
 const Pipelines = @import("./pipelines.zig").Pipelines;
+const WorldPipelineCache = @import("world_pipeline_cache.zig").WorldPipelineCache;
 const COLOR_OUTPUT_FORMAT = @import("./pipelines/_first_pass_color_targets.zig").COLOR_OUTPUT_FORMAT;
 const NORMAL_OUTPUT_FORMAT = @import("./pipelines/_first_pass_color_targets.zig").NORMAL_OUTPUT_FORMAT;
 const SSAO_OUTPUT_FORMAT = @import("./pipelines/_first_pass_color_targets.zig").SSAO_OUTPUT_FORMAT;
@@ -116,6 +117,7 @@ pub const Engine = struct {
 
     // ---
     pipelines: Pipelines,
+    world_pipeline_cache: WorldPipelineCache,
     bind_group_layouts: BindGroupLayouts,
 
     // ---
@@ -369,6 +371,7 @@ pub const Engine = struct {
             .time = 0,
             .gctx = gctx,
             .pipelines = pipelines,
+            .world_pipeline_cache = .init(allocator, gctx),
             .bind_group_layouts = bind_group_layouts,
 
             .bind_group_shadow_map = bind_group_shadow_map,
@@ -415,6 +418,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(engine: *Engine) void {
+        engine.world_pipeline_cache.deinit();
         engine.temp_buffers.deinit(engine.allocator);
 
         var iterator = engine.models_hash.iterator();
