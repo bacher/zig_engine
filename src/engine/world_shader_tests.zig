@@ -6,6 +6,7 @@ const WorldLayout = @import("world_layout.zig").WorldLayout;
 const WorldPipelines = @import("pipelines.zig").WorldPipelines;
 const WorldPipelineCache = @import("world_pipeline_cache.zig").WorldPipelineCache;
 const layouts_module = @import("bind_group_layouts.zig");
+const coordinate_readback = @import("world_coordinate_readback.zig");
 
 // Dawn's native entry points, also used by zgpu.GraphicsContext.create.
 extern fn dniCreate() ?*anyopaque;
@@ -50,26 +51,45 @@ const ValidationResponse = struct {
     }
 };
 
+const HeadlessDawn = struct {
+    native: *anyopaque,
+    adapter: wgpu.Adapter,
+    device: wgpu.Device,
+
+    fn init() !HeadlessDawn {
+        dawnProcSetProcs(dnGetProcs());
+        const native = dniCreate() orelse return error.NoGraphicsInstance;
+        errdefer dniDestroy(native);
+        const instance = dniGetWgpuInstance(native) orelse return error.NoGraphicsInstance;
+        var adapter_response: AdapterResponse = .{};
+        instance.requestAdapter(.{ .power_preference = .high_performance, .backend_type = if (@import("builtin").os.tag == .macos) .metal else .undef }, AdapterResponse.callback, &adapter_response);
+        const adapter = adapter_response.adapter orelse return error.NoGraphicsAdapter;
+        errdefer adapter.release();
+        var properties: wgpu.AdapterProperties = undefined;
+        properties.next_in_chain = null;
+        adapter.getProperties(&properties);
+        if (properties.backend_type == .nul) return error.NoGraphicsAdapter;
+        std.debug.print("Dawn adapter: {s} ({s})\n", .{ properties.name, @tagName(properties.backend_type) });
+        var device_response: DeviceResponse = .{};
+        adapter.requestDevice(.{}, DeviceResponse.callback, &device_response);
+        const device = device_response.device orelse return error.NoGraphicsDevice;
+        return .{ .native = native, .adapter = adapter, .device = device };
+    }
+
+    fn deinit(self: HeadlessDawn) void {
+        self.device.destroy();
+        self.device.release();
+        self.adapter.release();
+        dniDestroy(self.native);
+    }
+};
+
 test "Dawn validates world pipeline sharing, lifetimes, and allocation cleanup" {
     const allocator = std.testing.allocator;
-    dawnProcSetProcs(dnGetProcs());
-    const native = dniCreate() orelse return error.NoGraphicsInstance;
-    defer dniDestroy(native);
-    const instance = dniGetWgpuInstance(native) orelse return error.NoGraphicsInstance;
-    var adapter_response: AdapterResponse = .{};
-    instance.requestAdapter(.{ .power_preference = .high_performance, .backend_type = if (@import("builtin").os.tag == .macos) .metal else .undef }, AdapterResponse.callback, &adapter_response);
-    const adapter = adapter_response.adapter orelse return error.NoGraphicsAdapter;
-    defer adapter.release();
-    var properties: wgpu.AdapterProperties = undefined;
-    properties.next_in_chain = null;
-    adapter.getProperties(&properties);
-    if (properties.backend_type == .nul) return error.NoGraphicsAdapter;
-    std.debug.print("Dawn adapter: {s} ({s})\n", .{ properties.name, @tagName(properties.backend_type) });
-    var device_response: DeviceResponse = .{};
-    adapter.requestDevice(.{}, DeviceResponse.callback, &device_response);
-    const device = device_response.device orelse return error.NoGraphicsDevice;
-    defer device.release();
     var uncaptured: ValidationResponse = .{};
+    const gpu = try HeadlessDawn.init();
+    defer gpu.deinit();
+    const device = gpu.device;
     device.setUncapturedErrorCallback(ValidationResponse.callback, &uncaptured);
 
     // Pipeline creation only needs these three pools, with no window/swapchain.
@@ -121,6 +141,27 @@ test "Dawn validates world pipeline sharing, lifetimes, and allocation cleanup" 
     }
     try std.testing.expect(response.done);
     try std.testing.expectEqual(@as(usize, 0), response.errors);
+    try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
+}
+
+test "GPU coordinate readback agrees with CPU at seams, precision boundaries, and signed limits" {
+    // Callback state outlives the device, including cancellation on a timeout.
+    var uncaptured: ValidationResponse = .{};
+    var validation: ValidationResponse = .{};
+    var mapping: coordinate_readback.MapResponse = .{};
+    const gpu = try HeadlessDawn.init();
+    defer gpu.deinit();
+    gpu.device.setUncapturedErrorCallback(ValidationResponse.callback, &uncaptured);
+    for ([_]u32{ 128, 512, 1 << 26 }) |width| {
+        const layout = try WorldLayout.init(.{ .size_in_chunks = .{ width, 2, 2 } });
+        gpu.device.pushErrorScope(.validation);
+        const checked = coordinate_readback.check(gpu.device, &layout, &mapping);
+        validation = .{};
+        _ = gpu.device.popErrorScope(ValidationResponse.callback, &validation);
+        try coordinate_readback.waitForCallback(gpu.device, &validation.done);
+        try std.testing.expectEqual(@as(usize, 0), validation.errors);
+        try checked;
+    }
     try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
 }
 

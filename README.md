@@ -11,7 +11,7 @@ zig build             # Build/install the library, both applications, and conten
 zig build run         # Run the demo application
 zig build run_voxel   # Run the voxel application
 zig build test        # Run registered unit/regression tests
-zig build test-gpu    # Optional headless Dawn pipeline/cache validation (requires graphics adapter)
+zig build test-gpu    # Optional headless Dawn GPU checks (requires graphics adapter)
 ```
 
 The applications load installed content relative to the executable directory. See [architecture](docs/architecture.md) for the build and startup flow.

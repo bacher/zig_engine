@@ -235,7 +235,7 @@ pub fn build(b: *std.Build) void {
     const run_slot_buffer_manager_unit_tests = b.addRunArtifact(slot_buffer_manager_unit_tests);
 
     const test_step = b.step("test", "Run unit tests for both application wrapping modes");
-    const gpu_test_step = b.step("test-gpu", "Validate world pipelines for both compiled wrapping modes with headless Dawn");
+    const gpu_test_step = b.step("test-gpu", "Validate world pipelines and coordinate arithmetic for both compiled wrapping modes with headless Dawn");
     for (engines) |library| {
         const engine_config = library.root_module.import_table.get("engine_config").?;
         const render_coordinates_tests = b.addTest(.{
