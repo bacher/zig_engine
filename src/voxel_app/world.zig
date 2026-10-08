@@ -354,7 +354,9 @@ fn insertGeneratedChunks(
     z_start: i32,
     z_end: i32,
 ) !void {
-    const column_generator = world_generator.ColumnGenerator.init(world.layout, generator, column);
+    var prepared = try generator.prepare(world.allocator, world.layout);
+    defer prepared.deinit(world.allocator);
+    const column_generator = world_generator.ColumnGenerator.init(&prepared, column);
     var z = z_start;
     while (z < z_end) : (z += 1) {
         try world.insertChunk(.{ column[0], column[1], z }, column_generator.generateChunk(world.allocator, z));
