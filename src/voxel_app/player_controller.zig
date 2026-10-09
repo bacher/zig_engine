@@ -12,7 +12,10 @@ pub const gravity: f64 = 10;
 pub const walk_speed: f64 = 5;
 pub const jump_speed: f64 = 5;
 pub const climb_hold_seconds: f64 = 0.25;
-pub const climb_duration_seconds: f64 = 0.2;
+pub const climb_duration_seconds: f64 = 0.35;
+pub const climb_anticipation_metres: f64 = 0.85;
+const climb_contact_progress: f64 = 0.8;
+const climb_entry_metres: f64 = 0.03;
 pub const recovery_radius: i64 = 8;
 const history_seconds: f64 = 5;
 const max_step_seconds: f64 = 1.0 / 120.0;
@@ -33,7 +36,16 @@ pub const UpdateResult = struct {
 
 pub const PlayerController = struct {
     const HistoryEntry = struct { cell: Cell, time: f64 };
-    const Climb = struct { start_z: f64, target_z: f64, elapsed: f64 = 0 };
+    const Climb = struct {
+        start: Position,
+        contact_delta: Position,
+        entry_delta: Position,
+        landing: Position,
+        allowance: collision.ClimbOverlap,
+        last_clear: Position,
+        overlapping: bool = false,
+        elapsed: f64 = 0,
+    };
 
     allocator: std.mem.Allocator,
     /// Feet, independent of the camera and its eye offset. Uses engine f64 coordinates.
@@ -60,6 +72,11 @@ pub const PlayerController = struct {
     pub fn resetJumpInput(self: *PlayerController) void {
         self.space_held_seconds = 0;
         self.auto_climb = false;
+        // Focus loss/Q can interrupt an exempt pose; return only to the last
+        // fully clear point on this short path rather than invoking world recovery.
+        if (self.climb) |climb| if (climb.overlapping) {
+            self.position = climb.last_clear;
+        };
         self.climb = null;
     }
 
@@ -83,7 +100,11 @@ pub const PlayerController = struct {
     pub fn update(self: *PlayerController, world: *const World, input: Input, elapsed: f64, now: f64) !UpdateResult {
         var result: UpdateResult = .{};
         self.expireHistory(now);
-        var query: collision.Query = .{ .world = world, .body = self.body };
+        var query: collision.Query = .{
+            .world = world,
+            .body = self.body,
+            .climb_overlap = if (self.climb) |climb| climb.allowance else null,
+        };
         switch (query.overlap(self.position, true)) {
             .missing => {
                 self.vertical_velocity = 0;
@@ -93,6 +114,7 @@ pub const PlayerController = struct {
                 return result;
             },
             .solid => {
+                query.climb_overlap = null;
                 if (now < self.next_recovery_attempt) {
                     result.recovery_failed = true;
                     result.missing_chunk = query.missing_chunk;
@@ -115,7 +137,6 @@ pub const PlayerController = struct {
         const dt = @max(0, elapsed);
         if (input.jump_pressed or !input.jump_down) self.space_held_seconds = 0;
         self.auto_climb = input.jump_down and self.space_held_seconds >= climb_hold_seconds;
-        if (!self.auto_climb) self.climb = null;
         self.grounded = query.moveAxis(self.position, 2, -ground_probe).collided;
         if (input.jump_pressed and self.grounded) {
             self.vertical_velocity = jump_speed;
@@ -135,29 +156,23 @@ pub const PlayerController = struct {
             walk_speed * (forward * @cos(yaw) + right * @sin(yaw)),
             0,
         };
-        // Use a consistent look-ahead for climb clearance. A tiny fractional
-        // substep may not cross the contact face's epsilon even with held movement.
-        const climb_dx = velocity[0] * max_step_seconds;
-        const climb_dy = velocity[1] * max_step_seconds;
         var remaining = dt;
         while (remaining > 0) {
             const step = @min(remaining, max_step_seconds);
             if (input.jump_down) self.space_held_seconds += step;
             self.auto_climb = input.jump_down and self.space_held_seconds >= climb_hold_seconds;
-            const start = self.position;
-            const dx = velocity[0] * step;
-            const dy = velocity[1] * step;
-            const mx = query.moveAxis(start, 0, dx);
-            const my = query.moveAxis(mx.position, 1, dy);
-            self.position = my.position;
-            if (self.climb == null and self.auto_climb and self.grounded and (mx.collided or my.collided)) {
-                if (findClimbLanding(&query, self.position, climb_dx, climb_dy, 1)) |landing| {
-                    self.climb = .{ .start_z = start[2], .target_z = landing[2] };
-                }
+            if (self.climb == null and self.auto_climb and self.grounded) {
+                self.beginClimb(&query, velocity);
             }
-
-            const climbing = self.climb != null and self.advanceClimb(&query, step, climb_dx, climb_dy);
+            const climbing = self.climb != null and self.advanceClimb(&query, step, now, &result);
+            if (result.recovery_failed) {
+                result.missing_chunk = query.missing_chunk;
+                return result;
+            }
             if (!climbing) {
+                const mx = query.moveAxis(self.position, 0, velocity[0] * step);
+                const my = query.moveAxis(mx.position, 1, velocity[1] * step);
+                self.position = my.position;
                 const supported = self.vertical_velocity <= 0 and query.moveAxis(self.position, 2, -ground_probe).collided;
                 const dz = if (supported) 0 else self.vertical_velocity * step - 0.5 * gravity * step * step;
                 if (supported) self.vertical_velocity = 0 else self.vertical_velocity -= gravity * step;
@@ -166,11 +181,11 @@ pub const PlayerController = struct {
                 self.grounded = supported or (mz.collided and dz < 0);
                 if (mz.collided or self.grounded) self.vertical_velocity = 0;
             }
-            try self.recordPosition(now - remaining + step);
+            if (self.climb == null or !self.climb.?.overlapping) try self.recordPosition(now - remaining + step);
             remaining -= step;
         }
         // Also record valid initial positions and zero-duration frames.
-        try self.recordPosition(now);
+        if (self.climb == null or !self.climb.?.overlapping) try self.recordPosition(now);
         self.expireHistory(now);
         result.missing_chunk = query.missing_chunk;
         return result;
@@ -189,31 +204,103 @@ pub const PlayerController = struct {
         return down.position;
     }
 
-    fn advanceClimb(self: *PlayerController, query: *collision.Query, step: f64, dx: f64, dy: f64) bool {
-        var climb = self.climb.?;
-        const remaining_rise = climb.target_z - self.position[2];
-        if (remaining_rise <= collision.epsilon) {
-            self.climb = null;
-            return false;
+    // Horizontal speed falls smoothly around the steepest part of the rise,
+    // then returns toward walking speed. Its integral avoids frame-rate dependence.
+    fn approachProgress(t: f64) f64 {
+        return 0.65 * t + 0.35 * @sin(2 * std.math.pi * t) / (2 * std.math.pi);
+    }
+
+    fn beginClimb(self: *PlayerController, query: *collision.Query, velocity: Position) void {
+        const speed = @sqrt(velocity[0] * velocity[0] + velocity[1] * velocity[1]);
+        if (speed <= collision.epsilon) return;
+        const direction = velocity / @as(Position, @splat(speed));
+        const lookahead = direction * @as(Position, @splat(climb_anticipation_metres + 2 * collision.epsilon));
+        const mx = query.moveAxis(self.position, 0, lookahead[0]);
+        const my = query.moveAxis(mx.position, 1, lookahead[1]);
+        if (!mx.collided and !my.collided) return;
+        const contact_delta = my.position - self.position;
+        const entry_delta = direction * @as(Position, @splat(climb_entry_metres));
+        const endpoint = self.position + contact_delta * @as(Position, @splat(approachProgress(1) / approachProgress(climb_contact_progress))) + entry_delta;
+        const landing = findClimbLanding(query, self.position, endpoint[0] - self.position[0], endpoint[1] - self.position[1], 1) orelse return;
+        const allowance = query.landingOverlap(landing) orelse return;
+        self.climb = .{
+            .start = self.position,
+            .contact_delta = contact_delta,
+            .entry_delta = entry_delta,
+            .landing = landing,
+            .allowance = allowance,
+            .last_clear = self.position,
+        };
+        query.climb_overlap = allowance;
+    }
+
+    fn abortClimb(self: *PlayerController, query: *collision.Query, now: f64, result: *UpdateResult) void {
+        const climb = self.climb.?;
+        self.climb = null;
+        query.climb_overlap = null;
+        self.vertical_velocity = 0;
+        if (!climb.overlapping or query.overlap(self.position, true) == .clear) return;
+        // Even the fallback point may have changed since the previous frame.
+        if (query.overlap(climb.last_clear, true) == .clear) {
+            self.position = climb.last_clear;
+        } else if (self.recover(query, now)) {
+            result.recovered = true;
+        } else {
+            self.next_recovery_attempt = now + 1;
+            self.grounded = false;
+            self.resetJumpInput();
+            result.recovery_failed = true;
         }
-        // Revalidate the landing using current terrain and movement intent. Releasing
-        // movement, moving away, or losing the step/clearance cancels the lift safely.
-        const landing = findClimbLanding(query, self.position, dx, dy, remaining_rise);
-        if (landing == null or @abs(landing.?[2] - climb.target_z) > collision.epsilon) {
-            self.climb = null;
+    }
+
+    fn advanceClimb(self: *PlayerController, query: *collision.Query, step: f64, now: f64, result: *UpdateResult) bool {
+        var climb = self.climb.?;
+        // Active paths are short commitments: key release/direction changes take
+        // effect after landing. Geometry remains fixed while terrain stays live.
+        var full_query = query.*;
+        full_query.climb_overlap = null;
+        if (full_query.overlap(climb.landing, true) != .clear or
+            !full_query.moveAxis(climb.landing, 2, -ground_probe).collided or
+            full_query.missing_chunk != null)
+        {
+            query.missing_chunk = full_query.missing_chunk;
+            self.abortClimb(query, now, result);
             return false;
         }
         climb.elapsed = @min(climb.elapsed + step, climb_duration_seconds);
-        const progress = climb.elapsed / climb_duration_seconds;
-        const eased = progress * progress * (3 - 2 * progress);
-        const target_z = climb.start_z + (climb.target_z - climb.start_z) * eased;
-        // Move the body itself; the camera follows its actual collision-safe position.
-        const up = query.moveAxis(self.position, 2, target_z - self.position[2]);
-        self.position = up.position;
+        const t = climb.elapsed / climb_duration_seconds;
+        const horizontal = approachProgress(t) / approachProgress(climb_contact_progress);
+        const entry_t = std.math.clamp((t - climb_contact_progress) / (1 - climb_contact_progress), 0, 1);
+        const entry = entry_t * entry_t * (3 - 2 * entry_t);
+        var target = climb.start + climb.contact_delta * @as(Position, @splat(horizontal)) + climb.entry_delta * @as(Position, @splat(entry));
+        target[2] = climb.start[2] + (climb.landing[2] - climb.start[2]) * t * t * (3 - 2 * t);
+        // Raise first at each tiny substep, then sweep horizontally. Only the
+        // whitelisted landing cells can overlap the lowest 12cm of the body.
+        const up = query.moveAxis(self.position, 2, target[2] - self.position[2]);
+        const mx = query.moveAxis(up.position, 0, target[0] - up.position[0]);
+        const my = query.moveAxis(mx.position, 1, target[1] - mx.position[1]);
+        if (up.collided or query.overlap(my.position, true) != .clear or query.missing_chunk != null) {
+            self.abortClimb(query, now, result);
+            return false;
+        }
+        // A late start at the face safely waits for foot clearance before entering.
+        // Any other clipping indicates an unrelated obstacle, so stop the path.
+        if ((mx.collided or my.collided) and target[2] >= climb.landing[2] - collision.max_climb_overlap) {
+            self.abortClimb(query, now, result);
+            return false;
+        }
+        self.position = my.position;
         self.vertical_velocity = 0;
         self.grounded = false;
-        self.climb = if (up.collided or climb.elapsed >= climb_duration_seconds) null else climb;
-        return !up.collided;
+        climb.overlapping = full_query.overlap(self.position, false) != .clear;
+        if (!climb.overlapping) climb.last_clear = self.position;
+        self.climb = climb;
+        if (climb.elapsed >= climb_duration_seconds) {
+            self.climb = null;
+            query.climb_overlap = null;
+            self.grounded = true;
+        }
+        return true;
     }
 
     pub fn expireHistory(self: *PlayerController, now: f64) void {
@@ -253,10 +340,10 @@ pub const PlayerController = struct {
     }
 
     fn restore(self: *PlayerController, position: Position) bool {
+        self.resetJumpInput();
         self.position = position;
         self.vertical_velocity = 0;
         self.grounded = false;
-        self.resetJumpInput();
         self.next_recovery_attempt = 0;
         return true;
     }
@@ -433,95 +520,124 @@ test "holding Space enables one-block climbing, release disables it, and tall wa
     try std.testing.expect(player.position[0] <= 4.7 + collision.epsilon);
 }
 
-test "auto-climbing raises the body and camera smoothly over multiple 120Hz frames" {
+test "overlap climb anticipates the face and raises the camera while moving forward" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     fixture.floor();
     fixture.fill(.{ 2, -1, 0 }, .{ 4, 1, 0 }, .stone);
-    var player = PlayerController.init(std.testing.allocator, .{ 1.7, 0.5, 0 });
+    var player = PlayerController.init(std.testing.allocator, .{ 0.85, 0.5, 0 });
     defer player.deinit();
     player.space_held_seconds = climb_hold_seconds;
     var camera = std.meta.Child(@TypeOf(@as(engine.Scene, undefined).camera)).init(fixture.world.layout, 1);
     var query: collision.Query = .{ .world = &fixture.world, .body = player.body };
-    var previous_height: f64 = 0;
-    for (0..24) |index| {
+    var previous = player.position;
+    var overlap_frames: usize = 0;
+    for (0..43) |index| {
         const result = try player.update(&fixture.world, .{ .right = 1, .jump_down = true }, 1.0 / 120.0, @as(f64, @floatFromInt(index + 1)) / 120.0);
         try std.testing.expect(!result.recovered);
-        try std.testing.expect(player.position[2] > previous_height);
-        // No frame may snap up more than seven centimetres at 120Hz.
-        try std.testing.expect(player.position[2] - previous_height < 0.07);
-        try std.testing.expectEqual(collision.Overlap.clear, query.overlap(player.position, false));
+        try std.testing.expect(player.position[0] > previous[0]);
+        try std.testing.expect(player.position[2] >= previous[2]);
+        try std.testing.expect(player.position[2] - previous[2] < 0.04);
+        if (index == 0 or index == 41) {
+            const horizontal_speed = (player.position[0] - previous[0]) * 120;
+            try std.testing.expect(horizontal_speed > 4.5 and horizontal_speed < 5.6);
+        }
+        if (index == 0) {
+            try std.testing.expect(player.position[2] > 0);
+            try std.testing.expect(player.position[0] + player.body.half_width < 2);
+        }
+        if (query.overlap(player.position, false) == .solid) {
+            overlap_frames += 1;
+            try std.testing.expect(1 - player.position[2] <= collision.max_climb_overlap + collision.epsilon);
+            try std.testing.expect(player.climb != null);
+            query.climb_overlap = player.climb.?.allowance;
+            try std.testing.expectEqual(collision.Overlap.clear, query.overlap(player.position, false));
+            query.climb_overlap = null;
+        }
         player.applyCamera(&camera);
         try std.testing.expectApproxEqAbs(player.position[2] + player.body.eye_height, camera.position[2], 0.000001);
-        if (index == 11) try std.testing.expectApproxEqAbs(@as(f64, 0.5), player.position[2], 0.000001);
-        previous_height = player.position[2];
+        previous = player.position;
     }
-    try std.testing.expectApproxEqAbs(@as(f64, 1), player.position[2], 0.000001);
-    _ = try player.update(&fixture.world, .{ .right = 1, .jump_down = true }, 0.05, 0.25);
-    try std.testing.expect(player.position[0] > 1.7);
+    try std.testing.expect(overlap_frames > 0 and overlap_frames < 10);
+    try std.testing.expect(player.position[0] > 2);
     try std.testing.expect(player.grounded);
     try std.testing.expect(player.climb == null);
     try std.testing.expectApproxEqAbs(@as(f64, 1), player.position[2], 0.000001);
 }
 
-test "auto-climbing duration follows elapsed time across frame rates and long frames" {
+test "overlap climb duration follows elapsed time across frame rates and long frames" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     fixture.floor();
     fixture.fill(.{ 2, -1, 0 }, .{ 4, 1, 0 }, .stone);
     for ([_]f64{ 30, 60, 120, 144, 240, 1000 }) |fps| {
-        var player = PlayerController.init(std.testing.allocator, .{ 1.7, 0.5, 0 });
+        var player = PlayerController.init(std.testing.allocator, .{ 0.85, 0.5, 0 });
         defer player.deinit();
         player.space_held_seconds = climb_hold_seconds;
         var now: f64 = 0;
-        for ([_]f64{ 0.1, 0.3 }) |checkpoint| {
+        for ([_]f64{ climb_duration_seconds / 2, 0.45 }) |checkpoint| {
             while (now < checkpoint) {
                 const dt = @min(1 / fps, checkpoint - now);
                 now += dt;
                 _ = try player.update(&fixture.world, .{ .right = 1, .jump_down = true }, dt, now);
             }
-            const height: f64 = if (checkpoint == 0.1) 0.5 else 1;
+            const height: f64 = if (checkpoint < climb_duration_seconds) 0.5 else 1;
             try std.testing.expectApproxEqAbs(height, player.position[2], 0.000001);
         }
         try std.testing.expect(player.grounded);
         try std.testing.expect(player.position[0] > 2);
     }
-    var player = PlayerController.init(std.testing.allocator, .{ 1.7, 0.5, 0 });
+    var player = PlayerController.init(std.testing.allocator, .{ 0.85, 0.5, 0 });
     defer player.deinit();
     player.space_held_seconds = climb_hold_seconds;
-    _ = try player.update(&fixture.world, .{ .right = 1, .jump_down = true }, 0.1, 0.1);
+    _ = try player.update(&fixture.world, .{ .right = 1, .jump_down = true }, climb_duration_seconds / 2, climb_duration_seconds / 2);
     try std.testing.expectApproxEqAbs(@as(f64, 0.5), player.position[2], 0.000001);
-    _ = try player.update(&fixture.world, .{ .right = 1, .jump_down = true }, 0.2, 0.3);
+    _ = try player.update(&fixture.world, .{ .right = 1, .jump_down = true }, 0.275, 0.45);
     try std.testing.expectApproxEqAbs(@as(f64, 1), player.position[2], 0.000001);
     try std.testing.expect(player.grounded);
-    try std.testing.expect(player.position[0] > 2);
 }
 
-test "releasing Space, stopping, or moving away cancels a climb and restores gravity" {
+test "releasing Space or movement finishes the short fixed climb safely" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     fixture.floor();
     fixture.set(.{ 2, 0, 0 }, .stone);
-    for ([_]Input{
-        .{ .right = 1 },
-        .{ .jump_down = true },
-        .{ .right = -1, .jump_down = true },
-    }) |input| {
-        var player = PlayerController.init(std.testing.allocator, .{ 1.7, 0.5, 0 });
+    for ([_]Input{ .{}, .{ .jump_down = true }, .{ .right = 1 } }) |input| {
+        var player = PlayerController.init(std.testing.allocator, .{ 0.85, 0.5, 0 });
         defer player.deinit();
         player.space_held_seconds = climb_hold_seconds;
         _ = try player.update(&fixture.world, .{ .right = 1, .jump_down = true }, 0.08, 0.08);
         const height = player.position[2];
-        try std.testing.expect(height > 0 and height < 1);
         const result = try player.update(&fixture.world, input, 0.01, 0.09);
         try std.testing.expect(!result.recovered);
-        try std.testing.expect(player.climb == null);
-        try std.testing.expect(player.position[2] < height);
-        try std.testing.expect(player.vertical_velocity < 0);
-        _ = try player.update(&fixture.world, input, 0.5, 0.59);
+        try std.testing.expect(player.climb != null);
+        try std.testing.expect(player.position[2] > height);
+        _ = try player.update(&fixture.world, input, 0.4, 0.49);
         try std.testing.expect(player.grounded);
-        try std.testing.expectApproxEqAbs(@as(f64, 0), player.position[2], 0.000001);
+        try std.testing.expect(player.climb == null);
+        try std.testing.expectApproxEqAbs(@as(f64, 1), player.position[2], 0.000001);
     }
+}
+
+test "resetting climb input during exempt foot contact restores the last clear path point" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.floor();
+    fixture.set(.{ 2, 0, 0 }, .stone);
+    var player = PlayerController.init(std.testing.allocator, .{ 0.85, 0.5, 0 });
+    defer player.deinit();
+    player.space_held_seconds = climb_hold_seconds;
+    _ = try player.update(&fixture.world, .{ .right = 1, .jump_down = true }, 0.29, 0.29);
+    try std.testing.expect(player.climb.?.overlapping);
+    const before = player.position;
+    player.resetJumpInput();
+    try std.testing.expect(player.climb == null);
+    var query: collision.Query = .{ .world = &fixture.world, .body = player.body };
+    try std.testing.expectEqual(collision.Overlap.clear, query.overlap(player.position, false));
+    try std.testing.expect(@reduce(.Add, (before - player.position) * (before - player.position)) < 0.04);
+    const result = try player.update(&fixture.world, .{}, 0.5, 0.79);
+    try std.testing.expect(!result.recovered);
+    try std.testing.expect(player.grounded);
 }
 
 test "new overhead terrain or a removed landing cancels an ongoing climb safely" {
@@ -552,6 +668,96 @@ test "new overhead terrain or a removed landing cancels an ongoing climb safely"
         try std.testing.expect(player.grounded);
         try std.testing.expectApproxEqAbs(@as(f64, 0), player.position[2], 0.000001);
     }
+}
+
+test "temporary lower-foot contact never exempts deeper overlap, other cells, missing data or placement" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.floor();
+    fixture.set(.{ 2, 0, 0 }, .stone);
+    var query: collision.Query = .{ .world = &fixture.world, .body = .{} };
+    const landing: Position = .{ 2.1, 0.5, 1 };
+    query.climb_overlap = query.landingOverlap(landing).?;
+    const feet: Position = .{ 1.8, 0.5, 0.9 };
+    try std.testing.expectEqual(collision.Overlap.clear, query.overlap(feet, true));
+    try std.testing.expectEqual(collision.Overlap.solid, query.overlap(.{ 1.8, 0.5, 0.87 }, true));
+    fixture.set(.{ 1, 0, 0 }, .stone);
+    try std.testing.expectEqual(collision.Overlap.solid, query.overlap(feet, true));
+    fixture.set(.{ 1, 0, 0 }, .none);
+    fixture.set(.{ 2, 0, 1 }, .stone);
+    try std.testing.expectEqual(collision.Overlap.solid, query.overlap(feet, true));
+    fixture.set(.{ 2, 0, 1 }, .none);
+    const origin: Cell = @as(Cell, fixture.world.layout.origin_chunk) * @as(Cell, @splat(engine.chunk_utils.CHUNK_SIZE));
+    const storage: [3]u32 = @as(@Vector(3, u32), @intCast(origin + Cell{ 2, 0, 0 }));
+    try std.testing.expect(collision.overlapsBlock(query.body, feet, fixture.world.layout, storage));
+    const chunk = fixture.world.layout.getChunkCoords(feet);
+    fixture.world.removeChunk(chunk);
+    try std.testing.expectEqual(collision.Overlap.missing, query.overlap(feet, true));
+    try std.testing.expectEqualDeep(chunk, query.missing_chunk.?);
+}
+
+test "removing the landing during allowed overlap returns to clear space and gravity" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.floor();
+    fixture.set(.{ 2, 0, 0 }, .stone);
+    var player = PlayerController.init(std.testing.allocator, .{ 0.85, 0.5, 0 });
+    defer player.deinit();
+    player.space_held_seconds = climb_hold_seconds;
+    _ = try player.update(&fixture.world, .{ .right = 1, .jump_down = true }, 0.3, 0.3);
+    try std.testing.expect(player.climb.?.overlapping);
+    fixture.set(.{ 2, 0, 0 }, .none);
+    player.terrainChanged();
+    const result = try player.update(&fixture.world, .{}, 0.01, 0.31);
+    try std.testing.expect(!result.recovered);
+    try std.testing.expect(player.climb == null);
+    try std.testing.expect(player.vertical_velocity < 0);
+    var query: collision.Query = .{ .world = &fixture.world, .body = player.body };
+    try std.testing.expectEqual(collision.Overlap.clear, query.overlap(player.position, false));
+}
+
+test "new unrelated terrain during foot overlap invokes full-body recovery" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.floor();
+    fixture.set(.{ 2, 0, 0 }, .stone);
+    var player = PlayerController.init(std.testing.allocator, .{ 0.85, 0.5, 0 });
+    defer player.deinit();
+    player.space_held_seconds = climb_hold_seconds;
+    _ = try player.update(&fixture.world, .{ .right = 1, .jump_down = true }, 0.3, 0.3);
+    try std.testing.expect(player.climb.?.overlapping);
+    fixture.set(.{ 2, 0, 1 }, .stone);
+    player.terrainChanged();
+    const result = try player.update(&fixture.world, .{}, 0.01, 0.31);
+    try std.testing.expect(result.recovered);
+    try std.testing.expect(player.climb == null);
+    var query: collision.Query = .{ .world = &fixture.world, .body = player.body };
+    try std.testing.expectEqual(collision.Overlap.clear, query.overlap(player.position, false));
+}
+
+test "anticipated climbing blocks missing terrain and crosses the periodic seam" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.fill(.{ 30, 0, -1 }, .{ 33, 0, -1 }, .stone);
+    const missing = fixture.world.layout.getChunkCoords(.{ 32.5, 0.5, 0 });
+    fixture.world.removeChunk(missing);
+    var blocked = PlayerController.init(std.testing.allocator, .{ 30.85, 0.5, 0 });
+    defer blocked.deinit();
+    blocked.space_held_seconds = climb_hold_seconds;
+    const result = try blocked.update(&fixture.world, .{ .right = 1, .jump_down = true }, 0.5, 0.5);
+    try std.testing.expectEqualDeep(missing, result.missing_chunk.?);
+    try std.testing.expect(blocked.climb == null);
+    try std.testing.expectApproxEqAbs(@as(f64, 31.7), blocked.position[0], 0.000001);
+    try std.testing.expectEqual(@as(f64, 0), blocked.position[2]);
+    try fixture.world.insertChunk(missing, @import("world.zig").WorldChunk.initEmpty());
+    fixture.fill(.{ 62, 0, -1 }, .{ 66, 0, -1 }, .stone);
+    fixture.fill(.{ 64, 0, 0 }, .{ 66, 0, 0 }, .stone);
+    var seam = PlayerController.init(std.testing.allocator, .{ 62.85, 0.5, 0 });
+    defer seam.deinit();
+    seam.space_held_seconds = climb_hold_seconds;
+    _ = try seam.update(&fixture.world, .{ .right = 1, .jump_down = true }, 0.5, 0.5);
+    try std.testing.expect(seam.position[0] > 64);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), seam.position[2], 0.000001);
 }
 
 test "auto-climbing respects overhead clearance" {

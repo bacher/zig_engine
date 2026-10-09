@@ -4,6 +4,22 @@ const World = @import("world.zig").World;
 pub const Position = engine.world_math.Position;
 pub const Cell = @Vector(3, i64);
 pub const epsilon: f64 = 0.0000001;
+/// Experimental climb exemption is restricted to the last 12cm of the feet.
+pub const max_climb_overlap: f64 = 0.12;
+
+pub const ClimbOverlap = struct {
+    top: f64,
+    cells: [4]Cell = undefined,
+    count: usize = 0,
+
+    fn allows(self: ClimbOverlap, cell: Cell, feet: Position) bool {
+        if (feet[2] < self.top - max_climb_overlap - epsilon) return false;
+        for (self.cells[0..self.count]) |allowed| {
+            if (@reduce(.And, cell == allowed)) return true;
+        }
+        return false;
+    }
+};
 
 pub const MovementCollision = enum { none, full_cube };
 
@@ -50,6 +66,40 @@ pub const Query = struct {
     body: Body,
     /// Only contact queries report missing data; recovery searches remain quiet.
     missing_chunk: ?engine.ChunkCoords = null,
+    climb_overlap: ?ClimbOverlap = null,
+
+    /// Capture only the known solid cells directly under the planned landing.
+    /// Later edits to other cells and missing chunks never receive an exemption.
+    pub fn landingOverlap(self: *Query, landing: Position) ?ClimbOverlap {
+        const bounds = self.body.bounds(landing - Position{ 0, 0, max_climb_overlap });
+        const first = bounds.firstCell();
+        const last = bounds.lastCell();
+        var overlap_cells: ClimbOverlap = .{ .top = landing[2] };
+        var z = first[2];
+        while (z <= last[2]) : (z += 1) {
+            var y = first[1];
+            while (y <= last[1]) : (y += 1) {
+                var x = first[0];
+                while (x <= last[0]) : (x += 1) {
+                    const cell = Cell{ x, y, z };
+                    switch (self.cellState(cell, true)) {
+                        .missing => return null,
+                        .solid => {
+                            if (@abs(@as(f64, @floatFromInt(z + 1)) - landing[2]) > epsilon or overlap_cells.count == overlap_cells.cells.len) return null;
+                            overlap_cells.cells[overlap_cells.count] = cell;
+                            overlap_cells.count += 1;
+                        },
+                        .clear => {},
+                    }
+                }
+            }
+        }
+        return if (overlap_cells.count == 0) null else overlap_cells;
+    }
+
+    fn exempt(self: *const Query, cell: Cell, feet: Position) bool {
+        return if (self.climb_overlap) |overlap_cells| overlap_cells.allows(cell, feet) else false;
+    }
 
     fn cellState(self: *Query, cell: Cell, report_missing: bool) Overlap {
         const layout = self.world.layout;
@@ -80,7 +130,9 @@ pub const Query = struct {
                 var x = first[0];
                 while (x <= last[0]) : (x += 1) {
                     switch (self.cellState(.{ x, y, z }, report_missing)) {
-                        .solid => result = .solid,
+                        .solid => if (!self.exempt(.{ x, y, z }, feet)) {
+                            result = .solid;
+                        },
                         .missing => if (result == .clear) {
                             result = .missing;
                         },
@@ -113,7 +165,8 @@ pub const Query = struct {
                     const gap = if (distance > 0) face - body_bounds.max[axis] else face + 1 - body_bounds.min[axis];
                     if (distance > 0 and (gap < -epsilon or gap > allowed)) continue;
                     if (distance < 0 and (gap > epsilon or gap < allowed)) continue;
-                    if (self.cellState(cell, true) == .clear) continue;
+                    const state = self.cellState(cell, true);
+                    if (state == .clear or (state == .solid and self.exempt(cell, feet))) continue;
                     allowed = if (distance > 0) @max(0, gap) else @min(0, gap);
                 }
             }
