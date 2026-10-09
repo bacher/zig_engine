@@ -121,7 +121,7 @@ The voxel application owns `PlayerController`; the engine renders its camera and
 
 One block/world unit is one metre. The default body is an upright 0.6m-wide, 1.8m-tall box with eyes 1.6m above its feet. W/A/S/D move horizontally relative to yaw at 5m/s, with normalized diagonal input; pitch only affects the view and is clamped near vertical. Mouse movement controls view continuously without a held button. Gravity is 10m/s² and a grounded Space press gives 5m/s upward velocity, reaching about 1.25m. A press/release between rendered frames still produces one jump.
 
-Holding Space for 0.25 seconds enables automatic one-block climbing while walking. Climbing requires ground contact, a clear swept path up/across/down, and a landing; two-block walls and low ceilings still obstruct movement. Holding Space does not repeatedly jump. Release disables climbing immediately. C has no player movement action.
+Holding Space for 0.25 seconds enables automatic one-block climbing while walking. Climbing requires ground contact, a clear swept path up/across/down, and a landing; two-block walls and low ceilings still obstruct movement. Each ascent moves the body gradually over 0.2 seconds with easing at the start and end, and the camera follows that body position. The remaining path and landing are rechecked throughout the ascent against current block data. Releasing Space, stopping or moving away from the step, losing the landing, or encountering an obstruction cancels the ascent and resumes gravity. Holding Space does not repeatedly jump. C has no player movement action.
 
 The player consumes the full monotonic frame interval using internal steps at most 1/120 second, including the last partial step. Input therefore updates every frame at any frame rate rather than waiting for a fixed player tick. Axis sweeps stop at cube faces and allow wall sliding, including during long movements/fast falls. World-service replies and GPU geometry do not gate movement. See [simulation timing](architecture.md#initialization-and-frame-order) for the independent future world tick.
 
@@ -135,7 +135,7 @@ When an optimistic edit, worker snapshot, or reconciliation embeds the body in s
 
 The initial voxel player spawns above the generated terrain and falls onto it. Column placement validates the candidate block against the body before changing the optimistic cache, also while the body is frozen during spectating.
 
-CPU regressions cover frame-time movement/gravity, short frames, diagonal/yaw movement, fast falls/wall sliding, jump edges/ceilings, held-Space climbing/clearance, missing-data blocking, recovery ordering/expiration/bounds, periodic seams, Q transitions, player streaming pins, and placement rejection. Cursor capture and interactive movement still require a windowed check.
+CPU regressions cover frame-time movement/gravity, short frames, diagonal/yaw movement, fast falls/wall sliding, jump edges/ceilings, gradual held-Space climbing across frame rates, clearance and climb cancellation on input/terrain changes, missing-data blocking, recovery ordering/expiration/bounds, periodic seams, Q transitions, player streaming pins, and placement rejection. Cursor capture and interactive movement still require a windowed check.
 
 ## Lifetime
 
