@@ -113,7 +113,29 @@ The default scene has a spectator controller:
 
 Movement uses a base speed of 5 world units per second and elapsed frame time. There is no collision, gravity, or terrain constraint in `SpectatorCamera`; it can move through solid terrain. Pitch is not explicitly clamped.
 
-`InputController` retains held keys. Press/repeat events update that state, but the application key-press callback fires only for a press. Releases are removed at the end of the frame, so a key released during event polling remains visible to that frame's movement update. Mouse state is polled each frame; unusually large deltas are suppressed at short frame intervals.
+`InputController` retains held keys. Press/repeat events update that state, but the application key-press callback fires only for a press. Released keys are excluded from held-key queries immediately and removed from storage at frame end. Press edges survive a same-frame release, so short Escape taps still exit. Mouse state is polled each frame. Cursor capture can follow the left button or remain enabled continuously; supported platforms use raw mouse motion while captured. Capture/focus transitions reset cursor deltas, and focus loss clears held keys.
+
+## Player controls and timing
+
+The voxel application owns `PlayerController`; the engine renders its camera and exposes input/time. The voxel app disables the scene's default spectator updates in player mode. Ordinary scene objects and groups have no player colliders.
+
+One block/world unit is one metre. The default body is an upright 0.6m-wide, 1.8m-tall box with eyes 1.6m above its feet. W/A/S/D move horizontally relative to yaw at 5m/s, with normalized diagonal input; pitch only affects the view and is clamped near vertical. Mouse movement controls view continuously without a held button. Gravity is 10m/s² and a grounded Space press gives 5m/s upward velocity, reaching about 1.25m. A press/release between rendered frames still produces one jump.
+
+Holding Space for 0.25 seconds enables automatic one-block climbing while walking. Climbing requires ground contact, a clear swept path up/across/down, and a landing; two-block walls and low ceilings still obstruct movement. Holding Space does not repeatedly jump. Release disables climbing immediately. C has no player movement action.
+
+The player consumes the full monotonic frame interval using internal steps at most 1/120 second, including the last partial step. Input therefore updates every frame at any frame rate rather than waiting for a fixed player tick. Axis sweeps stop at cube faces and allow wall sliding, including during long movements/fast falls. World-service replies and GPU geometry do not gate movement. See [simulation timing](architecture.md#initialization-and-frame-order) for the independent future world tick.
+
+Q enters debug spectator mode at the player's current eye position and orientation. The player and its velocity freeze, and its surrounding block chunks remain subscribed. Q returns to that player's position and view; it does not teleport the body to the spectator camera. Every later excursion starts at the player again. Player history continues to expire during spectating. Focus loss freezes controls, releases capture, and clears jump/held input; focus regain resumes without integrating the paused frame interval.
+
+Movement collision is a fixed property of `BlockType` in `terrain_collision.zig`. Air has none; stone, dirt, grass-covered ground, water, sand, and snow currently use full cubes. Water remains solid pending fluid movement. Future decorative types can map to no collision independently of rendering/occupancy. No per-block instance collision state exists. X wraps using the current world layout; finite y/z storage edges act as walls.
+
+Unknown chunks act as fully solid and stderr reports the encountered chunk, once per continuous contact with that chunk. When the body's starting volume is unknown, movement waits in place until data arrives. Recovery searches only accept known clear body-sized space.
+
+When an optimistic edit, worker snapshot, or reconciliation embeds the body in solid terrain, recovery tries nearby foot cells first, then the newest still-clear position from at most five seconds of history, then the nearest clear candidate within eight metres. History stores foot-cell coordinates and timestamps, deduplicating consecutive visits to the same cell. Restoration centres the body horizontally in that cell with feet on its bottom face and resets vertical velocity. All candidates are checked against current block data and the entire body. If none fits, movement freezes, stderr warns, and recovery retries on delivered terrain changes or once per second. A final failure policy is deferred in `TODO.md`.
+
+The initial voxel player spawns above the generated terrain and falls onto it. Column placement validates the candidate block against the body before changing the optimistic cache, also while the body is frozen during spectating.
+
+CPU regressions cover frame-time movement/gravity, short frames, diagonal/yaw movement, fast falls/wall sliding, jump edges/ceilings, held-Space climbing/clearance, missing-data blocking, recovery ordering/expiration/bounds, periodic seams, Q transitions, player streaming pins, and placement rejection. Cursor capture and interactive movement still require a windowed check.
 
 ## Lifetime
 
@@ -129,6 +151,7 @@ Models survive scene destruction and are released at engine teardown. For indivi
 - [`game_object.zig`](../src/engine/game_object.zig) and [`game_object_group.zig`](../src/engine/game_object_group.zig): transforms, attachment, and animation lifetime.
 - [`engine.zig`](../src/engine/engine.zig): `runLoop`, `update`, `draw`, and `getRenderTransform`.
 - [`input_controller.zig`](../src/engine/input_controller.zig), [`spectator_camera.zig`](../src/engine/spectator_camera.zig), [`camera.zig`](../src/engine/camera.zig): controls and projection.
+- [`player_controller.zig`](../src/voxel_app/player_controller.zig), [`terrain_collision.zig`](../src/voxel_app/terrain_collision.zig): player physics/recovery and terrain collision regression tests. [`main.zig`](../src/voxel_app/main.zig) contains Q, streaming-pin, and placement integration tests.
 - [`resource_lifetime_tests.zig`](../src/engine/resource_lifetime_tests.zig): headless shared-model and scene/engine resource lifetime checks, including allocation failures.
 - [`hierarchy_tests.zig`](../src/engine/hierarchy_tests.zig): nested transforms, parent updates, reparenting, ownership, and dirty instances at large positions.
 - [`render_coordinates_tests.zig`](../src/engine/render_coordinates_tests.zig): camera precision and rendering-frame invariance.

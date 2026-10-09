@@ -6,6 +6,8 @@ pub const KeyParams = struct {
     mods: zglfw.Mods,
 };
 
+pub const CursorCapture = enum { while_left_button, always };
+
 pub fn InputController(comptime Context: type) type {
     return struct {
         pub const Callbacks = struct {
@@ -26,12 +28,17 @@ pub fn InputController(comptime Context: type) type {
         // keyboard
         pressed_keys: std.AutoHashMap(zglfw.Key, void),
         release_queue: std.AutoHashMap(zglfw.Key, void),
+        pressed_this_frame: std.AutoHashMapUnmanaged(zglfw.Key, void) = .empty,
 
         // mouse
         cursor_position: [2]f32,
         cursor_position_delta: [2]f32 = .{ 0, 0 },
         cursor_left_button_pressed: bool = false,
         cursor_right_button_pressed: bool = false,
+        cursor_capture: CursorCapture = .while_left_button,
+        cursor_captured: bool = false,
+        focused: bool = true,
+        focus_changed: bool = false,
 
         last_update_time: f64 = 0.0, // seconds
 
@@ -66,6 +73,7 @@ pub fn InputController(comptime Context: type) type {
             }
             input_controller.pressed_keys.deinit();
             input_controller.release_queue.deinit();
+            input_controller.pressed_this_frame.deinit(input_controller.allocator);
             input_controller.allocator.destroy(input_controller);
         }
 
@@ -95,6 +103,10 @@ pub fn InputController(comptime Context: type) type {
                 }
 
                 if (action == .press) {
+                    input_controller.pressed_this_frame.put(input_controller.allocator, key, {}) catch |err| {
+                        std.debug.print("InputController: failed {}\n", .{err});
+                        return;
+                    };
                     if (input_controller.callbacks.on_key_press) |callback| {
                         callback(
                             input_controller.callbacks.context,
@@ -122,51 +134,30 @@ pub fn InputController(comptime Context: type) type {
 
         pub fn updateMouseState(input_controller: *Self, time_sec: f64) !void {
             const window = input_controller.window;
-
-            const new_position = getCursorPosition(window);
-
-            var delta: [2]f32 = .{
-                new_position[0] - input_controller.cursor_position[0],
-                new_position[1] - input_controller.cursor_position[1],
-            };
-
-            const delta_time: f32 = @floatCast(time_sec - input_controller.last_update_time);
+            const focused = window.getAttribute(.focused);
+            input_controller.focus_changed = focused != input_controller.focused;
+            input_controller.focused = focused;
+            if (!focused) {
+                input_controller.pressed_keys.clearRetainingCapacity();
+                input_controller.release_queue.clearRetainingCapacity();
+                input_controller.pressed_this_frame.clearRetainingCapacity();
+            }
             input_controller.last_update_time = time_sec;
-
-            // ignore too fast mouse movement when fps is reasonable (>= 50 fps)
-            if (delta_time < 0.02) {
-                const threshold = 20000 * delta_time;
-
-                // for  60 fsp ~> 333px
-                // for 120 fsp ~> 177px
-                if (@abs(delta[0]) > threshold or
-                    @abs(delta[1]) > threshold)
-                {
-                    delta = .{ 0, 0 };
-                }
+            input_controller.cursor_left_button_pressed = focused and window.getMouseButton(.left) != .release;
+            input_controller.cursor_right_button_pressed = focused and window.getMouseButton(.right) != .release;
+            const capture = focused and (input_controller.cursor_capture == .always or input_controller.cursor_left_button_pressed);
+            const capture_changed = capture != input_controller.cursor_captured;
+            if (capture_changed) {
+                try window.setInputMode(.cursor, if (capture) zglfw.Cursor.Mode.disabled else zglfw.Cursor.Mode.normal);
+                if (zglfw.rawMouseMotionSupported()) try window.setInputMode(.raw_mouse_motion, capture);
+                input_controller.cursor_captured = capture;
             }
-
-            input_controller.cursor_position_delta = delta;
+            const new_position = getCursorPosition(window);
+            input_controller.cursor_position_delta = if (capture_changed or input_controller.focus_changed or !focused)
+                .{ 0, 0 }
+            else
+                .{ new_position[0] - input_controller.cursor_position[0], new_position[1] - input_controller.cursor_position[1] };
             input_controller.cursor_position = new_position;
-
-            const cursor_left_button_pressed = window.getMouseButton(.left) != .release;
-            const cursor_right_button_pressed = window.getMouseButton(.right) != .release;
-
-            if (input_controller.cursor_left_button_pressed != cursor_left_button_pressed) {
-                input_controller.cursor_left_button_pressed = cursor_left_button_pressed;
-
-                if (cursor_left_button_pressed) {
-                    try window.setInputMode(.cursor, zglfw.Cursor.Mode.disabled);
-                } else {
-                    try window.setInputMode(.cursor, zglfw.Cursor.Mode.normal);
-                }
-            }
-
-            input_controller.cursor_right_button_pressed = cursor_right_button_pressed;
-
-            // if (input_controller.cursor_left_button_pressed) {
-            //     std.debug.print("new_position x {d:5.0}, y {d:5.0}\n", .{ new_position[0], new_position[1] });
-            // }
         }
 
         pub fn flushQueue(input_controller: *Self) void {
@@ -176,10 +167,15 @@ pub fn InputController(comptime Context: type) type {
                 _ = input_controller.pressed_keys.remove(key);
             }
             input_controller.release_queue.clearRetainingCapacity();
+            input_controller.pressed_this_frame.clearRetainingCapacity();
         }
 
         pub fn isKeyPressed(input_controller: *const Self, key: zglfw.Key) bool {
-            return input_controller.pressed_keys.getKey(key) != null;
+            return input_controller.pressed_keys.contains(key) and !input_controller.release_queue.contains(key);
+        }
+
+        pub fn wasKeyPressed(input_controller: *const Self, key: zglfw.Key) bool {
+            return input_controller.pressed_this_frame.contains(key);
         }
     };
 }
@@ -194,3 +190,31 @@ fn getCursorPosition(window: *zglfw.Window) [2]f32 {
 }
 
 pub const InputControllerGeneric = InputController(void);
+
+test "press-release between frames keeps the press edge, ends held input, and repeats do not create edges" {
+    var context: void = {};
+    var input: InputControllerGeneric = .{
+        .allocator = std.testing.allocator,
+        .window = undefined,
+        .callbacks = .{ .context = &context },
+        .pressed_keys = std.AutoHashMap(zglfw.Key, void).init(std.testing.allocator),
+        .release_queue = std.AutoHashMap(zglfw.Key, void).init(std.testing.allocator),
+        .cursor_position = .{ 0, 0 },
+    };
+    defer input.pressed_keys.deinit();
+    defer input.release_queue.deinit();
+    defer input.pressed_this_frame.deinit(std.testing.allocator);
+    InputControllerGeneric.instance = &input;
+    defer InputControllerGeneric.instance = null;
+    InputControllerGeneric.onKeyCallback(undefined, .escape, 0, .press, .{});
+    InputControllerGeneric.onKeyCallback(undefined, .escape, 0, .release, .{});
+    try std.testing.expect(input.wasKeyPressed(.escape));
+    try std.testing.expect(!input.isKeyPressed(.escape));
+    input.flushQueue();
+    try std.testing.expect(!input.wasKeyPressed(.escape));
+    InputControllerGeneric.onKeyCallback(undefined, .space, 0, .press, .{});
+    input.flushQueue();
+    InputControllerGeneric.onKeyCallback(undefined, .space, 0, .repeat, .{});
+    try std.testing.expect(input.isKeyPressed(.space));
+    try std.testing.expect(!input.wasKeyPressed(.space));
+}

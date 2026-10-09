@@ -330,6 +330,13 @@ pub const World = struct {
     /// Returns the placed block, or null if `top` is occupied. Fails without changing anything
     /// if it has to look into a chunk that isn't received.
     pub fn dropBlockInColumn(self: *World, top: [3]u32, block_type: BlockType, minimum_z: u32) ChunkNotReceivedError!?[3]u32 {
+        const block = try self.findDropPosition(top, minimum_z) orelse return null;
+        self.setBlock(block, block_type);
+        return block;
+    }
+
+    /// Computes a placement before mutation, allowing application-level body checks.
+    pub fn findDropPosition(self: *const World, top: [3]u32, minimum_z: u32) ChunkNotReceivedError!?[3]u32 {
         if (minimum_z > top[2]) return null;
         if (try self.isBlockSolid(top)) {
             return null;
@@ -342,7 +349,6 @@ pub const World = struct {
 
         // No support was found within reach; do not create a floating block at the limit.
         if (block[2] == minimum_z and minimum_z != 0) return null;
-        self.setBlock(block, block_type);
         return block;
     }
 };

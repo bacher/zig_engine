@@ -33,6 +33,9 @@ const world_data_service = @import("./world_data_service.zig");
 const WorldDataService = world_data_service.WorldDataService;
 const ChunkResponse = world_data_service.ChunkResponse;
 const SimulationWorker = @import("./simulation_worker.zig").SimulationWorker;
+const player_module = @import("player_controller.zig");
+const PlayerController = player_module.PlayerController;
+const terrain_collision = @import("terrain_collision.zig");
 const consts = @import("./consts.zig");
 const world_engine = @import("./world_engine_glue.zig");
 
@@ -52,6 +55,11 @@ const Game = struct {
     world_data: ?*WorldDataService = null,
     world_client: ?*world_data_service.Client = null,
     simulation: ?*SimulationWorker = null,
+    player: ?PlayerController = null,
+    control_mode: enum { player, spectator } = .player,
+    jump_requested: bool = false,
+    last_missing_collision: ?ChunkCoords = null,
+    recovery_warning: bool = false,
     /// Active subscriptions, including loads still in flight. Kept until cache eviction.
     chunk_subscriptions: std.AutoHashMapUnmanaged(u32, u64) = .empty,
     chunk_packages: std.ArrayList(world_data_service.ResponsePackage) = .empty,
@@ -98,6 +106,7 @@ const Game = struct {
 
     pub fn deinit(game: *Game) void {
         game.stopWorkers();
+        if (game.player) |*player| player.deinit();
         game.chunk_subscriptions.deinit(game.allocator);
         for (game.chunk_packages.items) |*package| package.deinit(game.allocator);
         game.chunk_packages.deinit(game.allocator);
@@ -125,6 +134,9 @@ const Game = struct {
         game.flushBlockOperations();
         game.updateChunksAroundCamera(false);
         const has_new_chunks = game.receiveChunks();
+        // Synchronize blocks first, then resolve local movement against that cache.
+        // Player input remains independent of mesh work and GPU upload capacity.
+        if (game.player != null) game.updatePlayer(has_new_chunks);
         game.updateChunksAroundCamera(has_new_chunks);
         game.rebuildDirtyChunks();
         const grid = game.engine.active_scene.?.voxel_grid;
@@ -140,6 +152,74 @@ const Game = struct {
         }
         game.gpu_capacity_warning = false;
         grid.uploadToGPU(game.engine.gctx);
+    }
+
+    fn updatePlayer(game: *Game, terrain_changed: bool) void {
+        const player = &game.player.?;
+        const engine = game.engine;
+        if (terrain_changed) player.terrainChanged();
+        player.expireHistory(engine.time);
+        if (game.control_mode == .spectator) return;
+        const input = engine.input_controller;
+        if (!input.focused) {
+            game.jump_requested = false;
+            player.resetJumpInput();
+            return;
+        }
+        const elapsed = if (input.focus_changed) 0 else engine.frame_delta;
+        if (input.focus_changed) game.jump_requested = false;
+        player.look(input.cursor_position_delta);
+        const forward = @as(i8, @intFromBool(input.isKeyPressed(.w))) - @as(i8, @intFromBool(input.isKeyPressed(.s)));
+        const right = @as(i8, @intFromBool(input.isKeyPressed(.d))) - @as(i8, @intFromBool(input.isKeyPressed(.a)));
+        const result = player.update(&game.world.?, .{
+            .forward = @floatFromInt(forward),
+            .right = @floatFromInt(right),
+            .jump_pressed = game.jump_requested,
+            .jump_down = input.isKeyPressed(.space),
+        }, elapsed, engine.time) catch |err| {
+            std.debug.print("player update failed: {}\n", .{err});
+            game.jump_requested = false;
+            player.applyCamera(engine.active_scene.?.camera);
+            return;
+        };
+        game.jump_requested = false;
+        if (result.missing_chunk) |chunk| {
+            if (game.last_missing_collision == null or !@reduce(.And, game.last_missing_collision.? == chunk)) {
+                std.debug.print("warning: player collision with missing chunk {d}; treating it as fully solid\n", .{chunk});
+            }
+        }
+        game.last_missing_collision = result.missing_chunk;
+        if (result.recovery_failed and !game.recovery_warning) {
+            std.debug.print("warning: player embedded in terrain; no clear history or space within {d}m; movement frozen (see TODO.md)\n", .{player_module.recovery_radius});
+        }
+        game.recovery_warning = result.recovery_failed;
+        if (result.recovered) {
+            std.debug.print("player recovered to {d}\n", .{player.position});
+        }
+        player.applyCamera(engine.active_scene.?.camera);
+    }
+
+    fn toggleControlMode(game: *Game) void {
+        const player = if (game.player) |*player| player else return;
+        const scene = game.engine.active_scene.?;
+        game.jump_requested = false;
+        player.resetJumpInput();
+        if (game.control_mode == .player) {
+            // Every excursion starts at the player's current eyes and orientation.
+            player.applyCamera(scene.camera);
+            scene.spectator_camera.yaw = player.yaw;
+            scene.spectator_camera.pitch = player.pitch;
+            game.control_mode = .spectator;
+            scene.spectator_enabled = true;
+            game.engine.input_controller.cursor_capture = .while_left_button;
+        } else {
+            game.control_mode = .player;
+            scene.spectator_enabled = false;
+            game.engine.input_controller.cursor_capture = .always;
+            player.terrainChanged();
+            player.applyCamera(scene.camera);
+        }
+        std.debug.print("control mode: {s}\n", .{@tagName(game.control_mode)});
     }
 
     /// Submit commands in optimistic edit order; no chunk data crosses in this direction.
@@ -293,6 +373,21 @@ const Game = struct {
 
     fn refreshPinnedChunks(game: *Game) void {
         game.pinned_chunks.clearRetainingCapacity();
+        // A detached debug camera must not evict the frozen player's collision data.
+        if (game.player) |*player| {
+            const centre = game.layout().getChunkCoords(player.position);
+            var dz: i32 = -BLOCK_LOAD_RADIUS;
+            while (dz <= BLOCK_LOAD_RADIUS) : (dz += 1) {
+                var dy: i32 = -BLOCK_LOAD_RADIUS;
+                while (dy <= BLOCK_LOAD_RADIUS) : (dy += 1) {
+                    var dx: i32 = -BLOCK_LOAD_RADIUS;
+                    while (dx <= BLOCK_LOAD_RADIUS) : (dx += 1) {
+                        const coords = game.layout().normalizeChunkCoords(centre +| ChunkCoords{ dx, dy, dz }) orelse continue;
+                        game.pinned_chunks.put(game.allocator, game.layout().encodeChunkCoords(coords), {}) catch @panic("OOM");
+                    }
+                }
+            }
+        }
         for (game.world.?.pending_operations.items) |pending| {
             const coords, const local = world_module.splitBlockCoords(pending.operation.block);
             game.pinned_chunks.put(game.allocator, game.layout().encodeChunkCoords(coords), {}) catch @panic("OOM");
@@ -388,7 +483,19 @@ const Game = struct {
         const minimum_z: u32 = @intFromFloat(@max(0, @floor(camera_z - TOOL_REACH)));
         const edit_result = switch (action) {
             .remove => world.removeTopBlockInColumn(top, minimum_z),
-            .add_dirt => world.dropBlockInColumn(top, .dirt, minimum_z),
+            .add_dirt => blk: {
+                const block = world.findDropPosition(top, minimum_z) catch |err| break :blk err;
+                const placement = block orelse break :blk @as(?[3]u32, null);
+                if (game.player) |*player| {
+                    if (terrain_collision.overlapsBlock(player.body, player.position, game.layout(), placement)) {
+                        std.debug.print("can't place block {any}: overlaps player body\n", .{placement});
+                        break :blk @as(?[3]u32, null);
+                    }
+                    player.terrainChanged();
+                }
+                world.setBlock(placement, .dirt);
+                break :blk @as(?[3]u32, placement);
+            },
         };
         // Chunks near the camera are normally received, so this happens only while they are
         // still loading, or when the column has to be searched too far from the camera.
@@ -645,7 +752,11 @@ pub fn main(init: std.process.Init) !void {
     defer scene.deinit();
     defer game.stopWorkers();
 
-    scene.camera.updatePosition(.{ -2.06, -2.96, 8.45 });
+    // Start above the generated terrain's maximum height, then fall onto it.
+    game.player = PlayerController.init(allocator, .{ -2.06, -2.96, 64 });
+    scene.spectator_enabled = false;
+    engine.input_controller.cursor_capture = .always;
+    game.player.?.applyCamera(scene.camera);
     // edge of the world:
     // scene.camera.updatePosition(.{ -8192.0, -4096.0, 0 });
 
@@ -769,12 +880,17 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
 }
 
 fn onKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque) void {
-    _ = engine;
     const game: *Game = @ptrCast(@alignCast(game_opaque));
+    if (!engine.window_context.window.getAttribute(.focused)) return;
 
     switch (key_params.key) {
         .x => game.editBlockUnderCamera(.remove),
         .z => game.editBlockUnderCamera(.add_dirt),
+        .q => game.toggleControlMode(),
+        // A press/release occurring between frames must still produce one jump.
+        .space => if (game.control_mode == .player) {
+            game.jump_requested = true;
+        },
         else => {},
     }
 }
@@ -790,6 +906,96 @@ test {
     _ = world_generator;
     _ = world_data_service;
     _ = SimulationWorker;
+    _ = player_module;
+}
+
+test "Q excursions start at player eyes and return to the frozen player position and view" {
+    var camera = std.meta.Child(@TypeOf(@as(Scene, undefined).camera)).init(&test_layout, 1);
+    var engine: Engine = undefined;
+    const InputController = std.meta.Child(@TypeOf(engine.input_controller));
+    var input: InputController = .{
+        .allocator = std.testing.allocator,
+        .window = undefined,
+        .callbacks = .{ .context = &engine },
+        .pressed_keys = std.AutoHashMap(zglfw.Key, void).init(std.testing.allocator),
+        .release_queue = std.AutoHashMap(zglfw.Key, void).init(std.testing.allocator),
+        .cursor_position = .{ 0, 0 },
+        .cursor_capture = .always,
+    };
+    defer input.pressed_keys.deinit();
+    defer input.release_queue.deinit();
+    var spectator: std.meta.Child(@TypeOf(@as(Scene, undefined).spectator_camera)) = .{
+        .camera = &camera,
+        .input_controller = @ptrCast(&input),
+    };
+    var scene: Scene = undefined;
+    scene.camera = &camera;
+    scene.spectator_camera = &spectator;
+    scene.spectator_enabled = false;
+    engine.active_scene = &scene;
+    engine.input_controller = &input;
+    var game: Game = .{
+        .allocator = std.testing.allocator,
+        .engine = &engine,
+        .player = PlayerController.init(std.testing.allocator, .{ 1.5, 2.5, 3 }),
+    };
+    defer game.player.?.deinit();
+    game.player.?.yaw = 0.5;
+    game.player.?.pitch = 0.2;
+    game.player.?.auto_climb = true;
+    game.toggleControlMode();
+    const eyes = camera.position;
+    try std.testing.expectEqualDeep(Position{ 1.5, 2.5, 4.6 }, eyes);
+    try std.testing.expect(scene.spectator_enabled);
+    try std.testing.expectEqual(@as(f32, 0.5), spectator.yaw);
+    try std.testing.expectEqual(@as(f32, 0.2), spectator.pitch);
+    try std.testing.expect(!game.player.?.auto_climb);
+    camera.updatePosition(.{ 100, 100, 100 });
+    spectator.yaw = 2;
+    game.toggleControlMode();
+    try std.testing.expectEqualDeep(eyes, camera.position);
+    try std.testing.expectEqualDeep(Position{ 1.5, 2.5, 3 }, game.player.?.position);
+    try std.testing.expect(!scene.spectator_enabled);
+    try std.testing.expectEqual(@as(f32, 0.5), game.player.?.yaw);
+    try std.testing.expectEqual(@as(@TypeOf(input.cursor_capture), .always), input.cursor_capture);
+    game.toggleControlMode();
+    try std.testing.expectEqualDeep(eyes, camera.position);
+}
+
+test "spectator streaming pins the frozen player's nearby block chunks" {
+    var fixture: StreamingTest = undefined;
+    fixture.init();
+    defer fixture.deinit();
+    fixture.game.player = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
+    fixture.game.control_mode = .spectator;
+    fixture.camera.position = .{ 500, 500, 0 };
+    fixture.game.refreshPinnedChunks();
+    const player_chunk = test_layout.getChunkCoords(fixture.game.player.?.position);
+    try std.testing.expectEqual(@as(u32, 27), fixture.game.pinned_chunks.count());
+    try std.testing.expect(fixture.game.pinned_chunks.contains(test_layout.encodeChunkCoords(player_chunk)));
+    try std.testing.expect(fixture.game.wantsBlocks(player_chunk));
+    try std.testing.expect(!fixture.game.pinned_chunks.contains(test_layout.encodeChunkCoords(test_layout.getChunkCoords(fixture.camera.position))));
+}
+
+test "column placement rejects the player's body before changing the optimistic cache" {
+    var fixture: StreamingTest = undefined;
+    fixture.init();
+    defer fixture.deinit();
+    fixture.game.player = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
+    fixture.camera.position = .{ 0.5, 0.5, 1.6 };
+    const centre = test_layout.getChunkCoords(.{ 0.5, 0.5, 0 });
+    try fixture.game.world.?.insertChunk(centre, WorldChunk.initEmpty());
+    try fixture.game.world.?.insertChunk(centre - ChunkCoords{ 0, 0, 1 }, WorldChunk.initEmpty());
+    const ground: [3]u32 = .{ 8192, 4096, 127 };
+    fixture.game.world.?.setBlock(ground, .stone);
+    fixture.game.world.?.pending_operations.clearRetainingCapacity();
+    fixture.game.editBlockUnderCamera(.add_dirt);
+    try std.testing.expect(!try fixture.game.world.?.isBlockSolid(.{ 8192, 4096, 128 }));
+    try std.testing.expectEqual(@as(usize, 0), fixture.game.world.?.pending_operations.items.len);
+    // The same protection applies while the player is frozen in spectator mode.
+    fixture.game.control_mode = .spectator;
+    fixture.game.editBlockUnderCamera(.add_dirt);
+    try std.testing.expectEqual(@as(usize, 0), fixture.game.world.?.pending_operations.items.len);
 }
 
 test "chunk loads, edits, and snapshots share one rebuild using the final contents" {
@@ -1222,6 +1428,7 @@ const StreamingTest = struct {
 
     fn deinit(self: *StreamingTest) void {
         const allocator = self.game.allocator;
+        if (self.game.player) |*player| player.deinit();
         self.game.world.?.deinit();
         self.game.chunk_subscriptions.deinit(allocator);
         self.game.chunk_modes.deinit(allocator);

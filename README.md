@@ -35,9 +35,11 @@ The subsystem docs link to implementing modules and existing tests. [TODO.md](TO
 
 ## Controls
 
-W/A/S/D move the spectator camera; Space/C move up/down. Hold the left mouse button to look around. Escape exits. E toggles SSAO, R toggles its debug view, and B toggles blur.
+The voxel app starts in player mode: W/A/S/D walk, mouse movement looks around, and Space jumps. Holding Space for 0.25 seconds enables automatic climbing of one-block steps; releasing it disables climbing. Terrain blocks stop movement, gravity is 10 m/s², and one block is one metre.
 
-In the voxel app, Z places dirt and X removes the top solid block in the column below the camera, within 20 blocks of reach. These are vertical column tools. See [scenes and input](docs/scenes.md) and [voxel tools](docs/voxel-world.md#tools-and-simulation-example).
+Q switches between player and debug spectator modes. Each spectator excursion starts at the player's eyes; the player freezes and returning restores its position and view. Spectator controls are W/A/S/D, Space/C for up/down, and looking while holding the left mouse button. The demo app uses these spectator controls by default. Escape exits. E toggles SSAO, R toggles its debug view, and B toggles blur.
+
+In the voxel app, Z places dirt and X removes the top solid block in the column below the camera, within 20 blocks of reach. Placement overlapping the player is rejected, including during spectating. These are vertical column tools. See [scenes and input](docs/scenes.md) and [voxel tools](docs/voxel-world.md#tools-and-simulation-example).
 
 ## Voxel app
 

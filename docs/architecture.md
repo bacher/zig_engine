@@ -53,6 +53,7 @@ The arrows show responsibilities and data flow, not separate processes. The serv
 | [`world_data_service.zig`](../src/voxel_app/world_data_service.zig) | Command ordering, authoritative revisions, subscriptions, batching, and retained modifications. |
 | [`world_generator.zig`](../src/voxel_app/world_generator.zig), [`perlin_noise.zig`](../src/voxel_app/perlin_noise.zig) | Deterministic heightmap terrain and flat test terrain. |
 | [`simulation_worker.zig`](../src/voxel_app/simulation_worker.zig) | A second world client that repeatedly edits one block. |
+| [`player_controller.zig`](../src/voxel_app/player_controller.zig), [`terrain_collision.zig`](../src/voxel_app/terrain_collision.zig) | Application-owned player body, gravity, jumping/climbing, terrain sweeps, and recovery against the local block cache. |
 | [`gltf_loader/`](../gltf_loader) | Local glTF JSON, geometry, texture, skin, and animation input support. |
 
 ## Build and dependencies
@@ -81,14 +82,16 @@ The application creates `WindowContext`, its own game state, and `Engine`, then 
 
 1. Poll GLFW events. Key-press callbacks can execute application logic here.
 2. Exit if the window closes or Escape is pressed.
-3. Update elapsed engine time, reset frame statistics, and poll mouse state.
-4. Update the active scene's camera aspect ratio and spectator controller.
-5. Call the application's `onUpdate` callback. The voxel app performs world synchronization and uploads here.
+3. Sample monotonic elapsed time and frame delta independently of GPU statistics, reset frame statistics, and poll mouse state/cursor capture.
+4. Update the active scene's camera aspect ratio and its optional spectator controller.
+5. Call the application's `onUpdate` callback. The voxel app receives block updates, advances the player against the resulting local cache, refreshes streaming, rebuilds meshes, and uploads geometry here.
 6. Draw the active scene, post-process, and invoke `onRender` for overlays.
 7. Submit GPU commands and present. Handle a reported swapchain resize.
 8. Remove released keys from the held-key state.
 
-There is no fixed simulation timestep in this loop. Camera movement uses frame elapsed time. Skeletal animation evaluation happens when an object is drawn, and skips repeated evaluations at the same engine time. The voxel service and simulation task progress independently of frame execution.
+Rendering, camera orientation, and local movement consume monotonic frame elapsed time. The player splits the complete elapsed interval into steps no larger than 1/120 second, consuming the final fractional step immediately; this is a numerical stability bound, not a 120 Hz input/update limit. There is no time clamp or dependency on world-worker progress. Loss of window focus freezes controls, and the first focused frame consumes no paused movement interval. Skeletal animation evaluation remains draw-driven and derives visual time from the same monotonic engine clock.
+
+Future world gameplay simulation will use a configurable fixed step around 20 or 40 ticks/s on its own worker, independently of local controls. That rate is not yet selected or implemented: the current simulation worker remains the two-second block-edit example, and the world-data service remains command-driven. Main-thread render/meshing stalls can still delay visible feedback. Player collisions use the latest delivered cache state, including optimistic edits, rather than waiting for authoritative worker state.
 
 ## Ownership and concurrency boundaries
 
@@ -100,7 +103,7 @@ There is no fixed simulation timestep in this loop. Camera movement uses frame e
 | Special model pointers returned by loading helpers | Borrowed from `Engine`; tracked separately from regular model IDs. |
 | Standalone textures returned by `loadTexture` | Caller; destroy after every borrowing model (normally after engine teardown). |
 | Authoritative world state, client endpoints, request/reply queues | `WorldDataService`. Only its worker accesses authoritative state while running. |
-| Local block cache, outstanding commands, streaming state | Voxel application's main thread. |
+| Local block cache, outstanding commands, streaming state, player/controller and five-second position history | Voxel application's main thread. |
 | Face arrays in a received mesh | Receiver, until ownership transfers to `VoxelGrid`'s upload queue. |
 
 GPU operations run on the application thread. The service generates data and face records without accessing GPU resources. Each producer/consumer thread uses its own client endpoint; a client's request-ID counter is not a shared multi-thread API. Service mailboxes use short mutex-protected sections, and an allocator used by the service must support concurrent allocation.
@@ -124,7 +127,7 @@ These are questions raised by the current implementation. Resolved decisions and
 2. **Scene lifetime (resolved).** Applications own scenes; the engine owns all models created through its helpers, including its built-in debug wireframe cube. Objects borrow models and own their instance/animation state. Scene teardown clears the active pointer and releases instance resources; engine teardown asserts that all scenes are gone and releases shared assets and GPU resources. Standalone textures remain caller-owned. See [scene and model lifetime](scene-lifetime-options.md) for the ownership contract, retention tradeoff, and verification limits.
 3. **Scene mutation (resolved).** Scenes support object creation and deletion during gameplay through scene-owned removal APIs. Deleting a group removes its current transform descendants; reparented-out objects/groups survive. Deleted instance slots are reused, and CPU/GPU storage grows subject to allocation success and device buffer/binding limits, replacing the arbitrary 4096-object cap. Mutations run on the application thread before drawing; removal invalidates borrowed object/group pointers and preserves shared models. See the [scene mutation contract](scenes.md#scene-mutation-contract). Voxel residency and upload behavior is unchanged; [voxel follow-ups](voxel-world.md#deferred-capacity-and-lifetime-work) are deferred.
 4. **Lighting (resolved).** The current renderer supports one directional light per rendered scene. The scene stores it by value, rejects a second addition, and uses its three cascades consistently in shadow and forward passes. Future lighting will allow at most one directional light alongside multiple point and spot lights; local lights are deferred and will require light accumulation and independent shadow allocation. Color and intensity remain unused by current shading. See the [lighting contract and extension plan](rendering.md#lighting-contract-and-extension-plan).
-5. **Simulation timing.** Camera movement is frame-driven, animation is draw-driven, and voxel commands are worker-driven. Is a separate fixed-step simulation an intended future requirement?
+5. **Simulation timing (resolved).** Local player/camera controls consume monotonic wall time every frame, independently of world-worker progress or tick rate. Player integration subdivides the full frame interval for collision/gravity stability without an artificial update-rate cap. Future world gameplay has an independent configurable fixed step around 20–40 ticks/s; its exact rate and scheduler remain deferred until that simulation is introduced. Cosmetic animation remains tied to presentation time; future gameplay timers/events belong to simulation time. See [player controls and timing](scenes.md#player-controls-and-timing).
 6. **Optimization policy.** Visibility queries temporarily perform no culling; voxel streaming has fixed boxes, permanent reveal flags, and a one-way radius reduction under capacity pressure. Which of these are acceptable lasting behavior, and which are temporary measures?
 
 ## Evidence and verification limits
