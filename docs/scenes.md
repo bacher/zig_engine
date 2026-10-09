@@ -6,7 +6,7 @@ This document describes the current implementation. For system boundaries and un
 
 A `Scene` holds ordinary game objects, separately owned root groups, directional lights, a camera and spectator controller, a voxel grid, and a CPU/GPU instance buffer. It also holds a dedicated cubemap skybox object. Only the engine's active scene is updated and rendered.
 
-Ordinary objects are individually allocated and retained in `scene.game_objects`. A regular object's model is looked up by `LoadedModelId` in the engine's registry. Special objects receive a model pointer from the caller.
+Ordinary objects are individually allocated and retained in `scene.game_objects`. A regular object's model is looked up by `LoadedModelId` in the engine's registry. Special objects receive a borrowed engine-owned model pointer from the caller.
 
 The ordinary-object limit is 4096. Creation assigns the next instance index and initializes an 80-byte chunk transform entry. Indices increase as objects are added; there is no general scene removal method that removes an object from all collections and reclaims its index. Calling `GameObject.deinit` alone is not a complete scene removal operation because the scene still holds its pointer.
 
@@ -84,11 +84,13 @@ Movement uses a base speed of 5 world units per second and elapsed frame time. T
 
 `InputController` retains held keys. Press/repeat events update that state, but the application key-press callback fires only for a press. Releases are removed at the end of the frame, so a key released during event polling remains visible to that frame's movement update. Mouse state is polled each frame; unusually large deltas are suppressed at short frame intervals.
 
-## Lifetime caveats
+## Lifetime
 
-`Scene.deinit` releases its reference to the engine's world pipeline cache and destroys its layout, dedicated skybox, scene-owned collections, voxel GPU buffers, instance buffer, cameras, groups, and ordinary object allocations. The final scene reference releases its shared pipeline set. All scenes must be destroyed before their engine. For ordinary objects it stops animations and destroys their allocations directly rather than invoking the entire `GameObject.deinit` path. Models referenced by those objects are managed separately.
+Applications destroy their scenes before the engine. `Scene.deinit` clears `engine.active_scene` if it points to that scene and decrements the engine's live-scene count. It destroys both ordinary objects and the dedicated skybox through `GameObject.deinit`, while parent groups and the visibility index still exist. That path detaches objects, removes their visibility entries, and stops animations; it never destroys borrowed models.
 
-This distinction matters for special cases: `GameObject.deinit` contains a terrain-model allocation-destruction branch, while normal scene destruction does not take that branch. Resource cleanup and manual object destruction should be reviewed together; the current code does not provide a complete object-removal lifecycle.
+The scene then releases groups, cameras, lights, voxel resources (binding before buffers), instance resources, layout, and its reference to the engine's world pipeline cache. The final scene reference evicts the shared pipeline set. Engine teardown asserts that no scenes remain. Destroying the active scene leaves no active scene; the application can explicitly select another or create a new one.
+
+Models survive scene destruction and are released at engine teardown. Calling `GameObject.deinit` directly still does not remove an ordinary object from the scene's owning collection or reclaim its instance index; a complete public object-removal API remains a separate review point.
 
 ## Sources and tests
 
@@ -96,6 +98,7 @@ This distinction matters for special cases: `GameObject.deinit` contains a terra
 - [`game_object.zig`](../src/engine/game_object.zig) and [`game_object_group.zig`](../src/engine/game_object_group.zig): transforms, attachment, and animation lifetime.
 - [`engine.zig`](../src/engine/engine.zig): `runLoop`, `update`, `draw`, and `getRenderTransform`.
 - [`input_controller.zig`](../src/engine/input_controller.zig), [`spectator_camera.zig`](../src/engine/spectator_camera.zig), [`camera.zig`](../src/engine/camera.zig): controls and projection.
+- [`resource_lifetime_tests.zig`](../src/engine/resource_lifetime_tests.zig): headless shared-model and scene/engine resource lifetime checks, including allocation failures.
 - [`hierarchy_tests.zig`](../src/engine/hierarchy_tests.zig): nested transforms, parent updates, reparenting, ownership, and dirty instances at large positions.
 - [`render_coordinates_tests.zig`](../src/engine/render_coordinates_tests.zig): camera precision and rendering-frame invariance.
 - [`naive_space_tree.zig`](../src/engine/naive_space_tree.zig): query, deduplication, and removal test for the active visibility index.

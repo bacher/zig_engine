@@ -31,6 +31,8 @@ pub const ModelDescriptor = struct {
     weights: types.BufferDescriptor,
     index: types.BufferDescriptor,
     color_texture: types.TextureDescriptor,
+    /// Material textures are owned; fallback descriptors are borrowed.
+    owns_color_texture: bool = false,
     geometry_bounds: types.GeometryBounds,
     has_skin: bool,
     options: ModelDescriptorOptions,
@@ -52,14 +54,21 @@ pub const ModelDescriptor = struct {
         defer buffers.deinit(arena_allocator);
 
         const positions_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, buffers.positions);
+        errdefer positions_buffer_info.deinit(gctx);
         const normal_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, buffers.normals);
+        errdefer normal_buffer_info.deinit(gctx);
         const texcoord_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, buffers.texcoord);
+        errdefer texcoord_buffer_info.deinit(gctx);
         const joints_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, try getJointBuffer(arena_allocator, buffers));
+        errdefer joints_buffer_info.deinit(gctx);
         const weights_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .vertex, try getWeightBuffer(arena_allocator, buffers));
+        errdefer weights_buffer_info.deinit(gctx);
         const index_buffer_info = try load_buffer.loadBufferIntoGpu(gctx, .index, buffers.indexes);
+        errdefer index_buffer_info.deinit(gctx);
 
         const material = loader.getObjectMaterial(object);
         var color_texture: types.TextureDescriptor = undefined;
+        var owns_color_texture = false;
 
         if (try loader.loadMaterialTextureData(material)) |image| {
             defer @constCast(&image).deinit();
@@ -70,6 +79,7 @@ pub const ModelDescriptor = struct {
                 image,
                 .{ .generate_mipmaps = image.width == image.height },
             );
+            owns_color_texture = true;
         } else if (options.color_texture_fallback) |fallback| {
             color_texture = fallback.*;
         } else {
@@ -87,6 +97,7 @@ pub const ModelDescriptor = struct {
             .weights = weights_buffer_info,
             .index = index_buffer_info,
             .color_texture = color_texture,
+            .owns_color_texture = owns_color_texture,
             .geometry_bounds = .{
                 .min = arrayF64to32(mesh.geometry_bounds.min),
                 .max = arrayF64to32(mesh.geometry_bounds.max),
@@ -99,9 +110,14 @@ pub const ModelDescriptor = struct {
         };
     }
 
-    pub fn deinit(model_description: ModelDescriptor) void {
-        _ = model_description;
-        // model_description.model.deinit();
+    pub fn deinit(self: ModelDescriptor, gctx: *zgpu.GraphicsContext) void {
+        self.position.deinit(gctx);
+        self.normal.deinit(gctx);
+        self.texcoord.deinit(gctx);
+        self.joints.deinit(gctx);
+        self.weights.deinit(gctx);
+        self.index.deinit(gctx);
+        if (self.owns_color_texture) self.color_texture.deinit(gctx);
     }
 };
 

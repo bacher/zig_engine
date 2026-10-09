@@ -23,8 +23,10 @@ pub const SkyBoxVertexData = struct {
 
 pub fn generateSkyBoxVertexData(allocator: std.mem.Allocator) !SkyBoxVertexData {
     const positions = try allocator.alignedAlloc(u8, .of(f32), @sizeOf(f32) * 3 * 14);
+    errdefer allocator.free(positions);
     const positions_slice = std.mem.bytesAsSlice([3]f32, positions);
     const uvs = try allocator.alignedAlloc(u8, .of(f32), @sizeOf(f32) * 2 * 14);
+    errdefer allocator.free(uvs);
     const uvs_slice = std.mem.bytesAsSlice([2]f32, uvs);
 
     const indices = try allocator.alignedAlloc(u8, .@"4", @sizeOf(u16) * 3 * 12); // TODO:

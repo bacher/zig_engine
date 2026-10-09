@@ -41,7 +41,11 @@ pub fn loadTextureIntoGpu(
             1,
     });
 
+    errdefer gctx.destroyResource(texture_handle);
+
     const view_handle = gctx.createTextureView(texture_handle, .{});
+
+    errdefer gctx.releaseResource(view_handle);
 
     const texture = gctx.lookupResource(texture_handle) orelse return error.TextureIsNoAvailable;
     const view = gctx.lookupResource(view_handle) orelse return error.ViewIsNoAvailable;
@@ -104,9 +108,13 @@ pub fn loadCubeTextureIntoGpu(
             1,
     });
 
+    errdefer gctx.destroyResource(texture_handle);
+
     const view_handle = gctx.createTextureView(texture_handle, .{
         .dimension = .tvdim_cube,
     });
+
+    errdefer gctx.releaseResource(view_handle);
 
     const texture = gctx.lookupResource(texture_handle) orelse return error.TextureIsNoAvailable;
     const view = gctx.lookupResource(view_handle) orelse return error.ViewIsNoAvailable;

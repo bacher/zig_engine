@@ -95,9 +95,10 @@ There is no fixed simulation timestep in this loop. Camera movement uses frame e
 | State/resource | Current controlling owner |
 | --- | --- |
 | Window and graphics context | Application's `WindowContext`. |
-| Common pipelines, shared world pipeline cache, engine input controller, registered regular models | `Engine`. World pipeline sets are evicted on final reference release. Explicit GPU cleanup is incomplete in some other paths; see [assets and animation](assets-animation.md). |
+| Common pipelines, shared world pipeline cache, engine input controller, all models created by engine helpers | `Engine`. World pipeline sets are evicted on final reference release; models remain until engine teardown. |
 | World layout, reference to cached pipelines, scene objects, cameras, groups, lights, instance buffer, voxel grid | `Scene`, which the application must destroy. |
-| Special model pointers returned by loading helpers | Usually the application; they are outside the regular-model registry. |
+| Special model pointers returned by loading helpers | Borrowed from `Engine`; tracked separately from regular model IDs. |
+| Standalone textures returned by `loadTexture` | Caller; destroy after every borrowing model (normally after engine teardown). |
 | Authoritative world state, client endpoints, request/reply queues | `WorldDataService`. Only its worker accesses authoritative state while running. |
 | Local block cache, outstanding commands, streaming state | Voxel application's main thread. |
 | Face arrays in a received mesh | Receiver, until ownership transfers to `VoxelGrid`'s upload queue. |
@@ -117,10 +118,10 @@ The voxel app stops the simulation worker, submits any remaining local commands,
 
 ## Review points
 
-These are questions raised by the current implementation, not proposed changes:
+These are questions raised by the current implementation. Resolved decisions and investigated proposals are marked explicitly:
 
 1. **Engine/application boundary (resolved).** Applications choose runtime dimensions at scene creation and optional x wrapping at compile time. The layout remains immutable, chunks stay fixed at 32³, and the engine shares specialized GPU pipelines across compatible scenes. The voxel app always wraps x. See [world configuration](world-configuration.md) and the [original research](world-configuration-options.md).
-2. **Scene lifetime.** Applications own scenes and special models, while the engine owns registered regular models. Is that split intentional? The cleanup paths do not yet express one consistent resource-ownership policy.
+2. **Scene lifetime (resolved).** Applications own scenes; the engine owns all models created through its helpers, including its built-in debug wireframe cube. Objects borrow models and own their instance/animation state. Scene teardown clears the active pointer and releases instance resources; engine teardown asserts that all scenes are gone and releases shared assets and GPU resources. Standalone textures remain caller-owned. See [scene and model lifetime](scene-lifetime-options.md) for the ownership contract, retention tradeoff, and verification limits.
 3. **Scene mutation.** Creation and transform updates are clear, but there is no complete public scene-object removal/index-reuse path. Is the current scene model intended mainly for setup followed by transform changes?
 4. **Lighting.** Examples use one directional light. The API accepts several, but forward rendering reads the first light and all lights write the same shadow layers. What lighting contract should be supported?
 5. **Simulation timing.** Camera movement is frame-driven, animation is draw-driven, and voxel commands are worker-driven. Is a separate fixed-step simulation an intended future requirement?
@@ -130,4 +131,4 @@ These are questions raised by the current implementation, not proposed changes:
 
 The source links identify the implementing modules. The subsystem documents link to the relevant test files and describe what they cover. `agent-sessions/` contains historical session logs; those logs may explain past work but do not override current source behavior.
 
-This documentation change does not establish that every described path currently passes tests or renders correctly. In particular, existing CPU tests do not establish full GPU rendering, resize, resource-lifetime, or multi-light correctness. Review corrections can distinguish a documentation error, an implementation bug, and a desired design change.
+CPU tests do not establish full GPU rendering, resize, or multi-light correctness. The scene/model lifetime changes are additionally covered by headless Dawn resource-count and allocation-failure checks under both wrapping configurations. These exercise real teardown paths with the graphics context still alive, but do not validate window initialization, input callback behavior, or interactive appearance. Review corrections can distinguish a documentation error, an implementation bug, and a desired design change.

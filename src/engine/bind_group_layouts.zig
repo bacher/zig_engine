@@ -57,6 +57,7 @@ pub const BindGroupLayouts = struct {
         layouts.shadow_map.deinit(gctx);
         layouts.lines.deinit(gctx);
         layouts.debug_texture.deinit(gctx);
+        layouts.ssao_pass.deinit(gctx);
         layouts.final_pass.deinit(gctx);
         layouts.voxel.deinit(gctx);
     }

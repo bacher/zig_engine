@@ -297,3 +297,18 @@ fn checkCacheHitWithoutAllocation(gctx: *zgpu.GraphicsContext, layouts: *const l
     try std.testing.expect(first == shared);
     try std.testing.expect(!failing.has_induced_failure);
 }
+
+test "headless engine and scene teardown releases owned resources and preserves borrowed assets" {
+    var uncaptured: ValidationResponse = .{};
+    var response: ValidationResponse = .{};
+    const gpu = try HeadlessDawn.init();
+    defer gpu.deinit();
+    gpu.device.setUncapturedErrorCallback(ValidationResponse.callback, &uncaptured);
+    gpu.device.pushErrorScope(.validation);
+    const checked = @import("resource_lifetime_tests.zig").check(gpu.device);
+    _ = gpu.device.popErrorScope(ValidationResponse.callback, &response);
+    try coordinate_readback.waitForCallback(gpu.device, &response.done);
+    try std.testing.expectEqual(@as(usize, 0), response.errors);
+    try checked;
+    try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
+}

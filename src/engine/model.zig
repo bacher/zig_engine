@@ -1,3 +1,5 @@
+//! Models created through Engine helpers are engine-owned. Scene objects borrow them.
+//! The deinit methods below are for the owning engine and failed-construction rollback.
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
@@ -16,8 +18,8 @@ pub const Model = struct {
     skeletal_animation_data: ?skeletal_animation.SkeletalAnimationData = null,
 
     pub fn deinit(model: Model, gctx: *zgpu.GraphicsContext) void {
-        model.model_descriptor.deinit();
         model.bind_group.deinit(gctx);
+        model.model_descriptor.deinit(gctx);
         if (model.skeletal_animation_data) |data| {
             data.deinit();
         }
@@ -42,8 +44,8 @@ pub const SkyBoxModel = struct {
     bind_group: BindGroup,
 
     pub fn deinit(model: SkyBoxModel, gctx: *zgpu.GraphicsContext) void {
-        model.model_descriptor.deinit();
         model.bind_group.deinit(gctx);
+        model.model_descriptor.deinit(gctx);
     }
 };
 
@@ -57,8 +59,8 @@ pub const SkyBoxCubemapModel = struct {
     bind_group: BindGroup,
 
     pub fn deinit(model: SkyBoxCubemapModel, gctx: *zgpu.GraphicsContext) void {
-        model.model_descriptor.deinit();
         model.bind_group.deinit(gctx);
+        model.model_descriptor.deinit(gctx);
     }
 };
 
@@ -67,8 +69,8 @@ pub const WindowBoxModel = struct {
     bind_group: BindGroup,
 
     pub fn deinit(model: WindowBoxModel, gctx: *zgpu.GraphicsContext) void {
-        model.model_descriptor.deinit();
         model.bind_group.deinit(gctx);
+        model.model_descriptor.deinit(gctx);
     }
 };
 
@@ -77,26 +79,25 @@ pub const PrimitiveModel = struct {
     bind_group: BindGroup,
 
     pub fn deinit(model: PrimitiveModel, gctx: *zgpu.GraphicsContext) void {
-        model.model_descriptor.deinit();
         model.bind_group.deinit(gctx);
+        model.model_descriptor.deinit(gctx);
     }
 };
 
 pub const CubeWireframeModel = struct {
     model_descriptor: CubeWireframeDescriptor,
+    /// Borrowed from Engine.bind_group_lines.
     bind_group: BindGroup,
 
     pub fn deinit(model: @This(), gctx: *zgpu.GraphicsContext) void {
-        model.model_descriptor.deinit();
-        model.bind_group.deinit(gctx);
+        model.model_descriptor.deinit(gctx);
     }
 };
 
 pub const TerrainHeightMapModel = struct {
     bind_group: BindGroup,
 
-    // `deinit` of TerrainHeightMapModel has different logic than other models.
-    // It is not automatically deinitialized by engine.
+    // Input textures and the sampler are borrowed; this model owns only its binding.
     pub fn deinit(model: *const TerrainHeightMapModel, gctx: *zgpu.GraphicsContext) void {
         model.bind_group.deinit(gctx);
     }

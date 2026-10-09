@@ -31,6 +31,7 @@ pub const PrimitiveDescriptor = struct {
             .vertex,
             vertex_data,
         );
+        errdefer positions_buffer_info.deinit(gctx);
 
         return PrimitiveDescriptor{
             .position = positions_buffer_info,
@@ -38,8 +39,7 @@ pub const PrimitiveDescriptor = struct {
         };
     }
 
-    pub fn deinit(model_description: PrimitiveDescriptor) void {
-        _ = model_description;
-        // model_description.model.deinit();
+    pub fn deinit(self: PrimitiveDescriptor, gctx: *zgpu.GraphicsContext) void {
+        self.position.deinit(gctx);
     }
 };

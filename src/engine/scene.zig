@@ -105,7 +105,7 @@ pub const Scene = struct {
         const buffer = try allocator.alloc(InstanceBufferEntry, INSTANCE_BUFFER_ENTRY_SIZE);
         errdefer allocator.free(buffer);
 
-        const outdated_indices = try std.DynamicBitSetUnmanaged.initEmpty(allocator, MAX_OBJECTS_COUNT);
+        var outdated_indices = try std.DynamicBitSetUnmanaged.initEmpty(allocator, MAX_OBJECTS_COUNT);
         errdefer outdated_indices.deinit(allocator);
 
         const scene_bind_group = engine.bind_group_layouts.scene.createBindGroup(
@@ -115,7 +115,7 @@ pub const Scene = struct {
         );
         errdefer scene_bind_group.deinit(engine.gctx);
 
-        const voxel_grid = VoxelGrid.init(allocator, engine.gctx);
+        const voxel_grid = try VoxelGrid.init(allocator, engine.gctx);
         errdefer voxel_grid.deinit(engine.gctx);
 
         const voxel_bind_group = engine.bind_group_layouts.voxel.createBindGroup(
@@ -125,12 +125,14 @@ pub const Scene = struct {
         );
         errdefer voxel_bind_group.deinit(engine.gctx);
 
+        const game_objects = try std.ArrayList(*GameObject).initCapacity(allocator, MAX_OBJECTS_COUNT);
+
         scene.* = .{
             .layout = layout,
             .pipelines = pipelines,
             .engine = engine,
             .allocator = allocator,
-            .game_objects = std.ArrayList(*GameObject).initCapacity(allocator, MAX_OBJECTS_COUNT) catch @panic("Failed to initialize game objects buffer"),
+            .game_objects = game_objects,
             .root_groups = .empty,
             .lights = .empty,
             .skybox_object = null,
@@ -148,12 +150,15 @@ pub const Scene = struct {
                 .outdated_indices = outdated_indices,
             },
         };
+        engine.live_scene_count += 1;
         return scene;
     }
 
     pub fn deinit(scene: *Scene) void {
         const gctx = scene.engine.gctx;
-        scene.engine.world_pipeline_cache.release(scene.pipelines);
+        std.debug.assert(scene.engine.live_scene_count > 0);
+        scene.engine.live_scene_count -= 1;
+        if (scene.engine.active_scene == scene) scene.engine.active_scene = null;
 
         // Objects detach from their parent during deinit, while groups and the
         // visibility index are still alive.
@@ -166,19 +171,17 @@ pub const Scene = struct {
         }
         scene.lights.deinit(scene.allocator);
 
+        scene.voxel_bind_group.deinit(gctx);
         scene.voxel_grid.deinit(gctx);
+
+        for (scene.game_objects.items) |game_object| game_object.deinit(gctx);
+        scene.game_objects.deinit(scene.allocator);
         scene.space_tree.deinit();
 
         for (scene.root_groups.items) |root_group| {
             root_group.deinit_recursively();
         }
         scene.root_groups.deinit(scene.allocator);
-
-        for (scene.game_objects.items) |game_object| {
-            game_object.stopAnimation(gctx);
-            scene.allocator.destroy(game_object);
-        }
-        scene.game_objects.deinit(scene.allocator);
 
         scene.instance_buffer.outdated_indices.deinit(scene.allocator);
         scene.allocator.free(scene.instance_buffer.buffer);
@@ -188,6 +191,7 @@ pub const Scene = struct {
         scene.camera.deinit();
         scene.allocator.destroy(scene.camera);
         scene.allocator.destroy(scene.spectator_camera);
+        scene.engine.world_pipeline_cache.release(scene.pipelines);
         scene.allocator.destroy(@constCast(scene.layout));
         scene.allocator.destroy(scene);
     }
@@ -211,6 +215,7 @@ pub const Scene = struct {
 
     pub fn addGroup(scene: *Scene) !*GameObjectGroup {
         const new_group = try GameObjectGroup.init(scene.allocator);
+        errdefer new_group.deinit();
         try scene.root_groups.append(scene.allocator, new_group);
         return new_group;
     }

@@ -96,3 +96,32 @@ test "reparented groups follow only their current parent and preserve local tran
     try expectPosition(.{ 0.125, 0, 0 }, child.aggregated_matrix);
     try std.testing.expectEqual(0, second.children.items.len);
 }
+
+test "object destruction borrows a terrain model shared by other objects" {
+    const allocator = std.testing.allocator;
+    const group = try GameObjectGroup.init(allocator);
+    defer group.deinit_recursively();
+    var scene: Scene = undefined;
+    var terrain: @import("model.zig").TerrainHeightMapModel = undefined;
+    const first = try GameObject.init(allocator, .{
+        .scene = &scene,
+        .model = .{ .terrain_height_map_model = &terrain },
+        .position = .{ 0, 0, 0 },
+        .parent = group,
+        .instance_index = null,
+        .skip_space_tree = true,
+    });
+    const second = try GameObject.init(allocator, .{
+        .scene = &scene,
+        .model = .{ .terrain_height_map_model = &terrain },
+        .position = .{ 1, 0, 0 },
+        .parent = group,
+        .instance_index = null,
+        .skip_space_tree = true,
+    });
+    defer second.deinit(undefined);
+    first.deinit(undefined);
+    try std.testing.expectEqual(@as(usize, 1), group.children.items.len);
+    try std.testing.expect(second.model.terrain_height_map_model == &terrain);
+    second.setPosition(.{ 2, 0, 0 });
+}

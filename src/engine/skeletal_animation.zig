@@ -247,22 +247,23 @@ pub const SkeletalAnimationData = struct {
         loader: *const gltf_loader.GltfLoader,
         animation_names: []const []const u8,
     ) !void {
-        data.animations = try data.allocator.alloc(Animation, animation_names.len);
+        const animations = try data.allocator.alloc(Animation, animation_names.len);
         var animations_count: usize = 0;
         errdefer {
-            for (data.animations[0..animations_count]) |animation| {
+            for (animations[0..animations_count]) |animation| {
                 animation.deinit(data.allocator);
             }
-            data.allocator.free(data.animations);
+            data.allocator.free(animations);
         }
 
         for (animation_names) |animation_name| {
             const gltf_animation = loader.findAnimationByName(animation_name) orelse return error.AnimationNotFound;
-            data.animations[animations_count] = try data.loadAnimationData(loader, animation_name, gltf_animation);
+            animations[animations_count] = try data.loadAnimationData(loader, animation_name, gltf_animation);
             animations_count += 1;
         }
 
-        data.animations = try data.allocator.realloc(data.animations, animations_count);
+        // Commit only fully initialized entries; init's outer rollback owns this slice afterward.
+        data.animations = animations;
     }
 
     fn loadAnimationData(

@@ -60,6 +60,10 @@ pub fn InputController(comptime Context: type) type {
         }
 
         pub fn deinit(input_controller: *Self) void {
+            if (Self.instance == input_controller) {
+                _ = input_controller.window.setKeyCallback(null);
+                Self.instance = null;
+            }
             input_controller.pressed_keys.deinit();
             input_controller.release_queue.deinit();
             input_controller.allocator.destroy(input_controller);

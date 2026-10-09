@@ -42,6 +42,7 @@ pub const SkyBoxCubemapDescriptor = struct {
             .vertex,
             vertex_data,
         );
+        errdefer positions_buffer_info.deinit(gctx);
 
         // TODO: Can we omit using of gltf_loader.ModelBuffer?
         const indices_data = gltf_loader.ModelBuffer{
@@ -56,17 +57,14 @@ pub const SkyBoxCubemapDescriptor = struct {
             .index,
             indices_data,
         );
+        errdefer index_buffer_info.deinit(gctx);
 
         var color_texture_images: [6]zstbi.Image = undefined;
-
+        var images_loaded: usize = 0;
+        defer for (color_texture_images[0..images_loaded]) |*image| image.deinit();
         for (0..6) |i| {
             color_texture_images[i] = try texture_loader.loadTextureData(allocator, texture_filenames[i]);
-            errdefer {
-                // free all previously allocated texture images
-                for (0..i - 1) |j| {
-                    color_texture_images[j].deinit();
-                }
-            }
+            images_loaded += 1;
         }
 
         const color_texture = try load_texture.loadCubeTextureIntoGpu(
@@ -76,12 +74,6 @@ pub const SkyBoxCubemapDescriptor = struct {
             .{ .generate_mipmaps = true },
         );
 
-        defer {
-            for (0..6) |i| {
-                color_texture_images[i].deinit();
-            }
-        }
-
         return .{
             .position = positions_buffer_info,
             .index = index_buffer_info,
@@ -90,8 +82,9 @@ pub const SkyBoxCubemapDescriptor = struct {
         };
     }
 
-    pub fn deinit(self: SkyBoxCubemapDescriptor) void {
-        // noop for now
-        _ = self;
+    pub fn deinit(self: SkyBoxCubemapDescriptor, gctx: *zgpu.GraphicsContext) void {
+        self.position.deinit(gctx);
+        self.index.deinit(gctx);
+        self.color_texture.deinit(gctx);
     }
 };

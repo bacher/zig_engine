@@ -34,6 +34,8 @@ pub fn loadBufferIntoGpu(
         .size = model_buffer.buffer.len,
     });
 
+    errdefer gctx.destroyResource(handle);
+
     if (gctx.lookupResource(handle)) |gpu_buffer| {
         gctx.queue.writeBuffer(gpu_buffer, 0, u8, model_buffer.buffer);
 

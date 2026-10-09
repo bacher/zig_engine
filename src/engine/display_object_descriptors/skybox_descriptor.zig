@@ -46,6 +46,7 @@ pub const SkyBoxDescriptor = struct {
             .vertex,
             vertex_data,
         );
+        errdefer positions_buffer_info.deinit(gctx);
 
         // TODO: Can we omit using of gltf_loader.ModelBuffer?
         const uv_data = gltf_loader.ModelBuffer{
@@ -64,6 +65,7 @@ pub const SkyBoxDescriptor = struct {
             .vertex,
             uv_data,
         );
+        errdefer uv_buffer_info.deinit(gctx);
 
         // TODO: Can we omit using of gltf_loader.ModelBuffer?
         const indices_data = gltf_loader.ModelBuffer{
@@ -78,6 +80,7 @@ pub const SkyBoxDescriptor = struct {
             .index,
             indices_data,
         );
+        errdefer index_buffer_info.deinit(gctx);
 
         const color_texture = try load_texture.loadTextureIntoGpu(
             gctx,
@@ -95,8 +98,10 @@ pub const SkyBoxDescriptor = struct {
         };
     }
 
-    pub fn deinit(self: SkyBoxDescriptor) void {
-        // noop for now
-        _ = self;
+    pub fn deinit(self: SkyBoxDescriptor, gctx: *zgpu.GraphicsContext) void {
+        self.position.deinit(gctx);
+        self.uvs.deinit(gctx);
+        self.index.deinit(gctx);
+        self.color_texture.deinit(gctx);
     }
 };

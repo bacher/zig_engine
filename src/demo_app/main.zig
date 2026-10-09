@@ -63,6 +63,13 @@ pub fn main(init: std.process.Init) !void {
     const game: *Game = try .init(allocator);
     defer game.deinit();
 
+    var terrain_textures: std.ArrayList(@import("engine").TextureDescriptor) = .empty;
+    defer {
+        for (terrain_textures.items) |texture| texture.deinit(window_context.gctx);
+        terrain_textures.deinit(allocator);
+    }
+    try terrain_textures.ensureTotalCapacity(allocator, 3);
+
     const engine = Engine.init(
         init.io,
         allocator,
@@ -120,26 +127,26 @@ pub fn main(init: std.process.Init) !void {
         .generate_mipmaps = false,
     });
 
+    terrain_textures.appendAssumeCapacity(mountains_texture);
+    const mixing_texture = try engine.loadTexture("content/masks/gradient-rough.jpg", .{
+        .generate_mipmaps = true,
+    });
+    terrain_textures.appendAssumeCapacity(mixing_texture);
+    const depth_map_texture = try engine.loadTexture("content/terrain/rocky-land-and-rivers/height-map.png", .{
+        .forced_num_components = 1,
+        .generate_mipmaps = false,
+        .format = .r16_uint,
+    });
+    terrain_textures.appendAssumeCapacity(depth_map_texture);
+
     const terrain_height_map_model = try engine.createTerrainHeightMapModel(.{
         .layers = .{
             mountains_texture,
             engine.uv_test_texture,
         },
-        .mixing_texture = try engine.loadTexture("content/masks/gradient-rough.jpg", .{
-            .generate_mipmaps = true,
-        }),
-        .depth_map_texture = try engine.loadTexture("content/terrain/rocky-land-and-rivers/height-map.png", .{
-            .forced_num_components = 1,
-            .generate_mipmaps = false,
-            // https://github.com/zig-gamedev/zgpu/blob/main/src/wgpu.zig#L480
-            .format = .r16_uint,
-        }),
+        .mixing_texture = mixing_texture,
+        .depth_map_texture = depth_map_texture,
     });
-
-    defer {
-        terrain_height_map_model.deinit(engine.gctx);
-        allocator.destroy(terrain_height_map_model);
-    }
 
     const terrain = try scene.addTerrainHeightMapObject(.{
         .model = terrain_height_map_model,
@@ -151,8 +158,6 @@ pub fn main(init: std.process.Init) !void {
     // -- Skybox (old) --
 
     // const skybox_model = try engine.loadSkyBoxModel("skybox/cubemaps_skybox.png");
-    // defer skybox_model.deinit(engine.gctx);
-    // defer allocator.destroy(skybox_model);
 
     // _ = try scene.addSkyBoxObject(.{
     //     .model = skybox_model,
@@ -168,8 +173,6 @@ pub fn main(init: std.process.Init) !void {
         "skybox/skybox/front.jpg",
         "skybox/skybox/back.jpg",
     });
-    defer skybox_cubemap_model.deinit(engine.gctx);
-    defer allocator.destroy(skybox_cubemap_model);
 
     _ = try scene.setSkyBoxCubemapObject(.{
         .model = skybox_cubemap_model,
@@ -185,12 +188,8 @@ pub fn main(init: std.process.Init) !void {
         try traverseGroup(engine, scene, root_group, loader, loader.root, 0, .{});
     }
 
-    var window_block_model = try engine.loadWindowBoxModel("window-block/wb-texture.png");
-    // TODO: Move cleanup to the engine
-    defer {
-        window_block_model.deinit(engine.gctx);
-        allocator.destroy(window_block_model);
-    }
+    const window_block_model = try engine.loadWindowBoxModel("window-block/wb-texture.png");
+    _ = window_block_model; // The window-box placement example below is disabled.
 
     // _ = man_model_id;
     try game.saved_game_objects.put(allocator, "man_1", try scene.addObject(.{
@@ -247,17 +246,12 @@ pub fn main(init: std.process.Init) !void {
 
     var tube_data = try tube.initUnitTube(allocator);
     defer tube_data.deinit(allocator);
-    var tube_model = try engine.loadPrimitive(tube_data);
-    defer {
-        tube_model.deinit(engine.gctx);
-        allocator.destroy(tube_model);
-    }
+    const tube_model = try engine.loadPrimitive(tube_data);
 
     // -- Coordinates --
 
     {
         const group = try scene.addGroup();
-        errdefer group.deinit();
 
         try game.saved_game_object_groups.put(allocator, "coordinates", group);
 

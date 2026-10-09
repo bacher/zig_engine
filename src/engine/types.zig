@@ -19,6 +19,10 @@ pub const BufferDescriptor = struct {
     elements_count: u32,
     buffer_size: u64,
 
+    pub fn deinit(descriptor: BufferDescriptor, gctx: *zgpu.GraphicsContext) void {
+        gctx.destroyResource(descriptor.handle);
+    }
+
     pub fn applyVertexBuffer(
         descriptor: *const BufferDescriptor,
         pass: wgpu.RenderPassEncoder,
@@ -50,6 +54,12 @@ pub const TextureDescriptor = struct {
     texture: wgpu.Texture,
     view_handle: zgpu.TextureViewHandle,
     view: wgpu.TextureView,
+
+    /// Releases this owned view and texture. Borrowed copies must not call this.
+    pub fn deinit(descriptor: TextureDescriptor, gctx: *zgpu.GraphicsContext) void {
+        gctx.releaseResource(descriptor.view_handle);
+        gctx.destroyResource(descriptor.texture_handle);
+    }
 
     pub fn applyTexture(
         descriptor: *const TextureDescriptor,

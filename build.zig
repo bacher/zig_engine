@@ -263,6 +263,10 @@ pub fn build(b: *std.Build) void {
                 .imports = &.{
                     .{ .name = "engine_config", .module = engine_config },
                     .{ .name = "zgpu", .module = zgpu.module("root") },
+                    .{ .name = "zglfw", .module = zglfw.module("root") },
+                    .{ .name = "zgui", .module = zgui.module("root") },
+                    .{ .name = "zstbi", .module = zstbi.module("root") },
+                    .{ .name = "gltf_loader", .module = gltf_loader_module },
                     .{ .name = "zmath", .module = zmath.module("root") },
                     .{ .name = "debug", .module = debug_module },
                 },

@@ -114,18 +114,11 @@ pub const GameObject = struct {
         return game_object;
     }
 
+    /// Destroys instance state only. Scene ownership must also be updated for individual removal.
     pub fn deinit(game_object: *GameObject, gctx: *zgpu.GraphicsContext) void {
         if (game_object.parent) |parent| parent.detachChild(.{ .game_object = game_object });
         if (!game_object.skip_space_tree) game_object.scene.space_tree.removeObject(game_object) catch {};
         game_object.stopAnimation(gctx);
-
-        switch (game_object.model) {
-            .terrain_height_map_model => |model| {
-                // model.deinit(game_object.gctx);
-                game_object.allocator.destroy(model);
-            },
-            else => {},
-        }
 
         if (game_object._gc) |pointer| {
             game_object.allocator.destroy(pointer);

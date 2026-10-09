@@ -3,6 +3,8 @@ pub const zgpu = @import("zgpu");
 pub const zgui = @import("zgui");
 pub const zglfw = @import("zglfw");
 
+pub const TextureDescriptor = @import("types.zig").TextureDescriptor;
+
 pub const Engine = @import("./engine.zig").Engine;
 pub const KeyParams = @import("./input_controller.zig").KeyParams;
 pub const WindowContext = @import("./glue.zig").WindowContext;

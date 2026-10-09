@@ -30,7 +30,7 @@ The selected primitive's material supplies a base-color image URI, resolved rela
 
 Material loading generates mipmaps when the image is square. The project has an existing TODO to avoid loading the same texture several times; no shared texture cache is present in this path. Several objects sharing one registered model reuse that model's texture, but separate model loads may duplicate it.
 
-Special helpers return pointers rather than registered model IDs: primitives, window boxes, skyboxes, cubemap skyboxes, and height-map terrain. Their descriptors and bind groups select different pipelines. Height-map terrain receives two layer textures, a mixing texture, and a height texture. The examples clean up special models explicitly.
+Special helpers return pointers rather than registered model IDs: primitives, window boxes, skyboxes, cubemap skyboxes, and height-map terrain. Their descriptors and bind groups select different pipelines. Height-map terrain receives two layer textures, a mixing texture, and a height texture. The engine tracks and destroys these models; their returned pointers are borrowed.
 
 ## Animation data and player state
 
@@ -53,13 +53,15 @@ The GPU palette has 64 matrices. Upload copies at most 64 computed joint matrice
 
 `playObjectAnimation` and `switchObjectAnimation` use the same playback operation. Starting a non-regular object returns an unsupported error; requesting animation on a model without copied animation data returns an error. Stopping frees the player's buffer/bind group. **Review point:** pipeline selection still follows the model's `has_skin` flag, and inspected draw paths bind joints only when an object has a player. Rendering a skinned model before playback or after stopping needs validation; the existence of an engine identity buffer alone does not establish that fallback binding in those paths.
 
-## Resource ownership caveats
+## Resource ownership
 
-The engine registry owns regular `Model` allocations and shared animation data. A scene owns per-object player resources. Special model pointers remain outside that registry and are usually cleaned up by the application. A model must remain valid while objects or players reference it.
+The engine owns regular model allocations, shared animation data, and all special models created through its helpers. Models remain allocated until engine teardown, independently of scene lifetime. Scene objects borrow them and own per-object animation resources. Applications must destroy all scenes before the engine, then destroy the graphics context last.
 
-The cleanup implementation is incomplete: `ModelDescriptor.deinit` is currently a no-op, and `Engine.deinit` does not explicitly destroy every texture, sampler, and bind group created during initialization. `WindowContext` later destroys the overall graphics context. These facts describe the present cleanup boundary; they do not establish leak-free independent engine/model teardown.
+Model descriptors release their geometry and model-created textures. Regular models distinguish owned material textures from borrowed fallback textures. The built-in wireframe model borrows the engine's line bind group, which the engine releases once. Engine teardown also releases render targets, shadow resources, asset textures, samplers, bindings, layouts, and the SSAO kernel buffer.
 
-Height-map terrain has another asymmetry: `GameObject.deinit` destroys its model allocation, but ordinary `Scene.deinit` directly frees objects and the examples also clean up the terrain model explicitly. Ownership should be settled before adding object removal or model unloading.
+`Engine.loadTexture` returns a caller-owned `TextureDescriptor`; call `texture.deinit(gctx)` only after its borrowers have been destroyed. Height-map model creation borrows all four input textures. A custom regular-model fallback is borrowed as well. Those textures must normally outlive the engine, since its models remain registered until teardown. The demo collects standalone terrain textures and releases them after the engine.
+
+Loading rolls back partially acquired geometry, textures, bindings, model allocations, and animation data on failure. No general model-unloading API or shared texture cache is introduced. See [scene and model lifetime](scene-lifetime-options.md) for the contract and tests.
 
 ## Sources and verification
 
@@ -72,4 +74,4 @@ Height-map terrain has another asymmetry: `GameObject.deinit` destroys its model
 - [`shaders/basic/skinned_vs.wgsl`](../src/engine/shaders/basic/skinned_vs.wgsl): vertex position deformation and current normal path.
 - [`src/demo_app/main.zig`](../src/demo_app/main.zig): example asset use and application-specific node traversal.
 
-The demo and voxel app load the `walkLikeMan` clip and create separate animated objects. This is an example use, not a complete importer/animation test suite. Static inspection for this extraction did not validate asset compatibility, animation appearance, or GPU cleanup at runtime.
+The demo and voxel app load the `walkLikeMan` clip and create separate animated objects. This is an example use, not a complete importer/animation test suite. Headless GPU lifetime tests exercise shared models, animation-player teardown, borrowed textures, and allocation-failure rollback under both wrapping configurations. They do not validate animation appearance or the GLFW input lifecycle.

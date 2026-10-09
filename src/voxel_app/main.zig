@@ -84,13 +84,20 @@ const Game = struct {
         return game;
     }
 
-    pub fn deinit(game: *Game) void {
+    fn stopWorkers(game: *Game) void {
         if (game.simulation) |simulation| simulation.destroy();
+        game.simulation = null;
         if (game.world_data) |world_data| {
-            // Submit remaining local commands before the service drains its queue.
-            game.flushBlockOperations();
+            // Setup can fail before both world and client have been initialized.
+            if (game.world != null and game.world_client != null) game.flushBlockOperations();
             world_data.destroy();
         }
+        game.world_data = null;
+        game.world_client = null;
+    }
+
+    pub fn deinit(game: *Game) void {
+        game.stopWorkers();
         game.chunk_subscriptions.deinit(game.allocator);
         for (game.chunk_packages.items) |*package| package.deinit(game.allocator);
         game.chunk_packages.deinit(game.allocator);
@@ -636,6 +643,7 @@ pub fn main(init: std.process.Init) !void {
 
     const scene = try engine.createScene(consts.WORLD_SETTINGS);
     defer scene.deinit();
+    defer game.stopWorkers();
 
     scene.camera.updatePosition(.{ -2.06, -2.96, 8.45 });
     // edge of the world:
@@ -644,8 +652,6 @@ pub fn main(init: std.process.Init) !void {
     // -- Skybox (old) --
 
     // const skybox_model = try engine.loadSkyBoxModel("skybox/cubemaps_skybox.png");
-    // defer skybox_model.deinit(engine.gctx);
-    // defer allocator.destroy(skybox_model);
 
     // _ = try scene.addSkyBoxObject(.{
     //     .model = skybox_model,
@@ -661,8 +667,6 @@ pub fn main(init: std.process.Init) !void {
         "skybox/skybox/front.jpg",
         "skybox/skybox/back.jpg",
     });
-    defer skybox_cubemap_model.deinit(engine.gctx);
-    defer allocator.destroy(skybox_cubemap_model);
 
     _ = try scene.setSkyBoxCubemapObject(.{
         .model = skybox_cubemap_model,
@@ -670,12 +674,8 @@ pub fn main(init: std.process.Init) !void {
 
     // ---
 
-    var window_block_model = try engine.loadWindowBoxModel("window-block/wb-texture.png");
-    // TODO: Move cleanup to the engine
-    defer {
-        window_block_model.deinit(engine.gctx);
-        allocator.destroy(window_block_model);
-    }
+    const window_block_model = try engine.loadWindowBoxModel("window-block/wb-texture.png");
+    _ = window_block_model; // The window-box placement example below is disabled.
 
     // _ = man_model_id;
     try game.saved_game_objects.put(allocator, "man_1", try scene.addObject(.{
@@ -698,17 +698,12 @@ pub fn main(init: std.process.Init) !void {
 
     var tube_data = try tube.initUnitTube(allocator);
     defer tube_data.deinit(allocator);
-    var tube_model = try engine.loadPrimitive(tube_data);
-    defer {
-        tube_model.deinit(engine.gctx);
-        allocator.destroy(tube_model);
-    }
+    const tube_model = try engine.loadPrimitive(tube_data);
 
     // -- Coordinates --
 
     {
         const group = try scene.addGroup();
-        errdefer group.deinit();
 
         try game.saved_game_object_groups.put(allocator, "coordinates", group);
 

@@ -62,6 +62,7 @@ pub const CubeWireframeDescriptor = struct {
             .vertex,
             vertex_data,
         );
+        errdefer positions_buffer_info.deinit(gctx);
 
         const geometry_bounds: types.GeometryBounds = .{
             .min = .{ -1.0, -1.0, -1.0 },
@@ -77,8 +78,7 @@ pub const CubeWireframeDescriptor = struct {
         };
     }
 
-    pub fn deinit(model_description: @This()) void {
-        _ = model_description;
-        // model_description.model.deinit();
+    pub fn deinit(self: @This(), gctx: *zgpu.GraphicsContext) void {
+        self.position.deinit(gctx);
     }
 };

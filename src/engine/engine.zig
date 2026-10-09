@@ -91,6 +91,15 @@ const EngineInitOptions = struct {
 pub const Engine = struct {
     pub const LoadedModelId = enum(u32) { _ };
 
+    const SpecialModel = union(enum) {
+        skybox: *SkyBoxModel,
+        cubemap: *SkyBoxCubemapModel,
+        window_box: *WindowBoxModel,
+        primitive: *PrimitiveModel,
+        wireframe: *CubeWireframeModel,
+        terrain: *TerrainHeightMapModel,
+    };
+
     var is_instanced: bool = false;
     var next_loaded_model_id: u32 = 0;
 
@@ -129,7 +138,10 @@ pub const Engine = struct {
     bind_group_debug_regular: BindGroup,
     bind_group_minecraft_texture: BindGroup,
 
+    /// Shared assets owned until engine teardown; objects borrow their IDs/pointers.
     models_hash: std.AutoHashMap(LoadedModelId, *Model),
+    special_models: std.ArrayList(SpecialModel) = .empty,
+    live_scene_count: usize = 0,
 
     // -- textures --
     depth_texture: DepthTexture,
@@ -417,7 +429,10 @@ pub const Engine = struct {
         return engine;
     }
 
+    /// All caller-owned scenes must have been destroyed before the engine.
     pub fn deinit(engine: *Engine) void {
+        std.debug.assert(engine.live_scene_count == 0);
+        std.debug.assert(engine.active_scene == null);
         engine.world_pipeline_cache.deinit();
         engine.temp_buffers.deinit(engine.allocator);
 
@@ -429,12 +444,38 @@ pub const Engine = struct {
         }
 
         engine.models_hash.deinit();
+        for (engine.special_models.items) |model| switch (model) {
+            inline else => |pointer| {
+                pointer.deinit(engine.gctx);
+                engine.allocator.destroy(pointer);
+            },
+        };
+        engine.special_models.deinit(engine.allocator);
+
+        engine.bind_group_debug_shadow_map_texture.deinit(engine.gctx);
+        engine.bind_group_shadow_map.deinit(engine.gctx);
+        engine.bind_group_lines.deinit(engine.gctx);
+        engine.bind_group_ssao_pass.deinit(engine.gctx);
+        engine.bind_group_final_pass.deinit(engine.gctx);
+        engine.bind_group_debug_regular.deinit(engine.gctx);
+        engine.bind_group_minecraft_texture.deinit(engine.gctx);
+        engine.pipelines.deinit(engine.gctx);
         engine.identity_joint_matrix_buffer.deinit(engine.gctx);
+
+        engine.depth_texture.deinit(engine.gctx);
+        engine.first_pass_color_output_texture.deinit(engine.gctx);
+        engine.first_pass_normal_output_texture.deinit(engine.gctx);
+        engine.ssao_output_texture.deinit(engine.gctx);
+        ShadowMapTexture.deinit(engine.gctx, engine.shadow_map_texture);
+        engine.shadow_map_depth_texture.deinit(engine.gctx);
+        engine.uv_test_texture.deinit(engine.gctx);
+        engine.minecraft_texture.deinit(engine.gctx);
+        engine.gctx.releaseResource(engine.texture_sampler);
+        engine.gctx.releaseResource(engine.texture_repeat_sampler);
+        engine.gctx.releaseResource(engine.texture_mirror_sampler);
         engine.bind_group_layouts.deinit(engine.gctx);
         engine.input_controller.deinit();
         engine.allocator.free(engine.content_dir);
-        engine.allocator.destroy(engine.cube_wireframe_model);
-        engine.pipelines.deinit(engine.gctx);
 
         zstbi.deinit();
         engine.allocator.destroy(engine);
@@ -1286,6 +1327,7 @@ pub const Engine = struct {
                 .color_texture_fallback = options.color_texture_fallback orelse &engine.uv_test_texture,
             },
         );
+        errdefer model_descriptor.deinit(engine.gctx);
 
         const skeletal_animation_data = try SkeletalAnimation.SkeletalAnimationData.init(
             engine.allocator,
@@ -1302,6 +1344,7 @@ pub const Engine = struct {
             engine.texture_repeat_sampler,
             model_descriptor.color_texture,
         );
+        errdefer bind_group.deinit(engine.gctx);
 
         const model = try engine.allocator.create(Model);
         errdefer engine.allocator.destroy(model);
@@ -1324,6 +1367,7 @@ pub const Engine = struct {
         format: ?wgpu.TextureFormat = null,
     };
 
+    /// Returns a caller-owned texture. Borrowers must be destroyed before TextureDescriptor.deinit.
     pub fn loadTexture(engine: *Engine, filename: []const u8, options: LoadTextureOptions) !types.TextureDescriptor {
         var imageData = try gltf_loader.StbiWrapper.loadTextureData(
             engine.allocator,
@@ -1343,6 +1387,7 @@ pub const Engine = struct {
         );
     }
 
+    /// All texture descriptors are borrowed and must outlive the engine-owned model.
     pub const CreateTerrainHeightMapDescriptorParams = struct {
         layers: [2]types.TextureDescriptor,
         mixing_texture: types.TextureDescriptor,
@@ -1350,7 +1395,7 @@ pub const Engine = struct {
     };
 
     pub fn createTerrainHeightMapModel(
-        engine: *const Engine,
+        engine: *Engine,
         options: CreateTerrainHeightMapDescriptorParams,
     ) !*TerrainHeightMapModel {
         const terrain_height_map_model = try engine.allocator.create(TerrainHeightMapModel);
@@ -1368,6 +1413,8 @@ pub const Engine = struct {
         terrain_height_map_model.* = .{
             .bind_group = terrain_height_map_bind_group,
         };
+        errdefer terrain_height_map_bind_group.deinit(engine.gctx);
+        try engine.special_models.append(engine.allocator, .{ .terrain = terrain_height_map_model });
         return terrain_height_map_model;
     }
 
@@ -1383,12 +1430,14 @@ pub const Engine = struct {
             engine.allocator,
             texture_full_filename,
         );
+        errdefer skybox_descriptor.deinit(engine.gctx);
 
-        const bind_group = try engine.bind_group_layouts.regular.createBindGroup(
+        const bind_group = engine.bind_group_layouts.regular_old.createBindGroup(
+            engine.gctx,
             engine.texture_sampler,
             skybox_descriptor.color_texture,
-            engine.identity_joint_matrix_buffer.handle,
         );
+        errdefer bind_group.deinit(engine.gctx);
 
         const model = try engine.allocator.create(SkyBoxModel);
         errdefer engine.allocator.destroy(model);
@@ -1397,28 +1446,20 @@ pub const Engine = struct {
             .bind_group = bind_group,
         };
 
+        try engine.special_models.append(engine.allocator, .{ .skybox = model });
         return model;
     }
 
     pub fn loadSkyBoxCubemapModel(engine: *Engine, texture_filenames: [6][]const u8) !*SkyBoxCubemapModel {
         var texture_full_filenames: [6][]const u8 = undefined;
-
+        var filenames_loaded: usize = 0;
+        defer for (texture_full_filenames[0..filenames_loaded]) |filename| engine.allocator.free(filename);
         for (0..6) |i| {
             texture_full_filenames[i] = try std.fs.path.join(engine.allocator, &.{
                 engine.content_dir,
                 texture_filenames[i],
             });
-            errdefer {
-                // free all previously allocated texture full filenames
-                for (0..i - i) |j| {
-                    engine.allocator.free(texture_full_filenames[j]);
-                }
-            }
-        }
-        defer {
-            for (0..6) |i| {
-                engine.allocator.free(texture_full_filenames[i]);
-            }
+            filenames_loaded += 1;
         }
 
         const skybox_cubemap_descriptor = try SkyBoxCubemapDescriptor.init(
@@ -1426,12 +1467,14 @@ pub const Engine = struct {
             engine.allocator,
             texture_full_filenames,
         );
+        errdefer skybox_cubemap_descriptor.deinit(engine.gctx);
 
         const bind_group = engine.bind_group_layouts.cubemap.createBindGroup(
             engine.gctx,
             engine.texture_sampler,
             skybox_cubemap_descriptor.color_texture,
         );
+        errdefer bind_group.deinit(engine.gctx);
 
         const model = try engine.allocator.create(SkyBoxCubemapModel);
         errdefer engine.allocator.destroy(model);
@@ -1440,6 +1483,7 @@ pub const Engine = struct {
             .bind_group = bind_group,
         };
 
+        try engine.special_models.append(engine.allocator, .{ .cubemap = model });
         return model;
     }
 
@@ -1447,6 +1491,7 @@ pub const Engine = struct {
         const cube_wireframe_descriptor = try CubeWireframeDescriptor.init(
             engine.gctx,
         );
+        errdefer cube_wireframe_descriptor.deinit(engine.gctx);
 
         const model = try engine.allocator.create(CubeWireframeModel);
         errdefer engine.allocator.destroy(model);
@@ -1455,6 +1500,7 @@ pub const Engine = struct {
             .bind_group = engine.bind_group_lines,
         };
 
+        try engine.special_models.append(engine.allocator, .{ .wireframe = model });
         return model;
     }
 
@@ -1470,12 +1516,14 @@ pub const Engine = struct {
             engine.allocator,
             texture_full_filename,
         );
+        errdefer window_box_descriptor.deinit(engine.gctx);
 
         const bind_group = engine.bind_group_layouts.regular.createBindGroup(
             engine.gctx,
             engine.texture_sampler,
             window_box_descriptor.color_texture,
         );
+        errdefer bind_group.deinit(engine.gctx);
 
         const model = try engine.allocator.create(WindowBoxModel);
         errdefer engine.allocator.destroy(model);
@@ -1484,13 +1532,16 @@ pub const Engine = struct {
             .bind_group = bind_group,
         };
 
+        try engine.special_models.append(engine.allocator, .{ .window_box = model });
         return model;
     }
 
     pub fn loadPrimitive(engine: *Engine, positions: GeometryData) !*PrimitiveModel {
         const primitive_descriptor = try PrimitiveDescriptor.init(engine.gctx, positions);
+        errdefer primitive_descriptor.deinit(engine.gctx);
 
         const bind_group = engine.bind_group_layouts.primitive_colorized.createBindGroup(engine.gctx);
+        errdefer bind_group.deinit(engine.gctx);
 
         const model = try engine.allocator.create(PrimitiveModel);
         errdefer engine.allocator.destroy(model);
@@ -1499,11 +1550,15 @@ pub const Engine = struct {
             .bind_group = bind_group,
         };
 
+        try engine.special_models.append(engine.allocator, .{ .primitive = model });
         return model;
     }
 
     fn recreateScreenDependantTextures(engine: *Engine) void {
         const gctx = engine.gctx;
+
+        engine.bind_group_ssao_pass.deinit(gctx);
+        engine.bind_group_final_pass.deinit(gctx);
 
         // Cleanup old textures
         engine.depth_texture.deinit(gctx);
@@ -1518,6 +1573,20 @@ pub const Engine = struct {
         engine.first_pass_color_output_texture = .init(gctx, w, h, COLOR_OUTPUT_FORMAT);
         engine.first_pass_normal_output_texture = .init(gctx, w, h, NORMAL_OUTPUT_FORMAT);
         engine.ssao_output_texture = .init(gctx, w, h, SSAO_OUTPUT_FORMAT);
+        engine.bind_group_ssao_pass = engine.bind_group_layouts.ssao_pass.createBindGroup(
+            gctx,
+            engine.texture_sampler,
+            engine.depth_texture.view_handle,
+            engine.first_pass_normal_output_texture.view_handle,
+        );
+        engine.bind_group_final_pass = engine.bind_group_layouts.final_pass.createBindGroup(
+            gctx,
+            engine.texture_sampler,
+            engine.depth_texture.view_handle,
+            engine.first_pass_color_output_texture.view_handle,
+            engine.first_pass_normal_output_texture.view_handle,
+            engine.ssao_output_texture.view_handle,
+        );
     }
 
     pub fn runLoop(engine: *Engine) !void {

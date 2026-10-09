@@ -47,7 +47,7 @@ pub const VoxelGrid = struct {
     gpu_block_buffer_manager: DynamicSlotBufferManager = .{},
     gpu_block_buffer: GPUBuffer,
 
-    pub fn init(allocator: std.mem.Allocator, gctx: *zgpu.GraphicsContext) *Self {
+    pub fn init(allocator: std.mem.Allocator, gctx: *zgpu.GraphicsContext) !*Self {
         var gpu_chunk_info_buffer: GPUBuffer = undefined;
         var gpu_block_buffer: GPUBuffer = undefined;
 
@@ -63,7 +63,10 @@ pub const VoxelGrid = struct {
                 .size = size,
             });
 
-            const buffer = gctx.lookupResource(handle).?;
+            const buffer = gctx.lookupResource(handle) orelse {
+                gctx.destroyResource(handle);
+                return error.BufferIsNotReady;
+            };
 
             gpu_chunk_info_buffer = .{
                 .handle = handle,
@@ -71,6 +74,8 @@ pub const VoxelGrid = struct {
                 .size = size,
             };
         }
+
+        errdefer gctx.destroyResource(gpu_chunk_info_buffer.handle);
 
         // block buffer
         {
@@ -84,7 +89,10 @@ pub const VoxelGrid = struct {
                 .size = size,
             });
 
-            const buffer = gctx.lookupResource(handle).?;
+            const buffer = gctx.lookupResource(handle) orelse {
+                gctx.destroyResource(handle);
+                return error.BufferIsNotReady;
+            };
 
             gpu_block_buffer = .{
                 .handle = handle,
@@ -93,15 +101,19 @@ pub const VoxelGrid = struct {
             };
         }
 
-        const grid = allocator.create(Self) catch @panic("OOM");
+        errdefer gctx.destroyResource(gpu_block_buffer.handle);
+
+        const grid = try allocator.create(Self);
+        errdefer allocator.destroy(grid);
         grid.* = Self{
             .allocator = allocator,
             .gpu_chunk_info_buffer = gpu_chunk_info_buffer,
             .gpu_block_buffer = gpu_block_buffer,
         };
 
-        grid.chunks.ensureTotalCapacity(allocator, 1024) catch @panic("OOM");
-        grid.chunks_to_upload.ensureTotalCapacity(allocator, 128) catch @panic("OOM");
+        try grid.chunks.ensureTotalCapacity(allocator, 1024);
+        errdefer grid.chunks.deinit(allocator);
+        try grid.chunks_to_upload.ensureTotalCapacity(allocator, 128);
 
         return grid;
     }
