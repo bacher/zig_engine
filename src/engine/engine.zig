@@ -119,8 +119,10 @@ pub const Engine = struct {
     zgui: bool = false,
     callbacks: Callbacks,
     content_dir: []const u8,
-    init_time: f64, // seconds
+    clock_start: std.Io.Timestamp,
+    previous_update: ?std.Io.Timestamp = null,
     time: f64, // seconds
+    frame_delta: f64 = 0, // monotonic elapsed seconds, independent of GPU statistics
 
     state: EngineState = .{},
 
@@ -256,7 +258,7 @@ pub const Engine = struct {
 
         const window_context = options.window_context;
         const gctx = window_context.gctx;
-        const init_time = gctx.stats.time;
+        const clock_start = std.Io.Clock.awake.now(io);
 
         // -- textures --
         const w = gctx.swapchain_descriptor.width;
@@ -379,7 +381,7 @@ pub const Engine = struct {
             .zgui = options.zgui,
             .callbacks = callbacks,
             .content_dir = content_dir_copied,
-            .init_time = init_time,
+            .clock_start = clock_start,
             .time = 0,
             .gctx = gctx,
             .pipelines = pipelines,
@@ -529,7 +531,13 @@ pub const Engine = struct {
     }
 
     pub fn update(engine: *Engine) !void {
-        engine.time = engine.gctx.stats.time - engine.init_time;
+        const now = std.Io.Clock.awake.now(engine.io);
+        engine.time = @as(f64, @floatFromInt(engine.clock_start.durationTo(now).nanoseconds)) / std.time.ns_per_s;
+        engine.frame_delta = if (engine.previous_update) |previous|
+            @as(f64, @floatFromInt(previous.durationTo(now).nanoseconds)) / std.time.ns_per_s
+        else
+            0;
+        engine.previous_update = now;
 
         // resetting frame stats before each frame
         engine.frame_stats = .{};
@@ -1617,7 +1625,7 @@ pub const Engine = struct {
         while (true) {
             zglfw.pollEvents();
 
-            if (window.shouldClose() or engine.input_controller.isKeyPressed(.escape)) {
+            if (window.shouldClose() or engine.input_controller.isKeyPressed(.escape) or engine.input_controller.wasKeyPressed(.escape)) {
                 break;
             }
 

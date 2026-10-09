@@ -4,7 +4,7 @@ The voxel application combines deterministic terrain generation with an in-memor
 
 ## Space and contents
 
-Chunks remain fixed at 32 by 32 by 32 blocks. The application chooses world dimensions at scene creation; its current preset is 512 by 256 by 8 chunks: 16384 by 8192 by 256 blocks. Each block occupies one world-coordinate unit. X wrapping is always enabled by the application's compile-time engine configuration. Positions beyond y/z storage boundaries cannot index terrain; outer faces at those boundaries remain exposed.
+Chunks remain fixed at 32 by 32 by 32 blocks. The application chooses world dimensions at scene creation; its current preset is 512 by 256 by 8 chunks: 16384 by 8192 by 256 blocks. Each block occupies one world-coordinate unit, defined as one metre. X wrapping is always enabled by the application's compile-time engine configuration. Positions beyond y/z storage boundaries cannot index terrain; outer faces at those boundaries remain exposed, and the player treats those edges as collision walls.
 
 World coordinates are centered using the immutable layout's half-dimension `origin_chunk`. With the current preset, world position zero corresponds to stored block coordinates (8192, 4096, 128). Spatial chunk coordinates are signed vectors; normalize x and validate y/z before encoding a storage ID through that world's layout. Its dimension exponents determine the packed ID widths: the current preset uses 9/8/3 bits, or 20 of the available 32 bits. The cache and service retain immutable copies of the scene's validated layout. A compile-time guard rejects an engine configuration with wrapping disabled. See [world configuration](world-configuration.md) and [coordinates](coordinates.md).
 
@@ -92,7 +92,7 @@ The world update sequence is:
 3. Take complete response packages.
 4. For each package, retire all acknowledged commands first, including failed commands, then accept payloads with current tokens/modes/revisions.
 5. Replace accepted block snapshots and replay remaining pending operations over them.
-6. Refresh streaming/pinning again after responses.
+6. Advance local player movement/recovery against the resulting cache, then refresh streaming/pinning again.
 7. Rebuild dirty local meshes once from the resulting cache and neighbor inputs.
 8. Preflight and upload queued face geometry.
 
@@ -104,7 +104,7 @@ This is asynchronous reconciliation. Local cached blocks may temporarily differ 
 
 The normal camera neighborhood uses Chebyshev distance: the largest axis chunk delta, with the shortest wrapped x delta. Chunks at distance at most 1 are requested as blocks (a 3-by-3-by-3 core); distance at most 3 is the total display neighborhood (7 by 7 by 7), with the rest requested as meshes. Neighborhoods are clipped at y/z storage boundaries. Requests proceed from nearest shells outward.
 
-27 block chunks is a steady-state target. Outstanding edits pin the edited chunk and any touched face neighbors in block mode until acknowledgment. Pins can extend beyond the current display box. In-flight representation changes can also retain more CPU blocks temporarily.
+27 block chunks is a steady-state target around each relevant position. The player's 3-by-3-by-3 collision neighborhood is pinned in block mode, including while its camera is detached for spectating. Outstanding edits also pin the edited chunk and any touched face neighbors until acknowledgment. Pins can extend beyond the current display box. A distant spectator camera therefore retains both its display/block neighborhood and the player's collision neighborhood. In-flight representation changes can retain more CPU blocks temporarily.
 
 For demotion from blocks to mesh, the old blocks, masks, and display remain available until the new mesh/unreachable response arrives. Then the CPU blocks and fallback masks are released. Retained demoted blocks no longer override authoritative neighbor planes because their block subscription has ended.
 

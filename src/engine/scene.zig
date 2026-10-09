@@ -47,6 +47,8 @@ pub const Scene = struct {
     voxel_bind_group: BindGroup,
     camera: *Camera,
     spectator_camera: *SpectatorCamera,
+    /// Applications can drive the camera themselves while retaining the debug controller.
+    spectator_enabled: bool = true,
     previous_frame_time: f64,
 
     // gpu related
@@ -475,7 +477,11 @@ pub const Scene = struct {
 
             // Time dependant update logic
 
-            scene.spectator_camera.update(time_passed);
+            if (scene.spectator_enabled and scene.engine.input_controller.focused and
+                !scene.engine.input_controller.focus_changed)
+            {
+                scene.spectator_camera.update(time_passed);
+            }
         }
 
         // Time independant update logic
