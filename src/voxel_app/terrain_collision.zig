@@ -20,6 +20,18 @@ pub const Body = struct {
     half_width: f64 = 0.3,
     height: f64 = 1.8,
     eye_height: f64 = 1.6,
+    /// The lower 20cm is a narrower support, not an allowed terrain penetration.
+    foot_height: f64 = 0.2,
+    foot_half_width: f64 = 0.15,
+
+    /// The camera/body envelope remains useful for describing the player's size.
+    /// Every collision decision uses these two actual boxes instead of the envelope.
+    pub fn colliderBounds(self: Body, feet: Position) [2]Bounds {
+        return .{
+            .{ .min = feet - Position{ self.foot_half_width, self.foot_half_width, 0 }, .max = feet + Position{ self.foot_half_width, self.foot_half_width, self.foot_height } },
+            .{ .min = feet + Position{ -self.half_width, -self.half_width, self.foot_height }, .max = feet + Position{ self.half_width, self.half_width, self.height } },
+        };
+    }
 
     pub fn bounds(self: Body, feet: Position) Bounds {
         return .{
@@ -69,22 +81,23 @@ pub const Query = struct {
     }
 
     pub fn overlap(self: *Query, feet: Position, report_missing: bool) Overlap {
-        const bounds = self.body.bounds(feet);
-        const first = bounds.firstCell();
-        const last = bounds.lastCell();
         var result: Overlap = .clear;
-        var z = first[2];
-        while (z <= last[2]) : (z += 1) {
-            var y = first[1];
-            while (y <= last[1]) : (y += 1) {
-                var x = first[0];
-                while (x <= last[0]) : (x += 1) {
-                    switch (self.cellState(.{ x, y, z }, report_missing)) {
-                        .solid => result = .solid,
-                        .missing => if (result == .clear) {
-                            result = .missing;
-                        },
-                        .clear => {},
+        for (self.body.colliderBounds(feet)) |bounds| {
+            const first = bounds.firstCell();
+            const last = bounds.lastCell();
+            var z = first[2];
+            while (z <= last[2]) : (z += 1) {
+                var y = first[1];
+                while (y <= last[1]) : (y += 1) {
+                    var x = first[0];
+                    while (x <= last[0]) : (x += 1) {
+                        switch (self.cellState(.{ x, y, z }, report_missing)) {
+                            .solid => result = .solid,
+                            .missing => if (result == .clear) {
+                                result = .missing;
+                            },
+                            .clear => {},
+                        }
                     }
                 }
             }
@@ -96,25 +109,26 @@ pub const Query = struct {
     /// so long displacements cannot tunnel through a one-block wall or floor.
     pub fn moveAxis(self: *Query, feet: Position, comptime axis: usize, distance: f64) Move {
         if (distance == 0) return .{ .position = feet, .collided = false };
-        const body_bounds = self.body.bounds(feet);
-        var swept = body_bounds;
-        if (distance > 0) swept.max[axis] += distance else swept.min[axis] += distance;
-        const first = swept.firstCell();
-        const last = swept.lastCell();
         var allowed = distance;
-        var z = first[2];
-        while (z <= last[2]) : (z += 1) {
-            var y = first[1];
-            while (y <= last[1]) : (y += 1) {
-                var x = first[0];
-                while (x <= last[0]) : (x += 1) {
-                    const cell = Cell{ x, y, z };
-                    const face: f64 = @floatFromInt(cell[axis]);
-                    const gap = if (distance > 0) face - body_bounds.max[axis] else face + 1 - body_bounds.min[axis];
-                    if (distance > 0 and (gap < -epsilon or gap > allowed)) continue;
-                    if (distance < 0 and (gap > epsilon or gap < allowed)) continue;
-                    if (self.cellState(cell, true) == .clear) continue;
-                    allowed = if (distance > 0) @max(0, gap) else @min(0, gap);
+        for (self.body.colliderBounds(feet)) |body_bounds| {
+            var swept = body_bounds;
+            if (distance > 0) swept.max[axis] += distance else swept.min[axis] += distance;
+            const first = swept.firstCell();
+            const last = swept.lastCell();
+            var z = first[2];
+            while (z <= last[2]) : (z += 1) {
+                var y = first[1];
+                while (y <= last[1]) : (y += 1) {
+                    var x = first[0];
+                    while (x <= last[0]) : (x += 1) {
+                        const cell = Cell{ x, y, z };
+                        const face: f64 = @floatFromInt(cell[axis]);
+                        const gap = if (distance > 0) face - body_bounds.max[axis] else face + 1 - body_bounds.min[axis];
+                        if (distance > 0 and (gap < -epsilon or gap > allowed)) continue;
+                        if (distance < 0 and (gap > epsilon or gap < allowed)) continue;
+                        if (self.cellState(cell, true) == .clear) continue;
+                        allowed = if (distance > 0) @max(0, gap) else @min(0, gap);
+                    }
                 }
             }
         }
@@ -135,7 +149,9 @@ pub fn overlapsBlock(body: Body, feet: Position, layout: *const engine.WorldLayo
         @as(Position, @floatFromInt(layout.origin_chunk)) * @as(Position, @splat(engine.chunk_utils.CHUNK_SIZE));
     const width: f64 = @floatFromInt(layout.size_in_blocks[0]);
     min[0] += @floor((feet[0] - min[0]) / width + 0.5) * width;
-    const bounds = body.bounds(feet);
-    return @reduce(.And, bounds.max > min + @as(Position, @splat(epsilon))) and
-        @reduce(.And, bounds.min < min + @as(Position, @splat(1 - epsilon)));
+    for (body.colliderBounds(feet)) |bounds| {
+        if (@reduce(.And, bounds.max > min + @as(Position, @splat(epsilon))) and
+            @reduce(.And, bounds.min < min + @as(Position, @splat(1 - epsilon)))) return true;
+    }
+    return false;
 }
