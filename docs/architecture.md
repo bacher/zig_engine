@@ -41,7 +41,7 @@ The arrows show responsibilities and data flow, not separate processes. The serv
 | [`build.zig`](../build.zig) | Per-application configured engine libraries, demo and voxel executables, content installation, run steps, and test aggregation. |
 | [`src/engine/root.zig`](../src/engine/root.zig) | Public engine exports and selected third-party library exports. |
 | [`engine.zig`](../src/engine/engine.zig) | Initialization, model registry, active scene, callbacks, render passes, and main loop. |
-| [`scene.zig`](../src/engine/scene.zig) | Immutable world layout, reference to shared world pipelines, objects, groups, lights, camera/controller, instance buffer, and voxel grid. |
+| [`scene.zig`](../src/engine/scene.zig) | Immutable world layout, reference to shared world pipelines, objects, groups, one directional light, camera/controller, instance buffer, and voxel grid. |
 | [`world_layout.zig`](../src/engine/world_layout.zig) | Runtime dimension validation, coordinates, storage IDs, compile-time wrapping, and shader specialization. |
 | [`world_pipeline_cache.zig`](../src/engine/world_pipeline_cache.zig) | Engine-owned world pipeline sharing, shader compatibility keys, reference counting, and final-release eviction. |
 | [`game_object.zig`](../src/engine/game_object.zig), [`game_object_group.zig`](../src/engine/game_object_group.zig) | Transform hierarchy and per-object animation state. |
@@ -96,7 +96,7 @@ There is no fixed simulation timestep in this loop. Camera movement uses frame e
 | --- | --- |
 | Window and graphics context | Application's `WindowContext`. |
 | Common pipelines, shared world pipeline cache, engine input controller, all models created by engine helpers | `Engine`. World pipeline sets are evicted on final reference release; models remain until engine teardown. |
-| World layout, reference to cached pipelines, scene objects, cameras, groups, lights, instance buffer, voxel grid | `Scene`, which the application must destroy. |
+| World layout, reference to cached pipelines, scene objects, cameras, groups, one directional light, instance buffer, voxel grid | `Scene`, which the application must destroy. |
 | Special model pointers returned by loading helpers | Borrowed from `Engine`; tracked separately from regular model IDs. |
 | Standalone textures returned by `loadTexture` | Caller; destroy after every borrowing model (normally after engine teardown). |
 | Authoritative world state, client endpoints, request/reply queues | `WorldDataService`. Only its worker accesses authoritative state while running. |
@@ -123,7 +123,7 @@ These are questions raised by the current implementation. Resolved decisions and
 1. **Engine/application boundary (resolved).** Applications choose runtime dimensions at scene creation and optional x wrapping at compile time. The layout remains immutable, chunks stay fixed at 32³, and the engine shares specialized GPU pipelines across compatible scenes. The voxel app always wraps x. See [world configuration](world-configuration.md) and the [original research](world-configuration-options.md).
 2. **Scene lifetime (resolved).** Applications own scenes; the engine owns all models created through its helpers, including its built-in debug wireframe cube. Objects borrow models and own their instance/animation state. Scene teardown clears the active pointer and releases instance resources; engine teardown asserts that all scenes are gone and releases shared assets and GPU resources. Standalone textures remain caller-owned. See [scene and model lifetime](scene-lifetime-options.md) for the ownership contract, retention tradeoff, and verification limits.
 3. **Scene mutation.** Creation and transform updates are clear, but there is no complete public scene-object removal/index-reuse path. Is the current scene model intended mainly for setup followed by transform changes?
-4. **Lighting.** Examples use one directional light. The API accepts several, but forward rendering reads the first light and all lights write the same shadow layers. What lighting contract should be supported?
+4. **Lighting (resolved).** The current renderer supports one directional light per rendered scene. The scene stores it by value, rejects a second addition, and uses its three cascades consistently in shadow and forward passes. Future lighting will allow at most one directional light alongside multiple point and spot lights; local lights are deferred and will require light accumulation and independent shadow allocation. Color and intensity remain unused by current shading. See the [lighting contract and extension plan](rendering.md#lighting-contract-and-extension-plan).
 5. **Simulation timing.** Camera movement is frame-driven, animation is draw-driven, and voxel commands are worker-driven. Is a separate fixed-step simulation an intended future requirement?
 6. **Optimization policy.** Visibility queries temporarily perform no culling; voxel streaming has fixed boxes, permanent reveal flags, and a one-way radius reduction under capacity pressure. Which of these are acceptable lasting behavior, and which are temporary measures?
 

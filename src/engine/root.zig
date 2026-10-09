@@ -26,4 +26,5 @@ pub const zgui_utils = @import("./zgui_utils.zig");
 
 test {
     _ = @import("hierarchy_tests.zig");
+    _ = @import("lighting_tests.zig");
 }

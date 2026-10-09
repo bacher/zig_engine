@@ -220,6 +220,8 @@ fn checkSceneFailures(allocator: std.mem.Allocator, engine: *Engine) !void {
     defer std.debug.assert(engine.live_scene_count == live_scenes);
     const scene = try Scene.init(engine, allocator, .{ .size_in_chunks = .{ 8, 8, 8 } });
     defer scene.deinit();
+    try std.testing.expect(scene.directional_light == null);
+    try scene.addDirectionalLight(.{ .direction = .{ 0.5, 0.5, -1, 0 }, .color = .{ 1, 1, 1, 1 }, .intensity = 1 });
     _ = try scene.addGroup();
 }
 

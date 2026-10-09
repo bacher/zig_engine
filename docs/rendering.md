@@ -60,13 +60,22 @@ The mesh (including skinned meshes), voxel, and height-map fragment shaders shar
 
 The shared function samples all three layers before cascade-dependent branches, keeping implicit texture derivatives in uniform control flow. It selects the tightest applicable cascade (2, then 1, with 0 as the fallback), compares sampled depth with biases of 0.002, 0.008, and 0.02 respectively, and returns 0.5 for shadowed color or 1.0 otherwise. The callers multiply RGB by this factor, preserve alpha, and discard fragments with alpha below 0.25 in the visible pass. The mesh shadow path renders geometry without sampling that alpha texture, so transparent cutouts and shadows need separate validation.
 
-The current API is broader than the effective light behavior:
+## Lighting contract and extension plan
 
-- Forward paths access `scene.lights.items[0]`, so an active rendered scene assumes at least one light.
-- Shadow passes iterate all lights, clearing and rewriting the same three shared layers. They do not allocate independent shadow textures per light.
-- Light color and intensity are stored in `DirectionalLightParams`, but the inspected rendering paths do not pass them to the shading calculation.
+The current renderer supports one directional light per rendered scene. Call `try scene.addDirectionalLight(params)` during setup, before the scene is drawn. The scene stores the light by value in `scene.directional_light`; a second addition returns `error.DirectionalLightAlreadyExists` and leaves the existing light and cascades unchanged. Scene creation starts with no light so setup and teardown can run without one. Drawing an active scene without a configured light is a programming error and panics with a setup instruction, before any passes are encoded.
 
-The examples use one directional light. These observations do not establish support for multiple lights or a general diffuse/specular lighting model.
+Both shadow and forward passes use this same directional light. Its three cascades own the three shared shadow layers for the current scene's frame. Lights need no separate allocation or teardown. To change the configured light, update `scene.directional_light.?.params`; the next draw refits the cascades. Color and intensity are stored in `DirectionalLightParams`, but current shading uses only shadow attenuation and does not consume those fields. This contract does not yet provide diffuse/specular lighting.
+
+The intended future contract is **at most one directional light, plus multiple point lights and multiple spot lights in the same scene**. Point and spot lights are planned, with no immediate implementation priority. Keep the directional slot separate from future collections of local lights; a list of directional lights does not express this contract.
+
+Adding local lights will require:
+
+- Point and spot parameters and scene collections, including positions, ranges, and spot cones.
+- GPU light data and shading that accumulates contributions from all supported lights, including their color and intensity.
+- A shadow allocation strategy for lights that cast shadows: directional cascades, point-light faces, and spot-light projections must have distinct allocations. The existing three directional layers cannot be reused by every light.
+- Defined behavior for scenes without a directional light, practical local-light limits, and regression coverage for mixed light types and shadows.
+
+The accumulation method, local-light limits, and which local lights cast shadows remain decisions for that work. This refactor enforces the current contract without adding speculative local-light APIs or reserving GPU storage for them.
 
 ## SSAO and final composition
 
@@ -86,6 +95,7 @@ Frame statistics include candidate object count, uploaded instance-range size, v
 
 - [`engine.zig`](../src/engine/engine.zig): `draw`, `drawGameObject`, `drawGameObjectToShadowMap`, transform adjustment, and resize handling.
 - [`light.zig`](../src/engine/light.zig): cascade fitting and camera-relative origins.
+- [`lighting_tests.zig`](../src/engine/lighting_tests.zig): single-light setup and rejection of a second directional light without changing existing state.
 - [`pipelines.zig`](../src/engine/pipelines.zig), [`pipelines/`](../src/engine/pipelines), and [`bind_group_layouts/`](../src/engine/bind_group_layouts): pipeline and binding configuration.
 - [`shaders/basic/`](../src/engine/shaders/basic), [`shaders/voxel/`](../src/engine/shaders/voxel), [`shaders/shadow_map/`](../src/engine/shaders/shadow_map), and [`shaders/quad/`](../src/engine/shaders/quad): vertex generation, shadow comparisons, and post-processing.
 - [`render_coordinates_tests.zig`](../src/engine/render_coordinates_tests.zig): agreement of camera/shadow projections and translation invariance across all cascades.

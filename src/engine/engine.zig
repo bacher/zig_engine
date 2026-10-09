@@ -568,21 +568,20 @@ pub const Engine = struct {
         engine.temp_buffers.resetVisibleObjectsLists();
 
         if (engine.active_scene) |scene| {
-            for (scene.lights.items) |light| {
-                for (&light.cascades) |*cascade| {
-                    light.applyCameraFrustum(cascade, scene.camera);
+            const light = if (scene.directional_light) |*light| light else @panic("Configure a directional light with Scene.addDirectionalLight before drawing the scene");
+            for (&light.cascades) |*cascade| {
+                light.applyCameraFrustum(cascade, scene.camera);
 
-                    const cascade_view_bound_box = cascade.getLightViewBoundBox();
-                    const visible_objects = scene.space_tree.getObjectsInBoundBox(
-                        cascade_view_bound_box,
-                    );
+                const cascade_view_bound_box = cascade.getLightViewBoundBox();
+                const visible_objects = scene.space_tree.getObjectsInBoundBox(
+                    cascade_view_bound_box,
+                );
 
-                    for (visible_objects) |game_object| {
-                        outdate_instances_range.update(scene, game_object);
-                    }
-
-                    engine.temp_buffers.writeVisibleObjectsList(visible_objects);
+                for (visible_objects) |game_object| {
+                    outdate_instances_range.update(scene, game_object);
                 }
+
+                engine.temp_buffers.writeVisibleObjectsList(visible_objects);
             }
 
             const camera_view_bound_box = scene.camera.getChunkFrustumPoints(.{}).getBoundingBox();
@@ -644,95 +643,94 @@ pub const Engine = struct {
                         engine.frame_stats.shadow_map_pass_time_taken = @as(f32, @floatFromInt(duration.nanoseconds)) * 0.000001;
                     }
 
-                    for (scene.lights.items) |light| {
-                        for (&light.cascades) |*cascade| {
-                            const shadow_map_view = engine.shadow_map_texture.layers_views[@intFromEnum(cascade.layer)].view;
+                    const light = &scene.directional_light.?;
+                    for (&light.cascades) |*cascade| {
+                        const shadow_map_view = engine.shadow_map_texture.layers_views[@intFromEnum(cascade.layer)].view;
 
-                            const shadow_map_attachments = [_]wgpu.RenderPassColorAttachment{.{
-                                .view = shadow_map_view,
-                                .load_op = .clear,
-                                .store_op = .store,
-                                .clear_value = .{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0 },
-                            }};
+                        const shadow_map_attachments = [_]wgpu.RenderPassColorAttachment{.{
+                            .view = shadow_map_view,
+                            .load_op = .clear,
+                            .store_op = .store,
+                            .clear_value = .{ .r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0 },
+                        }};
 
-                            const shadow_map_render_pass_info = wgpu.RenderPassDescriptor{
-                                .color_attachments = &shadow_map_attachments,
-                                .color_attachment_count = shadow_map_attachments.len,
-                                .depth_stencil_attachment = &depth_attachment,
-                            };
+                        const shadow_map_render_pass_info = wgpu.RenderPassDescriptor{
+                            .color_attachments = &shadow_map_attachments,
+                            .color_attachment_count = shadow_map_attachments.len,
+                            .depth_stencil_attachment = &depth_attachment,
+                        };
 
-                            const shadow_map_pass = encoder.beginRenderPass(shadow_map_render_pass_info);
-                            defer {
-                                shadow_map_pass.end();
-                                shadow_map_pass.release();
-                            }
-
-                            shadow_map_pass.setPipeline(scene.pipelines.shadow_map.pipeline_gpu);
-
-                            const potentially_visible_game_objects = engine.temp_buffers.getNextVisibleObjectsChunk();
-
-                            const clip_from_chunk_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
-                            clip_from_chunk_uniform.slice[0] = cascade.clip_from_chunk;
-
-                            const settings_uniform = engine.gctx.uniformsAllocate(SceneShaderRuntimeSettings, 1);
-                            settings_uniform.slice[0] = .{
-                                .ssao_enabled = engine.state.ssao_enabled,
-                            };
-                            const camera_chunk_uniform = engine.gctx.uniformsAllocate([3]i32, 1);
-                            camera_chunk_uniform.slice[0] = cascade.chunk;
-
-                            shadow_map_pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
-                                clip_from_chunk_uniform.offset,
-                                clip_from_chunk_uniform.offset, // Shadow shaders do not read the view matrix.
-                                settings_uniform.offset,
-                                clip_from_chunk_uniform.offset,
-                                camera_chunk_uniform.offset,
-                            });
-
-                            for (potentially_visible_game_objects) |game_object| {
-                                const target_buffer = switch (game_object.model) {
-                                    // if (game_object.joints_bind_group != null) { ???
-                                    .regular_model => |model| if (model.model_descriptor.has_skin)
-                                        &engine.temp_buffers.skinned_objects
-                                    else
-                                        &engine.temp_buffers.regular_objects,
-                                    .primitive_colorized => &engine.temp_buffers.regular_objects,
-                                    .window_box_model => &engine.temp_buffers.regular_objects,
-                                    else => &engine.temp_buffers.rest_objects,
-                                };
-                                target_buffer.append(allocator, game_object) catch @panic("Failed to grow draw buffer");
-                            }
-
-                            shadow_map_pass.setPipeline(scene.pipelines.shadow_map.pipeline_gpu);
-
-                            for (engine.temp_buffers.regular_objects.items) |game_object| {
-                                engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, cascade, game_object);
-                            }
-
-                            if (engine.temp_buffers.skinned_objects.items.len > 0) {
-                                shadow_map_pass.setPipeline(scene.pipelines.shadow_map_skinned.pipeline_gpu);
-                                for (engine.temp_buffers.skinned_objects.items) |game_object| {
-                                    engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, cascade, game_object);
-                                }
-                            }
-
-                            shadow_map_pass.setPipeline(scene.pipelines.shadow_map_voxel.pipeline_gpu);
-                            shadow_map_pass.setBindGroup(1, scene.voxel_bind_group.wgpu_bind_group, &.{});
-                            for (scene.voxel_grid.chunks.items) |chunk| {
-                                const info = chunk.gpu_residence_info orelse continue;
-                                // Opposite views cover all six sides. Shadow visibility must
-                                // not depend on which faces the camera can see.
-                                inline for (.{ 0, 7 }) |view_index| {
-                                    shadow_map_pass.draw(@intCast(info.faces_count_per_view[view_index] * 6), 1, 0, (info.chunk_index << 3) + view_index);
-                                }
-                            }
-
-                            for (engine.temp_buffers.rest_objects.items) |game_object| {
-                                engine.drawGameObjectToShadowMap(shadow_map_pass, scene, light, cascade, game_object);
-                            }
-
-                            engine.temp_buffers.resetDrawingLists();
+                        const shadow_map_pass = encoder.beginRenderPass(shadow_map_render_pass_info);
+                        defer {
+                            shadow_map_pass.end();
+                            shadow_map_pass.release();
                         }
+
+                        shadow_map_pass.setPipeline(scene.pipelines.shadow_map.pipeline_gpu);
+
+                        const potentially_visible_game_objects = engine.temp_buffers.getNextVisibleObjectsChunk();
+
+                        const clip_from_chunk_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
+                        clip_from_chunk_uniform.slice[0] = cascade.clip_from_chunk;
+
+                        const settings_uniform = engine.gctx.uniformsAllocate(SceneShaderRuntimeSettings, 1);
+                        settings_uniform.slice[0] = .{
+                            .ssao_enabled = engine.state.ssao_enabled,
+                        };
+                        const camera_chunk_uniform = engine.gctx.uniformsAllocate([3]i32, 1);
+                        camera_chunk_uniform.slice[0] = cascade.chunk;
+
+                        shadow_map_pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
+                            clip_from_chunk_uniform.offset,
+                            clip_from_chunk_uniform.offset, // Shadow shaders do not read the view matrix.
+                            settings_uniform.offset,
+                            clip_from_chunk_uniform.offset,
+                            camera_chunk_uniform.offset,
+                        });
+
+                        for (potentially_visible_game_objects) |game_object| {
+                            const target_buffer = switch (game_object.model) {
+                                // if (game_object.joints_bind_group != null) { ???
+                                .regular_model => |model| if (model.model_descriptor.has_skin)
+                                    &engine.temp_buffers.skinned_objects
+                                else
+                                    &engine.temp_buffers.regular_objects,
+                                .primitive_colorized => &engine.temp_buffers.regular_objects,
+                                .window_box_model => &engine.temp_buffers.regular_objects,
+                                else => &engine.temp_buffers.rest_objects,
+                            };
+                            target_buffer.append(allocator, game_object) catch @panic("Failed to grow draw buffer");
+                        }
+
+                        shadow_map_pass.setPipeline(scene.pipelines.shadow_map.pipeline_gpu);
+
+                        for (engine.temp_buffers.regular_objects.items) |game_object| {
+                            engine.drawGameObjectToShadowMap(shadow_map_pass, scene, cascade, game_object);
+                        }
+
+                        if (engine.temp_buffers.skinned_objects.items.len > 0) {
+                            shadow_map_pass.setPipeline(scene.pipelines.shadow_map_skinned.pipeline_gpu);
+                            for (engine.temp_buffers.skinned_objects.items) |game_object| {
+                                engine.drawGameObjectToShadowMap(shadow_map_pass, scene, cascade, game_object);
+                            }
+                        }
+
+                        shadow_map_pass.setPipeline(scene.pipelines.shadow_map_voxel.pipeline_gpu);
+                        shadow_map_pass.setBindGroup(1, scene.voxel_bind_group.wgpu_bind_group, &.{});
+                        for (scene.voxel_grid.chunks.items) |chunk| {
+                            const info = chunk.gpu_residence_info orelse continue;
+                            // Opposite views cover all six sides. Shadow visibility must
+                            // not depend on which faces the camera can see.
+                            inline for (.{ 0, 7 }) |view_index| {
+                                shadow_map_pass.draw(@intCast(info.faces_count_per_view[view_index] * 6), 1, 0, (info.chunk_index << 3) + view_index);
+                            }
+                        }
+
+                        for (engine.temp_buffers.rest_objects.items) |game_object| {
+                            engine.drawGameObjectToShadowMap(shadow_map_pass, scene, cascade, game_object);
+                        }
+
+                        engine.temp_buffers.resetDrawingLists();
                     }
                 }
             }
@@ -804,7 +802,7 @@ pub const Engine = struct {
                     pass.setPipeline(scene.pipelines.voxel_pipeline.pipeline_gpu);
                     pass.setBindGroup(1, engine.bind_group_minecraft_texture.wgpu_bind_group, &.{});
 
-                    const global_light_clip_matrix_array = getGlobalLightClipMatrixArray(gctx, scene.lights.items[0]);
+                    const global_light_clip_matrix_array = getGlobalLightClipMatrixArray(gctx, &scene.directional_light.?);
                     pass.setBindGroup(2, engine.bind_group_shadow_map.wgpu_bind_group, &.{
                         global_light_clip_matrix_array.offset,
                     });
@@ -1109,7 +1107,7 @@ pub const Engine = struct {
                 pass.setBindGroup(1, model.bind_group.wgpu_bind_group, &.{});
 
                 pass.setBindGroup(2, engine.bind_group_shadow_map.wgpu_bind_group, &.{
-                    getGlobalLightClipMatrixArray(engine.gctx, scene.lights.items[0]).offset,
+                    getGlobalLightClipMatrixArray(engine.gctx, &scene.directional_light.?).offset,
                 });
 
                 if (game_object.joints_bind_group) |joints_bind_group| {
@@ -1119,7 +1117,7 @@ pub const Engine = struct {
                 pass.drawIndexed(model.model_descriptor.index.elements_count, 1, 0, 0, game_object.instance_index orelse 0);
             },
             .terrain_height_map_model => |model| {
-                const light_clip_from_object_array_uniform = getLightClipMatrixArray(scene.layout, engine.gctx, scene.lights.items[0], transform);
+                const light_clip_from_object_array_uniform = getLightClipMatrixArray(scene.layout, engine.gctx, &scene.directional_light.?, transform);
                 const time_uniform = engine.gctx.uniformsAllocate(u32, 1);
                 time_uniform.slice[0] = @intFromFloat(engine.time * 1000);
 
@@ -1226,12 +1224,9 @@ pub const Engine = struct {
         engine: *Engine,
         pass: wgpu.RenderPassEncoder,
         scene: *const Scene,
-        light: *const DirectionalLight,
         cascade: *const DirectionalLightCascade,
         game_object: *GameObject,
     ) void {
-        _ = light;
-
         switch (game_object.model) {
             .regular_model => |model| {
                 const model_descriptor = model.model_descriptor;

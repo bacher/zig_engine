@@ -7,3 +7,5 @@
 - [ ] Check the camara max distance, is it too big?
 - [x] Rename BindGroupDefinition into BindGroupLayouts
 - [x] Move BindGroupLayouts initialization into layouts file (instead of engine.zig)
+
+- [ ] Add multiple point and spot lights alongside at most one directional light; implement light accumulation and per-light shadow allocation (deferred; see [lighting plan](docs/rendering.md#lighting-contract-and-extension-plan)).

@@ -38,8 +38,8 @@ pub const Scene = struct {
     allocator: std.mem.Allocator,
     game_objects: std.ArrayList(*GameObject) = undefined,
     root_groups: std.ArrayList(*GameObjectGroup) = .empty,
-    // TODO: Maybe store light as a value instead of a pointer?
-    lights: std.ArrayList(*DirectionalLight) = .empty,
+    /// Configure before drawing. Future point/spot lights will have separate collections.
+    directional_light: ?DirectionalLight = null,
     skybox_object: ?*GameObject,
     space_tree: *SpaceTree(GameObject),
     voxel_grid: *VoxelGrid,
@@ -134,7 +134,7 @@ pub const Scene = struct {
             .allocator = allocator,
             .game_objects = game_objects,
             .root_groups = .empty,
-            .lights = .empty,
+            .directional_light = null,
             .skybox_object = null,
             .space_tree = space_tree,
             .voxel_grid = voxel_grid,
@@ -165,11 +165,6 @@ pub const Scene = struct {
         if (scene.skybox_object) |skybox_object| skybox_object.deinit(gctx);
 
         scene.scene_bind_group.deinit(gctx);
-
-        for (scene.lights.items) |light| {
-            scene.allocator.destroy(light);
-        }
-        scene.lights.deinit(scene.allocator);
 
         scene.voxel_bind_group.deinit(gctx);
         scene.voxel_grid.deinit(gctx);
@@ -370,12 +365,10 @@ pub const Scene = struct {
         return game_object;
     }
 
-    pub fn addDirectionalLight(scene: *Scene, params: DirectionalLightParams) !void {
-        const light = try scene.allocator.create(DirectionalLight);
-        errdefer scene.allocator.destroy(light);
-        light.* = .init(params);
-
-        try scene.lights.append(scene.allocator, light);
+    /// A scene supports one directional light; a second addition leaves it unchanged.
+    pub fn addDirectionalLight(scene: *Scene, params: DirectionalLightParams) error{DirectionalLightAlreadyExists}!void {
+        if (scene.directional_light != null) return error.DirectionalLightAlreadyExists;
+        scene.directional_light = .init(params);
     }
 
     pub fn playObjectAnimation(scene: *Scene, game_object: *GameObject, animation_name: []const u8) !void {

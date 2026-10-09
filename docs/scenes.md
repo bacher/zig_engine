@@ -4,7 +4,7 @@ This document describes the current implementation. For system boundaries and un
 
 ## Scene state
 
-A `Scene` holds ordinary game objects, separately owned root groups, directional lights, a camera and spectator controller, a voxel grid, and a CPU/GPU instance buffer. It also holds a dedicated cubemap skybox object. Only the engine's active scene is updated and rendered.
+A `Scene` holds ordinary game objects, separately owned root groups, one optional directional-light value, a camera and spectator controller, a voxel grid, and a CPU/GPU instance buffer. It also holds a dedicated cubemap skybox object. Only the engine's active scene is updated and rendered. Configure its directional light with `addDirectionalLight` before drawing; a second addition is rejected. See the [lighting contract](rendering.md#lighting-contract-and-extension-plan) for current requirements and future point/spot support.
 
 Ordinary objects are individually allocated and retained in `scene.game_objects`. A regular object's model is looked up by `LoadedModelId` in the engine's registry. Special objects receive a borrowed engine-owned model pointer from the caller.
 
@@ -88,7 +88,7 @@ Movement uses a base speed of 5 world units per second and elapsed frame time. T
 
 Applications destroy their scenes before the engine. `Scene.deinit` clears `engine.active_scene` if it points to that scene and decrements the engine's live-scene count. It destroys both ordinary objects and the dedicated skybox through `GameObject.deinit`, while parent groups and the visibility index still exist. That path detaches objects, removes their visibility entries, and stops animations; it never destroys borrowed models.
 
-The scene then releases groups, cameras, lights, voxel resources (binding before buffers), instance resources, layout, and its reference to the engine's world pipeline cache. The final scene reference evicts the shared pipeline set. Engine teardown asserts that no scenes remain. Destroying the active scene leaves no active scene; the application can explicitly select another or create a new one.
+The scene then releases groups, cameras, voxel resources (binding before buffers), instance resources, layout, and its reference to the engine's world pipeline cache. The final scene reference evicts the shared pipeline set. Engine teardown asserts that no scenes remain. Destroying the active scene leaves no active scene; the application can explicitly select another or create a new one.
 
 Models survive scene destruction and are released at engine teardown. Calling `GameObject.deinit` directly still does not remove an ordinary object from the scene's owning collection or reclaim its instance index; a complete public object-removal API remains a separate review point.
 
