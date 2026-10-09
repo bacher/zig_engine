@@ -22,7 +22,7 @@ The UV-test texture is an engine-initialized debug/fallback asset. The voxel atl
 
 - Applications own the window/graphics context and scenes. Destroy every scene before its engine, and the engine before the graphics context. Stop workers that use scene state before destroying scenes.
 - The engine owns every model returned by its creation/loading helpers. IDs and pointers are borrowed references valid until engine teardown. Applications choose which assets to load without taking over destruction.
-- Scenes own objects, groups, cameras, lights, voxel resources, and instance resources. Objects borrow models and own only instance state, including animation players. `GameObject.deinit` never destroys a model.
+- Scenes own objects, every scene-created group independently of parenting, cameras, lights, voxel resources, and instance resources. Objects borrow models and own only instance state, including animation players. `GameObject.deinit` never destroys a model.
 - Models own geometry and textures they create. Regular descriptors track whether their color texture was loaded from a material or borrowed as a fallback. Engine samplers and the wireframe's line bind group are borrowed dependencies.
 - `loadTexture` returns a caller-owned texture. Terrain creation borrows all input textures, and custom regular-model fallback textures are borrowed. Their owners must keep them alive until every borrowing model is gone, normally until after engine teardown, then call `TextureDescriptor.deinit(gctx)`. Descriptor copying does not transfer ownership.
 
@@ -40,7 +40,7 @@ The examples no longer destroy model pointers. The demo releases standalone terr
 
 ## Retention tradeoff
 
-Models remain allocated until engine teardown. Replacing a skybox or destroying a scene retains its assets, allowing other scenes to share them. Reclaiming assets during long-running scene switching would require an explicit unloading API, asset scopes, or retained handles. This change does not add automatic scene destruction, model unloading, a texture cache, or ordinary-object removal/index reuse.
+Models remain allocated until engine teardown. Replacing a skybox or destroying a scene retains its assets, allowing other scenes to share them. Reclaiming assets during long-running scene switching would require an explicit unloading API, asset scopes, or retained handles. The subsequent [scene mutation implementation](scenes.md#scene-mutation-contract) adds gameplay object/group removal, reusable slots, and growing ordinary-instance storage while preserving engine ownership of shared models. Automatic scene destruction, model unloading, and a texture cache remain separate concerns. Voxel residency is unchanged; its [capacity and lifetime follow-ups](voxel-world.md#deferred-capacity-and-lifetime-work) are deferred.
 
 ## Verification
 

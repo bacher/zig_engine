@@ -3,6 +3,7 @@ const zmath = @import("zmath");
 
 const world_math = @import("world_math.zig");
 const GameObject = @import("./game_object.zig").GameObject;
+const Scene = @import("scene.zig").Scene;
 
 pub const GroupChild = union(enum) {
     game_object: *GameObject,
@@ -10,6 +11,8 @@ pub const GroupChild = union(enum) {
 };
 
 pub const GameObjectGroup = struct {
+    /// Scene groups are owned in a flat registry, independently of parenting.
+    scene: ?*Scene = null,
     allocator: std.mem.Allocator,
     position: world_math.Position,
     rotation: zmath.Quat = zmath.quatFromRollPitchYaw(0, 0, 0),
@@ -20,7 +23,7 @@ pub const GameObjectGroup = struct {
     // bounding_radius: f32,
     parent: ?*GameObjectGroup,
     children: std.ArrayList(GroupChild) = .empty,
-    // Allocation ownership stays with the creator when transforms are reparented.
+    // Only standalone groups use creator ownership. Scene groups use Scene.groups.
     owned_groups: std.ArrayList(*GameObjectGroup) = .empty,
     _gc: ?*GameObjectGroup,
 
@@ -42,6 +45,11 @@ pub const GameObjectGroup = struct {
     }
 
     pub fn deinit(game_object_group: *GameObjectGroup) void {
+        if (game_object_group.parent) |parent| parent.detachChild(.{ .group = game_object_group });
+        for (game_object_group.children.items) |child| switch (child) {
+            .group => |group| group.parent = null,
+            .game_object => |object| object.parent = null,
+        };
         game_object_group.children.deinit(game_object_group.allocator);
         game_object_group.owned_groups.deinit(game_object_group.allocator);
 
@@ -51,11 +59,20 @@ pub const GameObjectGroup = struct {
     }
 
     pub fn deinit_recursively(game_object_group: *GameObjectGroup) void {
+        std.debug.assert(game_object_group.scene == null); // Use Scene.removeGroup for scene groups.
         for (game_object_group.owned_groups.items) |group| group.deinit_recursively();
         game_object_group.deinit();
     }
 
     pub fn addGroup(group: *GameObjectGroup) !*GameObjectGroup {
+        if (group.scene) |scene| {
+            const child = try scene.addGroup();
+            errdefer scene.removeGroup(child) catch unreachable;
+            try group.attachChild(.{ .group = child });
+            child.parent = group;
+            child.updateAggregatedMatrix();
+            return child;
+        }
         const new_group = try GameObjectGroup.init(group.allocator);
         errdefer new_group.deinit();
         try group.owned_groups.append(group.allocator, new_group);
@@ -67,6 +84,9 @@ pub const GameObjectGroup = struct {
     }
 
     pub fn addObject(group: *GameObjectGroup, game_object: *GameObject) !void {
+        if (group.scene != game_object.scene) return error.GroupBelongsToAnotherScene;
+        if (game_object.skip_space_tree) return error.ObjectCannotBeGrouped;
+        if (group.scene) |scene| try scene.checkMutationAllowed();
         try group.attachChild(.{ .game_object = game_object });
         game_object.setParent(group);
     }
@@ -116,6 +136,8 @@ pub const GameObjectGroup = struct {
     }
 
     pub fn setParent(group: *GameObjectGroup, parent: ?*GameObjectGroup) void {
+        if (group.scene) |scene| scene.checkMutationAllowed() catch @panic("Cannot reparent while drawing");
+        if (parent) |new_parent| std.debug.assert(group.scene == new_parent.scene);
         if (group.parent != parent) {
             var ancestor = parent;
             while (ancestor) |node| : (ancestor = node.parent) std.debug.assert(node != group);

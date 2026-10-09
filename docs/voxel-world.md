@@ -144,6 +144,20 @@ Face allocations use power-of-two multiples of a 1024-byte slot. Sixty-four span
 
 Replacing/removing a chunk releases its resident slots and frees any superseded queued face arrays. After successful upload, all queued arrays are freed. Zero-face uploads consume no GPU residency slot. Capacity checks do not make arbitrary voxel patterns fit the fixed per-chunk and total limits.
 
+## Deferred capacity and lifetime work
+
+The ordinary scene-object mutation work leaves voxel code and behavior unchanged. Voxels already reclaim residency slots when chunks are replaced or removed; they do not use `Scene.removeObject`, `Scene.removeGroup`, or the ordinary instance free list. The voxel metadata limit of 4096 is independent of the removed ordinary-object cap.
+
+Follow-up work should address these separate decisions and implementation tasks:
+
+- Define a voxel memory budget bounded by device buffer/storage-binding limits and CPU memory allocation. Decide whether to grow the current 4 MiB face buffer and 4096-entry metadata buffer or use explicit budgets with eviction. Available bytes alone are insufficient because the face allocator also has size classes and fragmentation.
+- Define how to handle chunks exceeding the current 64 KiB face-allocation limit: split their geometry across allocations or revise the allocation scheme. Shrinking the visible neighborhood cannot make a single oversized chunk fit.
+- Define recovery after temporary capacity pressure. The current radius reduction from 3 to 2 is permanent for that run; consider restoring the requested radius once sufficient capacity returns, without repeated shrink/grow oscillation.
+- If buffers grow, replace voxel bindings together with both residency allocators, preserve resident face records and metadata, and retain resources needed by submitted frames. Keep the existing queued-batch preflight guarantee so failure preserves resident geometry and pending uploads.
+- Extend tests for repeated chunk load/replace/evict cycles, pending uploads for removed chunks, fragmentation, oversized chunks, budget exhaustion/recovery, and GPU readback after any future buffer replacement. Preserve token/revision checks so delayed worker responses cannot resurrect evicted data.
+
+All GPU residency mutation must continue on the application thread; the world-data worker must not manipulate GPU resources. Scene-group deletion does not affect voxel chunks. Changes to authoritative modified-world retention or persistence need their own policy and are outside ordinary instance removal.
+
 ## Persistence, caches, and shutdown
 
 The service retains committed modified chunks, permanent reveal flags, and mesh invalidation revisions independently of subscriptions. Untouched blocks and built meshes are temporary. Generated boundary masks and column heights have bounded caches (512 chunks and 64 columns respectively); these caches are cleared when their thresholds are reached rather than managed as an LRU.

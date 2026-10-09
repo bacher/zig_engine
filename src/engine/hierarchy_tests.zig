@@ -36,20 +36,17 @@ test "nested groups inherit f64 translation rotation and scale without changing 
 
 test "objects supplied a parent receive updates and retain sub-f32-world offsets on upload" {
     const allocator = std.testing.allocator;
-    const tree = try SpaceTree(GameObject).init(allocator);
-    defer tree.deinit();
-    const root = try GameObjectGroup.init(allocator);
-    defer root.deinit_recursively();
+    var fixture: SceneFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const scene = &fixture.scene;
+    const root = try scene.addGroup();
     const child = try root.addGroup();
     root.setPosition(.{ 1e9, -1e9, 1e9 });
     child.setPosition(.{ 0.125, 0.25, 0.5 });
-    var scene: Scene = undefined;
-    scene.space_tree = tree;
-    scene.instance_buffer.outdated_indices = try std.DynamicBitSetUnmanaged.initEmpty(allocator, 1);
-    defer scene.instance_buffer.outdated_indices.deinit(allocator);
     var model: PrimitiveModel = undefined; // No geometry or GPU is needed for transforms.
     const object = try GameObject.init(allocator, .{
-        .scene = &scene,
+        .scene = scene,
         .position = .{ 0.015625, 0.03125, 0.0625 },
         .model = .{ .primitive_colorized = &model },
         .parent = child,
@@ -99,12 +96,14 @@ test "reparented groups follow only their current parent and preserve local tran
 
 test "object destruction borrows a terrain model shared by other objects" {
     const allocator = std.testing.allocator;
-    const group = try GameObjectGroup.init(allocator);
-    defer group.deinit_recursively();
-    var scene: Scene = undefined;
+    var fixture: SceneFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const scene = &fixture.scene;
+    const group = try scene.addGroup();
     var terrain: @import("model.zig").TerrainHeightMapModel = undefined;
     const first = try GameObject.init(allocator, .{
-        .scene = &scene,
+        .scene = scene,
         .model = .{ .terrain_height_map_model = &terrain },
         .position = .{ 0, 0, 0 },
         .parent = group,
@@ -112,7 +111,7 @@ test "object destruction borrows a terrain model shared by other objects" {
         .skip_space_tree = true,
     });
     const second = try GameObject.init(allocator, .{
-        .scene = &scene,
+        .scene = scene,
         .model = .{ .terrain_height_map_model = &terrain },
         .position = .{ 1, 0, 0 },
         .parent = group,
@@ -124,4 +123,171 @@ test "object destruction borrows a terrain model shared by other objects" {
     try std.testing.expectEqual(@as(usize, 1), group.children.items.len);
     try std.testing.expect(second.model.terrain_height_map_model == &terrain);
     second.setPosition(.{ 2, 0, 0 });
+}
+
+/// Real object/group APIs with CPU instance storage; these tests never grow or
+/// access GPU resources. Headless tests exercise growth and animated instances.
+const SceneFixture = struct {
+    engine: @import("engine.zig").Engine,
+    scene: Scene,
+    model: PrimitiveModel = undefined,
+
+    fn init(self: *SceneFixture) !void {
+        const allocator = std.testing.allocator;
+        self.engine = undefined;
+        self.engine.allocator = allocator;
+        self.engine.gctx = undefined;
+        self.engine.temp_buffers = .{
+            .visible_objects_lists = .empty,
+            .visible_objects_lists_chunks = .empty,
+            .regular_objects = .empty,
+            .skinned_objects = .empty,
+            .wireframe_objects = .empty,
+            .rest_objects = .empty,
+        };
+        const tree = try SpaceTree(GameObject).init(allocator);
+        errdefer tree.deinit();
+        const buffer = try allocator.alloc(ChunkTransform, 8);
+        errdefer allocator.free(buffer);
+        @memset(buffer, std.mem.zeroes(ChunkTransform));
+        var dirty = try std.DynamicBitSetUnmanaged.initEmpty(allocator, 8);
+        errdefer dirty.deinit(allocator);
+        const free = try std.ArrayList(u32).initCapacity(allocator, 8);
+        self.scene = undefined;
+        self.scene.layout = &layout;
+        self.scene.engine = &self.engine;
+        self.scene.allocator = allocator;
+        self.scene.is_drawing = false;
+        self.scene.groups = .empty;
+        self.scene.game_objects = .empty;
+        self.scene.space_tree = tree;
+        self.scene.instance_buffer = .{
+            .buffer = buffer,
+            .max_capacity = 8,
+            .free_indices = free,
+            .outdated_indices = dirty,
+            .handle = undefined,
+            .gpu_buffer = undefined,
+        };
+    }
+
+    fn add(self: *SceneFixture, parent: ?*GameObjectGroup) !*GameObject {
+        const object = try self.scene.addPrimitiveObject(.{ .model = &self.model, .position = .{ 1, 2, 3 } });
+        object.setParent(parent);
+        return object;
+    }
+
+    fn deinit(self: *SceneFixture) void {
+        const allocator = std.testing.allocator;
+        for (self.scene.game_objects.items) |object| object.deinit(undefined);
+        self.scene.game_objects.deinit(allocator);
+        while (self.scene.groups.pop()) |group| group.deinit();
+        self.scene.groups.deinit(allocator);
+        self.scene.space_tree.deinit();
+        self.scene.instance_buffer.outdated_indices.deinit(allocator);
+        self.scene.instance_buffer.free_indices.deinit(allocator);
+        allocator.free(self.scene.instance_buffer.buffer);
+        inline for (.{ "visible_objects_lists", "visible_objects_lists_chunks", "regular_objects", "skinned_objects", "wireframe_objects", "rest_objects" }) |name| {
+            @field(self.engine.temp_buffers, name).deinit(allocator);
+        }
+    }
+};
+
+test "gameplay removal reuses slots indefinitely and detaches scene and visibility entries" {
+    var fixture: SceneFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const scene = &fixture.scene;
+    const group = try scene.addGroup();
+    const survivor = try fixture.add(group);
+    for (0..5000) |_| {
+        const object = try fixture.add(group);
+        try std.testing.expectEqual(@as(u32, 1), object.instance_index.?);
+        try scene.removeObject(object);
+        try std.testing.expectEqual(@as(usize, 1), scene.game_objects.items.len);
+        try std.testing.expectEqual(@as(usize, 1), group.children.items.len);
+        try std.testing.expectEqual(@as(usize, 1), scene.space_tree.objects.items.len);
+        try std.testing.expect(!scene.instance_buffer.outdated_indices.isSet(1));
+    }
+    try std.testing.expectEqual(@as(u32, 2), scene.instance_buffer.next_index);
+    survivor.setPosition(.{ 4, 5, 6 });
+    try std.testing.expect(scene.instance_buffer.outdated_indices.isSet(0));
+}
+
+test "group removal follows current hierarchy including moved-in descendants and detached survivors" {
+    var fixture: SceneFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const scene = &fixture.scene;
+    const car = try scene.addGroup();
+    const outside = try scene.addGroup();
+    const moved_out = try car.addGroup();
+    moved_out.setParent(outside);
+    const survivor = try fixture.add(moved_out);
+    const detached = try car.addGroup();
+    detached.setParent(null);
+    _ = try fixture.add(detached);
+    const moved_in = try outside.addGroup();
+    moved_in.setParent(car);
+    const nested = try moved_in.addGroup();
+    _ = try fixture.add(nested);
+    _ = try fixture.add(car);
+
+    // Even with no allocation available, removal must complete.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    scene.allocator = failing.allocator();
+    defer scene.allocator = std.testing.allocator;
+    try scene.removeGroup(car);
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 3), scene.groups.items.len);
+    try std.testing.expectEqual(@as(usize, 2), scene.game_objects.items.len);
+    try std.testing.expectEqual(@as(usize, 2), scene.space_tree.objects.items.len);
+    try std.testing.expectEqual(outside, moved_out.parent.?);
+    outside.setPosition(.{ 10, 0, 0 });
+    try expectPosition(.{ 11, 2, 3 }, survivor.aggregated_matrix);
+    try scene.removeGroup(outside);
+    try std.testing.expectEqual(@as(usize, 1), scene.groups.items.len);
+    try std.testing.expectEqual(@as(usize, 1), scene.game_objects.items.len);
+    try std.testing.expect(detached.parent == null);
+    try scene.removeGroup(detached);
+    try std.testing.expectEqual(@as(usize, 0), scene.groups.items.len);
+    try std.testing.expectEqual(@as(usize, 0), scene.space_tree.objects.items.len);
+}
+
+test "scene mutations reject foreign membership and drawing without changing live objects" {
+    var first: SceneFixture = undefined;
+    try first.init();
+    defer first.deinit();
+    var second: SceneFixture = undefined;
+    try second.init();
+    defer second.deinit();
+    const group = try first.scene.addGroup();
+    const object = try first.add(group);
+    try std.testing.expectError(error.ObjectNotInScene, second.scene.removeObject(object));
+    try std.testing.expectError(error.GroupNotInScene, second.scene.removeGroup(group));
+    const foreign = try second.add(null);
+    try std.testing.expectError(error.GroupBelongsToAnotherScene, group.addObject(foreign));
+    first.scene.is_drawing = true;
+    defer first.scene.is_drawing = false;
+    try std.testing.expectError(error.SceneMutationDuringDraw, first.scene.addGroup());
+    try std.testing.expectError(error.SceneMutationDuringDraw, group.addGroup());
+    try std.testing.expectError(error.SceneMutationDuringDraw, first.scene.removeObject(object));
+    try std.testing.expectError(error.SceneMutationDuringDraw, first.scene.removeGroup(group));
+    try std.testing.expectError(error.SceneMutationDuringDraw, first.scene.addPrimitiveObject(.{ .model = &first.model, .position = .{ 0, 0, 0 } }));
+    try std.testing.expectEqual(@as(usize, 1), first.scene.game_objects.items.len);
+    try std.testing.expectEqual(@as(usize, 1), first.scene.groups.items.len);
+}
+
+test "capacity exhaustion preserves existing objects and freed slots remain usable" {
+    var fixture: SceneFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var objects: [8]*GameObject = undefined;
+    for (&objects) |*object| object.* = try fixture.add(null);
+    try std.testing.expectError(error.SceneCapacityReached, fixture.add(null));
+    try std.testing.expectEqual(@as(usize, 8), fixture.scene.game_objects.items.len);
+    try fixture.scene.removeObject(objects[3]);
+    const replacement = try fixture.add(null);
+    try std.testing.expectEqual(@as(u32, 3), replacement.instance_index.?);
+    try std.testing.expectEqual(@as(usize, 8), fixture.scene.space_tree.objects.items.len);
 }

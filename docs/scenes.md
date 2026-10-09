@@ -4,11 +4,13 @@ This document describes the current implementation. For system boundaries and un
 
 ## Scene state
 
-A `Scene` holds ordinary game objects, separately owned root groups, one optional directional-light value, a camera and spectator controller, a voxel grid, and a CPU/GPU instance buffer. It also holds a dedicated cubemap skybox object. Only the engine's active scene is updated and rendered. Configure its directional light with `addDirectionalLight` before drawing; a second addition is rejected. See the [lighting contract](rendering.md#lighting-contract-and-extension-plan) for current requirements and future point/spot support.
+A `Scene` holds ordinary game objects, a flat registry of owned groups, one optional directional-light value, a camera and spectator controller, a voxel grid, and a CPU/GPU instance buffer. It also holds a dedicated cubemap skybox object. Only the engine's active scene is updated and rendered. Configure its directional light with `addDirectionalLight` before drawing; a second addition is rejected. See the [lighting contract](rendering.md#lighting-contract-and-extension-plan) for current requirements and future point/spot support.
 
 Ordinary objects are individually allocated and retained in `scene.game_objects`. A regular object's model is looked up by `LoadedModelId` in the engine's registry. Special objects receive a borrowed engine-owned model pointer from the caller.
 
-The ordinary-object limit is 4096. Creation assigns the next instance index and initializes an 80-byte chunk transform entry. Indices increase as objects are added; there is no general scene removal method that removes an object from all collections and reclaims its index. Calling `GameObject.deinit` alone is not a complete scene removal operation because the scene still holds its pointer.
+Ordinary-object storage starts with up to 64 transform slots and grows as needed. Each slot holds an 80-byte chunk transform entry. The maximum capacity is derived from the device's buffer and storage-binding size limits, bounded by the index representation and CPU address space; CPU allocation can fail earlier. The old arbitrary 4096-object cap has been removed. Deleted objects' indices return to a free list and are reused before more slots are added. Storage retains its capacity for future objects.
+
+Use `Scene.removeObject` for individual removal. It detaches the object from its transform parent and visibility index, removes it from the scene's owning collection, stops animation, releases instance state, and returns its transform slot to the free list. `GameObject.deinit` is low-level teardown for construction rollback and scene cleanup; calling it directly on a scene-owned object bypasses collection and slot bookkeeping.
 
 The cubemap skybox is an exception: it has no instance index, bypasses the visibility index, and is replaced/destroyed through `setSkyBoxCubemapObject`. The older skybox path creates an ordinary scene object with an instance index.
 
@@ -27,6 +29,35 @@ The cubemap skybox is an exception: it has no instance index, bypasses the visib
 
 Voxels are held in `scene.voxel_grid`, outside the ordinary object collection. Block contents, revisions, and streaming are application/service responsibilities.
 
+## Scene mutation contract
+
+The owner confirmed the gameplay requirements on 2026-10-09. Applications can create and delete ordinary objects throughout a scene's lifetime. Repeated creation/deletion reuses available slots, so the total number of objects ever created does not impose a capacity limit.
+
+Use `Scene.removeGroup` to delete a group and all of its current transform descendants, including nested groups and their objects. Objects and groups reparented out of that subtree survive; those reparented into it are deleted. Objects and their parents must belong to the same scene. Group creation through `Scene.addGroup` or a scene group's `addGroup` registers every new group with the scene, independently of its parent.
+
+```zig
+const enemy = try scene.addObject(.{
+    .model_id = enemy_model_id,
+    .position = .{ 0, 0, 0 },
+    .parent = null,
+});
+// Later, during gameplay update:
+try scene.removeObject(enemy);
+try scene.removeGroup(car_group); // Also removes its current parts and subgroups.
+```
+
+Mutations run synchronously on the application thread before drawing, including `onUpdate` and key-press callbacks. Addition/removal during drawing returns `SceneMutationDuringDraw`; reparenting during drawing panics because the existing setter API has no error return. Apply changes requested by `onRender` in the next update. Scene teardown during drawing is prohibited. These APIs are not thread-safe.
+
+Successful removal immediately invalidates every application-held pointer to the deleted object/group, including pointers held in application maps. Applications must clear those references and must not use them again. Removal with a live object/group from another scene returns `ObjectNotInScene`/`GroupNotInScene`; creation or attachment with a foreign parent returns `GroupBelongsToAnotherScene`, while the void reparenting setters enforce same-scene parenting as a precondition. Removal does not destroy shared models, which remain engine-owned. The dedicated cubemap skybox uses its replacement API and cannot be attached to an ordinary group.
+
+Deletion does not allocate. Free-list capacity is reserved with instance storage, and freed CPU transform entries are cleared so uploads spanning holes read initialized data. Allocation failures during creation roll back partial object/animation state, parent attachment, visibility registration, and slot reservation. Existing objects remain valid; storage or draw scratch capacity may have grown before a later construction step fails.
+
+Capacity grows geometrically up to the device-derived maximum. Growth allocates CPU transforms and dirty-index tracking, creates a new GPU buffer and binding, and seeds it with existing transforms. The old binding/buffer references are released, allowing submitted GPU work to retain the old buffer. Draw preparation refreshes dirty entries and uploads the affected range. Renderer visibility lists also grow, and their counts use `usize` rather than a 16-bit count. `SceneCapacityReached` reports exhaustion of the supported slot count; CPU storage/scratch allocation failures return `OutOfMemory`. The pinned zgpu resource-creation API does not provide synchronous recovery from GPU out-of-memory or device loss; those remain graphics-context concerns.
+
+CPU tests cover 5,000 create/delete cycles, hierarchy and visibility detachment, recursive deletion after reparenting, foreign membership, drawing guards, allocation-free removal, capacity exhaustion, and visibility lists exceeding 65,535 entries. Headless Dawn tests cover growth past 4096 live regular objects, GPU transform readback after growth and reuse, animation cleanup, shared-model survival, and injected allocation failures in scene and draw storage under both wrapping configurations. These do not replace an interactive rendering check.
+
+Voxel chunks use separate residency and upload allocators. Their behavior is unchanged; see the [deferred voxel capacity and lifetime work](voxel-world.md#deferred-capacity-and-lifetime-work).
+
 ## Transform hierarchy
 
 Each object or group has a local position, quaternion rotation, and uniform scalar scale. Root positions are world positions. Child positions are relative to their transform parent.
@@ -42,7 +73,7 @@ Groups can contain objects and other groups. Creating a child group attaches it 
 
 Reparenting preserves the local transform. Consequently, world position may change. It does not implement a keep-world-position operation. Repeated attachment is deduplicated, and group reparenting asserts that the parent chain would not introduce a cycle.
 
-Transform parenting and allocation ownership are separate. A group created by another group stays in its creator's `owned_groups` list even after reparenting. Scene-created groups stay owned by the scene. Recursive destruction follows allocation ownership, not the current transform tree.
+Transform parenting and allocation ownership are separate. A scene owns all its groups in one flat registry, including groups created through other scene groups. Reparenting does not transfer scene ownership. Gameplay group deletion follows current transform descendants; whole-scene teardown releases every registered group, including detached groups. Standalone groups created directly with `GameObjectGroup.init` retain creator-based `owned_groups` cleanup and must not be mixed into a scene hierarchy; `deinit_recursively` is for those standalone groups.
 
 Use setters for changes. Assigning `position`, `rotation`, or `scale` directly bypasses matrix recomputation and GPU invalidation.
 
@@ -90,7 +121,7 @@ Applications destroy their scenes before the engine. `Scene.deinit` clears `engi
 
 The scene then releases groups, cameras, voxel resources (binding before buffers), instance resources, layout, and its reference to the engine's world pipeline cache. The final scene reference evicts the shared pipeline set. Engine teardown asserts that no scenes remain. Destroying the active scene leaves no active scene; the application can explicitly select another or create a new one.
 
-Models survive scene destruction and are released at engine teardown. Calling `GameObject.deinit` directly still does not remove an ordinary object from the scene's owning collection or reclaim its instance index; a complete public object-removal API remains a separate review point.
+Models survive scene destruction and are released at engine teardown. For individual gameplay removal, use `Scene.removeObject` or `Scene.removeGroup`, which also update scene ownership and instance-slot bookkeeping.
 
 ## Sources and tests
 

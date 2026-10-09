@@ -88,6 +88,9 @@ pub const GameObject = struct {
     };
 
     pub fn init(allocator: std.mem.Allocator, params: GameObjectInitParams) !*GameObject {
+        if (params.parent) |parent| {
+            if (parent.scene != params.scene) return error.GroupBelongsToAnotherScene;
+        }
         const game_object = try allocator.create(GameObject);
         errdefer allocator.destroy(game_object);
 
@@ -106,6 +109,10 @@ pub const GameObject = struct {
         };
 
         if (params.parent) |parent| try parent.attachChild(.{ .game_object = game_object });
+        errdefer if (params.parent) |parent| parent.detachChild(.{ .game_object = game_object });
+        // Registration failure must roll back construction, rather than silently
+        // leaving an allocated object outside the renderer's visibility index.
+        if (!params.skip_space_tree) try params.scene.space_tree.addObject(game_object);
 
         game_object.updateAggregatedMatrix(.{
             .is_initial = true,
@@ -114,7 +121,8 @@ pub const GameObject = struct {
         return game_object;
     }
 
-    /// Destroys instance state only. Scene ownership must also be updated for individual removal.
+    /// Low-level teardown for construction rollback and scene cleanup.
+    /// Applications remove ordinary objects through Scene.removeObject.
     pub fn deinit(game_object: *GameObject, gctx: *zgpu.GraphicsContext) void {
         if (game_object.parent) |parent| parent.detachChild(.{ .game_object = game_object });
         if (!game_object.skip_space_tree) game_object.scene.space_tree.removeObject(game_object) catch {};
@@ -207,6 +215,11 @@ pub const GameObject = struct {
     }
 
     pub fn setParent(game_object: *GameObject, parent: ?*GameObjectGroup) void {
+        game_object.scene.checkMutationAllowed() catch @panic("Cannot reparent while drawing");
+        if (parent) |new_parent| {
+            std.debug.assert(new_parent.scene == game_object.scene);
+            std.debug.assert(!game_object.skip_space_tree);
+        }
         if (game_object.parent != parent) {
             if (parent) |new_parent| new_parent.attachChild(.{ .game_object = game_object }) catch @panic("Failed to attach object");
             if (game_object.parent) |old_parent| old_parent.detachChild(.{ .game_object = game_object });

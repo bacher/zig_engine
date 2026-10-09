@@ -187,6 +187,8 @@ fn checkScenes(engine: *Engine, params: Engine.CreateTerrainHeightMapDescriptorP
     defer loader.deinit();
     const id = try engine.loadModel(&loader, loader.findFirstObjectWithMesh().?, .{ .animations = &.{"walkLikeMan"} });
     const model = engine.models_hash.get(id).?;
+    try checkSceneMutation(engine, id);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, checkMutationFailures, .{ engine, id });
     const baseline = counts(engine.gctx);
     {
         const first = try engine.createScene(.{ .size_in_chunks = .{ 8, 8, 8 } });
@@ -211,6 +213,153 @@ fn checkScenes(engine: *Engine, params: Engine.CreateTerrainHeightMapDescriptorP
         engine.active_scene = second;
     }
     try std.testing.expectEqualDeep(baseline, counts(engine.gctx));
+}
+
+fn checkSceneMutation(engine: *Engine, id: Engine.LoadedModelId) !void {
+    const baseline = counts(engine.gctx);
+    const model = engine.models_hash.get(id).?;
+    {
+        const scene = try engine.createScene(.{ .size_in_chunks = .{ 8, 8, 8 } });
+        defer scene.deinit();
+        engine.active_scene = scene;
+        try scene.addDirectionalLight(.{ .direction = .{ 0.5, 0.5, -1, 0 }, .color = .{ 1, 1, 1, 1 }, .intensity = 1 });
+        const first = try scene.addObject(.{ .model_id = id, .position = .{ 10, 20, 30 }, .parent = null });
+        engine.prepareSceneObjects();
+        const old_buffer = scene.instance_buffer.handle;
+        const old_binding = scene.scene_bind_group.bind_group_handle;
+        // Grow past both the initial capacity and the previous hardcoded cap.
+        for (1..4097) |i| {
+            _ = try scene.addObject(.{ .model_id = id, .position = .{ @floatFromInt(i), 0, 0 }, .parent = null });
+        }
+        try std.testing.expect(scene.instance_buffer.buffer.len >= 4097);
+        try std.testing.expect(!engine.gctx.isResourceValid(old_buffer));
+        try std.testing.expect(!engine.gctx.isResourceValid(old_binding));
+        try std.testing.expect(engine.gctx.isResourceValid(scene.scene_bind_group.bind_group_handle));
+        engine.prepareSceneObjects();
+        try std.testing.expectEqual(@as(usize, 4), engine.temp_buffers.visible_objects_lists_chunks.items.len);
+        for (engine.temp_buffers.visible_objects_lists_chunks.items) |count| try std.testing.expectEqual(@as(usize, 4097), count);
+        // The first transform is clean: growing storage must preserve it anyway.
+        try expectGpuTransforms(scene, &.{ 0, 4096 });
+        const removed = scene.game_objects.items[2048];
+        try scene.removeObject(removed);
+        first.setPosition(.{ 17, 18, 19 });
+        const replacement = try scene.addObject(.{ .model_id = id, .position = .{ -100, 2, 3 }, .parent = null });
+        try std.testing.expectEqual(@as(u32, 2048), replacement.instance_index.?);
+        engine.prepareSceneObjects();
+        try expectGpuTransforms(scene, &.{ 0, 2048, 4096 });
+        try std.testing.expectEqual(@as(usize, 4097), scene.space_tree.objects.items.len);
+
+        // Failed animation construction rolls back hierarchy, visibility and slot state.
+        const group = try scene.addGroup();
+        const before_failure = counts(engine.gctx);
+        try std.testing.expectError(error.AnimationNotLoaded, scene.addObject(.{
+            .model_id = id,
+            .position = .{ 0, 0, 0 },
+            .parent = group,
+            .animation_name = "missing-scene-mutation-animation",
+        }));
+        try std.testing.expectEqual(@as(usize, 0), group.children.items.len);
+        try std.testing.expectEqual(@as(usize, 4097), scene.game_objects.items.len);
+        try std.testing.expectEqual(@as(usize, 4097), scene.space_tree.objects.items.len);
+        try std.testing.expectEqualDeep(before_failure, counts(engine.gctx));
+        const child = try group.addGroup();
+        _ = try scene.addObject(.{ .model_id = id, .position = .{ 0, 0, 0 }, .parent = child, .animation_name = "walkLikeMan" });
+        try scene.removeGroup(group);
+        try std.testing.expectEqualDeep(before_failure, counts(engine.gctx));
+        try std.testing.expectEqual(@as(usize, 0), scene.groups.items.len);
+        try std.testing.expect(engine.gctx.isResourceValid(model.model_descriptor.position.handle));
+    }
+    try std.testing.expectEqualDeep(baseline, counts(engine.gctx));
+}
+
+/// Inject failures into both scene storage and the engine's draw scratch lists.
+/// Every failed addition must preserve the already live hierarchy and instances.
+fn checkMutationFailures(allocator: std.mem.Allocator, engine: *Engine, id: Engine.LoadedModelId) !void {
+    const baseline = counts(engine.gctx);
+    defer std.debug.assert(std.meta.eql(baseline, counts(engine.gctx)));
+    const saved_allocator = engine.allocator;
+    const saved_buffers = engine.temp_buffers;
+    engine.allocator = allocator;
+    engine.temp_buffers = .{
+        .visible_objects_lists = .empty,
+        .visible_objects_lists_chunks = .empty,
+        .regular_objects = .empty,
+        .skinned_objects = .empty,
+        .wireframe_objects = .empty,
+        .rest_objects = .empty,
+    };
+    defer {
+        inline for (.{ "visible_objects_lists", "visible_objects_lists_chunks", "regular_objects", "skinned_objects", "wireframe_objects", "rest_objects" }) |name| {
+            @field(engine.temp_buffers, name).deinit(allocator);
+        }
+        engine.temp_buffers = saved_buffers;
+        engine.allocator = saved_allocator;
+    }
+    const scene = try Scene.init(engine, allocator, .{ .size_in_chunks = .{ 8, 8, 8 } });
+    defer scene.deinit();
+    const group = try scene.addGroup();
+    const child = try group.addGroup();
+    for (0..65) |i| {
+        const handles = counts(engine.gctx);
+        _ = scene.addObject(.{
+            .model_id = id,
+            .position = .{ @floatFromInt(i), 0, 0 },
+            .parent = child,
+            .animation_name = if (i == 0) "walkLikeMan" else null,
+        }) catch |err| {
+            try std.testing.expectEqual(i, scene.game_objects.items.len);
+            try std.testing.expectEqual(i, scene.space_tree.objects.items.len);
+            try std.testing.expectEqual(i, child.children.items.len);
+            try std.testing.expectEqual(i, scene.instance_buffer.next_index - scene.instance_buffer.free_indices.items.len);
+            try std.testing.expectEqualDeep(handles, counts(engine.gctx));
+            return err;
+        };
+    }
+    try scene.removeGroup(group);
+    try std.testing.expectEqual(@as(usize, 0), scene.game_objects.items.len);
+    try std.testing.expectEqual(@as(usize, 0), scene.groups.items.len);
+    const reused = try scene.addObject(.{ .model_id = id, .position = .{ 0, 0, 0 }, .parent = null });
+    try std.testing.expect(reused.instance_index.? < 65);
+}
+
+const MutationMap = struct {
+    done: bool = false,
+    status: wgpu.BufferMapAsyncStatus = .unknown,
+
+    fn callback(status: wgpu.BufferMapAsyncStatus, userdata: ?*anyopaque) callconv(.c) void {
+        const self: *MutationMap = @ptrCast(@alignCast(userdata));
+        self.status = status;
+        self.done = true;
+    }
+};
+
+fn expectGpuTransforms(scene: *Scene, indices: []const u32) !void {
+    const Entry = @import("scene.zig").InstanceBufferEntry;
+    const device = scene.engine.gctx.device;
+    const size = indices.len * @sizeOf(Entry);
+    const readback = device.createBuffer(.{ .usage = .{ .copy_dst = true, .map_read = true }, .size = size });
+    defer readback.release();
+    const encoder = device.createCommandEncoder(null);
+    defer encoder.release();
+    for (indices, 0..) |index, i| {
+        encoder.copyBufferToBuffer(scene.instance_buffer.gpu_buffer, @as(usize, index) * @sizeOf(Entry), readback, i * @sizeOf(Entry), @sizeOf(Entry));
+    }
+    const commands = encoder.finish(null);
+    defer commands.release();
+    scene.engine.gctx.queue.submit(&.{commands});
+    var mapping: MutationMap = .{};
+    readback.mapAsync(.{ .read = true }, 0, size, MutationMap.callback, &mapping);
+    // Keep callback state alive after cancellation as well as successful mapping.
+    defer {
+        readback.unmap();
+        while (!mapping.done) device.tick();
+    }
+    try @import("world_coordinate_readback.zig").waitForCallback(device, &mapping.done);
+    try std.testing.expectEqual(wgpu.BufferMapAsyncStatus.success, mapping.status);
+    const results = readback.getConstMappedRange(Entry, 0, indices.len) orelse return error.NoMappedGpuResults;
+    for (indices, results) |index, entry| {
+        try std.testing.expectEqualDeep(scene.instance_buffer.buffer[index], entry);
+    }
 }
 
 fn checkSceneFailures(allocator: std.mem.Allocator, engine: *Engine) !void {

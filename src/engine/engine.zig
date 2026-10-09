@@ -182,8 +182,8 @@ pub const Engine = struct {
     // -- temporary buffers --
     temp_buffers: struct {
         visible_objects_lists: std.ArrayList(*GameObject) = undefined,
-        visible_objects_lists_chunks: std.ArrayList(u16) = undefined,
-        visible_objects_current_chunk_index: u16 = 0,
+        visible_objects_lists_chunks: std.ArrayList(usize) = undefined,
+        visible_objects_current_chunk_index: usize = 0,
         visible_objects_current_offset: usize = 0,
 
         regular_objects: std.ArrayList(*GameObject) = undefined,
@@ -194,7 +194,7 @@ pub const Engine = struct {
         fn init(allocator: std.mem.Allocator) @This() {
             return @This(){
                 .visible_objects_lists = std.ArrayList(*GameObject).initCapacity(allocator, 4096) catch @panic("Failed to initialize visible objects lists buffer"),
-                .visible_objects_lists_chunks = std.ArrayList(u16).initCapacity(allocator, 128) catch @panic("Failed to initialize visible objects lists chunks buffer"),
+                .visible_objects_lists_chunks = std.ArrayList(usize).initCapacity(allocator, 4) catch @panic("Failed to initialize visible objects lists chunks buffer"),
 
                 .regular_objects = std.ArrayList(*GameObject).initCapacity(allocator, 1024) catch @panic("Failed to initialize regular objects buffer"),
                 .skinned_objects = std.ArrayList(*GameObject).initCapacity(allocator, 1024) catch @panic("Failed to initialize skinned objects buffer"),
@@ -228,7 +228,7 @@ pub const Engine = struct {
         }
 
         fn writeVisibleObjectsList(buffers: *@This(), visible_objects: []const *GameObject) void {
-            buffers.visible_objects_lists_chunks.appendAssumeCapacity(@intCast(visible_objects.len));
+            buffers.visible_objects_lists_chunks.appendAssumeCapacity(visible_objects.len);
             const slice = buffers.visible_objects_lists.addManyAsSliceAssumeCapacity(visible_objects.len);
             @memcpy(slice, visible_objects);
         }
@@ -546,7 +546,18 @@ pub const Engine = struct {
         }
     }
 
-    pub fn draw(engine: *Engine) GraphicsContextState {
+    /// Reserve draw scratch storage as part of fallible object creation.
+    pub fn reserveObjectDrawCapacity(engine: *Engine, count: usize) !void {
+        try engine.temp_buffers.visible_objects_lists.ensureTotalCapacity(engine.allocator, count * 4);
+        try engine.temp_buffers.visible_objects_lists_chunks.ensureTotalCapacity(engine.allocator, 4);
+        try engine.temp_buffers.regular_objects.ensureTotalCapacity(engine.allocator, count);
+        try engine.temp_buffers.skinned_objects.ensureTotalCapacity(engine.allocator, count);
+        try engine.temp_buffers.wireframe_objects.ensureTotalCapacity(engine.allocator, count);
+        try engine.temp_buffers.rest_objects.ensureTotalCapacity(engine.allocator, count);
+    }
+
+    /// Gather scene visibility and upload transforms before encoding render passes.
+    pub fn prepareSceneObjects(engine: *Engine) void {
         var outdate_instances_range: struct {
             min: u32 = std.math.maxInt(u32),
             max: u32 = 0,
@@ -600,7 +611,7 @@ pub const Engine = struct {
             if (outdate_instances_range.min <= outdate_instances_range.max) {
                 scene.engine.gctx.queue.writeBuffer(
                     scene.instance_buffer.gpu_buffer,
-                    outdate_instances_range.min * @sizeOf(InstanceBufferEntry),
+                    @as(usize, outdate_instances_range.min) * @sizeOf(InstanceBufferEntry),
                     InstanceBufferEntry,
                     scene.instance_buffer.buffer[outdate_instances_range.min .. outdate_instances_range.max + 1],
                 );
@@ -608,6 +619,18 @@ pub const Engine = struct {
                 engine.frame_stats.instances_written_count = outdate_instances_range.max - outdate_instances_range.min + 1;
             }
         }
+    }
+
+    pub fn draw(engine: *Engine) GraphicsContextState {
+        const drawn_scene = engine.active_scene;
+        if (drawn_scene) |scene| {
+            std.debug.assert(!scene.is_drawing);
+            scene.is_drawing = true;
+        }
+        defer if (drawn_scene) |scene| {
+            scene.is_drawing = false;
+        };
+        engine.prepareSceneObjects();
 
         const gctx = engine.gctx;
         const allocator = engine.allocator;
@@ -1625,6 +1648,27 @@ fn slowOperation() void {
     const end = std.time.milliTimestamp() + 500;
     while (std.time.milliTimestamp() < end) {
         // noop
+    }
+}
+
+test "visibility scratch storage grows beyond u16 object counts across all four passes" {
+    const allocator = std.testing.allocator;
+    var engine: Engine = undefined;
+    engine.allocator = allocator;
+    engine.temp_buffers = @TypeOf(engine.temp_buffers).init(allocator);
+    defer engine.temp_buffers.deinit(allocator);
+    const count = 65537;
+    try engine.reserveObjectDrawCapacity(count);
+    engine.temp_buffers.resetVisibleObjectsLists();
+    const objects = try allocator.alloc(*GameObject, count);
+    defer allocator.free(objects);
+    var object: GameObject = undefined;
+    @memset(objects, &object);
+    for (0..4) |_| engine.temp_buffers.writeVisibleObjectsList(objects);
+    for (0..4) |_| {
+        const queried = engine.temp_buffers.getNextVisibleObjectsChunk();
+        try std.testing.expectEqual(@as(usize, count), queried.len);
+        try std.testing.expectEqual(&object, queried[count - 1]);
     }
 }
 
