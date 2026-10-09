@@ -2,7 +2,7 @@ const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
 
 pub const shader_body = @embedFile("../shaders/basic/skinned_vs.wgsl");
-const wgsl_fs = @embedFile("../shaders/basic/fs.wgsl");
+const wgsl_fs = @embedFile("../shaders/shadow_map/sampling.wgsl") ++ "\n" ++ @embedFile("../shaders/basic/fs.wgsl");
 
 const Pipeline = @import("../pipeline.zig").Pipeline;
 const BindGroupLayouts = @import("../bind_group_layouts.zig").BindGroupLayouts;

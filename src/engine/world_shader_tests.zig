@@ -7,6 +7,7 @@ const WorldPipelines = @import("pipelines.zig").WorldPipelines;
 const WorldPipelineCache = @import("world_pipeline_cache.zig").WorldPipelineCache;
 const layouts_module = @import("bind_group_layouts.zig");
 const coordinate_readback = @import("world_coordinate_readback.zig");
+const terrain_pipeline = @import("pipelines/terrain_height_map_pipeline.zig");
 
 // Dawn's native entry points, also used by zgpu.GraphicsContext.create.
 extern fn dniCreate() ?*anyopaque;
@@ -125,6 +126,20 @@ test "Dawn validates world pipeline sharing, lifetimes, and allocation cleanup" 
             device.tick();
         }
         try std.testing.expect(response.done);
+        try std.testing.expectEqual(@as(usize, 0), response.errors);
+    }
+
+    // Terrain uses the shared shadow sampler at group 1 instead of group 2.
+    // Keep its pipeline scoped so cache checks still start with empty pools.
+    {
+        layouts.terrain_height_map = .init(&gctx);
+        defer layouts.terrain_height_map.deinit(&gctx);
+        device.pushErrorScope(.validation);
+        var terrain = terrain_pipeline.createTerrainHeightMapPipeline(&gctx, &layouts);
+        defer terrain.deinit(&gctx);
+        var response: ValidationResponse = .{};
+        _ = device.popErrorScope(ValidationResponse.callback, &response);
+        try coordinate_readback.waitForCallback(device, &response.done);
         try std.testing.expectEqual(@as(usize, 0), response.errors);
     }
 
