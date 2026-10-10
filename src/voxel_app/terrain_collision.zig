@@ -4,6 +4,8 @@ const World = @import("world.zig").World;
 pub const Position = engine.world_math.Position;
 pub const Cell = @Vector(3, i64);
 pub const epsilon: f64 = 0.0000001;
+/// Small downward sweep used to recognize standing contact.
+pub const ground_probe: f64 = 0.00001;
 
 pub const MovementCollision = enum { none, full_cube };
 
