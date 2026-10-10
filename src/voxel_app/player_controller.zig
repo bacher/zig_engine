@@ -16,6 +16,8 @@ pub const climb_duration_seconds: f64 = 0.25;
 const climb_landing_distance: f64 = 0.1;
 const climb_face_margin: f64 = 0.001;
 const max_climb_rise: f64 = 1;
+const max_airborne_climb_rise: f64 = 0.5;
+const airborne_climb_speed_fraction: f64 = 0.9;
 pub const recovery_radius: i64 = 8;
 const history_seconds: f64 = 5;
 const max_step_seconds: f64 = 1.0 / 120.0;
@@ -41,16 +43,17 @@ pub const PlayerController = struct {
         approach_delta: Position,
         landing: Position,
         planned_velocity: Position,
+        rise_duration: f64,
         duration: f64,
         elapsed: f64 = 0,
 
         fn positionAt(self: Climb, elapsed: f64) Position {
-            const progress = std.math.clamp(elapsed / climb_duration_seconds, 0, 1);
+            const progress = std.math.clamp(elapsed / self.rise_duration, 0, 1);
             const eased = progress * progress * (3 - 2 * progress);
             var position = self.start + self.approach_delta * @as(Position, @splat(progress));
             // Once the rise finishes before the contact face, walk the short level
             // exit at the planned speed until the body reaches supporting terrain.
-            position += self.planned_velocity * @as(Position, @splat(@max(0, elapsed - climb_duration_seconds)));
+            position += self.planned_velocity * @as(Position, @splat(@max(0, elapsed - self.rise_duration)));
             position[2] = self.start[2] + (self.landing[2] - self.start[2]) * eased;
             return position;
         }
@@ -64,7 +67,7 @@ pub const PlayerController = struct {
     vertical_velocity: f64 = 0,
     grounded: bool = false,
     last_grounded_z: f64 = 0,
-    climb_blocked_until_grounded: bool = false,
+    climb_blocked: bool = false,
     yaw: f32 = 0,
     pitch: f32 = 0,
     space_held_seconds: f64 = 0,
@@ -90,14 +93,15 @@ pub const PlayerController = struct {
     fn cancelClimb(self: *PlayerController) void {
         // An input/terrain cancellation must resume gravity instead of immediately
         // acquiring the same or another ledge during the next airborne substep.
-        if (self.climb != null) self.climb_blocked_until_grounded = true;
+        // Ground contact or a fresh airborne Space press permits another attempt.
+        if (self.climb != null) self.climb_blocked = true;
         self.climb = null;
     }
 
     fn rememberGroundContact(self: *PlayerController) void {
         if (self.climb == null and self.grounded and self.vertical_velocity <= 0) {
             self.last_grounded_z = self.position[2];
-            self.climb_blocked_until_grounded = false;
+            self.climb_blocked = false;
         }
     }
 
@@ -151,10 +155,17 @@ pub const PlayerController = struct {
         }
 
         const dt = @max(0, elapsed);
-        if (input.jump_pressed or !input.jump_down) self.space_held_seconds = 0;
+        self.grounded = query.moveAxis(self.position, 2, -ground_probe).collided;
+        if (!input.jump_down) {
+            self.space_held_seconds = 0;
+        } else if (input.jump_pressed) {
+            // An airborne press grabs a nearby lip immediately; a grounded press
+            // still jumps and uses the ordinary hold delay for automatic climbing.
+            self.space_held_seconds = if (self.grounded) 0 else climb_hold_seconds;
+            if (!self.grounded) self.climb_blocked = false;
+        }
         self.auto_climb = input.jump_down and self.space_held_seconds >= climb_hold_seconds;
         if (!self.auto_climb) self.cancelClimb();
-        self.grounded = query.moveAxis(self.position, 2, -ground_probe).collided;
         self.rememberGroundContact();
         if (input.jump_pressed and self.grounded) {
             self.vertical_velocity = jump_speed;
@@ -179,7 +190,7 @@ pub const PlayerController = struct {
             var step = @min(remaining, max_step_seconds);
             self.auto_climb = input.jump_down and self.space_held_seconds >= climb_hold_seconds;
             if (input.jump_down and !self.auto_climb) step = @min(step, climb_hold_seconds - self.space_held_seconds);
-            if (self.climb == null and self.auto_climb and !self.climb_blocked_until_grounded) {
+            if (self.climb == null and self.auto_climb and !self.climb_blocked) {
                 if (self.planClimb(&query, velocity, step)) |plan| {
                     if (plan.delay == 0) self.climb = plan.climb else step = @min(step, plan.delay);
                 }
@@ -228,9 +239,10 @@ pub const PlayerController = struct {
 
     fn planClimb(self: *const PlayerController, query: *collision.Query, velocity: Position, step: f64) ?ClimbPlan {
         const start = self.position;
-        // Catch a lip after walking off support, but never lift more than one metre
-        // from the current feet or the last standing surface (including after a jump).
-        const rise = @min(max_climb_rise, self.last_grounded_z + max_climb_rise - start[2]);
+        // Airborne catches have shorter reach. Keep the standing-height cap too,
+        // so jumping cannot turn a two-block column into a reachable ledge.
+        const reach = if (self.grounded) max_climb_rise else max_airborne_climb_rise;
+        const rise = @min(reach, self.last_grounded_z + max_climb_rise - start[2]);
         if (rise <= collision.epsilon) return null;
         const speed = @sqrt(@reduce(.Add, velocity * velocity));
         if (speed < 0.1) return null;
@@ -246,6 +258,19 @@ pub const PlayerController = struct {
         const landing_delta = direction * @as(Position, @splat(distance + climb_landing_distance));
         const landing = findClimbLanding(query, climb_start, landing_delta[0], landing_delta[1], rise) orelse return null;
         if (landing[2] <= climb_start[2] + collision.epsilon) return null;
+        const actual_rise = landing[2] - climb_start[2];
+        // A full-height approach needs footing just before the face. Without this
+        // check, the grounded preview could lift the body across a hole to a raised
+        // far edge before airborne reach limits ever had a chance to apply.
+        if (actual_rise > max_airborne_climb_rise and
+            !query.moveAxis(climb_start + approach_delta, 2, -ground_probe).collided) return null;
+        // A tiny lip catch must not stretch a few centimetres of walking over the
+        // full step duration. Aim for 90% of walking speed, while limiting vertical
+        // speed to that of a full-height ascent when already close to the face.
+        const rise_duration = if (self.grounded) climb_duration_seconds else @min(climb_duration_seconds, @max(
+            climb_duration_seconds * actual_rise / max_climb_rise,
+            @max(0, distance - climb_face_margin) / (speed * airborne_climb_speed_fraction),
+        ));
         return .{
             .delay = delay,
             .climb = .{
@@ -253,7 +278,8 @@ pub const PlayerController = struct {
                 .approach_delta = approach_delta,
                 .landing = landing,
                 .planned_velocity = velocity,
-                .duration = climb_duration_seconds + (climb_landing_distance + @min(distance, climb_face_margin)) / speed,
+                .rise_duration = rise_duration,
+                .duration = rise_duration + (climb_landing_distance + @min(distance, climb_face_margin)) / speed,
             },
         };
     }
@@ -337,7 +363,7 @@ pub const PlayerController = struct {
         self.grounded = false;
         self.resetJumpInput();
         self.last_grounded_z = position[2];
-        self.climb_blocked_until_grounded = false;
+        self.climb_blocked = false;
         self.next_recovery_attempt = 0;
         return true;
     }
@@ -535,10 +561,18 @@ test "held Space catches the far lip of deep one-cell holes without ground suppo
                 while (now < 0.65) {
                     const dt = @min(1 / fps, 0.65 - now);
                     now += dt;
+                    const previous_x = player.position[0];
+                    const previous_z = player.position[2];
                     const result = try player.update(&fixture.world, .{ .right = 1, .jump_down = true }, dt, now);
                     try std.testing.expect(!result.recovered);
                     try std.testing.expectEqual(collision.Overlap.clear, query.overlap(player.position, false));
-                    caught_while_airborne = caught_while_airborne or (player.climb != null and !player.grounded);
+                    if (held_seconds == climb_hold_seconds) {
+                        try std.testing.expect(player.position[0] - previous_x >= 0.85 * walk_speed * dt);
+                    }
+                    // A short catch may finish between rendered frames; lifting
+                    // previously falling feet also demonstrates an airborne catch.
+                    caught_while_airborne = caught_while_airborne or (player.climb != null and !player.grounded) or
+                        (previous_z < 0 and player.position[2] > previous_z + collision.epsilon);
                 }
                 try std.testing.expect(caught_while_airborne);
                 try std.testing.expect(player.position[0] > 2 and player.grounded);
@@ -552,24 +586,110 @@ test "held Space catches the far lip of deep one-cell holes without ground suppo
     }
 }
 
-test "airborne climbing catches nearby tops but rejects tops more than one metre above the feet" {
+test "airborne climbing catches nearby tops but rejects tops more than half a metre above the feet" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     fixture.hole(4);
-    for ([_]f64{ -0.25, -0.9, -1.01 }) |height| {
+    for ([_]f64{ -0.25, -0.49, -0.51, -1.01 }) |height| {
         var player = PlayerController.init(std.testing.allocator, .{ 1.4, 0.5, height });
         defer player.deinit();
         player.vertical_velocity = -2;
         player.space_held_seconds = climb_hold_seconds;
         const result = try player.update(&fixture.world, .{ .right = 1, .jump_down = true }, 0.001, 0.001);
         try std.testing.expect(!result.recovered);
-        if (height > -1) {
+        if (height > -0.5) {
             try std.testing.expect(player.climb != null and player.position[2] > height);
             _ = try player.update(&fixture.world, .{ .right = 1, .jump_down = true }, 0.4, 0.401);
             try std.testing.expect(player.grounded and player.position[0] > 2);
             try std.testing.expectApproxEqAbs(@as(f64, 0), player.position[2], 0.000001);
         } else {
             try std.testing.expect(player.climb == null and player.position[2] < height);
+        }
+    }
+}
+
+test "an airborne Space press enables climbing immediately while a grounded press jumps" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.hole(4);
+    var airborne = PlayerController.init(std.testing.allocator, .{ 1.4, 0.5, -0.25 });
+    defer airborne.deinit();
+    airborne.vertical_velocity = -2;
+    _ = try airborne.update(&fixture.world, .{ .right = 1, .jump_down = true, .jump_pressed = true }, 0.001, 0.001);
+    try std.testing.expect(airborne.auto_climb and airborne.climb != null);
+    try std.testing.expect(airborne.position[2] > -0.25);
+    _ = try airborne.update(&fixture.world, .{ .right = 1, .jump_down = true }, 0.005, 0.006);
+    try std.testing.expect(airborne.auto_climb and airborne.climb != null);
+    const height = airborne.position[2];
+    _ = try airborne.update(&fixture.world, .{ .right = 1 }, 0.001, 0.007);
+    try std.testing.expect(!airborne.auto_climb and airborne.climb == null);
+    try std.testing.expect(airborne.vertical_velocity < 0 and airborne.position[2] < height);
+    _ = try airborne.update(&fixture.world, .{ .right = 1, .jump_down = true, .jump_pressed = true }, 0.001, 0.008);
+    try std.testing.expect(airborne.auto_climb and airborne.climb != null);
+
+    var tapped = PlayerController.init(std.testing.allocator, .{ 1.4, 0.5, -0.25 });
+    defer tapped.deinit();
+    tapped.vertical_velocity = -2;
+    // An airborne press/release within one frame does not latch climbing on.
+    _ = try tapped.update(&fixture.world, .{ .right = 1, .jump_pressed = true }, 0.001, 0.001);
+    try std.testing.expect(!tapped.auto_climb and tapped.climb == null);
+    try std.testing.expect(tapped.position[2] < -0.25);
+
+    var grounded = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
+    defer grounded.deinit();
+    _ = try grounded.update(&fixture.world, .{ .right = 1, .jump_down = true, .jump_pressed = true }, 0.001, 0.001);
+    try std.testing.expect(!grounded.auto_climb and grounded.climb == null);
+    try std.testing.expect(grounded.vertical_velocity > 0 and grounded.position[2] > 0);
+}
+
+test "a raised far lip across a hole requires jumping before airborne climbing" {
+    for ([_]i64{ 1, 4 }) |depth| {
+        var fixture = try Fixture.init();
+        defer fixture.deinit();
+        fixture.hole(depth);
+        fixture.fill(.{ 2, -1, 0 }, .{ 4, 1, 0 }, .stone);
+        for ([_]f64{ 30, 144, 1000 }) |fps| {
+            var walking = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
+            defer walking.deinit();
+            walking.space_held_seconds = climb_hold_seconds;
+            var query: collision.Query = .{ .world = &fixture.world, .body = walking.body };
+            var now: f64 = 0;
+            while (now < 0.65) {
+                const dt = @min(1 / fps, 0.65 - now);
+                now += dt;
+                const result = try walking.update(&fixture.world, .{ .right = 1, .jump_down = true }, dt, now);
+                try std.testing.expect(!result.recovered and walking.climb == null);
+                try std.testing.expectEqual(collision.Overlap.clear, query.overlap(walking.position, false));
+            }
+            try std.testing.expect(walking.position[0] < 1.7 + collision.epsilon and walking.position[2] < 0);
+
+            var jumping = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
+            defer jumping.deinit();
+            now = 0;
+            var caught_while_airborne = false;
+            // Press to jump, release, then press and hold again during flight.
+            for ([_]f64{ 0.02, 0.05, 0.65 }, 0..) |checkpoint, phase| {
+                var first_frame = true;
+                while (now < checkpoint) {
+                    const dt = @min(1 / fps, checkpoint - now);
+                    now += dt;
+                    const result = try jumping.update(&fixture.world, .{
+                        .right = 1,
+                        .jump_down = phase != 1,
+                        .jump_pressed = first_frame and phase != 1,
+                    }, dt, now);
+                    first_frame = false;
+                    try std.testing.expect(!result.recovered);
+                    try std.testing.expectEqual(collision.Overlap.clear, query.overlap(jumping.position, false));
+                    if (phase == 2) try std.testing.expect(jumping.auto_climb);
+                    if (jumping.climb != null and !jumping.grounded) {
+                        caught_while_airborne = true;
+                        try std.testing.expect(now < 0.05 + climb_hold_seconds);
+                    }
+                }
+            }
+            try std.testing.expect(caught_while_airborne and jumping.grounded and jumping.position[0] > 2);
+            try std.testing.expectApproxEqAbs(@as(f64, 1), jumping.position[2], 0.000001);
         }
     }
 }
