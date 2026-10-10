@@ -14,7 +14,19 @@ pub fn movementCollision(block: engine.voxel_chunk.BlockType) MovementCollision 
     return switch (block) {
         .none => .none,
         // Water remains a solid cube until swimming/fluid movement is introduced.
-        .stone, .dirt, .grass, .water, .sand, .snow => .full_cube,
+        .stone,
+        .dirt,
+        .grass,
+        .water,
+        .sand,
+        .snow,
+        .packed_dirt,
+        .crushed_stone,
+        .tree_trunk,
+        .planks,
+        .rebar,
+        .reinforced_concrete,
+        => .full_cube,
     };
 }
 

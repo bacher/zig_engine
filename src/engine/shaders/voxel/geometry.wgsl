@@ -17,7 +17,7 @@ const ATLAS_SLOT = 0.046875;
 
 fn getUv(side: u32, vertex_index: u32, block_type: u32) -> vec2f {
     var shift = vec2(0.0, 0.0);
-    // should be synced with src/engine/voxel_chunk.zig's BlockType enum
+    // Keep numeric types in sync with voxel/voxel_chunk.zig's BlockType enum.
     switch block_type {
         case 0, default: { /* none  */ shift = vec2( 0.0,  0.0); }
         case 1:          { /* stone */ shift = vec2( 1.0,  0.0); }
@@ -32,6 +32,18 @@ fn getUv(side: u32, vertex_index: u32, block_type: u32) -> vec2f {
         case 4:          { /* water */ shift = vec2(13.0, 12.0); }
         case 5:          { /* sand  */ shift = vec2( 2.0,  1.0); }
         case 6:          { /* snow  */ shift = vec2( 0.0,  4.0); }
+        case 7:          { /* packed soil */ shift = vec2(2.0, 0.0); }
+        case 8:          { /* crushed stone */ shift = vec2(0.0, 1.0); }
+        case 9:          { /* tree trunk */
+            if side == 4u || side == 5u {
+                shift = vec2(5.0, 1.0);
+            } else {
+                shift = vec2(4.0, 1.0);
+            }
+        }
+        case 10:         { /* planks */ shift = vec2(4.0, 0.0); }
+        case 11:         { /* rebar: existing metal atlas tile */ shift = vec2(6.0, 1.0); }
+        case 12:         { /* reinforced concrete: existing stone atlas tile */ shift = vec2(1.0, 0.0); }
     }
 
     var uv = vec2(0.0, 0.0);

@@ -40,12 +40,55 @@ pub const Side = enum(u8) {
 
 pub const BlockType = enum(u8) {
     none = 0,
+    /// Natural rock. Mining yields crushed stone; players cannot place this type.
     stone,
+    /// Loose soil. Generated soil uses packed_dirt instead.
     dirt,
+    /// Packed soil with a grass surface; not a separately placeable material.
     grass,
     water,
     sand,
     snow,
+    packed_dirt,
+    crushed_stone,
+    tree_trunk,
+    planks,
+    rebar,
+    reinforced_concrete,
+
+    pub fn isEarth(self: BlockType) bool {
+        return self == .dirt or self == .packed_dirt or self == .grass;
+    }
+
+    pub fn isWood(self: BlockType) bool {
+        return self == .tree_trunk or self == .planks;
+    }
+
+    pub fn isReinforced(self: BlockType) bool {
+        return self == .rebar or self == .reinforced_concrete;
+    }
+
+    pub fn isMineralConstruction(self: BlockType) bool {
+        return self == .crushed_stone or self.isReinforced();
+    }
+
+    pub fn isStablePlatformMaterial(self: BlockType) bool {
+        return self.isEarth() or self == .stone or self.isMineralConstruction();
+    }
+
+    pub fn isStructural(self: BlockType) bool {
+        return self.isStablePlatformMaterial() or self.isWood();
+    }
+
+    pub fn isPlaceable(self: BlockType) bool {
+        return self != .none and self != .stone and self != .packed_dirt and self != .grass;
+    }
+
+    pub fn minedType(self: BlockType) BlockType {
+        if (self == .stone) return .crushed_stone;
+        if (self.isEarth()) return .dirt;
+        return self;
+    }
 };
 
 /// Structs starting with GPU_ prefix are uploaded to the GPU, memory layout is important

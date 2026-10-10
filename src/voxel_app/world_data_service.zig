@@ -15,6 +15,8 @@ const ChunkId = @import("./consts.zig").ChunkId;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const WORLD_SIZE = test_layout.size_in_chunks;
 const Side = @import("engine").voxel_chunk.Side;
+const transformations = @import("block_transformations.zig");
+const rules = @import("block_rules.zig");
 
 /// Unbounded multi-producer queue. Pushing never waits for the consumer (only for the short
 /// critical section), the consumer takes all queued items at once.
@@ -92,6 +94,8 @@ fn Mailbox(comptime T: type) type {
 pub const OperationResult = struct {
     request_id: u64,
     status: OperationStatus,
+    failure: ?rules.Failure = null,
+    mined_type: ?@import("engine").voxel_chunk.BlockType = null,
 };
 
 pub const Representation = enum { blocks, mesh };
@@ -124,7 +128,7 @@ pub const ChunkResponse = struct {
 
     pub fn deinit(self: ChunkResponse, allocator: std.mem.Allocator) void {
         switch (self.data) {
-            .blocks => |snapshot| snapshot.chunk.content.deinit(allocator),
+            .blocks => |snapshot| snapshot.chunk.deinit(allocator),
             .mesh => |mesh| {
                 var owned = mesh;
                 owned.deinit(allocator);
@@ -164,6 +168,7 @@ const Request = union(enum) {
     },
     evict_chunk: struct { client: *Client, position: ChunkId, subscription_id: u64 },
     operation: struct { client: *Client, request_id: u64, operation: BlockOperation },
+    advance_time: transformations.Tick,
 };
 
 /// One endpoint per producer/consumer thread. Endpoints and their queued replies are owned
@@ -306,6 +311,12 @@ pub const WorldDataService = struct {
         return client;
     }
 
+    /// The game owns simulation time. Pausing or stopping frames does not advance it;
+    /// subscriptions and mesh/block eviction have no effect on transformation deadlines.
+    pub fn advanceTo(self: *WorldDataService, tick: transformations.Tick) void {
+        self.requests.push(self.io, self.allocator, .{ .advance_time = tick });
+    }
+
     /// Call after all producers have stopped. Drains submitted edits, skips pending loads,
     /// and frees replies that nobody consumed.
     pub fn destroy(self: *WorldDataService) void {
@@ -338,6 +349,7 @@ pub const WorldDataService = struct {
             for (batch.items) |request| self.processRequest(request);
             batch.clearRetainingCapacity();
             if (self.is_shutting_down.load(.monotonic)) continue;
+            self.processTransformations();
 
             // Coalesce every edited mesh in this batch, including face dependencies, then
             // publish it together with all corresponding block snapshots/acknowledgments.
@@ -357,6 +369,12 @@ pub const WorldDataService = struct {
                     self.mesh_loads.clearRetainingCapacity();
                     self.next_mesh_load = 0;
                 }
+                // A late load can first discover natural soil whose initial grass
+                // deadline has already elapsed. Publish its final appearance now.
+                self.processTransformations();
+                var transformed = self.dirty_meshes.keyIterator();
+                while (transformed.next()) |id| self.publishMesh(self.layout.decodeChunkId(id.*));
+                self.dirty_meshes.clearRetainingCapacity();
                 self.flushPackages();
             }
         }
@@ -425,7 +443,7 @@ pub const WorldDataService = struct {
         }
         if (!needed) return;
         const chunk = self.worker_state.loadAt(self.allocator, coords);
-        defer chunk.content.deinit(self.allocator);
+        defer chunk.deinit(self.allocator);
         var mesh: ChunkSideData = .{};
         if (chunk.content == .blocks and !chunk.flags.is_unreachable) {
             mesh = mesher.extractChunkSideData(self.allocator, chunk.content, self.worker_state.neighborBoundaries(self.allocator, coords));
@@ -447,6 +465,7 @@ pub const WorldDataService = struct {
 
     fn processRequest(self: *WorldDataService, request: Request) void {
         switch (request) {
+            .advance_time => |tick| self.worker_state.tick = @max(self.worker_state.tick, tick),
             .register => |client| self.clients.append(self.allocator, client) catch @panic("OOM"),
             .evict_chunk => |evict| {
                 if (evict.client.subscriptions.get(evict.position)) |sub| {
@@ -475,7 +494,7 @@ pub const WorldDataService = struct {
                 const coords, const local = world_module.splitBlockCoords(edit.operation.block);
                 const position = self.layout.encodeChunkCoords(coords);
                 const result = self.worker_state.applyOperation(self.allocator, edit.operation);
-                defer result.chunk.content.deinit(self.allocator);
+                defer result.chunk.deinit(self.allocator);
                 if (self.is_shutting_down.load(.monotonic)) return;
                 if (result.status == .success) {
                     var affected: [7]?ChunkCoords = @splat(null);
@@ -484,6 +503,9 @@ pub const WorldDataService = struct {
                         const i = @intFromEnum(side);
                         if (local[i / 2] == (if (i % 2 == 0) @as(u5, 0) else CHUNK_SIZE - 1))
                             affected[i] = world_module.adjacentChunk(self.layout, coords, side);
+                    }
+                    if (result.changed_below) |below| {
+                        if (!@reduce(.And, below == coords)) self.publishMaterialChange(below);
                     }
                     for (affected, 0..) |entry, i| {
                         const changed = entry orelse continue;
@@ -507,10 +529,58 @@ pub const WorldDataService = struct {
                     ChunkResponse{ .coords = coords, .subscription_id = sub.?.id, .chunk_revision = result.chunk.chunk_revision, .mesh_revision = self.worker_state.meshRevision(coords), .data = .acknowledgement }
                 else
                     self.blockResponse(coords, if (sub) |value| value.id else null, result.chunk.clone(self.allocator));
-                response.operation = .{ .request_id = edit.request_id, .status = result.status };
+                response.operation = .{ .request_id = edit.request_id, .status = result.status, .failure = result.diagnostics.failure, .mined_type = result.diagnostics.mined_type };
                 edit.client.append(response);
             },
         }
+    }
+
+    fn publishMaterialChange(self: *WorldDataService, coords: ChunkCoords) void {
+        const id = self.layout.encodeChunkCoords(coords);
+        self.dirty_meshes.put(self.allocator, id, {}) catch @panic("OOM");
+        for (self.clients.items) |client| {
+            const sub = client.subscriptions.getPtr(id) orelse continue;
+            if (sub.mode == .mesh) {
+                sub.mesh_pending = true;
+            } else client.append(self.blockResponse(coords, sub.id, self.worker_state.modified_chunks.get(id).?.clone(self.allocator)));
+        }
+    }
+
+    fn processTransformations(self: *WorldDataService) void {
+        // Gather keys before processing: reads can materialize another generated chunk.
+        var due_chunks: std.ArrayList(ChunkId) = .empty;
+        defer due_chunks.deinit(self.allocator);
+        var iterator = self.worker_state.timed_chunks.keyIterator();
+        while (iterator.next()) |entry| {
+            const events = self.worker_state.modified_chunks.get(entry.*).?.metadata.timed.events.items;
+            if (events.len != 0 and events[0].due_tick <= self.worker_state.tick)
+                due_chunks.append(self.allocator, entry.*) catch @panic("OOM");
+        }
+        for (due_chunks.items) |id| {
+            const coords = self.layout.decodeChunkId(id);
+            if (self.worker_state.transformChunk(self.allocator, coords)) self.publishMaterialChange(coords);
+        }
+    }
+};
+
+const ReadContext = struct {
+    state: *WorkerState,
+    allocator: std.mem.Allocator,
+    chunks: world_module.ChunksHashMap = .empty,
+
+    fn deinit(self: *ReadContext) void {
+        var iterator = self.chunks.valueIterator();
+        while (iterator.next()) |chunk| chunk.deinit(self.allocator);
+        self.chunks.deinit(self.allocator);
+    }
+
+    fn read(context: *anyopaque, block: [3]u32) ?@import("engine").voxel_chunk.BlockType {
+        const self: *ReadContext = @ptrCast(@alignCast(context));
+        const coords, const local = world_module.splitBlockCoords(block);
+        const id = self.state.layout.encodeChunkCoords(coords);
+        if (!self.chunks.contains(id))
+            self.chunks.put(self.allocator, id, self.state.loadAt(self.allocator, coords)) catch @panic("OOM");
+        return self.chunks.get(id).?.content.getBlock(local);
     }
 };
 
@@ -529,13 +599,16 @@ const WorkerState = struct {
     /// Bounded cache for immutable generated planes. Modified chunks keep their own
     /// incrementally updated masks and always take precedence over this cache.
     boundary_cache: std.AutoHashMapUnmanaged(ChunkId, BoundaryMasks) = .empty,
+    tick: transformations.Tick = 0,
+    /// Chunks without pending events are not visited by time processing.
+    timed_chunks: std.AutoHashMapUnmanaged(ChunkId, void) = .empty,
 
     fn boundariesAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) BoundaryMasks {
         const id = self.layout.encodeChunkCoords(coords);
         if (self.modified_chunks.getPtr(id)) |chunk| return chunk.boundaries;
         if (self.boundary_cache.get(id)) |masks| return masks;
         const chunk = self.loadAt(allocator, coords);
-        defer chunk.content.deinit(allocator);
+        defer chunk.deinit(allocator);
         if (self.boundary_cache.count() >= 512) self.boundary_cache.clearRetainingCapacity();
         self.boundary_cache.put(allocator, id, chunk.boundaries) catch @panic("OOM");
         return chunk.boundaries;
@@ -561,29 +634,43 @@ const WorkerState = struct {
             if (self.columns.count() >= 64) self.columns.clearRetainingCapacity();
             self.columns.put(allocator, key, ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] })) catch @panic("OOM");
         }
-        return self.columns.getPtr(key).?.generateChunk(allocator, coords[2]);
+        const chunk = self.columns.getPtr(key).?.generateChunk(allocator, coords[2]);
+        // Retain sparse pending events even when nobody subscribes to this chunk.
+        // The service already retains committed chunks independently of streaming.
+        if (chunk.metadata.timed.events.items.len != 0) {
+            self.modified_chunks.put(allocator, self.layout.encodeChunkCoords(coords), chunk.clone(allocator)) catch @panic("OOM");
+            self.refreshTimedIndex(allocator, self.layout.encodeChunkCoords(coords));
+        }
+        return chunk;
     }
 
     fn deinit(self: *WorkerState, allocator: std.mem.Allocator) void {
         var iterator = self.modified_chunks.valueIterator();
-        while (iterator.next()) |chunk| chunk.content.deinit(allocator);
+        while (iterator.next()) |chunk| chunk.deinit(allocator);
         self.modified_chunks.deinit(allocator);
         self.mesh_revisions.deinit(allocator);
         self.columns.deinit(allocator);
         self.boundary_cache.deinit(allocator);
+        self.timed_chunks.deinit(allocator);
         self.generator.deinit(allocator);
     }
 
-    fn loadChunk(self: *const WorkerState, allocator: std.mem.Allocator, generator: *const ColumnGenerator, coords: ChunkCoords) WorldChunk {
-        if (self.modified_chunks.get(self.layout.encodeChunkCoords(coords))) |chunk| return chunk.clone(allocator);
-        return generator.generateChunk(allocator, coords[2]);
+    fn loadChunk(self: *WorkerState, allocator: std.mem.Allocator, _: *const ColumnGenerator, coords: ChunkCoords) WorldChunk {
+        return self.loadAt(allocator, coords);
     }
 
     fn applyOperation(self: *WorkerState, allocator: std.mem.Allocator, operation: BlockOperation) struct {
         status: OperationStatus,
         chunk: WorldChunk,
         revealed_neighbors: [6]?ChunkCoords,
+        changed_below: ?ChunkCoords,
+        diagnostics: world_module.EditResult,
     } {
+        const cells = world_module.collectConstructed(allocator, self.layout, &self.modified_chunks);
+        defer allocator.free(cells);
+        var context: ReadContext = .{ .state = self, .allocator = allocator };
+        defer context.deinit();
+        const diagnostics = world_module.validateEdit(allocator, .{ .layout = self.layout, .context = &context, .block_at = ReadContext.read }, cells, operation);
         const coords, const local = world_module.splitBlockCoords(operation.block);
         const position = self.layout.encodeChunkCoords(coords);
         var chunk = if (self.modified_chunks.get(position)) |stored| stored.clone(allocator) else blk: {
@@ -591,9 +678,19 @@ const WorkerState = struct {
             break :blk generator.generateChunk(allocator, coords[2]);
         };
         const previous_flags = chunk.flags;
-        const status = chunk.apply(allocator, local, operation.action);
+        const status = diagnostics.status;
         var revealed_neighbors: [6]?ChunkCoords = @splat(null);
+        var changed_below: ?ChunkCoords = null;
         if (status == .success) {
+            std.debug.assert(chunk.apply(allocator, local, operation.action) == .success);
+            if (operation.action == .put) {
+                chunk.metadata.markConstructed(allocator, transformations.index(local));
+                if (operation.action.put == .dirt) chunk.metadata.timed.schedule(allocator, .{
+                    .block = transformations.index(local),
+                    .kind = .compact_dirt,
+                    .due_tick = self.tick +| transformations.transformation_delay,
+                });
+            }
             chunk.chunk_revision += 1;
             self.next_mesh_revision += 1;
             self.mesh_revisions.put(allocator, position, self.next_mesh_revision) catch @panic("OOM");
@@ -604,15 +701,117 @@ const WorkerState = struct {
                 self.mesh_revisions.put(allocator, self.layout.encodeChunkCoords(neighbor), self.next_mesh_revision) catch @panic("OOM");
             }
             const entry = self.modified_chunks.getOrPut(allocator, position) catch @panic("OOM");
-            if (entry.found_existing) entry.value_ptr.content.deinit(allocator);
+            if (entry.found_existing) entry.value_ptr.deinit(allocator);
             entry.value_ptr.* = chunk.clone(allocator);
+            self.refreshTimedIndex(allocator, position);
             for (std.enums.values(Side)) |side| {
                 if (!previous_flags.getSideSolidness(side) or chunk.flags.getSideSolidness(side)) continue;
                 const neighbor = world_module.adjacentChunk(self.layout, coords, side) orelse continue;
                 if (self.revealChunk(allocator, neighbor)) revealed_neighbors[@intFromEnum(side)] = neighbor;
             }
+            changed_below = self.updateBelow(allocator, operation.block, operation.action == .put);
+            // Covering soil can change another cell in this same chunk too.
+            chunk.deinit(allocator);
+            chunk = self.modified_chunks.get(position).?.clone(allocator);
         }
-        return .{ .status = status, .chunk = chunk, .revealed_neighbors = revealed_neighbors };
+        return .{ .status = status, .chunk = chunk, .revealed_neighbors = revealed_neighbors, .changed_below = changed_below, .diagnostics = diagnostics };
+    }
+
+    fn store(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords, chunk: WorldChunk, material_changed: bool, metadata_changed: bool) void {
+        const id = self.layout.encodeChunkCoords(coords);
+        var updated = chunk;
+        if (material_changed or metadata_changed) updated.chunk_revision += 1;
+        if (material_changed) {
+            self.next_mesh_revision += 1;
+            self.mesh_revisions.put(allocator, id, self.next_mesh_revision) catch @panic("OOM");
+        }
+        const entry = self.modified_chunks.getOrPut(allocator, id) catch @panic("OOM");
+        if (entry.found_existing) entry.value_ptr.deinit(allocator);
+        entry.value_ptr.* = updated;
+        self.refreshTimedIndex(allocator, id);
+    }
+
+    fn refreshTimedIndex(self: *WorkerState, allocator: std.mem.Allocator, id: ChunkId) void {
+        if (self.modified_chunks.get(id).?.metadata.timed.events.items.len == 0) {
+            _ = self.timed_chunks.remove(id);
+        } else self.timed_chunks.put(allocator, id, {}) catch @panic("OOM");
+    }
+
+    fn updateBelow(self: *WorkerState, allocator: std.mem.Allocator, block: [3]u32, covered: bool) ?ChunkCoords {
+        if (block[2] == 0) return null;
+        var below = block;
+        below[2] -= 1;
+        const coords, const local = world_module.splitBlockCoords(below);
+        var chunk = self.loadAt(allocator, coords);
+        const existing = chunk.content.getBlock(local);
+        if (!existing.isEarth()) {
+            chunk.deinit(allocator);
+            return null;
+        }
+        const index = transformations.index(local);
+        var changed = false;
+        var metadata_changed = false;
+        if (covered) {
+            const previous_count = chunk.metadata.timed.events.items.len;
+            chunk.metadata.timed.cancel(index);
+            metadata_changed = previous_count != chunk.metadata.timed.events.items.len;
+            if (existing != .packed_dirt) {
+                chunk.changeType(local, .packed_dirt);
+                changed = true;
+            }
+        } else if (existing != .dirt) {
+            chunk.metadata.timed.schedule(allocator, .{ .block = index, .kind = .grow_grass, .due_tick = self.tick +| transformations.transformation_delay });
+            metadata_changed = true;
+        }
+        if (!changed and !metadata_changed) {
+            chunk.deinit(allocator);
+            return null;
+        }
+        self.store(allocator, coords, chunk, changed, metadata_changed);
+        return coords;
+    }
+
+    fn transformChunk(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) bool {
+        var chunk = self.loadAt(allocator, coords);
+        var context: ReadContext = .{ .state = self, .allocator = allocator };
+        defer context.deinit();
+        var changed = false;
+        var processed = false;
+        while (true) {
+            const due = chunk.metadata.timed.takeDue(allocator, self.tick);
+            defer allocator.free(due);
+            if (due.len == 0) break;
+            processed = true;
+            for (due) |event| {
+                const local = transformations.coordinates(event.block);
+                const existing = chunk.content.getBlock(local);
+                const above = [3]u32{
+                    @as(u32, @intCast(coords[0])) * CHUNK_SIZE + local[0],
+                    @as(u32, @intCast(coords[1])) * CHUNK_SIZE + local[1],
+                    @as(u32, @intCast(coords[2])) * CHUNK_SIZE + local[2] + 1,
+                };
+                const exposed = above[2] == self.layout.size_in_blocks[2] or ReadContext.read(&context, above).? == .none;
+                switch (event.kind) {
+                    .compact_dirt => {
+                        if (existing != .dirt) continue;
+                        chunk.changeType(local, .packed_dirt);
+                        changed = true;
+                        if (exposed) chunk.metadata.timed.schedule(allocator, .{ .block = event.block, .kind = .grow_grass, .due_tick = event.due_tick +| transformations.transformation_delay });
+                    },
+                    .grow_grass => {
+                        if (existing != .packed_dirt or !exposed) continue;
+                        chunk.changeType(local, .grass);
+                        changed = true;
+                    },
+                }
+            }
+        }
+        if (chunk.metadata.timed.events.items.len == 0) {
+            chunk.metadata.timed.deinit(allocator);
+            chunk.metadata.timed = .{};
+        }
+        self.store(allocator, coords, chunk, changed, processed);
+        return changed or processed;
     }
 
     /// Reveals even an unsubscribed chunk. Its revision makes it dirty, so later loads
@@ -628,7 +827,7 @@ const WorkerState = struct {
         const generator = ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] });
         var chunk = generator.generateChunk(allocator, coords[2]);
         if (!chunk.flags.is_unreachable) {
-            chunk.content.deinit(allocator);
+            chunk.deinit(allocator);
             return false;
         }
         chunk.flags.is_unreachable = false;
@@ -647,6 +846,126 @@ fn waitForResponses(client: *Client, out: *std.ArrayList(ChunkResponse), count: 
         batch.clearRetainingCapacity();
     }
     try std.testing.expectEqual(count, out.items.len);
+}
+
+fn readStateBlock(state: *WorkerState, block: [3]u32) @import("engine").voxel_chunk.BlockType {
+    const coords, const local = world_module.splitBlockCoords(block);
+    const chunk = state.loadAt(std.testing.allocator, coords);
+    defer chunk.deinit(std.testing.allocator);
+    return chunk.content.getBlock(local);
+}
+
+test "soil compacts at thirty minutes, grows grass later, and resets exposure after covering" {
+    const allocator = std.testing.allocator;
+    var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, allocator, &test_layout) };
+    defer state.deinit(allocator);
+    const surface = test_layout.size_in_blocks[2] / 2 - CHUNK_SIZE / 2;
+    const block = [3]u32{ 10, 10, surface };
+    const coords, _ = world_module.splitBlockCoords(block);
+    const placed = state.applyOperation(allocator, .{ .block = block, .action = .{ .put = .dirt } });
+    defer placed.chunk.deinit(allocator);
+    try std.testing.expectEqual(OperationStatus.success, placed.status);
+    state.tick = transformations.transformation_delay - 1;
+    try std.testing.expect(!state.transformChunk(allocator, coords));
+    try std.testing.expectEqual(.dirt, readStateBlock(&state, block));
+    state.tick += 1;
+    try std.testing.expect(state.transformChunk(allocator, coords));
+    try std.testing.expectEqual(.packed_dirt, readStateBlock(&state, block));
+    state.tick = transformations.transformation_delay * 2;
+    try std.testing.expect(state.transformChunk(allocator, coords));
+    try std.testing.expectEqual(.grass, readStateBlock(&state, block));
+    var above = block;
+    above[2] += 1;
+    // Sand is outside this feature's structural groups and can cover the surface.
+    const cover = state.applyOperation(allocator, .{ .block = above, .action = .{ .put = .sand } });
+    defer cover.chunk.deinit(allocator);
+    try std.testing.expectEqual(OperationStatus.success, cover.status);
+    try std.testing.expectEqual(.packed_dirt, readStateBlock(&state, block));
+    state.tick += transformations.transformation_delay;
+    try std.testing.expect(!state.transformChunk(allocator, coords));
+    const uncover = state.applyOperation(allocator, .{ .block = above, .action = .remove });
+    defer uncover.chunk.deinit(allocator);
+    state.tick += transformations.transformation_delay - 1;
+    try std.testing.expect(!state.transformChunk(allocator, coords));
+    state.tick += 1;
+    try std.testing.expect(state.transformChunk(allocator, coords));
+    try std.testing.expectEqual(.grass, readStateBlock(&state, block));
+}
+
+test "covering loose earth across a chunk boundary compacts it and cancels its old deadline" {
+    const allocator = std.testing.allocator;
+    var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, allocator, &test_layout) };
+    defer state.deinit(allocator);
+    const lower_coords: ChunkCoords = .{ 0, 0, 3 };
+    const data = try allocator.create(@import("world_chunk_data.zig").WorldChunkData);
+    data.* = @import("world_chunk_data.zig").WorldChunkData.initFilled(.packed_dirt);
+    data.blocks[31][10][10] = .dirt;
+    var lower = WorldChunk.initBlocks(data);
+    lower.metadata.timed.schedule(allocator, .{ .block = transformations.index(.{ 10, 10, 31 }), .kind = .compact_dirt, .due_tick = transformations.transformation_delay });
+    try state.modified_chunks.put(allocator, test_layout.encodeChunkCoords(lower_coords), lower);
+    const block = [3]u32{ 10, 10, 4 * CHUNK_SIZE };
+    const placed = state.applyOperation(allocator, .{ .block = block, .action = .{ .put = .planks } });
+    defer placed.chunk.deinit(allocator);
+    try std.testing.expectEqual(OperationStatus.success, placed.status);
+    try std.testing.expectEqual(lower_coords, placed.changed_below.?);
+    const packed_chunk = state.modified_chunks.get(test_layout.encodeChunkCoords(lower_coords)).?;
+    try std.testing.expectEqual(.packed_dirt, packed_chunk.content.getBlock(.{ 10, 10, 31 }));
+    try std.testing.expectEqual(0, packed_chunk.metadata.timed.events.items.len);
+    const removed = state.applyOperation(allocator, .{ .block = block, .action = .remove });
+    defer removed.chunk.deinit(allocator);
+    state.tick = transformations.transformation_delay;
+    try std.testing.expect(state.transformChunk(allocator, lower_coords));
+    try std.testing.expectEqual(.grass, readStateBlock(&state, .{ 10, 10, 4 * CHUNK_SIZE - 1 }));
+}
+
+test "mining natural stone yields crushed stone and does not allow placing natural rock" {
+    const allocator = std.testing.allocator;
+    var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, allocator, &test_layout) };
+    defer state.deinit(allocator);
+    const block = [3]u32{ 10, 10, test_layout.size_in_blocks[2] / 2 - CHUNK_SIZE / 2 - 1 };
+    const mined = state.applyOperation(allocator, .{ .block = block, .action = .remove });
+    defer mined.chunk.deinit(allocator);
+    try std.testing.expectEqual(OperationStatus.success, mined.status);
+    try std.testing.expectEqual(.crushed_stone, mined.diagnostics.mined_type.?);
+    const replaced = state.applyOperation(allocator, .{ .block = block, .action = .{ .put = .stone } });
+    defer replaced.chunk.deinit(allocator);
+    try std.testing.expectEqual(OperationStatus.constraint_violation, replaced.status);
+    try std.testing.expectEqual(rules.Reason.material_not_placeable, replaced.diagnostics.failure.?.reason);
+}
+
+test "evicting a subscription preserves timers and a large time step catches up both stages" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
+    defer service.destroy();
+    const client = try service.createClient();
+    const block = [3]u32{ 10, 10, test_layout.size_in_blocks[2] / 2 - CHUNK_SIZE / 2 };
+    const coords, const local = world_module.splitBlockCoords(block);
+    var responses: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&responses);
+    const token = client.requestChunks(.{ 0, 0 }, coords[2], coords[2] + 1);
+    try waitForResponses(client, &responses, 1);
+    for (responses.items) |response| response.deinit(std.testing.allocator);
+    responses.clearRetainingCapacity();
+    _ = client.submitOperation(.{ .block = block, .action = .{ .put = .dirt } });
+    try waitForResponses(client, &responses, 1);
+    try std.testing.expectEqual(OperationStatus.success, responses.items[0].operation.?.status);
+    for (responses.items) |response| response.deinit(std.testing.allocator);
+    responses.clearRetainingCapacity();
+    client.evictChunk(test_layout.encodeChunkCoords(coords), token);
+    service.advanceTo(transformations.transformation_delay * 2);
+    const reloaded = client.requestChunks(.{ 0, 0 }, coords[2], coords[2] + 1);
+    var grown = false;
+    while (!grown) {
+        try std.testing.expect(try client.waitResponses(&responses));
+        for (responses.items) |response| {
+            if (response.subscription_id == reloaded and response.data == .blocks)
+                grown = grown or response.data.blocks.chunk.content.getBlock(local) == .grass;
+            response.deinit(std.testing.allocator);
+        }
+        responses.clearRetainingCapacity();
+    }
+    _ = client.submitOperation(.{ .block = block, .action = .remove });
+    try waitForResponses(client, &responses, 1);
+    try std.testing.expectEqual(.dirt, responses.items[0].operation.?.mined_type.?);
 }
 
 fn deinitResponses(responses: *std.ArrayList(ChunkResponse)) void {
@@ -770,7 +1089,7 @@ test "loaded chunks match generation and subscribe with the load token" {
     const column = ColumnGenerator.init(&service.worker_state.generator, .{ 10, 20 });
     for (responses.items, 2..) |response, z| {
         const expected = column.generateChunk(std.testing.allocator, @intCast(z));
-        defer expected.content.deinit(std.testing.allocator);
+        defer expected.deinit(std.testing.allocator);
         try std.testing.expectEqual(token, response.subscription_id);
         try std.testing.expectEqual(null, response.operation);
         try std.testing.expectEqual(ChunkCoords{ 10, 20, @intCast(z) }, response.coords);
@@ -818,8 +1137,8 @@ test "commands validate against authority and return status plus independent sna
     defer service.destroy();
     const client = try service.createClient();
     const block = [3]u32{ 1, 2, WORLD_SIZE[2] * CHUNK_SIZE - 1 };
-    const put = client.submitOperation(.{ .block = block, .action = .{ .put = .dirt } });
-    const duplicate = client.submitOperation(.{ .block = block, .action = .{ .put = .stone } });
+    const put = client.submitOperation(.{ .block = block, .action = .{ .put = .sand } });
+    const duplicate = client.submitOperation(.{ .block = block, .action = .{ .put = .snow } });
     const remove = client.submitOperation(.{ .block = block, .action = .remove });
     const missing = client.submitOperation(.{ .block = block, .action = .remove });
     var responses: std.ArrayList(ChunkResponse) = .empty;
@@ -834,8 +1153,8 @@ test "commands validate against authority and return status plus independent sna
         try std.testing.expectEqual(status, response.operation.?.status);
         try std.testing.expectEqual(revision, response.data.blocks.chunk.chunk_revision);
     }
-    try std.testing.expectEqual(.dirt, responses.items[0].data.blocks.chunk.content.getBlock(.{ 1, 2, 31 }));
-    try std.testing.expectEqual(.dirt, responses.items[1].data.blocks.chunk.content.getBlock(.{ 1, 2, 31 }));
+    try std.testing.expectEqual(.sand, responses.items[0].data.blocks.chunk.content.getBlock(.{ 1, 2, 31 }));
+    try std.testing.expectEqual(.sand, responses.items[1].data.blocks.chunk.content.getBlock(.{ 1, 2, 31 }));
     try std.testing.expectEqual(1, responses.items[1].data.blocks.chunk.solid_block_count);
     try std.testing.expect(responses.items[2].data.blocks.chunk.content == .empty);
     try std.testing.expectEqual(WorldChunk.initEmpty().flags, responses.items[2].data.blocks.chunk.flags);
@@ -852,8 +1171,8 @@ test "successful edits push data only to subscribers and combine the origin repl
     const observer_token = observer.requestChunks(.{ 0, 0 }, z, z + 1);
     _ = other.requestChunks(.{ 1, 0 }, z, z + 1);
     const block = [3]u32{ 0, 0, z * CHUNK_SIZE };
-    const id = origin.submitOperation(.{ .block = block, .action = .{ .put = .dirt } });
-    _ = origin.submitOperation(.{ .block = block, .action = .{ .put = .stone } });
+    const id = origin.submitOperation(.{ .block = block, .action = .{ .put = .sand } });
+    _ = origin.submitOperation(.{ .block = block, .action = .{ .put = .snow } });
     var origin_responses: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&origin_responses);
     // Last reply is also a barrier: all prior broadcasts have been enqueued.
@@ -864,7 +1183,7 @@ test "successful edits push data only to subscribers and combine the origin repl
     try std.testing.expectEqual(2, observed.items.len);
     try std.testing.expectEqual(observer_token, observed.items[1].subscription_id);
     try std.testing.expectEqual(null, observed.items[1].operation);
-    try std.testing.expectEqual(.dirt, observed.items[1].data.blocks.chunk.content.getBlock(.{ 0, 0, 0 }));
+    try std.testing.expectEqual(.sand, observed.items[1].data.blocks.chunk.content.getBlock(.{ 0, 0, 0 }));
     try std.testing.expectEqual(origin_token, origin_responses.items[1].subscription_id);
     try std.testing.expectEqual(id, origin_responses.items[1].operation.?.request_id);
     var unrelated: std.ArrayList(ChunkResponse) = .empty;
@@ -882,13 +1201,13 @@ test "eviction stops pushes and a fresh load returns committed edits with a new 
     const position = test_layout.encodeChunkId(0, 0, z);
     const old_token = main.requestChunks(.{ 0, 0 }, z, z + 1);
     const block = [3]u32{ 16, 16, z * CHUNK_SIZE };
-    _ = npc.submitOperation(.{ .block = block, .action = .{ .put = .dirt } });
+    _ = npc.submitOperation(.{ .block = block, .action = .{ .put = .sand } });
     main.evictChunk(position, old_token);
     _ = npc.submitOperation(.{ .block = block, .action = .remove });
     const new_token = main.requestChunks(.{ 0, 0 }, z, z + 1);
     // A delayed eviction for the old generation must not remove the new subscription.
     main.evictChunk(position, old_token);
-    _ = npc.submitOperation(.{ .block = block, .action = .{ .put = .stone } });
+    _ = npc.submitOperation(.{ .block = block, .action = .{ .put = .snow } });
     var npc_responses: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&npc_responses);
     try waitForResponses(npc, &npc_responses, 3);
@@ -906,7 +1225,7 @@ test "eviction stops pushes and a fresh load returns committed edits with a new 
 }
 
 fn putFromClient(client: *Client, block: [3]u32) void {
-    _ = client.submitOperation(.{ .block = block, .action = .{ .put = .dirt } });
+    _ = client.submitOperation(.{ .block = block, .action = .{ .put = .sand } });
 }
 
 test "concurrent clients cannot both put into the same empty block" {
@@ -976,7 +1295,7 @@ test "losing solid faces retains previously unloaded neighbors as dirty revision
             .block = .{ @as(u32, @intCast(coords[0])) * CHUNK_SIZE + local[0], @as(u32, @intCast(coords[1])) * CHUNK_SIZE + local[1], @as(u32, @intCast(coords[2])) * CHUNK_SIZE + local[2] },
             .action = .remove,
         });
-        defer result.chunk.content.deinit(std.testing.allocator);
+        defer result.chunk.deinit(std.testing.allocator);
         try std.testing.expectEqual(OperationStatus.success, result.status);
         try std.testing.expectEqual(index + 1, result.chunk.chunk_revision);
         for (result.revealed_neighbors, 0..) |neighbor_opt, neighbor_index| {
@@ -990,7 +1309,7 @@ test "losing solid faces retains previously unloaded neighbors as dirty revision
                 try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, retained.solid_block_count);
                 const generator = ColumnGenerator.init(&state.generator, .{ neighbor_coords[0], neighbor_coords[1] });
                 const reloaded = state.loadChunk(std.testing.allocator, &generator, neighbor_coords);
-                defer reloaded.content.deinit(std.testing.allocator);
+                defer reloaded.deinit(std.testing.allocator);
                 try std.testing.expectEqual(retained.flags, reloaded.flags);
                 try std.testing.expectEqual(retained.chunk_revision, reloaded.chunk_revision);
             } else {
@@ -1001,12 +1320,12 @@ test "losing solid faces retains previously unloaded neighbors as dirty revision
     try std.testing.expectEqual(7, state.modified_chunks.count());
 
     // Resealing and reopening a wall never hides or revises the revealed neighbor again.
-    for ([_]world_module.BlockAction{ .{ .put = .stone }, .remove, .remove }) |action| {
+    for ([_]world_module.BlockAction{ .{ .put = .snow }, .remove, .remove }) |action| {
         const result = state.applyOperation(std.testing.allocator, .{
             .block = .{ 0, 2 * CHUNK_SIZE + 8, 3 * CHUNK_SIZE + 8 },
             .action = action,
         });
-        defer result.chunk.content.deinit(std.testing.allocator);
+        defer result.chunk.deinit(std.testing.allocator);
         for (result.revealed_neighbors) |neighbor| try std.testing.expectEqual(null, neighbor);
     }
     const wrapped_neighbor = state.modified_chunks.get(test_layout.encodeChunkId(WORLD_SIZE[0] - 1, 2, 3)).?;
@@ -1021,7 +1340,7 @@ test "interior edits expose no neighbors and a corner reveals three face neighbo
         .block = .{ 8, 2 * CHUNK_SIZE + 8, 2 * CHUNK_SIZE + 8 },
         .action = .remove,
     });
-    defer interior.chunk.content.deinit(std.testing.allocator);
+    defer interior.chunk.deinit(std.testing.allocator);
     try std.testing.expect(interior.chunk.flags.is_unreachable);
     for (interior.revealed_neighbors) |neighbor| try std.testing.expectEqual(null, neighbor);
     try std.testing.expectEqual(1, state.modified_chunks.count());
@@ -1030,7 +1349,7 @@ test "interior edits expose no neighbors and a corner reveals three face neighbo
         .block = .{ 0, 2 * CHUNK_SIZE, 2 * CHUNK_SIZE },
         .action = .remove,
     });
-    defer corner.chunk.content.deinit(std.testing.allocator);
+    defer corner.chunk.deinit(std.testing.allocator);
     for (corner.revealed_neighbors, 0..) |neighbor, side| {
         try std.testing.expectEqual(side % 2 == 0, neighbor != null);
     }
@@ -1043,7 +1362,7 @@ test "interior edits expose no neighbors and a corner reveals three face neighbo
         .block = .{ CHUNK_SIZE, 2 * CHUNK_SIZE + 8, 2 * CHUNK_SIZE + 8 },
         .action = .remove,
     });
-    defer opening.chunk.content.deinit(std.testing.allocator);
+    defer opening.chunk.deinit(std.testing.allocator);
     try std.testing.expectEqual(ChunkCoords{ 0, 2, 2 }, opening.revealed_neighbors[@intFromEnum(Side.left)].?);
     const revealed = state.modified_chunks.get(test_layout.encodeChunkId(0, 2, 2)).?;
     try std.testing.expectEqual(3, revealed.chunk_revision);
@@ -1179,7 +1498,7 @@ test "worker coalesces boundary meshes while preserving all operation acknowledg
     service.requests.mutex.lockUncancelable(service.io);
     const operations = [_]BlockOperation{
         .{ .block = .{ 3 * CHUNK_SIZE - 1, 2 * CHUNK_SIZE + 8, 3 * CHUNK_SIZE + 8 }, .action = .remove },
-        .{ .block = .{ 3 * CHUNK_SIZE - 1, 2 * CHUNK_SIZE + 8, 3 * CHUNK_SIZE + 8 }, .action = .{ .put = .dirt } },
+        .{ .block = .{ 3 * CHUNK_SIZE - 1, 2 * CHUNK_SIZE + 8, 3 * CHUNK_SIZE + 8 }, .action = .{ .put = .sand } },
         .{ .block = .{ 2 * CHUNK_SIZE + 8, 2 * CHUNK_SIZE + 8, 3 * CHUNK_SIZE + 8 }, .action = .remove },
     };
     for (operations) |operation| service.requests.items.append(allocator, .{

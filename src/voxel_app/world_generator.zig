@@ -2,6 +2,7 @@ const ChunkCoords = @import("engine").ChunkCoords;
 const std = @import("std");
 
 const BlockType = @import("engine").voxel_chunk.BlockType;
+const transformations = @import("block_transformations.zig");
 const PerlinNoise = @import("./perlin_noise.zig").PerlinNoise;
 const WorldChunkData = @import("./world_chunk_data.zig").WorldChunkData;
 const WorldChunk = @import("./world.zig").WorldChunk;
@@ -269,7 +270,19 @@ const TerrainColumn = struct {
             return allocateChunk(allocator, WorldChunkData.initSolid());
         }
 
-        return allocateChunk(allocator, generateTerrainChunk(&self.heights, chunk_bottom, self.dirt_depth));
+        var chunk = allocateChunk(allocator, generateTerrainChunk(&self.heights, chunk_bottom, self.dirt_depth));
+        for (self.heights, 0..) |row, y| {
+            for (row, 0..) |height, x| {
+                const surface = height - 1;
+                if (surface < chunk_bottom or surface >= chunk_top) continue;
+                chunk.metadata.timed.schedule(allocator, .{
+                    .block = transformations.index(.{ @intCast(x), @intCast(y), @intCast(surface - chunk_bottom) }),
+                    .kind = .grow_grass,
+                    .due_tick = transformations.transformation_delay,
+                });
+            }
+        }
+        return chunk;
     }
 };
 
@@ -333,10 +346,8 @@ fn generateTerrainChunk(
 
                 chunk.blocks[local_z][local_y][local_x] = if (block_z >= height)
                     BlockType.none
-                else if (depth_below_surface == 0)
-                    BlockType.grass
                 else if (depth_below_surface <= dirt_depth)
-                    BlockType.dirt
+                    BlockType.packed_dirt
                 else
                     BlockType.stone;
             }
@@ -355,9 +366,9 @@ test "terrain generation is deterministic" {
 
     for (0..WORLD_SIZE[2]) |z| {
         var a = first.generateChunk(std.testing.allocator, @intCast(z));
-        defer a.content.deinit(std.testing.allocator);
+        defer a.deinit(std.testing.allocator);
         var b = second.generateChunk(std.testing.allocator, @intCast(z));
-        defer b.content.deinit(std.testing.allocator);
+        defer b.deinit(std.testing.allocator);
 
         try std.testing.expectEqual(a.flags, b.flags);
         try std.testing.expectEqualSlices(
@@ -374,7 +385,7 @@ test "terrain column has surface chunks between stone and air" {
     const column_generator = ColumnGenerator.init(&prepared, .{ 0, 0 });
 
     const bottom = column_generator.generateChunk(std.testing.allocator, 0);
-    defer bottom.content.deinit(std.testing.allocator);
+    defer bottom.deinit(std.testing.allocator);
     try std.testing.expect(bottom.content == .blocks);
     try std.testing.expectEqualSlices(
         u8,
@@ -389,9 +400,9 @@ test "terrain column has surface chunks between stone and air" {
     var surface_chunk_count: usize = 0;
     for (0..WORLD_SIZE[2]) |z| {
         var chunk = column_generator.generateChunk(std.testing.allocator, @intCast(z));
-        defer chunk.content.deinit(std.testing.allocator);
+        defer chunk.deinit(std.testing.allocator);
         const data = chunk.content.toData();
-        if (std.mem.indexOfScalar(BlockType, asFlatBlocks(&data), .grass) != null) {
+        if (std.mem.indexOfScalar(BlockType, asFlatBlocks(&data), .packed_dirt) != null) {
             surface_chunk_count += 1;
         }
     }
@@ -410,7 +421,7 @@ test "flat world has the surface chunk in the middle, stone below and air above"
 
     for (0..WORLD_SIZE[2]) |z| {
         var chunk = column_generator.generateChunk(std.testing.allocator, @intCast(z));
-        defer chunk.content.deinit(std.testing.allocator);
+        defer chunk.deinit(std.testing.allocator);
 
         if (z == surface_z) {
             try std.testing.expect(chunk.content == .blocks);
@@ -442,7 +453,7 @@ test "shortcut terrain chunks match the full generation, only chunks without blo
 
     for (0..WORLD_SIZE[2]) |z| {
         var chunk = column_generator.generateChunk(std.testing.allocator, @intCast(z));
-        defer chunk.content.deinit(std.testing.allocator);
+        defer chunk.deinit(std.testing.allocator);
 
         const expected = generateTerrainChunk(&heights, @intCast(z * CHUNK_SIZE), params.dirt_depth);
         try std.testing.expectEqualSlices(
@@ -475,14 +486,14 @@ test "unreachable terrain requires a solid ceiling and one-block horizontal wall
         } },
     };
     var chunk = column.generateChunk(std.testing.allocator, 2);
-    defer chunk.content.deinit(std.testing.allocator);
+    defer chunk.deinit(std.testing.allocator);
     try std.testing.expect(chunk.flags.is_unreachable);
     // This takes the layered generation path, rather than the all-stone shortcut.
-    try std.testing.expectEqual(BlockType.dirt, chunk.content.getBlock(.{ 0, 0, CHUNK_SIZE - 1 }));
+    try std.testing.expectEqual(BlockType.packed_dirt, chunk.content.getBlock(.{ 0, 0, CHUNK_SIZE - 1 }));
 
     column.column.terrain.minimum_adjacent_height = top - 1;
     const cliff_chunk = column.generateChunk(std.testing.allocator, 2);
-    defer cliff_chunk.content.deinit(std.testing.allocator);
+    defer cliff_chunk.deinit(std.testing.allocator);
     try std.testing.expect(!cliff_chunk.flags.is_unreachable);
 
     column.column.terrain.minimum_adjacent_height = top;
@@ -490,7 +501,7 @@ test "unreachable terrain requires a solid ceiling and one-block horizontal wall
     column.column.terrain.minimum_height = top;
     column.column.terrain.maximum_height = top;
     const surface_chunk = column.generateChunk(std.testing.allocator, 2);
-    defer surface_chunk.content.deinit(std.testing.allocator);
+    defer surface_chunk.deinit(std.testing.allocator);
     try std.testing.expect(!surface_chunk.flags.is_unreachable);
 }
 
@@ -513,7 +524,7 @@ test "generated unreachable flags agree with all six actual neighboring walls" {
             for (0..WORLD_SIZE[2]) |z| {
                 const chunk_coords = ChunkCoords{ coords[0], coords[1], @intCast(z) };
                 const chunk = column.generateChunk(std.testing.allocator, @intCast(z));
-                defer chunk.content.deinit(std.testing.allocator);
+                defer chunk.deinit(std.testing.allocator);
                 var enclosed = true;
                 for (std.enums.values(@import("engine").voxel_chunk.Side)) |side| {
                     const neighbor_coords = world.adjacentChunk(&test_layout, chunk_coords, side) orelse {
@@ -522,7 +533,7 @@ test "generated unreachable flags agree with all six actual neighboring walls" {
                     };
                     const neighbor_column = ColumnGenerator.init(&prepared, .{ neighbor_coords[0], neighbor_coords[1] });
                     const neighbor = neighbor_column.generateChunk(std.testing.allocator, neighbor_coords[2]);
-                    defer neighbor.content.deinit(std.testing.allocator);
+                    defer neighbor.deinit(std.testing.allocator);
                     if (!neighbor.flags.getSideSolidness(side.getOpposite())) enclosed = false;
                 }
                 try std.testing.expectEqual(enclosed, chunk.flags.is_unreachable);
@@ -554,10 +565,10 @@ test "terrain midpoint, height bounds, and periodic x use each world's dimension
         const column = ColumnGenerator.init(&flat, .{ layout.size_in_chunks[0] - 1, layout.size_in_chunks[1] - 1 });
         const surface_z = @divExact(layout.size_in_chunks[2], 2) - 1;
         const surface = column.generateChunk(std.testing.allocator, surface_z);
-        defer surface.content.deinit(std.testing.allocator);
+        defer surface.deinit(std.testing.allocator);
         try std.testing.expectEqual(BlockType.stone, surface.content.getBlock(.{ 16, 16, 15 }));
         const above = column.generateChunk(std.testing.allocator, surface_z + 1);
-        defer above.content.deinit(std.testing.allocator);
+        defer above.deinit(std.testing.allocator);
         try std.testing.expect(above.content == .empty);
         try std.testing.expect(!surface.flags.is_unreachable);
         try std.testing.expectEqual(ChunkCoords{ 0, 1, 1 }, @import("world.zig").adjacentChunk(&layout, .{ layout.size_in_chunks[0] - 1, 1, 1 }, .right).?);
@@ -605,7 +616,7 @@ test "large worlds prepare periods beyond u32 and generate both seam columns" {
         };
         for (0..2) |z| {
             const chunk = column.generateChunk(std.testing.allocator, @intCast(z));
-            defer chunk.content.deinit(std.testing.allocator);
+            defer chunk.deinit(std.testing.allocator);
         }
     }
     try std.testing.expectEqual(prepared.kind.terrain.height(-1, 63), prepared.kind.terrain.height(layout.size_in_blocks[0] - 1, 63));

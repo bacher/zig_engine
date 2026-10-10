@@ -39,7 +39,7 @@ The voxel app starts in player mode: W/A/S/D walk, mouse movement looks around, 
 
 Q switches between player and debug spectator modes. Each spectator excursion starts at the player's eyes; the player freezes and returning restores its position and view. Spectator controls are W/A/S/D, Space/C for up/down, and looking while holding the left mouse button. The demo app uses these spectator controls by default. Escape exits. E toggles SSAO, R toggles its debug view, and B toggles blur.
 
-In the voxel app, Z places dirt and X removes the top solid block in the column below the camera, within 20 blocks of reach. Placement overlapping the player is rejected, including during spectating. These are vertical column tools. See [scenes and input](docs/scenes.md) and [voxel tools](docs/voxel-world.md#tools-and-simulation-example).
+In the voxel app, keys 1-6 select loose soil, crushed stone, trunk, planks, rebar, and reinforced concrete. Z places the selected material and X mines the top solid block in the column below the camera, within 20 blocks of reach. Placement overlapping the player is rejected, including during spectating. These are vertical column tools. See [block placement rules](docs/block-placement.md), [scenes and input](docs/scenes.md), and [voxel tools](docs/voxel-world.md#tools-and-simulation-example).
 
 ## Voxel app
 

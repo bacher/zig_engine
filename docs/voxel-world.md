@@ -8,7 +8,7 @@ Chunks remain fixed at 32 by 32 by 32 blocks. The application chooses world dime
 
 World coordinates are centered using the immutable layout's half-dimension `origin_chunk`. With the current preset, world position zero corresponds to stored block coordinates (8192, 4096, 128). Spatial chunk coordinates are signed vectors; normalize x and validate y/z before encoding a storage ID through that world's layout. Its dimension exponents determine the packed ID widths: the current preset uses 9/8/3 bits, or 20 of the available 32 bits. The cache and service retain immutable copies of the scene's validated layout. A compile-time guard rejects an engine configuration with wrapping disabled. See [world configuration](world-configuration.md) and [coordinates](coordinates.md).
 
-`WorldChunkData.blocks` is indexed `[z][y][x]` and contains one `BlockType` per block. Types are air (`none`), stone, dirt, grass, water, sand, and snow. Current occupancy tests treat every non-air type as solid; water does not have a separate transparent/fluid occupancy rule.
+`WorldChunkData.blocks` is indexed `[z][y][x]` and contains one `BlockType` per block. Types include air, natural/crushed stone, loose/packed soil, grass-covered packed soil, trunks, planks, rebar, reinforced concrete, water, sand, and snow. Current occupancy tests treat every non-air type as solid; water does not have a separate transparent/fluid occupancy rule. Sparse construction indices and ordered time events live in additional chunk metadata. See [block placement and transformations](block-placement.md).
 
 `WorldChunk` contains block content, solid count, flags, own boundary masks, and authoritative chunk revision. Content is either allocation-free `empty` or a dense block array. A solid chunk still stores individual blocks; there is no separate uniform-solid representation. Removing the final solid block releases the dense allocation.
 
@@ -44,7 +44,7 @@ The prepared generator borrows its layout. Columns retain that layout and materi
 
 Terrain height combines periodic-x Perlin noise octaves, rounds the result, and clamps it between 1 and the world's block height. X periods use whole numbers of noise cells so both height values and slopes meet at the wrap seam. Default settings use noise scale 192, four octaves, frequency multiplier 2, amplitude multiplier 0.5, base height at half the selected world height (128 with the preset), height amplitude 48, and four dirt blocks below the surface.
 
-The generated column has grass at the surface, dirt immediately below, stone deeper down, and air above. There are no generated caves. Fully above-surface chunks are empty; sufficiently deep chunks use a shortcut to fill stone. The flat generator supplies solid lower chunks and a half-filled surface chunk near the world midpoint.
+The generated column has packed soil at and immediately below the surface, natural stone deeper down, and air above. Exposed generated soil schedules grass at world tick zero plus 30 minutes. There are no generated caves. Fully above-surface chunks are empty; sufficiently deep chunks use a shortcut to fill stone. The flat generator supplies solid lower chunks and a half-filled surface chunk near the world midpoint.
 
 Generation is deterministic for the same layout, coordinates, seed, and parameters. Regression snapshots from before octave preparation retain the same default/custom heights and enclosure bounds at seams and world edges. Untouched chunks can therefore be discarded and regenerated. Committed modifications override generated data.
 
@@ -61,7 +61,7 @@ Generation is deterministic for the same layout, coordinates, seed, and paramete
 
 A load is a continuing subscription, not just a one-time fetch. Its request ID becomes the subscription token for the requested chunks. Loading a different representation or reloading replaces the token; delayed replies and eviction requests from an older generation must not affect the new subscription.
 
-Commands carry intent, never replacement chunk snapshots. A put succeeds only when the target is air; a remove succeeds only when it is solid. Status is `success`, `already_exists`, or `already_removed`. Each command gets an acknowledgment, including conflicts. Commands from one endpoint preserve submission order; commands from different endpoints are ordered by the shared request queue, without a separate cross-client ordering promise.
+Commands carry intent, never replacement chunk snapshots. A put requires air and valid structural support; a remove requires an occupied cell and must preserve constructed blocks' support. Status is `success`, `already_exists`, `already_removed`, `constraint_violation`, or `missing_data`. Results include structured failure diagnostics and the mined material where applicable. Each command gets an acknowledgment, including conflicts. Commands from one endpoint preserve submission order; commands from different endpoints are ordered by the shared request queue, without a separate cross-client ordering promise. Simulation-time advancement shares this queue.
 
 The service sends independently owned snapshots/face arrays. Consumers must free rejected or unused payloads. Client endpoints remain owned by the service until it is destroyed. Request/reply mailboxes are unbounded: producers briefly lock to enqueue, but there is no queue-size backpressure policy.
 
@@ -160,7 +160,7 @@ All GPU residency mutation must continue on the application thread; the world-da
 
 ## Persistence, caches, and shutdown
 
-The service retains committed modified chunks, permanent reveal flags, and mesh invalidation revisions independently of subscriptions. Untouched blocks and built meshes are temporary. Generated boundary masks and column heights have bounded caches (512 chunks and 64 columns respectively); these caches are cleared when their thresholds are reached rather than managed as an LRU.
+The service retains committed modified chunks, pending timed chunk state, permanent reveal flags, and mesh invalidation revisions independently of subscriptions. Untouched blocks without time events and built meshes are temporary. Only chunks with pending events are visited during time processing. Generated boundary masks and column heights have bounded caches (512 chunks and 64 columns respectively); these caches are cleared when their thresholds are reached rather than managed as an LRU.
 
 There is no disk persistence. Edits survive client eviction/reloading during one service lifetime and disappear when the application/service is destroyed. Modified-state storage is not bounded by the streaming box.
 
@@ -168,7 +168,7 @@ Stop every client worker before destroying the service. Shutdown closes the requ
 
 ## Tools and simulation example
 
-Z places dirt and X removes the top solid block in the vertical column below the camera. These tools search at most 20 blocks beneath the actual camera position; they are not crosshair raycasts. Placement requires support within reach, except that the world bottom can provide the floor. Unreceived chunks produce no edit, and no support within the bounded search produces no floating placement.
+Keys 1-6 select loose soil, crushed stone, trunk, planks, rebar, and reinforced concrete. Z places the selection and X mines the top occupied block in the vertical column below the camera. These tools search at most 20 blocks beneath the actual camera position; they are not crosshair raycasts. The column search can reach the world bottom, but every placement must still pass its material's structural rules. Unreceived dependencies produce no edit, and no support within the bounded search produces no floating placement.
 
 The simulation worker initially loads the central chunk column, finds the surface at its horizontal midpoint, then evicts those subscriptions. It submits one dirt put, waits for the result, and waits two seconds between subsequent operations. A successful put switches the next action to remove; a failed put retries a put. Removal switches back to putting. It communicates only through its own service endpoint, so visible changes arrive on the main thread through ordinary subscriptions. This is a concurrency example, not a broader NPC simulation system.
 
