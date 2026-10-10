@@ -279,7 +279,7 @@ test "held Space cannot turn a jump into a climb onto a two-block column" {
             const result = try player.update(&fixture.world, .{ .right = 1, .jump_down = true, .jump_pressed = jump_pressed }, dt, now);
             try std.testing.expect(!result.recovered);
             try std.testing.expect(player.climb == null);
-            try std.testing.expect(player.position[2] <= 1.25 + collision.epsilon);
+            try std.testing.expect(player.position[2] <= player_controller.jump_height + collision.epsilon);
             try std.testing.expectEqual(collision.Overlap.clear, query.overlap(player.position, false));
         }
         try std.testing.expect(player.position[0] <= 1.7 + collision.epsilon and player.grounded);

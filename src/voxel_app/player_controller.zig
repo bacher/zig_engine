@@ -11,7 +11,8 @@ const Cell = collision.Cell;
 
 pub const gravity: f64 = 10;
 pub const walk_speed: f64 = 5;
-pub const jump_speed: f64 = 5;
+pub const jump_height: f64 = 1.05;
+pub const jump_speed: f64 = @sqrt(2 * gravity * jump_height);
 pub const climb_hold_seconds: f64 = 0.25;
 pub const climb_duration_seconds = climb_trajectory.duration_seconds;
 pub const recovery_radius: i64 = 8;
@@ -388,21 +389,77 @@ test "sweeps stop fast falls and long movements at floors and walls and allow sl
     try std.testing.expectApproxEqAbs(@as(f64, 1.7), long_move.position[0], 0.000001);
 }
 
+test "a regular jump reaches 1.05 blocks and mounts a one-block step" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.floor();
+    fixture.fill(.{ 2, -1, 0 }, .{ 8, 1, 0 }, .stone);
+    const apex_time = jump_speed / gravity;
+    for ([_]f64{ 30, 144, 1000 }) |fps| {
+        var player = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
+        defer player.deinit();
+        var query: collision.Query = .{ .world = &fixture.world, .body = player.body };
+        var now: f64 = 0;
+        for ([_]f64{ apex_time, 1 }) |checkpoint| {
+            while (now < checkpoint) {
+                const first_frame = now == 0;
+                const dt = @min(1 / fps, checkpoint - now);
+                now += dt;
+                const result = try player.update(&fixture.world, .{ .right = 1, .jump_pressed = first_frame }, dt, now);
+                try std.testing.expect(!result.recovered and player.climb == null);
+                try std.testing.expectEqual(collision.Overlap.clear, query.overlap(player.position, false));
+                try std.testing.expect(player.position[2] <= 1.05 + collision.epsilon);
+            }
+            if (checkpoint == apex_time) try std.testing.expectApproxEqAbs(@as(f64, 1.05), player.position[2], 0.000001);
+        }
+        try std.testing.expect(player.grounded);
+        try std.testing.expect(player.position[0] > 2);
+        try std.testing.expectApproxEqAbs(@as(f64, 1), player.position[2], 0.000001);
+    }
+}
+
+test "regular jumps clear holes without enabling climbing" {
+    for ([_]i64{ 1, 2, 3 }) |width| {
+        var fixture = try Fixture.init();
+        defer fixture.deinit();
+        fixture.fill(.{ -4, -2, -9 }, .{ 8, 2, -1 }, .stone);
+        fixture.fill(.{ 1, 0, -8 }, .{ width, 0, -1 }, .none);
+        for ([_]f64{ 30, 144, 1000 }) |fps| {
+            var player = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
+            defer player.deinit();
+            var query: collision.Query = .{ .world = &fixture.world, .body = player.body };
+            var now: f64 = 0;
+            while (now < 1) {
+                const first_frame = now == 0;
+                const dt = @min(1 / fps, 1 - now);
+                now += dt;
+                const result = try player.update(&fixture.world, .{ .right = 1, .jump_pressed = first_frame }, dt, now);
+                try std.testing.expect(!result.recovered and player.climb == null and !player.auto_climb);
+                try std.testing.expectEqual(collision.Overlap.clear, query.overlap(player.position, false));
+                try std.testing.expect(player.position[2] >= -collision.epsilon);
+            }
+            try std.testing.expect(player.grounded and player.position[0] > @as(f64, @floatFromInt(width + 1)));
+            try std.testing.expectApproxEqAbs(@as(f64, 0), player.position[2], 0.000001);
+        }
+    }
+}
+
 test "a fast Space tap jumps once, holding does not repeatedly jump, and ceilings stop ascent" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     fixture.floor();
     var player = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
     defer player.deinit();
-    _ = try player.update(&fixture.world, .{ .jump_pressed = true, .jump_down = false }, 0.5, 0.5);
-    try std.testing.expectApproxEqAbs(@as(f64, 1.25), player.position[2], 0.000001);
-    _ = try player.update(&fixture.world, .{ .jump_down = true }, 0.6, 1.1);
+    const apex_time = jump_speed / gravity;
+    _ = try player.update(&fixture.world, .{ .jump_pressed = true, .jump_down = false }, apex_time, apex_time);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.05), player.position[2], 0.000001);
+    _ = try player.update(&fixture.world, .{ .jump_down = true }, 0.6, apex_time + 0.6);
     try std.testing.expect(player.grounded);
     try std.testing.expectApproxEqAbs(@as(f64, 0), player.position[2], 0.000001);
-    _ = try player.update(&fixture.world, .{ .jump_down = true }, 0.3, 1.4);
+    _ = try player.update(&fixture.world, .{ .jump_down = true }, 0.3, apex_time + 0.9);
     try std.testing.expectApproxEqAbs(@as(f64, 0), player.position[2], 0.000001);
     fixture.set(.{ 0, 0, 2 }, .stone);
-    _ = try player.update(&fixture.world, .{ .jump_pressed = true }, 0.1, 1.5);
+    _ = try player.update(&fixture.world, .{ .jump_pressed = true }, 0.1, apex_time + 1);
     try std.testing.expect(player.position[2] > 0 and player.position[2] <= 0.2 + collision.epsilon);
     try std.testing.expect(player.vertical_velocity <= 0);
 }
