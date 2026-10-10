@@ -37,12 +37,24 @@ pub const PlayerController = struct {
     const HistoryEntry = struct { cell: Cell, time: f64 };
     const Climb = struct {
         start: Position,
-        approach: Position,
+        approach_delta: Position,
         landing: Position,
-        velocity: Position,
+        planned_velocity: Position,
         duration: f64,
         elapsed: f64 = 0,
+
+        fn positionAt(self: Climb, elapsed: f64) Position {
+            const progress = std.math.clamp(elapsed / climb_duration_seconds, 0, 1);
+            const eased = progress * progress * (3 - 2 * progress);
+            var position = self.start + self.approach_delta * @as(Position, @splat(progress));
+            // Once the rise finishes before the contact face, walk the short level
+            // exit at the planned speed until the body reaches supporting terrain.
+            position += self.planned_velocity * @as(Position, @splat(@max(0, elapsed - climb_duration_seconds)));
+            position[2] = self.start[2] + (self.landing[2] - self.start[2]) * eased;
+            return position;
+        }
     };
+    const ClimbPlan = struct { delay: f64, climb: Climb };
 
     allocator: std.mem.Allocator,
     /// Feet, independent of the camera and its eye offset. Uses engine f64 coordinates.
@@ -146,12 +158,17 @@ pub const PlayerController = struct {
         };
         var remaining = dt;
         while (remaining > 0) {
-            const step = @min(remaining, max_step_seconds);
-            if (input.jump_down) self.space_held_seconds += step;
+            var step = @min(remaining, max_step_seconds);
             self.auto_climb = input.jump_down and self.space_held_seconds >= climb_hold_seconds;
+            if (input.jump_down and !self.auto_climb) step = @min(step, climb_hold_seconds - self.space_held_seconds);
             if (self.climb == null and self.auto_climb and self.grounded) {
-                self.climb = planClimb(&query, self.position, velocity);
+                if (planClimb(&query, self.position, velocity, step)) |plan| {
+                    if (plan.delay == 0) self.climb = plan.climb else step = @min(step, plan.delay);
+                }
             }
+            // Split at trajectory completion too, so the next stair can start at
+            // that instant rather than waiting for another frame/substep boundary.
+            if (self.climb) |climb| step = @min(step, climb.duration - climb.elapsed);
             const climbing = self.climb != null and self.advanceClimb(&query, step, velocity);
             if (!climbing) {
                 const mx = query.moveAxis(self.position, 0, velocity[0] * step);
@@ -165,6 +182,8 @@ pub const PlayerController = struct {
                 self.grounded = supported or (mz.collided and dz < 0);
                 if (mz.collided or self.grounded) self.vertical_velocity = 0;
             }
+            if (input.jump_down) self.space_held_seconds += step;
+            self.auto_climb = input.jump_down and self.space_held_seconds >= climb_hold_seconds;
             try self.recordPosition(now - remaining + step);
             remaining -= step;
         }
@@ -188,38 +207,31 @@ pub const PlayerController = struct {
         return down.position;
     }
 
-    fn planClimb(query: *collision.Query, start: Position, velocity: Position) ?Climb {
+    fn planClimb(query: *collision.Query, start: Position, velocity: Position, step: f64) ?ClimbPlan {
         const speed = @sqrt(@reduce(.Add, velocity * velocity));
         if (speed < 0.1) return null;
         const direction = velocity / @as(Position, @splat(speed));
-        // A bounded ray preview finds the first face along the walking direction,
-        // including diagonal approaches. Each small preview uses the ordinary sweeps.
-        const preview = velocity * @as(Position, @splat(climb_duration_seconds / 16));
-        var previous = start;
-        for (0..16) |_| {
-            const mx = query.moveAxis(previous, 0, preview[0]);
-            const my = query.moveAxis(mx.position, 1, preview[1]);
-            if (mx.collided or my.collided) {
-                var fraction: f64 = 1;
-                if (mx.collided) fraction = @min(fraction, (mx.position[0] - previous[0]) / preview[0]);
-                if (my.collided) fraction = @min(fraction, (my.position[1] - previous[1]) / preview[1]);
-                const contact = previous + preview * @as(Position, @splat(fraction));
-                const distance = @sqrt(@reduce(.Add, (contact - start) * (contact - start)));
-                const approach = direction * @as(Position, @splat(@max(0, distance - climb_face_margin)));
-                const landing_delta = direction * @as(Position, @splat(distance + climb_landing_distance));
-                const landing = findClimbLanding(query, start, landing_delta[0], landing_delta[1], 1) orelse return null;
-                if (landing[2] <= start[2] + collision.epsilon) return null;
-                return .{
-                    .start = start,
-                    .approach = approach,
-                    .landing = landing,
-                    .velocity = velocity,
-                    .duration = climb_duration_seconds + (climb_landing_distance + @min(distance, climb_face_margin)) / speed,
-                };
-            }
-            previous += preview;
-        }
-        return null;
+        // Look one substep beyond the usual preview to locate an entry during this
+        // substep. The tiny extension includes a face exactly on the preview edge.
+        const contact_time = query.horizontalContactTime(start, velocity, climb_duration_seconds + step + 2 * collision.epsilon / speed) orelse return null;
+        var delay = @max(0, contact_time - climb_duration_seconds);
+        if (delay * speed <= collision.epsilon) delay = 0;
+        const climb_start = start + velocity * @as(Position, @splat(delay));
+        const distance = speed * (contact_time - delay);
+        const approach_delta = direction * @as(Position, @splat(@max(0, distance - climb_face_margin)));
+        const landing_delta = direction * @as(Position, @splat(distance + climb_landing_distance));
+        const landing = findClimbLanding(query, climb_start, landing_delta[0], landing_delta[1], 1) orelse return null;
+        if (landing[2] <= climb_start[2] + collision.epsilon) return null;
+        return .{
+            .delay = delay,
+            .climb = .{
+                .start = climb_start,
+                .approach_delta = approach_delta,
+                .landing = landing,
+                .planned_velocity = velocity,
+                .duration = climb_duration_seconds + (climb_landing_distance + @min(distance, climb_face_margin)) / speed,
+            },
+        };
     }
 
     fn advanceClimb(self: *PlayerController, query: *collision.Query, step: f64, velocity: Position) bool {
@@ -227,8 +239,8 @@ pub const PlayerController = struct {
         // Releasing movement or turning abandons the arc. Because the original box
         // remains clear at every point, normal gravity can safely take over anywhere.
         const speed_squared = @reduce(.Add, velocity * velocity);
-        const planned_speed_squared = @reduce(.Add, climb.velocity * climb.velocity);
-        const alignment = @reduce(.Add, velocity * climb.velocity);
+        const planned_speed_squared = @reduce(.Add, climb.planned_velocity * climb.planned_velocity);
+        const alignment = @reduce(.Add, velocity * climb.planned_velocity);
         if (speed_squared < 0.01 or alignment < @sqrt(speed_squared * planned_speed_squared) * 0.8660254037844386) {
             self.climb = null;
             return false;
@@ -239,14 +251,8 @@ pub const PlayerController = struct {
             self.climb = null;
             return false;
         }
-        // Consume the complete substep across the exit, including any fractional
-        // remainder; truncating at the arc end would briefly slow horizontal motion.
         climb.elapsed += step;
-        const progress = @min(climb.elapsed / climb_duration_seconds, 1);
-        const eased = progress * progress * (3 - 2 * progress);
-        var target = climb.start + climb.approach * @as(Position, @splat(progress)) +
-            climb.velocity * @as(Position, @splat(@max(0, climb.elapsed - climb_duration_seconds)));
-        target[2] = climb.start[2] + (climb.landing[2] - climb.start[2]) * eased;
+        const target = climb.positionAt(climb.elapsed);
         // Feet reach the top before the box crosses the face. A short level lead-out
         // bridges into support, avoiding a fall in the tiny clearance gap at the end.
         const up = query.moveAxis(self.position, 2, target[2] - self.position[2]);
@@ -542,6 +548,101 @@ test "anticipatory arc timing matches across short, long and fractional frames" 
         }
         try std.testing.expect(player.grounded and player.climb == null);
     }
+}
+
+fn expectClimbFramePartitions(fixture: *Fixture, start: Position, input: Input, held_seconds: f64, checkpoints: [4]f64) ![4]Position {
+    var expected: [checkpoints.len]Position = undefined;
+    var baseline = PlayerController.init(std.testing.allocator, start);
+    defer baseline.deinit();
+    baseline.space_held_seconds = held_seconds;
+    var previous_time: f64 = 0;
+    for (checkpoints, 0..) |checkpoint, index| {
+        _ = try baseline.update(&fixture.world, input, checkpoint - previous_time, checkpoint);
+        expected[index] = baseline.position;
+        previous_time = checkpoint;
+    }
+    for ([_]f64{ 30, 60, 120, 144, 240, 1000, 0 }) |fps| {
+        var player = PlayerController.init(std.testing.allocator, start);
+        defer player.deinit();
+        player.space_held_seconds = held_seconds;
+        var now: f64 = 0;
+        var frame: usize = 0;
+        const irregular_frames = [_]f64{ 0.003, 0.017, 0.041, 0.00037 };
+        var query: collision.Query = .{ .world = &fixture.world, .body = player.body };
+        for (checkpoints, expected) |checkpoint, position| {
+            while (now < checkpoint) {
+                const interval = if (fps == 0) irregular_frames[frame % irregular_frames.len] else 1 / fps;
+                const dt = @min(interval, checkpoint - now);
+                now += dt;
+                frame += 1;
+                const result = try player.update(&fixture.world, input, dt, now);
+                try std.testing.expect(!result.recovered);
+                try std.testing.expectEqual(collision.Overlap.clear, query.overlap(player.position, false));
+            }
+            try std.testing.expect(@reduce(.Max, @abs(player.position - position)) < 0.000001);
+        }
+        try std.testing.expectEqual(baseline.grounded, player.grounded);
+        try std.testing.expectEqual(baseline.climb == null, player.climb == null);
+    }
+    return expected;
+}
+
+test "climb preview entry matches across distant approaches and frame partitions" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.floor();
+    fixture.fill(.{ 2, -1, 0 }, .{ 4, 1, 0 }, .stone);
+    const expected = try expectClimbFramePartitions(&fixture, .{ -0.5, 0.5, 0 }, .{ .right = 1, .jump_down = true }, climb_hold_seconds, .{ 0.19, 0.315, 0.46, 0.6 });
+    // The face is 2.2m away; the 1.25m preview starts the arc at exactly 0.19s.
+    try std.testing.expectApproxEqAbs(@as(f64, 0.5), expected[1][2], 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 1), expected[3][2], 0.000001);
+}
+
+test "diagonal corner preview entry matches frame partitions in both directions" {
+    for ([_]f64{ 1, -1 }) |sign| {
+        var fixture = try Fixture.init();
+        defer fixture.deinit();
+        fixture.floor();
+        if (sign > 0) fixture.fill(.{ 2, 2, 0 }, .{ 8, 8, 0 }, .stone) else fixture.fill(.{ -9, -9, 0 }, .{ -3, -3, 0 }, .stone);
+        const onset = 2.2 / 3.0 - climb_duration_seconds;
+        const expected = try expectClimbFramePartitions(&fixture, .{ -0.5 * sign, -1.19 * sign, 0 }, .{ .right = 0.75 * sign, .forward = sign, .jump_down = true }, climb_hold_seconds, .{ onset, onset + 0.125, onset + 0.26, onset + 0.4 });
+        try std.testing.expectApproxEqAbs(@as(f64, 0.5), expected[1][2], 0.000001);
+        try std.testing.expectApproxEqAbs(@as(f64, 1), expected[3][2], 0.000001);
+    }
+}
+
+test "held Space activates climbing at the same instant across frame partitions" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.floor();
+    fixture.fill(.{ 2, -1, 0 }, .{ 4, 1, 0 }, .stone);
+    for ([_]f64{ 0, 0.2 }) |held_seconds| {
+        const onset = climb_hold_seconds - held_seconds;
+        const expected = try expectClimbFramePartitions(&fixture, .{ 0.5, 0.5, 0 }, .{ .right = 1, .jump_down = true }, held_seconds, .{ onset, onset + 0.125, onset + 0.26, onset + 0.4 });
+        try std.testing.expectApproxEqAbs(@as(f64, 0.5), expected[1][2], 0.000001);
+    }
+}
+
+test "consecutive climbs start at each exit across frame partitions" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.floor();
+    for (2..10) |x| fixture.fill(.{ @intCast(x), -1, 0 }, .{ @intCast(x), 1, @intCast(x - 2) }, .stone);
+    const exit_time = climb_duration_seconds + (climb_landing_distance + climb_face_margin) / walk_speed;
+    const expected = try expectClimbFramePartitions(&fixture, .{ 0.5, 0.5, 0 }, .{ .right = 1, .jump_down = true }, climb_hold_seconds, .{ exit_time, 2 * exit_time, 3 * exit_time, 1.1 });
+    for (0..3) |index| try std.testing.expectApproxEqAbs(@as(f64, @floatFromInt(index + 1)), expected[index][2], 0.000001);
+}
+
+test "horizontal contact preview uses the body corner and skips cubes off the path" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ 2, 2, 0 }, .stone);
+    var query: collision.Query = .{ .world = &fixture.world, .body = .{} };
+    // Y reaches the face first, but the box only contacts the corner once X arrives.
+    try std.testing.expectApproxEqAbs(@as(f64, 0.4), query.horizontalContactTime(.{ 0.5, 0.5, 0 }, .{ 3, 4, 0 }, 1).?, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.2 / 3.0), query.horizontalContactTime(.{ 3.5, 3.5, 0 }, .{ -3, -4, 0 }, 1).?, 0.000001);
+    // The swept bounding rectangle contains the block; the diagonal path misses it.
+    try std.testing.expect(query.horizontalContactTime(.{ 0.5, -2.5, 0 }, .{ 3, 4, 0 }, 1.25) == null);
 }
 
 test "small mouse-look changes preserve the short climb path but sharp turns cancel it" {

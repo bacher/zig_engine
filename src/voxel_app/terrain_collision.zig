@@ -92,6 +92,47 @@ pub const Query = struct {
         return result;
     }
 
+    /// Earliest contact along a straight horizontal path, in seconds. Intersect each
+    /// cube's x/y time intervals so diagonal corners have the same contact time
+    /// regardless of how the movement is divided into frames.
+    pub fn horizontalContactTime(self: *Query, feet: Position, velocity: Position, duration: f64) ?f64 {
+        const bounds = self.body.bounds(feet);
+        const delta = velocity * @as(Position, @splat(duration));
+        const swept: Bounds = .{
+            .min = bounds.min + @min(delta, @as(Position, @splat(0))),
+            .max = bounds.max + @max(delta, @as(Position, @splat(0))),
+        };
+        const first = swept.firstCell();
+        const last = swept.lastCell();
+        var contact: ?f64 = null;
+        var z = first[2];
+        while (z <= last[2]) : (z += 1) {
+            var y = first[1];
+            while (y <= last[1]) : (y += 1) {
+                var x = first[0];
+                while (x <= last[0]) : (x += 1) {
+                    const cell = Cell{ x, y, z };
+                    var enter: f64 = 0;
+                    var leave = duration;
+                    inline for (0..2) |axis| {
+                        const face: f64 = @floatFromInt(cell[axis]);
+                        if (velocity[axis] == 0) {
+                            if (bounds.max[axis] <= face + epsilon or bounds.min[axis] >= face + 1 - epsilon) leave = 0;
+                        } else {
+                            const a = (face - bounds.max[axis]) / velocity[axis];
+                            const b = (face + 1 - bounds.min[axis]) / velocity[axis];
+                            enter = @max(enter, @min(a, b));
+                            leave = @min(leave, @max(a, b));
+                        }
+                    }
+                    if (enter >= leave or (contact != null and enter > contact.?)) continue;
+                    if (self.cellState(cell, true) != .clear) contact = enter;
+                }
+            }
+        }
+        return contact;
+    }
+
     /// Sweep along one axis, clipping at the first cube face. The whole path is tested,
     /// so long displacements cannot tunnel through a one-block wall or floor.
     pub fn moveAxis(self: *Query, feet: Position, comptime axis: usize, distance: f64) Move {
