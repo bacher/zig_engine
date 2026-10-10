@@ -84,8 +84,8 @@ bridge. Multi-cell gaps need temporary supports, which are a separate future fea
 ## Edits and diagnostics
 
 Validation evaluates hypothetical contents before mutation. Both placements and removals
-are checked against constructed cells, including changes to platform cubes away from a
-vertical support column. An edit that invalidates a construction is rejected atomically.
+are checked against potentially affected constructed cells, including changes to platform
+cubes away from a vertical support column. An edit that invalidates a construction is rejected atomically.
 This prevents support-removal exploits and adding an incompatible material beneath an
 existing overhang. Natural terrain cells are not themselves revalidated as constructions.
 
@@ -95,8 +95,11 @@ coordinates with an explicit truncation flag. The client retains the latest prev
 These are CPU data for future text and 3D hints. There is no ghost block, dependency outline,
 or transparent rendering pass in this change.
 
-The current implementation revalidates constructed cells on edits rather than maintaining
-a dependency index. This favors consistent results over incremental complexity. Time events
+The current implementation scans construction indices and uses conservative downward support
+envelopes to skip unrelated cells, rather than maintaining a dependency index. Soil depends
+only on its immediate 3x3 footprint; wood and mineral envelopes include horizontal routes
+at each lower level and off-center platform cells. Missing data within an affected envelope
+still blocks client approval; incomplete constructions outside it do not veto edits. Time events
 do not run structural validation because the soil states have the same support properties.
 
 ## Simulation time and transformations
@@ -106,6 +109,7 @@ time; the service processes monotonic `advanceTo` requests in the same queue as 
 Stopping game-time advancement pauses deadlines. Subscription eviction has no effect.
 
 - Placing loose soil schedules compaction 30 minutes later.
+- Soil placed beneath an existing block is packed immediately, without a pending timer.
 - Placing any block directly above loose soil compacts the covered soil immediately.
 - Newly compacted exposed soil schedules grass 30 minutes after compaction.
 - Covering soil clears grass and cancels its pending surface timer.

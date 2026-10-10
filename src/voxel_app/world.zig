@@ -958,3 +958,26 @@ test "cached boundary masks track generation edits clones and optimistic reconci
     try world.insertChunk(coords, WorldChunk.initEmpty());
     try std.testing.expect(!world.getChunk(coords).?.boundaries[0].contains(.left, .{ 0, 8, 8 }));
 }
+
+test "streaming incomplete constructions permits unrelated edits but protects affected supports" {
+    var world = try World.init(std.testing.allocator, &test_layout);
+    defer world.deinit();
+    const data = try std.testing.allocator.create(WorldChunkData);
+    data.* = WorldChunkData.initFlat();
+    try world.insertChunk(.{ 0, 0, 0 }, WorldChunk.initBlocks(data));
+    const neighbor_data = try std.testing.allocator.create(WorldChunkData);
+    neighbor_data.* = WorldChunkData.initFlat();
+    try world.insertChunk(.{ 1, 0, 0 }, WorldChunk.initBlocks(neighbor_data));
+    // Its footprint spans the neighboring chunk, which later leaves the block cache.
+    try std.testing.expectEqual(OperationStatus.success, world.setBlock(.{ 31, 10, 16 }, .dirt).status);
+    world.pending_operations.clearRetainingCapacity();
+    try std.testing.expectEqual(OperationStatus.success, world.previewOperation(.{ .block = .{ 10, 10, 15 }, .action = .remove }).status);
+    try std.testing.expectEqual(OperationStatus.constraint_violation, world.previewOperation(.{ .block = .{ 31, 10, 15 }, .action = .remove }).status);
+    world.removeChunk(.{ 1, 0, 0 });
+    try std.testing.expectEqual(OperationStatus.missing_data, world.tryOperation(.{ .block = .{ 31, 10, 15 }, .action = .remove }).status);
+    try std.testing.expectEqual(0, world.pending_operations.items.len);
+    const result = world.tryOperation(.{ .block = .{ 10, 10, 15 }, .action = .remove });
+    try std.testing.expectEqual(OperationStatus.success, result.status);
+    try std.testing.expectEqual(1, world.pending_operations.items.len);
+    try std.testing.expect(!try world.isBlockSolid(.{ 10, 10, 15 }));
+}

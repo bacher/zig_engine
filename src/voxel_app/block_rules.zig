@@ -3,6 +3,17 @@ const std = @import("std");
 const engine = @import("engine");
 pub const BlockType = engine.voxel_chunk.BlockType;
 pub const Cell = @Vector(3, i64);
+pub const Limits = struct {
+    pub const wood_height: u32 = 12;
+    pub const mineral_height: u32 = 20;
+    pub const crushed_column: u32 = 6;
+    pub const plank_span: u32 = 2;
+    pub const reinforced_span: u32 = 4;
+    pub const maximum_span: u32 = @max(plank_span, reinforced_span);
+};
+const horizontal_search_radius = Limits.maximum_span + 1;
+const horizontal_search_width = 2 * horizontal_search_radius + 1;
+const horizontal_search_capacity = horizontal_search_width * horizontal_search_width;
 pub const Reason = enum {
     material_not_placeable,
     missing_data,
@@ -145,8 +156,8 @@ pub const Validator = struct {
 
     fn height(cell: Cell, material: BlockType, base: State) Evaluation {
         const state: State = if (material.isWood()) .{ .wood = base.wood + 1 } else .{ .mineral = base.mineral + 1 };
-        if (state.wood > 12) return failure(.wood_height, cell, state.wood, 12);
-        if (state.mineral > 20) return failure(.mineral_height, cell, state.mineral, 20);
+        if (state.wood > Limits.wood_height) return failure(.wood_height, cell, state.wood, Limits.wood_height);
+        if (state.mineral > Limits.mineral_height) return failure(.mineral_height, cell, state.mineral, Limits.mineral_height);
         return .{ .supported = state };
     }
 
@@ -181,7 +192,8 @@ pub const Validator = struct {
     fn horizontal(self: *Validator, cell: Cell, material: BlockType, limit: u32) Missing!Evaluation {
         const Node = struct { cell: Cell, distance: u32 };
         // Search one extra shell to report an exceeded span, rather than a generic failure.
-        var nodes: [121]Node = undefined;
+        std.debug.assert(limit <= Limits.maximum_span);
+        var nodes: [horizontal_search_capacity]Node = undefined;
         nodes[0] = .{ .cell = cell, .distance = 0 };
         var count: usize = 1;
         var cursor: usize = 0;
@@ -243,25 +255,28 @@ pub const Validator = struct {
         return rejected;
     }
 
+    fn crushedBridgeSide(self: *Validator, side: Cell) Missing!Evaluation {
+        const neighbor = try self.get(side);
+        if (neighbor != .stone and neighbor != .crushed_stone)
+            return failure(.missing_foundation, side, 0, 1);
+        // Another unsupported bridge cannot extend the one-cell exception.
+        if (neighbor == .crushed_stone) return self.direct(side, neighbor);
+        if (!(try self.get(side - Cell{ 0, 0, 1 })).isStablePlatformMaterial())
+            return failure(.missing_foundation, side, 0, 1);
+        return .{ .supported = .{} };
+    }
+
     fn crushedBridge(self: *Validator, cell: Cell) Missing!Evaluation {
+        var unknown = false;
         for ([_]Cell{ .{ 1, 0, 0 }, .{ 0, 1, 0 } }) |direction| {
             var states: [2]State = undefined;
             var valid = true;
+            var unresolved = false;
             for ([_]Cell{ cell - direction, cell + direction }, 0..) |side, i| {
-                const neighbor = try self.get(side);
-                if (neighbor != .stone and neighbor != .crushed_stone) {
-                    valid = false;
-                    break;
-                }
-                // The side blocks need direct vertical support. Another bridge cell
-                // cannot extend this special exception into an unlimited stone span.
-                const state = if (neighbor == .stone) blk: {
-                    if (!(try self.get(side - Cell{ 0, 0, 1 })).isStablePlatformMaterial()) {
-                        valid = false;
-                        break;
-                    }
-                    break :blk Evaluation{ .supported = .{} };
-                } else try self.direct(side, neighbor);
+                const state = self.crushedBridgeSide(side) catch {
+                    unresolved = true;
+                    continue;
+                };
                 switch (state) {
                     .supported => |value| states[i] = value,
                     .rejected => {
@@ -270,8 +285,14 @@ pub const Validator = struct {
                     },
                 }
             }
-            if (valid) return .{ .supported = .{ .mineral = @max(1, @min(states[0].mineral, states[1].mineral)) } };
+            if (!valid) continue;
+            if (unresolved) {
+                unknown = true;
+                continue;
+            }
+            return .{ .supported = .{ .mineral = @max(1, @min(states[0].mineral, states[1].mineral)) } };
         }
+        if (unknown) return error.MissingData;
         var result = failure(.missing_foundation, cell, 0, 2);
         for ([_]Cell{ .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 } }) |direction| {
             result.rejected.add(cell + direction);
@@ -298,7 +319,7 @@ pub const Validator = struct {
             var below = cell;
             while (try self.get(below) == .crushed_stone) : (below[2] -= 1) {
                 run += 1;
-                if (run > 6) return failure(.crushed_column, cell, run, 6);
+                if (run > Limits.crushed_column) return failure(.crushed_column, cell, run, Limits.crushed_column);
                 if (try self.stablePlatform(below)) break;
             }
         }
@@ -306,12 +327,14 @@ pub const Validator = struct {
         const below = try self.get(cell - Cell{ 0, 0, 1 });
         // An incompatible occupied block cannot be treated as air to bypass the hierarchy.
         if (below != .none) {
-            if (direct_result == .supported) return direct_result;
-            if (direct_result.rejected.reason != .wood_height and direct_result.rejected.reason != .mineral_height)
+            if (direct_result == .rejected and direct_result.rejected.reason != .wood_height and direct_result.rejected.reason != .mineral_height)
                 return direct_result;
         }
-        if (material == .planks) return self.horizontal(cell, material, 2);
-        if (material.isReinforced()) return self.horizontal(cell, material, 4);
+        // Height one is already minimal. Otherwise compare all legal routes before caching.
+        if (direct_result == .supported and direct_result.supported.wood + direct_result.supported.mineral == 1)
+            return direct_result;
+        if (material == .planks) return self.horizontal(cell, material, Limits.plank_span);
+        if (material.isReinforced()) return self.horizontal(cell, material, Limits.reinforced_span);
         if (material == .crushed_stone and below == .none) return self.crushedBridge(cell);
         return direct_result;
     }
@@ -331,11 +354,32 @@ pub const Validator = struct {
         return self.checkExisting(cell);
     }
 
-    /// Check all constructed cells after the hypothetical edit. Generated cells are not
-    /// subjected to construction rules. A caller may gather cells before reading chunks.
+    /// A conservative downward support envelope, computed without a dependency index.
+    /// Each lower level can add a horizontal search shell and an off-center platform cell.
+    /// Soil reads only its immediate footprint. Wrapped x distances must follow the seam.
+    fn mayDependOnEdit(self: *Validator, cell: Cell) Missing!bool {
+        const edit = self.edit orelse return true;
+        const depth = cell[2] - edit.cell[2];
+        if (depth < 0) return false;
+        const material = try self.get(cell);
+        const radius: u64 = if (material.isEarth()) blk: {
+            if (depth != 1) return false;
+            break :blk 1;
+        } else if (material.isWood() or material.isMineralConstruction())
+            @intCast((depth + 1) * (horizontal_search_radius + 1))
+        else
+            return false;
+        var dx: u64 = @abs(cell[0] - edit.cell[0]);
+        if (comptime engine.WorldLayout.wrap_x) dx = @min(dx, self.reader.layout.size_in_blocks[0] - dx);
+        return dx <= radius and @abs(cell[1] - edit.cell[1]) <= radius;
+    }
+
+    /// Revalidate potentially affected constructions; unrelated missing support data
+    /// must not veto an edit. Generated cells are not subjected to construction rules.
     pub fn checkDependents(self: *Validator, cells: []const Cell, removal: bool) ?Failure {
         for (cells) |cell| {
             if (self.edit) |edit| if (@reduce(.And, edit.cell == cell)) continue;
+            if (!(self.mayDependOnEdit(cell) catch return failure(.missing_data, cell, 0, 0).rejected)) continue;
             if (self.checkExisting(cell)) |reason| {
                 var result = reason;
                 result.cause = reason.reason;
@@ -395,6 +439,9 @@ test "loose earth needs nine cells; unknown dependencies and world seams are dis
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.put(.{ 0, 10, 4 }, .dirt);
+    const seam_removal = fixture.check(.{ fixture.layout.size_in_blocks[0] - 1, 10, 3 }, .none).?;
+    try std.testing.expectEqual(Reason.would_remove_support, seam_removal.reason);
+    try std.testing.expectEqual(Reason.earth_footprint, seam_removal.cause.?);
     try std.testing.expectEqual(Reason.earth_footprint, fixture.check(.{ 20, 0, 4 }, .dirt).?.reason);
     fixture.missing = .{ 20, 20, 3 };
     try std.testing.expectEqual(Reason.missing_data, fixture.check(.{ 20, 20, 4 }, .dirt).?.reason);
@@ -550,4 +597,61 @@ test "crushed stone bridges one cell between opposed vertically supported stone 
     try fixture.raw(.{ 11, 10, 4 }, .none);
     try std.testing.expect(fixture.check(.{ 10, 10, 6 }, .crushed_stone) != null);
     try std.testing.expectEqual(Reason.material_not_placeable, fixture.check(.{ 20, 20, 4 }, .stone).?.reason);
+}
+
+test "planks and reinforced blocks inherit the lowest height across vertical and horizontal routes" {
+    for ([_]struct { material: BlockType, above: BlockType, height: u32 }{
+        .{ .material = .planks, .above = .tree_trunk, .height = Limits.wood_height },
+        .{ .material = .reinforced_concrete, .above = .rebar, .height = Limits.mineral_height },
+    }) |construction| {
+        var fixture: Fixture = .{};
+        defer fixture.deinit();
+        const top: i64 = 3 + construction.height;
+        for (4..@as(usize, @intCast(top + 1))) |z| try fixture.put(.{ 10, 10, @intCast(z) }, construction.material);
+        try std.testing.expect(fixture.check(.{ 10, 10, top + 1 }, construction.above) != null);
+        // The existing top cell can inherit height one from this nearby natural ledge.
+        try fixture.raw(.{ 11, 10, top - 1 }, .stone);
+        try fixture.put(.{ 11, 10, top }, construction.material);
+        try fixture.put(.{ 10, 10, top + 1 }, construction.above);
+        const removed = fixture.check(.{ 11, 10, top - 1 }, .none).?;
+        try std.testing.expectEqual(Reason.would_remove_support, removed.reason);
+        try std.testing.expectEqual(if (construction.material.isWood()) Reason.wood_height else Reason.mineral_height, removed.cause.?);
+        // Even a shorter horizontal route cannot legalize incompatible occupied support.
+        try fixture.raw(.{ 10, 10, top - 1 }, .sand);
+        const incompatible = fixture.check(.{ 10, 10, top }, construction.material).?;
+        try std.testing.expectEqual(if (construction.material.isWood()) Reason.incompatible_support else Reason.missing_foundation, incompatible.reason);
+    }
+}
+
+test "a known bridge orientation remains valid despite missing alternative neighbors" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    for ([_]i64{ 9, 11 }) |y| {
+        try fixture.put(.{ 10, y, 4 }, .crushed_stone);
+        try fixture.put(.{ 10, y, 5 }, .crushed_stone);
+    }
+    try std.testing.expect(fixture.check(.{ 10, 10, 5 }, .crushed_stone) == null);
+    fixture.missing = .{ 9, 10, 5 };
+    try std.testing.expect(fixture.check(.{ 10, 10, 5 }, .crushed_stone) == null);
+    // An unavailable x side cannot matter when its opposite side is known to be air.
+    try fixture.raw(.{ 10, 11, 5 }, .none);
+    try std.testing.expectEqual(Reason.missing_foundation, fixture.check(.{ 10, 10, 5 }, .crushed_stone).?.reason);
+    // Now the missing x side could complete a valid pair, so its data is required.
+    try fixture.raw(.{ 11, 10, 4 }, .crushed_stone);
+    try fixture.raw(.{ 11, 10, 5 }, .crushed_stone);
+    try std.testing.expectEqual(Reason.missing_data, fixture.check(.{ 10, 10, 5 }, .crushed_stone).?.reason);
+}
+
+test "dependent filtering follows supports through successive offset floors" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.put(.{ 10, 10, 4 }, .planks);
+    for (1..4) |level| {
+        const origin: Cell = .{ 10 + 2 * @as(i64, @intCast(level - 1)), 10, 4 + @as(i64, @intCast(level)) };
+        for (0..3) |offset| try fixture.put(origin + Cell{ @intCast(offset), 0, 0 }, .planks);
+    }
+    // Isolate the highest construction: its foundation is six cells away horizontally.
+    fixture.constructed.clearRetainingCapacity();
+    try fixture.constructed.append(std.testing.allocator, .{ 16, 10, 7 });
+    try std.testing.expectEqual(Reason.would_remove_support, fixture.check(.{ 10, 10, 3 }, .none).?.reason);
 }

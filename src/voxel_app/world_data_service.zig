@@ -468,7 +468,6 @@ pub const WorldDataService = struct {
             },
             .load_chunks => |load| {
                 if (self.is_shutting_down.load(.monotonic)) return;
-                const generator = if (load.mode == .blocks) ColumnGenerator.init(&self.worker_state.generator, load.column) else null;
                 var z = load.z_start;
                 while (z < load.z_end) : (z += 1) {
                     const coords = ChunkCoords{ load.column[0], load.column[1], z };
@@ -477,8 +476,8 @@ pub const WorldDataService = struct {
                         .mode = load.mode,
                         .mesh_pending = load.mode == .mesh,
                     }) catch @panic("OOM");
-                    if (generator) |*column| {
-                        load.client.append(self.blockResponse(coords, load.request_id, self.worker_state.loadChunk(self.allocator, column, coords)));
+                    if (load.mode == .blocks) {
+                        load.client.append(self.blockResponse(coords, load.request_id, self.worker_state.loadChunk(self.allocator, coords)));
                     } else {
                         self.mesh_loads.append(self.allocator, .{ .client = load.client, .coords = coords, .token = load.request_id }) catch @panic("OOM");
                     }
@@ -642,7 +641,7 @@ const WorkerState = struct {
         self.generator.deinit(allocator);
     }
 
-    fn loadChunk(self: *WorkerState, allocator: std.mem.Allocator, _: *const ColumnGenerator, coords: ChunkCoords) WorldChunk {
+    fn loadChunk(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) WorldChunk {
         return self.loadAt(allocator, coords);
     }
 
@@ -672,11 +671,18 @@ const WorkerState = struct {
             std.debug.assert(chunk.apply(allocator, local, operation.action) == .success);
             if (operation.action == .put) {
                 chunk.metadata.markConstructed(allocator, transformations.index(local));
-                if (operation.action.put == .dirt) chunk.metadata.timed.schedule(allocator, .{
-                    .block = transformations.index(local),
-                    .kind = .compact_dirt,
-                    .due_tick = self.tick +| transformations.transformation_delay,
-                });
+                if (operation.action.put == .dirt) {
+                    var above = operation.block;
+                    above[2] += 1;
+                    const covered = above[2] < self.layout.size_in_blocks[2] and ReadContext.read(&context, above).? != .none;
+                    if (covered) {
+                        chunk.changeType(local, .packed_dirt);
+                    } else chunk.metadata.timed.schedule(allocator, .{
+                        .block = transformations.index(local),
+                        .kind = .compact_dirt,
+                        .due_tick = self.tick +| transformations.transformation_delay,
+                    });
+                }
             }
             chunk.chunk_revision += 1;
             self.next_mesh_revision += 1;
@@ -1331,8 +1337,7 @@ test "losing solid faces retains previously unloaded neighbors as dirty revision
                 try std.testing.expect(retained.isDirty());
                 try std.testing.expectEqual(1, retained.chunk_revision);
                 try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, retained.solid_block_count);
-                const generator = ColumnGenerator.init(&state.generator, .{ neighbor_coords[0], neighbor_coords[1] });
-                const reloaded = state.loadChunk(std.testing.allocator, &generator, neighbor_coords);
+                const reloaded = state.loadChunk(std.testing.allocator, neighbor_coords);
                 defer reloaded.deinit(std.testing.allocator);
                 try std.testing.expectEqual(retained.flags, reloaded.flags);
                 try std.testing.expectEqual(retained.chunk_revision, reloaded.chunk_revision);
@@ -1732,4 +1737,51 @@ test "boundary-only observers are notified before the edit reply without subscri
     try waitForResponses(editor, &replies, 2);
     observer.takeResponses(&observed);
     try std.testing.expectEqual(1, observed.items.len);
+}
+
+test "soil placed beneath existing sand packs immediately and waits for exposure before growing grass" {
+    const allocator = std.testing.allocator;
+    var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, allocator, &test_layout) };
+    defer state.deinit(allocator);
+    const surface = test_layout.size_in_blocks[2] / 2 - CHUNK_SIZE / 2;
+    const block = [3]u32{ 10, 10, surface };
+    const covered = state.applyOperation(allocator, .{ .block = .{ 10, 10, surface + 1 }, .action = .{ .put = .sand } });
+    defer covered.chunk.deinit(allocator);
+    try std.testing.expectEqual(OperationStatus.success, covered.status);
+    const placed = state.applyOperation(allocator, .{ .block = block, .action = .{ .put = .dirt } });
+    defer placed.chunk.deinit(allocator);
+    try std.testing.expectEqual(OperationStatus.success, placed.status);
+    try std.testing.expectEqual(rules.BlockType.packed_dirt, readStateBlock(&state, block));
+    try std.testing.expectEqual(rules.BlockType.packed_dirt, placed.chunk.content.getBlock(world_module.splitBlockCoords(block)[1]));
+    try std.testing.expectEqual(0, placed.chunk.metadata.timed.events.items.len);
+    const coords, _ = world_module.splitBlockCoords(block);
+    state.tick = transformations.transformation_delay * 2;
+    try std.testing.expect(!state.transformChunk(allocator, coords));
+    try std.testing.expectEqual(.packed_dirt, readStateBlock(&state, block));
+    const uncovered = state.applyOperation(allocator, .{ .block = .{ 10, 10, surface + 1 }, .action = .remove });
+    defer uncovered.chunk.deinit(allocator);
+    try std.testing.expectEqual(OperationStatus.success, uncovered.status);
+    state.tick += transformations.transformation_delay - 1;
+    try std.testing.expect(!state.transformChunk(allocator, coords));
+    state.tick += 1;
+    try std.testing.expect(state.transformChunk(allocator, coords));
+    try std.testing.expectEqual(.grass, readStateBlock(&state, block));
+}
+
+test "refilling an underground hole packs soil under a ceiling, including across chunk boundaries" {
+    const allocator = std.testing.allocator;
+    var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, allocator, &test_layout) };
+    defer state.deinit(allocator);
+    const surface = test_layout.size_in_blocks[2] / 2 - CHUNK_SIZE / 2;
+    for ([_]u32{ surface - 2, CHUNK_SIZE - 1 }) |z| {
+        const block = [3]u32{ 10, 10, z };
+        const mined = state.applyOperation(allocator, .{ .block = block, .action = .remove });
+        defer mined.chunk.deinit(allocator);
+        try std.testing.expectEqual(OperationStatus.success, mined.status);
+        const filled = state.applyOperation(allocator, .{ .block = block, .action = .{ .put = .dirt } });
+        defer filled.chunk.deinit(allocator);
+        try std.testing.expectEqual(OperationStatus.success, filled.status);
+        try std.testing.expectEqual(rules.BlockType.packed_dirt, readStateBlock(&state, block));
+        try std.testing.expectEqual(0, filled.chunk.metadata.timed.events.items.len);
+    }
 }
