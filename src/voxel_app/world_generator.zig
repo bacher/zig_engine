@@ -2,7 +2,6 @@ const ChunkCoords = @import("engine").ChunkCoords;
 const std = @import("std");
 
 const BlockType = @import("engine").voxel_chunk.BlockType;
-const transformations = @import("block_transformations.zig");
 const PerlinNoise = @import("./perlin_noise.zig").PerlinNoise;
 const WorldChunkData = @import("./world_chunk_data.zig").WorldChunkData;
 const WorldChunk = @import("./world.zig").WorldChunk;
@@ -270,19 +269,7 @@ const TerrainColumn = struct {
             return allocateChunk(allocator, WorldChunkData.initSolid());
         }
 
-        var chunk = allocateChunk(allocator, generateTerrainChunk(&self.heights, chunk_bottom, self.dirt_depth));
-        for (self.heights, 0..) |row, y| {
-            for (row, 0..) |height, x| {
-                const surface = height - 1;
-                if (surface < chunk_bottom or surface >= chunk_top) continue;
-                chunk.metadata.timed.schedule(allocator, .{
-                    .block = transformations.index(.{ @intCast(x), @intCast(y), @intCast(surface - chunk_bottom) }),
-                    .kind = .grow_grass,
-                    .due_tick = transformations.transformation_delay,
-                });
-            }
-        }
-        return chunk;
+        return allocateChunk(allocator, generateTerrainChunk(&self.heights, chunk_bottom, self.dirt_depth));
     }
 };
 
@@ -346,6 +333,8 @@ fn generateTerrainChunk(
 
                 chunk.blocks[local_z][local_y][local_x] = if (block_z >= height)
                     BlockType.none
+                else if (depth_below_surface == 0)
+                    BlockType.grass
                 else if (depth_below_surface <= dirt_depth)
                     BlockType.packed_dirt
                 else
@@ -503,6 +492,9 @@ test "unreachable terrain requires a solid ceiling and one-block horizontal wall
     const surface_chunk = column.generateChunk(std.testing.allocator, 2);
     defer surface_chunk.deinit(std.testing.allocator);
     try std.testing.expect(!surface_chunk.flags.is_unreachable);
+    try std.testing.expectEqual(BlockType.grass, surface_chunk.content.getBlock(.{ 0, 0, CHUNK_SIZE - 1 }));
+    try std.testing.expectEqual(BlockType.packed_dirt, surface_chunk.content.getBlock(.{ 0, 0, CHUNK_SIZE - 2 }));
+    try std.testing.expectEqual(0, surface_chunk.metadata.timed.events.items.len);
 }
 
 test "generated unreachable flags agree with all six actual neighboring walls" {

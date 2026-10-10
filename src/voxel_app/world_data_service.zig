@@ -369,12 +369,6 @@ pub const WorldDataService = struct {
                     self.mesh_loads.clearRetainingCapacity();
                     self.next_mesh_load = 0;
                 }
-                // A late load can first discover natural soil whose initial grass
-                // deadline has already elapsed. Publish its final appearance now.
-                self.processTransformations();
-                var transformed = self.dirty_meshes.keyIterator();
-                while (transformed.next()) |id| self.publishMesh(self.layout.decodeChunkId(id.*));
-                self.dirty_meshes.clearRetainingCapacity();
                 self.flushPackages();
             }
         }
@@ -634,14 +628,7 @@ const WorkerState = struct {
             if (self.columns.count() >= 64) self.columns.clearRetainingCapacity();
             self.columns.put(allocator, key, ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] })) catch @panic("OOM");
         }
-        const chunk = self.columns.getPtr(key).?.generateChunk(allocator, coords[2]);
-        // Retain sparse pending events even when nobody subscribes to this chunk.
-        // The service already retains committed chunks independently of streaming.
-        if (chunk.metadata.timed.events.items.len != 0) {
-            self.modified_chunks.put(allocator, self.layout.encodeChunkCoords(coords), chunk.clone(allocator)) catch @panic("OOM");
-            self.refreshTimedIndex(allocator, self.layout.encodeChunkCoords(coords));
-        }
-        return chunk;
+        return self.columns.getPtr(key).?.generateChunk(allocator, coords[2]);
     }
 
     fn deinit(self: *WorkerState, allocator: std.mem.Allocator) void {
@@ -853,6 +840,43 @@ fn readStateBlock(state: *WorkerState, block: [3]u32) @import("engine").voxel_ch
     const chunk = state.loadAt(std.testing.allocator, coords);
     defer chunk.deinit(std.testing.allocator);
     return chunk.content.getBlock(local);
+}
+
+test "generated soil is already packed and grassy, but newly exposed soil waits thirty minutes" {
+    const allocator = std.testing.allocator;
+    var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.{
+        .terrain = .{ .seed = 12345, .params = .{ .base_height = CHUNK_SIZE + 1, .height_amplitude = 0 } },
+    }, allocator, &test_layout) };
+    defer state.deinit(allocator);
+    // Put the surface in the first layer of a chunk, with packed soil in the chunk below.
+    const surface = [3]u32{ 10, 10, CHUNK_SIZE };
+    const below = [3]u32{ 10, 10, CHUNK_SIZE - 1 };
+    for ([_]transformations.Tick{ 0, transformations.transformation_delay * 2 }) |tick| {
+        state.tick = tick;
+        try std.testing.expectEqual(.grass, readStateBlock(&state, surface));
+        try std.testing.expectEqual(.packed_dirt, readStateBlock(&state, below));
+        try std.testing.expectEqual(.stone, readStateBlock(&state, .{ 10, 10, CHUNK_SIZE - 5 }));
+        // Untouched terrain needs neither scheduled events nor retained modified chunks.
+        try std.testing.expectEqual(0, state.timed_chunks.count());
+        try std.testing.expectEqual(0, state.modified_chunks.count());
+    }
+    const mined = state.applyOperation(allocator, .{ .block = surface, .action = .remove });
+    defer mined.chunk.deinit(allocator);
+    try std.testing.expectEqual(OperationStatus.success, mined.status);
+    try std.testing.expectEqual(.dirt, mined.diagnostics.mined_type.?);
+    const below_coords, _ = world_module.splitBlockCoords(below);
+    try std.testing.expectEqual(below_coords, mined.changed_below.?);
+    const events = state.modified_chunks.get(test_layout.encodeChunkCoords(below_coords)).?.metadata.timed.events.items;
+    try std.testing.expectEqual(1, events.len);
+    try std.testing.expectEqual(transformations.Kind.grow_grass, events[0].kind);
+    try std.testing.expectEqual(state.tick + transformations.transformation_delay, events[0].due_tick);
+    state.tick += transformations.transformation_delay - 1;
+    try std.testing.expect(!state.transformChunk(allocator, below_coords));
+    try std.testing.expectEqual(.packed_dirt, readStateBlock(&state, below));
+    state.tick += 1;
+    try std.testing.expect(state.transformChunk(allocator, below_coords));
+    try std.testing.expectEqual(.grass, readStateBlock(&state, below));
+    try std.testing.expectEqual(0, state.timed_chunks.count());
 }
 
 test "soil compacts at thirty minutes, grows grass later, and resets exposure after covering" {

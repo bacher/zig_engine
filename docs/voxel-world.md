@@ -44,7 +44,7 @@ The prepared generator borrows its layout. Columns retain that layout and materi
 
 Terrain height combines periodic-x Perlin noise octaves, rounds the result, and clamps it between 1 and the world's block height. X periods use whole numbers of noise cells so both height values and slopes meet at the wrap seam. Default settings use noise scale 192, four octaves, frequency multiplier 2, amplitude multiplier 0.5, base height at half the selected world height (128 with the preset), height amplitude 48, and four dirt blocks below the surface.
 
-The generated column has packed soil at and immediately below the surface, natural stone deeper down, and air above. Exposed generated soil schedules grass at world tick zero plus 30 minutes. There are no generated caves. Fully above-surface chunks are empty; sufficiently deep chunks use a shortcut to fill stone. The flat generator supplies solid lower chunks and a half-filled surface chunk near the world midpoint.
+The generated column has grass-covered packed soil at the surface, packed soil immediately below, natural stone deeper down, and air above. Generated soil is already compacted and its surface already grassy, without pending transformations. There are no generated caves. Fully above-surface chunks are empty; sufficiently deep chunks use a shortcut to fill stone. The flat generator supplies solid lower chunks and a half-filled surface chunk near the world midpoint.
 
 Generation is deterministic for the same layout, coordinates, seed, and parameters. Regression snapshots from before octave preparation retain the same default/custom heights and enclosure bounds at seams and world edges. Untouched chunks can therefore be discarded and regenerated. Committed modifications override generated data.
 

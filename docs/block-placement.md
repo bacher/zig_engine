@@ -110,8 +110,8 @@ Stopping game-time advancement pauses deadlines. Subscription eviction has no ef
 - Newly compacted exposed soil schedules grass 30 minutes after compaction.
 - Covering soil clears grass and cancels its pending surface timer.
 - Exposing packed soil schedules grass 30 minutes after the exposure.
-- Initial terrain is packed soil, with its exposed surface's grass deadline 30 minutes
-  after world tick zero. A terrain chunk first discovered later catches up to world time.
+- Generated soil is already packed, with grass on its exposed surface immediately.
+  Generation schedules no soil transformations, regardless of when a chunk is discovered.
 - Grass may grow underground. Light and sky access are not checked.
 
 Each chunk has sparse, independently owned metadata for constructed indices and a sorted
