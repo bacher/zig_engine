@@ -6,6 +6,11 @@ pub const KeyParams = struct {
     mods: zglfw.Mods,
 };
 
+pub const MouseButtonParams = struct {
+    button: zglfw.MouseButton,
+    mods: zglfw.Mods,
+};
+
 pub const CursorCapture = enum { while_left_button, always };
 
 pub fn InputController(comptime Context: type) type {
@@ -14,6 +19,7 @@ pub fn InputController(comptime Context: type) type {
             context: *Context,
             on_key_press: ?*const (fn (context: *Context, key_params: KeyParams) void) = null,
             on_key_release: ?*const (fn (context: *Context, key_params: KeyParams) void) = null,
+            on_mouse_button_press: ?*const fn (context: *Context, params: MouseButtonParams) void = null,
         };
 
         const Self = @This();
@@ -34,7 +40,6 @@ pub fn InputController(comptime Context: type) type {
         cursor_position: [2]f32,
         cursor_position_delta: [2]f32 = .{ 0, 0 },
         cursor_left_button_pressed: bool = false,
-        cursor_left_button_pressed_this_frame: bool = false,
         cursor_right_button_pressed: bool = false,
         cursor_capture: CursorCapture = .while_left_button,
         cursor_captured: bool = false,
@@ -84,10 +89,12 @@ pub fn InputController(comptime Context: type) type {
             _ = input_controller.window.setMouseButtonCallback(Self.onMouseButtonCallback);
         }
 
-        fn onMouseButtonCallback(_: *zglfw.Window, button: zglfw.MouseButton, action: zglfw.Action, _: zglfw.Mods) callconv(.c) void {
+        fn onMouseButtonCallback(_: *zglfw.Window, button: zglfw.MouseButton, action: zglfw.Action, mods: zglfw.Mods) callconv(.c) void {
             if (Self.instance) |input_controller| {
-                if (button == .left and action == .press and input_controller.focused)
-                    input_controller.cursor_left_button_pressed_this_frame = true;
+                if (action == .press and input_controller.focused) {
+                    if (input_controller.callbacks.on_mouse_button_press) |callback|
+                        callback(input_controller.callbacks.context, .{ .button = button, .mods = mods });
+                }
             }
         }
 
@@ -147,8 +154,6 @@ pub fn InputController(comptime Context: type) type {
             const focused = window.getAttribute(.focused);
             input_controller.focus_changed = focused != input_controller.focused;
             input_controller.focused = focused;
-            if (!focused or input_controller.focus_changed)
-                input_controller.cursor_left_button_pressed_this_frame = false;
             if (!focused) {
                 input_controller.pressed_keys.clearRetainingCapacity();
                 input_controller.release_queue.clearRetainingCapacity();
@@ -180,7 +185,6 @@ pub fn InputController(comptime Context: type) type {
             }
             input_controller.release_queue.clearRetainingCapacity();
             input_controller.pressed_this_frame.clearRetainingCapacity();
-            input_controller.cursor_left_button_pressed_this_frame = false;
         }
 
         pub fn isKeyPressed(input_controller: *const Self, key: zglfw.Key) bool {
@@ -230,16 +234,55 @@ test "press-release between frames keeps the press edge, ends held input, and re
     InputControllerGeneric.onKeyCallback(undefined, .space, 0, .repeat, .{});
     try std.testing.expect(input.isKeyPressed(.space));
     try std.testing.expect(!input.wasKeyPressed(.space));
+}
 
-    // A complete click between frames survives release and fires only once.
-    InputControllerGeneric.onMouseButtonCallback(undefined, .left, .press, .{});
-    InputControllerGeneric.onMouseButtonCallback(undefined, .left, .release, .{});
-    try std.testing.expect(input.cursor_left_button_pressed_this_frame);
+test "keyboard and mouse press callbacks preserve every event and modifier in arrival order" {
+    const Event = union(enum) { key: KeyParams, mouse: MouseButtonParams };
+    const Probe = struct {
+        events: std.ArrayList(Event) = .empty,
+
+        fn key(self: *@This(), params: KeyParams) void {
+            self.events.append(std.testing.allocator, .{ .key = params }) catch @panic("OOM");
+        }
+
+        fn mouse(self: *@This(), params: MouseButtonParams) void {
+            self.events.append(std.testing.allocator, .{ .mouse = params }) catch @panic("OOM");
+        }
+    };
+    var probe: Probe = .{};
+    defer probe.events.deinit(std.testing.allocator);
+    const Input = InputController(Probe);
+    var input: Input = .{
+        .allocator = std.testing.allocator,
+        .window = undefined,
+        .callbacks = .{ .context = &probe, .on_key_press = Probe.key, .on_mouse_button_press = Probe.mouse },
+        .pressed_keys = std.AutoHashMap(zglfw.Key, void).init(std.testing.allocator),
+        .release_queue = std.AutoHashMap(zglfw.Key, void).init(std.testing.allocator),
+        .cursor_position = .{ 0, 0 },
+    };
+    defer input.pressed_keys.deinit();
+    defer input.release_queue.deinit();
+    defer input.pressed_this_frame.deinit(std.testing.allocator);
+    Input.instance = &input;
+    defer Input.instance = null;
+    Input.onKeyCallback(undefined, .e, 0, .press, .{ .shift = true });
+    Input.onKeyCallback(undefined, .e, 0, .repeat, .{ .shift = true });
+    Input.onKeyCallback(undefined, .e, 0, .release, .{});
+    Input.onMouseButtonCallback(undefined, .left, .press, .{ .control = true });
+    Input.onMouseButtonCallback(undefined, .left, .release, .{});
+    Input.onKeyCallback(undefined, .e, 0, .press, .{});
+    Input.onKeyCallback(undefined, .e, 0, .release, .{});
+    Input.onMouseButtonCallback(undefined, .left, .press, .{});
+    Input.onMouseButtonCallback(undefined, .left, .release, .{});
+    const expected = [_]Event{
+        .{ .key = .{ .key = .e, .mods = .{ .shift = true } } },
+        .{ .mouse = .{ .button = .left, .mods = .{ .control = true } } },
+        .{ .key = .{ .key = .e, .mods = .{} } },
+        .{ .mouse = .{ .button = .left, .mods = .{} } },
+    };
+    try std.testing.expectEqualDeep(&expected, probe.events.items);
     input.flushQueue();
-    try std.testing.expect(!input.cursor_left_button_pressed_this_frame);
-    InputControllerGeneric.onMouseButtonCallback(undefined, .right, .press, .{});
-    try std.testing.expect(!input.cursor_left_button_pressed_this_frame);
     input.focused = false;
-    InputControllerGeneric.onMouseButtonCallback(undefined, .left, .press, .{});
-    try std.testing.expect(!input.cursor_left_button_pressed_this_frame);
+    Input.onMouseButtonCallback(undefined, .left, .press, .{});
+    try std.testing.expectEqual(4, probe.events.items.len);
 }

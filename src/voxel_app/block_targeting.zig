@@ -9,7 +9,7 @@ pub const reach: f64 = 4;
 
 pub const Hit = struct {
     block: [3]u32,
-    /// The face-adjacent cell, absent when starting inside a block or outside storage.
+    /// The face-adjacent cell, absent for strictly interior starts or outside storage.
     placement: ?[3]u32,
     distance: f64,
 };
@@ -24,17 +24,28 @@ pub fn cast(world: *const World, position: Position, direction: Position) @impor
     var start = position + @as(Position, @floatFromInt(world.layout.origin_chunk)) * @as(Position, @splat(engine.chunk_utils.CHUNK_SIZE));
     // Keep periodic positions small before converting to integer cell coordinates.
     start[0] = @mod(start[0], @as(f64, @floatFromInt(world.layout.size_in_blocks[0])));
+    // Allow eight f64 epsilon units at the storage-coordinate scale for origin
+    // conversion and DDA rounding. This only widens the cutoff by rounding noise.
+    const reach_limit = reach + 8 * std.math.floatEps(f64) * @max(reach, @reduce(.Max, @abs(start)));
     // Even a spectator far outside the finite world cannot reach it from here.
     inline for (1..3) |axis| {
-        if (start[axis] < -reach or start[axis] > @as(f64, @floatFromInt(world.layout.size_in_blocks[axis])) + reach) return null;
+        if (start[axis] < -reach_limit or start[axis] > @as(f64, @floatFromInt(world.layout.size_in_blocks[axis])) + reach_limit) return null;
     }
     var cell: Cell = @intFromFloat(@floor(start));
     var step: Cell = @splat(0);
     var next: Position = @splat(std.math.inf(f64));
     var interval: Position = @splat(std.math.inf(f64));
+    var entry_step: ?Cell = null;
     inline for (0..3) |axis| {
         if (forward[axis] != 0) {
             step[axis] = if (forward[axis] > 0) 1 else -1;
+            // Positive rays start in the entered cell; negative rays step into it
+            // at distance zero below. Preserve a face for either boundary start.
+            if (step[axis] > 0 and start[axis] == @floor(start[axis]) and entry_step == null) {
+                var normal: Cell = @splat(0);
+                normal[axis] = step[axis];
+                entry_step = normal;
+            }
             const boundary: f64 = @floatFromInt(cell[axis] + @as(i64, @intFromBool(step[axis] > 0)));
             next[axis] = (boundary - start[axis]) / forward[axis];
             interval[axis] = 1 / @abs(forward[axis]);
@@ -42,8 +53,7 @@ pub fn cast(world: *const World, position: Position, direction: Position) @impor
     }
 
     var distance: f64 = 0;
-    var entry_step: ?Cell = null;
-    while (distance <= reach) {
+    while (distance <= reach_limit) {
         const exit = @reduce(.Min, next);
         // At an exact boundary, ignore the cell behind a negative-pointing ray.
         if (exit > distance) {
@@ -57,7 +67,7 @@ pub fn cast(world: *const World, position: Position, direction: Position) @impor
                 }
             }
         }
-        if (exit > reach) return null;
+        if (exit > reach_limit) return null;
         distance = exit;
         entry_step = null;
         // Skip cells touched only at an edge/corner. Choose a deterministic face at ties.
@@ -85,7 +95,9 @@ fn storedCell(layout: *const engine.WorldLayout, cell: Cell) ?[3]u32 {
 const Fixture = @import("terrain_test_fixture.zig").Fixture;
 
 fn expectHit(world: *const World, position: Position, direction: Position, block: Cell, placement: ?Cell, distance: f64) !void {
-    const hit = (try cast(world, position, direction)).?;
+    const result = try cast(world, position, direction);
+    try std.testing.expect(result != null);
+    const hit = result.?;
     const origin: Cell = @as(Cell, world.layout.origin_chunk) * @as(Cell, @splat(engine.chunk_utils.CHUNK_SIZE));
     try std.testing.expectEqual(storedCell(world.layout, block + origin).?, hit.block);
     try std.testing.expectEqual(if (placement) |cell| storedCell(world.layout, cell + origin) else null, hit.placement);
@@ -172,4 +184,29 @@ test "finite bounds and starts inside occupied cells never invent a placement fa
     fixture.set(.{ 0, 0, 0 }, .stone);
     try expectHit(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 0, 1, 0 }, .{ 0, 0, 0 }, null, 0);
     try std.testing.expectEqual(null, try cast(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 0, 0, 0 }));
+}
+
+test "zero-distance boundary hits retain placement faces for both signs on every axis" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ 0, 0, 0 }, .stone);
+    inline for (0..3) |axis| {
+        for ([_]i64{ -1, 1 }) |sign| {
+            var position: Position = @splat(0.5);
+            position[axis] = if (sign > 0) 0 else 1;
+            var direction: Position = @splat(0);
+            direction[axis] = @floatFromInt(sign);
+            var placement: Cell = @splat(0);
+            placement[axis] = -sign;
+            try expectHit(&fixture.world, position, direction, .{ 0, 0, 0 }, placement, 0);
+        }
+    }
+}
+
+test "diagonal hits at exactly four metres tolerate rounding but reject blocks beyond reach" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ 3, 3, 0 }, .stone);
+    try expectHit(&fixture.world, .{ 0.6, 0.1, 0.5 }, .{ 3, 4, 0 }, .{ 3, 3, 0 }, .{ 2, 3, 0 }, 4);
+    try std.testing.expectEqual(null, try cast(&fixture.world, .{ 0.6 - 0.000001, 0.1, 0.5 }, .{ 3, 4, 0 }));
 }

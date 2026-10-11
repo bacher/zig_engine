@@ -13,6 +13,7 @@ const debug = @import("debug");
 const WindowContext = @import("engine").WindowContext;
 const Engine = @import("engine").Engine;
 const KeyParams = @import("engine").KeyParams;
+const MouseButtonParams = @import("engine").MouseButtonParams;
 const GameObject = @import("engine").GameObject;
 const GameObjectGroup = @import("engine").GameObjectGroup;
 const Scene = @import("engine").Scene;
@@ -59,8 +60,8 @@ const Game = struct {
     player: ?PlayerController = null,
     control_mode: enum { player, spectator } = .player,
     jump_requested: bool = false,
-    placement_requested: bool = false,
-    removal_requested: bool = false,
+    /// Keyboard and mouse presses retain their order and material until the camera updates.
+    tool_commands: std.ArrayList(BlockAction) = .empty,
     last_missing_collision: ?ChunkCoords = null,
     recovery_warning: bool = false,
     selected_material: voxel_chunk_module.BlockType = .dirt,
@@ -111,6 +112,7 @@ const Game = struct {
 
     pub fn deinit(game: *Game) void {
         game.stopWorkers();
+        game.tool_commands.deinit(game.allocator);
         if (game.player) |*player| player.deinit();
         game.chunk_subscriptions.deinit(game.allocator);
         for (game.chunk_packages.items) |*package| package.deinit(game.allocator);
@@ -490,13 +492,15 @@ const Game = struct {
 
     fn updateBlockTool(game: *Game) void {
         const input = game.engine.input_controller;
-        const place = game.placement_requested or input.cursor_left_button_pressed_this_frame;
-        const remove = game.removal_requested;
-        game.placement_requested = false;
-        game.removal_requested = false;
+        defer game.tool_commands.clearRetainingCapacity();
         if (!input.focused or input.focus_changed) return;
-        if (remove) game.editBlockInView(.remove);
-        if (place) game.editBlockInView(.place);
+        for (game.tool_commands.items) |command| game.editBlockInView(command);
+    }
+
+    fn queueBlockAction(game: *Game, action: BlockAction) void {
+        game.tool_commands.append(game.allocator, action) catch |err| {
+            std.debug.print("can't queue block edit: {s}\n", .{@errorName(err)});
+        };
     }
 
     fn editBlockInView(game: *Game, action: BlockAction) void {
@@ -519,7 +523,7 @@ const Game = struct {
         };
         const result = world.tryOperation(.{ .block = edited_block, .action = switch (action) {
             .remove => .remove,
-            .place => .{ .put = game.selected_material },
+            .place => |material| .{ .put = material },
         } });
         if (result.status != .success) {
             if (result.failure) |failure|
@@ -625,9 +629,9 @@ fn applyChunkResponse(world: *World, subscriptions: *const std.AutoHashMapUnmana
     return true;
 }
 
-const BlockAction = enum {
+const BlockAction = union(enum) {
     remove,
-    place,
+    place: voxel_chunk_module.BlockType,
 };
 
 fn initWorld(game: *Game) !void {
@@ -733,6 +737,7 @@ pub fn main(init: std.process.Init) !void {
             .onUpdate = onUpdate,
             .onRender = onRender,
             .onKeyPress = onKeyPress,
+            .onMouseButtonPress = onMouseButtonPress,
         },
     );
     game.engine = engine;
@@ -888,9 +893,9 @@ fn onKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque) v
 
 fn handleKeyPress(game: *Game, key_params: KeyParams) void {
     switch (key_params.key) {
-        .x => game.removal_requested = true,
+        .x => game.queueBlockAction(.remove),
         .e => if (!key_params.mods.control) {
-            game.placement_requested = true;
+            game.queueBlockAction(.{ .place = game.selected_material });
         },
         .one, .two, .three, .four, .five, .six => {
             game.selected_material = switch (key_params.key) {
@@ -911,6 +916,16 @@ fn handleKeyPress(game: *Game, key_params: KeyParams) void {
         },
         else => {},
     }
+}
+
+fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams, game_opaque: *anyopaque) void {
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
+    if (!engine.window_context.window.getAttribute(.focused)) return;
+    handleMouseButtonPress(game, params);
+}
+
+fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
+    if (params.button == .left) game.queueBlockAction(.{ .place = game.selected_material });
 }
 
 fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
@@ -1008,12 +1023,12 @@ test "camera placement rejects the player's body before changing the optimistic 
     const ground: [3]u32 = .{ 8192, 4096, 127 };
     fixture.game.world.?.setBlockUnchecked(ground, .stone);
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
-    fixture.game.editBlockInView(.place);
+    fixture.game.editBlockInView(.{ .place = fixture.game.selected_material });
     try std.testing.expect(!try fixture.game.world.?.isBlockSolid(.{ 8192, 4096, 128 }));
     try std.testing.expectEqual(@as(usize, 0), fixture.game.world.?.pending_operations.items.len);
     // The same protection applies while the player is frozen in spectator mode.
     fixture.game.control_mode = .spectator;
-    fixture.game.editBlockInView(.place);
+    fixture.game.editBlockInView(.{ .place = fixture.game.selected_material });
     try std.testing.expectEqual(@as(usize, 0), fixture.game.world.?.pending_operations.items.len);
 }
 
@@ -1053,7 +1068,7 @@ test "E and left click place once, X removes, Ctrl E and Z do not place, and 1-6
     try std.testing.expectEqual(2, fixture.game.world.?.pending_operations.items.len);
     try std.testing.expect(fixture.game.world.?.pending_operations.items[1].operation.action == .remove);
 
-    input.cursor_left_button_pressed_this_frame = true;
+    handleMouseButtonPress(&fixture.game, .{ .button = .left, .mods = .{} });
     input.cursor_left_button_pressed = true;
     fixture.game.updateBlockTool();
     try std.testing.expectEqual(3, fixture.game.world.?.pending_operations.items.len);
@@ -1068,13 +1083,102 @@ test "E and left click place once, X removes, Ctrl E and Z do not place, and 1-6
     fixture.game.updateBlockTool();
     try std.testing.expectEqual(3, fixture.game.world.?.pending_operations.items.len);
     input.focus_changed = true;
-    input.cursor_left_button_pressed_this_frame = true;
+    handleMouseButtonPress(&fixture.game, .{ .button = .left, .mods = .{} });
     handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
     fixture.game.updateBlockTool();
     input.flushQueue();
     input.focus_changed = false;
     fixture.game.updateBlockTool();
     try std.testing.expectEqual(3, fixture.game.world.?.pending_operations.items.len);
+}
+
+test "tool presses before an update preserve placement then removal order" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
+    handleKeyPress(&fixture.game, .{ .key = .x, .mods = .{} });
+    fixture.game.updateBlockTool();
+    const operations = fixture.game.world.?.pending_operations.items;
+    try std.testing.expectEqual(2, operations.len);
+    try std.testing.expect(operations[0].operation.action == .put);
+    try std.testing.expect(operations[1].operation.action == .remove);
+    try std.testing.expectEqual(operations[0].operation.block, operations[1].operation.block);
+    try std.testing.expect(try fixture.game.world.?.isBlockSolid(StreamingTest.toolTarget()));
+}
+
+test "two keyboard or mouse placement presses before an update both edit the world" {
+    for ([_]bool{ false, true }) |mouse| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        try fixture.prepareToolTest();
+        for (0..2) |_| {
+            if (mouse) {
+                handleMouseButtonPress(&fixture.game, .{ .button = .left, .mods = .{} });
+            } else {
+                handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
+            }
+        }
+        fixture.game.updateBlockTool();
+        const operations = fixture.game.world.?.pending_operations.items;
+        try std.testing.expectEqual(2, operations.len);
+        try std.testing.expectEqual(operations[0].operation.block[1] - 1, operations[1].operation.block[1]);
+    }
+}
+
+test "a placement press captures its material before the next selection" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
+    fixture.game.selected_material = .snow;
+    fixture.game.updateBlockTool();
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, fixture.game.world.?.pending_operations.items[0].operation.action.put);
+}
+
+test "mixed keyboard and mouse commands execute in order with each press's material" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
+    fixture.game.selected_material = .snow;
+    handleMouseButtonPress(&fixture.game, .{ .button = .left, .mods = .{} });
+    handleKeyPress(&fixture.game, .{ .key = .x, .mods = .{} });
+    handleMouseButtonPress(&fixture.game, .{ .button = .right, .mods = .{} });
+    fixture.game.updateBlockTool();
+    const operations = fixture.game.world.?.pending_operations.items;
+    try std.testing.expectEqual(3, operations.len);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, operations[0].operation.action.put);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.snow, operations[1].operation.action.put);
+    try std.testing.expectEqual(operations[0].operation.block[1] - 1, operations[1].operation.block[1]);
+    try std.testing.expect(operations[2].operation.action == .remove);
+    try std.testing.expectEqual(operations[1].operation.block, operations[2].operation.block);
+    try std.testing.expect(try fixture.game.world.?.isBlockSolid(operations[0].operation.block));
+    try std.testing.expect(!try fixture.game.world.?.isBlockSolid(operations[1].operation.block));
+    try std.testing.expectEqual(0, fixture.game.tool_commands.items.len);
+}
+
+test "queued edits use the camera view updated after the press" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    const origin = test_layout.origin_chunk;
+    try fixture.game.world.?.insertChunk(origin - ChunkCoords{ 0, 0, 1 }, WorldChunk.initEmpty());
+    const target = StreamingTest.toolTarget();
+    const placement: [3]u32 = .{ target[0], target[1] - 3, target[2] };
+    fixture.game.world.?.setBlockUnchecked(.{ placement[0], placement[1], placement[2] - 1 }, .stone);
+    fixture.game.world.?.pending_operations.clearRetainingCapacity();
+    handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
+    try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
+    fixture.camera.updateView(zmath.rotationX(math.pi / 2.0));
+    fixture.game.updateBlockTool();
+    try std.testing.expectEqual(placement, fixture.game.world.?.pending_operations.items[0].operation.block);
+    try std.testing.expect(try fixture.game.world.?.isBlockSolid(target));
 }
 
 test "camera placement keeps structural validation and targets no block in empty air" {
@@ -1094,14 +1198,14 @@ test "camera placement keeps structural validation and targets no block in empty
     };
     fixture.game.world.?.setBlockUnchecked(target, .stone);
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
-    fixture.game.editBlockInView(.place);
+    fixture.game.editBlockInView(.{ .place = fixture.game.selected_material });
     try std.testing.expectEqual(world_module.OperationStatus.constraint_violation, fixture.game.world.?.last_edit_result.?.status);
     try std.testing.expectEqual(@import("block_rules.zig").Reason.earth_footprint, fixture.game.world.?.last_edit_result.?.failure.?.reason);
     try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
     // Looking away from the existing block targets empty air.
     fixture.game.selected_material = .sand;
     fixture.camera.updateView(zmath.rotationY(-math.pi / 2.0));
-    fixture.game.editBlockInView(.place);
+    fixture.game.editBlockInView(.{ .place = fixture.game.selected_material });
     fixture.game.editBlockInView(.remove);
     try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
 }
@@ -1508,6 +1612,25 @@ const StreamingTest = struct {
         self.initWithLayout(&test_layout);
     }
 
+    fn toolTarget() [3]u32 {
+        const origin = test_layout.origin_chunk;
+        return .{
+            @intCast(origin[0] * consts.CHUNK_SIZE),
+            @intCast(origin[1] * consts.CHUNK_SIZE + 3),
+            @intCast(origin[2] * consts.CHUNK_SIZE),
+        };
+    }
+
+    fn prepareToolTest(self: *StreamingTest) !void {
+        self.camera.updatePosition(.{ 0.5, 0.5, 0.5 });
+        self.game.selected_material = .sand;
+        try self.game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
+        const target = toolTarget();
+        self.game.world.?.setBlockUnchecked(target, .stone);
+        self.game.world.?.setBlockUnchecked(.{ target[0], target[1] + 1, target[2] }, .stone);
+        self.game.world.?.pending_operations.clearRetainingCapacity();
+    }
+
     fn initWithLayout(self: *StreamingTest, layout: *const WorldLayout) void {
         self.scene.layout = layout;
         self.camera = @TypeOf(self.camera).init(self.scene.layout, 1);
@@ -1529,6 +1652,7 @@ const StreamingTest = struct {
 
     fn deinit(self: *StreamingTest) void {
         const allocator = self.game.allocator;
+        self.game.tool_commands.deinit(allocator);
         self.input.pressed_keys.deinit();
         self.input.release_queue.deinit();
         self.input.pressed_this_frame.deinit(allocator);
@@ -1754,7 +1878,7 @@ test "camera tools place on the hit face, remove the nearest block, and stop at 
     const placement: [3]u32 = .{ target[0], target[1] - 1, target[2] };
     fixture.game.world.?.setBlockUnchecked(target, .stone);
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
-    fixture.game.editBlockInView(.place);
+    fixture.game.editBlockInView(.{ .place = fixture.game.selected_material });
     try std.testing.expect(try fixture.game.world.?.isBlockSolid(placement));
     try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, fixture.game.world.?.pending_operations.items[0].operation.action.put);
     fixture.game.editBlockInView(.remove);
@@ -1764,14 +1888,14 @@ test "camera tools place on the hit face, remove the nearest block, and stop at 
     fixture.camera.updatePosition(.{ 0.5, -0.01, 0.5 });
     // Load the camera's chunk so failure is caused by reach rather than missing data.
     try fixture.game.world.?.insertChunk(origin - ChunkCoords{ 0, 1, 0 }, WorldChunk.initEmpty());
-    fixture.game.editBlockInView(.place);
+    fixture.game.editBlockInView(.{ .place = fixture.game.selected_material });
     fixture.game.editBlockInView(.remove);
     try std.testing.expectEqual(2, fixture.game.world.?.pending_operations.items.len);
     fixture.camera.updatePosition(.{ 0.5, 0, 0.5 });
     fixture.game.editBlockInView(.remove);
     try std.testing.expect(!try fixture.game.world.?.isBlockSolid(target));
     try std.testing.expectEqual(3, fixture.game.world.?.pending_operations.items.len);
-    fixture.game.editBlockInView(.place);
+    fixture.game.editBlockInView(.{ .place = fixture.game.selected_material });
     try std.testing.expectEqual(3, fixture.game.world.?.pending_operations.items.len);
 }
 
