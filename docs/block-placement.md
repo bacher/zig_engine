@@ -1,8 +1,8 @@
 # Block placement and timed soil changes
 
 The client and `WorldDataService` use the same structural validator. The client previews an
-edit against received blocks; the service checks it again against authoritative contents,
-including generated and modified chunks outside every client's subscriptions. Missing
+edit against received blocks; the service checks it again against authoritative contents
+within the same fixed support window. Missing
 client data produces `missing_data`, never an assumption that the missing cells are air.
 
 ## Materials and mining
@@ -81,6 +81,31 @@ neighbors. Both neighbors must have direct vertical support; another unsupported
 cell cannot act as one of these sides. This exception does not permit an unlimited stone
 bridge. Multi-cell gaps need temporary supports, which are a separate future feature.
 
+## Fixed support window
+
+Every edit uses an inclusive cube centered on its target cell: at most 28 cells away on
+each axis. All support reads, including platform corners and diagonal intermediate cells,
+must fit inside this cube. Searches do not recenter on intermediate supports: stacked
+overhangs accumulate horizontal displacement across floors. Stable platforms reset height
+counters, but do not reset the window.
+
+Each revalidated dependent also keeps a 28-cell cube centered on itself. Its support must
+be proved within the intersection of that cube and the edit's cube. Validation accepts any
+known legal route in these bounds. It never queries cells outside them or treats those
+cells as air. If remaining support cannot be proved without looking outside, the edit is
+rejected conservatively, even when a farther alternative foundation actually exists.
+
+The window uses block coordinates, independently of chunk boundaries, with shortest x
+displacements across the wrapped seam. Translating the same construction and its foundation
+does not change the result, provided the translated construction fits the finite y/z world
+bounds. Loading extra chunks cannot extend a legal support route or change the decision.
+
+With 32-cell chunks, a target within four cells of the player's cell on each axis has its
+whole window inside the player's loaded 3x3x3 chunk neighborhood. This assumes those chunks
+have arrived; missing cells inside the window still produce `missing_data`. The planned
+four-cell camera tool is separate work. The current column tool retains its 20-cell reach,
+so it does not always have this client-side availability guarantee.
+
 ## Edits and diagnostics
 
 Validation evaluates hypothetical contents before mutation. Both placements and removals
@@ -95,12 +120,22 @@ coordinates with an explicit truncation flag. The client retains the latest prev
 These are CPU data for future text and 3D hints. There is no ghost block, dependency outline,
 or transparent rendering pass in this change.
 
-The current implementation scans construction indices and uses conservative downward support
-envelopes to skip unrelated cells, rather than maintaining a dependency index. Soil depends
+`support_search_limit` reports the 28-cell limit and an attempted cell outside the window.
+For a dependent edit rejection it appears as the underlying cause of `would_remove_support`
+or `would_invalidate_structure`. This distinguishes an unproved remaining foundation from
+a definite height or span violation.
+
+The implementation visits construction indices only in chunks intersecting the edit window
+(at most 27 chunk IDs), filters cells to the window, and sorts them in target-relative z/y/x
+order for deterministic diagnostics. Conservative downward support envelopes skip unrelated
+cells. Soil depends
 only on its immediate 3x3 footprint; wood and mineral envelopes include horizontal routes
 at each lower level and off-center platform cells. Missing data within an affected envelope
 still blocks client approval; incomplete constructions outside it do not veto edits. Time events
 do not run structural validation because the soil states have the same support properties.
+Support states and memoization exist only during validation; no support graph or dependency
+information is added to stored chunk metadata. A dependency index could be a separate future
+optimization, but is not required for correctness.
 
 ## Simulation time and transformations
 
@@ -144,5 +179,7 @@ follow-ups.
 `zig build test` covers footprints, centered platforms, diagonal connectivity, square
 platforms, span limits, inherited/group heights, protected platform edits, crushed-stone
 bridges, mining conversions, timer ordering, covering/exposure, chunk boundaries, eviction,
-and time catch-up. `zig build test-gpu` checks the shared voxel shader pipelines when a
+time catch-up, inclusive support windows, stacked overhangs, conservative dependent edits,
+root-specific caches, translated/wrapped constructions, and client/service agreement with
+only a 3x3x3 neighborhood. `zig build test-gpu` checks the shared voxel shader pipelines when a
 graphics adapter is available.

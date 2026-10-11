@@ -207,20 +207,57 @@ pub const PendingOperation = struct {
     request_id: ?u64 = null,
 };
 
-pub fn collectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayout, chunks: *const ChunksHashMap) []block_rules.Cell {
+/// Read construction indices only from chunks intersecting the target's fixed window.
+/// This visits at most 27 chunk IDs, independently of retained edits elsewhere in the world.
+pub fn collectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayout, chunks: *const ChunksHashMap, target: [3]u32) []block_rules.Cell {
     var cells: std.ArrayList(block_rules.Cell) = .empty;
-    var iterator = chunks.iterator();
-    while (iterator.next()) |entry| {
-        const coords = layout.decodeChunkId(entry.key_ptr.*);
-        for (entry.value_ptr.metadata.constructed.items) |index| {
-            const local = transformations.coordinates(index);
-            cells.append(allocator, .{
-                @as(i64, coords[0]) * CHUNK_SIZE + local[0],
-                @as(i64, coords[1]) * CHUNK_SIZE + local[1],
-                @as(i64, coords[2]) * CHUNK_SIZE + local[2],
-            }) catch @panic("OOM");
+    const center: block_rules.Cell = .{ target[0], target[1], target[2] };
+    var low: ChunkCoords = undefined;
+    var high: ChunkCoords = undefined;
+    inline for (0..3) |axis| {
+        low[axis] = @intCast(@divFloor(center[axis] - block_rules.Limits.support_radius, CHUNK_SIZE));
+        high[axis] = @intCast(@divFloor(center[axis] + block_rules.Limits.support_radius, CHUNK_SIZE));
+    }
+    var visited: [27]ChunkId = undefined;
+    var count: usize = 0;
+    var z = low[2];
+    while (z <= high[2]) : (z += 1) {
+        var y = low[1];
+        while (y <= high[1]) : (y += 1) {
+            var x = low[0];
+            while (x <= high[0]) : (x += 1) {
+                const coords = layout.normalizeChunkCoords(.{ x, y, z }) orelse continue;
+                const id = layout.encodeChunkCoords(coords);
+                // A small wrapped world can map multiple coordinates to the same chunk.
+                if (std.mem.indexOfScalar(ChunkId, visited[0..count], id) != null) continue;
+                visited[count] = id;
+                count += 1;
+                const chunk = chunks.get(id) orelse continue;
+                for (chunk.metadata.constructed.items) |index| {
+                    const local = transformations.coordinates(index);
+                    const cell: block_rules.Cell = .{
+                        @as(i64, coords[0]) * CHUNK_SIZE + local[0],
+                        @as(i64, coords[1]) * CHUNK_SIZE + local[1],
+                        @as(i64, coords[2]) * CHUNK_SIZE + local[2],
+                    };
+                    if (block_rules.distance(layout, cell, center) <= block_rules.Limits.support_radius)
+                        cells.append(allocator, cell) catch @panic("OOM");
+                }
+            }
         }
     }
+    const Order = struct {
+        layout: *const WorldLayout,
+        center: block_rules.Cell,
+
+        fn lessThan(self: @This(), a: block_rules.Cell, b: block_rules.Cell) bool {
+            const da = block_rules.displacement(self.layout, a, self.center);
+            const db = block_rules.displacement(self.layout, b, self.center);
+            inline for (.{ 2, 1, 0 }) |axis| if (da[axis] != db[axis]) return da[axis] < db[axis];
+            return false;
+        }
+    };
+    std.mem.sort(block_rules.Cell, cells.items, Order{ .layout = layout, .center = center }, Order.lessThan);
     return cells.toOwnedSlice(allocator) catch @panic("OOM");
 }
 
@@ -369,7 +406,7 @@ pub const World = struct {
 
     pub fn previewOperation(self: *const World, operation: BlockOperation) EditResult {
         operation.validate(self.layout);
-        const cells = collectConstructed(self.allocator, self.layout, &self.chunks);
+        const cells = collectConstructed(self.allocator, self.layout, &self.chunks, operation.block);
         defer self.allocator.free(cells);
         return validateEdit(self.allocator, .{ .layout = self.layout, .context = @constCast(self), .block_at = readBlock }, cells, operation);
     }
@@ -980,4 +1017,51 @@ test "streaming incomplete constructions permits unrelated edits but protects af
     try std.testing.expectEqual(OperationStatus.success, result.status);
     try std.testing.expectEqual(1, world.pending_operations.items.len);
     try std.testing.expect(!try world.isBlockSolid(.{ 10, 10, 15 }));
+}
+
+test "construction collection includes the 28-cell boundary with translation-independent ordering" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } });
+    const offsets = [_]block_rules.Cell{
+        .{ 0, 0, -28 }, .{ -28, -3, 0 }, .{ 28, 1, 0 },
+        .{ 0, -28, 1 }, .{ 0, 28, 1 },   .{ 0, 0, 28 },
+    };
+    for ([_]block_rules.Cell{ .{ 80, 80, 80 }, .{ 95, 95, 95 }, .{ 252, 128, 128 } }) |center| {
+        var world = try World.init(std.testing.allocator, &layout);
+        defer world.deinit();
+        const reader: block_rules.Reader = .{ .layout = world.layout, .context = &world, .block_at = World.readBlock };
+        // Deliberately insert in reverse order so hash-map and metadata order cannot
+        // affect which dependent is reported first.
+        const additional = [_]block_rules.Cell{ .{ 29, 0, 0 }, .{ -29, 0, 0 }, .{ 0, 29, 0 }, .{ 0, 0, 29 }, .{ 70, 70, 70 } };
+        const inserted = offsets ++ additional;
+        var i = inserted.len;
+        while (i > 0) {
+            i -= 1;
+            const cell = reader.normalize(center + inserted[i]).?;
+            const coords, const local = splitBlockCoords(.{ @intCast(cell[0]), @intCast(cell[1]), @intCast(cell[2]) });
+            if (!world.hasChunk(coords)) try world.insertChunk(coords, WorldChunk.initEmpty());
+            world.chunks.getPtr(layout.encodeChunkCoords(coords)).?.metadata.markConstructed(std.testing.allocator, transformations.index(local));
+        }
+        const cells = collectConstructed(std.testing.allocator, world.layout, &world.chunks, .{ @intCast(center[0]), @intCast(center[1]), @intCast(center[2]) });
+        defer std.testing.allocator.free(cells);
+        try std.testing.expectEqual(offsets.len, cells.len);
+        for (cells, offsets) |cell, expected| try std.testing.expectEqualDeep(expected, block_rules.displacement(&layout, cell, center));
+    }
+}
+
+test "construction collection deduplicates chunks in the smallest wrapped world" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    var world = try World.init(std.testing.allocator, &layout);
+    defer world.deinit();
+    for ([_]ChunkCoords{ .{ 0, 1, 1 }, .{ 1, 1, 1 } }) |coords| {
+        var chunk = WorldChunk.initEmpty();
+        chunk.metadata.markConstructed(std.testing.allocator, transformations.index(.{ 0, 1, 1 }));
+        try world.insertChunk(coords, chunk);
+    }
+    // The window crosses three signed x chunk coordinates, two of which normalize
+    // to the same stored chunk. Each constructed cell must occur exactly once.
+    const cells = collectConstructed(std.testing.allocator, &layout, &world.chunks, .{ 4, 32, 32 });
+    defer std.testing.allocator.free(cells);
+    try std.testing.expectEqual(2, cells.len);
+    try std.testing.expectEqualDeep(block_rules.Cell{ 0, 33, 33 }, cells[0]);
+    try std.testing.expectEqualDeep(block_rules.Cell{ 32, 33, 33 }, cells[1]);
 }

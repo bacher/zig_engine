@@ -63,6 +63,8 @@ A load is a continuing subscription, not just a one-time fetch. Its request ID b
 
 Commands carry intent, never replacement chunk snapshots. A put requires air and valid structural support; a remove requires an occupied cell and must preserve constructed blocks' support. Status is `success`, `already_exists`, `already_removed`, `constraint_violation`, or `missing_data`. Results include structured failure diagnostics and the mined material where applicable. Each command gets an acknowledgment, including conflicts. Commands from one endpoint preserve submission order; commands from different endpoints are ordered by the shared request queue, without a separate cross-client ordering promise. Simulation-time advancement shares this queue.
 
+Structural validation reads only the inclusive 28-cell cube around the edited target. Recursive support searches keep that center, and revalidated dependents must also stay within their own 28-cell cubes. Construction indices are collected from at most 27 intersecting chunk IDs in deterministic target-relative order. Support outside the bounds cannot justify approval; edits are rejected conservatively if no remaining route can be proved inside them. This requires no persistent support/dependency metadata. See [placement windows](block-placement.md#fixed-support-window).
+
 The service sends independently owned snapshots/face arrays. Consumers must free rejected or unused payloads. Client endpoints remain owned by the service until it is destroyed. Request/reply mailboxes are unbounded: producers briefly lock to enqueue, but there is no queue-size backpressure policy.
 
 ## Revisions and invalidation

@@ -9,6 +9,7 @@ pub const Limits = struct {
     pub const crushed_column: u32 = 6;
     pub const plank_span: u32 = 2;
     pub const reinforced_span: u32 = 4;
+    pub const support_radius: u32 = 28;
     pub const maximum_span: u32 = @max(plank_span, reinforced_span);
 };
 const horizontal_search_radius = Limits.maximum_span + 1;
@@ -27,7 +28,22 @@ pub const Reason = enum {
     crushed_column,
     would_remove_support,
     would_invalidate_structure,
+    support_search_limit,
 };
+
+/// Target-relative coordinates remain continuous across the wrapped x seam.
+pub fn displacement(layout: *const engine.WorldLayout, cell: Cell, center: Cell) Cell {
+    var delta = cell - center;
+    if (comptime engine.WorldLayout.wrap_x) {
+        const width: i64 = layout.size_in_blocks[0];
+        delta[0] = @mod(delta[0] + @divExact(width, 2), width) - @divExact(width, 2);
+    }
+    return delta;
+}
+
+pub fn distance(layout: *const engine.WorldLayout, cell: Cell, center: Cell) u64 {
+    return @reduce(.Max, @abs(displacement(layout, cell, center)));
+}
 
 /// Value-owned diagnostics survive asynchronous replies. Coordinates are storage-space
 /// cells (including missing cells at world edges), ready for a future 3D overlay.
@@ -77,7 +93,11 @@ pub const Reader = struct {
 const State = struct { wood: u32 = 0, mineral: u32 = 0 };
 const Evaluation = union(enum) { supported: State, rejected: Failure };
 const Cache = std.AutoHashMapUnmanaged(Cell, Evaluation);
-const Missing = error{MissingData};
+const ReadError = error{ MissingData, SupportWindowExceeded };
+
+fn rememberError(previous: *?ReadError, next: ReadError) void {
+    if (previous.* == null or next == error.SupportWindowExceeded) previous.* = next;
+}
 
 pub const Validator = struct {
     allocator: std.mem.Allocator,
@@ -86,17 +106,46 @@ pub const Validator = struct {
     edit: ?struct { cell: Cell, material: BlockType } = null,
     cache: Cache = .empty,
     depth: u16 = 0,
+    /// Recursive support searches never recenter on intermediate blocks.
+    root: ?Cell = null,
+    outside: ?struct { cell: Cell, center: Cell } = null,
 
     pub fn deinit(self: *Validator) void {
         self.cache.deinit(self.allocator);
     }
 
-    fn get(self: *Validator, cell: Cell) Missing!BlockType {
+    fn bound(self: *Validator, cell: Cell, center: Cell) ReadError!void {
+        if (distance(self.reader.layout, cell, center) > Limits.support_radius) {
+            if (self.outside == null) self.outside = .{ .cell = cell, .center = center };
+            return error.SupportWindowExceeded;
+        }
+    }
+
+    fn get(self: *Validator, cell: Cell) ReadError!BlockType {
+        if (self.edit) |edit| try self.bound(cell, edit.cell);
+        if (self.root) |root| try self.bound(cell, root);
         const normalized = self.reader.normalize(cell) orelse return .none;
         if (self.edit) |edit| {
             if (@reduce(.And, normalized == edit.cell)) return edit.material;
         }
         return self.reader.get(normalized) orelse error.MissingData;
+    }
+
+    fn beginCheck(self: *Validator, cell: Cell) void {
+        if (self.root) |root| if (@reduce(.And, root == cell)) return;
+        self.root = cell;
+        self.cache.clearRetainingCapacity();
+        self.outside = null;
+    }
+
+    fn readFailure(self: *Validator, err: ReadError, cell: Cell) Evaluation {
+        if (err == error.MissingData) return failure(.missing_data, cell, 0, 0);
+        var result = failure(.support_search_limit, cell, Limits.support_radius + 1, Limits.support_radius);
+        if (self.outside) |outside| {
+            result.rejected.actual = @intCast(distance(self.reader.layout, outside.cell, outside.center));
+            result.rejected.add(outside.cell);
+        }
+        return result;
     }
 
     fn failure(reason: Reason, cell: Cell, actual: u32, limit: u32) Evaluation {
@@ -106,14 +155,14 @@ pub const Validator = struct {
     }
 
     /// The cube occupies z-1 through z-3, centered directly beneath this cell.
-    pub fn stablePlatform(self: *Validator, cell: Cell) Missing!bool {
-        var unknown = false;
+    pub fn stablePlatform(self: *Validator, cell: Cell) ReadError!bool {
+        var unresolved: ?ReadError = null;
         var incomplete = false;
         for (1..4) |depth| {
             for (0..3) |y| {
                 for (0..3) |x| {
-                    const block = self.get(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }) catch {
-                        unknown = true;
+                    const block = self.get(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }) catch |err| {
+                        rememberError(&unresolved, err);
                         continue;
                     };
                     incomplete = incomplete or !block.isStablePlatformMaterial();
@@ -121,7 +170,7 @@ pub const Validator = struct {
             }
         }
         if (incomplete) return false;
-        if (unknown) return error.MissingData;
+        if (unresolved) |err| return err;
         return true;
     }
 
@@ -142,7 +191,7 @@ pub const Validator = struct {
         return .{ .rejected = result };
     }
 
-    fn footprint(self: *Validator, cell: Cell) Missing!Evaluation {
+    fn footprint(self: *Validator, cell: Cell) ReadError!Evaluation {
         var result: Failure = .{ .reason = .earth_footprint, .subject = cell, .limit = 9 };
         for (0..3) |y| {
             for (0..3) |x| {
@@ -163,11 +212,30 @@ pub const Validator = struct {
 
     /// Vertical support always decreases z; horizontal searches use only these direct
     /// sources, so same-level loops cannot create their own support.
-    fn direct(self: *Validator, cell: Cell, material: BlockType) Missing!Evaluation {
+    fn direct(self: *Validator, cell: Cell, material: BlockType) ReadError!Evaluation {
         const below_cell = cell - Cell{ 0, 0, 1 };
         const below = try self.get(below_cell);
         if (below == .none) return failure(.missing_foundation, cell, 0, 1);
-        if (try self.stablePlatform(cell)) return height(cell, material, .{});
+        // These foundations already give the minimum height without inspecting an unused cube.
+        if (below == .stone or (material.isWood() and below.isMineralConstruction()))
+            return height(cell, material, .{});
+        var unresolved: ?ReadError = null;
+        const platform = below.isStablePlatformMaterial() and (self.stablePlatform(cell) catch |err| blk: {
+            rememberError(&unresolved, err);
+            break :blk false;
+        });
+        if (platform) return height(cell, material, .{});
+        const vertical_result = self.vertical(cell, material, below) catch |err| {
+            rememberError(&unresolved, err);
+            return unresolved.?;
+        };
+        if (vertical_result == .supported) return vertical_result;
+        if (unresolved) |err| return err;
+        return vertical_result;
+    }
+
+    fn vertical(self: *Validator, cell: Cell, material: BlockType, below: BlockType) ReadError!Evaluation {
+        const below_cell = cell - Cell{ 0, 0, 1 };
         if (below.isEarth()) return self.platformFailure(.earth_requires_stable_platform, cell);
         if (material.isWood()) {
             if (!below.isStructural()) return failure(.incompatible_support, below_cell, 0, 0);
@@ -189,7 +257,7 @@ pub const Validator = struct {
         return if (material == .planks) neighbor == .planks else neighbor.isReinforced();
     }
 
-    fn horizontal(self: *Validator, cell: Cell, material: BlockType, limit: u32) Missing!Evaluation {
+    fn horizontal(self: *Validator, cell: Cell, material: BlockType, limit: u32) ReadError!Evaluation {
         const Node = struct { cell: Cell, distance: u32 };
         // Search one extra shell to report an exceeded span, rather than a generic failure.
         std.debug.assert(limit <= Limits.maximum_span);
@@ -199,12 +267,12 @@ pub const Validator = struct {
         var cursor: usize = 0;
         var best: ?State = null;
         var rejected = failure(.horizontal_span, cell, limit + 1, limit);
-        var unknown = false;
+        var unresolved: ?ReadError = null;
         while (cursor < count) : (cursor += 1) {
             const node = nodes[cursor];
-            const source = self.direct(node.cell, material) catch blk: {
-                unknown = true;
-                break :blk failure(.missing_data, node.cell, 0, 0);
+            const source = self.direct(node.cell, material) catch |err| blk: {
+                rememberError(&unresolved, err);
+                break :blk self.readFailure(err, node.cell);
             };
             switch (source) {
                 .supported => |state| {
@@ -214,6 +282,8 @@ pub const Validator = struct {
                 },
                 .rejected => |reason| {
                     if (reason.reason == .wood_height or reason.reason == .mineral_height) rejected = source;
+                    if (reason.reason == .missing_data) rememberError(&unresolved, error.MissingData);
+                    if (reason.reason == .support_search_limit) rememberError(&unresolved, error.SupportWindowExceeded);
                 },
             }
             if (node.distance >= limit + 1) continue;
@@ -223,20 +293,20 @@ pub const Validator = struct {
                     const dy = @as(i64, @intCast(y)) - 1;
                     if (dx == 0 and dy == 0) continue;
                     const next = self.reader.normalize(node.cell + Cell{ dx, dy, 0 }) orelse continue;
-                    const neighbor = self.get(next) catch {
-                        unknown = true;
+                    const neighbor = self.get(next) catch |err| {
+                        rememberError(&unresolved, err);
                         continue;
                     };
                     if (!sameHorizontalFamily(material, neighbor)) continue;
                     if (dx != 0 and dy != 0) {
                         // Both intermediate cells must fill the corner: corner-only chains
                         // do not transmit support even though diagonals cost one step.
-                        const a = self.get(node.cell + Cell{ dx, 0, 0 }) catch {
-                            unknown = true;
+                        const a = self.get(node.cell + Cell{ dx, 0, 0 }) catch |err| {
+                            rememberError(&unresolved, err);
                             continue;
                         };
-                        const b = self.get(node.cell + Cell{ 0, dy, 0 }) catch {
-                            unknown = true;
+                        const b = self.get(node.cell + Cell{ 0, dy, 0 }) catch |err| {
+                            rememberError(&unresolved, err);
                             continue;
                         };
                         if (!sameHorizontalFamily(material, a) or !sameHorizontalFamily(material, b)) continue;
@@ -251,11 +321,11 @@ pub const Validator = struct {
             }
         }
         if (best) |state| return .{ .supported = state };
-        if (unknown) return error.MissingData;
+        if (unresolved) |err| return err;
         return rejected;
     }
 
-    fn crushedBridgeSide(self: *Validator, side: Cell) Missing!Evaluation {
+    fn crushedBridgeSide(self: *Validator, side: Cell) ReadError!Evaluation {
         const neighbor = try self.get(side);
         if (neighbor != .stone and neighbor != .crushed_stone)
             return failure(.missing_foundation, side, 0, 1);
@@ -266,33 +336,39 @@ pub const Validator = struct {
         return .{ .supported = .{} };
     }
 
-    fn crushedBridge(self: *Validator, cell: Cell) Missing!Evaluation {
-        var unknown = false;
+    fn crushedBridge(self: *Validator, cell: Cell) ReadError!Evaluation {
+        var pending: ?ReadError = null;
         for ([_]Cell{ .{ 1, 0, 0 }, .{ 0, 1, 0 } }) |direction| {
             var states: [2]State = undefined;
             var valid = true;
-            var unresolved = false;
+            var unresolved: ?ReadError = null;
             for ([_]Cell{ cell - direction, cell + direction }, 0..) |side, i| {
-                const state = self.crushedBridgeSide(side) catch {
-                    unresolved = true;
+                const state = self.crushedBridgeSide(side) catch |err| {
+                    rememberError(&unresolved, err);
                     continue;
                 };
                 switch (state) {
                     .supported => |value| states[i] = value,
-                    .rejected => {
-                        valid = false;
-                        break;
+                    .rejected => |reason| {
+                        if (reason.reason == .missing_data) {
+                            rememberError(&unresolved, error.MissingData);
+                        } else if (reason.reason == .support_search_limit) {
+                            rememberError(&unresolved, error.SupportWindowExceeded);
+                        } else {
+                            valid = false;
+                            break;
+                        }
                     },
                 }
             }
             if (!valid) continue;
-            if (unresolved) {
-                unknown = true;
+            if (unresolved) |err| {
+                rememberError(&pending, err);
                 continue;
             }
             return .{ .supported = .{ .mineral = @max(1, @min(states[0].mineral, states[1].mineral)) } };
         }
-        if (unknown) return error.MissingData;
+        if (pending) |err| return err;
         var result = failure(.missing_foundation, cell, 0, 2);
         for ([_]Cell{ .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 } }) |direction| {
             result.rejected.add(cell + direction);
@@ -301,7 +377,7 @@ pub const Validator = struct {
         return result;
     }
 
-    fn evaluate(self: *Validator, cell: Cell, material: BlockType) Missing!Evaluation {
+    fn evaluate(self: *Validator, cell: Cell, material: BlockType) ReadError!Evaluation {
         if (self.cache.get(cell)) |cached| return cached;
         if (self.depth >= 256) return failure(.missing_foundation, cell, 0, 1);
         self.depth += 1;
@@ -311,24 +387,37 @@ pub const Validator = struct {
         return result;
     }
 
-    fn evaluateUncached(self: *Validator, cell: Cell, material: BlockType) Missing!Evaluation {
+    fn evaluateUncached(self: *Validator, cell: Cell, material: BlockType) ReadError!Evaluation {
         if (material.isEarth()) return self.footprint(cell);
         if (!material.isWood() and !material.isMineralConstruction()) return .{ .supported = .{} };
         if (material == .crushed_stone) {
             var run: u32 = 0;
             var below = cell;
+            var unresolved: ?ReadError = null;
             while (try self.get(below) == .crushed_stone) : (below[2] -= 1) {
                 run += 1;
-                if (run > Limits.crushed_column) return failure(.crushed_column, cell, run, Limits.crushed_column);
-                if (try self.stablePlatform(below)) break;
+                if (run > Limits.crushed_column) {
+                    if (unresolved) |err| return err;
+                    return failure(.crushed_column, cell, run, Limits.crushed_column);
+                }
+                const platform = self.stablePlatform(below) catch |err| blk: {
+                    rememberError(&unresolved, err);
+                    break :blk false;
+                };
+                if (platform) break;
             }
         }
-        const direct_result = try self.direct(cell, material);
         const below = try self.get(cell - Cell{ 0, 0, 1 });
+        const direct_result = self.direct(cell, material) catch |err| self.readFailure(err, cell);
         // An incompatible occupied block cannot be treated as air to bypass the hierarchy.
         if (below != .none) {
-            if (direct_result == .rejected and direct_result.rejected.reason != .wood_height and direct_result.rejected.reason != .mineral_height)
-                return direct_result;
+            if (direct_result == .rejected) {
+                const compatible = if (material.isWood()) below.isStructural() and !below.isEarth() else if (material == .crushed_stone) below == .crushed_stone or below == .stone else below.isReinforced() or below == .stone;
+                if (!compatible) return direct_result;
+                const reason = direct_result.rejected.reason;
+                if (reason != .wood_height and reason != .mineral_height and reason != .missing_data and reason != .support_search_limit)
+                    return direct_result;
+            }
         }
         // Height one is already minimal. Otherwise compare all legal routes before caching.
         if (direct_result == .supported and direct_result.supported.wood + direct_result.supported.mineral == 1)
@@ -340,12 +429,16 @@ pub const Validator = struct {
     }
 
     pub fn checkExisting(self: *Validator, cell: Cell) ?Failure {
-        const material = self.get(cell) catch return failure(.missing_data, cell, 0, 0).rejected;
+        self.beginCheck(cell);
+        const material = self.get(cell) catch |err| return self.readFailure(err, cell).rejected;
         if (material == .none) return null;
-        const result = self.evaluate(cell, material) catch return failure(.missing_data, cell, 0, 0).rejected;
+        const result = self.evaluate(cell, material) catch |err| return self.readFailure(err, cell).rejected;
         return switch (result) {
             .supported => null,
-            .rejected => |reason| reason,
+            .rejected => |reason| if (self.outside != null and (reason.reason == .wood_height or reason.reason == .mineral_height or reason.reason == .horizontal_span or reason.reason == .missing_foundation))
+                self.readFailure(error.SupportWindowExceeded, cell).rejected
+            else
+                reason,
         };
     }
 
@@ -357,10 +450,12 @@ pub const Validator = struct {
     /// A conservative downward support envelope, computed without a dependency index.
     /// Each lower level can add a horizontal search shell and an off-center platform cell.
     /// Soil reads only its immediate footprint. Wrapped x distances must follow the seam.
-    fn mayDependOnEdit(self: *Validator, cell: Cell) Missing!bool {
+    fn mayDependOnEdit(self: *Validator, cell: Cell) ReadError!bool {
         const edit = self.edit orelse return true;
+        if (distance(self.reader.layout, cell, edit.cell) > Limits.support_radius) return false;
         const depth = cell[2] - edit.cell[2];
         if (depth < 0) return false;
+        self.beginCheck(cell);
         const material = try self.get(cell);
         const radius: u64 = if (material.isEarth()) blk: {
             if (depth != 1) return false;
@@ -369,9 +464,8 @@ pub const Validator = struct {
             @intCast((depth + 1) * (horizontal_search_radius + 1))
         else
             return false;
-        var dx: u64 = @abs(cell[0] - edit.cell[0]);
-        if (comptime engine.WorldLayout.wrap_x) dx = @min(dx, self.reader.layout.size_in_blocks[0] - dx);
-        return dx <= radius and @abs(cell[1] - edit.cell[1]) <= radius;
+        const delta = displacement(self.reader.layout, cell, edit.cell);
+        return @abs(delta[0]) <= radius and @abs(delta[1]) <= radius;
     }
 
     /// Revalidate potentially affected constructions; unrelated missing support data
@@ -379,7 +473,7 @@ pub const Validator = struct {
     pub fn checkDependents(self: *Validator, cells: []const Cell, removal: bool) ?Failure {
         for (cells) |cell| {
             if (self.edit) |edit| if (@reduce(.And, edit.cell == cell)) continue;
-            if (!(self.mayDependOnEdit(cell) catch return failure(.missing_data, cell, 0, 0).rejected)) continue;
+            if (!(self.mayDependOnEdit(cell) catch |err| return self.readFailure(err, cell).rejected)) continue;
             if (self.checkExisting(cell)) |reason| {
                 var result = reason;
                 result.cause = reason.reason;
@@ -397,6 +491,9 @@ const Fixture = struct {
     blocks: std.AutoHashMapUnmanaged(Cell, BlockType) = .empty,
     constructed: std.ArrayList(Cell) = .empty,
     missing: ?Cell = null,
+    read_center: ?Cell = null,
+    outside_reads: usize = 0,
+    maximum_read_distance: u64 = 0,
 
     fn deinit(self: *Fixture) void {
         self.blocks.deinit(std.testing.allocator);
@@ -406,18 +503,29 @@ const Fixture = struct {
     fn read(context: *anyopaque, block: [3]u32) ?BlockType {
         const self: *Fixture = @ptrCast(@alignCast(context));
         const cell: Cell = .{ block[0], block[1], block[2] };
+        if (self.read_center) |center| {
+            const reach = distance(&self.layout, cell, center);
+            self.maximum_read_distance = @max(self.maximum_read_distance, reach);
+            if (reach > Limits.support_radius) {
+                self.outside_reads += 1;
+                return null;
+            }
+        }
         if (self.missing) |missing| if (@reduce(.And, cell == missing)) return null;
         return self.blocks.get(cell) orelse if (cell[2] < 4) BlockType.stone else BlockType.none;
     }
 
     fn check(self: *Fixture, cell: Cell, material: BlockType) ?Failure {
+        const reader: Reader = .{ .layout = &self.layout, .context = self, .block_at = read };
+        const normalized = reader.normalize(cell) orelse return Validator.failure(.missing_foundation, cell, 0, 1).rejected;
+        if (self.read_center != null) self.read_center = normalized;
         var validator: Validator = .{
             .allocator = std.testing.allocator,
-            .reader = .{ .layout = &self.layout, .context = self, .block_at = read },
-            .edit = .{ .cell = cell, .material = material },
+            .reader = reader,
+            .edit = .{ .cell = normalized, .material = material },
         };
         defer validator.deinit();
-        if (material != .none) if (validator.checkPlacement(cell, material)) |reason| return reason;
+        if (material != .none) if (validator.checkPlacement(normalized, material)) |reason| return reason;
         return validator.checkDependents(self.constructed.items, material == .none);
     }
 
@@ -431,7 +539,30 @@ const Fixture = struct {
     }
 
     fn raw(self: *Fixture, cell: Cell, material: BlockType) !void {
-        try self.blocks.put(std.testing.allocator, cell, material);
+        const reader: Reader = .{ .layout = &self.layout, .context = self, .block_at = read };
+        try self.blocks.put(std.testing.allocator, reader.normalize(cell) orelse return error.TestUnexpectedResult, material);
+    }
+
+    fn staircase(self: *Fixture, origin: Cell, direction: Cell, reach: u32, foundation: BlockType) !Cell {
+        for (1..4) |depth| {
+            for (0..3) |y| {
+                for (0..3) |x| try self.raw(origin + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, foundation);
+            }
+        }
+        try self.raw(origin, .rebar);
+        var progress: u32 = 0;
+        var level: i64 = 0;
+        while (progress < reach) {
+            const length = @min(Limits.reinforced_span, reach - progress);
+            level += 1;
+            const start = origin + direction * @as(Cell, @splat(progress)) + Cell{ 0, 0, level };
+            for (0..length + 1) |offset| try self.raw(start + direction * @as(Cell, @splat(@intCast(offset))), .rebar);
+            progress += length;
+        }
+        const reader: Reader = .{ .layout = &self.layout, .context = self, .block_at = read };
+        const target = reader.normalize(origin + direction * @as(Cell, @splat(reach)) + Cell{ 0, 0, level }).?;
+        try self.raw(target, .none);
+        return target;
     }
 };
 
@@ -654,4 +785,179 @@ test "dependent filtering follows supports through successive offset floors" {
     fixture.constructed.clearRetainingCapacity();
     try fixture.constructed.append(std.testing.allocator, .{ 16, 10, 7 });
     try std.testing.expectEqual(Reason.would_remove_support, fixture.check(.{ 10, 10, 3 }, .none).?.reason);
+}
+
+test "the inclusive read window bounds every axis before querying blocks, including the wrapped seam" {
+    var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = .{ 0, 128, 128 } };
+    defer fixture.deinit();
+    const center = fixture.read_center.?;
+    var validator: Validator = .{
+        .allocator = std.testing.allocator,
+        .reader = .{ .layout = &fixture.layout, .context = &fixture, .block_at = Fixture.read },
+        .edit = .{ .cell = center, .material = .rebar },
+    };
+    defer validator.deinit();
+    inline for (0..3) |axis| {
+        for ([_]i64{ -1, 1 }) |sign| {
+            var cell = center;
+            cell[axis] += sign * Limits.support_radius;
+            try std.testing.expectEqual(BlockType.none, try validator.get(cell));
+            cell[axis] += sign;
+            try std.testing.expectError(error.SupportWindowExceeded, validator.get(cell));
+        }
+    }
+    const diagnostic = validator.readFailure(error.SupportWindowExceeded, center).rejected;
+    try std.testing.expectEqual(Reason.support_search_limit, diagnostic.reason);
+    try std.testing.expectEqual(29, diagnostic.actual);
+    try std.testing.expectEqual(28, diagnostic.limit);
+    try std.testing.expectEqual(0, fixture.outside_reads);
+    try std.testing.expectEqual(28, fixture.maximum_read_distance);
+}
+
+test "stacked overhangs keep one 28-cell window under translations, directions, and wrapping" {
+    for ([_]Cell{ .{ 80, 80, 64 }, .{ 95, 95, 95 }, .{ 252, 128, 95 } }) |origin| {
+        for ([_]Cell{ .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 } }) |direction| {
+            for ([_]u32{ 28, 29 }) |reach| {
+                var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = origin };
+                defer fixture.deinit();
+                const target = try fixture.staircase(origin, direction, reach, .stone);
+                const result = fixture.check(target, .rebar);
+                if (reach == 28) {
+                    try std.testing.expect(result == null);
+                } else {
+                    try std.testing.expectEqual(Reason.support_search_limit, result.?.reason);
+                    try std.testing.expectEqual(28, result.?.limit);
+                }
+                try std.testing.expectEqual(0, fixture.outside_reads);
+                try std.testing.expect(fixture.maximum_read_distance <= 28);
+            }
+        }
+    }
+}
+
+test "a stable platform must fit wholly inside the window and a known closer route still suffices" {
+    for ([_]u32{ 27, 28 }) |reach| {
+        var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = .{ 96, 96, 64 } };
+        defer fixture.deinit();
+        const target = try fixture.staircase(.{ 96, 96, 64 }, .{ 1, 0, 0 }, reach, .packed_dirt);
+        const result = fixture.check(target, .rebar);
+        if (reach == 27) {
+            try std.testing.expect(result == null);
+        } else {
+            try std.testing.expectEqual(Reason.support_search_limit, result.?.reason);
+            // A valid nearby side foundation makes the unresolved remote route unnecessary.
+            try fixture.raw(target + Cell{ 0, 1, -1 }, .stone);
+            try fixture.raw(target + Cell{ 0, 1, 0 }, .reinforced_concrete);
+            try std.testing.expect(fixture.check(target, .rebar) == null);
+        }
+        try std.testing.expectEqual(0, fixture.outside_reads);
+    }
+}
+
+test "removal conservatively rejects a dependent whose remaining foundation is outside the edit window" {
+    const origin: Cell = .{ 80, 80, 64 };
+    var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = origin };
+    defer fixture.deinit();
+    const end = try fixture.staircase(origin, .{ 1, 0, 0 }, 28, .stone);
+    try fixture.raw(end, .rebar);
+    // This taller fallback column keeps the offset floors legal after removing the
+    // original foundation, but cannot support the last two levels of the tower.
+    try fixture.raw(.{ 81, 80, 52 }, .stone);
+    for (53..65) |z| try fixture.raw(.{ 81, 80, @intCast(z) }, .rebar);
+    try fixture.raw(end + Cell{ 0, 0, 1 }, .rebar);
+    const top = end + Cell{ 0, 0, 2 };
+    try fixture.raw(top, .rebar);
+    // The tower has another legal, low foundation within its own window, but this
+    // route is beyond x=108, the removal's inclusive boundary.
+    for (1..5) |offset| try fixture.raw(end + Cell{ @intCast(offset), 0, 0 }, .rebar);
+    try fixture.raw(end + Cell{ 4, 0, -1 }, .stone);
+    var validator: Validator = .{
+        .allocator = std.testing.allocator,
+        .reader = .{ .layout = &fixture.layout, .context = &fixture, .block_at = Fixture.read },
+        .edit = .{ .cell = origin, .material = .none },
+    };
+    defer validator.deinit();
+    // All constructions remain valid when checked using their own windows.
+    fixture.read_center = null;
+    var iterator = fixture.blocks.iterator();
+    while (iterator.next()) |entry| {
+        if (entry.value_ptr.* != .rebar) continue;
+        try fixture.constructed.append(std.testing.allocator, entry.key_ptr.*);
+        var independent: Validator = .{ .allocator = std.testing.allocator, .reader = validator.reader, .edit = validator.edit };
+        defer independent.deinit();
+        independent.edit = null;
+        try std.testing.expect(independent.checkExisting(entry.key_ptr.*) == null);
+    }
+    // The near floors can still prove their height from the fallback column.
+    fixture.read_center = origin;
+    fixture.maximum_read_distance = 0;
+    try std.testing.expect(validator.checkExisting(end) == null);
+    const failure_result = validator.checkDependents(&.{top}, true).?;
+    try std.testing.expectEqual(Reason.would_remove_support, failure_result.reason);
+    try std.testing.expectEqual(Reason.support_search_limit, failure_result.cause.?);
+    const all_dependents = fixture.check(origin, .none).?;
+    try std.testing.expectEqual(Reason.would_remove_support, all_dependents.reason);
+    try std.testing.expectEqual(Reason.support_search_limit, all_dependents.cause.?);
+    try std.testing.expectEqual(0, fixture.outside_reads);
+    try std.testing.expect(fixture.maximum_read_distance <= 28);
+}
+
+test "dependent windows intersect the edit window and never reuse another root's cached support" {
+    const origin: Cell = .{ 80, 80, 64 };
+    const edit: Cell = .{ 94, 80, 67 };
+    var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = edit };
+    defer fixture.deinit();
+    const near = try fixture.staircase(origin, .{ 1, 0, 0 }, 28, .stone);
+    try fixture.raw(near, .rebar);
+    const far = near + Cell{ 1, 0, 0 };
+    try fixture.raw(far, .rebar);
+    var validator: Validator = .{
+        .allocator = std.testing.allocator,
+        .reader = .{ .layout = &fixture.layout, .context = &fixture, .block_at = Fixture.read },
+        .edit = .{ .cell = edit, .material = .none },
+    };
+    defer validator.deinit();
+    try std.testing.expect(validator.checkExisting(near) == null);
+    try std.testing.expectEqual(Reason.support_search_limit, validator.checkExisting(far).?.reason);
+    try std.testing.expect(validator.checkExisting(near) == null);
+    for ([_][2]Cell{ .{ near, far }, .{ far, near } }) |order| {
+        const failure_result = validator.checkDependents(&order, true).?;
+        try std.testing.expectEqual(Reason.support_search_limit, failure_result.cause.?);
+        try std.testing.expectEqualDeep(far, failure_result.subject);
+    }
+    // The foundation is within the edit window, but outside the far block's own window.
+    try std.testing.expectEqual(0, fixture.outside_reads);
+    try std.testing.expect(fixture.maximum_read_distance <= 28);
+}
+
+test "a short crushed column on known natural stone needs no unresolved platform corners" {
+    const edit: Cell = .{ 80, 80, 64 };
+    const dependent: Cell = .{ 108, 80, 80 };
+    var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = edit };
+    defer fixture.deinit();
+    // The apparent platform crosses the edit's boundary, but direct natural-stone
+    // support and the one-cell crushed run are both completely known inside it.
+    for (1..4) |depth| {
+        for (0..3) |y| {
+            for (0..3) |x| try fixture.raw(dependent + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, .stone);
+        }
+    }
+    try fixture.raw(dependent, .crushed_stone);
+    try fixture.constructed.append(std.testing.allocator, dependent);
+    try std.testing.expect(fixture.check(edit, .none) == null);
+    try std.testing.expectEqual(0, fixture.outside_reads);
+    try std.testing.expect(fixture.maximum_read_distance <= 28);
+}
+
+test "nested unknown foundations retain their diagnostic while a known horizontal route can still succeed" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    for (4..7) |z| try fixture.raw(.{ 10, 10, @intCast(z) }, .tree_trunk);
+    try fixture.raw(.{ 10, 10, 7 }, .planks);
+    try fixture.raw(.{ 11, 10, 7 }, .planks);
+    fixture.missing = .{ 10, 10, 4 };
+    try std.testing.expectEqual(Reason.missing_data, fixture.check(.{ 12, 10, 7 }, .planks).?.reason);
+    try fixture.raw(.{ 12, 11, 6 }, .stone);
+    try fixture.raw(.{ 12, 11, 7 }, .planks);
+    try std.testing.expect(fixture.check(.{ 12, 10, 7 }, .planks) == null);
 }

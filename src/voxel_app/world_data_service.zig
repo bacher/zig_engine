@@ -652,7 +652,7 @@ const WorkerState = struct {
         changed_below: ?ChunkCoords,
         diagnostics: world_module.EditResult,
     } {
-        const cells = world_module.collectConstructed(allocator, self.layout, &self.modified_chunks);
+        const cells = world_module.collectConstructed(allocator, self.layout, &self.modified_chunks, operation.block);
         defer allocator.free(cells);
         var context: ReadContext = .{ .state = self, .allocator = allocator };
         defer context.deinit();
@@ -846,6 +846,85 @@ fn readStateBlock(state: *WorkerState, block: [3]u32) @import("engine").voxel_ch
     const chunk = state.loadAt(std.testing.allocator, coords);
     defer chunk.deinit(std.testing.allocator);
     return chunk.content.getBlock(local);
+}
+
+test "client and authority agree with only the player's 3x3x3 chunks and ignore extra support beyond 28 cells" {
+    const allocator = std.testing.allocator;
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } });
+    const Setup = struct {
+        fn put(state: *WorkerState, cell: rules.Cell, material: rules.BlockType) void {
+            const reader: rules.Reader = .{ .layout = state.layout, .context = state, .block_at = undefined };
+            const normalized = reader.normalize(cell).?;
+            const coords, const local = world_module.splitBlockCoords(.{ @intCast(normalized[0]), @intCast(normalized[1]), @intCast(normalized[2]) });
+            const id = state.layout.encodeChunkCoords(coords);
+            if (!state.modified_chunks.contains(id)) state.modified_chunks.put(std.testing.allocator, id, WorldChunk.initEmpty()) catch @panic("OOM");
+            const chunk = state.modified_chunks.getPtr(id).?;
+            std.debug.assert(chunk.apply(std.testing.allocator, local, .{ .put = material }) == .success);
+            if (material == .rebar) chunk.metadata.markConstructed(std.testing.allocator, transformations.index(local));
+        }
+    };
+    for ([_]rules.Cell{ .{ 64, 64, 64 }, .{ 95, 95, 95 }, .{ 255, 95, 95 } }) |player| {
+        for ([_]u32{ 28, 29 }) |reach| {
+            var state: WorkerState = .{ .layout = &layout, .generator = try WorldGenerator.prepare(.flat, allocator, &layout) };
+            defer state.deinit(allocator);
+            var client = try world_module.World.init(allocator, &layout);
+            defer client.deinit();
+            const reader: rules.Reader = .{ .layout = &layout, .context = &state, .block_at = undefined };
+            // Exercise both extreme tool directions from a chunk boundary, plus x wrap.
+            const delta: i64 = if (player[0] == 64) -4 else 4;
+            const target = reader.normalize(player + @as(rules.Cell, @splat(delta))).?;
+            const direction: i64 = if (delta < 0) 1 else -1;
+            const levels = (reach + rules.Limits.reinforced_span - 1) / rules.Limits.reinforced_span;
+            const origin = target - rules.Cell{ direction * reach, 0, levels };
+            const player_chunk: ChunkCoords = .{ @intCast(@divFloor(player[0], CHUNK_SIZE)), @intCast(@divFloor(player[1], CHUNK_SIZE)), @intCast(@divFloor(player[2], CHUNK_SIZE)) };
+            for (0..3) |z| {
+                for (0..3) |y| {
+                    for (0..3) |x| {
+                        const coords = layout.normalizeChunkCoords(player_chunk + ChunkCoords{ @as(i32, @intCast(x)) - 1, @as(i32, @intCast(y)) - 1, @as(i32, @intCast(z)) - 1 }).?;
+                        try state.modified_chunks.put(allocator, layout.encodeChunkCoords(coords), WorldChunk.initEmpty());
+                    }
+                }
+            }
+            Setup.put(&state, origin - rules.Cell{ 0, 0, 1 }, .stone);
+            Setup.put(&state, origin, .rebar);
+            var progress: u32 = 0;
+            var level: i64 = 0;
+            while (progress < reach) {
+                const length = @min(rules.Limits.reinforced_span, reach - progress);
+                level += 1;
+                for (0..length + 1) |offset| {
+                    if (progress + offset == reach) continue;
+                    Setup.put(&state, origin + rules.Cell{ direction * @as(i64, @intCast(progress + offset)), 0, level }, .rebar);
+                }
+                progress += length;
+            }
+            // Subscribe the client to exactly the player's 27 chunks, even when the
+            // authoritative fallback foundation lies just beyond those subscriptions.
+            for (0..3) |z| {
+                for (0..3) |y| {
+                    for (0..3) |x| {
+                        const coords = layout.normalizeChunkCoords(player_chunk + ChunkCoords{ @as(i32, @intCast(x)) - 1, @as(i32, @intCast(y)) - 1, @as(i32, @intCast(z)) - 1 }).?;
+                        try client.insertChunk(coords, state.modified_chunks.get(layout.encodeChunkCoords(coords)).?.clone(allocator));
+                    }
+                }
+            }
+            try std.testing.expectEqual(27, client.chunks.count());
+            const operation: BlockOperation = .{ .block = .{ @intCast(target[0]), @intCast(target[1]), @intCast(target[2]) }, .action = .{ .put = .rebar } };
+            const preview = client.previewOperation(operation);
+            try std.testing.expectEqual(if (reach == 28) OperationStatus.success else OperationStatus.constraint_violation, preview.status);
+            if (reach == 29) try std.testing.expectEqual(rules.Reason.support_search_limit, preview.failure.?.reason);
+            // Additional loaded chunks cannot change a decision or its diagnostics.
+            var iterator = state.modified_chunks.iterator();
+            while (iterator.next()) |entry| {
+                const coords = layout.decodeChunkId(entry.key_ptr.*);
+                if (!client.hasChunk(coords)) try client.insertChunk(coords, entry.value_ptr.clone(allocator));
+            }
+            try std.testing.expectEqualDeep(preview, client.previewOperation(operation));
+            const applied = state.applyOperation(allocator, operation);
+            defer applied.chunk.deinit(allocator);
+            try std.testing.expectEqualDeep(preview, applied.diagnostics);
+        }
+    }
 }
 
 test "generated soil is already packed and grassy, but newly exposed soil waits thirty minutes" {
