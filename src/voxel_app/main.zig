@@ -1181,6 +1181,49 @@ test "queued edits use the camera view updated after the press" {
     try std.testing.expect(try fixture.game.world.?.isBlockSolid(target));
 }
 
+test "mouse look and removal in the same frame use the new player and spectator aim" {
+    for ([_]bool{ false, true }) |spectating| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        fixture.engine.time = 1;
+        fixture.engine.frame_delta = 0.016;
+        fixture.game.player = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
+        fixture.game.player.?.applyCamera(&fixture.camera);
+        try fixture.game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
+        try fixture.game.world.?.insertChunk(test_layout.origin_chunk - ChunkCoords{ 0, 0, 1 }, WorldChunk.initEmpty());
+        const coordinates = @import("block_coordinates.zig");
+        const old_target = coordinates.fromWorld(&test_layout, .{ 0, 3, 1 }).?;
+        const new_target = coordinates.fromWorld(&test_layout, .{ 3, 0, 1 }).?;
+        fixture.game.world.?.setBlockUnchecked(coordinates.fromWorld(&test_layout, .{ 0, 0, -1 }).?, .stone);
+        fixture.game.world.?.setBlockUnchecked(old_target, .stone);
+        fixture.game.world.?.setBlockUnchecked(new_target, .stone);
+        fixture.game.world.?.pending_operations.clearRetainingCapacity();
+
+        var spectator: std.meta.Child(@TypeOf(fixture.scene.spectator_camera)) = .{
+            .camera = &fixture.camera,
+            .input_controller = @ptrCast(&fixture.input),
+        };
+        if (spectating) fixture.game.control_mode = .spectator;
+        // Event polling queues X while the view still points along +y. The mouse
+        // delta turns it toward +x during the current frame's camera update.
+        handleKeyPress(&fixture.game, .{ .key = .x, .mods = .{} });
+        try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
+        fixture.input.cursor_position_delta = .{ math.pi / 0.01, 0 };
+        fixture.input.cursor_left_button_pressed = true;
+        if (spectating) spectator.update(0.016);
+        fixture.game.updatePlayer(false);
+        fixture.game.updateBlockTool();
+
+        const operations = fixture.game.world.?.pending_operations.items;
+        try std.testing.expectEqual(1, operations.len);
+        try std.testing.expectEqual(new_target, operations[0].operation.block);
+        try std.testing.expect(operations[0].operation.action == .remove);
+        try std.testing.expect(try fixture.game.world.?.isBlockSolid(old_target));
+        try std.testing.expect(!try fixture.game.world.?.isBlockSolid(new_target));
+    }
+}
+
 test "camera placement keeps structural validation and targets no block in empty air" {
     var fixture: StreamingTest = .{};
     fixture.init();

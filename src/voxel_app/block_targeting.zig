@@ -3,7 +3,8 @@ const std = @import("std");
 const engine = @import("engine");
 const World = @import("world.zig").World;
 const Position = engine.world_math.Position;
-const Cell = @Vector(3, i64);
+const coordinates = @import("block_coordinates.zig");
+const Cell = coordinates.Cell;
 
 pub const reach: f64 = 4;
 
@@ -25,8 +26,10 @@ pub fn cast(world: *const World, position: Position, direction: Position) @impor
     // Keep periodic positions small before converting to integer cell coordinates.
     start[0] = @mod(start[0], @as(f64, @floatFromInt(world.layout.size_in_blocks[0])));
     // Allow eight f64 epsilon units at the storage-coordinate scale for origin
-    // conversion and DDA rounding. This only widens the cutoff by rounding noise.
-    const reach_limit = reach + 8 * std.math.floatEps(f64) * @max(reach, @reduce(.Max, @abs(start)));
+    // conversion, normalization and DDA accumulation. Use the same allowance for
+    // the inclusive reach limit and mathematically tied boundary crossings.
+    const distance_tolerance = 8 * std.math.floatEps(f64) * @max(reach, @reduce(.Max, @abs(start)));
+    const reach_limit = reach + distance_tolerance;
     // Even a spectator far outside the finite world cannot reach it from here.
     inline for (1..3) |axis| {
         if (start[axis] < -reach_limit or start[axis] > @as(f64, @floatFromInt(world.layout.size_in_blocks[axis])) + reach_limit) return null;
@@ -57,11 +60,11 @@ pub fn cast(world: *const World, position: Position, direction: Position) @impor
         const exit = @reduce(.Min, next);
         // At an exact boundary, ignore the cell behind a negative-pointing ray.
         if (exit > distance) {
-            if (storedCell(world.layout, cell)) |block| {
+            if (coordinates.fromStorage(world.layout, cell)) |block| {
                 if (try world.isBlockSolid(block)) {
                     var placement: ?[3]u32 = null;
                     if (entry_step) |normal| {
-                        placement = storedCell(world.layout, cell - normal);
+                        placement = coordinates.fromStorage(world.layout, cell - normal);
                     }
                     return .{ .block = block, .placement = placement, .distance = distance };
                 }
@@ -72,7 +75,7 @@ pub fn cast(world: *const World, position: Position, direction: Position) @impor
         entry_step = null;
         // Skip cells touched only at an edge/corner. Choose a deterministic face at ties.
         inline for (0..3) |axis| {
-            if (next[axis] == exit) {
+            if (next[axis] - exit <= distance_tolerance) {
                 if (entry_step == null) {
                     var normal: Cell = @splat(0);
                     normal[axis] = step[axis];
@@ -86,21 +89,14 @@ pub fn cast(world: *const World, position: Position, direction: Position) @impor
     return null;
 }
 
-fn storedCell(layout: *const engine.WorldLayout, cell: Cell) ?[3]u32 {
-    if (cell[1] < 0 or cell[1] >= layout.size_in_blocks[1] or
-        cell[2] < 0 or cell[2] >= layout.size_in_blocks[2]) return null;
-    return .{ @intCast(@mod(cell[0], layout.size_in_blocks[0])), @intCast(cell[1]), @intCast(cell[2]) };
-}
-
 const Fixture = @import("terrain_test_fixture.zig").Fixture;
 
 fn expectHit(world: *const World, position: Position, direction: Position, block: Cell, placement: ?Cell, distance: f64) !void {
     const result = try cast(world, position, direction);
     try std.testing.expect(result != null);
     const hit = result.?;
-    const origin: Cell = @as(Cell, world.layout.origin_chunk) * @as(Cell, @splat(engine.chunk_utils.CHUNK_SIZE));
-    try std.testing.expectEqual(storedCell(world.layout, block + origin).?, hit.block);
-    try std.testing.expectEqual(if (placement) |cell| storedCell(world.layout, cell + origin) else null, hit.placement);
+    try std.testing.expectEqual(coordinates.fromWorld(world.layout, block).?, hit.block);
+    try std.testing.expectEqual(if (placement) |cell| coordinates.fromWorld(world.layout, cell) else null, hit.placement);
     try std.testing.expectApproxEqAbs(distance, hit.distance, 0.00000001);
 }
 
@@ -150,6 +146,63 @@ test "exact boundaries and diagonal edge crossings ignore cells behind or beside
     fixture.set(.{ 1, 0, 0 }, .stone);
     fixture.set(.{ 2, 2, 0 }, .stone);
     try expectHit(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 1, 1, 0 }, .{ 2, 2, 0 }, .{ 1, 2, 0 }, 1.5 * @sqrt(@as(f64, 2)));
+}
+
+test "unequal diagonals skip corner-only cells for either sign and every axis ordering" {
+    const cases = [_]struct { direction: Position, graze: Cell, target: Cell, placement: Cell }{
+        .{ .direction = .{ 1, 3, 0 }, .graze = .{ 1, 1, 0 }, .target = .{ 1, 2, 0 }, .placement = .{ 0, 2, 0 } },
+        .{ .direction = .{ 3, 1, 0 }, .graze = .{ 1, 1, 0 }, .target = .{ 2, 1, 0 }, .placement = .{ 1, 1, 0 } },
+        .{ .direction = .{ 1, 0, 3 }, .graze = .{ 1, 0, 1 }, .target = .{ 1, 0, 2 }, .placement = .{ 0, 0, 2 } },
+        .{ .direction = .{ 3, 0, 1 }, .graze = .{ 1, 0, 1 }, .target = .{ 2, 0, 1 }, .placement = .{ 1, 0, 1 } },
+        .{ .direction = .{ 0, 1, 3 }, .graze = .{ 0, 1, 1 }, .target = .{ 0, 1, 2 }, .placement = .{ 0, 0, 2 } },
+        .{ .direction = .{ 0, 3, 1 }, .graze = .{ 0, 1, 1 }, .target = .{ 0, 2, 1 }, .placement = .{ 0, 1, 1 } },
+        .{ .direction = .{ 1, 1, 3 }, .graze = .{ 1, 1, 1 }, .target = .{ 1, 1, 2 }, .placement = .{ 0, 1, 2 } },
+    };
+    for (cases) |case| {
+        for ([_]i64{ -1, 1 }) |sign| {
+            var fixture = try Fixture.init();
+            defer fixture.deinit();
+            var graze = case.graze;
+            var target = case.target;
+            var placement = case.placement;
+            inline for (0..3) |axis| {
+                graze[axis] *= sign;
+                target[axis] *= sign;
+                placement[axis] *= sign;
+            }
+            const direction = case.direction * @as(Position, @splat(@floatFromInt(sign)));
+            fixture.set(graze, .stone);
+            fixture.set(target, .stone);
+            const distance = 0.5 * @sqrt(@reduce(.Add, direction * direction));
+            try expectHit(&fixture.world, .{ 0.5, 0.5, 0.5 }, direction, target, placement, distance);
+        }
+    }
+}
+
+test "nearby distinct diagonal crossings still target a briefly entered cell" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ 1, 1, 0 }, .stone);
+    fixture.set(.{ 1, 2, 0 }, .stone);
+    const direction: Position = .{ 1, 3 - 0.000001, 0 };
+    try expectHit(&fixture.world, .{ 0.5, 0.5, 0.5 }, direction, .{ 1, 1, 0 }, .{ 0, 1, 0 }, 0.5 * @sqrt(@reduce(.Add, direction * direction)));
+}
+
+test "tied crossings skip unloaded grazed chunks but stop at unloaded entered chunks" {
+    const cases = [_]struct { start: Position, direction: Position, graze: Position, target: Cell, placement: Cell }{
+        .{ .start = .{ 31.5, 30.5, 0.5 }, .direction = .{ 1, 3, 0 }, .graze = .{ 32.5, 31.5, 0.5 }, .target = .{ 32, 32, 0 }, .placement = .{ 31, 32, 0 } },
+        .{ .start = .{ 0.5, 1.5, 0.5 }, .direction = .{ -1, -3, 0 }, .graze = .{ -0.5, 0.5, 0.5 }, .target = .{ -1, -1, 0 }, .placement = .{ 0, -1, 0 } },
+    };
+    for (cases) |case| {
+        var fixture = try Fixture.init();
+        defer fixture.deinit();
+        fixture.set(case.target, .stone);
+        fixture.world.removeChunk(fixture.world.layout.getChunkCoords(case.graze));
+        try expectHit(&fixture.world, case.start, case.direction, case.target, case.placement, 0.5 * @sqrt(@as(f64, 10)));
+        const target_position = @as(Position, @floatFromInt(case.target)) + @as(Position, @splat(0.5));
+        fixture.world.removeChunk(fixture.world.layout.getChunkCoords(target_position));
+        try std.testing.expectError(error.ChunkNotReceived, cast(&fixture.world, case.start, case.direction));
+    }
 }
 
 test "unknown chunks stop targeting before a block across a chunk boundary" {
