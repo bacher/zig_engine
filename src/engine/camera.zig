@@ -134,6 +134,12 @@ pub const Camera = struct {
         return .{ local[0], local[1], local[2], 1 };
     }
 
+    /// The centre-of-view ray in world axes, independent of camera translation.
+    pub fn getForwardDirection(camera: *const Camera) Position {
+        const forward = utils.matApply(zmath.transpose(camera.view_from_camera), .{ 0, 0, -1, 0 });
+        return .{ forward[0], forward[1], forward[2] };
+    }
+
     /// Fit shadow cascades without ever reconstructing a world-space frustum.
     pub fn getChunkFrustumPoints(camera: *const Camera, options: struct { depth: f32 = 1.0 }) FrustumPoints {
         return FrustumPoints.initFromMatrix(camera.world_from_clip_chunked, camera.getLocalPosition(), options.depth);

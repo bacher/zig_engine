@@ -109,7 +109,8 @@ The default scene has a spectator controller:
 | E | Toggle SSAO; exits SSAO debug mode if it was active. |
 | R | Toggle SSAO debug display, enabling SSAO when entering it. |
 | B | Toggle SSAO blur. |
-| Z / X in the voxel app | Place dirt / remove a block below the camera within tool reach. |
+| X / Z in the voxel app | Place the selected block / remove the first block along the camera view, within four metres. |
+| 1–6 in the voxel app | Select stone, dirt, grass, water, sand, or snow. |
 
 Movement uses a base speed of 5 world units per second and elapsed frame time. There is no collision, gravity, or terrain constraint in `SpectatorCamera`; it can move through solid terrain. Pitch is not explicitly clamped.
 

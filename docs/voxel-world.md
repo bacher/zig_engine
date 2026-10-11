@@ -168,7 +168,7 @@ Stop every client worker before destroying the service. Shutdown closes the requ
 
 ## Tools and simulation example
 
-Z places dirt and X removes the top solid block in the vertical column below the camera. These tools search at most 20 blocks beneath the actual camera position; they are not crosshair raycasts. Placement requires support within reach, except that the world bottom can provide the floor. Unreceived chunks produce no edit, and no support within the bounded search produces no floating placement.
+X places the selected block in the empty cell adjacent to the face you look at; Z removes the first occupied block along the camera view. Keys 1–6 select stone, dirt, grass, water, sand, and snow, with dirt selected initially. A voxel raycast measures up to four metres from the camera to the hit face. No hit means no edit. Unreceived chunks stop the ray, and placement requires a received, empty cell that does not overlap the player, including the frozen player during spectating. X wraps at world seams; finite y/z edges cannot receive blocks. The tools have no UI or target highlighting.
 
 The simulation worker initially loads the central chunk column, finds the surface at its horizontal midpoint, then evicts those subscriptions. It submits one dirt put, waits for the result, and waits two seconds between subsequent operations. A successful put switches the next action to remove; a failed put retries a put. Removal switches back to putting. It communicates only through its own service endpoint, so visible changes arrive on the main thread through ordinary subscriptions. This is a concurrency example, not a broader NPC simulation system.
 
@@ -176,9 +176,10 @@ The simulation worker initially loads the central chunk column, finds the surfac
 
 | Source/test file | Behavior to inspect |
 | --- | --- |
-| [`world.zig`](../src/voxel_app/world.zig) | Contents, edit preconditions, replay/rollback, stale snapshots, column tools, and reveals. |
+| [`world.zig`](../src/voxel_app/world.zig) | Contents, edit preconditions, replay/rollback, stale snapshots, and reveals. |
 | [`world_data_service.zig`](../src/voxel_app/world_data_service.zig) | Queue ordering, conflicts, tokens, broadcasts/packages, revisions, masks, eviction, caches, and shutdown. |
-| [`main.zig`](../src/voxel_app/main.zig) | Streaming/pinning, handoffs, package application, mesh reuse, mask precedence, bounded tools, and capacity fallback. |
+| [`main.zig`](../src/voxel_app/main.zig) | Streaming/pinning, handoffs, package application, mesh reuse, mask precedence, tool controls, player-overlap rejection, and capacity fallback. |
+| [`block_tool.zig`](../src/voxel_app/block_tool.zig) | Camera ray targeting, four-metre reach, face placement, diagonal crossings, missing data, and world seams/bounds. |
 | [`world_generator.zig`](../src/voxel_app/world_generator.zig), [`perlin_noise.zig`](../src/voxel_app/perlin_noise.zig) | Determinism, surface/shortcut consistency, periodic x, and enclosure certification. |
 | [`boundary_mask.zig`](../src/voxel_app/boundary_mask.zig), [`world_engine_glue.zig`](../src/voxel_app/world_engine_glue.zig) | Mask coordinates/sizes and cross-chunk face extraction. |
 | [`simulation_worker.zig`](../src/voxel_app/simulation_worker.zig) | Surface selection, result-dependent action changes, cancellation, and subscription updates. |
