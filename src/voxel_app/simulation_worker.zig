@@ -131,7 +131,7 @@ test "simulation alternates on success and retries conflicting puts" {
 
 test "simulation surface is above the center block, including at chunk boundaries" {
     var chunk = world.WorldChunk.initEmpty();
-    defer chunk.content.deinit(std.testing.allocator);
+    defer chunk.deinit(std.testing.allocator);
     try std.testing.expectEqual(0, surfaceAboveChunk(chunk, 3));
     _ = chunk.apply(std.testing.allocator, .{ 0, 0, 31 }, .{ .put = .stone });
     try std.testing.expectEqual(0, surfaceAboveChunk(chunk, 3));
@@ -165,7 +165,7 @@ test "simulation repeatedly pushes put remove put to a subscribed client" {
     }
     try std.testing.expect(try observer.waitResponses(&responses));
     try std.testing.expectEqual(1, responses.items.len);
-    responses.items[0].data.blocks.chunk.content.deinit(allocator);
+    responses.items[0].data.blocks.chunk.deinit(allocator);
     responses.clearRetainingCapacity();
 
     const started = Io.Clock.awake.now(io);

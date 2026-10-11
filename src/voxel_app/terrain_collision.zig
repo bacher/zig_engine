@@ -1,8 +1,9 @@
 //! CPU collision queries against the application's optimistic block cache.
 const engine = @import("engine");
 const World = @import("world.zig").World;
+const block_coordinates = @import("block_coordinates.zig");
 pub const Position = engine.world_math.Position;
-pub const Cell = @Vector(3, i64);
+pub const Cell = block_coordinates.Cell;
 pub const epsilon: f64 = 0.0000001;
 /// Small downward sweep used to recognize standing contact.
 pub const ground_probe: f64 = 0.00001;
@@ -14,7 +15,19 @@ pub fn movementCollision(block: engine.voxel_chunk.BlockType) MovementCollision 
     return switch (block) {
         .none => .none,
         // Water remains a solid cube until swimming/fluid movement is introduced.
-        .stone, .dirt, .grass, .water, .sand, .snow => .full_cube,
+        .stone,
+        .dirt,
+        .grass,
+        .water,
+        .sand,
+        .snow,
+        .packed_dirt,
+        .crushed_stone,
+        .tree_trunk,
+        .planks,
+        .rebar,
+        .reinforced_concrete,
+        => .full_cube,
     };
 }
 
@@ -55,13 +68,8 @@ pub const Query = struct {
 
     fn cellState(self: *Query, cell: Cell, report_missing: bool) Overlap {
         const layout = self.world.layout;
-        const origin: Cell = @as(Cell, layout.origin_chunk) * @as(Cell, @splat(engine.chunk_utils.CHUNK_SIZE));
-        var stored = cell + origin;
-        stored[0] = @mod(stored[0], layout.size_in_blocks[0]);
         // The finite y/z edges are walls. X follows the voxel application's topology.
-        if (stored[1] < 0 or stored[1] >= layout.size_in_blocks[1] or
-            stored[2] < 0 or stored[2] >= layout.size_in_blocks[2]) return .solid;
-        const block: [3]u32 = @as(@Vector(3, u32), @intCast(stored));
+        const block = block_coordinates.fromWorldCell(layout, cell) orelse return .solid;
         const chunk_coords, const local = @import("world.zig").splitBlockCoords(block);
         const chunk = self.world.getChunk(chunk_coords) orelse {
             if (report_missing) self.missing_chunk = self.missing_chunk orelse chunk_coords;

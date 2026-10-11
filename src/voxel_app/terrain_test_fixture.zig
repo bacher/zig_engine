@@ -3,6 +3,7 @@ const std = @import("std");
 const engine = @import("engine");
 const World = @import("world.zig").World;
 const Cell = @import("terrain_collision.zig").Cell;
+const block_coordinates = @import("block_coordinates.zig");
 
 pub const Fixture = struct {
     world: World,
@@ -22,10 +23,7 @@ pub const Fixture = struct {
     }
 
     pub fn set(self: *Fixture, cell: Cell, block: engine.voxel_chunk.BlockType) void {
-        const origin: Cell = @as(Cell, self.world.layout.origin_chunk) * @as(Cell, @splat(engine.chunk_utils.CHUNK_SIZE));
-        var stored = cell + origin;
-        stored[0] = @mod(stored[0], self.world.layout.size_in_blocks[0]);
-        self.world.setBlock(@as(@Vector(3, u32), @intCast(stored)), block);
+        self.world.setBlockUnchecked(block_coordinates.fromWorldCell(self.world.layout, cell).?, block);
     }
 
     pub fn fill(self: *Fixture, first: Cell, last: Cell, block: engine.voxel_chunk.BlockType) void {

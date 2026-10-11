@@ -157,6 +157,19 @@ pub fn build(b: *std.Build) void {
     const run_voxel_step = b.step("run_voxel", "Run the voxel app");
     run_voxel_step.dependOn(&run_voxel_cmd.step);
 
+    const placement_benchmark = b.addExecutable(.{
+        .name = "block-placement-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/block_placement_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    placement_benchmark.root_module.linkLibrary(voxel_engine_lib);
+    placement_benchmark.root_module.addImport("engine", voxel_engine_lib.root_module);
+    const benchmark_step = b.step("bench-placement", "Benchmark structural validation beside a 200-block plank building");
+    benchmark_step.dependOn(&b.addRunArtifact(placement_benchmark).step);
+
     const exe_unit_tests = b.addTest(.{
         .root_module = demo_exe.root_module,
     });

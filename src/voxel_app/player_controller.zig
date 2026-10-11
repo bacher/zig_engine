@@ -516,7 +516,7 @@ test "authoritative rollback of an optimistic opening triggers recovery from cur
     fixture.world.pending_operations.clearRetainingCapacity();
     const coords = fixture.world.layout.getChunkCoords(.{ 0.5, 0.5, 0 });
     var authority = fixture.world.getChunk(coords).?.clone(std.testing.allocator);
-    defer authority.content.deinit(std.testing.allocator);
+    defer authority.deinit(std.testing.allocator);
     authority.chunk_revision = 1;
     fixture.set(.{ 0, 0, 0 }, .none);
     fixture.world.pending_operations.items[0].request_id = 1;
