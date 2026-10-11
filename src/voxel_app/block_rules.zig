@@ -92,7 +92,50 @@ pub const Reader = struct {
 
 const State = struct { wood: u32 = 0, mineral: u32 = 0 };
 const Evaluation = union(enum) { supported: State, rejected: Failure };
-const Cache = std.AutoHashMapUnmanaged(Cell, Evaluation);
+/// Every consulted cell, including absent neighbors and diagonal/platform probes,
+/// participates in reuse eligibility. Coordinates are relative to one cache center.
+const ReadBounds = struct {
+    low: Cell,
+    high: Cell,
+
+    fn include(self: *ReadBounds, cell: Cell) void {
+        self.low = @min(self.low, cell);
+        self.high = @max(self.high, cell);
+    }
+
+    fn fits(self: ReadBounds, layout: *const engine.WorldLayout, center: Cell) bool {
+        const radius: i64 = Limits.support_radius;
+        inline for (1..3) |axis| {
+            if (self.low[axis] < center[axis] - radius or self.high[axis] > center[axis] + radius) return false;
+        }
+        if (self.low[0] >= center[0] - radius and self.high[0] <= center[0] + radius) return true;
+        if (comptime engine.WorldLayout.wrap_x) {
+            const width: i64 = layout.size_in_blocks[0];
+            // Require the whole interval to fit one periodic window. Checking just
+            // the wrapped endpoints could miss excluded cells between them.
+            for ([_]i64{ center[0] - width, center[0] + width }) |wrapped| {
+                if (self.low[0] >= wrapped - radius and self.high[0] <= wrapped + radius) return true;
+            }
+        }
+        return false;
+    }
+};
+
+const Evidence = struct {
+    bounds: ReadBounds,
+    /// A clipped or missing-data search can find support without finding its lowest
+    /// height. Such results are reusable only in their original root window.
+    complete: bool = true,
+
+    fn merge(self: *Evidence, other: Evidence) void {
+        self.bounds.include(other.bounds.low);
+        self.bounds.include(other.bounds.high);
+        self.complete = self.complete and other.complete;
+    }
+};
+
+const CacheEntry = struct { evaluation: Evaluation, evidence: Evidence, scope: u64 };
+const Cache = std.AutoHashMapUnmanaged(Cell, CacheEntry);
 const ReadError = error{ MissingData, SupportWindowExceeded };
 
 fn rememberError(previous: *?ReadError, next: ReadError) void {
@@ -109,6 +152,10 @@ pub const Validator = struct {
     /// Recursive support searches never recenter on intermediate blocks.
     root: ?Cell = null,
     outside: ?struct { cell: Cell, center: Cell } = null,
+    /// All cache state belongs to this hypothetical edit, never to world metadata.
+    cache_center: ?Cell = null,
+    scope: u64 = 0,
+    evidence: ?Evidence = null,
 
     pub fn deinit(self: *Validator) void {
         self.cache.deinit(self.allocator);
@@ -122,19 +169,38 @@ pub const Validator = struct {
     }
 
     fn get(self: *Validator, cell: Cell) ReadError!BlockType {
-        if (self.edit) |edit| try self.bound(cell, edit.cell);
-        if (self.root) |root| try self.bound(cell, root);
+        if (self.evidence) |*evidence| evidence.bounds.include(displacement(self.reader.layout, cell, self.cache_center.?));
+        if (self.edit) |edit| self.bound(cell, edit.cell) catch |err| {
+            self.markIncomplete();
+            return err;
+        };
+        if (self.root) |root| self.bound(cell, root) catch |err| {
+            self.markIncomplete();
+            return err;
+        };
         const normalized = self.reader.normalize(cell) orelse return .none;
         if (self.edit) |edit| {
             if (@reduce(.And, normalized == edit.cell)) return edit.material;
         }
-        return self.reader.get(normalized) orelse error.MissingData;
+        return self.reader.get(normalized) orelse {
+            self.markIncomplete();
+            return error.MissingData;
+        };
+    }
+
+    fn markIncomplete(self: *Validator) void {
+        if (self.evidence) |*evidence| evidence.complete = false;
+    }
+
+    fn mergeEvidence(self: *Validator, evidence: Evidence) void {
+        if (self.evidence) |*current| current.merge(evidence);
     }
 
     fn beginCheck(self: *Validator, cell: Cell) void {
         if (self.root) |root| if (@reduce(.And, root == cell)) return;
         self.root = cell;
-        self.cache.clearRetainingCapacity();
+        if (self.cache_center == null) self.cache_center = if (self.edit) |edit| edit.cell else cell;
+        self.scope += 1;
         self.outside = null;
     }
 
@@ -378,12 +444,31 @@ pub const Validator = struct {
     }
 
     fn evaluate(self: *Validator, cell: Cell, material: BlockType) ReadError!Evaluation {
-        if (self.cache.get(cell)) |cached| return cached;
-        if (self.depth >= 256) return failure(.missing_foundation, cell, 0, 1);
+        if (self.cache.get(cell)) |cached| {
+            const reusable = cached.scope == self.scope or
+                (cached.evaluation == .supported and cached.evidence.complete and
+                    cached.evidence.bounds.fits(self.reader.layout, displacement(self.reader.layout, self.root.?, self.cache_center.?)));
+            if (reusable) {
+                self.mergeEvidence(cached.evidence);
+                return cached.evaluation;
+            }
+        }
+        if (self.depth >= 256) {
+            self.markIncomplete();
+            return failure(.missing_foundation, cell, 0, 1);
+        }
+        const outer_evidence = self.evidence;
+        const relative = displacement(self.reader.layout, cell, self.cache_center.?);
+        self.evidence = .{ .bounds = .{ .low = relative, .high = relative } };
         self.depth += 1;
-        defer self.depth -= 1;
+        defer {
+            const evidence = self.evidence.?;
+            self.evidence = outer_evidence;
+            self.mergeEvidence(evidence);
+            self.depth -= 1;
+        }
         const result = try self.evaluateUncached(cell, material);
-        self.cache.put(self.allocator, cell, result) catch @panic("OOM");
+        self.cache.put(self.allocator, cell, .{ .evaluation = result, .evidence = self.evidence.?, .scope = self.scope }) catch @panic("OOM");
         return result;
     }
 
@@ -493,6 +578,7 @@ const Fixture = struct {
     missing: ?Cell = null,
     read_center: ?Cell = null,
     outside_reads: usize = 0,
+    read_calls: usize = 0,
     maximum_read_distance: u64 = 0,
 
     fn deinit(self: *Fixture) void {
@@ -502,6 +588,7 @@ const Fixture = struct {
 
     fn read(context: *anyopaque, block: [3]u32) ?BlockType {
         const self: *Fixture = @ptrCast(@alignCast(context));
+        self.read_calls += 1;
         const cell: Cell = .{ block[0], block[1], block[2] };
         if (self.read_center) |center| {
             const reach = distance(&self.layout, cell, center);
@@ -960,4 +1047,74 @@ test "nested unknown foundations retain their diagnostic while a known horizonta
     try fixture.raw(.{ 12, 11, 6 }, .stone);
     try fixture.raw(.{ 12, 11, 7 }, .planks);
     try std.testing.expect(fixture.check(.{ 12, 10, 7 }, .planks) == null);
+}
+
+test "an adjacent edit reuses overlapping searches in a 200-block plank building" {
+    // The second position crosses chunk boundaries and puts the edit on the x seam.
+    for ([_]Cell{ .{ 20, 20, 4 }, .{ 59, 27, 4 } }) |origin| {
+        const target = origin + Cell{ 5, 2, 0 };
+        var fixture: Fixture = .{ .read_center = target };
+        defer fixture.deinit();
+        for (0..8) |z| {
+            for (0..5) |y| {
+                for (0..5) |x| {
+                    const cell = origin + Cell{ @intCast(x), @intCast(y), @intCast(z) };
+                    try fixture.raw(cell, .planks);
+                    try fixture.constructed.append(std.testing.allocator, cell);
+                }
+            }
+        }
+        try std.testing.expect(fixture.check(target, .planks) == null);
+        // Count work instead of asserting a machine-dependent elapsed time. The version
+        // rebuilding each dependent's graph takes 2,840,990 reads at the first position.
+        if (fixture.read_calls > 200_000) std.debug.print("placement validation used {d} reader calls\n", .{fixture.read_calls});
+        try std.testing.expect(fixture.read_calls <= 200_000);
+        try std.testing.expectEqual(0, fixture.outside_reads);
+    }
+}
+
+test "a clipped successful search is recomputed when another root admits a lower foundation" {
+    const origin: Cell = .{ 108, 80, 64 };
+    const edit: Cell = .{ 94, 80, 67 };
+    var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = edit };
+    defer fixture.deinit();
+    const first = try fixture.staircase(origin, .{ -1, 0, 0 }, 28, .stone);
+    try fixture.raw(first, .rebar);
+    try fixture.raw(.{ 108, 80, 52 }, .stone);
+    for (53..65) |z| try fixture.raw(.{ 108, 80, @intCast(z) }, .rebar);
+    // The first root's window ends at x=108. It can use the tall column, but
+    // cannot see the lower foundation and platform corners at x=109.
+    try fixture.raw(.{ 109, 80, 64 }, .rebar);
+    const second = first + Cell{ 1, 0, 2 };
+    try fixture.raw(second - Cell{ 0, 0, 1 }, .rebar);
+    try fixture.raw(second, .rebar);
+    var validator: Validator = .{
+        .allocator = std.testing.allocator,
+        .reader = .{ .layout = &fixture.layout, .context = &fixture, .block_at = Fixture.read },
+        .edit = .{ .cell = edit, .material = .none },
+    };
+    defer validator.deinit();
+    try std.testing.expect(validator.checkExisting(first) == null);
+    try std.testing.expectEqual(19, validator.cache.get(first).?.evaluation.supported.mineral);
+    try std.testing.expect(!validator.cache.get(first).?.evidence.complete);
+    // Reusing the higher, incomplete result would reject this tower at height 21.
+    // The shifted root admits the complete platform and proves height 10 instead.
+    try std.testing.expect(validator.checkExisting(second) == null);
+    try std.testing.expectEqual(10, validator.cache.get(second).?.evaluation.supported.mineral);
+    try std.testing.expectEqual(0, fixture.outside_reads);
+}
+
+test "cached read bounds fit whole periodic intervals rather than just their wrapped endpoints" {
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    const crossing: ReadBounds = .{ .low = .{ -28, 0, 0 }, .high = .{ 0, 0, 0 } };
+    // Both endpoints fit, but an intermediate read at x=-4 is 32 cells away.
+    try std.testing.expect(distance(&layout, crossing.low, .{ 28, 0, 0 }) <= 28);
+    try std.testing.expect(distance(&layout, crossing.high, .{ 28, 0, 0 }) <= 28);
+    try std.testing.expect(!crossing.fits(&layout, .{ 28, 0, 0 }));
+    const left: ReadBounds = .{ .low = .{ -31, -1, -1 }, .high = .{ -29, 1, 1 } };
+    const right: ReadBounds = .{ .low = .{ 29, -1, -1 }, .high = .{ 31, 1, 1 } };
+    try std.testing.expect(left.fits(&layout, .{ 28, 0, 0 }));
+    try std.testing.expect(right.fits(&layout, .{ -28, 0, 0 }));
+    try std.testing.expect(!left.fits(&layout, .{ 28, 30, 0 }));
+    try std.testing.expect(!right.fits(&layout, .{ -28, 0, 30 }));
 }

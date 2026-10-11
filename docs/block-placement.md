@@ -137,6 +137,13 @@ Support states and memoization exist only during validation; no support graph or
 information is added to stored chunk metadata. A dependency index could be a separate future
 optimization, but is not required for correctness.
 
+Within one edit, each cached evaluation records a bounding box of all consulted cells,
+including nested reads, absent neighbors, platform corners, and diagonal intermediates.
+A successful result can be reused for another dependent only if the search had no missing
+or out-of-window reads and the entire box fits the new dependent's window. Rejected and
+incomplete results remain scoped to their original root. This preserves the window and
+lowest-height rules while avoiding repeated overlapping searches during synchronous previews.
+
 ## Simulation time and transformations
 
 Simulation time uses 60 ticks per second. The application advances it from frame elapsed
@@ -183,3 +190,9 @@ time catch-up, inclusive support windows, stacked overhangs, conservative depend
 root-specific caches, translated/wrapped constructions, and client/service agreement with
 only a 3x3x3 neighborhood. `zig build test-gpu` checks the shared voxel shader pipelines when a
 graphics adapter is available.
+
+`zig build bench-placement -Doptimize=ReleaseFast` reports reader calls and the median/minimum
+time for ten `World.previewOperation` calls beside a 200-block (5x5x8) plank building over
+natural stone. The CPU suite enforces a reader-call budget for that reproduction, also at
+a translated position across the wrapped seam; elapsed time is reported rather than asserted
+because it depends on the machine and build mode.
