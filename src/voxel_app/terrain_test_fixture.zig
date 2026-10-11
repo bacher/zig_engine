@@ -25,7 +25,7 @@ pub const Fixture = struct {
         const origin: Cell = @as(Cell, self.world.layout.origin_chunk) * @as(Cell, @splat(engine.chunk_utils.CHUNK_SIZE));
         var stored = cell + origin;
         stored[0] = @mod(stored[0], self.world.layout.size_in_blocks[0]);
-        self.world.setBlock(@as(@Vector(3, u32), @intCast(stored)), block);
+        self.world.setBlockUnchecked(@as(@Vector(3, u32), @intCast(stored)), block);
     }
 
     pub fn fill(self: *Fixture, first: Cell, last: Cell, block: engine.voxel_chunk.BlockType) void {

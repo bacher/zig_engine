@@ -109,7 +109,8 @@ The default scene has a spectator controller:
 | E | Toggle SSAO; exits SSAO debug mode if it was active. |
 | R | Toggle SSAO debug display, enabling SSAO when entering it. |
 | B | Toggle SSAO blur. |
-| Z / X in the voxel app | Place dirt / remove a block below the camera within tool reach. |
+| 1-6 in the voxel app | Select loose soil, crushed stone, trunk, planks, rebar, or reinforced concrete. |
+| Z / X in the voxel app | Place the selected material / mine a block below the camera within tool reach. |
 
 Movement uses a base speed of 5 world units per second and elapsed frame time. There is no collision, gravity, or terrain constraint in `SpectatorCamera`; it can move through solid terrain. Pitch is not explicitly clamped.
 
@@ -129,7 +130,7 @@ The player consumes the full monotonic frame interval using internal steps at mo
 
 Q enters debug spectator mode at the player's current eye position and orientation. The player and its velocity freeze, and its surrounding block chunks remain subscribed. Q returns to that player's position and view; it does not teleport the body to the spectator camera. Every later excursion starts at the player again. Player history continues to expire during spectating. Focus loss freezes controls, releases capture, and clears jump/held input; focus regain resumes without integrating the paused frame interval.
 
-Movement collision is a fixed property of `BlockType` in `terrain_collision.zig`. Air has none; stone, dirt, grass-covered ground, water, sand, and snow currently use full cubes. Water remains solid pending fluid movement. Future decorative types can map to no collision independently of rendering/occupancy. No per-block instance collision state exists. X wraps using the current world layout; finite y/z storage edges act as walls.
+Movement collision is a fixed property of `BlockType` in `terrain_collision.zig`. Air has none; all current terrain and construction materials use full cubes. Water remains solid pending fluid movement. Future decorative types can map to no collision independently of rendering/occupancy. No per-block instance collision state exists. X wraps using the current world layout; finite y/z storage edges act as walls.
 
 Unknown chunks act as fully solid and stderr reports the encountered chunk, once per continuous contact with that chunk. When the body's starting volume is unknown, movement waits in place until data arrives. Recovery searches only accept known clear body-sized space.
 
