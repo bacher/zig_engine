@@ -39,13 +39,13 @@ const terrain_collision = @import("terrain_collision.zig");
 const consts = @import("./consts.zig");
 const world_engine = @import("./world_engine_glue.zig");
 const transformations = @import("block_transformations.zig");
+const block_targeting = @import("block_targeting.zig");
 
 const DEBUG = true;
 
 /// Chunks within this distance are requested; reachable chunks are uploaded to the GPU.
 const CHUNK_LOAD_RADIUS = 3;
 const BLOCK_LOAD_RADIUS = 1;
-const TOOL_REACH: f64 = 20;
 
 const Game = struct {
     const MeshVersion = struct { chunk_revision: u32, mesh_revision: u64 };
@@ -59,6 +59,8 @@ const Game = struct {
     player: ?PlayerController = null,
     control_mode: enum { player, spectator } = .player,
     jump_requested: bool = false,
+    placement_requested: bool = false,
+    removal_requested: bool = false,
     last_missing_collision: ?ChunkCoords = null,
     recovery_warning: bool = false,
     selected_material: voxel_chunk_module.BlockType = .dirt,
@@ -148,6 +150,8 @@ const Game = struct {
         // Synchronize blocks first, then resolve local movement against that cache.
         // Player input remains independent of mesh work and GPU upload capacity.
         if (game.player != null) game.updatePlayer(has_new_chunks);
+        game.updateBlockTool();
+        game.flushBlockOperations();
         game.updateChunksAroundCamera(has_new_chunks);
         game.rebuildDirtyChunks();
         const grid = game.engine.active_scene.?.voxel_grid;
@@ -484,47 +488,45 @@ const Game = struct {
         }
     }
 
-    fn editBlockUnderCamera(game: *Game, action: BlockAction) void {
+    fn updateBlockTool(game: *Game) void {
+        const input = game.engine.input_controller;
+        const place = game.placement_requested or input.cursor_left_button_pressed_this_frame;
+        const remove = game.removal_requested;
+        game.placement_requested = false;
+        game.removal_requested = false;
+        if (!input.focused or input.focus_changed) return;
+        if (remove) game.editBlockInView(.remove);
+        if (place) game.editBlockInView(.place);
+    }
+
+    fn editBlockInView(game: *Game, action: BlockAction) void {
         const world = if (game.world) |*world| world else return;
         world.last_edit_result = null;
-
-        const camera_position = game.engine.active_scene.?.camera.position;
-        const top = getColumnTopUnderPosition(game.layout(), camera_position) orelse return;
-
-        const camera_z = camera_position[2] + @as(f64, @floatFromInt(game.layout().origin_chunk[2] * consts.CHUNK_SIZE));
-        if (camera_z - @as(f64, @floatFromInt(top[2] + 1)) > TOOL_REACH) return;
-        const minimum_z: u32 = @intFromFloat(@max(0, @floor(camera_z - TOOL_REACH)));
-        const edit_result = switch (action) {
-            .remove => world.removeTopBlockInColumn(top, minimum_z),
-            .place => blk: {
-                const block = world.findDropPosition(top, minimum_z) catch |err| break :blk err;
-                const placement = block orelse break :blk @as(?[3]u32, null);
-                if (game.player) |*player| {
-                    if (terrain_collision.overlapsBlock(player.body, player.position, game.layout(), placement)) {
-                        std.debug.print("can't place block {any}: overlaps player body\n", .{placement});
-                        break :blk @as(?[3]u32, null);
-                    }
-                }
-                if (world.tryOperation(.{ .block = placement, .action = .{ .put = game.selected_material } }).status != .success)
-                    break :blk @as(?[3]u32, null);
-                if (game.player) |*player| player.terrainChanged();
-                break :blk @as(?[3]u32, placement);
-            },
+        const camera = game.engine.active_scene.?.camera;
+        const hit = (block_targeting.cast(world, camera.position, camera.forwardDirection()) catch {
+            if (DEBUG) std.debug.print("can't target block: chunks aren't received yet\n", .{});
+            return;
+        }) orelse return;
+        const edited_block = switch (action) {
+            .remove => hit.block,
+            .place => hit.placement orelse return,
         };
-        // Chunks near the camera are normally received, so this happens only while they are
-        // still loading, or when the column has to be searched too far from the camera.
-        const edited_block = edit_result catch |err| switch (err) {
-            error.ChunkNotReceived => {
-                if (DEBUG) {
-                    std.debug.print("can't {s} block under {any}, chunks aren't received yet\n", .{ @tagName(action), top });
-                }
+        if (action == .place) if (game.player) |*player| {
+            if (terrain_collision.overlapsBlock(player.body, player.position, game.layout(), edited_block)) {
+                std.debug.print("can't place block {any}: overlaps player body\n", .{edited_block});
                 return;
-            },
-        } orelse {
-            if (world.last_edit_result) |result| if (result.failure) |failure|
+            }
+        };
+        const result = world.tryOperation(.{ .block = edited_block, .action = switch (action) {
+            .remove => .remove,
+            .place => .{ .put = game.selected_material },
+        } });
+        if (result.status != .success) {
+            if (result.failure) |failure|
                 std.debug.print("can't edit block: {s} at {any}, {d}/{d}\n", .{ @tagName(failure.reason), failure.subject, failure.actual, failure.limit });
             return;
-        };
+        }
+        if (game.player) |*player| player.terrainChanged();
 
         if (DEBUG) {
             std.debug.print("{s} block {any}\n", .{ @tagName(action), edited_block });
@@ -627,26 +629,6 @@ const BlockAction = enum {
     remove,
     place,
 };
-
-/// Returns the block containing `position`, clamped to the top of the world.
-/// Returns null if the position is outside of the world (or below its bottom).
-fn getColumnTopUnderPosition(layout: *const WorldLayout, position: Position) ?[3]u32 {
-    const origin: @Vector(3, i64) = layout.origin_chunk;
-    const block = @as(@Vector(3, i64), @intFromFloat(@floor(position))) +
-        origin * @as(@Vector(3, i64), @splat(consts.CHUNK_SIZE));
-
-    const world_size = layout.size_in_blocks;
-
-    if (block[1] < 0 or block[1] >= world_size[1] or block[2] < 0) {
-        return null;
-    }
-
-    return .{
-        @intCast(@mod(block[0], world_size[0])),
-        @intCast(block[1]),
-        @intCast(@min(block[2], world_size[2] - 1)),
-    };
-}
 
 fn initWorld(game: *Game) !void {
     game.world_data = try WorldDataService.create(game.engine.io, game.allocator, game.engine.active_scene.?.layout, .{ .terrain = .{ .seed = 12345 } });
@@ -901,9 +883,15 @@ fn onKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque) v
     const game: *Game = @ptrCast(@alignCast(game_opaque));
     if (!engine.window_context.window.getAttribute(.focused)) return;
 
+    handleKeyPress(game, key_params);
+}
+
+fn handleKeyPress(game: *Game, key_params: KeyParams) void {
     switch (key_params.key) {
-        .x => game.editBlockUnderCamera(.remove),
-        .z => game.editBlockUnderCamera(.place),
+        .x => game.removal_requested = true,
+        .e => if (!key_params.mods.control) {
+            game.placement_requested = true;
+        },
         .one, .two, .three, .four, .five, .six => {
             game.selected_material = switch (key_params.key) {
                 .one => .dirt,
@@ -1007,25 +995,115 @@ test "spectator streaming pins the frozen player's nearby block chunks" {
     try std.testing.expect(!fixture.game.pinned_chunks.contains(test_layout.encodeChunkCoords(test_layout.getChunkCoords(fixture.camera.position))));
 }
 
-test "column placement rejects the player's body before changing the optimistic cache" {
+test "camera placement rejects the player's body before changing the optimistic cache" {
     var fixture: StreamingTest = undefined;
     fixture.init();
     defer fixture.deinit();
     fixture.game.player = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
-    fixture.camera.position = .{ 0.5, 0.5, 1.6 };
+    fixture.camera.updatePosition(.{ 0.5, 0.5, 1.6 });
+    fixture.camera.updateView(zmath.rotationX(math.pi / 2.0));
     const centre = test_layout.getChunkCoords(.{ 0.5, 0.5, 0 });
     try fixture.game.world.?.insertChunk(centre, WorldChunk.initEmpty());
     try fixture.game.world.?.insertChunk(centre - ChunkCoords{ 0, 0, 1 }, WorldChunk.initEmpty());
     const ground: [3]u32 = .{ 8192, 4096, 127 };
     fixture.game.world.?.setBlockUnchecked(ground, .stone);
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
-    fixture.game.editBlockUnderCamera(.place);
+    fixture.game.editBlockInView(.place);
     try std.testing.expect(!try fixture.game.world.?.isBlockSolid(.{ 8192, 4096, 128 }));
     try std.testing.expectEqual(@as(usize, 0), fixture.game.world.?.pending_operations.items.len);
     // The same protection applies while the player is frozen in spectator mode.
     fixture.game.control_mode = .spectator;
-    fixture.game.editBlockUnderCamera(.place);
+    fixture.game.editBlockInView(.place);
     try std.testing.expectEqual(@as(usize, 0), fixture.game.world.?.pending_operations.items.len);
+}
+
+test "E and left click place once, X removes, Ctrl E and Z do not place, and 1-6 select materials" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const input = &fixture.input;
+    fixture.camera.updatePosition(.{ 0.5, 0.5, 0.5 });
+    const origin = test_layout.origin_chunk;
+    try fixture.game.world.?.insertChunk(origin, WorldChunk.initEmpty());
+    const target: [3]u32 = .{
+        @intCast(origin[0] * consts.CHUNK_SIZE),
+        @intCast(origin[1] * consts.CHUNK_SIZE + 3),
+        @intCast(origin[2] * consts.CHUNK_SIZE),
+    };
+    fixture.game.world.?.setBlockUnchecked(target, .stone);
+    fixture.game.world.?.pending_operations.clearRetainingCapacity();
+
+    const materials = [_]voxel_chunk_module.BlockType{ .dirt, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete };
+    for ([_]zglfw.Key{ .one, .two, .three, .four, .five, .six }, materials) |key, material| {
+        handleKeyPress(&fixture.game, .{ .key = key, .mods = .{} });
+        try std.testing.expectEqual(material, fixture.game.selected_material);
+    }
+    fixture.game.selected_material = .sand;
+    handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{ .control = true } });
+    handleKeyPress(&fixture.game, .{ .key = .z, .mods = .{} });
+    fixture.game.updateBlockTool();
+    try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
+    handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
+    fixture.game.updateBlockTool();
+    try std.testing.expectEqual(1, fixture.game.world.?.pending_operations.items.len);
+    fixture.game.updateBlockTool();
+    try std.testing.expectEqual(1, fixture.game.world.?.pending_operations.items.len);
+    handleKeyPress(&fixture.game, .{ .key = .x, .mods = .{} });
+    fixture.game.updateBlockTool();
+    try std.testing.expectEqual(2, fixture.game.world.?.pending_operations.items.len);
+    try std.testing.expect(fixture.game.world.?.pending_operations.items[1].operation.action == .remove);
+
+    input.cursor_left_button_pressed_this_frame = true;
+    input.cursor_left_button_pressed = true;
+    fixture.game.updateBlockTool();
+    try std.testing.expectEqual(3, fixture.game.world.?.pending_operations.items.len);
+    input.flushQueue();
+    fixture.game.updateBlockTool();
+    try std.testing.expectEqual(3, fixture.game.world.?.pending_operations.items.len);
+    // Focus loss or regain must discard queued edits and mouse presses.
+    input.focused = false;
+    handleKeyPress(&fixture.game, .{ .key = .x, .mods = .{} });
+    fixture.game.updateBlockTool();
+    input.focused = true;
+    fixture.game.updateBlockTool();
+    try std.testing.expectEqual(3, fixture.game.world.?.pending_operations.items.len);
+    input.focus_changed = true;
+    input.cursor_left_button_pressed_this_frame = true;
+    handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
+    fixture.game.updateBlockTool();
+    input.flushQueue();
+    input.focus_changed = false;
+    fixture.game.updateBlockTool();
+    try std.testing.expectEqual(3, fixture.game.world.?.pending_operations.items.len);
+}
+
+test "camera placement keeps structural validation and targets no block in empty air" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    fixture.camera.updatePosition(.{ 0.5, 0.5, 0.5 });
+    const origin = test_layout.origin_chunk;
+    try fixture.game.world.?.insertChunk(origin, WorldChunk.initEmpty());
+    try fixture.game.world.?.insertChunk(origin - ChunkCoords{ 1, 0, 0 }, WorldChunk.initEmpty());
+    try fixture.game.world.?.insertChunk(origin - ChunkCoords{ 0, 0, 1 }, WorldChunk.initEmpty());
+    try fixture.game.world.?.insertChunk(origin - ChunkCoords{ 1, 0, 1 }, WorldChunk.initEmpty());
+    const target: [3]u32 = .{
+        @intCast(origin[0] * consts.CHUNK_SIZE),
+        @intCast(origin[1] * consts.CHUNK_SIZE + 3),
+        @intCast(origin[2] * consts.CHUNK_SIZE),
+    };
+    fixture.game.world.?.setBlockUnchecked(target, .stone);
+    fixture.game.world.?.pending_operations.clearRetainingCapacity();
+    fixture.game.editBlockInView(.place);
+    try std.testing.expectEqual(world_module.OperationStatus.constraint_violation, fixture.game.world.?.last_edit_result.?.status);
+    try std.testing.expectEqual(@import("block_rules.zig").Reason.earth_footprint, fixture.game.world.?.last_edit_result.?.failure.?.reason);
+    try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
+    // Looking away from the existing block targets empty air.
+    fixture.game.selected_material = .sand;
+    fixture.camera.updateView(zmath.rotationY(-math.pi / 2.0));
+    fixture.game.editBlockInView(.place);
+    fixture.game.editBlockInView(.remove);
+    try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
 }
 
 test "chunk loads, edits, and snapshots share one rebuild using the final contents" {
@@ -1227,22 +1305,6 @@ test "voxel upload queue retains negative spatial chunks and removes only matchi
     try std.testing.expectEqual(ChunkCoords{ -1, -2, -4 }, fixture.grid.chunks_to_upload.items[0].chunk_coords);
 }
 
-test "column top under a position is clamped to the top of the world" {
-    const origin = [3]u32{
-        test_layout.origin_chunk[0] * consts.CHUNK_SIZE,
-        test_layout.origin_chunk[1] * consts.CHUNK_SIZE,
-        test_layout.origin_chunk[2] * consts.CHUNK_SIZE,
-    };
-    const world_size = test_layout.size_in_blocks;
-
-    try std.testing.expectEqual(origin, getColumnTopUnderPosition(&test_layout, .{ 0.5, 0.5, 0.5 }).?);
-    try std.testing.expectEqual([3]u32{ origin[0] - 1, origin[1] - 1, origin[2] - 1 }, getColumnTopUnderPosition(&test_layout, .{ -0.5, -0.5, -0.5 }).?);
-    try std.testing.expectEqual([3]u32{ origin[0], origin[1], world_size[2] - 1 }, getColumnTopUnderPosition(&test_layout, .{ 0, 0, 1.0e6 }).?);
-    try std.testing.expectEqual([3]u32{ world_size[0] - 1, origin[1], origin[2] }, getColumnTopUnderPosition(&test_layout, .{ -@as(f32, @floatFromInt(origin[0])) - 1, 0, 0 }).?);
-    try std.testing.expectEqual(null, getColumnTopUnderPosition(&test_layout, .{ 0, 0, -@as(f32, @floatFromInt(origin[2])) - 1 }));
-    try std.testing.expectEqual(null, getColumnTopUnderPosition(&test_layout, .{ 0, @floatFromInt(world_size[1]), 0 }));
-}
-
 const TestColumn = struct {
     is_missing: []const bool,
     ranges: std.ArrayList([2]i32) = .empty,
@@ -1435,6 +1497,7 @@ test "unreachable chunks keep CPU blocks and queue a mesh immediately after a lo
 
 /// Exercises the actual subscription and upload paths without a graphics device.
 const StreamingTest = struct {
+    input: std.meta.Child(@TypeOf(@as(Engine, undefined).input_controller)) = undefined,
     camera: std.meta.Child(@TypeOf(@as(Scene, undefined).camera)) = undefined,
     grid: @import("engine").VoxelGrid = undefined,
     scene: Scene = undefined,
@@ -1447,17 +1510,28 @@ const StreamingTest = struct {
 
     fn initWithLayout(self: *StreamingTest, layout: *const WorldLayout) void {
         self.scene.layout = layout;
-        self.camera.layout = self.scene.layout;
-        self.camera.position = .{ 0, 0, 0 };
+        self.camera = @TypeOf(self.camera).init(self.scene.layout, 1);
         self.grid = .{ .allocator = std.testing.allocator, .gpu_chunk_info_buffer = undefined, .gpu_block_buffer = undefined };
         self.scene.voxel_grid = &self.grid;
         self.scene.camera = &self.camera;
         self.engine.active_scene = &self.scene;
+        self.input = .{
+            .allocator = std.testing.allocator,
+            .window = undefined,
+            .callbacks = .{ .context = &self.engine },
+            .pressed_keys = std.AutoHashMap(zglfw.Key, void).init(std.testing.allocator),
+            .release_queue = std.AutoHashMap(zglfw.Key, void).init(std.testing.allocator),
+            .cursor_position = .{ 0, 0 },
+        };
+        self.engine.input_controller = &self.input;
         self.game = .{ .allocator = std.testing.allocator, .engine = &self.engine, .world = World.init(std.testing.allocator, self.scene.layout) catch unreachable };
     }
 
     fn deinit(self: *StreamingTest) void {
         const allocator = self.game.allocator;
+        self.input.pressed_keys.deinit();
+        self.input.release_queue.deinit();
+        self.input.pressed_this_frame.deinit(allocator);
         if (self.game.player) |*player| player.deinit();
         self.game.world.?.deinit();
         self.game.chunk_subscriptions.deinit(allocator);
@@ -1664,34 +1738,41 @@ test "streaming holds 27 block chunks, pins edits across movement, and completes
     try std.testing.expect(try fixture.game.world.?.isBlockSolid(block));
 }
 
-test "column tools stop within 20 blocks of the actual camera and never place at an unsupported limit" {
+test "camera tools place on the hit face, remove the nearest block, and stop at four metres" {
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    // This test isolates column reach; soil footprints have separate structural tests.
     fixture.game.selected_material = .sand;
-    fixture.camera.position = .{ 0.5, 0.5, 20.5 };
+    fixture.camera.updatePosition(.{ 0.5, 0, 0.5 });
     const origin = test_layout.origin_chunk;
     try fixture.game.world.?.insertChunk(origin, WorldChunk.initEmpty());
-    // This surface is 19.5 blocks below the camera, so removal is allowed.
-    fixture.game.world.?.setBlockUnchecked(.{ origin[0] * consts.CHUNK_SIZE, origin[1] * consts.CHUNK_SIZE, origin[2] * consts.CHUNK_SIZE }, .stone);
+    const target: [3]u32 = .{
+        @intCast(origin[0] * consts.CHUNK_SIZE),
+        @intCast(origin[1] * consts.CHUNK_SIZE + 4),
+        @intCast(origin[2] * consts.CHUNK_SIZE),
+    };
+    const placement: [3]u32 = .{ target[0], target[1] - 1, target[2] };
+    fixture.game.world.?.setBlockUnchecked(target, .stone);
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
-    fixture.game.editBlockUnderCamera(.remove);
-    try std.testing.expectEqual(1, fixture.game.world.?.pending_operations.items.len);
-    fixture.game.world.?.pending_operations.clearRetainingCapacity();
-    // An empty search must stop before looking into the missing chunk below the core.
-    fixture.game.editBlockUnderCamera(.place);
-    try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
-    var below = WorldChunk.initEmpty();
-    _ = below.apply(std.testing.allocator, .{ 0, 0, 31 }, .{ .put = .stone });
-    try fixture.game.world.?.insertChunk(.{ origin[0], origin[1], origin[2] - 1 }, below);
-    fixture.game.editBlockUnderCamera(.remove);
-    fixture.game.editBlockUnderCamera(.place);
-    try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
-    // Moving one block closer makes that same surface reachable for placement.
-    fixture.camera.position[2] -= 1;
-    fixture.game.editBlockUnderCamera(.place);
-    try std.testing.expectEqual(1, fixture.game.world.?.pending_operations.items.len);
+    fixture.game.editBlockInView(.place);
+    try std.testing.expect(try fixture.game.world.?.isBlockSolid(placement));
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, fixture.game.world.?.pending_operations.items[0].operation.action.put);
+    fixture.game.editBlockInView(.remove);
+    try std.testing.expect(!try fixture.game.world.?.isBlockSolid(placement));
+    try std.testing.expect(try fixture.game.world.?.isBlockSolid(target));
+    try std.testing.expectEqual(2, fixture.game.world.?.pending_operations.items.len);
+    fixture.camera.updatePosition(.{ 0.5, -0.01, 0.5 });
+    // Load the camera's chunk so failure is caused by reach rather than missing data.
+    try fixture.game.world.?.insertChunk(origin - ChunkCoords{ 0, 1, 0 }, WorldChunk.initEmpty());
+    fixture.game.editBlockInView(.place);
+    fixture.game.editBlockInView(.remove);
+    try std.testing.expectEqual(2, fixture.game.world.?.pending_operations.items.len);
+    fixture.camera.updatePosition(.{ 0.5, 0, 0.5 });
+    fixture.game.editBlockInView(.remove);
+    try std.testing.expect(!try fixture.game.world.?.isBlockSolid(target));
+    try std.testing.expectEqual(3, fixture.game.world.?.pending_operations.items.len);
+    fixture.game.editBlockInView(.place);
+    try std.testing.expectEqual(3, fixture.game.world.?.pending_operations.items.len);
 }
 
 test "demotion retains complete local geometry and masks until the service mesh arrives" {

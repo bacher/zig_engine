@@ -14,7 +14,7 @@
 
 - [ ] Define a final player recovery policy when adjacent cells, five seconds of position history, and the bounded eight-metre search contain no clear body-sized space. Currently movement freezes, stderr reports the failure, and recovery retries after terrain updates or once per second.
 
-- [ ] Render block placement failures and dependent blocks in a separate 3D overlay pass, using structured CPU diagnostics; add ghost/crosshair targeting. See [block placement](docs/block-placement.md).
+- [ ] Render block placement failures and dependent blocks in a separate 3D overlay pass, using structured CPU diagnostics; add a placement ghost and target highlighting. See [block placement](docs/block-placement.md).
 - [ ] Add temporary construction supports/scaffolding for multi-cell masonry gaps.
 - [ ] Add an inventory using authoritative `mined_type` results, recipes, and dedicated construction-material textures.
 - [ ] Add an incremental construction dependency index and a memory budget for retained timed chunk state when building scale requires it.

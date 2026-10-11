@@ -486,7 +486,7 @@ pub const Engine = struct {
 
     fn onKeyPress(engine: *Engine, key_params: KeyParams) void {
         switch (key_params.key) {
-            .e => {
+            .e => if (key_params.mods.control) {
                 if (engine.state.debug_ssao_enabled) {
                     engine.state.ssao_enabled = true;
                     engine.state.debug_ssao_enabled = false;
@@ -495,7 +495,7 @@ pub const Engine = struct {
                 }
                 std.debug.print("SSAO = {}\n", .{engine.state.ssao_enabled});
             },
-            .r => {
+            .r => if (key_params.mods.control) {
                 if (!engine.state.debug_ssao_enabled) {
                     engine.state.ssao_enabled = true;
                     engine.state.debug_ssao_enabled = true;
@@ -1651,6 +1651,22 @@ pub const Engine = struct {
         }
     }
 };
+
+test "SSAO debug shortcuts require Ctrl and Ctrl E exits the debug view" {
+    var context: u8 = 0;
+    var engine: Engine = undefined;
+    engine.state = .{};
+    engine.callbacks = .{ .argument = &context, .onUpdate = null, .onRender = null };
+    Engine.onKeyPress(&engine, .{ .key = .e, .mods = .{} });
+    Engine.onKeyPress(&engine, .{ .key = .r, .mods = .{} });
+    try std.testing.expectEqualDeep(EngineState{}, engine.state);
+    Engine.onKeyPress(&engine, .{ .key = .e, .mods = .{ .control = true } });
+    try std.testing.expect(!engine.state.ssao_enabled);
+    Engine.onKeyPress(&engine, .{ .key = .r, .mods = .{ .control = true } });
+    try std.testing.expect(engine.state.ssao_enabled and engine.state.debug_ssao_enabled);
+    Engine.onKeyPress(&engine, .{ .key = .e, .mods = .{ .control = true } });
+    try std.testing.expect(engine.state.ssao_enabled and !engine.state.debug_ssao_enabled);
+}
 
 fn slowOperation() void {
     const end = std.time.milliTimestamp() + 500;

@@ -34,6 +34,7 @@ pub fn InputController(comptime Context: type) type {
         cursor_position: [2]f32,
         cursor_position_delta: [2]f32 = .{ 0, 0 },
         cursor_left_button_pressed: bool = false,
+        cursor_left_button_pressed_this_frame: bool = false,
         cursor_right_button_pressed: bool = false,
         cursor_capture: CursorCapture = .while_left_button,
         cursor_captured: bool = false,
@@ -69,6 +70,7 @@ pub fn InputController(comptime Context: type) type {
         pub fn deinit(input_controller: *Self) void {
             if (Self.instance == input_controller) {
                 _ = input_controller.window.setKeyCallback(null);
+                _ = input_controller.window.setMouseButtonCallback(null);
                 Self.instance = null;
             }
             input_controller.pressed_keys.deinit();
@@ -79,6 +81,14 @@ pub fn InputController(comptime Context: type) type {
 
         pub fn listenWindowEvents(input_controller: *Self) void {
             _ = input_controller.window.setKeyCallback(Self.onKeyCallback);
+            _ = input_controller.window.setMouseButtonCallback(Self.onMouseButtonCallback);
+        }
+
+        fn onMouseButtonCallback(_: *zglfw.Window, button: zglfw.MouseButton, action: zglfw.Action, _: zglfw.Mods) callconv(.c) void {
+            if (Self.instance) |input_controller| {
+                if (button == .left and action == .press and input_controller.focused)
+                    input_controller.cursor_left_button_pressed_this_frame = true;
+            }
         }
 
         fn onKeyCallback(
@@ -137,6 +147,8 @@ pub fn InputController(comptime Context: type) type {
             const focused = window.getAttribute(.focused);
             input_controller.focus_changed = focused != input_controller.focused;
             input_controller.focused = focused;
+            if (!focused or input_controller.focus_changed)
+                input_controller.cursor_left_button_pressed_this_frame = false;
             if (!focused) {
                 input_controller.pressed_keys.clearRetainingCapacity();
                 input_controller.release_queue.clearRetainingCapacity();
@@ -168,6 +180,7 @@ pub fn InputController(comptime Context: type) type {
             }
             input_controller.release_queue.clearRetainingCapacity();
             input_controller.pressed_this_frame.clearRetainingCapacity();
+            input_controller.cursor_left_button_pressed_this_frame = false;
         }
 
         pub fn isKeyPressed(input_controller: *const Self, key: zglfw.Key) bool {
@@ -217,4 +230,16 @@ test "press-release between frames keeps the press edge, ends held input, and re
     InputControllerGeneric.onKeyCallback(undefined, .space, 0, .repeat, .{});
     try std.testing.expect(input.isKeyPressed(.space));
     try std.testing.expect(!input.wasKeyPressed(.space));
+
+    // A complete click between frames survives release and fires only once.
+    InputControllerGeneric.onMouseButtonCallback(undefined, .left, .press, .{});
+    InputControllerGeneric.onMouseButtonCallback(undefined, .left, .release, .{});
+    try std.testing.expect(input.cursor_left_button_pressed_this_frame);
+    input.flushQueue();
+    try std.testing.expect(!input.cursor_left_button_pressed_this_frame);
+    InputControllerGeneric.onMouseButtonCallback(undefined, .right, .press, .{});
+    try std.testing.expect(!input.cursor_left_button_pressed_this_frame);
+    input.focused = false;
+    InputControllerGeneric.onMouseButtonCallback(undefined, .left, .press, .{});
+    try std.testing.expect(!input.cursor_left_button_pressed_this_frame);
 }

@@ -106,15 +106,15 @@ The default scene has a spectator controller:
 | Space / C | Move along world +Z / -Z. |
 | Hold left mouse button and move mouse | Capture the cursor and change yaw/pitch. Release restores the cursor. |
 | Escape | Leave the engine loop. |
-| E | Toggle SSAO; exits SSAO debug mode if it was active. |
-| R | Toggle SSAO debug display, enabling SSAO when entering it. |
+| Ctrl+E | Toggle SSAO; exits SSAO debug mode if it was active. |
+| Ctrl+R | Toggle SSAO debug display, enabling SSAO when entering it. |
 | B | Toggle SSAO blur. |
 | 1-6 in the voxel app | Select loose soil, crushed stone, trunk, planks, rebar, or reinforced concrete. |
-| Z / X in the voxel app | Place the selected material / mine a block below the camera within tool reach. |
+| E or left click / X in the voxel app | Place against the first block’s hit face / mine that block along the camera view, within four metres. |
 
 Movement uses a base speed of 5 world units per second and elapsed frame time. There is no collision, gravity, or terrain constraint in `SpectatorCamera`; it can move through solid terrain. Pitch is not explicitly clamped.
 
-`InputController` retains held keys. Press/repeat events update that state, but the application key-press callback fires only for a press. Released keys are excluded from held-key queries immediately and removed from storage at frame end. Press edges survive a same-frame release, so short Escape taps still exit. Mouse state is polled each frame. Cursor capture can follow the left button or remain enabled continuously; supported platforms use raw mouse motion while captured. Capture/focus transitions reset cursor deltas, and focus loss clears held keys.
+`InputController` retains held keys. Press/repeat events update that state, but the application key-press callback fires only for a press. Released keys are excluded from held-key queries immediately and removed from storage at frame end. Press edges survive a same-frame release, so short Escape taps still exit. Held mouse state is polled each frame; a left-button press edge survives a same-frame release and clears at frame end. Cursor capture can follow the left button or remain enabled continuously; supported platforms use raw mouse motion while captured. Capture/focus transitions reset cursor deltas, and focus loss clears held keys.
 
 ## Player controls and timing
 
@@ -136,7 +136,7 @@ Unknown chunks act as fully solid and stderr reports the encountered chunk, once
 
 When an optimistic edit, worker snapshot, or reconciliation embeds the body in solid terrain, recovery tries nearby foot cells first, then the newest still-clear position from at most five seconds of history, then the nearest clear candidate within eight metres. History stores foot-cell coordinates and timestamps, deduplicating consecutive visits to the same cell. Restoration centres the body horizontally in that cell with feet on its bottom face and resets vertical velocity. All candidates are checked against current block data and the entire body. If none fits, movement freezes, stderr warns, and recovery retries on delivered terrain changes or once per second. A final failure policy is deferred in `TODO.md`.
 
-The initial voxel player spawns above the generated terrain and falls onto it. Column placement validates the candidate block against the body before changing the optimistic cache, also while the body is frozen during spectating.
+The initial voxel player spawns above the generated terrain and falls onto it. Camera-directed placement validates the candidate block against the body before changing the optimistic cache, also while the body is frozen during spectating.
 
 CPU regressions cover frame-time movement/gravity, short frames, diagonal/yaw movement, fast falls/wall sliding, jump edges/ceilings, anticipated forward/upward climbing across frame rates, speed during airborne lip catches over deep one-cell holes, jumping before climbing onto raised far edges, immediate airborne Space activation and cancellation on release, climb height limits and rejection of jump-assisted two-block climbs, full-box clearance at every substep, diagonal and consecutive stairs, climb cancellation on input/terrain changes, missing-data blocking, recovery ordering/expiration/bounds, periodic seams, Q transitions, player streaming pins, and placement rejection. Cursor capture and interactive movement still require a windowed check.
 

@@ -170,7 +170,7 @@ Stop every client worker before destroying the service. Shutdown closes the requ
 
 ## Tools and simulation example
 
-Keys 1-6 select loose soil, crushed stone, trunk, planks, rebar, and reinforced concrete. Z places the selection and X mines the top occupied block in the vertical column below the camera. These tools search at most 20 blocks beneath the actual camera position; they are not crosshair raycasts. The column search can reach the world bottom, but every placement must still pass its material's structural rules. Unreceived dependencies produce no edit, and no support within the bounded search produces no floating placement.
+Keys 1-6 select loose soil, crushed stone, trunk, planks, rebar, and reinforced concrete. E or left click places the selection against the face of the first occupied block along the camera view; X mines that block. A voxel-boundary raycast reaches four metres from the camera to the hit face, including the limit. It follows the current frame’s camera view, crosses chunk boundaries and the wrapped x seam, and stops at unreceived chunks. Empty air produces no edit. Each press edits once; Ctrl+E remains the SSAO shortcut. Placements still pass material support rules and player-overlap checks, including while spectating. There is no selection UI or target highlighting.
 
 The simulation worker initially loads the central chunk column, finds the surface at its horizontal midpoint, then evicts those subscriptions. It submits one dirt put, waits for the result, and waits two seconds between subsequent operations. A successful put switches the next action to remove; a failed put retries a put. Removal switches back to putting. It communicates only through its own service endpoint, so visible changes arrive on the main thread through ordinary subscriptions. This is a concurrency example, not a broader NPC simulation system.
 
@@ -178,9 +178,10 @@ The simulation worker initially loads the central chunk column, finds the surfac
 
 | Source/test file | Behavior to inspect |
 | --- | --- |
-| [`world.zig`](../src/voxel_app/world.zig) | Contents, edit preconditions, replay/rollback, stale snapshots, column tools, and reveals. |
+| [`world.zig`](../src/voxel_app/world.zig) | Contents, edit preconditions, replay/rollback, stale snapshots, column helpers, and reveals. |
 | [`world_data_service.zig`](../src/voxel_app/world_data_service.zig) | Queue ordering, conflicts, tokens, broadcasts/packages, revisions, masks, eviction, caches, and shutdown. |
-| [`main.zig`](../src/voxel_app/main.zig) | Streaming/pinning, handoffs, package application, mesh reuse, mask precedence, bounded tools, and capacity fallback. |
+| [`main.zig`](../src/voxel_app/main.zig) | Streaming/pinning, handoffs, package application, mesh reuse, mask precedence, camera tools, and capacity fallback. |
+| [`block_targeting.zig`](../src/voxel_app/block_targeting.zig) | Four-metre camera rays, hit faces, bounds, missing chunks, and wrapped seams. |
 | [`world_generator.zig`](../src/voxel_app/world_generator.zig), [`perlin_noise.zig`](../src/voxel_app/perlin_noise.zig) | Determinism, surface/shortcut consistency, periodic x, and enclosure certification. |
 | [`boundary_mask.zig`](../src/voxel_app/boundary_mask.zig), [`world_engine_glue.zig`](../src/voxel_app/world_engine_glue.zig) | Mask coordinates/sizes and cross-chunk face extraction. |
 | [`simulation_worker.zig`](../src/voxel_app/simulation_worker.zig) | Surface selection, result-dependent action changes, cancellation, and subscription updates. |
