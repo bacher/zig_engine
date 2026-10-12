@@ -807,7 +807,7 @@ pub fn main(init: std.process.Init) !void {
     defer game.stopWorkers();
 
     try initWorld(game);
-    const spawn = try player_spawn.loadPosition(game.world_data.?, .{}, .{ -2.06, -2.96 });
+    const spawn = try player_spawn.loadPosition(game.world_client.?, .{}, .{ -2.06, -2.96 });
     game.player = PlayerController.init(allocator, spawn);
     game.player.?.grounded = true;
     game.simulation = try SimulationWorker.create(game.world_data.?);

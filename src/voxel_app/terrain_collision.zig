@@ -48,14 +48,34 @@ pub const Bounds = struct {
     min: Position,
     max: Position,
 
+    /// Cells whose interiors overlap the box on x/y. Shared with spawn support.
+    pub fn horizontalCells(self: Bounds) HorizontalCells {
+        return .{
+            .first = .{ firstOverlappingCell(self.min[0]), firstOverlappingCell(self.min[1]) },
+            .last = .{ lastOverlappingCell(self.max[0]), lastOverlappingCell(self.max[1]) },
+        };
+    }
+
     fn firstCell(self: Bounds) Cell {
-        return @intFromFloat(@floor(self.min + @as(Position, @splat(epsilon))));
+        const horizontal = self.horizontalCells();
+        return .{ horizontal.first[0], horizontal.first[1], firstOverlappingCell(self.min[2]) };
     }
 
     fn lastCell(self: Bounds) Cell {
-        return @intFromFloat(@ceil(self.max - @as(Position, @splat(epsilon))) - @as(Position, @splat(1)));
+        const horizontal = self.horizontalCells();
+        return .{ horizontal.last[0], horizontal.last[1], lastOverlappingCell(self.max[2]) };
     }
 };
+
+pub const HorizontalCells = struct { first: [2]i64, last: [2]i64 };
+
+fn firstOverlappingCell(min: f64) i64 {
+    return @intFromFloat(@floor(min + epsilon));
+}
+
+fn lastOverlappingCell(max: f64) i64 {
+    return @intFromFloat(@ceil(max - epsilon) - 1);
+}
 
 pub const Overlap = enum { clear, missing, solid };
 pub const Move = struct { position: Position, collided: bool };
