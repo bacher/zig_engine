@@ -16,7 +16,8 @@ flowchart LR
     Depth --> SSAO
     Color --> Final[Final composite]
     SSAO --> Final
-    Final --> Overlay[Application and GUI overlay]
+    Final --> Focus[Depth-tested block outline]
+    Focus --> Overlay[Application and GUI overlay]
     Overlay --> Present[Submit and present]
 ```
 
@@ -26,6 +27,7 @@ flowchart LR
 | Forward scene | Clears and renders color (`rgba8_unorm`), encoded view-space normals (`rgb10_a2_unorm`), and depth. Some pipelines disable normal writes. |
 | SSAO | Full-screen pass reconstructs view-space positions from depth and uses the normal texture to estimate occlusion; output is `r16_float`. |
 | Final composite | Full-screen pass copies scene color or multiplies it by SSAO. Optional blur/debug display are applied here. |
+| Block outline | When the application selects a cell, loads swapchain color and scene depth and draws twelve green edges as three-pixel-wide pairs of triangles, without writing depth. |
 | Overlay | If `onRender` exists, loads the swapchain color without a depth attachment, invokes the application callback, and renders GUI when enabled. |
 
 The SSAO pass is still encoded when SSAO is disabled. The final shader bypasses its result in that case. GUI frame creation and the engine debug window currently occur inside the optional `onRender` branch.
@@ -41,6 +43,8 @@ Skyboxes use camera rotation and projection, omitting translation. The dedicated
 CPU world transforms remain in `f64`. GPU paths use chunk-local matrices plus integer chunk coordinates, with a camera/cascade chunk origin. Integer chunk subtraction and optional x wrapping happen before conversion to meters. The application selects wrapping at compile time. Scenes acquire a reference to six specialized pipelines in the engine cache: unwrapped scenes share one set, and wrapped scenes share by x width. Unwrapped shaders omit periodic arithmetic and width/mask constants. Common pipelines stay engine-owned. See [world configuration](world-configuration.md) and [coordinates](coordinates.md); using an absolute-world `f32` matrix would break the large-position guarantees.
 
 ## Voxel rendering
+
+The voxel app refreshes `Scene.highlighted_block` using the editing raycast after camera updates, optimistic edits, and subscription changes. The engine's independent [`block_outline.zig`](../src/engine/block_outline.zig) pipeline draws it after post-processing and before GUI overlays. It emits 72 procedural vertices, clips edges against the near plane, and expands them in screen space to keep their width constant when distance or window size changes. Scene depth hides occluded edges; a small depth bias avoids coplanar flicker. The outline's storage cell is rebased to the camera chunk, including the wrapped x seam, before conversion to f32. No voxel face or shadow shader contains highlighting logic.
 
 The voxel grid stores exposed-face records, not a conventional indexed mesh or a dense GPU block array. Each record contains local block coordinates and block type in four bytes. Six lists group those records by outward face direction. The vertex shader generates six vertices per face and selects atlas UVs using block type and direction.
 

@@ -26,6 +26,7 @@ pub const ChunkCoords = world_math.ChunkCoords;
 pub const zgui_utils = @import("./zgui_utils.zig");
 
 test {
+    _ = @import("block_outline.zig");
     _ = @import("input_controller.zig");
     _ = @import("hierarchy_tests.zig");
     _ = @import("lighting_tests.zig");

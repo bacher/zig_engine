@@ -1026,6 +1026,38 @@ pub const Engine = struct {
                 pass.draw(6, 1, 0, 0);
             }
 
+            // Draw the focused block after post-processing, with scene occlusion.
+            if (engine.active_scene) |scene| {
+                if (scene.highlighted_block) |block| {
+                    const outline = @import("block_outline.zig");
+                    const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
+                        .view = back_buffer_view,
+                        .load_op = .load,
+                        .store_op = .store,
+                    }};
+                    const pass = encoder.beginRenderPass(.{
+                        .color_attachments = &color_attachments,
+                        .color_attachment_count = color_attachments.len,
+                        .depth_stencil_attachment = &.{
+                            .view = engine.depth_texture.view,
+                            .depth_load_op = .load,
+                            .depth_store_op = .store,
+                        },
+                    });
+                    defer {
+                        pass.end();
+                        pass.release();
+                    }
+                    const transform = gctx.uniformsAllocate(zmath.Mat, 1);
+                    transform.slice[0] = outline.clipFromBlock(scene.camera, block);
+                    const stroke = gctx.uniformsAllocate(zmath.Vec, 1);
+                    stroke.slice[0] = .{ engine.screen_size[0], engine.screen_size[1], outline.width_pixels, 0 };
+                    pass.setPipeline(engine.pipelines.block_outline.pipeline_gpu);
+                    pass.setBindGroup(0, engine.bind_group_lines.wgpu_bind_group, &.{ transform.offset, stroke.offset });
+                    pass.draw(outline.vertex_count, 1, 0, 0);
+                }
+            }
+
             if (engine.callbacks.onRender) |onRender| {
                 const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
                     .view = back_buffer_view,

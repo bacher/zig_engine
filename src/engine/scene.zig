@@ -49,6 +49,8 @@ pub const Scene = struct {
     spectator_camera: *SpectatorCamera,
     /// Applications can drive the camera themselves while retaining the debug controller.
     spectator_enabled: bool = true,
+    /// Application-selected storage cell; rendered independently of voxel faces.
+    highlighted_block: ?[3]u32 = null,
     previous_frame_time: f64,
 
     // gpu related

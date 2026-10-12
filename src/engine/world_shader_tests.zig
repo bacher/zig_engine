@@ -312,3 +312,19 @@ test "headless engine and scene teardown releases owned resources and preserves 
     try checked;
     try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
 }
+
+test "block outline renders green thick edges with depth occlusion and near clipping" {
+    var uncaptured: ValidationResponse = .{};
+    var response: ValidationResponse = .{};
+    var mapping: @import("block_outline_readback.zig").Mapping = .{};
+    const gpu = try HeadlessDawn.init();
+    defer gpu.deinit();
+    gpu.device.setUncapturedErrorCallback(ValidationResponse.callback, &uncaptured);
+    gpu.device.pushErrorScope(.validation);
+    const checked = @import("block_outline_readback.zig").check(gpu.device, &mapping);
+    _ = gpu.device.popErrorScope(ValidationResponse.callback, &response);
+    try coordinate_readback.waitForCallback(gpu.device, &response.done);
+    try std.testing.expectEqual(@as(usize, 0), response.errors);
+    try checked;
+    try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
+}
