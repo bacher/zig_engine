@@ -77,7 +77,7 @@ The service sends independently owned snapshots/face arrays. Consumers must free
 
 An interior edit changes its own chunk/mesh. A face/edge/corner edit additionally invalidates the one/two/three touched face neighbors. A neighbor's mesh revision may change without its block contents or chunk revision changing. This is why chunk revision alone cannot certify reusable geometry.
 
-When replacing cached blocks with a snapshot, the render client compares the old and reconciled boundary occupancy masks. It rebuilds face neighbors only for changed planes; interior edits and material-only changes rebuild the edited chunk. A first block snapshot or removal of a local meshing dependency conservatively invalidates all loaded face neighbors.
+When replacing cached blocks with a snapshot, the render client compares the old and reconciled boundary occupancy masks. It rebuilds face neighbors only for changed planes; interior edits and material-only changes rebuild the edited chunk. The first accepted block snapshot in each subscription, including a promotion that still retains old blocks, conservatively invalidates all loaded face neighbors. Removing a local meshing dependency does the same.
 
 The worker batches currently queued requests, coalesces affected mesh builds, builds once for the relevant final state, and distributes owned copies to mesh subscribers. It sends unchanged blocks again only when needed for a block snapshot, such as a flag-changing reveal; neighbor-only occupancy updates use boundary payloads.
 
