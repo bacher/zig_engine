@@ -178,7 +178,7 @@ The simulation worker initially loads the central chunk column, finds the surfac
 
 | Source/test file | Behavior to inspect |
 | --- | --- |
-| [`world.zig`](../src/voxel_app/world.zig) | Contents, edit preconditions, replay/rollback, stale snapshots, column helpers, and reveals. |
+| [`world.zig`](../src/voxel_app/world.zig) | Contents, edit preconditions, replay/rollback, stale snapshots, and reveals. |
 | [`world_data_service.zig`](../src/voxel_app/world_data_service.zig) | Queue ordering, conflicts, tokens, broadcasts/packages, revisions, masks, eviction, caches, and shutdown. |
 | [`main.zig`](../src/voxel_app/main.zig) | Streaming/pinning, handoffs, package application, mesh reuse, mask precedence, camera tools, and capacity fallback. |
 | [`block_targeting.zig`](../src/voxel_app/block_targeting.zig) | Four-metre camera rays, hit faces, bounds, missing chunks, and wrapped seams. |

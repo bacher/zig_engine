@@ -647,22 +647,6 @@ fn getChunkDistance(layout: *const WorldLayout, chunk_id: u32, camera_chunk_coor
     return @reduce(.Max, @abs(delta));
 }
 
-/// Calls `context.onRange(z_start, z_end)` for every range [z_start, z_end) of consecutive z
-/// in [z_min, z_max] for which `context.isMissing(z)` is true. Does nothing if z_min > z_max.
-fn forEachMissingChunkRange(z_min: i32, z_max: i32, context: anytype) void {
-    var range_start: ?i32 = null;
-    var z = z_min;
-    while (z <= z_max + 1) : (z += 1) {
-        const is_missing = z <= z_max and context.isMissing(@intCast(z));
-        if (is_missing) {
-            range_start = range_start orelse @intCast(z);
-        } else if (range_start) |start| {
-            context.onRange(start, @intCast(z));
-            range_start = null;
-        }
-    }
-}
-
 /// Returns neighbors indexed by Side; null items are outside the stored world.
 /// Returns null if a neighbor has not been received from the world-data thread yet.
 fn getSurroundingChunks(world: *const World, coords: ChunkCoords) ?[6]?WorldChunk {
@@ -1450,55 +1434,6 @@ test "voxel upload queue retains negative spatial chunks and removes only matchi
     fixture.grid.removeChunk(coords);
     try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items.len);
     try std.testing.expectEqual(ChunkCoords{ -1, -2, -4 }, fixture.grid.chunks_to_upload.items[0].chunk_coords);
-}
-
-const TestColumn = struct {
-    is_missing: []const bool,
-    ranges: std.ArrayList([2]i32) = .empty,
-
-    fn isMissing(self: *const TestColumn, z: i32) bool {
-        return self.is_missing[@intCast(z)];
-    }
-
-    fn onRange(self: *TestColumn, z_start: i32, z_end: i32) void {
-        self.ranges.append(std.testing.allocator, .{ z_start, z_end }) catch @panic("OOM");
-    }
-};
-
-fn expectMissingChunkRanges(expected: []const [2]i32, z_min: i32, z_max: i32, is_missing: []const bool) !void {
-    var column = TestColumn{ .is_missing = is_missing };
-    defer column.ranges.deinit(std.testing.allocator);
-
-    forEachMissingChunkRange(z_min, z_max, &column);
-    try std.testing.expectEqualSlices([2]i32, expected, column.ranges.items);
-}
-
-test "missing chunks of a column are split into ranges of consecutive chunks" {
-    const height = test_layout.size_in_chunks[2];
-    const all_missing: [height]bool = @splat(true);
-    const none_missing: [height]bool = @splat(false);
-
-    try expectMissingChunkRanges(&.{.{ 0, height }}, 0, height - 1, &all_missing);
-    try expectMissingChunkRanges(&.{.{ 1, 3 }}, 1, 2, &all_missing);
-    try expectMissingChunkRanges(&.{}, 0, height - 1, &none_missing);
-
-    var with_gaps = all_missing;
-    with_gaps[0] = false;
-    with_gaps[2] = false;
-    with_gaps[3] = false;
-    try expectMissingChunkRanges(&.{ .{ 1, 2 }, .{ 4, height } }, 0, height - 1, &with_gaps);
-    try expectMissingChunkRanges(&.{.{ 1, 2 }}, 0, 3, &with_gaps);
-
-    var only_top = none_missing;
-    only_top[height - 1] = true;
-    try expectMissingChunkRanges(&.{.{ height - 1, height }}, 0, height - 1, &only_top);
-}
-
-test "camera outside of the world height has no chunks to request" {
-    const all_missing: [test_layout.size_in_chunks[2]]bool = @splat(true);
-
-    try expectMissingChunkRanges(&.{}, 0, -3, &all_missing);
-    try expectMissingChunkRanges(&.{}, test_layout.size_in_chunks[2] + 2, test_layout.size_in_chunks[2] - 1, &all_missing);
 }
 
 test "evicted edit replies retire pending work without restoring chunks" {
