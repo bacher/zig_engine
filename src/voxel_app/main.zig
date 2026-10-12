@@ -155,6 +155,7 @@ const Game = struct {
         game.updateBlockTool();
         game.flushBlockOperations();
         game.updateChunksAroundCamera(has_new_chunks);
+        game.updateBlockFocus();
         game.rebuildDirtyChunks();
         const grid = game.engine.active_scene.?.voxel_grid;
         if (!grid.hasUploadCapacity() and game.render_radius > 2) {
@@ -495,6 +496,17 @@ const Game = struct {
         defer game.tool_commands.clearRetainingCapacity();
         if (!input.focused or input.focus_changed) return;
         for (game.tool_commands.items) |command| game.editBlockInView(command);
+    }
+
+    fn updateBlockFocus(game: *Game) void {
+        const scene = game.engine.active_scene orelse return;
+        scene.highlighted_block = null;
+        const input = game.engine.input_controller;
+        if (!input.focused or input.focus_changed) return;
+        const world = if (game.world) |*world| world else return;
+        const camera = scene.camera;
+        const hit = (block_targeting.cast(world, camera.position, camera.forwardDirection()) catch return) orelse return;
+        scene.highlighted_block = hit.block;
     }
 
     fn queueBlockAction(game: *Game, action: BlockAction) void {
@@ -1206,6 +1218,53 @@ test "mouse look and removal in the same frame use the new player and spectator 
         try std.testing.expect(try fixture.game.world.?.isBlockSolid(old_target));
         try std.testing.expect(!try fixture.game.world.?.isBlockSolid(new_target));
     }
+}
+
+test "block focus tracks the editable target after camera changes and optimistic edits" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    const target = StreamingTest.toolTarget();
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(target, fixture.scene.highlighted_block.?);
+    handleKeyPress(&fixture.game, .{ .key = .x, .mods = .{} });
+    fixture.game.updateBlockTool();
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual([3]u32{ target[0], target[1] + 1, target[2] }, fixture.scene.highlighted_block.?);
+    fixture.camera.updateView(zmath.rotationY(math.pi / 2.0));
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(null, fixture.scene.highlighted_block);
+    fixture.camera.updateView(zmath.identity());
+    fixture.game.updateBlockFocus();
+    try std.testing.expect(fixture.scene.highlighted_block != null);
+    // The further block remains solid, but moving back puts it beyond reach.
+    try fixture.game.world.?.insertChunk(test_layout.origin_chunk - ChunkCoords{ 0, 1, 0 }, WorldChunk.initEmpty());
+    fixture.camera.updatePosition(.{ 0.5, -0.5, 0.5 });
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(null, fixture.scene.highlighted_block);
+}
+
+test "block focus clears on focus transitions or missing terrain" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    fixture.game.updateBlockFocus();
+    try std.testing.expect(fixture.scene.highlighted_block != null);
+    fixture.input.focused = false;
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(null, fixture.scene.highlighted_block);
+    fixture.input.focused = true;
+    fixture.input.focus_changed = true;
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(null, fixture.scene.highlighted_block);
+    fixture.input.focus_changed = false;
+    fixture.game.updateBlockFocus();
+    try std.testing.expect(fixture.scene.highlighted_block != null);
+    fixture.game.world.?.removeChunk(test_layout.origin_chunk);
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(null, fixture.scene.highlighted_block);
 }
 
 test "camera placement keeps structural validation and targets no block in empty air" {

@@ -137,6 +137,7 @@ pub const Engine = struct {
     bind_group_debug_shadow_map_texture: BindGroup,
     bind_group_shadow_map: BindGroup,
     bind_group_lines: BindGroup,
+    bind_group_block_outline: BindGroup,
     bind_group_ssao_pass: BindGroup,
     bind_group_final_pass: BindGroup,
     bind_group_debug_regular: BindGroup,
@@ -303,6 +304,7 @@ pub const Engine = struct {
             shadow_map_texture.array_view.view_handle,
         );
         const bind_group_lines = bind_group_layouts.lines.createBindGroup(gctx);
+        const bind_group_block_outline = bind_group_layouts.block_outline.createBindGroup(gctx);
 
         const bind_group_ssao_pass = bind_group_layouts.ssao_pass.createBindGroup(
             gctx,
@@ -394,6 +396,7 @@ pub const Engine = struct {
             .bind_group_shadow_map = bind_group_shadow_map,
             .bind_group_debug_shadow_map_texture = bind_group_debug_shadow_map_texture,
             .bind_group_lines = bind_group_lines,
+            .bind_group_block_outline = bind_group_block_outline,
             .bind_group_ssao_pass = bind_group_ssao_pass,
             .bind_group_final_pass = bind_group_final_pass,
             .bind_group_debug_regular = bind_group_debug_regular,
@@ -460,6 +463,7 @@ pub const Engine = struct {
         engine.bind_group_debug_shadow_map_texture.deinit(engine.gctx);
         engine.bind_group_shadow_map.deinit(engine.gctx);
         engine.bind_group_lines.deinit(engine.gctx);
+        engine.bind_group_block_outline.deinit(engine.gctx);
         engine.bind_group_ssao_pass.deinit(engine.gctx);
         engine.bind_group_final_pass.deinit(engine.gctx);
         engine.bind_group_debug_regular.deinit(engine.gctx);
@@ -1024,6 +1028,36 @@ pub const Engine = struct {
                     frag_size_uniform.offset,
                 });
                 pass.draw(6, 1, 0, 0);
+            }
+
+            // Draw the focused block after post-processing, with scene occlusion.
+            if (engine.active_scene) |scene| {
+                if (scene.highlighted_block) |block| {
+                    const outline = @import("block_outline.zig");
+                    const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
+                        .view = back_buffer_view,
+                        .load_op = .load,
+                        .store_op = .store,
+                    }};
+                    const pass = encoder.beginRenderPass(.{
+                        .color_attachments = &color_attachments,
+                        .color_attachment_count = color_attachments.len,
+                        .depth_stencil_attachment = &.{
+                            .view = engine.depth_texture.view,
+                            .depth_load_op = .load,
+                            .depth_store_op = .store,
+                        },
+                    });
+                    defer {
+                        pass.end();
+                        pass.release();
+                    }
+                    const data = gctx.uniformsAllocate(outline.Uniforms, 1);
+                    data.slice[0] = outline.uniforms(scene.camera, block, engine.screen_size);
+                    pass.setPipeline(engine.pipelines.block_outline.pipeline_gpu);
+                    pass.setBindGroup(0, engine.bind_group_block_outline.wgpu_bind_group, &.{data.offset});
+                    pass.draw(outline.vertex_count, 1, 0, 0);
+                }
             }
 
             if (engine.callbacks.onRender) |onRender| {

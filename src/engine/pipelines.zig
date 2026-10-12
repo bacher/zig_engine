@@ -35,6 +35,7 @@ pub const Pipelines = struct {
     shadow_map_terrain: Pipeline,
     // -- debug pipelines --
     lines: Pipeline,
+    block_outline: Pipeline,
     debug_texture: Pipeline,
     // -- rest --
     ssao_pipeline: Pipeline,
@@ -95,6 +96,7 @@ pub const Pipelines = struct {
             .terrain_height_map = terrain_height_map_pipeline,
             .shadow_map_terrain = shadow_map_terrain_pipeline_module.createShadowMapTerrainPipeline(gctx, bind_group_layouts),
             .lines = lines_pipeline,
+            .block_outline = @import("block_outline.zig").createPipeline(gctx, bind_group_layouts, zgpu.GraphicsContext.swapchain_format),
             .debug_texture = debug_texture_pipeline,
             .ssao_pipeline = ssao_pipeline,
             .screen_quad_pipeline = screen_quad_pipeline,
@@ -109,6 +111,7 @@ pub const Pipelines = struct {
         pipelines.terrain_height_map.deinit(gctx);
         pipelines.shadow_map_terrain.deinit(gctx);
         pipelines.lines.deinit(gctx);
+        pipelines.block_outline.deinit(gctx);
         pipelines.debug_texture.deinit(gctx);
         pipelines.ssao_pipeline.deinit(gctx);
         pipelines.screen_quad_pipeline.deinit(gctx);
