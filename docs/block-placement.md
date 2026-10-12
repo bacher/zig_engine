@@ -247,3 +247,28 @@ On the local Apple M4 Max, ReleaseFast cache checks measured median times of 0.0
 measured 2.64 ms in that run. These are CPU microbenchmarks, not full-frame timings. Window
 invalidation avoids rerunning validation after distant updates; a new target or material,
 or a change anywhere in an intersecting chunk, can still incur full synchronous validation.
+
+## Potential performance follow-ups
+
+Asynchronous preview validation and per-frame work budgets may help if synchronous validation
+causes gameplay hitches. Both require investigation; neither is a committed implementation
+plan. First measure ReleaseFast full-frame times and preview completion latency, including
+tail latency, around large, deep, and branching constructions while aiming, changing materials,
+and streaming chunks. Record validation frequency, CPU time, and allocation/memory costs.
+The existing microbenchmark shows potential cost but does not establish in-game frame spikes.
+
+- **Asynchronous validation:** investigate moving preview searches to a worker using immutable,
+  thread-safe world snapshots. Coalesce or cancel obsolete requests, bound the worker queue,
+  and verify target, material, and chunk content/availability stamps before applying results.
+  Measure whether snapshot and scheduling costs are justified by reduced frame spikes, and
+  how quickly useful results arrive during continuous aim changes.
+- **Per-frame work budgets:** investigate resumable searches with elapsed-time, reader-call,
+  or visited-node limits. Preserve the validation snapshot, memoization, and root-specific
+  rules across yields, and discard stale work. Measure budget overshoot, retained memory,
+  and completion latency; continuous aim changes must not leave useful previews perpetually
+  unfinished. A reader-call or node limit alone does not guarantee a frame-time limit.
+
+Either approach needs defined pending-preview behavior: incomplete work must remain unknown,
+never imply approval or a definite rejection. Player overlap must still be checked every frame,
+and actual edits must remain independently fully validated. Adopt either approach only if
+measured frame spikes or preview delays justify the added state and scheduling complexity.
