@@ -21,7 +21,7 @@ client data produces `missing_data`, never an assumption that the missing cells 
 Water, sand, and snow retain their existing placement/collision behavior. They are outside
 the structural material families and cannot supply earth footprints or stable platforms.
 All new materials currently have full-cube collision. The existing atlas supplies temporary
-tiles for the new construction materials; no new texture assets or overlay pipeline are added.
+tiles for the new construction materials; placement hints use the shared block-outline shader.
 
 Mining results include `mined_type`. There is no inventory, recipe, or dropped-item system
 yet; this result provides the conversion contract for a future inventory.
@@ -117,8 +117,40 @@ existing overhang. Natural terrain cells are not themselves revalidated as const
 Operation results carry status, an optional mined material, and an optional failure:
 reason, underlying cause, affected cell, measured value, limit, and up to 32 involved cell
 coordinates with an explicit truncation flag. The client retains the latest preview/result.
-These are CPU data for future text and 3D hints. There is no ghost block, dependency outline,
-or transparent rendering pass in this change.
+In putting mode, while aiming at a reachable block, a translucent cyan cube outline previews an allowed
+placement; a red outline marks a rejected placement. Orange outlines show the affected
+construction and involved cells, including empty spaces that need support. Putting mode
+hides green focus edges. Missing cells beyond finite world edges retain
+their signed positions, while x coordinates wrap across the seam. Diagnostics show at most
+32 involved cells plus the affected cell and candidate; truncation is reported in the console.
+
+Hints reuse the focus outline's procedural edges and instance buffer. They retain all twelve
+edges. Occupied diagnostic cells correct the depth of camera-facing edges to preserve full
+stroke width over their own tilted surfaces; rear edges and empty/unknown hints retain their
+actual edge depth. Visible strokes use alpha blending; strokes hidden behind
+scene geometry use 30% of that opacity, so buried support remains identifiable. Neither
+pass writes scene depth. Diagnostics use two instanced draws, with all hidden strokes before
+all visible strokes and one upload of the active cell records. There is no solid ghost mesh
+or screen text yet.
+
+`World.previewOperation` checks hypothetical placement without changing blocks, pending
+commands, or the latest actual edit result. Its result is cached by target, selected material,
+and the contents/availability of chunks intersecting the 28-cell support window (at most
+27 distinct chunks). Each update compares their local validation stamps; this allocates
+nothing and runs no support searches. Missing chunks also participate, so their arrival
+invalidates a missing-data result. Accepted snapshots, eviction, and optimistic block
+changes within the window invalidate it; changes outside it preserve the cached result.
+Local stamps are independent of authoritative revisions, so same-revision snapshots and
+eviction/reload between updates cannot retain stale previews. Rejected stale snapshots and
+no-op edits preserve the cache. Invalidation is conservative at chunk granularity.
+Changing the target or material still runs full synchronous validation; actual edits always
+validate independently of preview caching. Player overlap is checked every frame, including
+the frozen player while spectating. Removing mode only targets and highlights the focused
+block: it does not
+call placement validation. Switching modes clears cached previews and hints. Losing focus,
+reaching empty air, or losing targeting data also clears the hints.
+`std.debug.print` reports changed previews with a readable reason, underlying cause, and
+measured/required values. Actual edit failures use the same descriptions.
 
 `support_search_limit` reports the 28-cell limit and an attempted cell outside the window.
 For a dependent edit rejection it appears as the underlying cause of `would_remove_support`
@@ -178,21 +210,65 @@ lifetime, as do other world edits.
 ## Tools and validation
 
 Keys 1-6 select loose soil, crushed stone, trunk, planks, rebar, and reinforced concrete.
-E or left click places against the hit face of the first occupied block along the camera
-view; X mines that block. Reach is four metres to the hit face, and each press edits once.
+Tab toggles removing (the initial mode) and putting, independently of player/spectator
+control. Left click performs the active mode's action. In putting mode E places against
+the hit face of the first occupied block; in removing mode X mines that block. The opposite
+mode's keyboard shortcut is ignored. Reach is four metres to the hit face, and each press edits once.
 Unknown chunks and empty air produce no edit. Player-overlap checks and structural validation
-still apply. Selection UI, target highlighting, and 3D placement hints are follow-ups.
+still apply to actual edits. Green edges show focus only in removing mode; putting mode
+shows colored translucent outlines for placement and
+support diagnostics. Material selection UI and screen text remain follow-ups.
 
 `zig build test` covers footprints, centered platforms, diagonal connectivity, square
 platforms, span limits, inherited/group heights, protected platform edits, crushed-stone
 bridges, mining conversions, timer ordering, covering/exposure, chunk boundaries, eviction,
 time catch-up, inclusive support windows, stacked overhangs, conservative dependent edits,
 root-specific caches, translated/wrapped constructions, and client/service agreement with
-only a 3x3x3 neighborhood. `zig build test-gpu` checks the shared voxel shader pipelines when a
-graphics adapter is available.
+only a 3x3x3 neighborhood. Preview tests count actual validation invocations to verify reuse,
+relevant invalidation, distant streaming changes, and per-frame player-overlap updates.
+`zig build test-gpu` checks the shared voxel shader pipelines when a graphics adapter is available.
 
-`zig build bench-placement -Doptimize=ReleaseFast` reports reader calls and the median/minimum
-time for ten `World.previewOperation` calls beside a 200-block (5x5x8) plank building over
-natural stone. The CPU suite enforces a reader-call budget for that reproduction, also at
+`zig build bench-outlines -Doptimize=ReleaseFast` measures CPU instance preparation for one
+focused outline and 20/34 diagnostic cells, including occupied-cell classification. With a
+graphics adapter, it also compares individual and instanced CPU command encoding for 1,
+20, 34, and 64 cells. It excludes structural validation, uploads, queue submission, and GPU
+execution. See [rendering costs and benchmark scope](rendering.md#voxel-rendering).
+
+`zig build bench-placement -Doptimize=ReleaseFast` also measures allocation-free cache checks
+for the benchmark's support window and a full 27-chunk window (11 samples of 10,000 checks),
+excluding raycast, structural validation, and rendering. It reports reader calls and the
+median/minimum time for ten `World.previewOperation` calls beside a 200-block (5x5x8) plank
+building over natural stone. The CPU suite enforces a reader-call budget for that reproduction, also at
 a translated position across the wrapped seam; elapsed time is reported rather than asserted
 because it depends on the machine and build mode.
+
+On the local Apple M4 Max, ReleaseFast cache checks measured median times of 0.009 µs for
+8 chunks and 0.050 µs for the maximum 27 chunks. Full validation beside the 200-block building
+measured 2.64 ms in that run. These are CPU microbenchmarks, not full-frame timings. Window
+invalidation avoids rerunning validation after distant updates; a new target or material,
+or a change anywhere in an intersecting chunk, can still incur full synchronous validation.
+
+## Potential performance follow-ups
+
+Asynchronous preview validation and per-frame work budgets may help if synchronous validation
+causes gameplay hitches. Both require investigation; neither is a committed implementation
+plan. First measure ReleaseFast full-frame times and preview completion latency, including
+tail latency, around large, deep, and branching constructions while aiming, changing materials,
+and streaming chunks. Record validation frequency, CPU time, and allocation/memory costs.
+The existing microbenchmark shows potential cost but does not establish in-game frame spikes.
+
+- **Asynchronous validation:** investigate moving preview searches to a worker using immutable,
+  thread-safe world snapshots. Coalesce or cancel obsolete requests, bound the worker queue,
+  and verify target, material, and chunk content/availability stamps before applying results.
+  Measure whether snapshot and scheduling costs are justified by reduced frame spikes, and
+  how quickly useful results arrive during continuous aim changes.
+- **Per-frame work budgets:** investigate resumable searches with elapsed-time, reader-call,
+  or visited-node limits. Preserve the validation snapshot, memoization, and root-specific
+  rules across yields, and discard stale work. Measure budget overshoot, retained memory,
+  and completion latency; continuous aim changes must not leave useful previews perpetually
+  unfinished. A reader-call or node limit alone does not guarantee a frame-time limit.
+
+Either approach needs defined pending-preview behavior: incomplete work must remain unknown,
+never imply approval or a definite rejection. Player overlap must still be checked every frame,
+and actual edits must remain independently fully validated. Adopt either approach only if
+measured frame spikes or preview delays justify the added state and scheduling complexity.

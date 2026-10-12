@@ -59,4 +59,37 @@ pub fn main(init: std.process.Init) !void {
         samples.len,
         @tagName(@import("builtin").mode),
     });
+    try benchmarkWindow(init, &world, operation.block);
+    const maximum_layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } });
+    var maximum_world = try world_module.World.init(allocator, &maximum_layout);
+    defer maximum_world.deinit();
+    for (1..4) |z| for (1..4) |y| {
+        for (1..4) |x|
+            try maximum_world.insertChunk(.{ @intCast(x), @intCast(y), @intCast(z) }, world_module.WorldChunk.initEmpty());
+    };
+    try benchmarkWindow(init, &maximum_world, .{ 80, 80, 80 });
+}
+
+/// Measure the unchanged-preview path separately from full structural validation.
+fn benchmarkWindow(init: std.process.Init, world: *world_module.World, target: [3]u32) !void {
+    var window = world.validationWindow(target);
+    const frames_per_sample = 10000;
+    var samples: [11]u64 = undefined;
+    for (&samples) |*sample| {
+        const start = std.Io.Clock.awake.now(init.io);
+        for (0..frames_per_sample) |_| {
+            std.mem.doNotOptimizeAway(world);
+            std.mem.doNotOptimizeAway(&window);
+            if (!window.isCurrent(world)) return error.CacheInvalidated;
+        }
+        sample.* = @intCast(start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds);
+    }
+    std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
+    std.debug.print("{d}-chunk placement cache: median {d:.3} us/check, min {d:.3} us/check ({d} frames/sample, {s}; excludes raycast, validation and rendering)\n", .{
+        window.chunks.count,
+        @as(f64, @floatFromInt(samples[samples.len / 2])) / (frames_per_sample * std.time.ns_per_us),
+        @as(f64, @floatFromInt(samples[0])) / (frames_per_sample * std.time.ns_per_us),
+        frames_per_sample,
+        @tagName(@import("builtin").mode),
+    });
 }

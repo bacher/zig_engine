@@ -3,8 +3,11 @@ struct Outline {
     block_from_clip: mat4x4f,
     // xy: viewport, z: stroke width, w: camera-facing face bit mask.
     stroke: vec4f,
+    color: vec4f,
+    parameters: vec4f,
 }
-@group(0) @binding(0) var<uniform> outline: Outline;
+@group(0) @binding(0) var<storage, read> outlines: array<Outline>;
+override opacity_scale: f32 = 1;
 
 const edges = array<vec2u, 12>(
     vec2u(0, 1), vec2u(2, 3), vec2u(4, 5), vec2u(6, 7),
@@ -23,11 +26,13 @@ fn corner(index: u32) -> vec3f {
 struct VertexOut {
     @builtin(position) position: vec4f,
     @location(0) @interpolate(flat) faces: u32,
+    @location(1) @interpolate(flat) instance: u32,
 }
 
-@vertex fn vs(@builtin(vertex_index) index: u32) -> VertexOut {
+@vertex fn vs(@builtin(vertex_index) index: u32, @builtin(instance_index) instance: u32) -> VertexOut {
+    let outline = outlines[instance];
     let edge = edges[index / 6u];
-    let hidden = VertexOut(vec4f(0, 0, -1, 1), 0u);
+    let hidden = VertexOut(vec4f(0, 0, -1, 1), 0u, instance);
     var faces = 0u;
     for (var axis = 0u; axis < 3u; axis++) {
         if (((edge.x ^ edge.y) & (1u << axis)) == 0u) {
@@ -54,13 +59,13 @@ struct VertexOut {
     var p = mix(a, b, q.x);
     // Square caps join corners; expansion in clip space keeps pixel width fixed.
     p = vec4f(p.xy + (normal * q.y + tangent * (2 * q.x - 1)) * outline.stroke.z / outline.stroke.xy * p.w, p.zw);
-    return VertexOut(p, faces);
+    return VertexOut(p, faces, instance);
 }
 
 // The expanded stroke can cover a target face closer than the thin edge itself.
 // Follow that surface's depth at each covered pixel, so the block cannot eat its
 // own outline. Other geometry still participates in the ordinary depth test.
-fn strokeDepth(pixel: vec2f, edge_depth: f32, faces: u32) -> f32 {
+fn strokeDepth(outline: Outline, pixel: vec2f, edge_depth: f32, faces: u32) -> f32 {
     let xy = vec2f(2 * pixel.x / outline.stroke.x - 1, 1 - 2 * pixel.y / outline.stroke.y);
     let near_h = outline.block_from_clip * vec4f(xy, 0, 1);
     let far_h = outline.block_from_clip * vec4f(xy, 1, 1);
@@ -112,9 +117,18 @@ struct FragmentOut {
 }
 
 @fragment fn fs(input: VertexOut) -> FragmentOut {
+    let outline = outlines[input.instance];
     var output: FragmentOut;
-    output.color = vec4f(0, 1, 0, 1);
+    output.color = outline.color;
+    output.color.a *= opacity_scale;
+    var depth = input.position.z;
+    // Full diagnostic cubes include rear edges. Only edges touching an eye-facing
+    // face may follow its surface; correcting rear edges would lift them forward.
+    let corrected_faces = input.faces & u32(outline.parameters.y);
+    if (outline.parameters.x != 0 && corrected_faces != 0u) {
+        depth = strokeDepth(outline, input.position.xy, depth, corrected_faces);
+    }
     // Eight f32 epsilon units cover reconstruction/rasterization rounding only.
-    output.depth = clamp(strokeDepth(input.position.xy, input.position.z, input.faces) - 0.0000009536743164, 0, 1);
+    output.depth = clamp(depth - 0.0000009536743164, 0, 1);
     return output;
 }

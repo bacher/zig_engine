@@ -16,7 +16,7 @@ flowchart LR
     Depth --> SSAO
     Color --> Final[Final composite]
     SSAO --> Final
-    Final --> Focus[Depth-tested block outline]
+    Final --> Focus[Block outlines and translucent cell hints]
     Focus --> Overlay[Application and GUI overlay]
     Overlay --> Present[Submit and present]
 ```
@@ -27,7 +27,7 @@ flowchart LR
 | Forward scene | Clears and renders color (`rgba8_unorm`), encoded view-space normals (`rgb10_a2_unorm`), and depth. Some pipelines disable normal writes. |
 | SSAO | Full-screen pass reconstructs view-space positions from depth and uses the normal texture to estimate occlusion; output is `r16_float`. |
 | Final composite | Full-screen pass copies scene color or multiplies it by SSAO. Optional blur/debug display are applied here. |
-| Block outline | When the application selects a cell, loads swapchain color and scene depth and draws visible green edges as three-pixel-wide pairs of triangles, without writing depth. |
+| Block outlines | Loads swapchain color and scene depth. Draws green focus edges and colored translucent cell hints as three-pixel-wide triangle pairs, with faint occluded hints and no depth writes. |
 | Overlay | If `onRender` exists, loads the swapchain color without a depth attachment, invokes the application callback, and renders GUI when enabled. |
 
 The SSAO pass is still encoded when SSAO is disabled. The final shader bypasses its result in that case. GUI frame creation and the engine debug window currently occur inside the optional `onRender` branch.
@@ -44,9 +44,67 @@ CPU world transforms remain in `f64`. GPU paths use chunk-local matrices plus in
 
 ## Voxel rendering
 
+The voxel app starts in removing mode, which shows green focus edges and skips placement
+preview validation. Tab switches to putting mode, which hides green focus edges and uses
+colored placement hints. Block mode is shared across player and spectator control.
+
 The voxel app refreshes `Scene.highlighted_block` using the editing raycast after camera updates, optimistic edits, and subscription changes. The engine's independent [`block_outline.zig`](../src/engine/block_outline.zig) pipeline draws it after post-processing and before GUI overlays. It emits 72 procedural vertices, clips edges against the near plane, and expands them in screen space to keep their width constant when distance or window size changes. It excludes edges whose adjacent faces both face away from the camera. For each stroke pixel overlapping the target cube, the fragment shader reconstructs the cube's front surface depth to prevent the target's own sloped faces from cutting into the stroke.
 
-The shader also extends each edge's visible adjacent face planes across the narrow stroke margin to keep coplanar neighboring blocks from trimming it. This continuation is limited to 0.25 metres beyond the unit face bounds: a small screen-space margin can otherwise extrapolate metres forward at grazing angles and leak through foreground blocks. Plane intersections outside that bounded neighborhood leave the reconstructed target/edge depth unchanged. This deliberately allows the outer stroke to be clipped on nearly edge-on coplanar surfaces when preserving it would require a more distant intersection. Scene depth still hides the outline behind other geometry; an eight-epsilon f32 allowance handles depth rounding, and the pass never writes scene depth. The pipeline owns dedicated transform/inverse-transform/viewport uniforms. The outline's storage cell is rebased to the camera chunk, including the wrapped x seam, before conversion to f32. No voxel face or shadow shader contains highlighting logic.
+The shader also extends each edge's visible adjacent face planes across the narrow stroke margin to keep coplanar neighboring blocks from trimming it. This continuation is limited to 0.25 metres beyond the unit face bounds: a small screen-space margin can otherwise extrapolate metres forward at grazing angles and leak through foreground blocks. Plane intersections outside that bounded neighborhood leave the reconstructed target/edge depth unchanged. This deliberately allows the outer stroke to be clipped on nearly edge-on coplanar surfaces when preserving it would require a more distant intersection. Scene depth still hides the outline behind other geometry; an eight-epsilon f32 allowance handles depth rounding, and the pass never writes scene depth. The pipeline reads each cell's transforms, viewport, masks, and color from a shared read-only instance buffer. The outline's storage cell is rebased to the camera chunk, including the wrapped x seam, before conversion to f32. No voxel face or shadow shader contains highlighting logic.
+
+`Scene.block_overlays` also carries a bounded, value-owned set of signed storage cells and
+RGBA colors and whether the cell contains a received block. Placement previews reuse the
+same outline shader and bind group layout, retaining all twelve edges. For occupied cells,
+edges touching camera-facing faces use the focus outline's bounded surface-depth correction,
+so the block's own tilted faces do not trim the expanded stroke. Rear edges, empty cells,
+unknown cells, and cells beyond finite world bounds retain their actual edge depth.
+The regular pipeline alpha-blends visible strokes with a `less_equal` depth test; a second
+pipeline uses `greater` and 30% opacity for hidden strokes. Both leave depth unchanged.
+All hidden overlays draw before all visible overlays, using two instanced draws and two pipeline selections for
+the overlay set. This prevents a later faint stroke from tinting an earlier bright stroke
+where diagnostic cells overlap on screen. Each cell's instance data is prepared once and
+uploaded once; a shader pipeline constant applies the hidden pass's lower opacity.
+Diagnostic colors take precedence when an overlay also covers the focused cell. The voxel
+app uses cyan/red for the placement candidate and orange for involved blocks or missing
+support cells. See [placement diagnostics](block-placement.md#edits-and-diagnostics).
+
+The correction adds one cached block lookup per distinct diagnostic cell and a six-bit
+camera-facing face mask. It adds no world support searches or mesh rebuilds. A persistent
+11,440-byte storage buffer holds up to 65 instances (64 engine overlays plus an optional
+ordinary focused cell). The shader selects records with `instance_index`; fragments receive
+the same index without interpolation. Only the active prefix is uploaded, using 176 bytes
+per cell. Ordinary green focus uses one instance in the visible draw and no hidden draw.
+Both depth passes reuse one transform/inverse-transform preparation per cell. GPU correction
+runs only for rasterized strokes touching camera-facing surfaces; its cost depends on their
+screen coverage, including overlap between cells. The current 34-cell preview bound submits
+two outline draws rather than 68, with the same 4,896 vertices.
+`zig build bench-outlines -Doptimize=ReleaseFast` measures CPU classification and instance
+preparation for one focused outline and 20/34 diagnostic cells (11 samples of 10,000 frames
+with a changing camera transform). It then compares individual versus instanced command
+encoding using the same shader/pipelines and actual Dawn API, alternating paths after warmup
+(11 samples of 1,000 frames). The latter includes encoder/pass creation, finish, and release,
+and excludes preparation, buffer uploads, queue submission, and GPU execution. Commands are
+never submitted. If no graphics adapter is available, only command encoding is skipped.
+
+On the local Apple M4 Max, the ReleaseFast benchmark measured median CPU preparation
+times of 0.035 µs for one focused cell, 0.778 µs for 20 diagnostic cells, and 1.360 µs for 34
+diagnostic cells. The diagnostic group contains received occupied cells and the candidate.
+Command-encoding medians on the Metal adapter were:
+
+| Cells | Individual draws | Instanced draws |
+| --- | ---: | ---: |
+| 1 focused | 0.802 µs | 0.826 µs |
+| 20 diagnostic | 3.197 µs | 0.840 µs |
+| 34 diagnostic | 4.922 µs | 0.845 µs |
+| 64 diagnostic | 8.407 µs | 0.828 µs |
+
+This saves about 4 µs of CPU command encoding at the current 34-cell bound: a modest absolute
+improvement, with better scaling as the batch grows. These are CPU microbenchmarks, not
+full-frame timings. GPU vertex and fragment counts are unchanged; storage-buffer access
+differs from the former per-cell uniforms, and GPU timing remains unmeasured. GPU image
+regressions compare instanced and individual draws at 20, 34, and 65 cells, including mixed
+correction masks and a visible-only focused cell. Profile GPU stroke coverage before raising
+the application preview bound; instancing does not reduce screen-space overdraw.
 
 The voxel grid stores exposed-face records, not a conventional indexed mesh or a dense GPU block array. Each record contains local block coordinates and block type in four bytes. Six lists group those records by outward face direction. The vertex shader generates six vertices per face and selects atlas UVs using block type and direction.
 

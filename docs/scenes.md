@@ -110,7 +110,9 @@ The default scene has a spectator controller:
 | Ctrl+R | Toggle SSAO debug display, enabling SSAO when entering it. |
 | B | Toggle SSAO blur. |
 | 1-6 in the voxel app | Select loose soil, crushed stone, trunk, planks, rebar, or reinforced concrete. |
-| E or left click / X in the voxel app | Place against the first block’s hit face / mine that block along the camera view, within four metres. |
+| Tab in the voxel app | Toggle putting/removing; initially removing, preserved across player/spectator control changes. |
+| Left click in the voxel app | Perform the active block mode's action within four metres. |
+| E / X in the voxel app | Place against the hit face in putting mode / mine the focused block in removing mode. Each shortcut is ignored in the other mode. |
 
 Movement uses a base speed of 5 world units per second and elapsed frame time. There is no collision, gravity, or terrain constraint in `SpectatorCamera`; it can move through solid terrain. Pitch is not explicitly clamped.
 

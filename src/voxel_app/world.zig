@@ -62,6 +62,9 @@ pub const WorldChunk = struct {
     /// Authoritative revision, advanced only by the world-data service for content or flag changes.
     /// Optimistic edits never change it. 0 means no edits have been committed yet.
     chunk_revision: u32 = 0,
+    /// Client-cache stamp assigned by World, including optimistic edits and reloads.
+    /// Independent of the service's authoritative chunk_revision.
+    validation_revision: u64 = 0,
     /// Cached own boundary occupancy, including optimistic edits. Never sent to the GPU.
     boundaries: boundary_mask.BoundaryMasks = @splat(.{}),
     metadata: ChunkMetadata = .{},
@@ -207,10 +210,14 @@ pub const PendingOperation = struct {
     request_id: ?u64 = null,
 };
 
-/// Read construction indices only from chunks intersecting the target's fixed window.
-/// This visits at most 27 chunk IDs, independently of retained edits elsewhere in the world.
-pub fn collectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayout, chunks: *const ChunksHashMap, target: [3]u32) []block_rules.Cell {
-    var cells: std.ArrayList(block_rules.Cell) = .empty;
+/// Includes absent chunks, clipped finite bounds, and deduplicated wrapped IDs.
+const ValidationChunks = struct {
+    ids: [27]ChunkId = undefined,
+    count: usize = 0,
+};
+
+fn validationChunks(layout: *const WorldLayout, target: [3]u32) ValidationChunks {
+    var result: ValidationChunks = .{};
     const center: block_rules.Cell = .{ target[0], target[1], target[2] };
     var low: ChunkCoords = undefined;
     var high: ChunkCoords = undefined;
@@ -218,8 +225,6 @@ pub fn collectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayo
         low[axis] = @intCast(@divFloor(center[axis] - block_rules.Limits.support_radius, CHUNK_SIZE));
         high[axis] = @intCast(@divFloor(center[axis] + block_rules.Limits.support_radius, CHUNK_SIZE));
     }
-    var visited: [27]ChunkId = undefined;
-    var count: usize = 0;
     var z = low[2];
     while (z <= high[2]) : (z += 1) {
         var y = low[1];
@@ -229,21 +234,48 @@ pub fn collectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayo
                 const coords = layout.normalizeChunkCoords(.{ x, y, z }) orelse continue;
                 const id = layout.encodeChunkCoords(coords);
                 // A small wrapped world can map multiple coordinates to the same chunk.
-                if (std.mem.indexOfScalar(ChunkId, visited[0..count], id) != null) continue;
-                visited[count] = id;
-                count += 1;
-                const chunk = chunks.get(id) orelse continue;
-                for (chunk.metadata.constructed.items) |index| {
-                    const local = transformations.coordinates(index);
-                    const cell: block_rules.Cell = .{
-                        @as(i64, coords[0]) * CHUNK_SIZE + local[0],
-                        @as(i64, coords[1]) * CHUNK_SIZE + local[1],
-                        @as(i64, coords[2]) * CHUNK_SIZE + local[2],
-                    };
-                    if (block_rules.distance(layout, cell, center) <= block_rules.Limits.support_radius)
-                        cells.append(allocator, cell) catch @panic("OOM");
-                }
+                if (std.mem.indexOfScalar(ChunkId, result.ids[0..result.count], id) != null) continue;
+                result.ids[result.count] = id;
+                result.count += 1;
             }
+        }
+    }
+    return result;
+}
+
+/// A conservative snapshot of all chunks the validator can consult for this edit.
+/// Matching this bounded set costs at most 27 lookups and never evaluates support.
+pub const ValidationWindow = struct {
+    chunks: ValidationChunks,
+    revisions: [27]?u64 = undefined,
+
+    pub fn isCurrent(self: *const ValidationWindow, world: *const World) bool {
+        for (self.chunks.ids[0..self.chunks.count], 0..) |id, i| {
+            const revision = if (world.chunks.get(id)) |chunk| chunk.validation_revision else null;
+            if (revision != self.revisions[i]) return false;
+        }
+        return true;
+    }
+};
+
+/// Read construction indices only from chunks intersecting the target's fixed window.
+/// This visits at most 27 chunk IDs, independently of retained edits elsewhere in the world.
+pub fn collectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayout, chunks: *const ChunksHashMap, target: [3]u32) []block_rules.Cell {
+    var cells: std.ArrayList(block_rules.Cell) = .empty;
+    const center: block_rules.Cell = .{ target[0], target[1], target[2] };
+    const window = validationChunks(layout, target);
+    for (window.ids[0..window.count]) |id| {
+        const chunk = chunks.get(id) orelse continue;
+        const coords = layout.decodeChunkId(id);
+        for (chunk.metadata.constructed.items) |index| {
+            const local = transformations.coordinates(index);
+            const cell: block_rules.Cell = .{
+                @as(i64, coords[0]) * CHUNK_SIZE + local[0],
+                @as(i64, coords[1]) * CHUNK_SIZE + local[1],
+                @as(i64, coords[2]) * CHUNK_SIZE + local[2],
+            };
+            if (block_rules.distance(layout, cell, center) <= block_rules.Limits.support_radius)
+                cells.append(allocator, cell) catch @panic("OOM");
         }
     }
     const Order = struct {
@@ -291,6 +323,10 @@ pub const World = struct {
     pending_operations: std.ArrayList(PendingOperation) = .empty,
     simulation_tick: transformations.Tick = 0,
     last_edit_result: ?EditResult = null,
+    /// Assigns distinct local stamps to chunk loads and optimistic block changes.
+    validation_revision: u64 = 0,
+    /// Tests count actual evaluator calls without adding runtime instrumentation.
+    preview_call_counter: if (@import("builtin").is_test) ?*usize else void = if (@import("builtin").is_test) null else {},
 
     pub fn init(allocator: std.mem.Allocator, layout: *const WorldLayout) !World {
         const owned_layout = try allocator.create(WorldLayout);
@@ -336,6 +372,8 @@ pub const World = struct {
             const neighbor = self.getChunk(neighbor_coords) orelse continue;
             if (!neighbor.flags.getSideSolidness(side.getOpposite())) updated.flags.is_unreachable = false;
         }
+        self.validation_revision +%= 1;
+        updated.validation_revision = self.validation_revision;
         self.chunks.put(self.allocator, position, updated) catch @panic("OOM");
         self.revealNeighbors(coords, updated.flags);
     }
@@ -405,10 +443,20 @@ pub const World = struct {
     }
 
     pub fn previewOperation(self: *const World, operation: BlockOperation) EditResult {
+        if (comptime @import("builtin").is_test) if (self.preview_call_counter) |counter| {
+            counter.* += 1;
+        };
         operation.validate(self.layout);
         const cells = collectConstructed(self.allocator, self.layout, &self.chunks, operation.block);
         defer self.allocator.free(cells);
         return validateEdit(self.allocator, .{ .layout = self.layout, .context = @constCast(self), .block_at = readBlock }, cells, operation);
+    }
+
+    pub fn validationWindow(self: *const World, target: [3]u32) ValidationWindow {
+        var window: ValidationWindow = .{ .chunks = validationChunks(self.layout, target) };
+        for (window.chunks.ids[0..window.chunks.count], 0..) |id, i|
+            window.revisions[i] = if (self.chunks.get(id)) |chunk| chunk.validation_revision else null;
+        return window;
     }
 
     /// Gameplay entry point. Preview and authority use the same rules; unknown client
@@ -439,6 +487,8 @@ pub const World = struct {
         const coords, const local = splitBlockCoords(block);
         const chunk = self.chunks.getPtr(self.layout.encodeChunkCoords(coords)).?;
         if (chunk.apply(self.allocator, local, operation.action) != .success) return;
+        self.validation_revision +%= 1;
+        chunk.validation_revision = self.validation_revision;
         self.revealNeighbors(coords, chunk.flags);
         self.pending_operations.append(self.allocator, .{ .operation = operation }) catch @panic("OOM");
     }
@@ -625,12 +675,13 @@ test "edits on both sides of a chunk border preserve neighboring contents and re
     const upper = ChunkCoords{ 0, 0, WORLD_SIZE[2] - 1 };
     try world.insertChunk(lower, createSolidChunk(0));
     try world.insertChunk(upper, WorldChunk.initEmpty());
+    const original_upper = world.getChunk(upper).?;
 
     const lower_top = [3]u32{ 3, 4, upper[2] * CHUNK_SIZE - 1 };
     try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = lower_top, .action = .remove }).status);
     try std.testing.expect(!try world.isBlockSolid(lower_top));
     try std.testing.expectEqual(0, world.getChunk(lower).?.chunk_revision);
-    try std.testing.expectEqual(WorldChunk.initEmpty(), world.getChunk(upper).?);
+    try std.testing.expectEqual(original_upper, world.getChunk(upper).?);
 
     try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = lower_top, .action = .{ .put = .dirt } }).status);
     const upper_bottom = [3]u32{ 3, 4, upper[2] * CHUNK_SIZE };
@@ -984,6 +1035,63 @@ test "streaming incomplete constructions permits unrelated edits but protects af
     try std.testing.expectEqual(OperationStatus.success, result.status);
     try std.testing.expectEqual(1, world.pending_operations.items.len);
     try std.testing.expect(!try world.isBlockSolid(.{ 10, 10, 15 }));
+}
+
+test "validation window covers all 27 chunks and ignores changes outside the window" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } });
+    var world = try World.init(std.testing.allocator, &layout);
+    defer world.deinit();
+    const target = [3]u32{ 80, 80, 80 };
+    var window = world.validationWindow(target);
+    try std.testing.expectEqual(27, window.chunks.count);
+    try std.testing.expect(window.isCurrent(&world));
+    for (1..4) |z| for (1..4) |y| {
+        for (1..4) |x| {
+            try world.insertChunk(.{ @intCast(x), @intCast(y), @intCast(z) }, WorldChunk.initEmpty());
+            try std.testing.expect(!window.isCurrent(&world));
+            window = world.validationWindow(target);
+            try std.testing.expect(window.isCurrent(&world));
+        }
+    };
+    // A changed cell on each face of the inclusive 28-cell boundary invalidates.
+    for (0..3) |axis| for ([_]i32{ -28, 28 }) |offset| {
+        var block = target;
+        block[axis] = @intCast(@as(i64, target[axis]) + offset);
+        world.setBlockUnchecked(block, .stone);
+        try std.testing.expect(!window.isCurrent(&world));
+        window = world.validationWindow(target);
+    };
+    try world.insertChunk(.{ 0, 0, 0 }, WorldChunk.initEmpty());
+    try std.testing.expect(window.isCurrent(&world));
+    world.setBlockUnchecked(.{ 0, 0, 0 }, .stone);
+    try std.testing.expect(window.isCurrent(&world));
+    world.removeChunk(.{ 0, 0, 0 });
+    try std.testing.expect(window.isCurrent(&world));
+}
+
+test "validation window tracks wrapped missing chunks and clips finite world bounds" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } });
+    var world = try World.init(std.testing.allocator, &layout);
+    defer world.deinit();
+    const target = [3]u32{ 4, 0, 0 };
+    var window = world.validationWindow(target);
+    try std.testing.expectEqual(if (WorldLayout.wrap_x) @as(usize, 3) else 2, window.chunks.count);
+    try world.insertChunk(.{ 7, 0, 0 }, WorldChunk.initEmpty());
+    try std.testing.expectEqual(!WorldLayout.wrap_x, window.isCurrent(&world));
+    window = world.validationWindow(target);
+    try world.insertChunk(.{ 0, 1, 0 }, WorldChunk.initEmpty());
+    try world.insertChunk(.{ 0, 0, 1 }, WorldChunk.initEmpty());
+    try std.testing.expect(window.isCurrent(&world));
+    try world.insertChunk(.{ 1, 0, 0 }, WorldChunk.initEmpty()); // x=32 is exactly 28 cells away.
+    try std.testing.expect(!window.isCurrent(&world));
+
+    const small_layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    var small = try World.init(std.testing.allocator, &small_layout);
+    defer small.deinit();
+    const small_window = small.validationWindow(.{ 4, 32, 32 });
+    try std.testing.expectEqual(8, small_window.chunks.count);
+    for (small_window.chunks.ids[0..small_window.chunks.count], 0..) |id, i|
+        try std.testing.expect(std.mem.indexOfScalar(ChunkId, small_window.chunks.ids[0..i], id) == null);
 }
 
 test "construction collection includes the 28-cell boundary with translation-independent ordering" {

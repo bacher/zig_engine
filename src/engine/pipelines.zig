@@ -36,6 +36,7 @@ pub const Pipelines = struct {
     // -- debug pipelines --
     lines: Pipeline,
     block_outline: Pipeline,
+    block_outline_occluded: Pipeline,
     debug_texture: Pipeline,
     // -- rest --
     ssao_pipeline: Pipeline,
@@ -96,7 +97,8 @@ pub const Pipelines = struct {
             .terrain_height_map = terrain_height_map_pipeline,
             .shadow_map_terrain = shadow_map_terrain_pipeline_module.createShadowMapTerrainPipeline(gctx, bind_group_layouts),
             .lines = lines_pipeline,
-            .block_outline = @import("block_outline.zig").createPipeline(gctx, bind_group_layouts, zgpu.GraphicsContext.swapchain_format),
+            .block_outline = @import("block_outline.zig").createPipeline(gctx, bind_group_layouts.block_outline, zgpu.GraphicsContext.swapchain_format),
+            .block_outline_occluded = @import("block_outline.zig").createOccludedPipeline(gctx, bind_group_layouts.block_outline, zgpu.GraphicsContext.swapchain_format),
             .debug_texture = debug_texture_pipeline,
             .ssao_pipeline = ssao_pipeline,
             .screen_quad_pipeline = screen_quad_pipeline,
@@ -112,6 +114,7 @@ pub const Pipelines = struct {
         pipelines.shadow_map_terrain.deinit(gctx);
         pipelines.lines.deinit(gctx);
         pipelines.block_outline.deinit(gctx);
+        pipelines.block_outline_occluded.deinit(gctx);
         pipelines.debug_texture.deinit(gctx);
         pipelines.ssao_pipeline.deinit(gctx);
         pipelines.screen_quad_pipeline.deinit(gctx);

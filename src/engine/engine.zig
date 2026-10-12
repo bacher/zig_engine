@@ -1030,9 +1030,9 @@ pub const Engine = struct {
                 pass.draw(6, 1, 0, 0);
             }
 
-            // Draw the focused block after post-processing, with scene occlusion.
+            // Draw cell hints after post-processing; hidden hints remain faintly visible.
             if (engine.active_scene) |scene| {
-                if (scene.highlighted_block) |block| {
+                if (scene.highlighted_block != null or scene.block_overlays.count != 0) {
                     const outline = @import("block_outline.zig");
                     const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
                         .view = back_buffer_view,
@@ -1052,11 +1052,23 @@ pub const Engine = struct {
                         pass.end();
                         pass.release();
                     }
-                    const data = gctx.uniformsAllocate(outline.Uniforms, 1);
-                    data.slice[0] = outline.uniforms(scene.camera, block, engine.screen_size);
-                    pass.setPipeline(engine.pipelines.block_outline.pipeline_gpu);
-                    pass.setBindGroup(0, engine.bind_group_block_outline.wgpu_bind_group, &.{data.offset});
-                    pass.draw(outline.vertex_count, 1, 0, 0);
+                    var instances: [outline.instance_capacity]outline.Instance = undefined;
+                    var visible_count: u32 = @intCast(scene.block_overlays.count);
+                    for (scene.block_overlays.cells[0..scene.block_overlays.count], 0..) |overlay, index| {
+                        instances[index] = outline.overlayInstance(scene.camera, overlay, engine.screen_size);
+                    }
+                    if (scene.highlighted_block) |block| {
+                        // A problem hint takes precedence over the ordinary focus color.
+                        if (!scene.block_overlays.contains(.{ block[0], block[1], block[2] })) {
+                            instances[visible_count] = outline.focusedInstance(scene.camera, block, engine.screen_size);
+                            visible_count += 1;
+                        }
+                    }
+                    if (visible_count != 0) {
+                        const buffer = gctx.lookupResource(engine.bind_group_layouts.block_outline.instance_buffer_handle).?;
+                        gctx.queue.writeBuffer(buffer, 0, outline.Instance, instances[0..visible_count]);
+                        outline.drawBatch(pass, engine.pipelines.block_outline_occluded.pipeline_gpu, engine.pipelines.block_outline.pipeline_gpu, engine.bind_group_block_outline.wgpu_bind_group, 0, @intCast(scene.block_overlays.count), visible_count);
+                    }
                 }
             }
 

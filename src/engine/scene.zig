@@ -51,6 +51,8 @@ pub const Scene = struct {
     spectator_enabled: bool = true,
     /// Application-selected storage cell; rendered independently of voxel faces.
     highlighted_block: ?[3]u32 = null,
+    /// Signed storage cells also allow hints for missing support beyond finite edges.
+    block_overlays: @import("block_outline.zig").Overlays = .{},
     previous_frame_time: f64,
 
     // gpu related

@@ -46,7 +46,7 @@ pub fn distance(layout: *const engine.WorldLayout, cell: Cell, center: Cell) u64
 }
 
 /// Value-owned diagnostics survive asynchronous replies. Coordinates are storage-space
-/// cells (including missing cells at world edges), ready for a future 3D overlay.
+/// cells (including missing cells at world edges), consumed by placement hints.
 pub const Failure = struct {
     reason: Reason,
     cause: ?Reason = null,
@@ -152,6 +152,7 @@ pub const Validator = struct {
     /// Recursive support searches never recenter on intermediate blocks.
     root: ?Cell = null,
     outside: ?struct { cell: Cell, center: Cell } = null,
+    missing: ?Cell = null,
     /// All cache state belongs to this hypothetical edit, never to world metadata.
     cache_center: ?Cell = null,
     scope: u64 = 0,
@@ -183,6 +184,7 @@ pub const Validator = struct {
             if (@reduce(.And, normalized == edit.cell)) return edit.material;
         }
         return self.reader.get(normalized) orelse {
+            if (self.missing == null) self.missing = normalized;
             self.markIncomplete();
             return error.MissingData;
         };
@@ -202,10 +204,15 @@ pub const Validator = struct {
         if (self.cache_center == null) self.cache_center = if (self.edit) |edit| edit.cell else cell;
         self.scope += 1;
         self.outside = null;
+        self.missing = null;
     }
 
     fn readFailure(self: *Validator, err: ReadError, cell: Cell) Evaluation {
-        if (err == error.MissingData) return failure(.missing_data, cell, 0, 0);
+        if (err == error.MissingData) {
+            var result = failure(.missing_data, cell, 0, 0);
+            if (self.missing) |missing| result.rejected.add(missing);
+            return result;
+        }
         var result = failure(.support_search_limit, cell, Limits.support_radius + 1, Limits.support_radius);
         if (self.outside) |outside| {
             result.rejected.actual = @intCast(distance(self.reader.layout, outside.cell, outside.center));
@@ -281,7 +288,11 @@ pub const Validator = struct {
     fn direct(self: *Validator, cell: Cell, material: BlockType) ReadError!Evaluation {
         const below_cell = cell - Cell{ 0, 0, 1 };
         const below = try self.get(below_cell);
-        if (below == .none) return failure(.missing_foundation, cell, 0, 1);
+        if (below == .none) {
+            var result = failure(.missing_foundation, cell, 0, 1);
+            result.rejected.add(below_cell);
+            return result;
+        }
         // These foundations already give the minimum height without inspecting an unused cube.
         if (below == .stone or (material.isWood() and below.isMineralConstruction()))
             return height(cell, material, .{});
@@ -314,7 +325,11 @@ pub const Validator = struct {
             if (!below.isReinforced()) return self.platformFailure(.missing_foundation, cell);
         }
         return switch (try self.evaluate(below_cell, below)) {
-            .supported => |base| height(cell, material, base),
+            .supported => |base| blk: {
+                var result = height(cell, material, base);
+                if (result == .rejected) result.rejected.add(below_cell);
+                break :blk result;
+            },
             .rejected => |reason| .{ .rejected = reason },
         };
     }
@@ -388,6 +403,9 @@ pub const Validator = struct {
         }
         if (best) |state| return .{ .supported = state };
         if (unresolved) |err| return err;
+        if (rejected.rejected.reason == .horizontal_span) {
+            for (nodes[0..count]) |node| rejected.rejected.add(node.cell);
+        }
         return rejected;
     }
 
@@ -483,7 +501,9 @@ pub const Validator = struct {
                 run += 1;
                 if (run > Limits.crushed_column) {
                     if (unresolved) |err| return err;
-                    return failure(.crushed_column, cell, run, Limits.crushed_column);
+                    var result = failure(.crushed_column, cell, run, Limits.crushed_column);
+                    for (1..run) |depth| result.rejected.add(cell - Cell{ 0, 0, @intCast(depth) });
+                    return result;
                 }
                 const platform = self.stablePlatform(below) catch |err| blk: {
                     rememberError(&unresolved, err);
@@ -563,6 +583,9 @@ pub const Validator = struct {
                 var result = reason;
                 result.cause = reason.reason;
                 result.reason = if (reason.reason == .missing_data) .missing_data else if (removal) .would_remove_support else .would_invalidate_structure;
+                result.subject = cell;
+                result.add(reason.subject);
+                result.add(cell);
                 if (self.edit) |edit| result.add(edit.cell);
                 return result;
             }
@@ -662,7 +685,9 @@ test "loose earth needs nine cells; unknown dependencies and world seams are dis
     try std.testing.expectEqual(Reason.earth_footprint, seam_removal.cause.?);
     try std.testing.expectEqual(Reason.earth_footprint, fixture.check(.{ 20, 0, 4 }, .dirt).?.reason);
     fixture.missing = .{ 20, 20, 3 };
-    try std.testing.expectEqual(Reason.missing_data, fixture.check(.{ 20, 20, 4 }, .dirt).?.reason);
+    const missing = fixture.check(.{ 20, 20, 4 }, .dirt).?;
+    try std.testing.expectEqual(Reason.missing_data, missing.reason);
+    try std.testing.expectEqualDeep(fixture.missing.?, missing.involved[1]);
     fixture.missing = null;
     try fixture.raw(.{ 20, 20, 3 }, .none);
     const failure_result = fixture.check(.{ 20, 20, 4 }, .dirt).?;
@@ -710,6 +735,7 @@ test "wood and reinforced spans count diagonal steps only through filled corners
     try std.testing.expectEqual(Reason.horizontal_span, wood_span.reason);
     try std.testing.expectEqual(3, wood_span.actual);
     try std.testing.expectEqual(2, wood_span.limit);
+    try std.testing.expect(wood_span.involved_count > 2);
     try fixture.put(.{ 30, 30, 4 }, .rebar);
     for (0..5) |offset| try fixture.put(.{ 30 + @as(i64, @intCast(offset)), 30, 5 }, if (offset % 2 == 0) .rebar else .reinforced_concrete);
     const concrete_span = fixture.check(.{ 35, 30, 5 }, .rebar).?;
@@ -725,6 +751,7 @@ test "wood inherits height across a cantilever and gets a fresh group above ston
     const reason = fixture.check(.{ 11, 10, 16 }, .tree_trunk).?;
     try std.testing.expectEqual(Reason.wood_height, reason.reason);
     try std.testing.expectEqual(13, reason.actual);
+    try std.testing.expectEqualDeep(Cell{ 11, 10, 15 }, reason.involved[1]);
     for (4..10) |z| try fixture.put(.{ 30, 30, @intCast(z) }, .crushed_stone);
     for (10..22) |z| try fixture.put(.{ 30, 30, @intCast(z) }, .tree_trunk);
     try std.testing.expectEqual(Reason.wood_height, fixture.check(.{ 30, 30, 22 }, .tree_trunk).?.reason);
@@ -738,7 +765,10 @@ test "mineral materials share twenty levels and crushed stone has a separate six
     try std.testing.expectEqual(Reason.mineral_height, reason.reason);
     try std.testing.expectEqual(21, reason.actual);
     for (4..10) |z| try fixture.put(.{ 30, 30, @intCast(z) }, .crushed_stone);
-    try std.testing.expectEqual(Reason.crushed_column, fixture.check(.{ 30, 30, 10 }, .crushed_stone).?.reason);
+    const crushed = fixture.check(.{ 30, 30, 10 }, .crushed_stone).?;
+    try std.testing.expectEqual(Reason.crushed_column, crushed.reason);
+    try std.testing.expectEqual(7, crushed.involved_count);
+    try std.testing.expectEqualDeep(Cell{ 30, 30, 4 }, crushed.involved[6]);
     try std.testing.expectEqual(Reason.incompatible_support, fixture.check(.{ 10, 10, 24 }, .crushed_stone).?.reason);
 }
 
@@ -776,6 +806,20 @@ test "a platform resets height and removing its off-center cell can invalidate t
     const reason = fixture.check(.{ 29, 29, 21 }, .none).?;
     try std.testing.expectEqual(Reason.would_remove_support, reason.reason);
     try std.testing.expectEqual(Reason.mineral_height, reason.cause);
+}
+
+test "dependent diagnostics identify the affected construction and its incompatible support" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    const trunk: Cell = .{ 10, 10, 4 };
+    const support: Cell = .{ 10, 10, 3 };
+    try fixture.put(trunk, .tree_trunk);
+    // Raw validation deliberately bypasses the occupied-cell edit precondition.
+    const rejected = fixture.check(support, .sand).?;
+    try std.testing.expectEqual(Reason.would_invalidate_structure, rejected.reason);
+    try std.testing.expectEqual(Reason.incompatible_support, rejected.cause.?);
+    try std.testing.expectEqualDeep(trunk, rejected.subject);
+    try std.testing.expectEqualDeep(support, rejected.involved[0]);
 }
 
 test "filled wooden and reinforced platforms reach square corners at their respective limits" {
