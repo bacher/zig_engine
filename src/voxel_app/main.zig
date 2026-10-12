@@ -36,6 +36,7 @@ const ChunkResponse = world_data_service.ChunkResponse;
 const SimulationWorker = @import("./simulation_worker.zig").SimulationWorker;
 const player_module = @import("player_controller.zig");
 const PlayerController = player_module.PlayerController;
+const player_spawn = @import("player_spawn.zig");
 const terrain_collision = @import("terrain_collision.zig");
 const consts = @import("./consts.zig");
 const world_engine = @import("./world_engine_glue.zig");
@@ -703,7 +704,6 @@ fn initWorld(game: *Game) !void {
     game.world_data = try WorldDataService.create(game.engine.io, game.allocator, game.engine.active_scene.?.layout, .{ .terrain = .{ .seed = 12345 } });
     game.world = try World.init(game.allocator, game.engine.active_scene.?.layout);
     game.world_client = try game.world_data.?.createClient();
-    game.simulation = try SimulationWorker.create(game.world_data.?);
 }
 
 /// Chebyshev distance between the chunk and the camera chunk, in chunks. The x axis wraps.
@@ -806,8 +806,11 @@ pub fn main(init: std.process.Init) !void {
     defer scene.deinit();
     defer game.stopWorkers();
 
-    // Start above the generated terrain's maximum height, then fall onto it.
-    game.player = PlayerController.init(allocator, .{ -2.06, -2.96, 64 });
+    try initWorld(game);
+    const spawn = try player_spawn.loadPosition(game.world_data.?, .{}, .{ -2.06, -2.96 });
+    game.player = PlayerController.init(allocator, spawn);
+    game.player.?.grounded = true;
+    game.simulation = try SimulationWorker.create(game.world_data.?);
     scene.spectator_enabled = false;
     engine.input_controller.cursor_capture = .always;
     game.player.?.applyCamera(scene.camera);
@@ -856,8 +859,6 @@ pub fn main(init: std.process.Init) !void {
         .parent = null,
         .animation_name = "walkLikeMan",
     }));
-
-    try initWorld(game);
 
     // -- Tube data for coordinates --
 
@@ -993,6 +994,7 @@ test {
     _ = world_data_service;
     _ = SimulationWorker;
     _ = player_module;
+    _ = player_spawn;
 }
 
 test "Q excursions start at player eyes and return to the frozen player position and view" {

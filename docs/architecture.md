@@ -78,6 +78,8 @@ The application creates `WindowContext`, its own game state, and `Engine`, then 
 
 `Engine.init` enforces one live engine instance. It uses the graphics context supplied by `WindowContext`, creates pipelines and shared GPU resources, initializes image loading, and installs an input controller. Both example applications separately initialize and deinitialize the GUI backend.
 
+Before entering its render loop, the voxel application starts the world-data service and finds the player's spawn surface through authoritative block subscriptions. It sets the player's feet and camera at that surface, then starts the simulation example. The temporary spawn subscriptions are evicted; normal neighborhood streaming uses the resulting player/camera position.
+
 `Engine.runLoop` prepares the initial active scene's instance buffer, then repeats:
 
 1. Poll GLFW events. Key-press callbacks can execute application logic here.
