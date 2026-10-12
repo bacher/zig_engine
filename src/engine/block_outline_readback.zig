@@ -30,7 +30,7 @@ pub fn check(device: wgpu.Device, mapping: *Mapping) !void {
     defer layouts.block_outline.deinit(&gctx);
     const pipeline = outline.createPipeline(&gctx, &layouts, .rgba8_unorm);
     defer pipeline.deinit(&gctx);
-    const uniforms = device.createBuffer(.{ .size = 512, .usage = .{ .uniform = true, .copy_dst = true } });
+    const uniforms = device.createBuffer(.{ .size = 1280, .usage = .{ .uniform = true, .copy_dst = true } });
     defer uniforms.release();
     const entries = [_]wgpu.BindGroupEntry{
         .{ .binding = 0, .buffer = uniforms, .size = @sizeOf(outline.Uniforms) },
@@ -175,7 +175,7 @@ fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.Bind
         const depth_view = depth.createView(.{});
         defer depth_view.release();
         const image_size: u64 = side * side * 4;
-        const readback = device.createBuffer(.{ .size = image_size * 3, .usage = .{ .copy_dst = true, .map_read = true } });
+        const readback = device.createBuffer(.{ .size = image_size * 6, .usage = .{ .copy_dst = true, .map_read = true } });
         defer readback.release();
         for (eyes, 0..) |eye, view_index| {
             const transform = @import("utils.zig").matMul(zmath.perspectiveFovRh(std.math.pi / 2.0, 1, 0.01, 1000), zmath.lookAtRh(eye, .{ 0.5, 0.5, 0.5, 1 }, .{ 0, 0, 1, 0 }));
@@ -193,7 +193,19 @@ fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.Bind
             const model = @import("utils.zig").matMul(zmath.translation(center[0] - 1, center[1] - 1, center[2] - 1), zmath.scaling(2, 2, 2));
             foreground.clip_from_block = @import("utils.zig").matMul(transform, model);
             queue.writeBuffer(uniforms, 256, outline.Uniforms, &.{foreground});
-            for (0..3) |with_cube| {
+            // Surround the target with coplanar neighbors along each axis,
+            // covering walls, floors, and ceilings from the oblique viewpoints.
+            inline for (0..3) |axis| {
+                var wall_scale: @Vector(3, f32) = @splat(3);
+                var wall_shift: @Vector(3, f32) = @splat(-1);
+                wall_scale[axis] = 1;
+                wall_shift[axis] = 0;
+                var wall = data;
+                const wall_model = @import("utils.zig").matMul(zmath.translation(wall_shift[0], wall_shift[1], wall_shift[2]), zmath.scaling(wall_scale[0], wall_scale[1], wall_scale[2]));
+                wall.clip_from_block = @import("utils.zig").matMul(transform, wall_model);
+                queue.writeBuffer(uniforms, 512 + 256 * axis, outline.Uniforms, &.{wall});
+            }
+            for (0..6) |variant| {
                 const encoder = device.createCommandEncoder(null);
                 defer encoder.release();
                 const scene = encoder.beginRenderPass(.{
@@ -202,12 +214,15 @@ fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.Bind
                     .depth_stencil_attachment = &.{ .view = depth_view, .depth_load_op = .clear, .depth_store_op = .store, .depth_clear_value = 1 },
                 });
                 defer scene.release();
-                if (with_cube >= 1) {
+                if (variant >= 1) {
                     scene.setPipeline(cube);
                     scene.setBindGroup(0, bind_group, &.{0});
                     scene.draw(36, 1, 0, 0);
-                    if (with_cube == 2) {
+                    if (variant == 2) {
                         scene.setBindGroup(0, bind_group, &.{256});
+                        scene.draw(36, 1, 0, 0);
+                    } else if (variant >= 3) {
+                        scene.setBindGroup(0, bind_group, &.{@intCast(512 + 256 * (variant - 3))});
                         scene.draw(36, 1, 0, 0);
                     }
                 }
@@ -223,20 +238,20 @@ fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.Bind
                 pass.setBindGroup(0, bind_group, &.{0});
                 pass.draw(outline.vertex_count, 1, 0, 0);
                 pass.end();
-                encoder.copyTextureToBuffer(.{ .texture = color }, .{ .buffer = readback, .layout = .{ .offset = with_cube * image_size, .bytes_per_row = side * 4, .rows_per_image = side } }, extent);
+                encoder.copyTextureToBuffer(.{ .texture = color }, .{ .buffer = readback, .layout = .{ .offset = variant * image_size, .bytes_per_row = side * 4, .rows_per_image = side } }, extent);
                 const command = encoder.finish(null);
                 defer command.release();
                 queue.submit(&.{command});
             }
             mapping.* = .{};
-            readback.mapAsync(.{ .read = true }, 0, image_size * 3, Mapping.callback, mapping);
+            readback.mapAsync(.{ .read = true }, 0, image_size * 6, Mapping.callback, mapping);
             defer readback.unmap();
             try callbacks.waitForCallback(device, &mapping.done);
             try std.testing.expectEqual(wgpu.BufferMapAsyncStatus.success, mapping.status);
-            const pixels = readback.getConstMappedRange([4]u8, 0, side * side * 3) orelse return error.NoMappedGpuResults;
+            const pixels = readback.getConstMappedRange([4]u8, 0, side * side * 6) orelse return error.NoMappedGpuResults;
             const baseline = pixels[0 .. side * side];
             const actual = pixels[side * side .. side * side * 2];
-            const occluded = pixels[side * side * 2 ..];
+            const occluded = pixels[side * side * 2 .. side * side * 3];
             for (occluded) |pixel| try std.testing.expectEqual(@as(u8, 0), pixel[1]);
             if (view_index == 0) {
                 // This back edge projects into the face interior, clear of the
@@ -250,12 +265,15 @@ fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.Bind
             }
             var probes: usize = 0;
             var missing: usize = 0;
+            var missing_coplanar: usize = 0;
             for (edges) |edge| {
                 const a = corner(edge[0]);
                 const b = corner(edge[1]);
                 var visible = false;
+                var wall_faces: [3]bool = @splat(false);
                 inline for (0..3) |axis| {
-                    if (a[axis] == b[axis] and (if (a[axis] == 0) eye[axis] < 0 else eye[axis] > 1)) visible = true;
+                    wall_faces[axis] = a[axis] == b[axis] and (if (a[axis] == 0) eye[axis] < 0 else eye[axis] > 1);
+                    visible = visible or wall_faces[axis];
                 }
                 if (!visible) continue;
                 const clip_a = @import("utils.zig").matApply(transform, a);
@@ -276,12 +294,20 @@ fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.Bind
                     try std.testing.expectEqual(@as(u8, 255), baseline[index][1]);
                     probes += 1;
                     if (actual[index][1] != 255) missing += 1;
+                    inline for (0..3) |axis| {
+                        const wall_index = side * side * (3 + axis) + index;
+                        if (wall_faces[axis] and pixels[wall_index][1] != 255) missing_coplanar += 1;
+                    }
                 };
             }
             try std.testing.expect(probes > 30);
             if (missing != 0) {
                 std.debug.print("outline self-occlusion: viewport={d}, eye={d}, lost {d}/{d} visible-edge pixels\n", .{ side, eye, missing, probes });
                 return error.OutlineSelfOcclusion;
+            }
+            if (missing_coplanar != 0) {
+                std.debug.print("outline coplanar occlusion: viewport={d}, eye={d}, lost {d} face-edge pixels\n", .{ side, eye, missing_coplanar });
+                return error.OutlineCoplanarOcclusion;
             }
         }
     }

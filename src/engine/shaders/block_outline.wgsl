@@ -20,18 +20,23 @@ fn corner(index: u32) -> vec3f {
     return vec3f(f32(index & 1u), f32((index >> 1u) & 1u), f32((index >> 2u) & 1u));
 }
 
-@vertex fn vs(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
+struct VertexOut {
+    @builtin(position) position: vec4f,
+    @location(0) @interpolate(flat) faces: u32,
+}
+
+@vertex fn vs(@builtin(vertex_index) index: u32) -> VertexOut {
     let edge = edges[index / 6u];
-    let hidden = vec4f(0, 0, -1, 1);
-    var visible = false;
+    let hidden = VertexOut(vec4f(0, 0, -1, 1), 0u);
+    var faces = 0u;
     for (var axis = 0u; axis < 3u; axis++) {
         if (((edge.x ^ edge.y) & (1u << axis)) == 0u) {
             let face = 2u * axis + ((edge.x >> axis) & 1u);
-            visible = visible || (u32(outline.stroke.w) & (1u << face)) != 0u;
+            faces |= (u32(outline.stroke.w) & (1u << face));
         }
     }
     // Depth correction must never bring a hidden back edge onto the front face.
-    if (!visible) { return hidden; }
+    if (faces == 0u) { return hidden; }
     var a = outline.clip_from_block * vec4f(corner(edge.x), 1);
     var b = outline.clip_from_block * vec4f(corner(edge.y), 1);
     // Clip to WebGPU's near plane before dividing by w or expanding the stroke.
@@ -49,13 +54,13 @@ fn corner(index: u32) -> vec3f {
     var p = mix(a, b, q.x);
     // Square caps join corners; expansion in clip space keeps pixel width fixed.
     p = vec4f(p.xy + (normal * q.y + tangent * (2 * q.x - 1)) * outline.stroke.z / outline.stroke.xy * p.w, p.zw);
-    return p;
+    return VertexOut(p, faces);
 }
 
 // The expanded stroke can cover a target face closer than the thin edge itself.
 // Follow that surface's depth at each covered pixel, so the block cannot eat its
 // own outline. Other geometry still participates in the ordinary depth test.
-fn strokeDepth(pixel: vec2f, edge_depth: f32) -> f32 {
+fn strokeDepth(pixel: vec2f, edge_depth: f32, faces: u32) -> f32 {
     let xy = vec2f(2 * pixel.x / outline.stroke.x - 1, 1 - 2 * pixel.y / outline.stroke.y);
     let near_h = outline.block_from_clip * vec4f(xy, 0, 1);
     let far_h = outline.block_from_clip * vec4f(xy, 1, 1);
@@ -63,9 +68,10 @@ fn strokeDepth(pixel: vec2f, edge_depth: f32) -> f32 {
     let direction = far_h.xyz / far_h.w - origin;
     var enter = 0.0;
     var exit = 1.0;
+    var intersects = true;
     for (var axis = 0u; axis < 3u; axis++) {
         if (abs(direction[axis]) < 0.00000001) {
-            if (origin[axis] < 0 || origin[axis] > 1) { return edge_depth; }
+            if (origin[axis] < 0 || origin[axis] > 1) { intersects = false; }
         } else {
             let a = -origin[axis] / direction[axis];
             let b = (1 - origin[axis]) / direction[axis];
@@ -73,9 +79,25 @@ fn strokeDepth(pixel: vec2f, edge_depth: f32) -> f32 {
             exit = min(exit, max(a, b));
         }
     }
-    if (enter > exit) { return edge_depth; }
-    let surface = outline.clip_from_block * vec4f(origin + direction * enter, 1);
-    return min(edge_depth, surface.z / surface.w);
+    var depth = edge_depth;
+    if (intersects && enter <= exit) {
+        let surface = outline.clip_from_block * vec4f(origin + direction * enter, 1);
+        depth = min(depth, surface.z / surface.w);
+    }
+    // The outer half of the stroke can lie just beyond the target cell, on a
+    // coplanar neighbor. Continue only this edge's visible adjacent face planes
+    // into that narrow rasterized margin so flat walls/floors cannot trim it.
+    for (var axis = 0u; axis < 3u; axis++) {
+        if (abs(direction[axis]) < 0.00000001) { continue; }
+        for (var side = 0u; side < 2u; side++) {
+            if ((faces & (1u << (2u * axis + side))) == 0u) { continue; }
+            let t = (f32(side) - origin[axis]) / direction[axis];
+            if (t < 0 || t > 1) { continue; }
+            let plane = outline.clip_from_block * vec4f(origin + direction * t, 1);
+            depth = min(depth, plane.z / plane.w);
+        }
+    }
+    return depth;
 }
 
 struct FragmentOut {
@@ -83,10 +105,10 @@ struct FragmentOut {
     @builtin(frag_depth) depth: f32,
 }
 
-@fragment fn fs(@builtin(position) position: vec4f) -> FragmentOut {
+@fragment fn fs(input: VertexOut) -> FragmentOut {
     var output: FragmentOut;
     output.color = vec4f(0, 1, 0, 1);
     // Eight f32 epsilon units cover reconstruction/rasterization rounding only.
-    output.depth = clamp(strokeDepth(position.xy, position.z) - 0.0000009536743164, 0, 1);
+    output.depth = clamp(strokeDepth(input.position.xy, input.position.z, input.faces) - 0.0000009536743164, 0, 1);
     return output;
 }
