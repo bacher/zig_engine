@@ -93,7 +93,13 @@ fn strokeDepth(pixel: vec2f, edge_depth: f32, faces: u32) -> f32 {
             if ((faces & (1u << (2u * axis + side))) == 0u) { continue; }
             let t = (f32(side) - origin[axis]) / direction[axis];
             if (t < 0 || t > 1) { continue; }
-            let plane = outline.clip_from_block * vec4f(origin + direction * t, 1);
+            let point = origin + direction * t;
+            // A pixel-wide margin can reach metres away at grazing angles.
+            // Limit extension to a quarter voxel around the face; otherwise
+            // retain the target/edge depth so foreground blocks still hide it.
+            const margin = 0.25;
+            if (any(point < vec3f(-margin)) || any(point > vec3f(1 + margin))) { continue; }
+            let plane = outline.clip_from_block * vec4f(point, 1);
             depth = min(depth, plane.z / plane.w);
         }
     }

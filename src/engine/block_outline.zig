@@ -18,7 +18,10 @@ pub const Uniforms = @import("bind_group_layouts/block_outline.zig").Uniforms;
 
 /// Rebase storage coordinates to the camera chunk before narrowing to f32.
 pub fn clipFromBlock(camera: *const Camera, block: [3]u32) zmath.Mat {
-    const position = blockPosition(camera, block);
+    return clipFromPosition(camera, blockPosition(camera, block));
+}
+
+fn clipFromPosition(camera: *const Camera, position: @Vector(3, f32)) zmath.Mat {
     return utils.matMul(camera.clip_from_world_chunked, zmath.translation(position[0], position[1], position[2]));
 }
 
@@ -45,8 +48,9 @@ pub fn faceMask(eye: @Vector(3, f32)) u32 {
 }
 
 pub fn uniforms(camera: *const Camera, block: [3]u32, viewport: @Vector(2, f32)) Uniforms {
-    const transform = clipFromBlock(camera, block);
-    const eye = chunks.getLocalPosition(camera.position) - blockPosition(camera, block);
+    const position = blockPosition(camera, block);
+    const transform = clipFromPosition(camera, position);
+    const eye = chunks.getLocalPosition(camera.position) - position;
     return .{
         .clip_from_block = transform,
         .block_from_clip = zmath.inverse(transform),
