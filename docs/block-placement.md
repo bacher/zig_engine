@@ -117,10 +117,10 @@ existing overhang. Natural terrain cells are not themselves revalidated as const
 Operation results carry status, an optional mined material, and an optional failure:
 reason, underlying cause, affected cell, measured value, limit, and up to 32 involved cell
 coordinates with an explicit truncation flag. The client retains the latest preview/result.
-While aiming at a reachable block, a translucent cyan cube outline previews an allowed
+In putting mode, while aiming at a reachable block, a translucent cyan cube outline previews an allowed
 placement; a red outline marks a rejected placement. Orange outlines show the affected
-construction and involved cells, including empty spaces that need support. They take
-precedence over ordinary green focus edges. Missing cells beyond finite world edges retain
+construction and involved cells, including empty spaces that need support. Putting mode
+hides green focus edges. Missing cells beyond finite world edges retain
 their signed positions, while x coordinates wrap across the seam. Diagnostics show at most
 32 involved cells plus the affected cell and candidate; truncation is reported in the console.
 
@@ -133,7 +133,9 @@ pass writes scene depth. There is no solid ghost mesh or screen text yet.
 commands, or the latest actual edit result. Its result is cached by target, selected material,
 and a world validation revision. Accepted chunk snapshots, eviction, and optimistic block
 changes invalidate it. Player overlap is checked every frame, including the frozen player
-while spectating. Losing focus, reaching empty air, or losing targeting data clears the hints.
+while spectating. Removing mode only targets and highlights the focused block: it does not
+call placement validation. Switching modes clears cached previews and hints. Losing focus,
+reaching empty air, or losing targeting data also clears the hints.
 `std.debug.print` reports changed previews with a readable reason, underlying cause, and
 measured/required values. Actual edit failures use the same descriptions.
 
@@ -195,10 +197,13 @@ lifetime, as do other world edits.
 ## Tools and validation
 
 Keys 1-6 select loose soil, crushed stone, trunk, planks, rebar, and reinforced concrete.
-E or left click places against the hit face of the first occupied block along the camera
-view; X mines that block. Reach is four metres to the hit face, and each press edits once.
+Tab toggles removing (the initial mode) and putting, independently of player/spectator
+control. Left click performs the active mode's action. In putting mode E places against
+the hit face of the first occupied block; in removing mode X mines that block. The opposite
+mode's keyboard shortcut is ignored. Reach is four metres to the hit face, and each press edits once.
 Unknown chunks and empty air produce no edit. Player-overlap checks and structural validation
-still apply. Green edges show focus, and colored translucent outlines show placement and
+still apply to actual edits. Green edges show focus only in removing mode; putting mode
+shows colored translucent outlines for placement and
 support diagnostics. Material selection UI and screen text remain follow-ups.
 
 `zig build test` covers footprints, centered platforms, diagonal connectivity, square

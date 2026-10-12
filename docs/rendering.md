@@ -44,6 +44,10 @@ CPU world transforms remain in `f64`. GPU paths use chunk-local matrices plus in
 
 ## Voxel rendering
 
+The voxel app starts in removing mode, which shows green focus edges and skips placement
+preview validation. Tab switches to putting mode, which hides green focus edges and uses
+colored placement hints. Block mode is shared across player and spectator control.
+
 The voxel app refreshes `Scene.highlighted_block` using the editing raycast after camera updates, optimistic edits, and subscription changes. The engine's independent [`block_outline.zig`](../src/engine/block_outline.zig) pipeline draws it after post-processing and before GUI overlays. It emits 72 procedural vertices, clips edges against the near plane, and expands them in screen space to keep their width constant when distance or window size changes. It excludes edges whose adjacent faces both face away from the camera. For each stroke pixel overlapping the target cube, the fragment shader reconstructs the cube's front surface depth to prevent the target's own sloped faces from cutting into the stroke.
 
 The shader also extends each edge's visible adjacent face planes across the narrow stroke margin to keep coplanar neighboring blocks from trimming it. This continuation is limited to 0.25 metres beyond the unit face bounds: a small screen-space margin can otherwise extrapolate metres forward at grazing angles and leak through foreground blocks. Plane intersections outside that bounded neighborhood leave the reconstructed target/edge depth unchanged. This deliberately allows the outer stroke to be clipped on nearly edge-on coplanar surfaces when preserving it would require a more distant intersection. Scene depth still hides the outline behind other geometry; an eight-epsilon f32 allowance handles depth rounding, and the pass never writes scene depth. The pipeline owns dedicated transform/inverse-transform/viewport uniforms. The outline's storage cell is rebased to the camera chunk, including the wrapped x seam, before conversion to f32. No voxel face or shadow shader contains highlighting logic.
