@@ -134,8 +134,32 @@ pub const Camera = struct {
         return .{ local[0], local[1], local[2], 1 };
     }
 
+    /// World-space direction through the centre of the camera view.
+    pub fn forwardDirection(camera: *const Camera) Position {
+        const forward = utils.matApply(zmath.transpose(camera.view_from_camera), zmath.Vec{ 0, 0, -1, 0 });
+        return @floatCast(@shuffle(f32, forward, undefined, @Vector(3, i32){ 0, 1, 2 }));
+    }
+
     /// Fit shadow cascades without ever reconstructing a world-space frustum.
     pub fn getChunkFrustumPoints(camera: *const Camera, options: struct { depth: f32 = 1.0 }) FrustumPoints {
         return FrustumPoints.initFromMatrix(camera.world_from_clip_chunked, camera.getLocalPosition(), options.depth);
     }
 };
+
+test "camera forward direction follows yaw and pitch independently of its position" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    var camera = Camera.init(&layout, 1);
+    const views = [_]zmath.Mat{
+        zmath.identity(),
+        zmath.rotationY(-math.pi / 2.0),
+        zmath.rotationX(math.pi / 2.0),
+        zmath.rotationX(-math.pi / 2.0),
+    };
+    const expected = [_]Position{ .{ 0, 1, 0 }, .{ -1, 0, 0 }, .{ 0, 0, -1 }, .{ 0, 0, 1 } };
+    for (views, expected) |view, direction| {
+        camera.updateView(view);
+        camera.updatePosition(.{ 1000000000.5, -0.5, 31.5 });
+        const actual = camera.forwardDirection();
+        inline for (0..3) |axis| try std.testing.expectApproxEqAbs(direction[axis], actual[axis], 0.000001);
+    }
+}

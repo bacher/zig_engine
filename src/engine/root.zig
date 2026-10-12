@@ -7,6 +7,7 @@ pub const TextureDescriptor = @import("types.zig").TextureDescriptor;
 
 pub const Engine = @import("./engine.zig").Engine;
 pub const KeyParams = @import("./input_controller.zig").KeyParams;
+pub const MouseButtonParams = @import("./input_controller.zig").MouseButtonParams;
 pub const WindowContext = @import("./glue.zig").WindowContext;
 pub const GameObject = @import("./game_object.zig").GameObject;
 pub const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;

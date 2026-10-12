@@ -446,48 +446,6 @@ pub const World = struct {
     pub fn setBlock(self: *World, block: [3]u32, block_type: BlockType) EditResult {
         return self.tryOperation(.{ .block = block, .action = if (block_type == .none) .remove else .{ .put = block_type } });
     }
-
-    /// Removes the topmost solid block in the inclusive range [minimum_z, top.z].
-    /// Returns the removed block, or null if there is nothing to remove. Fails without changing
-    /// anything if it has to look into a chunk that isn't received.
-    pub fn removeTopBlockInColumn(self: *World, top: [3]u32, minimum_z: u32) ChunkNotReceivedError!?[3]u32 {
-        if (minimum_z > top[2]) return null;
-        var block = top;
-        while (true) : (block[2] -= 1) {
-            if (try self.isBlockSolid(block)) {
-                if (self.tryOperation(.{ .block = block, .action = .remove }).status == .success) return block;
-                return null;
-            }
-            if (block[2] == minimum_z) return null;
-        }
-    }
-
-    /// Searches the inclusive range [minimum_z, top.z], placing above the first solid block
-    /// (or on the world bottom when minimum_z is zero). No support means no placement.
-    /// Returns the placed block, or null if `top` is occupied. Fails without changing anything
-    /// if it has to look into a chunk that isn't received.
-    pub fn dropBlockInColumn(self: *World, top: [3]u32, block_type: BlockType, minimum_z: u32) ChunkNotReceivedError!?[3]u32 {
-        const block = try self.findDropPosition(top, minimum_z) orelse return null;
-        if (self.tryOperation(.{ .block = block, .action = .{ .put = block_type } }).status == .success) return block;
-        return null;
-    }
-
-    /// Computes a placement before mutation, allowing application-level body checks.
-    pub fn findDropPosition(self: *const World, top: [3]u32, minimum_z: u32) ChunkNotReceivedError!?[3]u32 {
-        if (minimum_z > top[2]) return null;
-        if (try self.isBlockSolid(top)) {
-            return null;
-        }
-
-        var block = top;
-        while (block[2] > minimum_z and !try self.isBlockSolid(.{ block[0], block[1], block[2] - 1 })) {
-            block[2] -= 1;
-        }
-
-        // No support was found within reach; do not create a floating block at the limit.
-        if (block[2] == minimum_z and minimum_z != 0) return null;
-        return block;
-    }
 };
 
 fn insertGeneratedChunks(
@@ -530,25 +488,25 @@ test "chunks are available only after they are inserted" {
     try std.testing.expectEqual(null, world.getChunk(.{ 3, 7, 4 }));
 }
 
-test "removing and dropping a block in a column are inverse operations" {
+test "removing and replacing a supported block leaves authoritative revisions unchanged" {
     var world = try World.init(std.testing.allocator, &test_layout);
     defer world.deinit();
 
-    const top = [3]u32{ 100, 200, WORLD_SIZE[2] * CHUNK_SIZE - 1 };
-    const column, _ = splitBlockCoords(top);
-    try insertGeneratedChunks(&world, .{ .terrain = .{ .seed = 12345 } }, .{ column[0], column[1] }, 0, WORLD_SIZE[2]);
+    const surface_chunk_z = WORLD_SIZE[2] / 2 - 1;
+    try insertGeneratedChunks(&world, .flat, .{ 0, 0 }, surface_chunk_z, surface_chunk_z + 1);
+    const block = [3]u32{ 10, 10, surface_chunk_z * CHUNK_SIZE + CHUNK_SIZE / 2 - 1 };
 
-    const removed = (try world.removeTopBlockInColumn(top, 0)).?;
-    try std.testing.expect(!try world.isBlockSolid(removed));
-    try std.testing.expect(try world.isBlockSolid(.{ removed[0], removed[1], removed[2] - 1 }));
+    try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = block, .action = .remove }).status);
+    try std.testing.expect(!try world.isBlockSolid(block));
+    try std.testing.expect(try world.isBlockSolid(.{ block[0], block[1], block[2] - 1 }));
 
-    const chunk_coords, _ = splitBlockCoords(removed);
+    const chunk_coords, _ = splitBlockCoords(block);
     try std.testing.expect(!world.getChunk(chunk_coords).?.isDirty());
 
-    const placed = (try world.dropBlockInColumn(top, .dirt, 0)).?;
-    try std.testing.expectEqual(removed, placed);
-    try std.testing.expect(try world.isBlockSolid(placed));
+    try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = block, .action = .{ .put = .dirt } }).status);
+    try std.testing.expect(try world.isBlockSolid(block));
     try std.testing.expectEqual(0, world.getChunk(chunk_coords).?.chunk_revision);
+    try std.testing.expectEqual(2, world.pending_operations.items.len);
 }
 
 test "editing a generated stone chunk keeps the rest of its blocks" {
@@ -556,8 +514,9 @@ test "editing a generated stone chunk keeps the rest of its blocks" {
     defer world.deinit();
     try insertGeneratedChunks(&world, .{ .terrain = .{ .seed = 12345 } }, .{ 0, 0 }, 0, 1);
 
-    const removed = (try world.removeTopBlockInColumn(.{ 5, 5, CHUNK_SIZE - 1 }, 0)).?;
-    try std.testing.expectEqual([3]u32{ 5, 5, CHUNK_SIZE - 1 }, removed);
+    const block = [3]u32{ 5, 5, CHUNK_SIZE - 1 };
+    try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = block, .action = .remove }).status);
+    try std.testing.expect(!try world.isBlockSolid(block));
 
     const chunk = world.getChunk(.{ 0, 0, 0 }).?;
     try std.testing.expect(!chunk.isDirty());
@@ -566,27 +525,31 @@ test "editing a generated stone chunk keeps the rest of its blocks" {
     try std.testing.expectEqual(BlockType.stone, chunk.content.blocks.blocks[0][0][0]);
 }
 
-test "column operations do nothing when there is no room" {
+test "editing rejects occupied placements and repeated removals without queueing them" {
     var world = try World.init(std.testing.allocator, &test_layout);
     defer world.deinit();
     try insertGeneratedChunks(&world, .flat, .{ 0, 0 }, 0, 1);
 
     const bottom = [3]u32{ 0, 0, 0 };
-    try std.testing.expectEqual(null, try world.dropBlockInColumn(bottom, .dirt, 0));
-    try std.testing.expectEqual(bottom, (try world.removeTopBlockInColumn(bottom, 0)).?);
-    try std.testing.expectEqual(null, try world.removeTopBlockInColumn(bottom, 0));
+    try std.testing.expectEqual(OperationStatus.already_exists, world.tryOperation(.{ .block = bottom, .action = .{ .put = .dirt } }).status);
+    try std.testing.expectEqual(0, world.pending_operations.items.len);
+    try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = bottom, .action = .remove }).status);
+    try std.testing.expectEqual(OperationStatus.already_removed, world.tryOperation(.{ .block = bottom, .action = .remove }).status);
+    try std.testing.expectEqual(1, world.pending_operations.items.len);
 }
 
-test "column operations fail without changes when they reach a chunk that isn't received" {
+test "edits to unreceived chunks fail without queueing or changing cached chunks" {
     var world = try World.init(std.testing.allocator, &test_layout);
     defer world.deinit();
-    // Only the air at the top of the column.
+    // Cache the air at the top of the world, but not the chunk directly below it.
     try insertGeneratedChunks(&world, .{ .terrain = .{ .seed = 12345 } }, .{ 0, 0 }, WORLD_SIZE[2] - 1, WORLD_SIZE[2]);
 
-    const top = [3]u32{ 5, 5, WORLD_SIZE[2] * CHUNK_SIZE - 1 };
-    try std.testing.expectError(error.ChunkNotReceived, world.removeTopBlockInColumn(top, 0));
-    try std.testing.expectError(error.ChunkNotReceived, world.dropBlockInColumn(top, .dirt, 0));
+    const block = [3]u32{ 5, 5, (WORLD_SIZE[2] - 1) * CHUNK_SIZE - 1 };
+    try std.testing.expectEqual(OperationStatus.missing_data, world.tryOperation(.{ .block = block, .action = .remove }).status);
+    try std.testing.expectEqual(OperationStatus.missing_data, world.tryOperation(.{ .block = block, .action = .{ .put = .dirt } }).status);
     try std.testing.expectEqual(0, world.pending_operations.items.len);
+    try std.testing.expect(!world.hasChunk(.{ 0, 0, WORLD_SIZE[2] - 2 }));
+    try std.testing.expect(world.getChunk(.{ 0, 0, WORLD_SIZE[2] - 1 }).?.content == .empty);
     try std.testing.expect(!world.getChunk(.{ 0, 0, WORLD_SIZE[2] - 1 }).?.isDirty());
 }
 
@@ -654,7 +617,7 @@ test "materializing an empty chunk fills it with air and isn't a modification" {
     world.removeChunk(coords);
 }
 
-test "column operations modify the chunk below when they cross a chunk border" {
+test "edits on both sides of a chunk border preserve neighboring contents and revisions" {
     var world = try World.init(std.testing.allocator, &test_layout);
     defer world.deinit();
 
@@ -663,29 +626,33 @@ test "column operations modify the chunk below when they cross a chunk border" {
     try world.insertChunk(lower, createSolidChunk(0));
     try world.insertChunk(upper, WorldChunk.initEmpty());
 
-    const top = [3]u32{ 3, 4, WORLD_SIZE[2] * CHUNK_SIZE - 1 };
     const lower_top = [3]u32{ 3, 4, upper[2] * CHUNK_SIZE - 1 };
-    try std.testing.expectEqual(lower_top, (try world.removeTopBlockInColumn(top, 0)).?);
+    try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = lower_top, .action = .remove }).status);
+    try std.testing.expect(!try world.isBlockSolid(lower_top));
     try std.testing.expectEqual(0, world.getChunk(lower).?.chunk_revision);
     try std.testing.expectEqual(WorldChunk.initEmpty(), world.getChunk(upper).?);
 
-    try std.testing.expectEqual(lower_top, (try world.dropBlockInColumn(top, .dirt, 0)).?);
+    try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = lower_top, .action = .{ .put = .dirt } }).status);
     const upper_bottom = [3]u32{ 3, 4, upper[2] * CHUNK_SIZE };
-    try std.testing.expectEqual(upper_bottom, (try world.dropBlockInColumn(top, .dirt, 0)).?);
+    try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = upper_bottom, .action = .{ .put = .dirt } }).status);
 
     try std.testing.expectEqual(0, world.getChunk(lower).?.chunk_revision);
     const upper_chunk = world.getChunk(upper).?;
     try std.testing.expectEqual(0, upper_chunk.chunk_revision);
     try std.testing.expectEqual(BlockType.dirt, upper_chunk.content.getBlock(.{ 3, 4, 0 }));
+    try std.testing.expectEqual(BlockType.none, upper_chunk.content.getBlock(.{ 3, 4, 1 }));
+    try std.testing.expectEqual(3, world.pending_operations.items.len);
 }
 
-test "column search can reach the world bottom but earth still needs its footprint" {
+test "earth placement at the world bottom still needs its footprint" {
     var world = try World.init(std.testing.allocator, &test_layout);
     defer world.deinit();
     try world.insertChunk(.{ 0, 0, 0 }, WorldChunk.initEmpty());
 
-    try std.testing.expectEqual(null, try world.dropBlockInColumn(.{ 7, 8, CHUNK_SIZE - 1 }, .dirt, 0));
-    try std.testing.expectEqual(block_rules.Reason.earth_footprint, world.last_edit_result.?.failure.?.reason);
+    const result = world.tryOperation(.{ .block = .{ 7, 8, 0 }, .action = .{ .put = .dirt } });
+    try std.testing.expectEqual(OperationStatus.constraint_violation, result.status);
+    try std.testing.expectEqual(block_rules.Reason.earth_footprint, result.failure.?.reason);
+    try std.testing.expectEqual(0, world.pending_operations.items.len);
     try std.testing.expectEqual(0, world.getChunk(.{ 0, 0, 0 }).?.chunk_revision);
 }
 

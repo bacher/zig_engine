@@ -102,9 +102,9 @@ bounds. Loading extra chunks cannot extend a legal support route or change the d
 
 With 32-cell chunks, a target within four cells of the player's cell on each axis has its
 whole window inside the player's loaded 3x3x3 chunk neighborhood. This assumes those chunks
-have arrived; missing cells inside the window still produce `missing_data`. The planned
-four-cell camera tool is separate work. The current column tool retains its 20-cell reach,
-so it does not always have this client-side availability guarantee.
+have arrived; missing cells inside the window still produce `missing_data`. The camera tool
+reaches four metres to the hit face; edits still require every cell used by their support
+checks to have arrived.
 
 ## Edits and diagnostics
 
@@ -178,10 +178,10 @@ lifetime, as do other world edits.
 ## Tools and validation
 
 Keys 1-6 select loose soil, crushed stone, trunk, planks, rebar, and reinforced concrete.
-Z uses the existing vertical-column placement tool with that selection; X mines the column.
-The existing reach and player-overlap checks still apply. Arbitrary-cell operations and
-previews support the structural rules; crosshair targeting and 3D placement hints are separate
-follow-ups.
+E or left click places against the hit face of the first occupied block along the camera
+view; X mines that block. Reach is four metres to the hit face, and each press edits once.
+Unknown chunks and empty air produce no edit. Player-overlap checks and structural validation
+still apply. Selection UI, target highlighting, and 3D placement hints are follow-ups.
 
 `zig build test` covers footprints, centered platforms, diagonal connectivity, square
 platforms, span limits, inherited/group heights, protected platform edits, crushed-stone

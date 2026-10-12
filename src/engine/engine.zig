@@ -54,6 +54,7 @@ const InstanceBufferEntry = @import("./scene.zig").InstanceBufferEntry;
 const Camera = @import("./camera.zig").Camera;
 const InputController = @import("./input_controller.zig").InputController;
 const KeyParams = @import("./input_controller.zig").KeyParams;
+const MouseButtonParams = @import("./input_controller.zig").MouseButtonParams;
 const GameObject = @import("./game_object.zig").GameObject;
 const xRotate = @import("./game_object.zig").xRotate;
 const DirectionalLight = @import("./light.zig").DirectionalLight;
@@ -108,6 +109,7 @@ pub const Engine = struct {
         onUpdate: ?*const fn (engine: *Engine, argument: *anyopaque) void,
         onRender: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder, argument: *anyopaque) void,
         onKeyPress: ?*const fn (engine: *Engine, key_params: KeyParams, argument: *anyopaque) void = null,
+        onMouseButtonPress: ?*const fn (engine: *Engine, params: MouseButtonParams, argument: *anyopaque) void = null,
     };
 
     gctx: *zgpu.GraphicsContext,
@@ -329,6 +331,7 @@ pub const Engine = struct {
         const input_controller = InputController(Engine).init(allocator, window_context.window, .{
             .context = engine,
             .on_key_press = onKeyPress,
+            .on_mouse_button_press = onMouseButtonPress,
         }) catch @panic("InputController can't be initialized");
         input_controller.listenWindowEvents();
 
@@ -486,7 +489,7 @@ pub const Engine = struct {
 
     fn onKeyPress(engine: *Engine, key_params: KeyParams) void {
         switch (key_params.key) {
-            .e => {
+            .e => if (key_params.mods.control) {
                 if (engine.state.debug_ssao_enabled) {
                     engine.state.ssao_enabled = true;
                     engine.state.debug_ssao_enabled = false;
@@ -495,7 +498,7 @@ pub const Engine = struct {
                 }
                 std.debug.print("SSAO = {}\n", .{engine.state.ssao_enabled});
             },
-            .r => {
+            .r => if (key_params.mods.control) {
                 if (!engine.state.debug_ssao_enabled) {
                     engine.state.ssao_enabled = true;
                     engine.state.debug_ssao_enabled = true;
@@ -514,6 +517,11 @@ pub const Engine = struct {
         if (engine.callbacks.onKeyPress) |callback| {
             callback(engine, key_params, engine.callbacks.argument);
         }
+    }
+
+    fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams) void {
+        if (engine.callbacks.onMouseButtonPress) |callback|
+            callback(engine, params, engine.callbacks.argument);
     }
 
     pub fn createScene(engine: *Engine, settings: WorldSettings) !*Scene {
@@ -1651,6 +1659,38 @@ pub const Engine = struct {
         }
     }
 };
+
+test "engine forwards mouse presses and their modifiers to the application" {
+    const Probe = struct {
+        received: ?MouseButtonParams = null,
+        fn press(_: *Engine, params: MouseButtonParams, argument: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(argument));
+            self.received = params;
+        }
+    };
+    var probe: Probe = .{};
+    var engine: Engine = undefined;
+    engine.callbacks = .{ .argument = &probe, .onUpdate = null, .onRender = null, .onMouseButtonPress = Probe.press };
+    const params: MouseButtonParams = .{ .button = .left, .mods = .{ .control = true } };
+    Engine.onMouseButtonPress(&engine, params);
+    try std.testing.expectEqualDeep(params, probe.received.?);
+}
+
+test "SSAO debug shortcuts require Ctrl and Ctrl E exits the debug view" {
+    var context: u8 = 0;
+    var engine: Engine = undefined;
+    engine.state = .{};
+    engine.callbacks = .{ .argument = &context, .onUpdate = null, .onRender = null };
+    Engine.onKeyPress(&engine, .{ .key = .e, .mods = .{} });
+    Engine.onKeyPress(&engine, .{ .key = .r, .mods = .{} });
+    try std.testing.expectEqualDeep(EngineState{}, engine.state);
+    Engine.onKeyPress(&engine, .{ .key = .e, .mods = .{ .control = true } });
+    try std.testing.expect(!engine.state.ssao_enabled);
+    Engine.onKeyPress(&engine, .{ .key = .r, .mods = .{ .control = true } });
+    try std.testing.expect(engine.state.ssao_enabled and engine.state.debug_ssao_enabled);
+    Engine.onKeyPress(&engine, .{ .key = .e, .mods = .{ .control = true } });
+    try std.testing.expect(engine.state.ssao_enabled and !engine.state.debug_ssao_enabled);
+}
 
 fn slowOperation() void {
     const end = std.time.milliTimestamp() + 500;

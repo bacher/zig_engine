@@ -102,6 +102,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/modules/debug/debug.zig"),
     });
     debug_module.addImport("zmath", zmath.module("root"));
+    for (engines) |library| library.root_module.addImport("debug", debug_module);
     demo_exe.root_module.addImport("debug", debug_module);
     voxel_exe.root_module.addImport("debug", debug_module);
 
