@@ -1,5 +1,4 @@
 const std = @import("std");
-const math = std.math;
 const zgui = @import("zgui");
 const zglfw = @import("zglfw");
 const zgpu = @import("zgpu");
@@ -7,24 +6,44 @@ const wgpu = zgpu.wgpu;
 
 const Engine = @import("./engine.zig").Engine;
 
+pub const DpiScaling = struct {
+    base_style: zgui.Style,
+    scale: f32 = 0,
+
+    pub fn init() DpiScaling {
+        var style = zgui.getStyle().*;
+        style.font_size_base = 16;
+        return .{ .base_style = style };
+    }
+
+    pub fn update(self: *DpiScaling, content_scale: [2]f32) void {
+        const scale = @max(content_scale[0], content_scale[1]);
+        if (scale == self.scale) return;
+        // Restore unscaled dimensions so monitor changes cannot accumulate rounding.
+        const style = zgui.getStyle();
+        style.* = self.base_style;
+        style.scaleAllSizes(scale);
+        style.font_scale_dpi = scale;
+        self.scale = scale;
+    }
+};
+
+// zgui owns a single context shared by the engine and application overlays.
+var dpi_scaling: DpiScaling = undefined;
+
 pub fn zguiInit(
     allocator: std.mem.Allocator,
     window: *zglfw.Window,
     device: wgpu.Device,
     content_dir: []const u8,
 ) void {
-    const scale_factor = scale_factor: {
-        const scale = window.getContentScale();
-        break :scale_factor @max(scale[0], scale[1]);
-    };
-
     zgui.init(allocator);
     errdefer zgui.deinit();
 
     const font_path = std.fmt.allocPrintSentinel(allocator, "{s}/{s}", .{ content_dir, "Roboto-Medium.ttf" }, 0) catch @panic("OOM");
     defer allocator.free(font_path);
 
-    _ = zgui.io.addFontFromFile(font_path, math.floor(16.0 * scale_factor));
+    _ = zgui.io.addFontFromFile(font_path, 16);
 
     zgui.backend.init(
         window,
@@ -34,7 +53,8 @@ pub fn zguiInit(
     );
     errdefer zgui.backend.deinit();
 
-    zgui.getStyle().scaleAllSizes(scale_factor);
+    dpi_scaling = DpiScaling.init();
+    dpi_scaling.update(window.getContentScale());
 }
 
 pub fn zguiDeinit() void {
@@ -42,7 +62,8 @@ pub fn zguiDeinit() void {
     zgui.deinit();
 }
 
-pub fn beginFrame(width: u32, height: u32) void {
+pub fn beginFrame(window: *zglfw.Window, width: u32, height: u32) void {
+    dpi_scaling.update(window.getContentScale());
     zgui.backend.newFrame(width, height);
     // zgui.showDemoWindow(null);
 }

@@ -151,6 +151,8 @@ The final shader optionally applies a weighted 3-by-3 blur to the SSAO texture, 
 
 After presentation reports a swapchain resize, the loop updates screen size/aspect ratio and recreates the depth, color, normal, and SSAO textures. The next scene update refreshes the camera projection.
 
+Before each GUI frame, the engine reads the window's current content scale. DPI changes update font scaling and restore GUI dimensions from the unscaled style before resizing them, avoiding rounding drift during repeated monitor changes. The voxel crosshair and message layout use this same scale; message fonts keep their unscaled 14px and 20px sizes, which the GUI scales and rasterizes for the current display.
+
 **Review point:** `recreateScreenDependantTextures` recreates those textures, but does not recreate the SSAO/final bind groups that were constructed with their original views. The static code path therefore does not establish correct rebinding after resize. This is an implementation concern to verify, not a documented promise that resizing is complete.
 
 Frame statistics include candidate object count, uploaded instance-range size, visibility-index counters, and shadow/main-pass elapsed times. The timers wrap CPU pass encoding; they are not GPU timestamp measurements. The object count is the queried ordinary-object list length, excluding voxel face draws and the separate cubemap skybox.

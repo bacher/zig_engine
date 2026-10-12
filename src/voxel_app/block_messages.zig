@@ -1,6 +1,7 @@
 //! Independent preview hints and short-lived feedback for actual block edits.
 const std = @import("std");
 const zgui = @import("engine").zgui;
+const zgui_utils = @import("engine").zgui_utils;
 const placement_preview = @import("placement_preview.zig");
 const block_diagnostics = @import("block_diagnostics.zig");
 
@@ -29,8 +30,8 @@ pub const TimedError = struct {
 pub fn draw(preview: ?placement_preview.Preview, action_error: *const TimedError, now: f64) void {
     const screen = zgui.io.getDisplaySize();
     if (screen[0] <= 0 or screen[1] <= 0) return;
-    // The existing zgui backend uses framebuffer pixels and a DPI-scaled 16px font.
-    const scale = zgui.getFontSize() / 16;
+    // Layout uses framebuffer pixels; font sizes are scaled by zgui itself.
+    const scale = zgui.getStyle().font_scale_dpi;
     var buffer: [block_diagnostics.message_capacity]u8 = undefined;
     if (preview) |current| if (current.errorMessage(&buffer)) |message| {
         drawMessage("##placement-preview-error", message, screen, scale, .preview);
@@ -47,7 +48,7 @@ fn drawMessage(name: [:0]const u8, message: []const u8, screen: [2]f32, scale: f
     const margin = @min(24 * scale, screen[0] * 0.1);
     const max_width = @max(1, @min((if (is_preview) @as(f32, 640) else 840) * scale, screen[0] - 2 * (margin + padding[0])));
 
-    zgui.pushFont(null, (if (is_preview) @as(f32, 14) else 20) * scale);
+    zgui.pushFont(null, if (is_preview) 14 else 20);
     defer zgui.popFont();
     const text_size = zgui.calcTextSize(message, .{ .wrap_width = max_width });
     zgui.setNextWindowPos(.{
@@ -116,17 +117,22 @@ test "action feedback owns its text and each new failure restarts the timeout" {
     try std.testing.expectEqual(null, feedback.message(18));
 }
 
-test "both overlays generate visible text inside small and high DPI viewports" {
+test "both overlays remain visible as the same context changes DPI" {
+    zgui.init(std.testing.allocator);
+    defer zgui.deinit();
+    zgui.io.setIniFilename(null);
+    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
+    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
+    var dpi = zgui_utils.DpiScaling.init();
     for ([_]struct { screen: [2]f32, scale: f32 }{
         .{ .screen = .{ 360, 240 }, .scale = 1 },
         .{ .screen = .{ 1280, 720 }, .scale = 1 },
         .{ .screen = .{ 2560, 1440 }, .scale = 2 },
+        .{ .screen = .{ 1600, 900 }, .scale = 1.25 },
+        .{ .screen = .{ 1280, 720 }, .scale = 1 },
+        .{ .screen = .{ 2560, 1440 }, .scale = 2 },
     }) |viewport| {
-        zgui.init(std.testing.allocator);
-        defer zgui.deinit();
-        zgui.io.setIniFilename(null);
-        zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
-        _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16 * viewport.scale);
+        dpi.update(.{ viewport.scale, viewport.scale });
         zgui.io.setDisplaySize(viewport.screen[0], viewport.screen[1]);
         zgui.newFrame();
         const preview: placement_preview.Preview = .{
@@ -155,14 +161,22 @@ test "both overlays generate visible text inside small and high DPI viewports" {
             const outline_color = zgui.colorConvertFloat4ToU32(action_outline_color);
             var outlined_vertices: usize = 0;
             var text_vertices: usize = 0;
+            var glyph_top: f32 = 0;
+            var tallest_glyph: f32 = 0;
             for (list.getVertexBuffer()) |vertex| {
                 if (vertex.color == outline_color) outlined_vertices += 1;
                 if (vertex.color != color) continue;
+                // Each glyph is a quad; check its rendered height to catch stale
+                // startup font sizes and accidentally applying DPI twice.
+                if (text_vertices % 4 == 0) glyph_top = vertex.pos[1];
+                tallest_glyph = @max(tallest_glyph, vertex.pos[1] - glyph_top);
                 text_vertices += 1;
                 if (is_preview) found_preview = true else found_action = true;
                 try std.testing.expect(vertex.pos[0] >= 0 and vertex.pos[0] <= viewport.screen[0]);
                 try std.testing.expect(vertex.pos[1] >= 0 and vertex.pos[1] <= viewport.screen[1]);
             }
+            const font_size = (if (is_preview) @as(f32, 14) else 20) * viewport.scale;
+            try std.testing.expect(tallest_glyph >= font_size * 0.6 and tallest_glyph <= font_size);
             if (is_preview) {
                 try std.testing.expectEqual(0, outlined_vertices);
             } else {

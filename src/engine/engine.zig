@@ -1090,6 +1090,7 @@ pub const Engine = struct {
 
                 if (engine.zgui) {
                     zgui_utils.beginFrame(
+                        engine.window_context.window,
                         engine.gctx.swapchain_descriptor.width,
                         engine.gctx.swapchain_descriptor.height,
                     );

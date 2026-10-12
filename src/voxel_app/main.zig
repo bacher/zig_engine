@@ -997,6 +997,80 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
     _ = pass;
     const game: *const Game = @ptrCast(@alignCast(game_opaque));
     block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
+    drawCrosshair();
+}
+
+fn drawCrosshair() void {
+    const screen = zgui.io.getDisplaySize();
+    if (screen[0] <= 0 or screen[1] <= 0) return;
+    const center: [2]f32 = .{ screen[0] / 2, screen[1] / 2 };
+    const scale = zgui.getStyle().font_scale_dpi;
+    const list = zgui.getForegroundDrawList();
+    list.addCircleFilled(.{
+        .p = center,
+        .r = 5 * scale,
+        .col = zgui.colorConvertFloat4ToU32(.{ 0, 0, 0, 1 }),
+        .num_segments = 32,
+    });
+    list.addCircleFilled(.{
+        .p = center,
+        .r = 4 * scale,
+        .col = zgui.colorConvertFloat4ToU32(.{ 1, 1, 1, 1 }),
+        .num_segments = 32,
+    });
+}
+
+test "crosshair and fonts follow DPI changes without accumulating style rounding" {
+    zgui.init(std.testing.allocator);
+    defer zgui.deinit();
+    zgui.io.setIniFilename(null);
+    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
+    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
+    const base_style = zgui.getStyle().*;
+    var dpi = zgui_utils.DpiScaling.init();
+    for ([_][2]f32{ .{ 1, 1 }, .{ 1, 2 }, .{ 1.25, 1.25 }, .{ 2, 2 }, .{ 1, 1 } }) |content_scale| {
+        dpi.update(content_scale);
+        const scale = @max(content_scale[0], content_scale[1]);
+        const screen: [2]f32 = .{ 1280 * scale, 720 * scale };
+        zgui.io.setDisplaySize(screen[0], screen[1]);
+        zgui.newFrame();
+        try std.testing.expectEqual(16 * scale, zgui.getFontSize());
+        // These are the unscaled sizes used by preview hints and action errors.
+        for ([_]f32{ 14, 20 }) |size| {
+            zgui.pushFont(null, size);
+            try std.testing.expectApproxEqAbs(@floor(size * scale + 0.5), zgui.getFontSize(), 0.01);
+            zgui.popFont();
+        }
+        drawCrosshair();
+        zgui.render();
+        const data = zgui.getDrawData();
+        try std.testing.expectEqual(1, data.cmd_lists_count);
+        const vertices = data.cmd_lists.items[0].getVertexBuffer();
+        for ([_]struct { color: [4]f32, radius: f32 }{
+            .{ .color = .{ 0, 0, 0, 1 }, .radius = 5 },
+            .{ .color = .{ 1, 1, 1, 1 }, .radius = 4 },
+        }) |circle| {
+            const color = zgui.colorConvertFloat4ToU32(circle.color);
+            var min: [2]f32 = .{ math.inf(f32), math.inf(f32) };
+            var max: [2]f32 = .{ -math.inf(f32), -math.inf(f32) };
+            for (vertices) |vertex| {
+                if (vertex.color != color) continue;
+                for (0..2) |axis| {
+                    min[axis] = @min(min[axis], vertex.pos[axis]);
+                    max[axis] = @max(max[axis], vertex.pos[axis]);
+                }
+            }
+            for (0..2) |axis| {
+                try std.testing.expectApproxEqAbs(screen[axis] / 2, (min[axis] + max[axis]) / 2, 0.01);
+                // Opaque vertices exclude a half-pixel antialiasing fringe at each edge.
+                try std.testing.expectApproxEqAbs(2 * circle.radius * scale - 1, max[axis] - min[axis], 0.1);
+            }
+        }
+        if (scale == 1) {
+            try std.testing.expectEqual(base_style.window_padding, zgui.getStyle().window_padding);
+            try std.testing.expectEqual(base_style.item_spacing, zgui.getStyle().item_spacing);
+        }
+    }
 }
 
 test {
