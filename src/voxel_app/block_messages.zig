@@ -4,6 +4,8 @@ const zgui = @import("engine").zgui;
 const placement_preview = @import("placement_preview.zig");
 
 pub const action_error_duration: f64 = 4;
+const action_outline_color: [4]f32 = .{ 0.02, 0.02, 0.02, 1 };
+const action_outline_width: f32 = 1.5;
 
 pub const TimedError = struct {
     buffer: [placement_preview.message_capacity]u8 = undefined,
@@ -39,7 +41,8 @@ pub fn draw(preview: ?placement_preview.Preview, action_error: *const TimedError
 
 fn drawMessage(name: [:0]const u8, message: []const u8, screen: [2]f32, scale: f32, kind: enum { preview, action }) void {
     const is_preview = kind == .preview;
-    const padding: [2]f32 = if (is_preview) .{ 12 * scale, 8 * scale } else .{ 0, 0 };
+    // Transparent gutters keep the outline and glyph antialiasing inside the clip rect.
+    const padding: [2]f32 = if (is_preview) .{ 12 * scale, 8 * scale } else .{ 4 * scale, 4 * scale };
     const margin = @min(24 * scale, screen[0] * 0.1);
     const max_width = @max(1, @min((if (is_preview) @as(f32, 640) else 840) * scale, screen[0] - 2 * (margin + padding[0])));
 
@@ -80,7 +83,22 @@ fn drawMessage(name: [:0]const u8, message: []const u8, screen: [2]f32, scale: f
     if (visible) {
         zgui.pushTextWrapPos(padding[0] + max_width);
         defer zgui.popTextWrapPos();
+        if (!is_preview) drawTextOutline(message, max_width, action_outline_width * scale);
         zgui.textUnformattedColored(if (is_preview) .{ 1, 0.65, 0.1, 1 } else .{ 1, 0.15, 0.1, 1 }, message);
+    }
+}
+
+fn drawTextOutline(message: []const u8, wrap_width: f32, width: f32) void {
+    const list = zgui.getWindowDrawList();
+    const position = zgui.getCursorScreenPos();
+    const color = zgui.colorConvertFloat4ToU32(action_outline_color);
+    // Draw behind the normal text without advancing its cursor or changing wrapping.
+    for ([_][2]f32{ .{ -1, -1 }, .{ 0, -1 }, .{ 1, -1 }, .{ -1, 0 }, .{ 1, 0 }, .{ -1, 1 }, .{ 0, 1 }, .{ 1, 1 } }) |offset| {
+        list.addTextExtendedUnformatted(.{ position[0] + offset[0] * width, position[1] + offset[1] * width }, color, message, .{
+            .font = zgui.getFont(),
+            .font_size = zgui.getFontSize(),
+            .wrap_width = wrap_width,
+        });
     }
 }
 
@@ -133,11 +151,31 @@ test "both overlays generate visible text inside small and high DPI viewports" {
         for (data.cmd_lists.items[0..@intCast(data.cmd_lists.len)]) |list| {
             const is_preview = std.mem.eql(u8, std.mem.span(list.getOwnerName().?), "##placement-preview-error");
             const color = zgui.colorConvertFloat4ToU32(if (is_preview) .{ 1, 0.65, 0.1, 1 } else .{ 1, 0.15, 0.1, 1 });
+            const outline_color = zgui.colorConvertFloat4ToU32(action_outline_color);
+            var outlined_vertices: usize = 0;
+            var text_vertices: usize = 0;
             for (list.getVertexBuffer()) |vertex| {
+                if (vertex.color == outline_color) outlined_vertices += 1;
                 if (vertex.color != color) continue;
+                text_vertices += 1;
                 if (is_preview) found_preview = true else found_action = true;
                 try std.testing.expect(vertex.pos[0] >= 0 and vertex.pos[0] <= viewport.screen[0]);
                 try std.testing.expect(vertex.pos[1] >= 0 and vertex.pos[1] <= viewport.screen[1]);
+            }
+            if (is_preview) {
+                try std.testing.expectEqual(0, outlined_vertices);
+            } else {
+                // All eight outline copies retain every glyph across wrapped lines.
+                try std.testing.expectEqual(8 * text_vertices, outlined_vertices);
+                const vertices = list.getVertexBuffer();
+                const indices = list.getIndexBuffer();
+                for (list.getCmdBuffer()) |command| {
+                    for (indices[command.idx_offset..][0..command.elem_count]) |index| {
+                        const vertex = vertices[command.vtx_offset + index];
+                        try std.testing.expect(vertex.pos[0] >= command.clip_rect[0] and vertex.pos[0] <= command.clip_rect[2]);
+                        try std.testing.expect(vertex.pos[1] >= command.clip_rect[1] and vertex.pos[1] <= command.clip_rect[3]);
+                    }
+                }
             }
         }
         try std.testing.expect(found_preview and found_action);

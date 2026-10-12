@@ -154,7 +154,8 @@ point. Its dark background is translucent and rounded. Allowed placement, lost t
 lost focus, and switching to removing mode immediately clear this hint.
 
 Actual edit failures, including player overlap and authoritative service rejections, show
-medium red text at the top centre with no background for four seconds. A new failure
+medium red text with a dark 1.5px outline at the top centre, with no background, for four
+seconds. The outline follows the text's wrapping and DPI scale. A new failure
 replaces the previous message and restarts its timer. Successful edits and preview changes
 do not erase this feedback; both messages can appear together. Text wraps to the viewport
 width and follows the existing zgui DPI scale. These gameplay diagnostics no longer print
