@@ -4,6 +4,7 @@ const engine = @import("engine");
 const rules = @import("block_rules.zig");
 const world = @import("world.zig");
 const outline = engine.block_outline;
+const coordinates = @import("block_coordinates.zig");
 
 pub const allowed_color: @Vector(4, f32) = .{ 0.1, 0.8, 1, 0.65 };
 pub const rejected_color: @Vector(4, f32) = .{ 1, 0.15, 0.1, 0.7 };
@@ -15,13 +16,13 @@ pub const Preview = struct {
     result: world.EditResult,
     overlaps_player: bool = false,
 
-    pub fn overlays(self: Preview, layout: *const engine.WorldLayout) outline.Overlays {
+    pub fn overlays(self: Preview, contents: *const world.World) outline.Overlays {
         var hints: outline.Overlays = .{};
         const candidate: rules.Cell = .{ self.block[0], self.block[1], self.block[2] };
         hints.add(.{ .cell = candidate, .color = if (self.overlaps_player or self.result.status != .success) rejected_color else allowed_color });
         if (!self.overlaps_player) if (self.result.failure) |failure| {
-            addProblem(&hints, layout, failure.subject);
-            for (failure.involved[0..failure.involved_count]) |cell| addProblem(&hints, layout, cell);
+            addProblem(&hints, contents, failure.subject);
+            for (failure.involved[0..failure.involved_count]) |cell| addProblem(&hints, contents, cell);
         };
         return hints;
     }
@@ -38,10 +39,15 @@ pub const Preview = struct {
     }
 };
 
-fn addProblem(hints: *outline.Overlays, layout: *const engine.WorldLayout, cell: rules.Cell) void {
+fn addProblem(hints: *outline.Overlays, contents: *const world.World, cell: rules.Cell) void {
     var normalized = cell;
-    normalized[0] = @mod(normalized[0], layout.size_in_blocks[0]);
-    hints.add(.{ .cell = normalized, .color = problem_color });
+    normalized[0] = @mod(normalized[0], contents.layout.size_in_blocks[0]);
+    if (hints.contains(normalized)) return;
+    const occupied = if (coordinates.fromStorage(contents.layout, normalized)) |block|
+        contents.isBlockSolid(block) catch false
+    else
+        false;
+    hints.add(.{ .cell = normalized, .color = problem_color, .occupied = occupied });
 }
 
 pub fn description(reason: rules.Reason) []const u8 {
@@ -72,6 +78,8 @@ pub fn printFailure(failure: rules.Failure) void {
 
 test "diagnostic overlays deduplicate wrapped cells and preserve missing cells outside finite bounds" {
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    var contents = try world.World.init(std.testing.allocator, &layout);
+    defer contents.deinit();
     const failure: rules.Failure = .{
         .reason = .would_invalidate_structure,
         .cause = .earth_footprint,
@@ -87,7 +95,7 @@ test "diagnostic overlays deduplicate wrapped cells and preserve missing cells o
         .involved_count = 4,
     };
     const preview: Preview = .{ .block = .{ 0, 0, 0 }, .material = .dirt, .result = .{ .status = .constraint_violation, .failure = failure } };
-    const hints = preview.overlays(&layout);
+    const hints = preview.overlays(&contents);
     try std.testing.expectEqual(3, hints.count);
     try std.testing.expectEqualDeep(rejected_color, hints.cells[0].color);
     try std.testing.expectEqualDeep(rules.Cell{ 0, 1, 0 }, hints.cells[1].cell);
@@ -96,8 +104,33 @@ test "diagnostic overlays deduplicate wrapped cells and preserve missing cells o
 
 test "full truncated diagnostics fit alongside the ghost and affected construction" {
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    var contents = try world.World.init(std.testing.allocator, &layout);
+    defer contents.deinit();
     var failure: rules.Failure = .{ .reason = .horizontal_span, .subject = .{ 0, 1, 2 }, .involved_count = 32, .truncated = true };
     for (&failure.involved, 0..) |*cell, i| cell.* = .{ @intCast(i), 0, 1 };
     const preview: Preview = .{ .block = .{ 0, 1, 1 }, .material = .planks, .result = .{ .status = .constraint_violation, .failure = failure } };
-    try std.testing.expectEqual(34, preview.overlays(&layout).count);
+    try std.testing.expectEqual(34, preview.overlays(&contents).count);
+}
+
+test "only received occupied diagnostic cells request surface depth correction" {
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    var contents = try world.World.init(std.testing.allocator, &layout);
+    defer contents.deinit();
+    try contents.insertChunk(.{ 0, 0, 0 }, world.WorldChunk.initEmpty());
+    try contents.insertChunk(.{ 1, 0, 0 }, world.WorldChunk.initEmpty());
+    contents.setBlockUnchecked(.{ 1, 0, 0 }, .stone);
+    contents.setBlockUnchecked(.{ 63, 0, 0 }, .stone);
+    var failure: rules.Failure = .{ .reason = .missing_foundation, .subject = .{ 1, 0, 0 }, .involved_count = 5 };
+    failure.involved[0] = .{ 2, 0, 0 }; // Received air.
+    failure.involved[1] = .{ 0, 32, 0 }; // Unknown chunk.
+    failure.involved[2] = .{ 0, -1, 0 }; // Finite y boundary.
+    failure.involved[3] = .{ 0, 0, -1 }; // Finite z boundary.
+    failure.involved[4] = .{ -1, 0, 0 }; // Wrapped occupied cell.
+    const preview: Preview = .{ .block = .{ 0, 0, 0 }, .material = .dirt, .result = .{ .status = .constraint_violation, .failure = failure } };
+    const hints = preview.overlays(&contents);
+    try std.testing.expectEqual(7, hints.count);
+    try std.testing.expect(!hints.cells[0].occupied); // The candidate remains a ghost.
+    try std.testing.expect(hints.cells[1].occupied);
+    for (hints.cells[2..6]) |hint| try std.testing.expect(!hint.occupied);
+    try std.testing.expect(hints.cells[6].occupied);
 }

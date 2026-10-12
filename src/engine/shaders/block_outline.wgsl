@@ -117,8 +117,11 @@ struct FragmentOut {
     var output: FragmentOut;
     output.color = outline.color;
     var depth = input.position.z;
-    if (outline.parameters.x != 0) {
-        depth = strokeDepth(input.position.xy, depth, input.faces);
+    // Full diagnostic cubes include rear edges. Only edges touching an eye-facing
+    // face may follow its surface; correcting rear edges would lift them forward.
+    let corrected_faces = input.faces & u32(outline.parameters.y);
+    if (outline.parameters.x != 0 && corrected_faces != 0u) {
+        depth = strokeDepth(input.position.xy, depth, corrected_faces);
     }
     // Eight f32 epsilon units cover reconstruction/rasterization rounding only.
     output.depth = clamp(depth - 0.0000009536743164, 0, 1);

@@ -15,7 +15,8 @@ const uniform_offsets = struct {
     const foreground = stride;
     const coplanar = [_]u32{ 2 * stride, 3 * stride, 4 * stride };
     const partial = 5 * stride;
-    const buffer_size = partial + stride;
+    const hidden_target = 6 * stride;
+    const buffer_size = hidden_target + stride;
 };
 
 const RenderCase = enum {
@@ -152,7 +153,8 @@ pub fn check(device: wgpu.Device, mapping: *Mapping) !void {
             }
         }
     }
-    try checkOblique(&gctx, &layouts, pipeline.pipeline_gpu, bind_group, uniforms, mapping);
+    try checkOblique(&gctx, &layouts, pipeline.pipeline_gpu, bind_group, uniforms, mapping, false);
+    try checkOblique(&gctx, &layouts, pipeline.pipeline_gpu, bind_group, uniforms, mapping, true);
     try checkHints(&gctx, &layouts, pipeline.pipeline_gpu, bind_group, uniforms, mapping);
 }
 
@@ -243,8 +245,10 @@ fn corner(index: u3) zmath.Vec {
 
 // Render actual cube surfaces before the outline: a cleared constant depth alone
 // cannot expose the self-occlusion caused by screen-space stroke expansion.
-fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.BindGroupLayouts, pipeline: wgpu.RenderPipeline, bind_group: wgpu.BindGroup, uniforms: wgpu.Buffer, mapping: *Mapping) !void {
+fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.BindGroupLayouts, pipeline: wgpu.RenderPipeline, bind_group: wgpu.BindGroup, uniforms: wgpu.Buffer, mapping: *Mapping, occupied_overlay: bool) !void {
     const device = gctx.device;
+    const hidden_pipeline = if (occupied_overlay) outline.createOccludedPipeline(gctx, layouts, .rgba8_unorm) else null;
+    defer if (hidden_pipeline) |hidden| hidden.deinit(gctx);
     const cube_source =
         \\@group(0) @binding(0) var<uniform> clip_from_cube: mat4x4f;
         \\const vertices = array<u32, 36>(
@@ -304,9 +308,16 @@ fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.Bind
             const data = outline.Uniforms{
                 .clip_from_block = transform,
                 .block_from_clip = zmath.inverse(transform),
-                .stroke = .{ @floatFromInt(side), @floatFromInt(side), outline.width_pixels, @floatFromInt(mask) },
+                .stroke = .{ @floatFromInt(side), @floatFromInt(side), outline.width_pixels, @floatFromInt(if (occupied_overlay) @as(u32, 63) else mask) },
+                .color = if (occupied_overlay) .{ 1, 0.65, 0.1, 0.65 } else .{ 0, 1, 0, 1 },
+                .parameters = .{ 1, @floatFromInt(mask), 0, 0 },
             };
             queue.writeBuffer(uniforms, uniform_offsets.target, outline.Uniforms, &.{data});
+            if (occupied_overlay) {
+                var faint = data;
+                faint.color[3] *= 0.3;
+                queue.writeBuffer(uniforms, uniform_offsets.hidden_target, outline.Uniforms, &.{faint});
+            }
             // A larger cube halfway to the eye must still occlude the corrected
             // outline. It uses a second dynamic-uniform region, not target data.
             const center = (eye + zmath.Vec{ 0.5, 0.5, 0.5, 1 }) * @as(zmath.Vec, @splat(0.5));
@@ -365,6 +376,11 @@ fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.Bind
                     .depth_stencil_attachment = &.{ .view = depth_view, .depth_load_op = .load, .depth_store_op = .store },
                 });
                 defer pass.release();
+                if (hidden_pipeline) |hidden| {
+                    pass.setPipeline(hidden.pipeline_gpu);
+                    pass.setBindGroup(0, bind_group, &.{uniform_offsets.hidden_target});
+                    pass.draw(outline.vertex_count, 1, 0, 0);
+                }
                 pass.setPipeline(pipeline);
                 pass.setBindGroup(0, bind_group, &.{uniform_offsets.target});
                 pass.draw(outline.vertex_count, 1, 0, 0);
@@ -383,8 +399,8 @@ fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.Bind
             const baseline = RenderCase.depth_free.pixels(pixels, side * side);
             const actual = RenderCase.target_only.pixels(pixels, side * side);
             const occluded = RenderCase.foreground_occluder.pixels(pixels, side * side);
-            for (occluded) |pixel| try std.testing.expectEqual(@as(u8, 0), pixel[1]);
-            if (view.grazing) try checkPartialOcclusion(RenderCase.partial_occluder.pixels(pixels, side * side), actual, data.block_from_clip, side);
+            for (occluded) |pixel| try std.testing.expect(!isBright(pixel, occupied_overlay));
+            if (view.grazing) try checkPartialOcclusion(RenderCase.partial_occluder.pixels(pixels, side * side), actual, data.block_from_clip, side, occupied_overlay);
             if (view_index == 0) {
                 // This back edge projects into the face interior, clear of the
                 // visible strokes. Depth correction must not reveal it there.
@@ -392,8 +408,15 @@ fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.Bind
                 const half: f32 = @as(f32, @floatFromInt(side)) / 2;
                 const x: usize = @intFromFloat(@floor((1 + hidden[0] / hidden[3]) * half));
                 const y: usize = @intFromFloat(@floor((1 - hidden[1] / hidden[3]) * half));
-                try std.testing.expectEqual(@as(u8, 0), baseline[y * side + x][1]);
-                try std.testing.expectEqual(@as(u8, 0), actual[y * side + x][1]);
+                if (occupied_overlay) {
+                    try std.testing.expect(isBright(baseline[y * side + x], true));
+                    // Rear edges remain at their actual depth, visible only in the
+                    // faint pass. Surface correction must never promote them.
+                    try std.testing.expect(@abs(@as(i16, actual[y * side + x][0]) - 50) <= 1);
+                } else {
+                    try std.testing.expectEqual(@as(u8, 0), baseline[y * side + x][1]);
+                    try std.testing.expectEqual(@as(u8, 0), actual[y * side + x][1]);
+                }
             }
             var probes: usize = 0;
             var missing: usize = 0;
@@ -423,15 +446,15 @@ fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.Bind
                     const offset = point - (pa + delta * @as(@Vector(2, f32), @splat(t)));
                     if (@reduce(.Add, offset * offset) > 1.25 * 1.25) continue;
                     const index = y * side + x;
-                    try std.testing.expectEqual(@as(u8, 255), baseline[index][1]);
+                    try std.testing.expect(isBright(baseline[index], occupied_overlay));
                     probes += 1;
-                    if (actual[index][1] != 255) missing += 1;
+                    if (!isBright(actual[index], occupied_overlay)) missing += 1;
                     // Nearly edge-on coplanar strokes may reach the world-space
                     // continuation limit; full width is checked at ordinary
                     // oblique views, and target self-occlusion at every view.
                     inline for (0..3) |axis| {
                         const wall_pixels = coplanar_cases[axis].pixels(pixels, side * side);
-                        if (!view.grazing and wall_faces[axis] and wall_pixels[index][1] != 255) missing_coplanar += 1;
+                        if (!view.grazing and wall_faces[axis] and !isBright(wall_pixels[index], occupied_overlay)) missing_coplanar += 1;
                     }
                 };
             }
@@ -448,14 +471,18 @@ fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.Bind
     }
 }
 
-fn checkPartialOcclusion(pixels: []const [4]u8, target_only: []const [4]u8, block_from_clip: zmath.Mat, side: u32) !void {
+fn isBright(pixel: [4]u8, occupied_overlay: bool) bool {
+    return if (occupied_overlay) pixel[0] >= 160 else pixel[1] == 255;
+}
+
+fn checkPartialOcclusion(pixels: []const [4]u8, target_only: []const [4]u8, block_from_clip: zmath.Mat, side: u32, occupied_overlay: bool) !void {
     var front_face_probes: usize = 0;
     var covered_stroke: usize = 0;
     var visible_stroke: usize = 0;
     var leaked: usize = 0;
     const size: f32 = @floatFromInt(side);
     for (pixels, target_only, 0..) |pixel, target_pixel, index| {
-        if (pixel[1] == 255) visible_stroke += 1;
+        if (isBright(pixel, occupied_overlay)) visible_stroke += 1;
         const x: f32 = @floatFromInt(index % side);
         const y: f32 = @floatFromInt(index / side);
         const xy = zmath.Vec{ 2 * (x + 0.5) / size - 1, 1 - 2 * (y + 0.5) / size, 0, 1 };
@@ -469,8 +496,8 @@ fn checkPartialOcclusion(pixels: []const [4]u8, target_only: []const [4]u8, bloc
         // the foreground voxel's nearer y=-1 face, not its coplanar side face.
         if (t < 0 or t > 1 or front[0] <= 0.001 or front[0] >= 0.999 or front[2] <= 0.001 or front[2] >= 0.999) continue;
         front_face_probes += 1;
-        if (target_pixel[1] == 255) covered_stroke += 1;
-        if (pixel[1] == 255) leaked += 1;
+        if (isBright(target_pixel, occupied_overlay)) covered_stroke += 1;
+        if (isBright(pixel, occupied_overlay)) leaked += 1;
     }
     try std.testing.expect(front_face_probes > 30);
     try std.testing.expect(covered_stroke > 20);

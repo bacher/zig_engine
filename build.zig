@@ -171,6 +171,19 @@ pub fn build(b: *std.Build) void {
     const benchmark_step = b.step("bench-placement", "Benchmark structural validation beside a 200-block plank building");
     benchmark_step.dependOn(&b.addRunArtifact(placement_benchmark).step);
 
+    const outline_benchmark = b.addExecutable(.{
+        .name = "block-outline-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/block_outline_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    outline_benchmark.root_module.linkLibrary(voxel_engine_lib);
+    outline_benchmark.root_module.addImport("engine", voxel_engine_lib.root_module);
+    const outline_benchmark_step = b.step("bench-outlines", "Measure CPU preparation for one focused outline and 20/34 diagnostic cells");
+    outline_benchmark_step.dependOn(&b.addRunArtifact(outline_benchmark).step);
+
     const exe_unit_tests = b.addTest(.{
         .root_module = demo_exe.root_module,
     });

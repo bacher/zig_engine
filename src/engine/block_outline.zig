@@ -16,7 +16,12 @@ pub const width_pixels: f32 = 3;
 pub const shader = @embedFile("shaders/block_outline.wgsl");
 pub const Uniforms = @import("bind_group_layouts/block_outline.zig").Uniforms;
 pub const Cell = @Vector(3, i64);
-pub const Overlay = struct { cell: Cell, color: zmath.Vec };
+pub const Overlay = struct {
+    cell: Cell,
+    color: zmath.Vec,
+    /// Correct only camera-facing edges of a cell with rendered block surfaces.
+    occupied: bool = false,
+};
 
 /// Value-owned, allocation-free hints. Applications replace the set each frame.
 pub const Overlays = struct {
@@ -80,15 +85,17 @@ pub fn uniforms(camera: *const Camera, block: [3]u32, viewport: @Vector(2, f32))
     };
 }
 
-/// Empty cells and diagnostics show all twelve edges at their actual cell depth.
+/// All twelve edges remain available. Occupied cells correct only front-facing edges.
 pub fn overlayUniforms(camera: *const Camera, overlay: Overlay, viewport: @Vector(2, f32)) Uniforms {
-    const transform = clipFromPosition(camera, blockPosition(camera, overlay.cell));
+    const position = blockPosition(camera, overlay.cell);
+    const transform = clipFromPosition(camera, position);
+    const eye = chunks.getLocalPosition(camera.position) - position;
     return .{
         .clip_from_block = transform,
         .block_from_clip = zmath.inverse(transform),
         .stroke = .{ viewport[0], viewport[1], width_pixels, 63 },
         .color = overlay.color,
-        .parameters = @splat(0),
+        .parameters = if (overlay.occupied) .{ 1, @floatFromInt(faceMask(eye)), 0, 0 } else @splat(0),
     };
 }
 
@@ -155,6 +162,10 @@ test "cell overlays retain signed finite edges and rebase across the wrapped sea
     try std.testing.expectEqualDeep(zmath.Vec{ 1, 0, 0, 0.5 }, outside.color);
     try std.testing.expectEqual(@as(f32, 63), outside.stroke[3]);
     try std.testing.expectEqual(@as(f32, 0), outside.parameters[0]);
+    const solid = overlayUniforms(&camera, .{ .cell = .{ 0, 0, 0 }, .color = .{ 1, 0.65, 0.1, 0.65 }, .occupied = true }, .{ 128, 128 });
+    try std.testing.expectEqual(@as(f32, 63), solid.stroke[3]);
+    try std.testing.expectEqual(@as(f32, 1), solid.parameters[0]);
+    try std.testing.expectEqual(@as(f32, 1), solid.parameters[1]);
     if (comptime WorldLayout.wrap_x) {
         const a = blockPosition(&camera, .{ -1, 0, 0 });
         const b = blockPosition(&camera, .{ 127, 0, 0 });

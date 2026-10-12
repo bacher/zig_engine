@@ -53,13 +53,34 @@ The voxel app refreshes `Scene.highlighted_block` using the editing raycast afte
 The shader also extends each edge's visible adjacent face planes across the narrow stroke margin to keep coplanar neighboring blocks from trimming it. This continuation is limited to 0.25 metres beyond the unit face bounds: a small screen-space margin can otherwise extrapolate metres forward at grazing angles and leak through foreground blocks. Plane intersections outside that bounded neighborhood leave the reconstructed target/edge depth unchanged. This deliberately allows the outer stroke to be clipped on nearly edge-on coplanar surfaces when preserving it would require a more distant intersection. Scene depth still hides the outline behind other geometry; an eight-epsilon f32 allowance handles depth rounding, and the pass never writes scene depth. The pipeline owns dedicated transform/inverse-transform/viewport uniforms. The outline's storage cell is rebased to the camera chunk, including the wrapped x seam, before conversion to f32. No voxel face or shadow shader contains highlighting logic.
 
 `Scene.block_overlays` also carries a bounded, value-owned set of signed storage cells and
-RGBA colors. Placement previews reuse the same outline shader and bind group layout,
-showing all twelve edges at their actual cell depth without focus surface reconstruction.
+RGBA colors and whether the cell contains a received block. Placement previews reuse the
+same outline shader and bind group layout, retaining all twelve edges. For occupied cells,
+edges touching camera-facing faces use the focus outline's bounded surface-depth correction,
+so the block's own tilted faces do not trim the expanded stroke. Rear edges, empty cells,
+unknown cells, and cells beyond finite world bounds retain their actual edge depth.
 The regular pipeline alpha-blends visible strokes with a `less_equal` depth test; a second
 pipeline uses `greater` and 30% opacity for hidden strokes. Both leave depth unchanged.
 Diagnostic colors take precedence when an overlay also covers the focused cell. The voxel
 app uses cyan/red for the placement candidate and orange for involved blocks or missing
 support cells. See [placement diagnostics](block-placement.md#edits-and-diagnostics).
+
+The correction adds one cached block lookup per distinct diagnostic cell and a six-bit
+camera-facing face mask. It adds no world support searches, mesh rebuilds, draw calls, or
+uniform buffer size. Both depth passes reuse one transform/inverse-transform preparation
+per cell. GPU correction runs only for rasterized strokes touching camera-facing surfaces;
+its cost depends on their screen coverage, including overlap between cells. At the current
+34-cell preview bound, the renderer still submits at most 68 outline draws (4,896 vertices).
+`zig build bench-outlines -Doptimize=ReleaseFast` measures CPU classification and uniform
+preparation for one focused outline and 20/34 diagnostic cells. It excludes GPU execution
+and command encoding; GPU correctness checks are not GPU performance measurements.
+
+On the local Apple M4 Max, the ReleaseFast benchmark measured median CPU preparation
+times of 0.02 µs for one focused cell, 0.72 µs for 20 diagnostic cells, and 1.41 µs for 34
+diagnostic cells (11 samples of 10,000 frames, with a changing camera transform). This uses
+a group of received occupied cells; it is a CPU microbenchmark, not a full-frame timing or
+a GPU timing guarantee for other hardware. The occupied-cell correction is enabled at the
+current bounded preview size. Profile GPU stroke coverage and command encoding before
+raising that bound or deciding whether instanced outline submission is necessary.
 
 The voxel grid stores exposed-face records, not a conventional indexed mesh or a dense GPU block array. Each record contains local block coordinates and block type in four bytes. Six lists group those records by outward face direction. The vertex shader generates six vertices per face and selects atlas UVs using block type and direction.
 

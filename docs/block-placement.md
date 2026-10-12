@@ -124,8 +124,10 @@ hides green focus edges. Missing cells beyond finite world edges retain
 their signed positions, while x coordinates wrap across the seam. Diagnostics show at most
 32 involved cells plus the affected cell and candidate; truncation is reported in the console.
 
-Hints reuse the focus outline's procedural edges and uniform bindings. They show all twelve
-edges at the cell's own depth. Visible strokes use alpha blending; strokes hidden behind
+Hints reuse the focus outline's procedural edges and uniform bindings. They retain all twelve
+edges. Occupied diagnostic cells correct the depth of camera-facing edges to preserve full
+stroke width over their own tilted surfaces; rear edges and empty/unknown hints retain their
+actual edge depth. Visible strokes use alpha blending; strokes hidden behind
 scene geometry use 30% of that opacity, so buried support remains identifiable. Neither
 pass writes scene depth. There is no solid ghost mesh or screen text yet.
 
@@ -213,6 +215,11 @@ time catch-up, inclusive support windows, stacked overhangs, conservative depend
 root-specific caches, translated/wrapped constructions, and client/service agreement with
 only a 3x3x3 neighborhood. `zig build test-gpu` checks the shared voxel shader pipelines when a
 graphics adapter is available.
+
+`zig build bench-outlines -Doptimize=ReleaseFast` measures CPU preparation for one focused
+outline and 20/34 diagnostic cells, including occupied-cell classification and shared
+uniform preparation for the visible and hidden passes. It excludes structural validation,
+GPU execution, and command encoding. See [rendering costs](rendering.md#voxel-rendering).
 
 `zig build bench-placement -Doptimize=ReleaseFast` reports reader calls and the median/minimum
 time for ten `World.previewOperation` calls beside a 200-block (5x5x8) plank building over

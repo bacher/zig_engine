@@ -9,8 +9,8 @@ pub const Uniforms = extern struct {
     /// Viewport xy, stroke width, and a bit mask of camera-facing cube faces.
     stroke: zmath.Vec,
     color: zmath.Vec = .{ 0, 1, 0, 1 },
-    /// x: use focused-block surface depth correction; other components reserved.
-    parameters: zmath.Vec = .{ 1, 0, 0, 0 },
+    /// x: surface depth correction; y: eligible face mask; zw: reserved.
+    parameters: zmath.Vec = .{ 1, 63, 0, 0 },
 };
 
 pub const BlockOutlineBindGroupLayout = struct {

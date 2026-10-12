@@ -1053,14 +1053,16 @@ pub const Engine = struct {
                         pass.release();
                     }
                     for (scene.block_overlays.cells[0..scene.block_overlays.count]) |overlay| {
+                        // Both depth passes share the same transform and face classification.
+                        const overlay_data = outline.overlayUniforms(scene.camera, overlay, engine.screen_size);
                         const hidden = gctx.uniformsAllocate(outline.Uniforms, 1);
-                        hidden.slice[0] = outline.overlayUniforms(scene.camera, overlay, engine.screen_size);
+                        hidden.slice[0] = overlay_data;
                         hidden.slice[0].color[3] *= 0.3;
                         pass.setPipeline(engine.pipelines.block_outline_occluded.pipeline_gpu);
                         pass.setBindGroup(0, engine.bind_group_block_outline.wgpu_bind_group, &.{hidden.offset});
                         pass.draw(outline.vertex_count, 1, 0, 0);
                         const visible = gctx.uniformsAllocate(outline.Uniforms, 1);
-                        visible.slice[0] = outline.overlayUniforms(scene.camera, overlay, engine.screen_size);
+                        visible.slice[0] = overlay_data;
                         pass.setPipeline(engine.pipelines.block_outline.pipeline_gpu);
                         pass.setBindGroup(0, engine.bind_group_block_outline.wgpu_bind_group, &.{visible.offset});
                         pass.draw(outline.vertex_count, 1, 0, 0);

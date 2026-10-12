@@ -525,7 +525,7 @@ const Game = struct {
         var preview: ?placement_preview.Preview = null;
         defer {
             if (preview) |current| {
-                scene.block_overlays = current.overlays(scene.layout);
+                scene.block_overlays = current.overlays(&game.world.?);
                 if (game.current_placement_preview == null or !std.meta.eql(game.current_placement_preview.?, current)) current.print();
             } else {
                 game.placement_validation = null;
