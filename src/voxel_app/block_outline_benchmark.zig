@@ -1,5 +1,5 @@
 //! Run with `zig build bench-outlines -Doptimize=ReleaseFast`.
-//! Measures cell classification and shared uniform preparation, without GPU commands.
+//! Measures cell classification and instance preparation, then CPU command encoding.
 const std = @import("std");
 const engine = @import("engine");
 const outline = engine.block_outline;
@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
             .material = .rebar,
             .result = .{ .status = .constraint_violation, .failure = failure },
         };
-        var output: [68]outline.Uniforms = undefined;
+        var output: [outline.instance_capacity]outline.Instance = undefined;
         var samples: [11]u64 = undefined;
         for (&samples) |*sample| {
             const start = std.Io.Clock.awake.now(init.io);
@@ -41,14 +41,11 @@ pub fn main(init: std.process.Init) !void {
                 std.mem.doNotOptimizeAway(&camera);
                 std.mem.doNotOptimizeAway(&preview);
                 if (count == 1) {
-                    output[0] = outline.uniforms(&camera, .{ 8, 12, 8 }, .{ 1920, 1080 });
+                    output[0] = outline.focusedInstance(&camera, .{ 8, 12, 8 }, .{ 1920, 1080 });
                 } else {
                     const hints = preview.overlays(&world);
                     for (hints.cells[0..hints.count], 0..) |hint, index| {
-                        const data = outline.overlayUniforms(&camera, hint, .{ 1920, 1080 });
-                        output[index * 2] = data;
-                        output[index * 2].color[3] *= 0.3;
-                        output[index * 2 + 1] = data;
+                        output[index] = outline.overlayInstance(&camera, hint, .{ 1920, 1080 });
                     }
                 }
                 std.mem.doNotOptimizeAway(&output);
@@ -65,4 +62,8 @@ pub fn main(init: std.process.Init) !void {
             @tagName(@import("builtin").mode),
         });
     }
+    @import("outline_submission_benchmark.zig").run(init) catch |err| switch (err) {
+        error.NoGraphicsAdapter => std.debug.print("outline command encoding benchmark skipped: no graphics adapter\n", .{}),
+        else => return err,
+    };
 }

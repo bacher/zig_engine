@@ -124,12 +124,14 @@ hides green focus edges. Missing cells beyond finite world edges retain
 their signed positions, while x coordinates wrap across the seam. Diagnostics show at most
 32 involved cells plus the affected cell and candidate; truncation is reported in the console.
 
-Hints reuse the focus outline's procedural edges and uniform bindings. They retain all twelve
+Hints reuse the focus outline's procedural edges and instance buffer. They retain all twelve
 edges. Occupied diagnostic cells correct the depth of camera-facing edges to preserve full
 stroke width over their own tilted surfaces; rear edges and empty/unknown hints retain their
 actual edge depth. Visible strokes use alpha blending; strokes hidden behind
 scene geometry use 30% of that opacity, so buried support remains identifiable. Neither
-pass writes scene depth. There is no solid ghost mesh or screen text yet.
+pass writes scene depth. Diagnostics use two instanced draws, with all hidden strokes before
+all visible strokes and one upload of the active cell records. There is no solid ghost mesh
+or screen text yet.
 
 `World.previewOperation` checks hypothetical placement without changing blocks, pending
 commands, or the latest actual edit result. Its result is cached by target, selected material,
@@ -226,10 +228,11 @@ only a 3x3x3 neighborhood. Preview tests count actual validation invocations to 
 relevant invalidation, distant streaming changes, and per-frame player-overlap updates.
 `zig build test-gpu` checks the shared voxel shader pipelines when a graphics adapter is available.
 
-`zig build bench-outlines -Doptimize=ReleaseFast` measures CPU preparation for one focused
-outline and 20/34 diagnostic cells, including occupied-cell classification and shared
-uniform preparation for the visible and hidden passes. It excludes structural validation,
-GPU execution, and command encoding. See [rendering costs](rendering.md#voxel-rendering).
+`zig build bench-outlines -Doptimize=ReleaseFast` measures CPU instance preparation for one
+focused outline and 20/34 diagnostic cells, including occupied-cell classification. With a
+graphics adapter, it also compares individual and instanced CPU command encoding for 1,
+20, 34, and 64 cells. It excludes structural validation, uploads, queue submission, and GPU
+execution. See [rendering costs and benchmark scope](rendering.md#voxel-rendering).
 
 `zig build bench-placement -Doptimize=ReleaseFast` also measures allocation-free cache checks
 for the benchmark's support window and a full 27-chunk window (11 samples of 10,000 checks),

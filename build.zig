@@ -181,7 +181,7 @@ pub fn build(b: *std.Build) void {
     });
     outline_benchmark.root_module.linkLibrary(voxel_engine_lib);
     outline_benchmark.root_module.addImport("engine", voxel_engine_lib.root_module);
-    const outline_benchmark_step = b.step("bench-outlines", "Measure CPU preparation for one focused outline and 20/34 diagnostic cells");
+    const outline_benchmark_step = b.step("bench-outlines", "Measure outline instance preparation and individual versus instanced CPU command encoding");
     outline_benchmark_step.dependOn(&b.addRunArtifact(outline_benchmark).step);
 
     const exe_unit_tests = b.addTest(.{

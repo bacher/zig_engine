@@ -9,12 +9,13 @@ const ChunkCoords = @import("world_math.zig").ChunkCoords;
 const chunks = @import("chunk_utils.zig");
 const utils = @import("utils.zig");
 const Pipeline = @import("pipeline.zig").Pipeline;
-const BindGroupLayouts = @import("bind_group_layouts.zig").BindGroupLayouts;
+pub const BindGroupLayout = @import("bind_group_layouts/block_outline.zig").BlockOutlineBindGroupLayout;
 
 pub const vertex_count = 12 * 6;
 pub const width_pixels: f32 = 3;
 pub const shader = @embedFile("shaders/block_outline.wgsl");
-pub const Uniforms = @import("bind_group_layouts/block_outline.zig").Uniforms;
+pub const Instance = @import("bind_group_layouts/block_outline.zig").Instance;
+pub const instance_capacity = @import("bind_group_layouts/block_outline.zig").instance_capacity;
 pub const Cell = @Vector(3, i64);
 pub const Overlay = struct {
     cell: Cell,
@@ -25,7 +26,7 @@ pub const Overlay = struct {
 
 /// Value-owned, allocation-free hints. Applications replace the set each frame.
 pub const Overlays = struct {
-    pub const capacity = 64;
+    pub const capacity = instance_capacity - 1;
     cells: [capacity]Overlay = undefined,
     count: usize = 0,
 
@@ -44,21 +45,18 @@ pub const Overlays = struct {
     }
 };
 
-pub const DrawOffsets = struct { hidden: u32, visible: u32 };
-
-/// Composite every faint stroke before bright strokes, with two pipeline selections.
-pub fn drawOverlays(pass: wgpu.RenderPassEncoder, hidden_pipeline: wgpu.RenderPipeline, visible_pipeline: wgpu.RenderPipeline, bind_group: wgpu.BindGroup, offsets: []const DrawOffsets) void {
-    if (offsets.len == 0) return;
-    pass.setPipeline(hidden_pipeline);
-    for (offsets) |cell| {
-        pass.setBindGroup(0, bind_group, &.{cell.hidden});
-        pass.draw(vertex_count, 1, 0, 0);
+/// Two instanced draws preserve faint-before-bright compositing. The optional focus
+/// cell is appended to the visible batch and excluded from the hidden batch.
+pub fn drawBatch(pass: wgpu.RenderPassEncoder, hidden_pipeline: wgpu.RenderPipeline, visible_pipeline: wgpu.RenderPipeline, bind_group: wgpu.BindGroup, offset: u32, hidden_count: u32, visible_count: u32) void {
+    std.debug.assert(hidden_count <= visible_count and visible_count <= instance_capacity);
+    if (visible_count == 0) return;
+    pass.setBindGroup(0, bind_group, &.{offset});
+    if (hidden_count != 0) {
+        pass.setPipeline(hidden_pipeline);
+        pass.draw(vertex_count, hidden_count, 0, 0);
     }
     pass.setPipeline(visible_pipeline);
-    for (offsets) |cell| {
-        pass.setBindGroup(0, bind_group, &.{cell.visible});
-        pass.draw(vertex_count, 1, 0, 0);
-    }
+    pass.draw(vertex_count, visible_count, 0, 0);
 }
 
 /// Rebase storage coordinates to the camera chunk before narrowing to f32.
@@ -92,7 +90,7 @@ pub fn faceMask(eye: @Vector(3, f32)) u32 {
     return if (mask == 0) 63 else mask;
 }
 
-pub fn uniforms(camera: *const Camera, block: [3]u32, viewport: @Vector(2, f32)) Uniforms {
+pub fn focusedInstance(camera: *const Camera, block: [3]u32, viewport: @Vector(2, f32)) Instance {
     const position = blockPosition(camera, .{ block[0], block[1], block[2] });
     const transform = clipFromPosition(camera, position);
     const eye = chunks.getLocalPosition(camera.position) - position;
@@ -104,7 +102,7 @@ pub fn uniforms(camera: *const Camera, block: [3]u32, viewport: @Vector(2, f32))
 }
 
 /// All twelve edges remain available. Occupied cells correct only front-facing edges.
-pub fn overlayUniforms(camera: *const Camera, overlay: Overlay, viewport: @Vector(2, f32)) Uniforms {
+pub fn overlayInstance(camera: *const Camera, overlay: Overlay, viewport: @Vector(2, f32)) Instance {
     const position = blockPosition(camera, overlay.cell);
     const transform = clipFromPosition(camera, position);
     const eye = chunks.getLocalPosition(camera.position) - position;
@@ -117,16 +115,16 @@ pub fn overlayUniforms(camera: *const Camera, overlay: Overlay, viewport: @Vecto
     };
 }
 
-pub fn createPipeline(gctx: *zgpu.GraphicsContext, layouts: *const BindGroupLayouts, format: wgpu.TextureFormat) Pipeline {
-    return createDepthPipeline(gctx, layouts, format, .less_equal);
+pub fn createPipeline(gctx: *zgpu.GraphicsContext, layout: BindGroupLayout, format: wgpu.TextureFormat) Pipeline {
+    return createDepthPipeline(gctx, layout, format, .less_equal);
 }
 
-pub fn createOccludedPipeline(gctx: *zgpu.GraphicsContext, layouts: *const BindGroupLayouts, format: wgpu.TextureFormat) Pipeline {
-    return createDepthPipeline(gctx, layouts, format, .greater);
+pub fn createOccludedPipeline(gctx: *zgpu.GraphicsContext, layout: BindGroupLayout, format: wgpu.TextureFormat) Pipeline {
+    return createDepthPipeline(gctx, layout, format, .greater);
 }
 
-fn createDepthPipeline(gctx: *zgpu.GraphicsContext, layouts: *const BindGroupLayouts, format: wgpu.TextureFormat, compare: wgpu.CompareFunction) Pipeline {
-    const layout = gctx.createPipelineLayout(&.{layouts.block_outline.bind_group_layout_handle});
+fn createDepthPipeline(gctx: *zgpu.GraphicsContext, bindings: BindGroupLayout, format: wgpu.TextureFormat, compare: wgpu.CompareFunction) Pipeline {
+    const layout = gctx.createPipelineLayout(&.{bindings.bind_group_layout_handle});
     defer gctx.releaseResource(layout);
     const module = zgpu.createWgslShaderModule(gctx.device, shader, "block_outline");
     defer module.release();
@@ -134,6 +132,7 @@ fn createDepthPipeline(gctx: *zgpu.GraphicsContext, layouts: *const BindGroupLay
         .color = .{ .src_factor = .src_alpha, .dst_factor = .one_minus_src_alpha, .operation = .add },
         .alpha = .{ .src_factor = .one, .dst_factor = .one_minus_src_alpha, .operation = .add },
     } }};
+    const constants = [_]wgpu.ConstantEntry{.{ .key = "opacity_scale", .value = if (compare == .greater) 0.3 else 1 }};
     const handle = gctx.createRenderPipeline(layout, .{
         .label = "block_outline",
         .primitive = .{ .topology = .triangle_list, .cull_mode = .none },
@@ -144,7 +143,7 @@ fn createDepthPipeline(gctx: *zgpu.GraphicsContext, layouts: *const BindGroupLay
             // Fragment depth follows the target surface under the expanded stroke.
         },
         .vertex = .{ .module = module, .entry_point = "vs" },
-        .fragment = &.{ .module = module, .entry_point = "fs", .targets = &targets, .target_count = targets.len },
+        .fragment = &.{ .module = module, .entry_point = "fs", .targets = &targets, .target_count = targets.len, .constants = &constants, .constant_count = constants.len },
     });
     return Pipeline.init(gctx, handle);
 }
@@ -155,12 +154,12 @@ test "block outline rebases chunk boundaries and periodic camera positions" {
     var camera = Camera.init(&layout, 1);
     camera.updatePosition(.{ -8192.5, 0.5, 0.5 });
     const expected = clipFromBlock(&camera, block);
-    try std.testing.expectEqual(@as(f32, 1), uniforms(&camera, block, .{ 128, 128 }).stroke[3]);
+    try std.testing.expectEqual(@as(f32, 1), focusedInstance(&camera, block, .{ 128, 128 }).stroke[3]);
     if (comptime WorldLayout.wrap_x) {
         for ([_]f64{ 16384, -32768, 16384 * 10000000000.0 }) |trip| {
             camera.updatePosition(.{ -8192.5 + trip, 0.5, 0.5 });
             const actual = clipFromBlock(&camera, block);
-            try std.testing.expectEqual(@as(f32, 1), uniforms(&camera, block, .{ 128, 128 }).stroke[3]);
+            try std.testing.expectEqual(@as(f32, 1), focusedInstance(&camera, block, .{ 128, 128 }).stroke[3]);
             inline for (0..4) |column| inline for (0..4) |row| {
                 try std.testing.expectApproxEqAbs(expected[column][row], actual[column][row], 0.000001);
             };
@@ -175,12 +174,12 @@ test "cell overlays retain signed finite edges and rebase across the wrapped sea
     const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 2, 2 } });
     var camera = Camera.init(&layout, 1);
     camera.updatePosition(.{ -64.5, -31.5, -31.5 });
-    const outside = overlayUniforms(&camera, .{ .cell = .{ 0, 0, -1 }, .color = .{ 1, 0, 0, 0.5 } }, .{ 128, 128 });
+    const outside = overlayInstance(&camera, .{ .cell = .{ 0, 0, -1 }, .color = .{ 1, 0, 0, 0.5 } }, .{ 128, 128 });
     try std.testing.expectEqualDeep(@Vector(3, f32){ 32, 0, -1 }, blockPosition(&camera, .{ 0, 0, -1 }));
     try std.testing.expectEqualDeep(zmath.Vec{ 1, 0, 0, 0.5 }, outside.color);
     try std.testing.expectEqual(@as(f32, 63), outside.stroke[3]);
     try std.testing.expectEqual(@as(f32, 0), outside.parameters[0]);
-    const solid = overlayUniforms(&camera, .{ .cell = .{ 0, 0, 0 }, .color = .{ 1, 0.65, 0.1, 0.65 }, .occupied = true }, .{ 128, 128 });
+    const solid = overlayInstance(&camera, .{ .cell = .{ 0, 0, 0 }, .color = .{ 1, 0.65, 0.1, 0.65 }, .occupied = true }, .{ 128, 128 });
     try std.testing.expectEqual(@as(f32, 63), solid.stroke[3]);
     try std.testing.expectEqual(@as(f32, 1), solid.parameters[0]);
     try std.testing.expectEqual(@as(f32, 1), solid.parameters[1]);

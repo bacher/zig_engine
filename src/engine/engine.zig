@@ -1052,27 +1052,22 @@ pub const Engine = struct {
                         pass.end();
                         pass.release();
                     }
-                    var overlay_offsets: [outline.Overlays.capacity]outline.DrawOffsets = undefined;
+                    var instances: [outline.instance_capacity]outline.Instance = undefined;
+                    var visible_count: u32 = @intCast(scene.block_overlays.count);
                     for (scene.block_overlays.cells[0..scene.block_overlays.count], 0..) |overlay, index| {
-                        // Both depth passes share the same transform and face classification.
-                        const overlay_data = outline.overlayUniforms(scene.camera, overlay, engine.screen_size);
-                        const hidden = gctx.uniformsAllocate(outline.Uniforms, 1);
-                        hidden.slice[0] = overlay_data;
-                        hidden.slice[0].color[3] *= 0.3;
-                        const visible = gctx.uniformsAllocate(outline.Uniforms, 1);
-                        visible.slice[0] = overlay_data;
-                        overlay_offsets[index] = .{ .hidden = hidden.offset, .visible = visible.offset };
+                        instances[index] = outline.overlayInstance(scene.camera, overlay, engine.screen_size);
                     }
-                    outline.drawOverlays(pass, engine.pipelines.block_outline_occluded.pipeline_gpu, engine.pipelines.block_outline.pipeline_gpu, engine.bind_group_block_outline.wgpu_bind_group, overlay_offsets[0..scene.block_overlays.count]);
                     if (scene.highlighted_block) |block| {
                         // A problem hint takes precedence over the ordinary focus color.
                         if (!scene.block_overlays.contains(.{ block[0], block[1], block[2] })) {
-                            const data = gctx.uniformsAllocate(outline.Uniforms, 1);
-                            data.slice[0] = outline.uniforms(scene.camera, block, engine.screen_size);
-                            pass.setPipeline(engine.pipelines.block_outline.pipeline_gpu);
-                            pass.setBindGroup(0, engine.bind_group_block_outline.wgpu_bind_group, &.{data.offset});
-                            pass.draw(outline.vertex_count, 1, 0, 0);
+                            instances[visible_count] = outline.focusedInstance(scene.camera, block, engine.screen_size);
+                            visible_count += 1;
                         }
+                    }
+                    if (visible_count != 0) {
+                        const buffer = gctx.lookupResource(engine.bind_group_layouts.block_outline.instance_buffer_handle).?;
+                        gctx.queue.writeBuffer(buffer, 0, outline.Instance, instances[0..visible_count]);
+                        outline.drawBatch(pass, engine.pipelines.block_outline_occluded.pipeline_gpu, engine.pipelines.block_outline.pipeline_gpu, engine.bind_group_block_outline.wgpu_bind_group, 0, @intCast(scene.block_overlays.count), visible_count);
                     }
                 }
             }
