@@ -43,7 +43,7 @@ In the voxel app, Tab switches between removing (the initial mode) and putting. 
 
 ## Voxel app
 
-The player starts standing on the current block surface. Spawn placement reads authoritative blocks, including committed edits, and checks support and body clearance before the first frame.
+The player starts standing on the current block surface. Before the first frame, the world-data service finds a supported position near the preferred spawn point using current blocks, including committed edits. It checks an empty 2×2×3 volume and support under the player's actual feet.
 
 The world-data service owns authoritative blocks and revisions. The main thread applies edits optimistically and reconciles them against subscribed snapshots. The normal neighborhood retains blocks in a 3×3×3 core and requests surrounding geometry within a 7×7×7 box; outstanding edits pin chunks during reconciliation. Both local and service meshes use neighbor boundary masks and the same exposed-face extractor.
 

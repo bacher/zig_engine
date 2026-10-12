@@ -36,7 +36,6 @@ const ChunkResponse = world_data_service.ChunkResponse;
 const SimulationWorker = @import("./simulation_worker.zig").SimulationWorker;
 const player_module = @import("player_controller.zig");
 const PlayerController = player_module.PlayerController;
-const player_spawn = @import("player_spawn.zig");
 const terrain_collision = @import("terrain_collision.zig");
 const consts = @import("./consts.zig");
 const world_engine = @import("./world_engine_glue.zig");
@@ -807,7 +806,13 @@ pub fn main(init: std.process.Init) !void {
     defer game.stopWorkers();
 
     try initWorld(game);
-    const spawn = try player_spawn.loadPosition(game.world_client.?, .{}, .{ -2.06, -2.96 });
+    const body: terrain_collision.Body = .{};
+    const spawn = try game.world_client.?.findStandingSpace(.{
+        .preferred_xy = .{ -2.06, -2.96 },
+        .clearance_size = .{ 2, 2, 3 },
+        .support_size = .{ 2 * body.half_width, 2 * body.half_width },
+        .search_radius = 8,
+    });
     game.player = PlayerController.init(allocator, spawn);
     game.player.?.grounded = true;
     game.simulation = try SimulationWorker.create(game.world_data.?);
@@ -994,7 +999,7 @@ test {
     _ = world_data_service;
     _ = SimulationWorker;
     _ = player_module;
-    _ = player_spawn;
+    _ = @import("standing_space.zig");
 }
 
 test "Q excursions start at player eyes and return to the frozen player position and view" {
