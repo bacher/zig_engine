@@ -25,7 +25,8 @@ pub const Overlay = struct {
 
 /// Value-owned, allocation-free hints. Applications replace the set each frame.
 pub const Overlays = struct {
-    cells: [64]Overlay = undefined,
+    pub const capacity = 64;
+    cells: [capacity]Overlay = undefined,
     count: usize = 0,
 
     pub fn contains(self: *const Overlays, cell: Cell) bool {
@@ -42,6 +43,23 @@ pub const Overlays = struct {
         self.count += 1;
     }
 };
+
+pub const DrawOffsets = struct { hidden: u32, visible: u32 };
+
+/// Composite every faint stroke before bright strokes, with two pipeline selections.
+pub fn drawOverlays(pass: wgpu.RenderPassEncoder, hidden_pipeline: wgpu.RenderPipeline, visible_pipeline: wgpu.RenderPipeline, bind_group: wgpu.BindGroup, offsets: []const DrawOffsets) void {
+    if (offsets.len == 0) return;
+    pass.setPipeline(hidden_pipeline);
+    for (offsets) |cell| {
+        pass.setBindGroup(0, bind_group, &.{cell.hidden});
+        pass.draw(vertex_count, 1, 0, 0);
+    }
+    pass.setPipeline(visible_pipeline);
+    for (offsets) |cell| {
+        pass.setBindGroup(0, bind_group, &.{cell.visible});
+        pass.draw(vertex_count, 1, 0, 0);
+    }
+}
 
 /// Rebase storage coordinates to the camera chunk before narrowing to f32.
 pub fn clipFromBlock(camera: *const Camera, block: [3]u32) zmath.Mat {

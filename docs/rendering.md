@@ -60,6 +60,9 @@ so the block's own tilted faces do not trim the expanded stroke. Rear edges, emp
 unknown cells, and cells beyond finite world bounds retain their actual edge depth.
 The regular pipeline alpha-blends visible strokes with a `less_equal` depth test; a second
 pipeline uses `greater` and 30% opacity for hidden strokes. Both leave depth unchanged.
+All hidden overlays draw before all visible overlays, using two pipeline selections for
+the overlay set. This prevents a later faint stroke from tinting an earlier bright stroke
+where diagnostic cells overlap on screen. Uniforms are still prepared once per cell.
 Diagnostic colors take precedence when an overlay also covers the focused cell. The voxel
 app uses cyan/red for the placement candidate and orange for involved blocks or missing
 support cells. See [placement diagnostics](block-placement.md#edits-and-diagnostics).

@@ -178,7 +178,9 @@ fn checkHints(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.BindGr
     defer depth_view.release();
     const readback = device.createBuffer(.{ .size = image_size * 2, .usage = .{ .copy_dst = true, .map_read = true } });
     defer readback.release();
-    for ([_]f32{ 1, 0.25 }) |clear_depth| {
+    for ([_]enum { visible, hidden, overlap_visible_first, overlap_hidden_first }{ .visible, .hidden, .overlap_visible_first, .overlap_hidden_first }) |case| {
+        const overlap = case == .overlap_visible_first or case == .overlap_hidden_first;
+        const clear_depth: f32 = if (overlap) 0.65 else if (case == .visible) 1 else 0.25;
         const encoder = device.createCommandEncoder(null);
         defer encoder.release();
         const attachments = [_]wgpu.RenderPassColorAttachment{.{ .view = color_view, .load_op = .clear, .store_op = .store, .clear_value = .{ .r = 0.2, .g = 0.4, .b = 0.6, .a = 1 } }};
@@ -188,12 +190,13 @@ fn checkHints(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.BindGr
             .depth_stencil_attachment = &.{ .view = depth_view, .depth_load_op = .clear, .depth_store_op = .store, .depth_clear_value = clear_depth },
         });
         defer pass.release();
+        var offsets: [2]outline.DrawOffsets = undefined;
         for (0..2) |index| {
             var transform = zmath.identity();
             transform[0][0] = 0.5;
             transform[1][1] = 0.5;
             transform[2] = .{ 0.1, 0.1, 0.1, 0 };
-            transform[3] = .{ if (index == 0) -0.7 else 0.1, -0.3, 0.5, 1 };
+            transform[3] = .{ if (index == 0 or overlap) -0.7 else 0.1, -0.3, if (index == 1 and overlap) 0.8 else 0.5, 1 };
             var data: outline.Uniforms = .{
                 .clip_from_block = transform,
                 .block_from_clip = zmath.inverse(transform),
@@ -206,13 +209,10 @@ fn checkHints(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.BindGr
             queue.writeBuffer(uniforms, visible_offset, outline.Uniforms, &.{data});
             data.color[3] *= 0.3;
             queue.writeBuffer(uniforms, hidden_offset, outline.Uniforms, &.{data});
-            pass.setPipeline(hidden_pipeline.pipeline_gpu);
-            pass.setBindGroup(0, bind_group, &.{hidden_offset});
-            pass.draw(outline.vertex_count, 1, 0, 0);
-            pass.setPipeline(visible_pipeline);
-            pass.setBindGroup(0, bind_group, &.{visible_offset});
-            pass.draw(outline.vertex_count, 1, 0, 0);
+            offsets[index] = .{ .hidden = hidden_offset, .visible = visible_offset };
         }
+        if (case == .overlap_hidden_first) std.mem.swap(outline.DrawOffsets, &offsets[0], &offsets[1]);
+        outline.drawOverlays(pass, hidden_pipeline.pipeline_gpu, visible_pipeline, bind_group, &offsets);
         pass.end();
         encoder.copyTextureToBuffer(.{ .texture = color }, .{ .buffer = readback, .layout = .{ .bytes_per_row = side * 4, .rows_per_image = side } }, extent);
         encoder.copyTextureToBuffer(.{ .texture = depth, .aspect = .depth_only }, .{ .buffer = readback, .layout = .{ .offset = image_size, .bytes_per_row = side * 4, .rows_per_image = side } }, extent);
@@ -227,7 +227,9 @@ fn checkHints(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.BindGr
         const pixels = readback.getConstMappedRange([4]u8, 0, side * side) orelse return error.NoMappedGpuResults;
         const depths = readback.getConstMappedRange(f32, image_size, side * side) orelse return error.NoMappedGpuResults;
         for (depths) |stored_depth| try std.testing.expectEqual(clear_depth, stored_depth);
-        const expected = if (clear_depth == 1) [_][4]u8{ .{ 153, 115, 77, 255 }, .{ 26, 179, 204, 255 } } else [_][4]u8{ .{ 82, 106, 130, 255 }, .{ 43, 125, 168, 255 } };
+        // The overlap probe must blend faint cyan BEFORE bright orange, regardless
+        // of cell order. Interleaved draws produce a different, cyan-tinted stroke.
+        const expected = if (overlap) [_][4]u8{ .{ 149, 126, 84, 255 }, .{ 51, 102, 153, 255 } } else if (clear_depth == 1) [_][4]u8{ .{ 153, 115, 77, 255 }, .{ 26, 179, 204, 255 } } else [_][4]u8{ .{ 82, 106, 130, 255 }, .{ 43, 125, 168, 255 } };
         for ([_]usize{ 19, 70 }, expected) |x, pixel| {
             inline for (0..4) |channel| {
                 try std.testing.expect(@abs(@as(i16, pixels[64 * side + x][channel]) - pixel[channel]) <= 1);
