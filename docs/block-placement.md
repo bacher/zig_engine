@@ -117,8 +117,9 @@ existing overhang. Natural terrain cells are not themselves revalidated as const
 Operation results carry status, an optional mined material, and an optional failure:
 reason, underlying cause, affected cell, measured value, limit, and up to 32 involved cell
 coordinates with an explicit truncation flag. The client retains the latest preview/result.
-In putting mode, while aiming at a reachable block, a translucent cyan cube outline previews an allowed
-placement; a red outline marks a rejected placement. Orange outlines show the affected
+In putting mode, while aiming at a reachable block, an opaque cyan cube outline previews an allowed
+placement; an opaque red outline marks a rejected placement. Both match the green removal
+target's three-pixel width and opacity. Translucent orange outlines show the affected
 construction and involved cells, including empty spaces that need support. Putting mode
 hides green focus edges. Missing cells beyond finite world edges retain
 their signed positions, while x coordinates wrap across the seam. Diagnostics show at most

@@ -7,8 +7,9 @@ const outline = engine.block_outline;
 const coordinates = @import("block_coordinates.zig");
 const block_diagnostics = @import("block_diagnostics.zig");
 
-pub const allowed_color: @Vector(4, f32) = .{ 0.1, 0.8, 1, 0.65 };
-pub const rejected_color: @Vector(4, f32) = .{ 1, 0.15, 0.1, 0.7 };
+// Match the opaque removal target's visual weight at the shared stroke width.
+pub const allowed_color: @Vector(4, f32) = .{ 0.1, 0.8, 1, 1 };
+pub const rejected_color: @Vector(4, f32) = .{ 1, 0.15, 0.1, 1 };
 pub const problem_color: @Vector(4, f32) = .{ 1, 0.65, 0.1, 0.65 };
 
 pub const Preview = struct {

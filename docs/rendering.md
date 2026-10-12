@@ -65,7 +65,8 @@ the overlay set. This prevents a later faint stroke from tinting an earlier brig
 where diagnostic cells overlap on screen. Each cell's instance data is prepared once and
 uploaded once; a shader pipeline constant applies the hidden pass's lower opacity.
 Diagnostic colors take precedence when an overlay also covers the focused cell. The voxel
-app uses cyan/red for the placement candidate and orange for involved blocks or missing
+app uses opaque cyan/red for the placement candidate, matching the green removal target's
+three-pixel width and opacity, and translucent orange for involved blocks or missing
 support cells. See [placement diagnostics](block-placement.md#edits-and-diagnostics).
 
 The correction adds one cached block lookup per distinct diagnostic cell and a six-bit
