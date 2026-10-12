@@ -313,7 +313,7 @@ test "headless engine and scene teardown releases owned resources and preserves 
     try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
 }
 
-test "block outline renders green thick edges with depth occlusion and near clipping" {
+test "block outline preserves thick green edges over tilted surfaces and behind occluders" {
     var uncaptured: ValidationResponse = .{};
     var response: ValidationResponse = .{};
     var mapping: @import("block_outline_readback.zig").Mapping = .{};

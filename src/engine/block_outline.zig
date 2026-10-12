@@ -14,9 +14,15 @@ const BindGroupLayouts = @import("bind_group_layouts.zig").BindGroupLayouts;
 pub const vertex_count = 12 * 6;
 pub const width_pixels: f32 = 3;
 pub const shader = @embedFile("shaders/block_outline.wgsl");
+pub const Uniforms = @import("bind_group_layouts/block_outline.zig").Uniforms;
 
 /// Rebase storage coordinates to the camera chunk before narrowing to f32.
 pub fn clipFromBlock(camera: *const Camera, block: [3]u32) zmath.Mat {
+    const position = blockPosition(camera, block);
+    return utils.matMul(camera.clip_from_world_chunked, zmath.translation(position[0], position[1], position[2]));
+}
+
+fn blockPosition(camera: *const Camera, block: [3]u32) @Vector(3, f32) {
     var chunk: ChunkCoords = undefined;
     var local: @Vector(3, f32) = undefined;
     inline for (0..3) |axis| {
@@ -24,14 +30,32 @@ pub fn clipFromBlock(camera: *const Camera, block: [3]u32) zmath.Mat {
         local[axis] = @floatFromInt(block[axis] % chunks.CHUNK_SIZE);
     }
     const delta: @Vector(3, f32) = @floatFromInt(camera.layout.getChunkDelta(chunk, camera.chunk));
-    const position = delta * @as(@Vector(3, f32), @splat(chunks.CHUNK_SIZE)) + local;
-    return utils.matMul(camera.clip_from_world_chunked, zmath.translation(position[0], position[1], position[2]));
+    return delta * @as(@Vector(3, f32), @splat(chunks.CHUNK_SIZE)) + local;
+}
+
+/// An edge is visible only if at least one of its adjacent faces faces the eye.
+pub fn faceMask(eye: @Vector(3, f32)) u32 {
+    var mask: u32 = 0;
+    inline for (0..3) |axis| {
+        if (eye[axis] <= 0) mask |= 1 << (2 * axis);
+        if (eye[axis] >= 1) mask |= 1 << (2 * axis + 1);
+    }
+    // Spectator cameras can enter a block: retain the interior-facing outline.
+    return if (mask == 0) 63 else mask;
+}
+
+pub fn uniforms(camera: *const Camera, block: [3]u32, viewport: @Vector(2, f32)) Uniforms {
+    const transform = clipFromBlock(camera, block);
+    const eye = chunks.getLocalPosition(camera.position) - blockPosition(camera, block);
+    return .{
+        .clip_from_block = transform,
+        .block_from_clip = zmath.inverse(transform),
+        .stroke = .{ viewport[0], viewport[1], width_pixels, @floatFromInt(faceMask(eye)) },
+    };
 }
 
 pub fn createPipeline(gctx: *zgpu.GraphicsContext, layouts: *const BindGroupLayouts, format: wgpu.TextureFormat) Pipeline {
-    // Reuse the transform + vec4 uniform layout; the second uniform supplies
-    // viewport dimensions and stroke width instead of the debug line color.
-    const layout = gctx.createPipelineLayout(&.{layouts.lines.bind_group_layout_handle});
+    const layout = gctx.createPipelineLayout(&.{layouts.block_outline.bind_group_layout_handle});
     defer gctx.releaseResource(layout);
     const module = zgpu.createWgslShaderModule(gctx.device, shader, "block_outline");
     defer module.release();
@@ -43,8 +67,7 @@ pub fn createPipeline(gctx: *zgpu.GraphicsContext, layouts: *const BindGroupLayo
             .format = .depth32_float,
             .depth_write_enabled = false,
             .depth_compare = .less_equal,
-            // Keep coplanar edge centers visible without changing scene depth.
-            .depth_bias = -2,
+            // Fragment depth follows the target surface under the expanded stroke.
         },
         .vertex = .{ .module = module, .entry_point = "vs" },
         .fragment = &.{ .module = module, .entry_point = "fs", .targets = &targets, .target_count = targets.len },
@@ -58,10 +81,12 @@ test "block outline rebases chunk boundaries and periodic camera positions" {
     var camera = Camera.init(&layout, 1);
     camera.updatePosition(.{ -8192.5, 0.5, 0.5 });
     const expected = clipFromBlock(&camera, block);
+    try std.testing.expectEqual(@as(f32, 1), uniforms(&camera, block, .{ 128, 128 }).stroke[3]);
     if (comptime WorldLayout.wrap_x) {
         for ([_]f64{ 16384, -32768, 16384 * 10000000000.0 }) |trip| {
             camera.updatePosition(.{ -8192.5 + trip, 0.5, 0.5 });
             const actual = clipFromBlock(&camera, block);
+            try std.testing.expectEqual(@as(f32, 1), uniforms(&camera, block, .{ 128, 128 }).stroke[3]);
             inline for (0..4) |column| inline for (0..4) |row| {
                 try std.testing.expectApproxEqAbs(expected[column][row], actual[column][row], 0.000001);
             };

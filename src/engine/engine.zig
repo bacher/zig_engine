@@ -137,6 +137,7 @@ pub const Engine = struct {
     bind_group_debug_shadow_map_texture: BindGroup,
     bind_group_shadow_map: BindGroup,
     bind_group_lines: BindGroup,
+    bind_group_block_outline: BindGroup,
     bind_group_ssao_pass: BindGroup,
     bind_group_final_pass: BindGroup,
     bind_group_debug_regular: BindGroup,
@@ -303,6 +304,7 @@ pub const Engine = struct {
             shadow_map_texture.array_view.view_handle,
         );
         const bind_group_lines = bind_group_layouts.lines.createBindGroup(gctx);
+        const bind_group_block_outline = bind_group_layouts.block_outline.createBindGroup(gctx);
 
         const bind_group_ssao_pass = bind_group_layouts.ssao_pass.createBindGroup(
             gctx,
@@ -394,6 +396,7 @@ pub const Engine = struct {
             .bind_group_shadow_map = bind_group_shadow_map,
             .bind_group_debug_shadow_map_texture = bind_group_debug_shadow_map_texture,
             .bind_group_lines = bind_group_lines,
+            .bind_group_block_outline = bind_group_block_outline,
             .bind_group_ssao_pass = bind_group_ssao_pass,
             .bind_group_final_pass = bind_group_final_pass,
             .bind_group_debug_regular = bind_group_debug_regular,
@@ -460,6 +463,7 @@ pub const Engine = struct {
         engine.bind_group_debug_shadow_map_texture.deinit(engine.gctx);
         engine.bind_group_shadow_map.deinit(engine.gctx);
         engine.bind_group_lines.deinit(engine.gctx);
+        engine.bind_group_block_outline.deinit(engine.gctx);
         engine.bind_group_ssao_pass.deinit(engine.gctx);
         engine.bind_group_final_pass.deinit(engine.gctx);
         engine.bind_group_debug_regular.deinit(engine.gctx);
@@ -1048,12 +1052,10 @@ pub const Engine = struct {
                         pass.end();
                         pass.release();
                     }
-                    const transform = gctx.uniformsAllocate(zmath.Mat, 1);
-                    transform.slice[0] = outline.clipFromBlock(scene.camera, block);
-                    const stroke = gctx.uniformsAllocate(zmath.Vec, 1);
-                    stroke.slice[0] = .{ engine.screen_size[0], engine.screen_size[1], outline.width_pixels, 0 };
+                    const data = gctx.uniformsAllocate(outline.Uniforms, 1);
+                    data.slice[0] = outline.uniforms(scene.camera, block, engine.screen_size);
                     pass.setPipeline(engine.pipelines.block_outline.pipeline_gpu);
-                    pass.setBindGroup(0, engine.bind_group_lines.wgpu_bind_group, &.{ transform.offset, stroke.offset });
+                    pass.setBindGroup(0, engine.bind_group_block_outline.wgpu_bind_group, &.{data.offset});
                     pass.draw(outline.vertex_count, 1, 0, 0);
                 }
             }

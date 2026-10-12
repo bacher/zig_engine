@@ -93,6 +93,7 @@ fn createEngine(gctx: *zgpu.GraphicsContext) !*Engine {
     engine.bind_group_debug_shadow_map_texture = layouts.debug_texture.createBindGroup(gctx, engine.texture_sampler, engine.shadow_map_texture.array_view.view_handle);
     engine.bind_group_shadow_map = layouts.shadow_map.createBindGroup(gctx, engine.texture_sampler, engine.shadow_map_texture.array_view.view_handle);
     engine.bind_group_lines = layouts.lines.createBindGroup(gctx);
+    engine.bind_group_block_outline = layouts.block_outline.createBindGroup(gctx);
     engine.bind_group_ssao_pass = layouts.ssao_pass.createBindGroup(gctx, engine.texture_sampler, engine.depth_texture.view_handle, engine.first_pass_normal_output_texture.view_handle);
     engine.bind_group_final_pass = layouts.final_pass.createBindGroup(gctx, engine.texture_sampler, engine.depth_texture.view_handle, engine.first_pass_color_output_texture.view_handle, engine.first_pass_normal_output_texture.view_handle, engine.ssao_output_texture.view_handle);
     engine.bind_group_debug_regular = layouts.regular.createBindGroup(gctx, engine.texture_repeat_sampler, engine.uv_test_texture);

@@ -18,10 +18,10 @@ pub const LinesBindGroupLayout = struct {
                 true,
                 0,
             ),
-            // Debug line color, or viewport/stroke parameters for block outlines.
+            // color
             zgpu.bufferEntry(
                 1,
-                .{ .vertex = true, .fragment = true },
+                .{ .fragment = true },
                 .uniform,
                 true,
                 0,

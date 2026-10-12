@@ -26,18 +26,17 @@ pub fn check(device: wgpu.Device, mapping: *Mapping) !void {
     }
     defer inline for (.{ "bind_group_layout_pool", "pipeline_layout_pool", "render_pipeline_pool" }) |name| @field(gctx, name).pool.deinit();
     var layouts: layouts_module.BindGroupLayouts = undefined;
-    layouts.lines = .init(&gctx);
-    defer layouts.lines.deinit(&gctx);
+    layouts.block_outline = .init(&gctx);
+    defer layouts.block_outline.deinit(&gctx);
     const pipeline = outline.createPipeline(&gctx, &layouts, .rgba8_unorm);
     defer pipeline.deinit(&gctx);
     const uniforms = device.createBuffer(.{ .size = 512, .usage = .{ .uniform = true, .copy_dst = true } });
     defer uniforms.release();
     const entries = [_]wgpu.BindGroupEntry{
-        .{ .binding = 0, .buffer = uniforms, .size = @sizeOf(zmath.Mat) },
-        .{ .binding = 1, .buffer = uniforms, .size = @sizeOf(zmath.Vec) },
+        .{ .binding = 0, .buffer = uniforms, .size = @sizeOf(outline.Uniforms) },
     };
     const bind_group = device.createBindGroup(.{
-        .layout = gctx.lookupResource(layouts.lines.bind_group_layout_handle).?,
+        .layout = gctx.lookupResource(layouts.block_outline.bind_group_layout_handle).?,
         .entries = &entries,
         .entry_count = entries.len,
     });
@@ -57,8 +56,7 @@ pub fn check(device: wgpu.Device, mapping: *Mapping) !void {
         const image_size: u64 = side * side * 4;
         const readback = device.createBuffer(.{ .size = image_size * 2, .usage = .{ .copy_dst = true, .map_read = true } });
         defer readback.release();
-        const stroke = zmath.Vec{ @floatFromInt(side), @floatFromInt(side), outline.width_pixels, 0 };
-        queue.writeBuffer(uniforms, 256, zmath.Vec, &.{stroke});
+        const stroke = zmath.Vec{ @floatFromInt(side), @floatFromInt(side), outline.width_pixels, 63 };
         for ([_]enum { visible, distant, occluded, near_clipped, perspective_near, behind }{ .visible, .distant, .occluded, .near_clipped, .perspective_near, .behind }) |case| {
             var transform = zmath.identity();
             transform[2][2] = 0.1;
@@ -76,7 +74,8 @@ pub fn check(device: wgpu.Device, mapping: *Mapping) !void {
             if (case == .perspective_near) {
                 transform = @import("utils.zig").matMul(zmath.perspectiveFovRh(std.math.pi / 2.0, 1, 0.1, 10), zmath.translation(-0.1, -0.1, -0.3));
             }
-            queue.writeBuffer(uniforms, 0, zmath.Mat, &.{transform});
+            const data = outline.Uniforms{ .clip_from_block = transform, .block_from_clip = zmath.inverse(transform), .stroke = stroke };
+            queue.writeBuffer(uniforms, 0, outline.Uniforms, &.{data});
             const clear_depth: f32 = if (case == .occluded) 0.25 else if (case == .perspective_near) 1 else 0.5;
             const encoder = device.createCommandEncoder(null);
             defer encoder.release();
@@ -88,7 +87,7 @@ pub fn check(device: wgpu.Device, mapping: *Mapping) !void {
             });
             defer pass.release();
             pass.setPipeline(pipeline.pipeline_gpu);
-            pass.setBindGroup(0, bind_group, &.{ 0, 256 });
+            pass.setBindGroup(0, bind_group, &.{0});
             pass.draw(outline.vertex_count, 1, 0, 0);
             pass.end();
             encoder.copyTextureToBuffer(.{ .texture = color }, .{ .buffer = readback, .layout = .{ .bytes_per_row = side * 4, .rows_per_image = side } }, extent);
@@ -122,6 +121,167 @@ pub fn check(device: wgpu.Device, mapping: *Mapping) !void {
                 }
                 // Rasterization's edge rule can include either boundary sample.
                 try std.testing.expect(left_width >= 2 and left_width <= 4);
+            }
+        }
+    }
+    try checkOblique(&gctx, &layouts, pipeline.pipeline_gpu, bind_group, uniforms, mapping);
+}
+
+const edges = [_][2]u3{ .{ 0, 1 }, .{ 2, 3 }, .{ 4, 5 }, .{ 6, 7 }, .{ 0, 2 }, .{ 1, 3 }, .{ 4, 6 }, .{ 5, 7 }, .{ 0, 4 }, .{ 1, 5 }, .{ 2, 6 }, .{ 3, 7 } };
+
+fn corner(index: u3) zmath.Vec {
+    return .{ @floatFromInt(index & 1), @floatFromInt((index >> 1) & 1), @floatFromInt((index >> 2) & 1), 1 };
+}
+
+// Render actual cube surfaces before the outline: a cleared constant depth alone
+// cannot expose the self-occlusion caused by screen-space stroke expansion.
+fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.BindGroupLayouts, pipeline: wgpu.RenderPipeline, bind_group: wgpu.BindGroup, uniforms: wgpu.Buffer, mapping: *Mapping) !void {
+    const device = gctx.device;
+    const cube_source =
+        \\@group(0) @binding(0) var<uniform> clip_from_cube: mat4x4f;
+        \\const vertices = array<u32, 36>(
+        \\    0,2,4, 2,6,4, 1,5,3, 3,5,7,
+        \\    0,4,1, 1,4,5, 2,3,6, 3,7,6,
+        \\    0,1,2, 1,3,2, 4,6,5, 5,6,7,
+        \\);
+        \\@vertex fn main(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
+        \\    let c = vertices[index];
+        \\    return clip_from_cube * vec4f(f32(c & 1u), f32((c >> 1u) & 1u), f32((c >> 2u) & 1u), 1);
+        \\}
+    ;
+    const module = zgpu.createWgslShaderModule(device, cube_source, "outline_test_cube");
+    defer module.release();
+    const cube_layouts = [_]wgpu.BindGroupLayout{gctx.lookupResource(layouts.block_outline.bind_group_layout_handle).?};
+    const cube_layout = device.createPipelineLayout(.{ .bind_group_layouts = &cube_layouts, .bind_group_layout_count = cube_layouts.len });
+    defer cube_layout.release();
+    const cube = device.createRenderPipeline(.{
+        .layout = cube_layout,
+        .primitive = .{ .topology = .triangle_list, .cull_mode = .none },
+        .vertex = .{ .module = module, .entry_point = "main" },
+        .depth_stencil = &.{ .format = .depth32_float, .depth_write_enabled = true, .depth_compare = .less },
+    });
+    defer cube.release();
+    const queue = device.getQueue();
+    defer queue.release();
+    const eyes = [_]zmath.Vec{ .{ 2.5, -3, 2, 1 }, .{ 3, 0.5, 2, 1 }, .{ -2, 2, -1.5, 1 }, .{ 0.6, -0.5, 3.5, 1 } };
+    for ([_]u32{ 128, 256 }) |side| {
+        const extent = wgpu.Extent3D{ .width = side, .height = side, .depth_or_array_layers = 1 };
+        const color = device.createTexture(.{ .size = extent, .format = .rgba8_unorm, .usage = .{ .render_attachment = true, .copy_src = true } });
+        defer color.release();
+        const color_view = color.createView(.{});
+        defer color_view.release();
+        const depth = device.createTexture(.{ .size = extent, .format = .depth32_float, .usage = .{ .render_attachment = true } });
+        defer depth.release();
+        const depth_view = depth.createView(.{});
+        defer depth_view.release();
+        const image_size: u64 = side * side * 4;
+        const readback = device.createBuffer(.{ .size = image_size * 3, .usage = .{ .copy_dst = true, .map_read = true } });
+        defer readback.release();
+        for (eyes, 0..) |eye, view_index| {
+            const transform = @import("utils.zig").matMul(zmath.perspectiveFovRh(std.math.pi / 2.0, 1, 0.01, 1000), zmath.lookAtRh(eye, .{ 0.5, 0.5, 0.5, 1 }, .{ 0, 0, 1, 0 }));
+            const mask = outline.faceMask(.{ eye[0], eye[1], eye[2] });
+            const data = outline.Uniforms{
+                .clip_from_block = transform,
+                .block_from_clip = zmath.inverse(transform),
+                .stroke = .{ @floatFromInt(side), @floatFromInt(side), outline.width_pixels, @floatFromInt(mask) },
+            };
+            queue.writeBuffer(uniforms, 0, outline.Uniforms, &.{data});
+            // A larger cube halfway to the eye must still occlude the corrected
+            // outline. It uses a second dynamic-uniform region, not target data.
+            const center = (eye + zmath.Vec{ 0.5, 0.5, 0.5, 1 }) * @as(zmath.Vec, @splat(0.5));
+            var foreground = data;
+            const model = @import("utils.zig").matMul(zmath.translation(center[0] - 1, center[1] - 1, center[2] - 1), zmath.scaling(2, 2, 2));
+            foreground.clip_from_block = @import("utils.zig").matMul(transform, model);
+            queue.writeBuffer(uniforms, 256, outline.Uniforms, &.{foreground});
+            for (0..3) |with_cube| {
+                const encoder = device.createCommandEncoder(null);
+                defer encoder.release();
+                const scene = encoder.beginRenderPass(.{
+                    .color_attachments = null,
+                    .color_attachment_count = 0,
+                    .depth_stencil_attachment = &.{ .view = depth_view, .depth_load_op = .clear, .depth_store_op = .store, .depth_clear_value = 1 },
+                });
+                defer scene.release();
+                if (with_cube >= 1) {
+                    scene.setPipeline(cube);
+                    scene.setBindGroup(0, bind_group, &.{0});
+                    scene.draw(36, 1, 0, 0);
+                    if (with_cube == 2) {
+                        scene.setBindGroup(0, bind_group, &.{256});
+                        scene.draw(36, 1, 0, 0);
+                    }
+                }
+                scene.end();
+                const attachments = [_]wgpu.RenderPassColorAttachment{.{ .view = color_view, .load_op = .clear, .store_op = .store, .clear_value = .{ .r = 0, .g = 0, .b = 0, .a = 1 } }};
+                const pass = encoder.beginRenderPass(.{
+                    .color_attachments = &attachments,
+                    .color_attachment_count = attachments.len,
+                    .depth_stencil_attachment = &.{ .view = depth_view, .depth_load_op = .load, .depth_store_op = .store },
+                });
+                defer pass.release();
+                pass.setPipeline(pipeline);
+                pass.setBindGroup(0, bind_group, &.{0});
+                pass.draw(outline.vertex_count, 1, 0, 0);
+                pass.end();
+                encoder.copyTextureToBuffer(.{ .texture = color }, .{ .buffer = readback, .layout = .{ .offset = with_cube * image_size, .bytes_per_row = side * 4, .rows_per_image = side } }, extent);
+                const command = encoder.finish(null);
+                defer command.release();
+                queue.submit(&.{command});
+            }
+            mapping.* = .{};
+            readback.mapAsync(.{ .read = true }, 0, image_size * 3, Mapping.callback, mapping);
+            defer readback.unmap();
+            try callbacks.waitForCallback(device, &mapping.done);
+            try std.testing.expectEqual(wgpu.BufferMapAsyncStatus.success, mapping.status);
+            const pixels = readback.getConstMappedRange([4]u8, 0, side * side * 3) orelse return error.NoMappedGpuResults;
+            const baseline = pixels[0 .. side * side];
+            const actual = pixels[side * side .. side * side * 2];
+            const occluded = pixels[side * side * 2 ..];
+            for (occluded) |pixel| try std.testing.expectEqual(@as(u8, 0), pixel[1]);
+            if (view_index == 0) {
+                // This back edge projects into the face interior, clear of the
+                // visible strokes. Depth correction must not reveal it there.
+                const hidden = @import("utils.zig").matApply(transform, .{ 0, 1, 0.5, 1 });
+                const half: f32 = @as(f32, @floatFromInt(side)) / 2;
+                const x: usize = @intFromFloat(@floor((1 + hidden[0] / hidden[3]) * half));
+                const y: usize = @intFromFloat(@floor((1 - hidden[1] / hidden[3]) * half));
+                try std.testing.expectEqual(@as(u8, 0), baseline[y * side + x][1]);
+                try std.testing.expectEqual(@as(u8, 0), actual[y * side + x][1]);
+            }
+            var probes: usize = 0;
+            var missing: usize = 0;
+            for (edges) |edge| {
+                const a = corner(edge[0]);
+                const b = corner(edge[1]);
+                var visible = false;
+                inline for (0..3) |axis| {
+                    if (a[axis] == b[axis] and (if (a[axis] == 0) eye[axis] < 0 else eye[axis] > 1)) visible = true;
+                }
+                if (!visible) continue;
+                const clip_a = @import("utils.zig").matApply(transform, a);
+                const clip_b = @import("utils.zig").matApply(transform, b);
+                const scale: @Vector(2, f32) = @splat(@as(f32, @floatFromInt(side)) / 2);
+                const pa = @Vector(2, f32){ 1 + clip_a[0] / clip_a[3], 1 - clip_a[1] / clip_a[3] } * scale;
+                const pb = @Vector(2, f32){ 1 + clip_b[0] / clip_b[3], 1 - clip_b[1] / clip_b[3] } * scale;
+                const delta = pb - pa;
+                const length_squared = @reduce(.Add, delta * delta);
+                if (length_squared < 1) continue;
+                for (0..side) |y| for (0..side) |x| {
+                    const point = @Vector(2, f32){ @as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5 };
+                    const t = @reduce(.Add, (point - pa) * delta) / length_squared;
+                    if (t < 0.2 or t > 0.8) continue;
+                    const offset = point - (pa + delta * @as(@Vector(2, f32), @splat(t)));
+                    if (@reduce(.Add, offset * offset) > 1.25 * 1.25) continue;
+                    const index = y * side + x;
+                    try std.testing.expectEqual(@as(u8, 255), baseline[index][1]);
+                    probes += 1;
+                    if (actual[index][1] != 255) missing += 1;
+                };
+            }
+            try std.testing.expect(probes > 30);
+            if (missing != 0) {
+                std.debug.print("outline self-occlusion: viewport={d}, eye={d}, lost {d}/{d} visible-edge pixels\n", .{ side, eye, missing, probes });
+                return error.OutlineSelfOcclusion;
             }
         }
     }
