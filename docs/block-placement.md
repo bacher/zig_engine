@@ -133,9 +133,18 @@ pass writes scene depth. There is no solid ghost mesh or screen text yet.
 
 `World.previewOperation` checks hypothetical placement without changing blocks, pending
 commands, or the latest actual edit result. Its result is cached by target, selected material,
-and a world validation revision. Accepted chunk snapshots, eviction, and optimistic block
-changes invalidate it. Player overlap is checked every frame, including the frozen player
-while spectating. Removing mode only targets and highlights the focused block: it does not
+and the contents/availability of chunks intersecting the 28-cell support window (at most
+27 distinct chunks). Each update compares their local validation stamps; this allocates
+nothing and runs no support searches. Missing chunks also participate, so their arrival
+invalidates a missing-data result. Accepted snapshots, eviction, and optimistic block
+changes within the window invalidate it; changes outside it preserve the cached result.
+Local stamps are independent of authoritative revisions, so same-revision snapshots and
+eviction/reload between updates cannot retain stale previews. Rejected stale snapshots and
+no-op edits preserve the cache. Invalidation is conservative at chunk granularity.
+Changing the target or material still runs full synchronous validation; actual edits always
+validate independently of preview caching. Player overlap is checked every frame, including
+the frozen player while spectating. Removing mode only targets and highlights the focused
+block: it does not
 call placement validation. Switching modes clears cached previews and hints. Losing focus,
 reaching empty air, or losing targeting data also clears the hints.
 `std.debug.print` reports changed previews with a readable reason, underlying cause, and
@@ -213,16 +222,25 @@ platforms, span limits, inherited/group heights, protected platform edits, crush
 bridges, mining conversions, timer ordering, covering/exposure, chunk boundaries, eviction,
 time catch-up, inclusive support windows, stacked overhangs, conservative dependent edits,
 root-specific caches, translated/wrapped constructions, and client/service agreement with
-only a 3x3x3 neighborhood. `zig build test-gpu` checks the shared voxel shader pipelines when a
-graphics adapter is available.
+only a 3x3x3 neighborhood. Preview tests count actual validation invocations to verify reuse,
+relevant invalidation, distant streaming changes, and per-frame player-overlap updates.
+`zig build test-gpu` checks the shared voxel shader pipelines when a graphics adapter is available.
 
 `zig build bench-outlines -Doptimize=ReleaseFast` measures CPU preparation for one focused
 outline and 20/34 diagnostic cells, including occupied-cell classification and shared
 uniform preparation for the visible and hidden passes. It excludes structural validation,
 GPU execution, and command encoding. See [rendering costs](rendering.md#voxel-rendering).
 
-`zig build bench-placement -Doptimize=ReleaseFast` reports reader calls and the median/minimum
-time for ten `World.previewOperation` calls beside a 200-block (5x5x8) plank building over
-natural stone. The CPU suite enforces a reader-call budget for that reproduction, also at
+`zig build bench-placement -Doptimize=ReleaseFast` also measures allocation-free cache checks
+for the benchmark's support window and a full 27-chunk window (11 samples of 10,000 checks),
+excluding raycast, structural validation, and rendering. It reports reader calls and the
+median/minimum time for ten `World.previewOperation` calls beside a 200-block (5x5x8) plank
+building over natural stone. The CPU suite enforces a reader-call budget for that reproduction, also at
 a translated position across the wrapped seam; elapsed time is reported rather than asserted
 because it depends on the machine and build mode.
+
+On the local Apple M4 Max, ReleaseFast cache checks measured median times of 0.009 µs for
+8 chunks and 0.050 µs for the maximum 27 chunks. Full validation beside the 200-block building
+measured 2.64 ms in that run. These are CPU microbenchmarks, not full-frame timings. Window
+invalidation avoids rerunning validation after distant updates; a new target or material,
+or a change anywhere in an intersecting chunk, can still incur full synchronous validation.

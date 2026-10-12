@@ -70,7 +70,7 @@ const Game = struct {
     placement_validation: ?struct {
         block: [3]u32,
         material: voxel_chunk_module.BlockType,
-        revision: u64,
+        window: world_module.ValidationWindow,
         result: world_module.EditResult,
     } = null,
     current_placement_preview: ?placement_preview.Preview = null,
@@ -545,12 +545,12 @@ const Game = struct {
         if (game.placement_validation == null or
             !std.meta.eql(game.placement_validation.?.block, block) or
             game.placement_validation.?.material != game.selected_material or
-            game.placement_validation.?.revision != world.validation_revision)
+            !game.placement_validation.?.window.isCurrent(world))
         {
             game.placement_validation = .{
                 .block = block,
                 .material = game.selected_material,
-                .revision = world.validation_revision,
+                .window = world.validationWindow(block),
                 .result = world.previewOperation(.{ .block = block, .action = .{ .put = game.selected_material } }),
             };
         }
@@ -1364,39 +1364,36 @@ test "Tab separates focus and placement previews and skips structural validation
         fixture.game.world.?.setBlockUnchecked(.{ target[0], target[1] - 1, target[2] - 1 }, .stone);
         fixture.game.world.?.pending_operations.clearRetainingCapacity();
 
-        // Structural evaluation allocates its per-edit cache. Track this to ensure
-        // removing does not silently compute a preview and merely hide the result.
-        var allocations = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-        fixture.game.world.?.allocator = allocations.allocator();
-        defer fixture.game.world.?.allocator = std.testing.allocator;
+        var validation_calls: usize = 0;
+        fixture.game.world.?.preview_call_counter = &validation_calls;
         fixture.game.updateBlockFocus();
         try std.testing.expectEqual(target, fixture.scene.highlighted_block.?);
         try std.testing.expectEqual(0, fixture.scene.block_overlays.count);
         try std.testing.expectEqual(null, fixture.game.placement_validation);
         try std.testing.expectEqual(null, fixture.game.current_placement_preview);
-        try std.testing.expectEqual(0, allocations.allocations);
+        try std.testing.expectEqual(0, validation_calls);
 
         handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
         fixture.game.updateBlockFocus();
         try std.testing.expectEqual(null, fixture.scene.highlighted_block);
         try std.testing.expectEqual(1, fixture.scene.block_overlays.count);
         try std.testing.expectEqual(world_module.OperationStatus.success, fixture.game.current_placement_preview.?.result.status);
-        try std.testing.expect(allocations.allocations > 0);
+        try std.testing.expectEqual(1, validation_calls);
 
         handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
         try std.testing.expectEqual(0, fixture.scene.block_overlays.count);
         try std.testing.expectEqual(null, fixture.game.placement_validation);
         try std.testing.expectEqual(null, fixture.game.current_placement_preview);
         fixture.game.world.?.removeChunk(below_chunk);
-        const previous_allocations = allocations.allocations;
         fixture.game.updateBlockFocus();
         try std.testing.expectEqual(target, fixture.scene.highlighted_block.?);
-        try std.testing.expectEqual(previous_allocations, allocations.allocations);
+        try std.testing.expectEqual(1, validation_calls);
 
         handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
         fixture.game.updateBlockFocus();
         try std.testing.expectEqual(null, fixture.scene.highlighted_block);
         try std.testing.expectEqual(world_module.OperationStatus.missing_data, fixture.game.current_placement_preview.?.result.status);
+        try std.testing.expectEqual(2, validation_calls);
         fixture.input.focused = false;
         fixture.game.updateBlockFocus();
         try std.testing.expectEqual(null, fixture.scene.highlighted_block);
@@ -1439,7 +1436,10 @@ test "placement preview shows missing footprint cells and refreshes after edits,
     for ([_]ChunkCoords{ origin - ChunkCoords{ 1, 0, 0 }, origin - ChunkCoords{ 0, 0, 1 }, origin - ChunkCoords{ 1, 0, 1 } }) |chunk|
         try fixture.game.world.?.insertChunk(chunk, WorldChunk.initEmpty());
     fixture.game.selected_material = .dirt;
+    var validation_calls: usize = 0;
+    fixture.game.world.?.preview_call_counter = &validation_calls;
     fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(1, validation_calls);
     const preview = fixture.game.current_placement_preview.?;
     try std.testing.expectEqual(@import("block_rules.zig").Reason.earth_footprint, preview.result.failure.?.reason);
     try std.testing.expectEqual(10, fixture.scene.block_overlays.count);
@@ -1457,9 +1457,9 @@ test "placement preview shows missing footprint cells and refreshes after edits,
     try std.testing.expectEqual(world_module.OperationStatus.success, fixture.game.current_placement_preview.?.result.status);
     try std.testing.expectEqual(1, fixture.scene.block_overlays.count);
     try std.testing.expectEqualDeep(placement_preview.allowed_color, fixture.scene.block_overlays.cells[0].color);
-    const cached = fixture.game.placement_validation.?;
+    try std.testing.expectEqual(2, validation_calls);
     fixture.game.updateBlockFocus();
-    try std.testing.expect(std.meta.eql(cached, fixture.game.placement_validation.?));
+    try std.testing.expectEqual(2, validation_calls);
 
     // A received replacement can remove support without a local tool command.
     const below_chunk = origin - ChunkCoords{ 0, 0, 1 };
@@ -1467,18 +1467,107 @@ test "placement preview shows missing footprint cells and refreshes after edits,
     replacement.chunk_revision = fixture.game.world.?.getChunk(below_chunk).?.chunk_revision + 1;
     try fixture.game.world.?.insertChunk(below_chunk, replacement);
     fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(3, validation_calls);
     try std.testing.expectEqual(@import("block_rules.zig").Reason.earth_footprint, fixture.game.current_placement_preview.?.result.failure.?.reason);
     try std.testing.expect(fixture.scene.block_overlays.count > 1);
     fixture.game.selected_material = .sand;
     fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(4, validation_calls);
     try std.testing.expectEqual(world_module.OperationStatus.success, fixture.game.current_placement_preview.?.result.status);
     try std.testing.expectEqual(1, fixture.scene.block_overlays.count);
     fixture.game.selected_material = .dirt;
     fixture.game.world.?.removeChunk(below_chunk);
     fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(5, validation_calls);
     try std.testing.expectEqual(world_module.OperationStatus.missing_data, fixture.game.current_placement_preview.?.result.status);
     try std.testing.expect(fixture.scene.block_overlays.count > 1);
     try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
+}
+
+test "placement cache ignores distant streaming and validates each relevant change once" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    const target = StreamingTest.toolTarget();
+    fixture.game.world.?.setBlockUnchecked(.{ target[0] + 1, target[1], target[2] }, .stone);
+    fixture.game.world.?.pending_operations.clearRetainingCapacity();
+    handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
+    var validation_calls: usize = 0;
+    const world = &fixture.game.world.?;
+    world.preview_call_counter = &validation_calls;
+    fixture.game.updateBlockFocus();
+    const original_block = fixture.game.current_placement_preview.?.block;
+    try std.testing.expectEqual(1, validation_calls);
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(1, validation_calls);
+
+    const distant = test_layout.origin_chunk + ChunkCoords{ 3, 0, 0 };
+    try world.insertChunk(distant, WorldChunk.initEmpty());
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(1, validation_calls);
+    world.setBlockUnchecked(.{ @intCast(distant[0] * consts.CHUNK_SIZE), target[1], target[2] }, .stone);
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(1, validation_calls);
+    try world.insertChunk(distant, WorldChunk.initEmpty());
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(1, validation_calls);
+    world.removeChunk(distant);
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(1, validation_calls);
+
+    const nearby = test_layout.origin_chunk - ChunkCoords{ 1, 0, 0 };
+    try world.insertChunk(nearby, WorldChunk.initEmpty()); // Previously missing.
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(2, validation_calls);
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(2, validation_calls);
+    const nearby_block = [3]u32{ target[0] - 1, target[1] - 1, target[2] };
+    world.setBlockUnchecked(nearby_block, .stone);
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(3, validation_calls);
+    world.setBlockUnchecked(nearby_block, .stone); // Rejected no-op.
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(3, validation_calls);
+    try world.insertChunk(nearby, WorldChunk.initEmpty()); // Same authoritative revision, optimistic replay.
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(4, validation_calls);
+    world.removeChunk(nearby);
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(5, validation_calls);
+    try world.insertChunk(nearby, WorldChunk.initEmpty());
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(6, validation_calls);
+    world.removeChunk(nearby);
+    try world.insertChunk(nearby, WorldChunk.initEmpty()); // Eviction/reload between two frames.
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(7, validation_calls);
+    var replacement = WorldChunk.initEmpty();
+    replacement.chunk_revision = 10;
+    try world.insertChunk(nearby, replacement);
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(8, validation_calls);
+    replacement.chunk_revision = 9;
+    try std.testing.expectError(error.StaleChunk, world.insertChunk(nearby, replacement));
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(8, validation_calls);
+
+    // A new target validates even when its window has the same chunk stamps.
+    fixture.camera.updatePosition(.{ 1.5, 0.5, 0.5 });
+    fixture.game.updateBlockFocus();
+    try std.testing.expect(!std.meta.eql(original_block, fixture.game.current_placement_preview.?.block));
+    try std.testing.expectEqual(9, validation_calls);
+    fixture.game.selected_material = .dirt;
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(10, validation_calls);
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(10, validation_calls);
+    fixture.game.selected_material = .sand;
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(11, validation_calls);
+    // Actual edits still evaluate the operation, even with a matching cached preview.
+    try std.testing.expectEqual(world_module.OperationStatus.success, world.tryOperation(.{ .block = fixture.game.current_placement_preview.?.block, .action = .{ .put = .sand } }).status);
+    try std.testing.expectEqual(12, validation_calls);
 }
 
 test "placement preview checks the frozen player each frame independently of structural caching" {
@@ -1487,19 +1576,21 @@ test "placement preview checks the frozen player each frame independently of str
     defer fixture.deinit();
     try fixture.prepareToolTest();
     handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
+    var validation_calls: usize = 0;
+    fixture.game.world.?.preview_call_counter = &validation_calls;
     fixture.game.updateBlockFocus();
-    const cached = fixture.game.placement_validation.?;
+    try std.testing.expectEqual(1, validation_calls);
     fixture.game.player = PlayerController.init(std.testing.allocator, .{ 0.5, 2.5, 0 });
     fixture.game.control_mode = .spectator;
     fixture.game.updateBlockFocus();
     try std.testing.expect(fixture.game.current_placement_preview.?.overlaps_player);
     try std.testing.expectEqualDeep(placement_preview.rejected_color, fixture.scene.block_overlays.cells[0].color);
-    try std.testing.expect(std.meta.eql(cached, fixture.game.placement_validation.?));
+    try std.testing.expectEqual(1, validation_calls);
     fixture.game.player.?.position = .{ 10.5, 10.5, 0 };
     fixture.game.updateBlockFocus();
     try std.testing.expect(!fixture.game.current_placement_preview.?.overlaps_player);
     try std.testing.expectEqualDeep(placement_preview.allowed_color, fixture.scene.block_overlays.cells[0].color);
-    try std.testing.expect(std.meta.eql(cached, fixture.game.placement_validation.?));
+    try std.testing.expectEqual(1, validation_calls);
     try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
 }
 
