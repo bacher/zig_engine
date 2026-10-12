@@ -42,6 +42,7 @@ const world_engine = @import("./world_engine_glue.zig");
 const transformations = @import("block_transformations.zig");
 const block_targeting = @import("block_targeting.zig");
 const placement_preview = @import("placement_preview.zig");
+const block_messages = @import("block_messages.zig");
 
 const DEBUG = true;
 
@@ -74,6 +75,7 @@ const Game = struct {
         result: world_module.EditResult,
     } = null,
     current_placement_preview: ?placement_preview.Preview = null,
+    block_action_error: block_messages.TimedError = .{},
     fractional_ticks: f64 = 0,
     /// Active subscriptions, including loads still in flight. Kept until cache eviction.
     chunk_subscriptions: std.AutoHashMapUnmanaged(u32, u64) = .empty,
@@ -279,7 +281,7 @@ const Game = struct {
             if (response.operation) |result| {
                 world.acknowledgeOperation(result.request_id);
                 world.last_edit_result = .{ .status = result.status, .failure = result.failure, .mined_type = result.mined_type };
-                if (result.status != .success) std.debug.print("block operation {d} failed: {s}\n", .{ result.request_id, @tagName(result.status) });
+                game.showBlockEditError(world.last_edit_result.?);
             }
         }
         for (package.responses.items) |response| {
@@ -526,7 +528,6 @@ const Game = struct {
         defer {
             if (preview) |current| {
                 scene.block_overlays = current.overlays(&game.world.?);
-                if (game.current_placement_preview == null or !std.meta.eql(game.current_placement_preview.?, current)) current.print();
             } else {
                 game.placement_validation = null;
             }
@@ -580,7 +581,7 @@ const Game = struct {
         };
         if (action == .place) if (game.player) |*player| {
             if (terrain_collision.overlapsBlock(player.body, player.position, game.layout(), edited_block)) {
-                std.debug.print("can't place block {any}: overlaps player body\n", .{edited_block});
+                game.block_action_error.show(placement_preview.player_overlap_message, game.engine.time);
                 return;
             }
         };
@@ -589,10 +590,7 @@ const Game = struct {
             .place => |material| .{ .put = material },
         } });
         if (result.status != .success) {
-            if (result.failure) |failure| {
-                std.debug.print("can't edit block: ", .{});
-                placement_preview.printFailure(failure);
-            }
+            game.showBlockEditError(result);
             return;
         }
         if (game.player) |*player| player.terrainChanged();
@@ -602,6 +600,13 @@ const Game = struct {
         }
 
         game.markChunksAroundBlockDirty(edited_block);
+    }
+
+    fn showBlockEditError(game: *Game, result: world_module.EditResult) void {
+        var buffer: [placement_preview.message_capacity]u8 = undefined;
+        if (placement_preview.errorMessageForResult(result, &buffer)) |message| {
+            game.block_action_error.show(message, game.engine.time);
+        }
     }
 
     /// Invalidates the edited chunk and face neighbors touched by a boundary edit.
@@ -988,9 +993,9 @@ fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
 }
 
 fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
-    _ = engine;
     _ = pass;
-    _ = game_opaque;
+    const game: *const Game = @ptrCast(@alignCast(game_opaque));
+    block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
 }
 
 test {
@@ -1089,6 +1094,7 @@ test "camera placement rejects the player's body before changing the optimistic 
     fixture.game.world.?.setBlockUnchecked(ground, .stone);
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
     fixture.game.editBlockInView(.{ .place = fixture.game.selected_material });
+    try std.testing.expectEqualStrings(placement_preview.player_overlap_message, fixture.game.block_action_error.message(0).?);
     try std.testing.expect(!try fixture.game.world.?.isBlockSolid(.{ 8192, 4096, 128 }));
     try std.testing.expectEqual(@as(usize, 0), fixture.game.world.?.pending_operations.items.len);
     // The same protection applies while the player is frozen in spectator mode.
@@ -1489,6 +1495,78 @@ test "placement preview shows missing footprint cells and refreshes after edits,
     try std.testing.expectEqual(world_module.OperationStatus.missing_data, fixture.game.current_placement_preview.?.result.status);
     try std.testing.expect(fixture.scene.block_overlays.count > 1);
     try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
+}
+
+test "preview errors and timed edit feedback coexist and clear independently" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    fixture.game.toggleBlockMode();
+    fixture.game.selected_material = .dirt;
+    fixture.game.updateBlockFocus();
+    var buffer: [placement_preview.message_capacity]u8 = undefined;
+    try std.testing.expect(fixture.game.current_placement_preview.?.errorMessage(&buffer) != null);
+    try std.testing.expectEqual(null, fixture.game.block_action_error.message(0));
+
+    fixture.game.editBlockInView(.{ .place = .dirt });
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqualStrings(fixture.game.current_placement_preview.?.errorMessage(&buffer).?, fixture.game.block_action_error.message(0).?);
+    try std.testing.expectEqual(null, fixture.game.block_action_error.message(block_messages.action_error_duration));
+    try std.testing.expect(fixture.game.current_placement_preview.?.errorMessage(&buffer) != null);
+
+    fixture.engine.time = 5;
+    fixture.game.editBlockInView(.{ .place = .dirt });
+    // A valid preview immediately removes the hint without erasing action feedback.
+    fixture.game.selected_material = .sand;
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(null, fixture.game.current_placement_preview.?.errorMessage(&buffer));
+    try std.testing.expect(fixture.game.block_action_error.message(5) != null);
+    fixture.game.editBlockInView(.{ .place = .sand });
+    try std.testing.expect(fixture.game.block_action_error.message(5) != null);
+
+    fixture.game.selected_material = .dirt;
+    fixture.game.updateBlockFocus();
+    fixture.input.focused = false;
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(null, fixture.game.current_placement_preview);
+    try std.testing.expect(fixture.game.block_action_error.message(5) != null);
+    fixture.input.focused = true;
+    fixture.game.updateBlockFocus();
+    fixture.game.toggleBlockMode();
+    try std.testing.expectEqual(null, fixture.game.current_placement_preview);
+    try std.testing.expect(fixture.game.block_action_error.message(5) != null);
+}
+
+test "authoritative rejection shows owned diagnostics even after a subscription expires" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    fixture.game.editBlockInView(.remove);
+    fixture.game.world.?.pending_operations.items[0].request_id = 42;
+    fixture.engine.time = 10;
+    try fixture.apply(&.{.{
+        .coords = test_layout.origin_chunk,
+        .subscription_id = null,
+        .operation = .{ .request_id = 42, .status = .constraint_violation, .failure = .{
+            .reason = .would_remove_support,
+            .cause = .missing_foundation,
+            .subject = .{ 0, 0, 0 },
+        } },
+        .data = .acknowledgement,
+    }});
+    try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
+    try std.testing.expectEqualStrings("Removal would leave an existing construction unsupported.\nCause: A suitable foundation is missing.", fixture.game.block_action_error.message(10).?);
+    // Success replies do not erase an error before its timeout.
+    try fixture.apply(&.{.{
+        .coords = test_layout.origin_chunk,
+        .subscription_id = null,
+        .operation = .{ .request_id = 43, .status = .success },
+        .data = .acknowledgement,
+    }});
+    try std.testing.expect(fixture.game.block_action_error.message(13.9) != null);
+    try std.testing.expectEqual(null, fixture.game.block_action_error.message(14));
 }
 
 test "placement cache ignores distant streaming and validates each relevant change once" {
@@ -2009,6 +2087,7 @@ const StreamingTest = struct {
         self.scene.voxel_grid = &self.grid;
         self.scene.camera = &self.camera;
         self.engine.active_scene = &self.scene;
+        self.engine.time = 0;
         self.input = .{
             .allocator = std.testing.allocator,
             .window = undefined,

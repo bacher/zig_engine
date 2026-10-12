@@ -178,8 +178,10 @@ In putting mode a translucent cyan outline previews allowed placement; red marks
 marks involved constructions or missing support cells. Hints hidden by terrain remain
 faintly visible. The preview uses the shared validator without editing the world and caches
 its structural result until the target, material, or world data changes. Player overlap is
-checked each frame. The console reports changed results and their reasons; screen text is
-deferred. See [placement diagnostics](block-placement.md#edits-and-diagnostics).
+checked each frame. Rejected placement shows small orange text at the bottom centre on a
+translucent rounded background. Actual edit failures show medium red text at the top centre
+without a background for four seconds, independently of the preview hint. Both overlays use
+zgui and can appear together. See [placement diagnostics](block-placement.md#edits-and-diagnostics).
 
 The simulation worker initially loads the central chunk column, finds the surface at its horizontal midpoint, then evicts those subscriptions. It submits one dirt put, waits for the result, and waits two seconds between subsequent operations. A successful put switches the next action to remove; a failed put retries a put. Removal switches back to putting. It communicates only through its own service endpoint, so visible changes arrive on the main thread through ordinary subscriptions. This is a concurrency example, not a broader NPC simulation system.
 

@@ -9,6 +9,8 @@ const coordinates = @import("block_coordinates.zig");
 pub const allowed_color: @Vector(4, f32) = .{ 0.1, 0.8, 1, 0.65 };
 pub const rejected_color: @Vector(4, f32) = .{ 1, 0.15, 0.1, 0.7 };
 pub const problem_color: @Vector(4, f32) = .{ 1, 0.65, 0.1, 0.65 };
+pub const message_capacity = 512;
+pub const player_overlap_message = "The block overlaps the player's body.";
 
 pub const Preview = struct {
     block: [3]u32,
@@ -27,15 +29,9 @@ pub const Preview = struct {
         return hints;
     }
 
-    pub fn print(self: Preview) void {
-        std.debug.print("placement preview: {s} at {any}: ", .{ @tagName(self.material), self.block });
-        if (self.overlaps_player) {
-            std.debug.print("the block overlaps the player's body\n", .{});
-        } else if (self.result.failure) |failure| {
-            printFailure(failure);
-        } else {
-            std.debug.print("{s}\n", .{if (self.result.status == .success) "allowed" else @tagName(self.result.status)});
-        }
+    pub fn errorMessage(self: Preview, buffer: *[message_capacity]u8) ?[]const u8 {
+        if (self.overlaps_player) return player_overlap_message;
+        return errorMessageForResult(self.result, buffer);
     }
 };
 
@@ -52,28 +48,60 @@ fn addProblem(hints: *outline.Overlays, contents: *const world.World, cell: rule
 
 pub fn description(reason: rules.Reason) []const u8 {
     return switch (reason) {
-        .material_not_placeable => "this material cannot be placed",
-        .missing_data => "support cannot be checked: required world cells have not loaded",
-        .earth_footprint => "soil requires a filled 3x3 support layer below it",
-        .earth_requires_stable_platform => "building on soil requires a filled 3x3x3 platform below the block",
-        .incompatible_support => "the material below cannot support this block",
-        .missing_foundation => "a suitable foundation is missing",
-        .horizontal_span => "horizontal distance from a supported block exceeds the limit",
-        .wood_height => "wood height above its foundation exceeds the limit",
-        .mineral_height => "mineral construction height above its foundation exceeds the limit",
-        .crushed_column => "too many consecutive crushed-stone blocks",
-        .would_remove_support => "removal would leave an existing construction unsupported",
-        .would_invalidate_structure => "placement would make an existing construction invalid",
-        .support_search_limit => "support cannot be proved within the allowed search radius",
+        .material_not_placeable => "This material cannot be placed.",
+        .missing_data => "Support cannot be checked: required world cells have not loaded.",
+        .earth_footprint => "Soil requires a filled 3x3 support layer below it.",
+        .earth_requires_stable_platform => "Building on soil requires a filled 3x3x3 platform below the block.",
+        .incompatible_support => "The material below cannot support this block.",
+        .missing_foundation => "A suitable foundation is missing.",
+        .horizontal_span => "Horizontal distance from a supported block exceeds the limit.",
+        .wood_height => "Wood height above its foundation exceeds the limit.",
+        .mineral_height => "Mineral construction height above its foundation exceeds the limit.",
+        .crushed_column => "Too many consecutive crushed-stone blocks.",
+        .would_remove_support => "Removal would leave an existing construction unsupported.",
+        .would_invalidate_structure => "Placement would make an existing construction invalid.",
+        .support_search_limit => "Support cannot be proved within the allowed search radius.",
     };
 }
 
-pub fn printFailure(failure: rules.Failure) void {
-    std.debug.print("{s} ({s}) at {any}", .{ description(failure.reason), @tagName(failure.reason), failure.subject });
-    if (failure.cause) |cause| std.debug.print("; cause: {s} ({s})", .{ description(cause), @tagName(cause) });
-    if (failure.limit != 0) std.debug.print("; actual {d}, required/limit {d}", .{ failure.actual, failure.limit });
-    if (failure.truncated) std.debug.print("; showing the first {d} problem cells", .{failure.involved_count});
-    std.debug.print("\n", .{});
+pub fn errorMessageForResult(result: world.EditResult, buffer: *[message_capacity]u8) ?[]const u8 {
+    if (result.status == .success) return null;
+    if (result.failure) |failure| {
+        var writer = std.Io.Writer.fixed(buffer);
+        writer.writeAll(description(failure.reason)) catch unreachable;
+        if (failure.cause) |cause| writer.print("\nCause: {s}", .{description(cause)}) catch unreachable;
+        if (failure.limit != 0) writer.print("\nActual: {d}; required/limit: {d}.", .{ failure.actual, failure.limit }) catch unreachable;
+        if (failure.truncated) writer.print("\nShowing the first {d} problem cells.", .{failure.involved_count}) catch unreachable;
+        return writer.buffered();
+    }
+    return switch (result.status) {
+        .success => unreachable,
+        .already_exists => "This cell is already occupied.",
+        .already_removed => "This block has already been removed.",
+        .missing_data => "Required world cells have not loaded.",
+        .constraint_violation => "The block edit violates construction constraints.",
+    };
+}
+
+test "error text preserves dependent causes, limits and truncated hints for every reason" {
+    var buffer: [message_capacity]u8 = undefined;
+    for (std.enums.values(rules.Reason)) |reason| {
+        for (std.enums.values(rules.Reason)) |cause| {
+            const message = errorMessageForResult(.{ .status = .constraint_violation, .failure = .{
+                .reason = reason,
+                .cause = cause,
+                .subject = .{ 0, 0, 0 },
+                .actual = std.math.maxInt(u32),
+                .limit = std.math.maxInt(u32),
+                .truncated = true,
+                .involved_count = 32,
+            } }, &buffer).?;
+            try std.testing.expect(std.mem.startsWith(u8, message, description(reason)));
+            try std.testing.expect(std.mem.indexOf(u8, message, description(cause)) != null);
+            try std.testing.expect(std.mem.indexOf(u8, message, "Actual: 4294967295; required/limit: 4294967295.") != null);
+            try std.testing.expect(std.mem.endsWith(u8, message, "Showing the first 32 problem cells."));
+        }
+    }
 }
 
 test "diagnostic overlays deduplicate wrapped cells and preserve missing cells outside finite bounds" {
