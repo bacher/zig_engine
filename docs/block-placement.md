@@ -21,7 +21,7 @@ client data produces `missing_data`, never an assumption that the missing cells 
 Water, sand, and snow retain their existing placement/collision behavior. They are outside
 the structural material families and cannot supply earth footprints or stable platforms.
 All new materials currently have full-cube collision. The existing atlas supplies temporary
-tiles for the new construction materials; no new texture assets or overlay pipeline are added.
+tiles for the new construction materials; placement hints use the shared block-outline shader.
 
 Mining results include `mined_type`. There is no inventory, recipe, or dropped-item system
 yet; this result provides the conversion contract for a future inventory.
@@ -117,8 +117,25 @@ existing overhang. Natural terrain cells are not themselves revalidated as const
 Operation results carry status, an optional mined material, and an optional failure:
 reason, underlying cause, affected cell, measured value, limit, and up to 32 involved cell
 coordinates with an explicit truncation flag. The client retains the latest preview/result.
-These are CPU data for future text and 3D hints. There is no ghost block, dependency outline,
-or transparent rendering pass in this change.
+While aiming at a reachable block, a translucent cyan cube outline previews an allowed
+placement; a red outline marks a rejected placement. Orange outlines show the affected
+construction and involved cells, including empty spaces that need support. They take
+precedence over ordinary green focus edges. Missing cells beyond finite world edges retain
+their signed positions, while x coordinates wrap across the seam. Diagnostics show at most
+32 involved cells plus the affected cell and candidate; truncation is reported in the console.
+
+Hints reuse the focus outline's procedural edges and uniform bindings. They show all twelve
+edges at the cell's own depth. Visible strokes use alpha blending; strokes hidden behind
+scene geometry use 30% of that opacity, so buried support remains identifiable. Neither
+pass writes scene depth. There is no solid ghost mesh or screen text yet.
+
+`World.previewOperation` checks hypothetical placement without changing blocks, pending
+commands, or the latest actual edit result. Its result is cached by target, selected material,
+and a world validation revision. Accepted chunk snapshots, eviction, and optimistic block
+changes invalidate it. Player overlap is checked every frame, including the frozen player
+while spectating. Losing focus, reaching empty air, or losing targeting data clears the hints.
+`std.debug.print` reports changed previews with a readable reason, underlying cause, and
+measured/required values. Actual edit failures use the same descriptions.
 
 `support_search_limit` reports the 28-cell limit and an attempted cell outside the window.
 For a dependent edit rejection it appears as the underlying cause of `would_remove_support`
@@ -181,7 +198,8 @@ Keys 1-6 select loose soil, crushed stone, trunk, planks, rebar, and reinforced 
 E or left click places against the hit face of the first occupied block along the camera
 view; X mines that block. Reach is four metres to the hit face, and each press edits once.
 Unknown chunks and empty air produce no edit. Player-overlap checks and structural validation
-still apply. Selection UI, target highlighting, and 3D placement hints are follow-ups.
+still apply. Green edges show focus, and colored translucent outlines show placement and
+support diagnostics. Material selection UI and screen text remain follow-ups.
 
 `zig build test` covers footprints, centered platforms, diagonal connectivity, square
 platforms, span limits, inherited/group heights, protected platform edits, crushed-stone

@@ -16,7 +16,7 @@ flowchart LR
     Depth --> SSAO
     Color --> Final[Final composite]
     SSAO --> Final
-    Final --> Focus[Depth-tested block outline]
+    Final --> Focus[Block outlines and translucent cell hints]
     Focus --> Overlay[Application and GUI overlay]
     Overlay --> Present[Submit and present]
 ```
@@ -27,7 +27,7 @@ flowchart LR
 | Forward scene | Clears and renders color (`rgba8_unorm`), encoded view-space normals (`rgb10_a2_unorm`), and depth. Some pipelines disable normal writes. |
 | SSAO | Full-screen pass reconstructs view-space positions from depth and uses the normal texture to estimate occlusion; output is `r16_float`. |
 | Final composite | Full-screen pass copies scene color or multiplies it by SSAO. Optional blur/debug display are applied here. |
-| Block outline | When the application selects a cell, loads swapchain color and scene depth and draws visible green edges as three-pixel-wide pairs of triangles, without writing depth. |
+| Block outlines | Loads swapchain color and scene depth. Draws green focus edges and colored translucent cell hints as three-pixel-wide triangle pairs, with faint occluded hints and no depth writes. |
 | Overlay | If `onRender` exists, loads the swapchain color without a depth attachment, invokes the application callback, and renders GUI when enabled. |
 
 The SSAO pass is still encoded when SSAO is disabled. The final shader bypasses its result in that case. GUI frame creation and the engine debug window currently occur inside the optional `onRender` branch.
@@ -47,6 +47,15 @@ CPU world transforms remain in `f64`. GPU paths use chunk-local matrices plus in
 The voxel app refreshes `Scene.highlighted_block` using the editing raycast after camera updates, optimistic edits, and subscription changes. The engine's independent [`block_outline.zig`](../src/engine/block_outline.zig) pipeline draws it after post-processing and before GUI overlays. It emits 72 procedural vertices, clips edges against the near plane, and expands them in screen space to keep their width constant when distance or window size changes. It excludes edges whose adjacent faces both face away from the camera. For each stroke pixel overlapping the target cube, the fragment shader reconstructs the cube's front surface depth to prevent the target's own sloped faces from cutting into the stroke.
 
 The shader also extends each edge's visible adjacent face planes across the narrow stroke margin to keep coplanar neighboring blocks from trimming it. This continuation is limited to 0.25 metres beyond the unit face bounds: a small screen-space margin can otherwise extrapolate metres forward at grazing angles and leak through foreground blocks. Plane intersections outside that bounded neighborhood leave the reconstructed target/edge depth unchanged. This deliberately allows the outer stroke to be clipped on nearly edge-on coplanar surfaces when preserving it would require a more distant intersection. Scene depth still hides the outline behind other geometry; an eight-epsilon f32 allowance handles depth rounding, and the pass never writes scene depth. The pipeline owns dedicated transform/inverse-transform/viewport uniforms. The outline's storage cell is rebased to the camera chunk, including the wrapped x seam, before conversion to f32. No voxel face or shadow shader contains highlighting logic.
+
+`Scene.block_overlays` also carries a bounded, value-owned set of signed storage cells and
+RGBA colors. Placement previews reuse the same outline shader and bind group layout,
+showing all twelve edges at their actual cell depth without focus surface reconstruction.
+The regular pipeline alpha-blends visible strokes with a `less_equal` depth test; a second
+pipeline uses `greater` and 30% opacity for hidden strokes. Both leave depth unchanged.
+Diagnostic colors take precedence when an overlay also covers the focused cell. The voxel
+app uses cyan/red for the placement candidate and orange for involved blocks or missing
+support cells. See [placement diagnostics](block-placement.md#edits-and-diagnostics).
 
 The voxel grid stores exposed-face records, not a conventional indexed mesh or a dense GPU block array. Each record contains local block coordinates and block type in four bytes. Six lists group those records by outward face direction. The vertex shader generates six vertices per face and selects atlas UVs using block type and direction.
 

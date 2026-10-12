@@ -14,6 +14,7 @@ pub const GameObjectGroup = @import("./game_object_group.zig").GameObjectGroup;
 pub const Scene = @import("./scene.zig").Scene;
 pub const VoxelGrid = @import("./voxel/voxel_grid.zig").VoxelGrid;
 pub const voxel_chunk = @import("./voxel/voxel_chunk.zig");
+pub const block_outline = @import("./block_outline.zig");
 pub const tube = @import("./shape_generation/tube.zig");
 pub const utils = @import("./utils.zig");
 /// Compile-time options injected by the application build.

@@ -172,6 +172,13 @@ Stop every client worker before destroying the service. Shutdown closes the requ
 
 Keys 1-6 select loose soil, crushed stone, trunk, planks, rebar, and reinforced concrete. E or left click places the selection against the face of the first occupied block along the camera view; X mines that block. A voxel-boundary raycast reaches four metres from the camera to the hit face, including the limit. It follows the current frame’s camera view, crosses chunk boundaries and the wrapped x seam, and stops at unreceived chunks. Empty air produces no edit. Each press edits once. Keyboard and mouse presses share an ordered queue and retain the selected material from press time; all queued commands run after the camera update. Ctrl+E remains the SSAO shortcut. Placements still pass material support rules and player-overlap checks, including while spectating. Green, three-pixel-wide edges mark the focused block using the same raycast, refreshed after edits and camera updates. The outline has a separate depth-tested render pass; material selection still has no UI.
 
+A translucent cyan outline previews allowed placement; red marks rejection, and orange
+marks involved constructions or missing support cells. Hints hidden by terrain remain
+faintly visible. The preview uses the shared validator without editing the world and caches
+its structural result until the target, material, or world data changes. Player overlap is
+checked each frame. The console reports changed results and their reasons; screen text is
+deferred. See [placement diagnostics](block-placement.md#edits-and-diagnostics).
+
 The simulation worker initially loads the central chunk column, finds the surface at its horizontal midpoint, then evicts those subscriptions. It submits one dirt put, waits for the result, and waits two seconds between subsequent operations. A successful put switches the next action to remove; a failed put retries a put. Removal switches back to putting. It communicates only through its own service endpoint, so visible changes arrive on the main thread through ordinary subscriptions. This is a concurrency example, not a broader NPC simulation system.
 
 ## Sources and regression coverage

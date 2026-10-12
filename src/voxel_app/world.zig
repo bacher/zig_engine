@@ -291,6 +291,8 @@ pub const World = struct {
     pending_operations: std.ArrayList(PendingOperation) = .empty,
     simulation_tick: transformations.Tick = 0,
     last_edit_result: ?EditResult = null,
+    /// Invalidates cached structural previews after block data or availability changes.
+    validation_revision: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, layout: *const WorldLayout) !World {
         const owned_layout = try allocator.create(WorldLayout);
@@ -337,6 +339,7 @@ pub const World = struct {
             if (!neighbor.flags.getSideSolidness(side.getOpposite())) updated.flags.is_unreachable = false;
         }
         self.chunks.put(self.allocator, position, updated) catch @panic("OOM");
+        self.validation_revision +%= 1;
         self.revealNeighbors(coords, updated.flags);
     }
 
@@ -366,6 +369,7 @@ pub const World = struct {
     /// resurrect an evicted chunk; the subscription token decides whether to accept the data.
     pub fn removeChunk(self: *World, coords: ChunkCoords) void {
         self.chunks.fetchRemove(self.layout.encodeChunkCoords(coords)).?.value.deinit(self.allocator);
+        self.validation_revision +%= 1;
     }
 
     pub fn getChunk(self: *const World, coords: ChunkCoords) ?WorldChunk {
@@ -439,6 +443,7 @@ pub const World = struct {
         const coords, const local = splitBlockCoords(block);
         const chunk = self.chunks.getPtr(self.layout.encodeChunkCoords(coords)).?;
         if (chunk.apply(self.allocator, local, operation.action) != .success) return;
+        self.validation_revision +%= 1;
         self.revealNeighbors(coords, chunk.flags);
         self.pending_operations.append(self.allocator, .{ .operation = operation }) catch @panic("OOM");
     }

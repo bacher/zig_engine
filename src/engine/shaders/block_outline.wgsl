@@ -3,6 +3,8 @@ struct Outline {
     block_from_clip: mat4x4f,
     // xy: viewport, z: stroke width, w: camera-facing face bit mask.
     stroke: vec4f,
+    color: vec4f,
+    parameters: vec4f,
 }
 @group(0) @binding(0) var<uniform> outline: Outline;
 
@@ -113,8 +115,12 @@ struct FragmentOut {
 
 @fragment fn fs(input: VertexOut) -> FragmentOut {
     var output: FragmentOut;
-    output.color = vec4f(0, 1, 0, 1);
+    output.color = outline.color;
+    var depth = input.position.z;
+    if (outline.parameters.x != 0) {
+        depth = strokeDepth(input.position.xy, depth, input.faces);
+    }
     // Eight f32 epsilon units cover reconstruction/rasterization rounding only.
-    output.depth = clamp(strokeDepth(input.position.xy, input.position.z, input.faces) - 0.0000009536743164, 0, 1);
+    output.depth = clamp(depth - 0.0000009536743164, 0, 1);
     return output;
 }
