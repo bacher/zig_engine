@@ -5,6 +5,7 @@ const rules = @import("block_rules.zig");
 const world = @import("world.zig");
 const outline = engine.block_outline;
 const coordinates = @import("block_coordinates.zig");
+const block_diagnostics = @import("block_diagnostics.zig");
 
 pub const allowed_color: @Vector(4, f32) = .{ 0.1, 0.8, 1, 0.65 };
 pub const rejected_color: @Vector(4, f32) = .{ 1, 0.15, 0.1, 0.7 };
@@ -27,15 +28,9 @@ pub const Preview = struct {
         return hints;
     }
 
-    pub fn print(self: Preview) void {
-        std.debug.print("placement preview: {s} at {any}: ", .{ @tagName(self.material), self.block });
-        if (self.overlaps_player) {
-            std.debug.print("the block overlaps the player's body\n", .{});
-        } else if (self.result.failure) |failure| {
-            printFailure(failure);
-        } else {
-            std.debug.print("{s}\n", .{if (self.result.status == .success) "allowed" else @tagName(self.result.status)});
-        }
+    pub fn errorMessage(self: Preview, buffer: *[block_diagnostics.message_capacity]u8) ?[]const u8 {
+        if (self.overlaps_player) return block_diagnostics.player_overlap_message;
+        return block_diagnostics.errorMessageForResult(self.result, buffer);
     }
 };
 
@@ -48,32 +43,6 @@ fn addProblem(hints: *outline.Overlays, contents: *const world.World, cell: rule
     else
         false;
     hints.add(.{ .cell = normalized, .color = problem_color, .occupied = occupied });
-}
-
-pub fn description(reason: rules.Reason) []const u8 {
-    return switch (reason) {
-        .material_not_placeable => "this material cannot be placed",
-        .missing_data => "support cannot be checked: required world cells have not loaded",
-        .earth_footprint => "soil requires a filled 3x3 support layer below it",
-        .earth_requires_stable_platform => "building on soil requires a filled 3x3x3 platform below the block",
-        .incompatible_support => "the material below cannot support this block",
-        .missing_foundation => "a suitable foundation is missing",
-        .horizontal_span => "horizontal distance from a supported block exceeds the limit",
-        .wood_height => "wood height above its foundation exceeds the limit",
-        .mineral_height => "mineral construction height above its foundation exceeds the limit",
-        .crushed_column => "too many consecutive crushed-stone blocks",
-        .would_remove_support => "removal would leave an existing construction unsupported",
-        .would_invalidate_structure => "placement would make an existing construction invalid",
-        .support_search_limit => "support cannot be proved within the allowed search radius",
-    };
-}
-
-pub fn printFailure(failure: rules.Failure) void {
-    std.debug.print("{s} ({s}) at {any}", .{ description(failure.reason), @tagName(failure.reason), failure.subject });
-    if (failure.cause) |cause| std.debug.print("; cause: {s} ({s})", .{ description(cause), @tagName(cause) });
-    if (failure.limit != 0) std.debug.print("; actual {d}, required/limit {d}", .{ failure.actual, failure.limit });
-    if (failure.truncated) std.debug.print("; showing the first {d} problem cells", .{failure.involved_count});
-    std.debug.print("\n", .{});
 }
 
 test "diagnostic overlays deduplicate wrapped cells and preserve missing cells outside finite bounds" {

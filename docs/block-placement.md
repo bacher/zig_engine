@@ -122,7 +122,7 @@ placement; a red outline marks a rejected placement. Orange outlines show the af
 construction and involved cells, including empty spaces that need support. Putting mode
 hides green focus edges. Missing cells beyond finite world edges retain
 their signed positions, while x coordinates wrap across the seam. Diagnostics show at most
-32 involved cells plus the affected cell and candidate; truncation is reported in the console.
+32 involved cells plus the affected cell and candidate; truncation is reported in the error text.
 
 Hints reuse the focus outline's procedural edges and instance buffer. They retain all twelve
 edges. Occupied diagnostic cells correct the depth of camera-facing edges to preserve full
@@ -130,8 +130,7 @@ stroke width over their own tilted surfaces; rear edges and empty/unknown hints 
 actual edge depth. Visible strokes use alpha blending; strokes hidden behind
 scene geometry use 30% of that opacity, so buried support remains identifiable. Neither
 pass writes scene depth. Diagnostics use two instanced draws, with all hidden strokes before
-all visible strokes and one upload of the active cell records. There is no solid ghost mesh
-or screen text yet.
+all visible strokes and one upload of the active cell records. There is no solid ghost mesh.
 
 `World.previewOperation` checks hypothetical placement without changing blocks, pending
 commands, or the latest actual edit result. Its result is cached by target, selected material,
@@ -149,8 +148,18 @@ the frozen player while spectating. Removing mode only targets and highlights th
 block: it does not
 call placement validation. Switching modes clears cached previews and hints. Losing focus,
 reaching empty air, or losing targeting data also clears the hints.
-`std.debug.print` reports changed previews with a readable reason, underlying cause, and
-measured/required values. Actual edit failures use the same descriptions.
+The zgui overlay shows the current rejection reason, underlying cause, measured/required
+values, and diagnostic truncation in small orange text at the bottom centre, below the aim
+point. Its dark background is translucent and rounded. Allowed placement, lost targeting,
+lost focus, and switching to removing mode immediately clear this hint.
+
+Actual edit failures, including player overlap and authoritative service rejections, show
+medium red text with a dark 1.5px outline at the top centre, with no background, for four
+seconds. The outline follows the text's wrapping and DPI scale. A new failure
+replaces the previous message and restarts its timer. Successful edits and preview changes
+do not erase this feedback; both messages can appear together. Text wraps to the viewport
+width and follows the existing zgui DPI scale. These gameplay diagnostics no longer print
+to the console; other debug output is unchanged.
 
 `support_search_limit` reports the 28-cell limit and an attempted cell outside the window.
 For a dependent edit rejection it appears as the underlying cause of `would_remove_support`
@@ -217,7 +226,7 @@ mode's keyboard shortcut is ignored. Reach is four metres to the hit face, and e
 Unknown chunks and empty air produce no edit. Player-overlap checks and structural validation
 still apply to actual edits. Green edges show focus only in removing mode; putting mode
 shows colored translucent outlines for placement and
-support diagnostics. Material selection UI and screen text remain follow-ups.
+support diagnostics and on-screen error text. Material selection UI remains a follow-up.
 
 `zig build test` covers footprints, centered platforms, diagonal connectivity, square
 platforms, span limits, inherited/group heights, protected platform edits, crushed-stone
