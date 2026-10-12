@@ -2,13 +2,14 @@
 const std = @import("std");
 const zgui = @import("engine").zgui;
 const placement_preview = @import("placement_preview.zig");
+const block_diagnostics = @import("block_diagnostics.zig");
 
 pub const action_error_duration: f64 = 4;
 const action_outline_color: [4]f32 = .{ 0.02, 0.02, 0.02, 1 };
 const action_outline_width: f32 = 1.5;
 
 pub const TimedError = struct {
-    buffer: [placement_preview.message_capacity]u8 = undefined,
+    buffer: [block_diagnostics.message_capacity]u8 = undefined,
     len: usize = 0,
     expires_at: f64 = 0,
 
@@ -30,7 +31,7 @@ pub fn draw(preview: ?placement_preview.Preview, action_error: *const TimedError
     if (screen[0] <= 0 or screen[1] <= 0) return;
     // The existing zgui backend uses framebuffer pixels and a DPI-scaled 16px font.
     const scale = zgui.getFontSize() / 16;
-    var buffer: [placement_preview.message_capacity]u8 = undefined;
+    var buffer: [block_diagnostics.message_capacity]u8 = undefined;
     if (preview) |current| if (current.errorMessage(&buffer)) |message| {
         drawMessage("##placement-preview-error", message, screen, scale, .preview);
     };
@@ -139,7 +140,7 @@ test "both overlays generate visible text inside small and high DPI viewports" {
                 .limit = 9,
             } },
         };
-        var buffer: [placement_preview.message_capacity]u8 = undefined;
+        var buffer: [block_diagnostics.message_capacity]u8 = undefined;
         var feedback: TimedError = .{};
         feedback.show(preview.errorMessage(&buffer).?, 0);
         draw(preview, &feedback, 0);

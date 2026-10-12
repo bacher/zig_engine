@@ -42,6 +42,7 @@ const world_engine = @import("./world_engine_glue.zig");
 const transformations = @import("block_transformations.zig");
 const block_targeting = @import("block_targeting.zig");
 const placement_preview = @import("placement_preview.zig");
+const block_diagnostics = @import("block_diagnostics.zig");
 const block_messages = @import("block_messages.zig");
 
 const DEBUG = true;
@@ -581,7 +582,7 @@ const Game = struct {
         };
         if (action == .place) if (game.player) |*player| {
             if (terrain_collision.overlapsBlock(player.body, player.position, game.layout(), edited_block)) {
-                game.block_action_error.show(placement_preview.player_overlap_message, game.engine.time);
+                game.block_action_error.show(block_diagnostics.player_overlap_message, game.engine.time);
                 return;
             }
         };
@@ -603,8 +604,8 @@ const Game = struct {
     }
 
     fn showBlockEditError(game: *Game, result: world_module.EditResult) void {
-        var buffer: [placement_preview.message_capacity]u8 = undefined;
-        if (placement_preview.errorMessageForResult(result, &buffer)) |message| {
+        var buffer: [block_diagnostics.message_capacity]u8 = undefined;
+        if (block_diagnostics.errorMessageForResult(result, &buffer)) |message| {
             game.block_action_error.show(message, game.engine.time);
         }
     }
@@ -1094,7 +1095,7 @@ test "camera placement rejects the player's body before changing the optimistic 
     fixture.game.world.?.setBlockUnchecked(ground, .stone);
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
     fixture.game.editBlockInView(.{ .place = fixture.game.selected_material });
-    try std.testing.expectEqualStrings(placement_preview.player_overlap_message, fixture.game.block_action_error.message(0).?);
+    try std.testing.expectEqualStrings(block_diagnostics.player_overlap_message, fixture.game.block_action_error.message(0).?);
     try std.testing.expect(!try fixture.game.world.?.isBlockSolid(.{ 8192, 4096, 128 }));
     try std.testing.expectEqual(@as(usize, 0), fixture.game.world.?.pending_operations.items.len);
     // The same protection applies while the player is frozen in spectator mode.
@@ -1505,7 +1506,7 @@ test "preview errors and timed edit feedback coexist and clear independently" {
     fixture.game.toggleBlockMode();
     fixture.game.selected_material = .dirt;
     fixture.game.updateBlockFocus();
-    var buffer: [placement_preview.message_capacity]u8 = undefined;
+    var buffer: [block_diagnostics.message_capacity]u8 = undefined;
     try std.testing.expect(fixture.game.current_placement_preview.?.errorMessage(&buffer) != null);
     try std.testing.expectEqual(null, fixture.game.block_action_error.message(0));
 
