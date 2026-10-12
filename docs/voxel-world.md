@@ -85,6 +85,8 @@ Initial distant mesh loads are queued. The worker performs at most one between r
 
 ## Optimistic cache and frame reconciliation
 
+`Client.findStandingSpace` requests a supported surface directly from the authority. Callers specify a preferred x/y, an empty clearance volume, a separate real contact footprint, and a horizontal search radius of up to fifteen blocks per axis. The worker reads current chunk contents through its normal authoritative block reader, preferring retained edits. It returns the nearest fitting surface as a position or error through a separate value-only mailbox. Searches create no terrain subscriptions, transfer no chunks, and preserve existing chunk packages. `requestStandingSpace` and `waitStandingSpace` expose the same operation separately. Only one search should be outstanding per client; cancellation abandons the wait, and later waits filter late replies by request ID. A result is not a reservation against subsequent edits.
+
 `World` on the main thread holds authoritative snapshots with outstanding local operations replayed on top. A locally valid edit changes that cache immediately and appends a pending operation. Conflicting local edits are no-ops. The next world update submits unsubmitted commands in their original order and records request IDs.
 
 The world update sequence is:
@@ -187,6 +189,7 @@ The simulation worker initially loads the central chunk column, finds the surfac
 | --- | --- |
 | [`world.zig`](../src/voxel_app/world.zig) | Contents, edit preconditions, replay/rollback, stale snapshots, and reveals. |
 | [`world_data_service.zig`](../src/voxel_app/world_data_service.zig) | Queue ordering, conflicts, tokens, broadcasts/packages, revisions, masks, eviction, caches, and shutdown. |
+| [`standing_space.zig`](../src/voxel_app/standing_space.zig), [`block_collision.zig`](../src/voxel_app/block_collision.zig) | Supported-space search, clearance versus real support, finite bounds, nearest offsets, and shared collision geometry. |
 | [`main.zig`](../src/voxel_app/main.zig) | Streaming/pinning, handoffs, package application, mesh reuse, mask precedence, camera tools, and capacity fallback. |
 | [`block_targeting.zig`](../src/voxel_app/block_targeting.zig) | Four-metre camera rays, hit faces, bounds, missing chunks, and wrapped seams. |
 | [`world_generator.zig`](../src/voxel_app/world_generator.zig), [`perlin_noise.zig`](../src/voxel_app/perlin_noise.zig) | Determinism, surface/shortcut consistency, periodic x, and enclosure certification. |

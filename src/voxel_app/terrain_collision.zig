@@ -4,32 +4,14 @@ const World = @import("world.zig").World;
 const coordinates = @import("block_coordinates.zig");
 pub const Position = engine.world_math.Position;
 pub const Cell = coordinates.Cell;
-pub const epsilon: f64 = 0.0000001;
+const geometry = @import("block_collision.zig");
+pub const epsilon = geometry.epsilon;
+pub const MovementCollision = geometry.MovementCollision;
+pub const movementCollision = geometry.movementCollision;
+pub const Bounds = geometry.Bounds;
+pub const HorizontalCells = geometry.HorizontalCells;
 /// Small downward sweep used to recognize standing contact.
 pub const ground_probe: f64 = 0.00001;
-
-pub const MovementCollision = enum { none, full_cube };
-
-/// A type property shared by all instances. Occupancy/meshing rules stay separate.
-pub fn movementCollision(block: engine.voxel_chunk.BlockType) MovementCollision {
-    return switch (block) {
-        .none => .none,
-        // Water remains a solid cube until swimming/fluid movement is introduced.
-        .stone,
-        .dirt,
-        .grass,
-        .water,
-        .sand,
-        .snow,
-        .packed_dirt,
-        .crushed_stone,
-        .tree_trunk,
-        .planks,
-        .rebar,
-        .reinforced_concrete,
-        => .full_cube,
-    };
-}
 
 pub const Body = struct {
     half_width: f64 = 0.3,
@@ -41,19 +23,6 @@ pub const Body = struct {
             .min = feet - Position{ self.half_width, self.half_width, 0 },
             .max = feet + Position{ self.half_width, self.half_width, self.height },
         };
-    }
-};
-
-pub const Bounds = struct {
-    min: Position,
-    max: Position,
-
-    fn firstCell(self: Bounds) Cell {
-        return @intFromFloat(@floor(self.min + @as(Position, @splat(epsilon))));
-    }
-
-    fn lastCell(self: Bounds) Cell {
-        return @intFromFloat(@ceil(self.max - @as(Position, @splat(epsilon))) - @as(Position, @splat(1)));
     }
 };
 

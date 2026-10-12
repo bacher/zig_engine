@@ -703,7 +703,6 @@ fn initWorld(game: *Game) !void {
     game.world_data = try WorldDataService.create(game.engine.io, game.allocator, game.engine.active_scene.?.layout, .{ .terrain = .{ .seed = 12345 } });
     game.world = try World.init(game.allocator, game.engine.active_scene.?.layout);
     game.world_client = try game.world_data.?.createClient();
-    game.simulation = try SimulationWorker.create(game.world_data.?);
 }
 
 /// Chebyshev distance between the chunk and the camera chunk, in chunks. The x axis wraps.
@@ -806,8 +805,17 @@ pub fn main(init: std.process.Init) !void {
     defer scene.deinit();
     defer game.stopWorkers();
 
-    // Start above the generated terrain's maximum height, then fall onto it.
-    game.player = PlayerController.init(allocator, .{ -2.06, -2.96, 64 });
+    try initWorld(game);
+    const body: terrain_collision.Body = .{};
+    const spawn = try game.world_client.?.findStandingSpace(.{
+        .preferred_xy = .{ -2.06, -2.96 },
+        .clearance_size = .{ 2, 2, 3 },
+        .support_size = .{ 2 * body.half_width, 2 * body.half_width },
+        .search_radius = 8,
+    });
+    game.player = PlayerController.init(allocator, spawn);
+    game.player.?.grounded = true;
+    game.simulation = try SimulationWorker.create(game.world_data.?);
     scene.spectator_enabled = false;
     engine.input_controller.cursor_capture = .always;
     game.player.?.applyCamera(scene.camera);
@@ -856,8 +864,6 @@ pub fn main(init: std.process.Init) !void {
         .parent = null,
         .animation_name = "walkLikeMan",
     }));
-
-    try initWorld(game);
 
     // -- Tube data for coordinates --
 
@@ -993,6 +999,7 @@ test {
     _ = world_data_service;
     _ = SimulationWorker;
     _ = player_module;
+    _ = @import("standing_space.zig");
 }
 
 test "Q excursions start at player eyes and return to the frozen player position and view" {

@@ -17,6 +17,13 @@ const WORLD_SIZE = test_layout.size_in_chunks;
 const Side = @import("engine").voxel_chunk.Side;
 const transformations = @import("block_transformations.zig");
 const rules = @import("block_rules.zig");
+const standing_space = @import("standing_space.zig");
+pub const StandingSpaceRequest = standing_space.Request;
+pub const StandingSpaceError = standing_space.Error || error{ServiceStopped};
+pub const StandingSpaceResponse = struct {
+    request_id: u64,
+    result: StandingSpaceError!standing_space.Position,
+};
 
 /// Unbounded multi-producer queue. Pushing never waits for the consumer (only for the short
 /// critical section), the consumer takes all queued items at once.
@@ -168,6 +175,7 @@ const Request = union(enum) {
     },
     evict_chunk: struct { client: *Client, position: ChunkId, subscription_id: u64 },
     operation: struct { client: *Client, request_id: u64, operation: BlockOperation },
+    standing_space: struct { client: *Client, request_id: u64, query: StandingSpaceRequest },
     advance_time: transformations.Tick,
 };
 
@@ -176,6 +184,8 @@ const Request = union(enum) {
 pub const Client = struct {
     service: *WorldDataService,
     responses: Mailbox(ResponsePackage) = .{},
+    /// Value-only query replies never consume chunk packages or create subscriptions.
+    space_responses: Mailbox(StandingSpaceResponse) = .{},
     /// Worker-owned package under construction.
     pending: ResponsePackage = .{},
     next_request_id: u64 = 1,
@@ -186,6 +196,36 @@ pub const Client = struct {
         const id = self.next_request_id;
         self.next_request_id += 1;
         return id;
+    }
+
+    /// Ordered with edits from all clients; searches current authoritative blocks.
+    /// Only a position/error crosses the endpoint. No chunks or subscriptions escape.
+    pub fn requestStandingSpace(self: *Client, query: StandingSpaceRequest) u64 {
+        const id = self.nextRequestId();
+        self.service.requests.push(self.service.io, self.service.allocator, .{ .standing_space = .{
+            .client = self,
+            .request_id = id,
+            .query = query,
+        } });
+        return id;
+    }
+
+    /// One outstanding search per endpoint. Cancellation stops waiting; an in-flight
+    /// worker search can finish, and a later wait discards its small value-only reply.
+    /// Existing terrain subscriptions and their queued packages remain untouched.
+    pub fn waitStandingSpace(self: *Client, request_id: u64) (Io.Cancelable || StandingSpaceError)!standing_space.Position {
+        var replies: std.ArrayList(StandingSpaceResponse) = .empty;
+        defer replies.deinit(self.service.allocator);
+        while (try self.space_responses.waitAndTakeAllCancelable(self.service.io, &replies)) {
+            for (replies.items) |reply|
+                if (reply.request_id == request_id) return reply.result;
+            replies.clearRetainingCapacity();
+        }
+        return error.ServiceStopped;
+    }
+
+    pub fn findStandingSpace(self: *Client, query: StandingSpaceRequest) (Io.Cancelable || StandingSpaceError)!standing_space.Position {
+        return self.waitStandingSpace(self.requestStandingSpace(query));
     }
 
     /// Loading subscribes to changes until eviction. A new load replaces the old token.
@@ -327,6 +367,7 @@ pub const WorldDataService = struct {
             for (client.responses.items.items) |*package| package.deinit(self.allocator);
             client.pending.deinit(self.allocator);
             client.responses.deinit(self.allocator);
+            client.space_responses.deinit(self.allocator);
             client.subscriptions.deinit(self.allocator);
             self.allocator.destroy(client);
         }
@@ -340,6 +381,7 @@ pub const WorldDataService = struct {
     }
 
     fn runWorker(self: *WorldDataService) void {
+        defer for (self.clients.items) |client| client.space_responses.close(self.io);
         var batch: std.ArrayList(Request) = .empty;
         defer batch.deinit(self.allocator);
         while (true) {
@@ -459,6 +501,13 @@ pub const WorldDataService = struct {
 
     fn processRequest(self: *WorldDataService, request: Request) void {
         switch (request) {
+            .standing_space => |search| {
+                const result: StandingSpaceError!standing_space.Position = if (self.is_shutting_down.load(.monotonic))
+                    error.ServiceStopped
+                else
+                    self.worker_state.findStandingSpace(self.allocator, search.query);
+                search.client.space_responses.push(self.io, self.allocator, .{ .request_id = search.request_id, .result = result });
+            },
             .advance_time => |tick| self.worker_state.tick = @max(self.worker_state.tick, tick),
             .register => |client| self.clients.append(self.allocator, client) catch @panic("OOM"),
             .evict_chunk => |evict| {
@@ -595,6 +644,12 @@ const WorkerState = struct {
     tick: transformations.Tick = 0,
     /// Chunks without pending events are not visited by time processing.
     timed_chunks: std.AutoHashMapUnmanaged(ChunkId, void) = .empty,
+
+    fn findStandingSpace(self: *WorkerState, allocator: std.mem.Allocator, query: StandingSpaceRequest) standing_space.Error!standing_space.Position {
+        var context: ReadContext = .{ .state = self, .allocator = allocator };
+        defer context.deinit();
+        return standing_space.find(.{ .layout = self.layout, .context = &context, .block_at = ReadContext.read }, query);
+    }
 
     fn boundariesAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) BoundaryMasks {
         const id = self.layout.encodeChunkCoords(coords);
@@ -1845,6 +1900,142 @@ test "soil placed beneath existing sand packs immediately and waits for exposure
     state.tick += 1;
     try std.testing.expect(state.transformChunk(allocator, coords));
     try std.testing.expectEqual(.grass, readStateBlock(&state, block));
+}
+
+fn testSpaceQuery(xy: [2]f64) StandingSpaceRequest {
+    return .{ .preferred_xy = xy, .clearance_size = .{ 2, 2, 3 }, .support_size = .{ 0.6, 0.6 } };
+}
+
+fn expectEditReply(client: *Client, id: u64) !void {
+    var responses: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&responses);
+    try std.testing.expect(try client.waitResponses(&responses));
+    try std.testing.expectEqual(1, responses.items.len);
+    try std.testing.expectEqual(id, responses.items[0].operation.?.request_id);
+    try std.testing.expectEqual(.success, responses.items[0].operation.?.status);
+}
+
+test "standing-space requests preserve active terrain subscriptions and queued packages" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &layout, .flat);
+    defer service.destroy();
+    const client = try service.createClient();
+    const token = client.requestChunks(.{ 0, 0 }, 0, 1);
+    const query = testSpaceQuery(.{ -21.5, -21.5 });
+    try std.testing.expectEqual(standing_space.Position{ -21.5, -21.5, -16 }, try client.findStandingSpace(query));
+    try std.testing.expectEqual(standing_space.Position{ -21.5, -21.5, -16 }, try client.findStandingSpace(query));
+    var responses: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&responses);
+    try std.testing.expect(try client.waitResponses(&responses));
+    try std.testing.expectEqual(1, responses.items.len);
+    try std.testing.expectEqual(token, responses.items[0].subscription_id);
+    try std.testing.expectEqual(.blocks, std.meta.activeTag(responses.items[0].data));
+    try std.testing.expectEqual(1, client.subscriptions.count());
+    try std.testing.expectEqual(1, service.clients.items.len);
+}
+
+test "standing-space search sees edits ordered before it, including after terrain eviction" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &layout, .flat);
+    defer service.destroy();
+    const client = try service.createClient();
+    const token = client.requestChunks(.{ 0, 0 }, 0, 1);
+    var responses: std.ArrayList(ChunkResponse) = .empty;
+    try std.testing.expect(try client.waitResponses(&responses));
+    deinitResponses(&responses);
+    client.evictChunk(layout.encodeChunkId(0, 0, 0), token);
+    var query = testSpaceQuery(.{ -21.5, -21.5 });
+    query.clearance_size = .{ 0.6, 0.6, 1.8 };
+    try std.testing.expectEqual(standing_space.Position{ -21.5, -21.5, -16 }, try client.findStandingSpace(query));
+    const put = client.submitOperation(.{ .block = .{ 10, 10, 16 }, .action = .{ .put = .dirt } });
+    // Search before consuming the edit acknowledgment; worker ordering is the guarantee.
+    try std.testing.expectEqual(standing_space.Position{ -21.5, -21.5, -15 }, try client.findStandingSpace(query));
+    try expectEditReply(client, put);
+    const remove = client.submitOperation(.{ .block = .{ 10, 10, 16 }, .action = .remove });
+    try std.testing.expectEqual(standing_space.Position{ -21.5, -21.5, -16 }, try client.findStandingSpace(query));
+    try expectEditReply(client, remove);
+    const dig = client.submitOperation(.{ .block = .{ 10, 10, 15 }, .action = .remove });
+    try std.testing.expectEqual(standing_space.Position{ -21.5, -21.5, -17 }, try client.findStandingSpace(query));
+    try expectEditReply(client, dig);
+    try std.testing.expectEqual(0, client.subscriptions.count());
+}
+
+test "standing-space failures and repeated searches create no clients, subscriptions or chunk replies" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &layout, .{
+        .terrain = .{ .seed = 12345, .params = .{ .base_height = 64, .height_amplitude = 0 } },
+    });
+    defer service.destroy();
+    const client = try service.createClient();
+    const query = testSpaceQuery(.{ -0.05, -0.05 });
+    for (0..2) |_| try std.testing.expectError(error.NoSpace, client.findStandingSpace(query));
+    var invalid = query;
+    invalid.support_size = .{ 3, 3 };
+    try std.testing.expectError(error.InvalidSearch, client.findStandingSpace(invalid));
+    try std.testing.expectEqual(0, client.subscriptions.count());
+    try std.testing.expectEqual(1, service.clients.items.len);
+    var responses: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&responses);
+    client.takeResponses(&responses);
+    try std.testing.expectEqual(0, responses.items.len);
+}
+
+test "canceling a standing-space wait preserves the endpoint and ignores its late value reply" {
+    const io = std.testing.io;
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    const service = try WorldDataService.create(io, std.testing.allocator, &layout, .flat);
+    defer service.destroy();
+    const client = try service.createClient();
+    client.space_responses.mutex.lockUncancelable(io);
+    var locked = true;
+    defer if (locked) client.space_responses.mutex.unlock(io);
+    const canceled_id = client.requestStandingSpace(testSpaceQuery(.{ -0.05, -0.05 }));
+    var task = try io.concurrent(Client.waitStandingSpace, .{ client, canceled_id });
+    const result = task.cancel(io);
+    client.space_responses.mutex.unlock(io);
+    locked = false;
+    try std.testing.expectError(error.Canceled, result);
+    // A different position makes accepting the canceled reply observable.
+    try std.testing.expectEqual(standing_space.Position{ 10.5, 10.5, -16 }, try client.findStandingSpace(testSpaceQuery(.{ 10.5, 10.5 })));
+    try std.testing.expectEqual(0, client.subscriptions.count());
+    try std.testing.expectEqual(1, service.clients.items.len);
+    var leftovers: std.ArrayList(StandingSpaceResponse) = .empty;
+    defer leftovers.deinit(service.allocator);
+    client.space_responses.takeAll(io, &leftovers);
+    try std.testing.expectEqual(0, leftovers.items.len);
+}
+
+test "standing-space queries use current blocks across chunk seams and above the old spawn height" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 8 } });
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &layout, .{
+        .terrain = .{ .seed = 12345, .params = .{ .base_height = 220, .height_amplitude = 0 } },
+    });
+    defer service.destroy();
+    const client = try service.createClient();
+    for ([_][2]f64{ .{ -2.06, -2.96 }, .{ -0.05, -0.05 }, .{ -31.95, -0.05 }, .{ 32.05, -0.05 } }) |xy|
+        try std.testing.expectEqual(standing_space.Position{ xy[0], xy[1], 92 }, try client.findStandingSpace(testSpaceQuery(xy)));
+    try std.testing.expectEqual(0, client.subscriptions.count());
+}
+
+test "default startup finds spare clearance around real player support" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .{ .terrain = .{ .seed = 12345 } });
+    defer service.destroy();
+    const client = try service.createClient();
+    var query = testSpaceQuery(.{ -2.06, -2.96 });
+    query.search_radius = 8;
+    const position = try client.findStandingSpace(query);
+    try std.testing.expect(@abs(position[0] - query.preferred_xy[0]) <= 8);
+    try std.testing.expect(@abs(position[1] - query.preferred_xy[1]) <= 8);
+    try std.testing.expectEqual(0, client.subscriptions.count());
+}
+
+test "service shutdown answers queued standing-space requests without loading terrain" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
+    defer service.destroy();
+    const client = try service.createClient();
+    service.is_shutting_down.store(true, .monotonic);
+    try std.testing.expectError(error.ServiceStopped, client.findStandingSpace(testSpaceQuery(.{ 0.5, 0.5 })));
+    try std.testing.expectEqual(0, client.subscriptions.count());
 }
 
 test "refilling an underground hole packs soil under a ceiling, including across chunk boundaries" {
