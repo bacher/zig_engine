@@ -106,6 +106,8 @@ pub const SpectatorCamera = struct {
     }
 
     pub fn updateCameraView(spectator_camera: *SpectatorCamera) void {
+        const pitch_limit: f32 = std.math.pi / 2.0;
+        spectator_camera.pitch = std.math.clamp(spectator_camera.pitch, -pitch_limit, pitch_limit);
         // NOTE: matFromRollPitchYaw can't be used because it applies pitch then yaw,
         //       but it should be yaw then pitch.
         // const view_mat = zmath.matFromRollPitchYaw(
@@ -124,3 +126,28 @@ pub const SpectatorCamera = struct {
         spectator_camera.camera.updateView(view_mat);
     }
 };
+
+test "spectator pitch stops at vertical and reverses without accumulated overshoot" {
+    const WorldLayout = @import("world_layout.zig").WorldLayout;
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    var camera = Camera.init(&layout, 1);
+    var input: InputControllerGeneric = undefined;
+    input.cursor_left_button_pressed = true;
+    var spectator = SpectatorCamera.init(&camera, &input);
+    const limit: f32 = std.math.pi / 2.0;
+    for ([_]f32{ -1, 1 }) |direction| {
+        input.cursor_position_delta = .{ 0, -direction * 2000 };
+        for (0..3) |_| {
+            spectator.handleView(0);
+            try std.testing.expectEqual(direction * limit, spectator.pitch);
+            try std.testing.expectApproxEqAbs(@as(f64, direction), camera.forwardDirection()[2], 0.000001);
+        }
+        input.cursor_position_delta = .{ 0, direction * 2 };
+        spectator.handleView(0);
+        try std.testing.expectApproxEqAbs(direction * (limit - 0.01), spectator.pitch, 0.000001);
+    }
+    // Programmatic changes use the same restriction as mouse input.
+    spectator.pitch = 2 * std.math.pi;
+    spectator.updateCameraView();
+    try std.testing.expectEqual(limit, spectator.pitch);
+}

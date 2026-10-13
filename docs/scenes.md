@@ -104,7 +104,7 @@ The default scene has a spectator controller:
 | W / S | Move forward/backward in the camera's orientation. |
 | A / D | Strafe left/right. Horizontal diagonal input is normalized. |
 | Space / C | Move along world +Z / -Z. |
-| Hold left mouse button and move mouse | Capture the cursor and change yaw/pitch. Release restores the cursor. |
+| Hold left mouse button and move mouse | Capture the cursor and change yaw/pitch; pitch stops at +/-90 degrees. Release restores the cursor. |
 | Escape | Leave the engine loop. |
 | Ctrl+E | Toggle SSAO; exits SSAO debug mode if it was active. |
 | Ctrl+R | Toggle SSAO debug display, enabling SSAO when entering it. |

@@ -45,6 +45,7 @@ const placement_preview = @import("placement_preview.zig");
 const block_diagnostics = @import("block_diagnostics.zig");
 const block_messages = @import("block_messages.zig");
 const held_block = @import("engine").held_block;
+const held_item_motion = @import("engine").held_item_motion;
 
 // Shared camera-space held pose for player and spectator modes.
 const held_block_pose: held_block.Pose = .{};
@@ -74,6 +75,7 @@ const Game = struct {
     recovery_warning: bool = false,
     selected_material: voxel_chunk_module.BlockType = .dirt,
     held_block_renderer: ?held_block.Renderer = null,
+    held_motion: held_item_motion.Motion = .{},
     placement_validation: ?struct {
         block: [3]u32,
         material: voxel_chunk_module.BlockType,
@@ -106,6 +108,21 @@ const Game = struct {
 
     fn heldMaterial(game: *const Game) ?voxel_chunk_module.BlockType {
         return if (game.block_mode == .putting) game.selected_material else null;
+    }
+
+    fn updateHeldMotion(game: *Game) void {
+        const scene = game.engine.active_scene orelse return;
+        const input = game.engine.input_controller;
+        const spectator = game.control_mode == .spectator;
+        const player = if (game.player) |*player| player else null;
+        game.held_motion.update(.{
+            .position = scene.camera.position,
+            .view_from_world = scene.camera.view_from_camera,
+            .look_angles = if (spectator) .{ scene.spectator_camera.yaw, scene.spectator_camera.pitch } else if (player) |p| .{ p.yaw, p.pitch } else .{ 0, 0 },
+            .grounded = !spectator and if (player) |p| p.grounded else false,
+            .gait_enabled = spectator or if (player) |p| p.grounded and p.climb == null else false,
+            .active = input.focused and !input.focus_changed,
+        }, game.engine.frame_delta);
     }
 
     fn layout(game: *const Game) *const WorldLayout {
@@ -237,6 +254,7 @@ const Game = struct {
         }
         game.recovery_warning = result.recovery_failed;
         if (result.recovered) {
+            game.held_motion.reset();
             std.debug.print("player recovered to {d}\n", .{player.position});
         }
         player.applyCamera(engine.active_scene.?.camera);
@@ -245,6 +263,7 @@ const Game = struct {
     fn toggleControlMode(game: *Game) void {
         const player = if (game.player) |*player| player else return;
         const scene = game.engine.active_scene.?;
+        game.held_motion.reset();
         game.jump_requested = false;
         player.resetJumpInput();
         if (game.control_mode == .player) {
@@ -984,6 +1003,7 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
     // }
 
     game.updateWorld();
+    game.updateHeldMotion();
 }
 
 fn onKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque) void {
@@ -1044,12 +1064,99 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
                 engine.bind_group_minecraft_texture.wgpu_bind_group,
                 scene.camera.clip_from_view,
                 material,
-                held_block_pose,
+                held_block_pose.withMotion(game.held_motion.offset),
             );
         }
     }
     block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
     drawCrosshair();
+}
+
+test "held motion sampling uses actual active-camera movement and material selection preserves motion" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    fixture.engine.frame_delta = 1.0 / 60.0;
+    game.player = PlayerController.init(std.testing.allocator, .{ 0, 0, 0 });
+    game.player.?.grounded = true;
+    fixture.camera.updatePosition(.{ 0, 0, 1.6 });
+    game.updateHeldMotion();
+    // Pushing into an obstacle must not animate a walk in place.
+    try fixture.input.pressed_keys.put(.w, {});
+    for (0..60) |_| game.updateHeldMotion();
+    try std.testing.expectEqualDeep(held_item_motion.Offset{}, game.held_motion.offset);
+    for (0..10) |_| {
+        fixture.camera.translate(.{ 0, 5.0 / 60.0, 0 });
+        game.updateHeldMotion();
+    }
+    try std.testing.expect(@abs(game.held_motion.offset.translation[1]) + @abs(game.held_motion.offset.translation[2]) > 0.001);
+    const previous = game.held_motion.previous;
+    handleKeyPress(game, .{ .key = .three, .mods = .{} });
+    try std.testing.expectEqual(previous, game.held_motion.previous);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.tree_trunk, game.selected_material);
+    // Spectator samples its camera, not the frozen player's feet.
+    var spectator: std.meta.Child(@TypeOf(@as(Scene, undefined).spectator_camera)) = .{
+        .camera = &fixture.camera,
+        .input_controller = @ptrCast(&fixture.input),
+    };
+    fixture.scene.spectator_camera = &spectator;
+    game.control_mode = .spectator;
+    game.held_motion.reset();
+    game.updateHeldMotion();
+    for (0..30) |_| {
+        fixture.camera.translate(.{ 5.0 / 60.0, 0, 0 });
+        game.updateHeldMotion();
+    }
+    try std.testing.expect(@abs(game.held_motion.offset.translation[0]) > 0.001);
+    fixture.input.focused = false;
+    game.updateHeldMotion();
+    try std.testing.expectEqualDeep(held_item_motion.Offset{}, game.held_motion.offset);
+}
+
+test "held pitch shift follows the active controller even when the item is hidden" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    fixture.engine.frame_delta = 1.0 / 60.0;
+    game.player = PlayerController.init(std.testing.allocator, .{ 0, 0, 0 });
+    game.player.?.grounded = true;
+    var spectator: std.meta.Child(@TypeOf(@as(Scene, undefined).spectator_camera)) = .{
+        .camera = &fixture.camera,
+        .input_controller = @ptrCast(&fixture.input),
+    };
+    fixture.scene.spectator_camera = &spectator;
+    for ([_]@TypeOf(game.control_mode){ .player, .spectator }) |mode| {
+        game.control_mode = mode;
+        game.player.?.pitch = 0;
+        spectator.pitch = 0;
+        game.held_motion.reset();
+        game.updateHeldMotion();
+        for ([_]f32{ -0.6, 0.6 }) |pitch| {
+            // The inactive controller deliberately looks in the opposite direction.
+            game.player.?.pitch = if (mode == .player) pitch else -pitch;
+            spectator.pitch = if (mode == .spectator) pitch else -pitch;
+            for (0..300) |_| game.updateHeldMotion();
+            const expected = -@sin(pitch) * game.held_motion.tuning.pitch_shift;
+            try std.testing.expectApproxEqAbs(expected, game.held_motion.offset.translation[1], 0.000001);
+            try std.testing.expectEqualDeep(@as(held_item_motion.Vec3, @splat(0)), game.held_motion.offset.rotation_degrees);
+            fixture.input.focus_changed = true;
+            game.updateHeldMotion();
+            try std.testing.expectApproxEqAbs(expected, game.held_motion.offset.translation[1], 0.000001);
+            fixture.input.focus_changed = false;
+            fixture.input.focused = false;
+            game.updateHeldMotion();
+            try std.testing.expectApproxEqAbs(expected, game.held_motion.offset.translation[1], 0.000001);
+            fixture.input.focused = true;
+            fixture.engine.frame_delta = 0.3;
+            game.updateHeldMotion();
+            try std.testing.expectApproxEqAbs(expected, game.held_motion.offset.translation[1], 0.000001);
+            fixture.engine.frame_delta = 1.0 / 60.0;
+            game.updateHeldMotion();
+            try std.testing.expectApproxEqAbs(expected, game.held_motion.offset.translation[1], 0.000001);
+        }
+    }
 }
 
 test "held material follows tool and selection in player and spectator modes without a target" {
