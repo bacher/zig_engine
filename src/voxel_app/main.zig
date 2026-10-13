@@ -80,6 +80,8 @@ const Game = struct {
     fractional_ticks: f64 = 0,
     /// Active subscriptions, including loads still in flight. Kept until cache eviction.
     chunk_subscriptions: std.AutoHashMapUnmanaged(u32, u64) = .empty,
+    /// Last accepted block snapshot's subscription; retained blocks may predate a promotion.
+    block_snapshot_tokens: std.AutoHashMapUnmanaged(u32, u64) = .empty,
     chunk_packages: std.ArrayList(world_data_service.ResponsePackage) = .empty,
     chunk_modes: std.AutoHashMapUnmanaged(u32, world_data_service.Representation) = .empty,
     /// Metadata only: CPU mesh arrays transfer directly to the GPU upload queue.
@@ -127,6 +129,7 @@ const Game = struct {
         game.tool_commands.deinit(game.allocator);
         if (game.player) |*player| player.deinit();
         game.chunk_subscriptions.deinit(game.allocator);
+        game.block_snapshot_tokens.deinit(game.allocator);
         for (game.chunk_packages.items) |*package| package.deinit(game.allocator);
         game.chunk_packages.deinit(game.allocator);
         game.chunk_modes.deinit(game.allocator);
@@ -299,13 +302,20 @@ const Game = struct {
                         response.deinit(game.allocator);
                         continue;
                     }
+                    // Re-promotion can retain blocks while neighbors were meshed with
+                    // fallback planes. Its first accepted snapshot reloads that dependency.
+                    const previous_boundaries: ?world_engine.BoundaryMasks = if (game.block_snapshot_tokens.get(id) == token)
+                        (if (world.getChunk(response.coords)) |chunk| chunk.boundaries else null)
+                    else
+                        null;
                     world.insertChunk(response.coords, snapshot.chunk) catch {
                         response.deinit(game.allocator);
                         continue;
                     };
+                    game.block_snapshot_tokens.put(game.allocator, id, token.?) catch @panic("OOM");
                     game.loadChunkIfNeeded(response.coords[0], response.coords[1], response.coords[2]);
                     if (snapshot.neighbors) |masks| game.installBoundaries(response.coords, masks, response.mesh_revision);
-                    game.markChunkAndNeighborsDirty(response.coords);
+                    game.markChunkSnapshotDirty(response.coords, previous_boundaries);
                 },
                 .boundaries => |masks| {
                     if (game.chunk_modes.get(id) != .blocks) continue;
@@ -329,6 +339,7 @@ const Game = struct {
                     game.loaded_chunk_ids.put(game.allocator, id, {}) catch @panic("OOM");
                     game.mesh_versions.put(game.allocator, id, .{ .chunk_revision = response.chunk_revision, .mesh_revision = response.mesh_revision }) catch @panic("OOM");
                     _ = game.dirty_chunk_ids.remove(id);
+                    _ = game.block_snapshot_tokens.remove(id);
                     if (world.hasChunk(response.coords)) {
                         world.removeChunk(response.coords);
                         game.markChunkAndNeighborsDirty(response.coords);
@@ -494,6 +505,7 @@ const Game = struct {
     }
 
     fn removeChunkByIdIfNeeded(game: *Game, chunk_id: u32) void {
+        _ = game.block_snapshot_tokens.remove(chunk_id);
         _ = game.dirty_chunk_ids.remove(chunk_id);
         _ = game.mesh_versions.remove(chunk_id);
         _ = game.boundary_snapshots.remove(chunk_id);
@@ -624,7 +636,21 @@ const Game = struct {
         }
     }
 
-    /// Snapshots don't identify the edited block, so invalidate all face neighbors.
+    /// Compare the reconciled occupancy, including pending local edits. A snapshot
+    /// without changed boundary planes cannot change a neighboring chunk's faces.
+    fn markChunkSnapshotDirty(game: *Game, chunk_coords: ChunkCoords, previous: ?world_engine.BoundaryMasks) void {
+        game.markChunkDirtyIfLoaded(chunk_coords);
+        const updated = game.world.?.getChunk(chunk_coords).?.boundaries;
+        for (std.enums.values(Side)) |side| {
+            const i = @intFromEnum(side);
+            if (previous) |masks| {
+                if (std.meta.eql(masks[i], updated[i])) continue;
+            }
+            if (world_module.adjacentChunk(game.layout(), chunk_coords, side)) |coords| game.markChunkDirtyIfLoaded(coords);
+        }
+    }
+
+    /// Loading or dropping a local meshing dependency can affect every face neighbor.
     fn markChunkAndNeighborsDirty(game: *Game, chunk_coords: ChunkCoords) void {
         game.markChunkDirtyIfLoaded(chunk_coords);
         for (std.enums.values(Side)) |side| {
@@ -2184,6 +2210,7 @@ const StreamingTest = struct {
         if (self.game.player) |*player| player.deinit();
         self.game.world.?.deinit();
         self.game.chunk_subscriptions.deinit(allocator);
+        self.game.block_snapshot_tokens.deinit(allocator);
         self.game.chunk_modes.deinit(allocator);
         self.game.mesh_versions.deinit(allocator);
         self.game.boundary_snapshots.deinit(allocator);
@@ -2220,15 +2247,25 @@ const StreamingTest = struct {
         return true;
     }
 
+    fn waitAndApplyPackages(self: *StreamingTest) !void {
+        try std.testing.expect(try self.game.world_client.?.waitPackages(&self.game.chunk_packages));
+        for (self.game.chunk_packages.items) |*package| {
+            self.game.applyPackage(package);
+            package.responses.deinit(self.game.allocator);
+        }
+        self.game.chunk_packages.clearRetainingCapacity();
+    }
+
+    fn upload(self: *const StreamingTest, coords: ChunkCoords) *const voxel_chunk_module.VoxelChunkUpload {
+        for (self.grid.chunks_to_upload.items) |*chunk| {
+            if (@reduce(.And, chunk.chunk_coords == coords)) return chunk;
+        }
+        @panic("Expected a queued upload for this chunk");
+    }
+
     fn drainUntilSettled(self: *StreamingTest) !void {
         while (!self.settled()) {
-            var packages: std.ArrayList(world_data_service.ResponsePackage) = .empty;
-            try std.testing.expect(try self.game.world_client.?.waitPackages(&packages));
-            for (packages.items) |*package| {
-                self.game.applyPackage(package);
-                package.responses.deinit(self.game.allocator);
-            }
-            packages.deinit(self.game.allocator);
+            try self.waitAndApplyPackages();
             self.game.updateChunksAroundCamera(true);
             self.game.rebuildDirtyChunks();
         }
@@ -2240,6 +2277,223 @@ fn singleTestBlock(local: [3]u5, revision: u32) WorldChunk {
     _ = chunk.apply(std.testing.allocator, local, .{ .put = .stone });
     chunk.chunk_revision = revision;
     return chunk;
+}
+
+test "block snapshots rebuild only the chunk and changed face neighbors" {
+    const cases = [_]struct { local: [3]u5, uploads: usize }{
+        .{ .local = .{ 16, 16, 16 }, .uploads = 1 },
+        .{ .local = .{ 0, 16, 16 }, .uploads = 2 },
+        .{ .local = .{ 31, 16, 16 }, .uploads = 2 },
+        .{ .local = .{ 16, 0, 16 }, .uploads = 2 },
+        .{ .local = .{ 16, 31, 16 }, .uploads = 2 },
+        .{ .local = .{ 16, 16, 0 }, .uploads = 2 },
+        .{ .local = .{ 16, 16, 31 }, .uploads = 2 },
+        .{ .local = .{ 0, 0, 16 }, .uploads = 3 },
+        .{ .local = .{ 31, 31, 31 }, .uploads = 4 },
+    };
+    for (cases) |case| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        const coords = ChunkCoords{ 0, 1, 1 }; // Includes a neighbor across the x wrap.
+        try fixture.subscribe(coords, 1, .blocks);
+        const initial = singleTestBlock(.{ 8, 8, 8 }, 0);
+        defer initial.deinit(std.testing.allocator);
+        try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .data = .{ .blocks = .{ .chunk = initial.clone(std.testing.allocator) } } }});
+        for (std.enums.values(Side)) |side| {
+            const neighbor = world_module.adjacentChunk(&test_layout, coords, side).?;
+            try fixture.subscribe(neighbor, 2, .blocks);
+            try fixture.apply(&.{.{ .coords = neighbor, .subscription_id = 2, .data = .{ .blocks = .{ .chunk = singleTestBlock(.{ 8, 8, 8 }, 0) } } }});
+        }
+        fixture.game.rebuildDirtyChunks();
+        fixture.grid.clearChunks();
+
+        for (0..4) |step| {
+            var snapshot = initial.clone(std.testing.allocator);
+            if (step % 2 == 0) _ = snapshot.apply(std.testing.allocator, case.local, .{ .put = .dirt });
+            snapshot.chunk_revision = @intCast(step + 1);
+            try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .chunk_revision = snapshot.chunk_revision, .data = .{ .blocks = .{ .chunk = snapshot } } }});
+            try std.testing.expectEqual(case.uploads, fixture.game.dirty_chunk_ids.count());
+            for (std.enums.values(Side)) |side| {
+                const i = @intFromEnum(side);
+                const neighbor = world_module.adjacentChunk(&test_layout, coords, side).?;
+                const touches = case.local[i / 2] == (if (i % 2 == 0) @as(u5, 0) else consts.CHUNK_SIZE - 1);
+                try std.testing.expectEqual(touches, fixture.game.dirty_chunk_ids.contains(test_layout.encodeChunkCoords(neighbor)));
+            }
+            fixture.game.rebuildDirtyChunks();
+            try std.testing.expectEqual(case.uploads, fixture.grid.chunks_to_upload.items.len);
+            fixture.grid.clearChunks();
+        }
+    }
+}
+
+test "simulation terrain edits queue one GPU chunk per put and remove" {
+    const allocator = std.testing.allocator;
+    const generator = world_generator.WorldGenerator{ .terrain = .{ .seed = 12345 } };
+    var prepared = try generator.prepare(allocator, &test_layout);
+    defer prepared.deinit(allocator);
+    const origin = test_layout.origin_chunk;
+    const column = world_generator.ColumnGenerator.init(&prepared, .{ origin[0], origin[1] });
+    var surface_z: u32 = 0;
+    for (0..@as(usize, @intCast(test_layout.size_in_chunks[2]))) |chunk_z| {
+        const chunk = column.generateChunk(allocator, @intCast(chunk_z));
+        defer chunk.deinit(allocator);
+        for (0..consts.CHUNK_SIZE) |z| {
+            if (chunk.content.getBlock(.{ 16, 16, @intCast(z) }) != .none)
+                surface_z = @intCast(chunk_z * consts.CHUNK_SIZE + z + 1);
+        }
+    }
+    const block = [3]u32{ @as(u32, @intCast(origin[0])) * consts.CHUNK_SIZE + 16, @as(u32, @intCast(origin[1])) * consts.CHUNK_SIZE + 16, surface_z };
+    const coords, const local = world_module.splitBlockCoords(block);
+    try std.testing.expectEqual([3]u32{ 8208, 4112, 106 }, block);
+    try std.testing.expectEqual([3]u5{ 16, 16, 10 }, local);
+    for (local) |axis| try std.testing.expect(axis > 0 and axis < consts.CHUNK_SIZE - 1);
+
+    const service = try WorldDataService.create(std.testing.io, allocator, &test_layout, generator);
+    defer service.destroy();
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    fixture.game.world_client = try service.createClient();
+    const worker = try service.createClient();
+    const body: terrain_collision.Body = .{};
+    const spawn = try fixture.game.world_client.?.findStandingSpace(.{
+        .preferred_xy = .{ -2.06, -2.96 },
+        .clearance_size = .{ 2, 2, 3 },
+        .support_size = .{ 2 * body.half_width, 2 * body.half_width },
+        .search_radius = 8,
+    });
+    const camera_chunk = test_layout.getChunkCoords(spawn + Position{ 0, 0, body.eye_height });
+    try std.testing.expectEqual(ChunkCoords{ 255, 127, 3 }, camera_chunk);
+    // Subscribe to the same 3x3x3 block core as the game's initial player camera.
+    for (0..3) |dy| {
+        for (0..3) |dx| {
+            const x = camera_chunk[0] + @as(i32, @intCast(dx)) - 1;
+            const y = camera_chunk[1] + @as(i32, @intCast(dy)) - 1;
+            const token = fixture.game.world_client.?.requestChunks(.{ x, y }, camera_chunk[2] - 1, camera_chunk[2] + 2);
+            for (0..3) |dz| try fixture.subscribe(.{ x, y, camera_chunk[2] + @as(i32, @intCast(dz)) - 1 }, token, .blocks);
+        }
+    }
+    while (!fixture.settled()) {
+        try fixture.waitAndApplyPackages();
+    }
+    fixture.game.rebuildDirtyChunks();
+    fixture.grid.clearChunks();
+
+    for (0..4) |step| {
+        _ = worker.submitOperation(.{ .block = block, .action = if (step % 2 == 0) .{ .put = .dirt } else .remove });
+        try fixture.waitAndApplyPackages();
+        fixture.game.rebuildDirtyChunks();
+        try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items.len);
+        try std.testing.expectEqual(coords, fixture.grid.chunks_to_upload.items[0].chunk_coords);
+        const expected: voxel_chunk_module.BlockType = if (step % 2 == 0) .dirt else .none;
+        try std.testing.expectEqual(expected, fixture.game.world.?.getChunk(coords).?.content.getBlock(local));
+        fixture.grid.clearChunks();
+    }
+}
+
+test "material-only boundary snapshots leave neighboring geometry unchanged" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const coords = ChunkCoords{ 1, 1, 1 };
+    const neighbor = ChunkCoords{ 2, 1, 1 };
+    const neighbor_id = test_layout.encodeChunkCoords(neighbor);
+    const local = [3]u5{ 31, 8, 8 };
+    try fixture.subscribe(coords, 1, .blocks);
+    try fixture.subscribe(neighbor, 2, .blocks);
+    try fixture.apply(&.{
+        .{ .coords = coords, .subscription_id = 1, .data = .{ .blocks = .{ .chunk = singleTestBlock(local, 0) } } },
+        .{ .coords = neighbor, .subscription_id = 2, .data = .{ .blocks = .{ .chunk = singleTestBlock(.{ 0, 8, 8 }, 0) } } },
+    });
+    fixture.game.rebuildDirtyChunks();
+    const neighbor_faces = fixture.upload(neighbor).chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.bottom)].items.ptr;
+    var snapshot = singleTestBlock(local, 1);
+    snapshot.changeType(local, .grass);
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .chunk_revision = 1, .data = .{ .blocks = .{ .chunk = snapshot } } }});
+    try std.testing.expectEqual(1, fixture.game.dirty_chunk_ids.count());
+    try std.testing.expect(!fixture.game.dirty_chunk_ids.contains(neighbor_id));
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expectEqual(neighbor_faces, fixture.upload(neighbor).chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.bottom)].items.ptr);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.grass, fixture.upload(coords).chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.bottom)].items[0].block_type);
+}
+
+test "snapshot boundary invalidation follows optimistic replay and failed edit rollback" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const coords = ChunkCoords{ 1, 1, 1 };
+    const neighbor = ChunkCoords{ 2, 1, 1 };
+    const neighbor_id = test_layout.encodeChunkCoords(neighbor);
+    const local = [3]u5{ 31, 8, 8 };
+    const block = [3]u32{ 63, 40, 40 };
+    try fixture.subscribe(coords, 1, .blocks);
+    try fixture.subscribe(neighbor, 2, .blocks);
+    try fixture.apply(&.{
+        .{ .coords = coords, .subscription_id = 1, .data = .{ .blocks = .{ .chunk = singleTestBlock(local, 0) } } },
+        .{ .coords = neighbor, .subscription_id = 2, .data = .{ .blocks = .{ .chunk = singleTestBlock(.{ 0, 8, 8 }, 0) } } },
+    });
+    fixture.game.rebuildDirtyChunks();
+    fixture.game.world.?.setBlockUnchecked(block, .none);
+    fixture.game.world.?.pending_operations.items[0].request_id = 7;
+    fixture.game.markChunksAroundBlockDirty(block);
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expectEqual(1, fixture.upload(neighbor).chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.left)].items.len);
+
+    // An older authority snapshot still contains the block; pending removal is replayed.
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .data = .{ .blocks = .{ .chunk = singleTestBlock(local, 0) } } }});
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.none, fixture.game.world.?.getChunk(coords).?.content.getBlock(local));
+    try std.testing.expect(!fixture.game.dirty_chunk_ids.contains(neighbor_id));
+    fixture.game.rebuildDirtyChunks();
+
+    // A failed acknowledgment retires the removal and restores boundary occupancy.
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .operation = .{ .request_id = 7, .status = .constraint_violation }, .data = .{ .blocks = .{ .chunk = singleTestBlock(local, 0) } } }});
+    try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
+    try std.testing.expect(fixture.game.dirty_chunk_ids.contains(neighbor_id));
+    fixture.game.rebuildDirtyChunks();
+    try std.testing.expectEqual(0, fixture.upload(neighbor).chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.left)].items.len);
+}
+
+test "canceled demotion and re-promotion reload neighboring mesh dependencies" {
+    for ([_]bool{ false, true }) |boundaries_first| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        const coords = ChunkCoords{ 1, 1, 1 };
+        const neighbor = ChunkCoords{ 2, 1, 1 };
+        const i = @intFromEnum(Side.right);
+        var solid_masks: world_engine.BoundaryMasks = @splat(.{});
+        solid_masks[i].set(.right, .{ 31, 8, 8 }, true);
+        try fixture.subscribe(coords, 1, .blocks);
+        try fixture.subscribe(neighbor, 2, .blocks);
+        try fixture.apply(&.{
+            .{ .coords = coords, .subscription_id = 1, .data = .{ .blocks = .{ .chunk = singleTestBlock(.{ 31, 8, 8 }, 0), .neighbors = solid_masks } } },
+            .{ .coords = neighbor, .subscription_id = 2, .data = .{ .blocks = .{ .chunk = singleTestBlock(.{ 0, 8, 8 }, 0) } } },
+        });
+        fixture.game.rebuildDirtyChunks();
+        try std.testing.expectEqual(0, fixture.upload(coords).chunk_side_data.blocks_grouped_by_side[i].items.len);
+
+        // Reject a remote removal on B's obsolete block subscription, retaining its blocks.
+        try fixture.subscribe(neighbor, 3, .mesh);
+        try fixture.apply(&.{
+            .{ .coords = neighbor, .subscription_id = 2, .chunk_revision = 1, .mesh_revision = 1, .data = .{ .blocks = .{ .chunk = WorldChunk.initEmpty() } } },
+            .{ .coords = coords, .subscription_id = 1, .mesh_revision = 1, .data = .{ .boundaries = @splat(.{}) } },
+        });
+        try std.testing.expectEqual(voxel_chunk_module.BlockType.stone, fixture.game.world.?.getChunk(neighbor).?.content.getBlock(.{ 0, 8, 8 }));
+        fixture.game.rebuildDirtyChunks();
+        try std.testing.expectEqual(1, fixture.upload(coords).chunk_side_data.blocks_grouped_by_side[i].items.len);
+
+        // Restore B at the authority, then promote before the demotion mesh arrives.
+        try fixture.subscribe(neighbor, 4, .blocks);
+        const snapshot: ChunkResponse = .{ .coords = neighbor, .subscription_id = 4, .chunk_revision = 2, .mesh_revision = 2, .data = .{ .blocks = .{ .chunk = singleTestBlock(.{ 0, 8, 8 }, 2) } } };
+        const boundaries: ChunkResponse = .{ .coords = coords, .subscription_id = 1, .mesh_revision = 2, .data = .{ .boundaries = solid_masks } };
+        try fixture.apply(if (boundaries_first) &.{ boundaries, snapshot } else &.{ snapshot, boundaries });
+        fixture.game.rebuildDirtyChunks();
+        try std.testing.expectEqual(0, fixture.upload(coords).chunk_side_data.blocks_grouped_by_side[i].items.len);
+        // A late demotion mesh cannot remove the restored local dependency.
+        try fixture.apply(&.{.{ .coords = neighbor, .subscription_id = 3, .chunk_revision = 1, .mesh_revision = 1, .data = .{ .mesh = .{} } }});
+        try std.testing.expect(fixture.game.world.?.hasChunk(neighbor));
+    }
 }
 
 test "promotion reuses matching authoritative mesh but rejects a neighbor-only revision change" {
