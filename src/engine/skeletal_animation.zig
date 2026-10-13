@@ -11,7 +11,7 @@ const gltf_types = gltf_loader.types;
 
 const Self = @This();
 
-pub const JointMatrixUniform = [types.max_skin_joints]zmath.Mat;
+pub const GPU_JointMatrixUniform = [types.max_skin_joints]zmath.Mat;
 
 pub const JointMatrixBuffer = struct {
     handle: zgpu.BufferHandle,
@@ -475,12 +475,12 @@ pub fn update(
         );
     }
 
-    var uniform: JointMatrixUniform = undefined;
+    var uniform: GPU_JointMatrixUniform = undefined;
     self.writeJointMatrixUniform(&uniform);
     gctx.queue.writeBuffer(self.joint_matrix_buffer.gpu_buffer, 0, zmath.Mat, uniform[0..]);
 }
 
-fn writeJointMatrixUniform(self: *const Self, target: *JointMatrixUniform) void {
+fn writeJointMatrixUniform(self: *const Self, target: *GPU_JointMatrixUniform) void {
     for (target) |*matrix| {
         matrix.* = zmath.identity();
     }
@@ -492,7 +492,7 @@ fn writeJointMatrixUniform(self: *const Self, target: *JointMatrixUniform) void 
 }
 
 pub fn createIdentityJointMatrixBuffer(gctx: *zgpu.GraphicsContext) !JointMatrixBuffer {
-    var uniform: JointMatrixUniform = undefined;
+    var uniform: GPU_JointMatrixUniform = undefined;
     for (&uniform) |*matrix| {
         matrix.* = zmath.identity();
     }
@@ -502,14 +502,14 @@ pub fn createIdentityJointMatrixBuffer(gctx: *zgpu.GraphicsContext) !JointMatrix
 
 fn createJointMatrixBuffer(
     gctx: *zgpu.GraphicsContext,
-    initial_data: *const JointMatrixUniform,
+    initial_data: *const GPU_JointMatrixUniform,
 ) !JointMatrixBuffer {
     const handle = gctx.createBuffer(.{
         .usage = .{
             .copy_dst = true,
             .uniform = true,
         },
-        .size = @sizeOf(JointMatrixUniform),
+        .size = @sizeOf(GPU_JointMatrixUniform),
     });
 
     const gpu_buffer = gctx.lookupResource(handle) orelse return error.BufferIsNotReady;

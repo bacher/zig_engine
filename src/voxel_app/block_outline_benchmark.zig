@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !void {
             .material = .rebar,
             .result = .{ .status = .constraint_violation, .failure = failure },
         };
-        var output: [outline.instance_capacity]outline.Instance = undefined;
+        var output: [outline.instance_capacity]outline.GPU_Instance = undefined;
         var samples: [11]u64 = undefined;
         for (&samples) |*sample| {
             const start = std.Io.Clock.awake.now(init.io);

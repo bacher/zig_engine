@@ -4,7 +4,7 @@ const zmath = @import("zmath");
 
 const BindGroup = @import("../bind_group.zig").BindGroup;
 
-pub const SceneShaderRuntimeSettings = packed struct {
+pub const GPU_SceneShaderRuntimeSettings = packed struct {
     ssao_enabled: bool,
     _padding: u31 = 0,
 };
@@ -108,7 +108,7 @@ pub const SceneBindGroupLayout = struct {
                     .binding = 3,
                     .buffer_handle = gctx.uniforms.buffer,
                     .offset = 0,
-                    .size = @sizeOf(SceneShaderRuntimeSettings),
+                    .size = @sizeOf(GPU_SceneShaderRuntimeSettings),
                 },
                 // Camera/light chunk to clip matrix
                 .{

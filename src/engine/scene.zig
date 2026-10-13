@@ -26,7 +26,7 @@ const VoxelGrid = @import("./voxel/voxel_grid.zig").VoxelGrid;
 
 const INITIAL_OBJECT_CAPACITY = 64;
 
-pub const InstanceBufferEntry = @import("chunk_transform.zig").ChunkTransform;
+pub const GPU_InstanceBufferEntry = @import("chunk_transform.zig").GPU_ChunkTransform;
 
 pub const Scene = struct {
     /// Immutable after creation; all scene coordinate consumers share this layout.
@@ -59,7 +59,7 @@ pub const Scene = struct {
     scene_bind_group: BindGroup,
 
     instance_buffer: struct {
-        buffer: []InstanceBufferEntry,
+        buffer: []GPU_InstanceBufferEntry,
         next_index: u32 = 0,
         max_capacity: u32,
         /// Reserved alongside buffer capacity, so deletion never allocates.
@@ -101,8 +101,8 @@ pub const Scene = struct {
         var limits: wgpu.SupportedLimits = .{};
         if (!engine.gctx.device.getLimits(&limits)) return error.DeviceLimitsUnavailable;
         const max_capacity: u32 = @intCast(@min(
-            @min(limits.limits.max_buffer_size, limits.limits.max_storage_buffer_binding_size) / @sizeOf(InstanceBufferEntry),
-            @min(std.math.maxInt(u32), std.math.maxInt(usize) / @sizeOf(InstanceBufferEntry)),
+            @min(limits.limits.max_buffer_size, limits.limits.max_storage_buffer_binding_size) / @sizeOf(GPU_InstanceBufferEntry),
+            @min(std.math.maxInt(u32), std.math.maxInt(usize) / @sizeOf(GPU_InstanceBufferEntry)),
         ));
         if (max_capacity == 0) return error.SceneCapacityReached;
         const capacity: usize = @min(INITIAL_OBJECT_CAPACITY, max_capacity);
@@ -112,15 +112,15 @@ pub const Scene = struct {
                 .storage = true,
                 .copy_src = true,
             },
-            .size = capacity * @sizeOf(InstanceBufferEntry),
+            .size = capacity * @sizeOf(GPU_InstanceBufferEntry),
         });
         errdefer engine.gctx.destroyResource(instance_buffer_handle);
 
         const instance_buffer_gpu_buffer = engine.gctx.lookupResource(instance_buffer_handle) orelse return error.BufferIsNotReady;
-        const buffer = try allocator.alloc(InstanceBufferEntry, capacity);
+        const buffer = try allocator.alloc(GPU_InstanceBufferEntry, capacity);
         errdefer allocator.free(buffer);
         // Upload ranges may span unused slots; keep them initialized.
-        @memset(buffer, std.mem.zeroes(InstanceBufferEntry));
+        @memset(buffer, std.mem.zeroes(GPU_InstanceBufferEntry));
 
         var outdated_indices = try std.DynamicBitSetUnmanaged.initEmpty(allocator, capacity);
         errdefer outdated_indices.deinit(allocator);
@@ -130,7 +130,7 @@ pub const Scene = struct {
         const scene_bind_group = engine.bind_group_layouts.scene.createBindGroup(
             engine.gctx,
             instance_buffer_handle,
-            capacity * @sizeOf(InstanceBufferEntry),
+            capacity * @sizeOf(GPU_InstanceBufferEntry),
         );
         errdefer scene_bind_group.deinit(engine.gctx);
 
@@ -218,7 +218,7 @@ pub const Scene = struct {
         if (scene.instance_buffer.next_index > 0) scene.engine.gctx.queue.writeBuffer(
             scene.instance_buffer.gpu_buffer,
             0,
-            InstanceBufferEntry,
+            GPU_InstanceBufferEntry,
             scene.instance_buffer.buffer[0..scene.instance_buffer.next_index],
         );
     }
@@ -287,17 +287,17 @@ pub const Scene = struct {
 
     fn releaseInstanceSlot(scene: *Scene, index: u32) void {
         scene.instance_buffer.outdated_indices.unset(index);
-        scene.instance_buffer.buffer[index] = std.mem.zeroes(InstanceBufferEntry);
+        scene.instance_buffer.buffer[index] = std.mem.zeroes(GPU_InstanceBufferEntry);
         scene.instance_buffer.free_indices.appendAssumeCapacity(index);
     }
 
     fn growInstanceBuffer(scene: *Scene) !void {
         const old_capacity = scene.instance_buffer.buffer.len;
         const capacity = @min(old_capacity * 2, scene.instance_buffer.max_capacity);
-        const buffer = try scene.allocator.alloc(InstanceBufferEntry, capacity);
+        const buffer = try scene.allocator.alloc(GPU_InstanceBufferEntry, capacity);
         errdefer scene.allocator.free(buffer);
         @memcpy(buffer[0..old_capacity], scene.instance_buffer.buffer);
-        @memset(buffer[old_capacity..], std.mem.zeroes(InstanceBufferEntry));
+        @memset(buffer[old_capacity..], std.mem.zeroes(GPU_InstanceBufferEntry));
         var dirty = try scene.instance_buffer.outdated_indices.clone(scene.allocator);
         errdefer dirty.deinit(scene.allocator);
         try dirty.resize(scene.allocator, capacity, false);
@@ -306,14 +306,14 @@ pub const Scene = struct {
         const gctx = scene.engine.gctx;
         const handle = gctx.createBuffer(.{
             .usage = .{ .copy_dst = true, .copy_src = true, .storage = true },
-            .size = capacity * @sizeOf(InstanceBufferEntry),
+            .size = capacity * @sizeOf(GPU_InstanceBufferEntry),
         });
         errdefer gctx.destroyResource(handle);
         const gpu_buffer = gctx.lookupResource(handle) orelse return error.BufferIsNotReady;
-        const binding = scene.engine.bind_group_layouts.scene.createBindGroup(gctx, handle, capacity * @sizeOf(InstanceBufferEntry));
+        const binding = scene.engine.bind_group_layouts.scene.createBindGroup(gctx, handle, capacity * @sizeOf(GPU_InstanceBufferEntry));
 
         // Seed unchanged transforms too. Dirty objects are recomputed before draw.
-        gctx.queue.writeBuffer(gpu_buffer, 0, InstanceBufferEntry, buffer[0..scene.instance_buffer.next_index]);
+        gctx.queue.writeBuffer(gpu_buffer, 0, GPU_InstanceBufferEntry, buffer[0..scene.instance_buffer.next_index]);
         scene.scene_bind_group.deinit(gctx);
         // Release rather than destroy: previously submitted commands can still
         // hold the old buffer while the next frame uses its replacement.
@@ -343,7 +343,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
+        scene.instance_buffer.buffer[instance_index] = GPU_InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
 
         if (params.animation_name) |animation_name| {
             try game_object.playAnimation(scene.animationContext(), animation_name);
@@ -367,7 +367,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
+        scene.instance_buffer.buffer[instance_index] = GPU_InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
         scene.game_objects.appendAssumeCapacity(game_object);
 
         return game_object;
@@ -388,7 +388,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
+        scene.instance_buffer.buffer[instance_index] = GPU_InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
         scene.game_objects.appendAssumeCapacity(game_object);
 
         return game_object;
@@ -408,7 +408,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
+        scene.instance_buffer.buffer[instance_index] = GPU_InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
         scene.game_objects.appendAssumeCapacity(game_object);
 
         return game_object;
@@ -451,7 +451,7 @@ pub const Scene = struct {
         });
         errdefer game_object.deinit(scene.engine.gctx);
 
-        scene.instance_buffer.buffer[instance_index] = InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
+        scene.instance_buffer.buffer[instance_index] = GPU_InstanceBufferEntry.init(scene.layout, game_object.getModelMatrix());
         scene.game_objects.appendAssumeCapacity(game_object);
 
         return game_object;

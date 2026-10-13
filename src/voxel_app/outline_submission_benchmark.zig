@@ -65,7 +65,7 @@ pub fn run(init: std.process.Init) !void {
     const stride = 256;
     const individual_buffer = device.createBuffer(.{ .size = stride * outline.instance_capacity, .usage = .{ .storage = true } });
     defer individual_buffer.release();
-    const entries = [_]wgpu.BindGroupEntry{.{ .binding = 0, .buffer = individual_buffer, .size = @sizeOf(outline.Instance) }};
+    const entries = [_]wgpu.BindGroupEntry{.{ .binding = 0, .buffer = individual_buffer, .size = @sizeOf(outline.GPU_Instance) }};
     const individual = device.createBindGroup(.{ .layout = gctx.lookupResource(layout.bind_group_layout_handle).?, .entries = &entries, .entry_count = entries.len });
     defer individual.release();
     const extent = wgpu.Extent3D{ .width = 128, .height = 128, .depth_or_array_layers = 1 };

@@ -61,7 +61,7 @@ pub fn check(device: wgpu.Device, mapping: *Mapping) !void {
     const instance_buffer = device.createBuffer(.{ .size = instance_offsets.buffer_size, .usage = .{ .storage = true, .copy_dst = true } });
     defer instance_buffer.release();
     const entries = [_]wgpu.BindGroupEntry{
-        .{ .binding = 0, .buffer = instance_buffer, .size = @sizeOf(outline.Instance) },
+        .{ .binding = 0, .buffer = instance_buffer, .size = @sizeOf(outline.GPU_Instance) },
     };
     const bind_group = device.createBindGroup(.{
         .layout = gctx.lookupResource(layouts.block_outline.bind_group_layout_handle).?,
@@ -102,8 +102,8 @@ pub fn check(device: wgpu.Device, mapping: *Mapping) !void {
             if (case == .perspective_near) {
                 transform = @import("utils.zig").matMul(zmath.perspectiveFovRh(std.math.pi / 2.0, 1, 0.1, 10), zmath.translation(-0.1, -0.1, -0.3));
             }
-            const data = outline.Instance{ .clip_from_block = transform, .block_from_clip = zmath.inverse(transform), .stroke = stroke };
-            queue.writeBuffer(instance_buffer, instance_offsets.target, outline.Instance, &.{data});
+            const data = outline.GPU_Instance{ .clip_from_block = transform, .block_from_clip = zmath.inverse(transform), .stroke = stroke };
+            queue.writeBuffer(instance_buffer, instance_offsets.target, outline.GPU_Instance, &.{data});
             const clear_depth: f32 = if (case == .occluded) 0.25 else if (case == .perspective_near) 1 else 0.5;
             const encoder = device.createCommandEncoder(null);
             defer encoder.release();
@@ -166,9 +166,9 @@ fn checkInstancedBatch(gctx: *zgpu.GraphicsContext, layout: outline.BindGroupLay
     defer hidden_pipeline.deinit(gctx);
     const queue = device.getQueue();
     defer queue.release();
-    const storage = device.createBuffer(.{ .size = outline.instance_capacity * @sizeOf(outline.Instance), .usage = .{ .storage = true, .copy_dst = true } });
+    const storage = device.createBuffer(.{ .size = outline.instance_capacity * @sizeOf(outline.GPU_Instance), .usage = .{ .storage = true, .copy_dst = true } });
     defer storage.release();
-    const entries = [_]wgpu.BindGroupEntry{.{ .binding = 0, .buffer = storage, .size = outline.instance_capacity * @sizeOf(outline.Instance) }};
+    const entries = [_]wgpu.BindGroupEntry{.{ .binding = 0, .buffer = storage, .size = outline.instance_capacity * @sizeOf(outline.GPU_Instance) }};
     const bind_group = device.createBindGroup(.{ .layout = gctx.lookupResource(layout.bind_group_layout_handle).?, .entries = &entries, .entry_count = entries.len });
     defer bind_group.release();
     const side = 128;
@@ -184,7 +184,7 @@ fn checkInstancedBatch(gctx: *zgpu.GraphicsContext, layout: outline.BindGroupLay
     defer depth_view.release();
     const readback = device.createBuffer(.{ .size = image_size * 4, .usage = .{ .copy_dst = true, .map_read = true } });
     defer readback.release();
-    var instances: [outline.instance_capacity]outline.Instance = undefined;
+    var instances: [outline.instance_capacity]outline.GPU_Instance = undefined;
     for (&instances, 0..) |*instance, index| {
         var transform = zmath.identity();
         transform[0][0] = 0.13;
@@ -204,7 +204,7 @@ fn checkInstancedBatch(gctx: *zgpu.GraphicsContext, layout: outline.BindGroupLay
         instances[count - 1].color = .{ 0, 1, 0, 1 };
         instances[count - 1].clip_from_block[3][2] = if (focus_hidden) 0.8 else 0.3;
         instances[count - 1].block_from_clip = zmath.inverse(instances[count - 1].clip_from_block);
-        queue.writeBuffer(storage, 0, outline.Instance, instances[0..count]);
+        queue.writeBuffer(storage, 0, outline.GPU_Instance, instances[0..count]);
         instances[count - 1] = last;
         for ([_]bool{ false, true }, 0..) |batched, image_index| {
             const encoder = device.createCommandEncoder(null);
@@ -255,7 +255,7 @@ fn checkHints(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.BindGr
     defer hidden_pipeline.deinit(gctx);
     const queue = device.getQueue();
     defer queue.release();
-    const entries = [_]wgpu.BindGroupEntry{.{ .binding = 0, .buffer = instance_buffer, .size = 2 * @sizeOf(outline.Instance) }};
+    const entries = [_]wgpu.BindGroupEntry{.{ .binding = 0, .buffer = instance_buffer, .size = 2 * @sizeOf(outline.GPU_Instance) }};
     const bind_group = device.createBindGroup(.{ .layout = gctx.lookupResource(layouts.block_outline.bind_group_layout_handle).?, .entries = &entries, .entry_count = entries.len });
     defer bind_group.release();
     const side = 128;
@@ -283,7 +283,7 @@ fn checkHints(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.BindGr
             .depth_stencil_attachment = &.{ .view = depth_view, .depth_load_op = .clear, .depth_store_op = .store, .depth_clear_value = clear_depth },
         });
         defer pass.release();
-        var instances: [2]outline.Instance = undefined;
+        var instances: [2]outline.GPU_Instance = undefined;
         for (0..2) |index| {
             var transform = zmath.identity();
             transform[0][0] = 0.5;
@@ -298,8 +298,8 @@ fn checkHints(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.BindGr
                 .parameters = @splat(0),
             };
         }
-        if (case == .overlap_hidden_first) std.mem.swap(outline.Instance, &instances[0], &instances[1]);
-        queue.writeBuffer(instance_buffer, 0, outline.Instance, &instances);
+        if (case == .overlap_hidden_first) std.mem.swap(outline.GPU_Instance, &instances[0], &instances[1]);
+        queue.writeBuffer(instance_buffer, 0, outline.GPU_Instance, &instances);
         outline.drawBatch(pass, hidden_pipeline.pipeline_gpu, visible_pipeline, bind_group, 0, 2, 2);
         pass.end();
         encoder.copyTextureToBuffer(.{ .texture = color }, .{ .buffer = readback, .layout = .{ .bytes_per_row = side * 4, .rows_per_image = side } }, extent);
@@ -395,26 +395,26 @@ fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.Bind
             const eye = view.eye;
             const transform = utils.matMul(zmath.perspectiveFovRh(view.fov, 1, 0.01, view.far), zmath.lookAtRh(eye, view.focus, .{ 0, 0, 1, 0 }));
             const mask = outline.faceMask(.{ eye[0], eye[1], eye[2] });
-            const data = outline.Instance{
+            const data = outline.GPU_Instance{
                 .clip_from_block = transform,
                 .block_from_clip = zmath.inverse(transform),
                 .stroke = .{ @floatFromInt(side), @floatFromInt(side), outline.width_pixels, @floatFromInt(if (occupied_overlay) @as(u32, 63) else mask) },
                 .color = if (occupied_overlay) .{ 1, 0.65, 0.1, 0.65 } else .{ 0, 1, 0, 1 },
                 .parameters = .{ 1, @floatFromInt(mask), 0, 0 },
             };
-            queue.writeBuffer(instance_buffer, instance_offsets.target, outline.Instance, &.{data});
+            queue.writeBuffer(instance_buffer, instance_offsets.target, outline.GPU_Instance, &.{data});
             // A larger cube halfway to the eye must still occlude the corrected
             // outline. It uses a second dynamic storage-buffer region, not target data.
             const center = (eye + zmath.Vec{ 0.5, 0.5, 0.5, 1 }) * @as(zmath.Vec, @splat(0.5));
             var foreground = data;
             const model = utils.matMul(zmath.translation(center[0] - 1, center[1] - 1, center[2] - 1), zmath.scaling(2, 2, 2));
             foreground.clip_from_block = utils.matMul(transform, model);
-            queue.writeBuffer(instance_buffer, instance_offsets.foreground, outline.Instance, &.{foreground});
+            queue.writeBuffer(instance_buffer, instance_offsets.foreground, outline.GPU_Instance, &.{foreground});
             // This adjacent voxel covers only part of the target at grazing
             // angles; its nearer y=-1 face must hide the outline beneath it.
             var partial = data;
             partial.clip_from_block = utils.matMul(transform, zmath.translation(0, -1, 0));
-            queue.writeBuffer(instance_buffer, instance_offsets.partial, outline.Instance, &.{partial});
+            queue.writeBuffer(instance_buffer, instance_offsets.partial, outline.GPU_Instance, &.{partial});
             // Surround the target with coplanar neighbors along each axis,
             // covering walls, floors, and ceilings from the oblique viewpoints.
             inline for (0..3) |axis| {
@@ -425,7 +425,7 @@ fn checkOblique(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.Bind
                 var wall = data;
                 const wall_model = utils.matMul(zmath.translation(wall_shift[0], wall_shift[1], wall_shift[2]), zmath.scaling(wall_scale[0], wall_scale[1], wall_scale[2]));
                 wall.clip_from_block = utils.matMul(transform, wall_model);
-                queue.writeBuffer(instance_buffer, instance_offsets.coplanar[axis], outline.Instance, &.{wall});
+                queue.writeBuffer(instance_buffer, instance_offsets.coplanar[axis], outline.GPU_Instance, &.{wall});
             }
             for (render_cases) |case| {
                 const encoder = device.createCommandEncoder(null);

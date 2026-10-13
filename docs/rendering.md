@@ -42,6 +42,30 @@ Skyboxes use camera rotation and projection, omitting translation. The dedicated
 
 CPU world transforms remain in `f64`. GPU paths use chunk-local matrices plus integer chunk coordinates, with a camera/cascade chunk origin. Integer chunk subtraction and optional x wrapping happen before conversion to meters. The application selects wrapping at compile time. Scenes acquire a reference to six specialized pipelines in the engine cache: unwrapped scenes share one set, and wrapped scenes share by x width. Unwrapped shaders omit periodic arithmetic and width/mask constants. Common pipelines stay engine-owned. See [world configuration](world-configuration.md) and [coordinates](coordinates.md); using an absolute-world `f32` matrix would break the large-position guarantees.
 
+## Zig/WGSL type naming agreement
+
+Use the `GPU_` prefix for every project-defined Zig type whose values represent
+the byte layout consumed or produced by WGSL. This includes uniform, storage,
+and vertex records, packed shader settings, named array payloads, and GPU readback
+types in tests. Keep the prefix on imports, aliases, and re-exports of these types.
+
+Examples are `GPU_ChunkTransform` (also exposed as `GPU_InstanceBufferEntry`),
+`GPU_BlockInfo`, `GPU_ChunkInfo`, `block_outline.GPU_Instance`,
+`held_block.GPU_Uniform`, `GPU_SceneShaderRuntimeSettings`,
+`GPU_PostEffectShaderRuntimeSettings`, and `GPU_JointMatrixUniform`.
+
+The prefix identifies a shader layout contract. Keep field order, sizes,
+alignment, padding, and array stride compatible with the corresponding WGSL
+declarations, and retain layout assertions and GPU readback coverage when
+changing a payload. Zig and WGSL type names can differ; the prefix is required
+on the Zig side.
+
+CPU domain types and resource owners such as `WorldLayout`, `Overlay`,
+`BufferDescriptor`, and `JointMatrixBuffer` keep their ordinary names. A CPU
+collection of GPU records, such as `BlockCoordList`, is not itself a shader
+payload. Built-in scalar/vector/array types and third-party math types used
+directly in uploads do not need new aliases solely to add the prefix.
+
 ## Voxel rendering
 
 The voxel app starts in removing mode, which shows green focus edges and skips placement

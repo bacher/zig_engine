@@ -91,7 +91,7 @@ pub const BlockType = enum(u8) {
     }
 };
 
-/// Structs starting with GPU_ prefix are uploaded to the GPU, memory layout is important
+/// Four-byte face record decoded from a u32 by WGSL. See docs/rendering.md for GPU_ naming.
 pub const GPU_BlockInfo = extern struct {
     coords: [3]u8,
     block_type: BlockType,
@@ -111,7 +111,7 @@ comptime {
 
 pub const BlockCoordList = std.ArrayList(GPU_BlockInfo);
 
-/// Structs starting with GPU_ prefix are uploaded to the GPU, memory layout is important
+/// Chunk metadata matching GPU_ChunkInfo in shaders/voxel/geometry.wgsl.
 pub const GPU_ChunkInfo = extern struct {
     // TODO: can we hold all needed info in [8]u32 -> [8][u10,u10,u10,u2], 10 bits per coord
     // [2]u16 = {count, index}

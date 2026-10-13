@@ -14,12 +14,12 @@ pub const vertex_count = 36;
 pub const Pose = @import("held_item_pose.zig").Pose;
 
 /// Field order matches shaders/held_block.wgsl.
-pub const Uniform = extern struct {
+pub const GPU_Uniform = extern struct {
     clip_from_block: zmath.Mat,
     view_from_block: zmath.Mat,
     material: [4]u32,
 
-    pub fn init(projection: zmath.Mat, block: BlockType, pose: Pose) Uniform {
+    pub fn init(projection: zmath.Mat, block: BlockType, pose: Pose) GPU_Uniform {
         const view = pose.viewFromItem(projection);
         return .{
             .clip_from_block = utils.matMul(projection, view),
@@ -31,10 +31,10 @@ pub const Uniform = extern struct {
 
 comptime {
     // Match HeldBlock in shaders/held_block.wgsl during ordinary application builds.
-    std.debug.assert(@sizeOf(Uniform) == 144);
-    std.debug.assert(@offsetOf(Uniform, "clip_from_block") == 0);
-    std.debug.assert(@offsetOf(Uniform, "view_from_block") == 64);
-    std.debug.assert(@offsetOf(Uniform, "material") == 128);
+    std.debug.assert(@sizeOf(GPU_Uniform) == 144);
+    std.debug.assert(@offsetOf(GPU_Uniform, "clip_from_block") == 0);
+    std.debug.assert(@offsetOf(GPU_Uniform, "view_from_block") == 64);
+    std.debug.assert(@offsetOf(GPU_Uniform, "material") == 128);
 }
 
 /// Owns preview GPU resources; borrows the engine's atlas layout and bind group.
@@ -46,15 +46,15 @@ pub const Renderer = struct {
 
     pub fn init(gctx: *zgpu.GraphicsContext, atlas_layout: zgpu.BindGroupLayoutHandle, format: wgpu.TextureFormat) Renderer {
         const layout = gctx.createBindGroupLayout(&.{
-            zgpu.bufferEntry(0, .{ .vertex = true }, .uniform, false, @sizeOf(Uniform)),
+            zgpu.bufferEntry(0, .{ .vertex = true }, .uniform, false, @sizeOf(GPU_Uniform)),
         });
         const buffer = gctx.createBuffer(.{
             .label = "held block pose",
             .usage = .{ .uniform = true, .copy_dst = true },
-            .size = @sizeOf(Uniform),
+            .size = @sizeOf(GPU_Uniform),
         });
         const binding = gctx.createBindGroup(layout, &.{
-            .{ .binding = 0, .buffer_handle = buffer, .size = @sizeOf(Uniform) },
+            .{ .binding = 0, .buffer_handle = buffer, .size = @sizeOf(GPU_Uniform) },
         });
         const pipeline_layout = gctx.createPipelineLayout(&.{ layout, atlas_layout });
         defer gctx.releaseResource(pipeline_layout);
@@ -84,8 +84,8 @@ pub const Renderer = struct {
     }
 
     pub fn draw(renderer: *const Renderer, gctx: *zgpu.GraphicsContext, pass: wgpu.RenderPassEncoder, atlas: wgpu.BindGroup, projection: zmath.Mat, block: BlockType, pose: Pose) void {
-        const uniform = Uniform.init(projection, block, pose);
-        gctx.queue.writeBuffer(gctx.lookupResource(renderer.buffer).?, 0, Uniform, &.{uniform});
+        const uniform = GPU_Uniform.init(projection, block, pose);
+        gctx.queue.writeBuffer(gctx.lookupResource(renderer.buffer).?, 0, GPU_Uniform, &.{uniform});
         pass.setPipeline(renderer.pipeline.pipeline_gpu);
         pass.setBindGroup(0, renderer.binding.wgpu_bind_group, null);
         pass.setBindGroup(1, atlas, null);
@@ -97,7 +97,7 @@ test "held block pose is centred below the crosshair and clipped by the bottom e
     const pose: Pose = .{};
     for ([_]f32{ 1, 4.0 / 3.0, 16.0 / 9.0, 21.0 / 9.0 }) |aspect| {
         const projection = zmath.perspectiveFovRh(std.math.pi / 4.0, aspect, 0.01, 200);
-        const uniform = Uniform.init(projection, .tree_trunk, pose);
+        const uniform = GPU_Uniform.init(projection, .tree_trunk, pose);
         const centre = utils.resolvePosition(utils.matApply(uniform.clip_from_block, .{ 0.5, 0.5, 0.5, 1 }));
         try std.testing.expectApproxEqAbs(pose.screen_position[0], centre[0], 0.00001);
         try std.testing.expectApproxEqAbs(pose.screen_position[1], centre[1], 0.00001);
