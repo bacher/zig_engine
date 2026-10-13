@@ -53,6 +53,14 @@ pub const Uniform = extern struct {
     }
 };
 
+comptime {
+    // Match HeldBlock in shaders/held_block.wgsl during ordinary application builds.
+    std.debug.assert(@sizeOf(Uniform) == 144);
+    std.debug.assert(@offsetOf(Uniform, "clip_from_block") == 0);
+    std.debug.assert(@offsetOf(Uniform, "view_from_block") == 64);
+    std.debug.assert(@offsetOf(Uniform, "material") == 128);
+}
+
 /// Owns preview GPU resources; borrows the engine's atlas layout and bind group.
 pub const Renderer = struct {
     layout: zgpu.BindGroupLayoutHandle,
@@ -136,5 +144,4 @@ test "held block pose is centred below the crosshair and clipped by the bottom e
         }
         try std.testing.expect(visible_corners > 0 and clipped_corners > 0);
     }
-    try std.testing.expectEqual(@as(usize, 144), @sizeOf(Uniform));
 }
