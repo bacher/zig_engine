@@ -1,7 +1,7 @@
 const std = @import("std");
 const WorldSettings = @import("world_layout.zig").WorldSettings;
 const WorldLayout = @import("world_layout.zig").WorldLayout;
-const ChunkTransform = @import("chunk_transform.zig").ChunkTransform;
+const GPU_ChunkTransform = @import("chunk_transform.zig").GPU_ChunkTransform;
 const math = std.math;
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
@@ -50,7 +50,7 @@ const SkeletalAnimation = @import("./skeletal_animation.zig");
 const PrimitiveDescriptor = @import("./display_object_descriptors/primitive_descriptor.zig").PrimitiveDescriptor;
 const GeometryData = @import("./shape_generation/geometry_data.zig").GeometryData;
 const Scene = @import("./scene.zig").Scene;
-const InstanceBufferEntry = @import("./scene.zig").InstanceBufferEntry;
+const GPU_InstanceBufferEntry = @import("./scene.zig").GPU_InstanceBufferEntry;
 const Camera = @import("./camera.zig").Camera;
 const InputController = @import("./input_controller.zig").InputController;
 const KeyParams = @import("./input_controller.zig").KeyParams;
@@ -59,8 +59,8 @@ const GameObject = @import("./game_object.zig").GameObject;
 const xRotate = @import("./game_object.zig").xRotate;
 const DirectionalLight = @import("./light.zig").DirectionalLight;
 const DirectionalLightCascade = @import("./light.zig").DirectionalLightCascade;
-const SceneShaderRuntimeSettings = @import("./bind_group_layouts/scene.zig").SceneShaderRuntimeSettings;
-const PostEffectShaderRuntimeSettings = @import("./bind_group_layouts/_types.zig").PostEffectShaderRuntimeSettings;
+const GPU_SceneShaderRuntimeSettings = @import("./bind_group_layouts/scene.zig").GPU_SceneShaderRuntimeSettings;
+const GPU_PostEffectShaderRuntimeSettings = @import("./bind_group_layouts/_types.zig").GPU_PostEffectShaderRuntimeSettings;
 const zgui_utils = @import("./zgui_utils.zig");
 
 const DEBUG_INTERNAL_TEXTURE = false;
@@ -631,8 +631,8 @@ pub const Engine = struct {
             if (outdate_instances_range.min <= outdate_instances_range.max) {
                 scene.engine.gctx.queue.writeBuffer(
                     scene.instance_buffer.gpu_buffer,
-                    @as(usize, outdate_instances_range.min) * @sizeOf(InstanceBufferEntry),
-                    InstanceBufferEntry,
+                    @as(usize, outdate_instances_range.min) * @sizeOf(GPU_InstanceBufferEntry),
+                    GPU_InstanceBufferEntry,
                     scene.instance_buffer.buffer[outdate_instances_range.min .. outdate_instances_range.max + 1],
                 );
 
@@ -662,7 +662,7 @@ pub const Engine = struct {
             const encoder = gctx.device.createCommandEncoder(null);
             defer encoder.release();
 
-            const shader_settings = PostEffectShaderRuntimeSettings{
+            const shader_settings = GPU_PostEffectShaderRuntimeSettings{
                 .ssao_enabled = engine.state.ssao_enabled,
                 .debug_ssao_enabled = engine.state.debug_ssao_enabled,
                 .ssao_blur_enabled = engine.state.ssao_blur_enabled,
@@ -716,7 +716,7 @@ pub const Engine = struct {
                         const clip_from_chunk_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                         clip_from_chunk_uniform.slice[0] = cascade.clip_from_chunk;
 
-                        const settings_uniform = engine.gctx.uniformsAllocate(SceneShaderRuntimeSettings, 1);
+                        const settings_uniform = engine.gctx.uniformsAllocate(GPU_SceneShaderRuntimeSettings, 1);
                         settings_uniform.slice[0] = .{
                             .ssao_enabled = engine.state.ssao_enabled,
                         };
@@ -822,7 +822,7 @@ pub const Engine = struct {
                     clip_from_chunk_uniform.slice[0] = scene.camera.clip_from_world_chunked;
                     const view_from_chunk_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                     view_from_chunk_uniform.slice[0] = scene.camera.view_from_world_chunked;
-                    const settings_uniform = engine.gctx.uniformsAllocate(SceneShaderRuntimeSettings, 1);
+                    const settings_uniform = engine.gctx.uniformsAllocate(GPU_SceneShaderRuntimeSettings, 1);
                     settings_uniform.slice[0] = .{
                         .ssao_enabled = engine.state.ssao_enabled,
                     };
@@ -965,7 +965,7 @@ pub const Engine = struct {
                 // TODO: remove duplication with the final pass:
                 const clip_from_view_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                 const view_from_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
-                const shader_run_time_settings_uniform = engine.gctx.uniformsAllocate(PostEffectShaderRuntimeSettings, 1);
+                const shader_run_time_settings_uniform = engine.gctx.uniformsAllocate(GPU_PostEffectShaderRuntimeSettings, 1);
                 shader_run_time_settings_uniform.slice[0] = shader_settings;
 
                 if (engine.active_scene) |scene| {
@@ -1009,7 +1009,7 @@ pub const Engine = struct {
 
                 const clip_from_view_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
                 const view_from_clip_uniform = engine.gctx.uniformsAllocate(zmath.Mat, 1);
-                const shader_run_time_settings_uniform = engine.gctx.uniformsAllocate(PostEffectShaderRuntimeSettings, 1);
+                const shader_run_time_settings_uniform = engine.gctx.uniformsAllocate(GPU_PostEffectShaderRuntimeSettings, 1);
                 shader_run_time_settings_uniform.slice[0] = shader_settings;
                 const frag_size_uniform = engine.gctx.uniformsAllocate(@Vector(2, f32), 1);
                 frag_size_uniform.slice[0] = @Vector(2, f32){ 1.0, 1.0 } / engine.screen_size;
@@ -1052,7 +1052,7 @@ pub const Engine = struct {
                         pass.end();
                         pass.release();
                     }
-                    var instances: [outline.instance_capacity]outline.Instance = undefined;
+                    var instances: [outline.instance_capacity]outline.GPU_Instance = undefined;
                     var visible_count: u32 = @intCast(scene.block_overlays.count);
                     for (scene.block_overlays.cells[0..scene.block_overlays.count], 0..) |overlay, index| {
                         instances[index] = outline.overlayInstance(scene.camera, overlay, engine.screen_size);
@@ -1066,7 +1066,7 @@ pub const Engine = struct {
                     }
                     if (visible_count != 0) {
                         const buffer = gctx.lookupResource(engine.bind_group_layouts.block_outline.instance_buffer_handle).?;
-                        gctx.queue.writeBuffer(buffer, 0, outline.Instance, instances[0..visible_count]);
+                        gctx.queue.writeBuffer(buffer, 0, outline.GPU_Instance, instances[0..visible_count]);
                         outline.drawBatch(pass, engine.pipelines.block_outline_occluded.pipeline_gpu, engine.pipelines.block_outline.pipeline_gpu, engine.bind_group_block_outline.wgpu_bind_group, 0, @intCast(scene.block_overlays.count), visible_count);
                     }
                 }
@@ -1279,7 +1279,7 @@ pub const Engine = struct {
         model_descriptor.position.applyVertexBuffer(pass, 0);
 
         const bounds = game_object.model.getBounds();
-        const relative_model = ChunkTransform.init(scene.layout, game_object.aggregated_matrix).relativeTo(scene.layout, scene.camera.chunk);
+        const relative_model = GPU_ChunkTransform.init(scene.layout, game_object.aggregated_matrix).relativeTo(scene.layout, scene.camera.chunk);
         const bound_center = utils.matApply1(relative_model, bounds.offset);
         const scale = zmath.util.getScaleVec(relative_model);
         const radius = bounds.radius * scale[0];
@@ -1774,13 +1774,13 @@ fn isBillboard(game_object: *const GameObject) bool {
     };
 }
 
-fn getRenderTransform(game_object: *const GameObject, camera: *const @import("camera.zig").Camera) ChunkTransform {
+fn getRenderTransform(game_object: *const GameObject, camera: *const @import("camera.zig").Camera) GPU_ChunkTransform {
     const billboard_mode = switch (game_object.model) {
         .regular_model => |model| model.model_descriptor.options.billboard_mode,
         else => .none,
     };
 
-    var transform = ChunkTransform.init(camera.layout, game_object.aggregated_matrix);
+    var transform = GPU_ChunkTransform.init(camera.layout, game_object.aggregated_matrix);
     var chunk_from_model = transform.chunk_from_model;
 
     if (billboard_mode != .none) {
@@ -1836,7 +1836,7 @@ fn getLightClipMatrixArray(
     layout: *const WorldLayout,
     gctx: *zgpu.GraphicsContext,
     light: *const DirectionalLight,
-    transform: ChunkTransform,
+    transform: GPU_ChunkTransform,
 ) struct { slice: []zmath.Mat, offset: u32 } {
     const uniform = gctx.uniformsAllocate(zmath.Mat, 3);
 

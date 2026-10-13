@@ -14,7 +14,7 @@ pub const BindGroupLayout = @import("bind_group_layouts/block_outline.zig").Bloc
 pub const vertex_count = 12 * 6;
 pub const width_pixels: f32 = 3;
 pub const shader = @embedFile("shaders/block_outline.wgsl");
-pub const Instance = @import("bind_group_layouts/block_outline.zig").Instance;
+pub const GPU_Instance = @import("bind_group_layouts/block_outline.zig").GPU_Instance;
 pub const instance_capacity = @import("bind_group_layouts/block_outline.zig").instance_capacity;
 pub const Cell = @Vector(3, i64);
 pub const Overlay = struct {
@@ -90,7 +90,7 @@ pub fn faceMask(eye: @Vector(3, f32)) u32 {
     return if (mask == 0) 63 else mask;
 }
 
-pub fn focusedInstance(camera: *const Camera, block: [3]u32, viewport: @Vector(2, f32)) Instance {
+pub fn focusedInstance(camera: *const Camera, block: [3]u32, viewport: @Vector(2, f32)) GPU_Instance {
     const position = blockPosition(camera, .{ block[0], block[1], block[2] });
     const transform = clipFromPosition(camera, position);
     const eye = chunks.getLocalPosition(camera.position) - position;
@@ -102,7 +102,7 @@ pub fn focusedInstance(camera: *const Camera, block: [3]u32, viewport: @Vector(2
 }
 
 /// All twelve edges remain available. Occupied cells correct only front-facing edges.
-pub fn overlayInstance(camera: *const Camera, overlay: Overlay, viewport: @Vector(2, f32)) Instance {
+pub fn overlayInstance(camera: *const Camera, overlay: Overlay, viewport: @Vector(2, f32)) GPU_Instance {
     const position = blockPosition(camera, overlay.cell);
     const transform = clipFromPosition(camera, position);
     const eye = chunks.getLocalPosition(camera.position) - position;

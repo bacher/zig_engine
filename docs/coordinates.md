@@ -35,14 +35,14 @@ CPU vectors are not serialized as raw bytes: three-component vectors may have pa
 
 ## Conversion to GPU coordinates
 
-`ChunkTransform.init(layout, matrix)` is the boundary between an accumulated CPU world matrix and GPU instance data:
+`GPU_ChunkTransform.init(layout, matrix)` is the boundary between an accumulated CPU world matrix and GPU instance data:
 
 1. Read the world translation as `f64`.
 2. Compute integer chunk coordinates from `floor(position / 32)` plus this world's origin offset. When enabled, wrap x before narrowing its chunk index to `i32`.
 3. Remove the chunk origin using `mod(position, 32)` **in f64**. Floor/modulo also handle negative positions.
 4. Convert that local translation to `f32`. Convert the rotation/scale columns separately; never convert the absolute translation column.
 
-An instance still occupies 80 bytes: a chunk-local `f32` matrix and a padded integer chunk coordinate. Before applying the camera or cascade matrix, the shader subtracts integer chunks, applies optional x wrapping, and then converts the small chunk delta to meters. CPU per-object paths use `ChunkTransform.relativeTo(layout, origin)` for the same operation.
+An instance still occupies 80 bytes: a chunk-local `f32` matrix and a padded integer chunk coordinate. Before applying the camera or cascade matrix, the shader subtracts integer chunks, applies optional x wrapping, and then converts the small chunk delta to meters. CPU per-object paths use `GPU_ChunkTransform.relativeTo(layout, origin)` for the same operation.
 
 For example, `1_000_000_000.125` retains the `.125` offset in the CPU transform and uploads it as a local coordinate. Casting the absolute value directly to `f32` would discard that offset. Likewise, an f32 absolute matrix cannot be repaired by widening it to f64 afterward.
 
@@ -57,7 +57,7 @@ The fields ending in `_world_chunked` refer to coordinates relative to the camer
 ## API and range notes
 
 - Position setters and object-creation parameters accept `world_math.Position` (`@Vector(3, f64)`). Three-component literals such as `.{ 1, 2, 3 }` still work; use the shared type for named positions and movement deltas. `getLocalPosition` in `chunk_utils` returns `@Vector(3, f32)` after removing the origin.
-- `GameObject.getModelMatrix` and `aggregated_matrix` return f64 matrices. Use `ChunkTransform.init(layout, matrix)` to prepare one for rendering. `world_math.fromFloat32` widens asset-local matrices before CPU composition.
+- `GameObject.getModelMatrix` and `aggregated_matrix` return f64 matrices. Use `GPU_ChunkTransform.init(layout, matrix)` to prepare one for rendering. `world_math.fromFloat32` widens asset-local matrices before CPU composition.
 - The GPU chunk encoding remains signed `i32`, and chunks on every unwrapped axis must fit it. This migration does not make the world unbounded. The voxel world still wraps only x.
 - Scenes still use the temporary ArrayList visibility index. It returns all registered objects and needs no absolute-world f32 bounding boxes. The retained, unused original SpaceTree still assumes f32 matrices and requires migration before it can index these objects again.
 

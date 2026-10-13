@@ -337,15 +337,15 @@ const MutationMap = struct {
 };
 
 fn expectGpuTransforms(scene: *Scene, indices: []const u32) !void {
-    const Entry = @import("scene.zig").InstanceBufferEntry;
+    const GPU_Entry = @import("scene.zig").GPU_InstanceBufferEntry;
     const device = scene.engine.gctx.device;
-    const size = indices.len * @sizeOf(Entry);
+    const size = indices.len * @sizeOf(GPU_Entry);
     const readback = device.createBuffer(.{ .usage = .{ .copy_dst = true, .map_read = true }, .size = size });
     defer readback.release();
     const encoder = device.createCommandEncoder(null);
     defer encoder.release();
     for (indices, 0..) |index, i| {
-        encoder.copyBufferToBuffer(scene.instance_buffer.gpu_buffer, @as(usize, index) * @sizeOf(Entry), readback, i * @sizeOf(Entry), @sizeOf(Entry));
+        encoder.copyBufferToBuffer(scene.instance_buffer.gpu_buffer, @as(usize, index) * @sizeOf(GPU_Entry), readback, i * @sizeOf(GPU_Entry), @sizeOf(GPU_Entry));
     }
     const commands = encoder.finish(null);
     defer commands.release();
@@ -359,7 +359,7 @@ fn expectGpuTransforms(scene: *Scene, indices: []const u32) !void {
     }
     try @import("world_coordinate_readback.zig").waitForCallback(device, &mapping.done);
     try std.testing.expectEqual(wgpu.BufferMapAsyncStatus.success, mapping.status);
-    const results = readback.getConstMappedRange(Entry, 0, indices.len) orelse return error.NoMappedGpuResults;
+    const results = readback.getConstMappedRange(GPU_Entry, 0, indices.len) orelse return error.NoMappedGpuResults;
     for (indices, results) |index, entry| {
         try std.testing.expectEqualDeep(scene.instance_buffer.buffer[index], entry);
     }

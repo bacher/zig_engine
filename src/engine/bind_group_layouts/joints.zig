@@ -17,7 +17,7 @@ pub const JointsBindGroupLayout = struct {
                 .{ .vertex = true },
                 .uniform,
                 false,
-                @sizeOf(SkeletalAnimation.JointMatrixUniform),
+                @sizeOf(SkeletalAnimation.GPU_JointMatrixUniform),
             ),
         });
 
@@ -43,7 +43,7 @@ pub const JointsBindGroupLayout = struct {
                     .binding = 0,
                     .buffer_handle = joint_matrix_buffer,
                     .offset = 0,
-                    .size = @sizeOf(SkeletalAnimation.JointMatrixUniform),
+                    .size = @sizeOf(SkeletalAnimation.GPU_JointMatrixUniform),
                 },
             },
         );

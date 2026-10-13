@@ -3,7 +3,7 @@ const WorldLayout = @import("world_layout.zig").WorldLayout;
 const std = @import("std");
 const zmath = @import("zmath");
 const chunks = @import("chunk_utils.zig");
-const ChunkTransform = @import("chunk_transform.zig").ChunkTransform;
+const GPU_ChunkTransform = @import("chunk_transform.zig").GPU_ChunkTransform;
 const Camera = @import("camera.zig").Camera;
 const DirectionalLight = @import("light.zig").DirectionalLight;
 const utils = @import("utils.zig");
@@ -18,7 +18,7 @@ fn expectVector(expected: zmath.Vec, actual: zmath.Vec, tolerance: f32) !void {
 }
 
 test "f64 world translations are rebased before narrowing to the GPU matrix" {
-    const object = ChunkTransform.init(&layout, world_math.translation(1e9 + 0.125, -1e9 - 0.25, 1e9 + 31.875));
+    const object = GPU_ChunkTransform.init(&layout, world_math.translation(1e9 + 0.125, -1e9 - 0.25, 1e9 + 31.875));
     try expectVector(.{ 0.125, 31.75, 31.875, 1 }, object.chunk_from_model[3], 0.000001);
     try expectVector(.{ 0.125, -0.25, 31.875, 1 }, object.relativeTo(&layout, layout.getChunkCoords(.{ 1e9, -1e9, 1e9 }))[3], 0.000001);
     // The lost offset is observable if a caller narrows the absolute position first.
@@ -42,16 +42,16 @@ test "x wraps before conversion to the GPU integer chunk range" {
     const repeated_worlds: f64 = 16384.0 * 100000000.0;
     try std.testing.expectEqual(layout.getChunkCoords(.{ 0.125, 0, 0 }), layout.getChunkCoords(.{ repeated_worlds + 0.125, 0, 0 }));
     try std.testing.expectEqual(layout.getChunkCoords(.{ -0.125, 0, 0 }), layout.getChunkCoords(.{ -repeated_worlds - 0.125, 0, 0 }));
-    const transform = ChunkTransform.init(&layout, world_math.translation(repeated_worlds + 0.125, 0, 0));
+    const transform = GPU_ChunkTransform.init(&layout, world_math.translation(repeated_worlds + 0.125, 0, 0));
     try expectVector(.{ 0.125, 0, 0, 1 }, transform.chunk_from_model[3], 0.000001);
 }
 
 test "chunk-local transforms preserve tiny vertices in far neighboring chunks" {
     // Adjacent integer chunks above f32's exact integer range must be subtracted
     // before conversion. This also checks the shared WGSL storage-buffer layout.
-    try std.testing.expectEqual(80, @sizeOf(ChunkTransform));
-    try std.testing.expectEqual(64, @offsetOf(ChunkTransform, "chunk"));
-    const object: ChunkTransform = .{
+    try std.testing.expectEqual(80, @sizeOf(GPU_ChunkTransform));
+    try std.testing.expectEqual(64, @offsetOf(GPU_ChunkTransform, "chunk"));
+    const object: GPU_ChunkTransform = .{
         .chunk = .{ 301, 16777219, -16777219, 0 },
         .chunk_from_model = zmath.translation(0.125, 0.25, 0.5),
     };
@@ -69,7 +69,7 @@ test "signed chunk differences span the full i32 range and wrap repeated x world
     try std.testing.expectEqual(expected, layout.getChunkDelta(a, b));
     try std.testing.expectEqual(-expected, layout.getChunkDelta(b, a));
 
-    const object: ChunkTransform = .{
+    const object: GPU_ChunkTransform = .{
         .chunk = .{ -513, high, low, 0 },
         .chunk_from_model = zmath.translation(0.125, 0.25, 0.5),
     };
@@ -91,13 +91,13 @@ test "camera supports the signed chunk limits after applying the world offset" {
 }
 
 test "negative boundaries and the x seam use the same local frame" {
-    const negative = ChunkTransform.init(&layout, world_math.translation(-0.25, -32.25, -64));
+    const negative = GPU_ChunkTransform.init(&layout, world_math.translation(-0.25, -32.25, -64));
     try std.testing.expectEqual(@Vector(4, i32){ 255, 126, 2, 0 }, negative.chunk);
     try expectVector(.{ 31.75, 31.75, 0, 1 }, negative.chunk_from_model[3], 0.00001);
-    const across_seam = ChunkTransform.init(&layout, world_math.translation(-8191.75, 0, 0));
+    const across_seam = GPU_ChunkTransform.init(&layout, world_math.translation(-8191.75, 0, 0));
     const camera_chunk = layout.getChunkCoords(.{ 8191.75, 0, 0 });
     try expectVector(.{ if (WorldLayout.wrap_x) 32.25 else -16351.75, 0, 0, 1 }, across_seam.relativeTo(&layout, camera_chunk)[3], 0.00001);
-    const reverse = ChunkTransform.init(&layout, world_math.translation(8191.75, 0, 0));
+    const reverse = GPU_ChunkTransform.init(&layout, world_math.translation(8191.75, 0, 0));
     try expectVector(.{ if (WorldLayout.wrap_x) -0.25 else 16383.75, 0, 0, 1 }, reverse.relativeTo(&layout, across_seam.getChunkCoords())[3], 0.00001);
 }
 
@@ -118,8 +118,8 @@ test "camera and all shadow cascades are invariant under a distant chunk transla
     far.updatePosition(.{ 3.25 + 1e9, -2.5 + 1e9, 6.125 - 1e9 });
     far.updateView(zmath.rotationZ(0.3));
 
-    const near_object = ChunkTransform.init(&layout, world_math.fromSRT(.{ 5.25, 40.5, 8.125 }, zmath.quatFromRollPitchYaw(0.4, 0, 0), 1));
-    const far_object = ChunkTransform.init(&layout, world_math.fromSRT(.{ 5.25 + 1e9, 40.5 + 1e9, 8.125 - 1e9 }, zmath.quatFromRollPitchYaw(0.4, 0, 0), 1));
+    const near_object = GPU_ChunkTransform.init(&layout, world_math.fromSRT(.{ 5.25, 40.5, 8.125 }, zmath.quatFromRollPitchYaw(0.4, 0, 0), 1));
+    const far_object = GPU_ChunkTransform.init(&layout, world_math.fromSRT(.{ 5.25 + 1e9, 40.5 + 1e9, 8.125 - 1e9 }, zmath.quatFromRollPitchYaw(0.4, 0, 0), 1));
     const near_model = near_object.relativeTo(&layout, near.chunk);
     const far_model = far_object.relativeTo(&layout, far.chunk);
     const vertex: zmath.Vec = .{ 0.001, 0.002, 0.003, 1 };
@@ -149,7 +149,7 @@ test "crossing a chunk boundary moves camera-space geometry continuously" {
     before.updatePosition(.{ 31.875, 1000000000, 10 });
     var after = Camera.init(&layout, 1);
     after.updatePosition(.{ 32.125, 1000000000, 10 });
-    const object = ChunkTransform.init(&layout, world_math.translation(33, 100010, 11));
+    const object = GPU_ChunkTransform.init(&layout, world_math.translation(33, 100010, 11));
     const before_position = utils.matApply(before.view_from_world_chunked, object.relativeTo(&layout, before.chunk)[3]);
     const after_position = utils.matApply(after.view_from_world_chunked, object.relativeTo(&layout, after.chunk)[3]);
     try expectVector(.{ -0.25, 0, 0, 0 }, after_position - before_position, 0.00001);
@@ -159,7 +159,7 @@ test "camera and object projections use the application topology at runtime-sele
     const small = try WorldLayout.init(.{ .size_in_chunks = .{ 128, 64, 16 } });
     var camera = Camera.init(&small, 1);
     camera.updatePosition(.{ 2047.75, 0, 0 });
-    const object = ChunkTransform.init(&small, world_math.translation(-2047.75, 0, 0));
+    const object = GPU_ChunkTransform.init(&small, world_math.translation(-2047.75, 0, 0));
     const relative = object.relativeTo(&small, camera.chunk);
     const view = utils.matApply(camera.view_from_world_chunked, relative[3]);
     try std.testing.expectApproxEqAbs(@as(f32, if (WorldLayout.wrap_x) 0.5 else -4095.5), view[0], 0.00001);
@@ -171,7 +171,7 @@ test "camera and object projections use the application topology at runtime-sele
         const high = std.math.maxInt(i32);
         const delta = small.getChunkDelta(.{ high, low, high }, .{ low, high, low });
         try std.testing.expectEqual(@Vector(3, i64){ 4294967295, -4294967295, 4294967295 }, delta);
-        const adjacent = ChunkTransform{
+        const adjacent = GPU_ChunkTransform{
             .chunk_from_model = zmath.translation(0.125, 0.25, 0.5),
             .chunk = .{ high, low, high, 0 },
         };

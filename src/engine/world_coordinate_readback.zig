@@ -23,8 +23,8 @@ const compute_body =
 
 // vec4 storage fields avoid vec3's padded array stride; the last output lane
 // marks each invocation as written, including cases with zero xyz offsets.
-const Input = extern struct { chunk: [4]i32, origin: [4]i32 };
-const Output = [4]f32;
+const GPU_Input = extern struct { chunk: [4]i32, origin: [4]i32 };
+const GPU_Output = [4]f32;
 
 const Case = struct {
     name: []const u8,
@@ -90,16 +90,16 @@ pub fn check(device: wgpu.Device, layout: *const WorldLayout, mapping: *MapRespo
         .{ .name = "f32 conversion rounding", .chunk = .{ far - 2, -far + 2, far }, .origin = .{ 0, 0, 0 } },
         .{ .name = "f32 conversion rounding reverse", .chunk = .{ 0, 0, 0 }, .origin = .{ far - 2, -far + 2, far } },
     };
-    var inputs: [cases.len]Input = undefined;
+    var inputs: [cases.len]GPU_Input = undefined;
     for (cases, &inputs) |case, *input| {
         input.* = .{
             .chunk = .{ case.chunk[0], case.chunk[1], case.chunk[2], 0 },
             .origin = .{ case.origin[0], case.origin[1], case.origin[2], 0 },
         };
     }
-    try std.testing.expectEqual(@as(usize, 32), @sizeOf(Input));
-    try std.testing.expectEqual(@as(usize, 16), @offsetOf(Input, "origin"));
-    try std.testing.expectEqual(@as(usize, 16), @sizeOf(Output));
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(GPU_Input));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(GPU_Input, "origin"));
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(GPU_Output));
 
     const source = try layout.shaderSource(std.testing.allocator, compute_body);
     defer std.testing.allocator.free(source);
@@ -111,7 +111,7 @@ pub fn check(device: wgpu.Device, layout: *const WorldLayout, mapping: *MapRespo
     defer bind_group_layout.release();
     const input_buffer = device.createBuffer(.{ .label = "coordinate_inputs", .size = @sizeOf(@TypeOf(inputs)), .usage = .{ .storage = true, .copy_dst = true } });
     defer input_buffer.release();
-    const result_size = cases.len * @sizeOf(Output);
+    const result_size = cases.len * @sizeOf(GPU_Output);
     const output_buffer = device.createBuffer(.{ .label = "coordinate_outputs", .size = result_size, .usage = .{ .storage = true, .copy_src = true } });
     defer output_buffer.release();
     const readback_buffer = device.createBuffer(.{ .label = "coordinate_readback", .size = result_size, .usage = .{ .map_read = true, .copy_dst = true } });
@@ -124,7 +124,7 @@ pub fn check(device: wgpu.Device, layout: *const WorldLayout, mapping: *MapRespo
     defer bind_group.release();
     const queue = device.getQueue();
     defer queue.release();
-    queue.writeBuffer(input_buffer, 0, Input, &inputs);
+    queue.writeBuffer(input_buffer, 0, GPU_Input, &inputs);
     const encoder = device.createCommandEncoder(null);
     defer encoder.release();
     const pass = encoder.beginComputePass(null);
@@ -145,7 +145,7 @@ pub fn check(device: wgpu.Device, layout: *const WorldLayout, mapping: *MapRespo
     defer readback_buffer.unmap();
     try waitForCallback(device, &mapping.done);
     try std.testing.expectEqual(wgpu.BufferMapAsyncStatus.success, mapping.status);
-    const results = readback_buffer.getConstMappedRange(Output, 0, cases.len) orelse return error.NoMappedGpuResults;
+    const results = readback_buffer.getConstMappedRange(GPU_Output, 0, cases.len) orelse return error.NoMappedGpuResults;
     for (cases, results) |case, result| {
         try std.testing.expectEqual(@as(f32, 1), result[3]);
         const delta = layout.getChunkDelta(case.chunk, case.origin);

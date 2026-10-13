@@ -3,7 +3,7 @@ const zmath = @import("zmath");
 const BindGroup = @import("../bind_group.zig").BindGroup;
 
 /// Keep the field order in sync with shaders/block_outline.wgsl.
-pub const Instance = extern struct {
+pub const GPU_Instance = extern struct {
     clip_from_block: zmath.Mat,
     block_from_clip: zmath.Mat,
     /// Viewport xy, stroke width, and a bit mask of camera-facing cube faces.
@@ -15,7 +15,7 @@ pub const Instance = extern struct {
 
 /// 64 application overlays plus an optional ordinary focused cell.
 pub const instance_capacity = 65;
-pub const instance_buffer_size = instance_capacity * @sizeOf(Instance);
+pub const instance_buffer_size = instance_capacity * @sizeOf(GPU_Instance);
 
 pub const BlockOutlineBindGroupLayout = struct {
     bind_group_layout_handle: zgpu.BindGroupLayoutHandle,
@@ -24,7 +24,7 @@ pub const BlockOutlineBindGroupLayout = struct {
     pub fn init(gctx: *zgpu.GraphicsContext) BlockOutlineBindGroupLayout {
         return .{
             .bind_group_layout_handle = gctx.createBindGroupLayout(&.{
-                zgpu.bufferEntry(0, .{ .vertex = true, .fragment = true }, .read_only_storage, true, @sizeOf(Instance)),
+                zgpu.bufferEntry(0, .{ .vertex = true, .fragment = true }, .read_only_storage, true, @sizeOf(GPU_Instance)),
             }),
             .instance_buffer_handle = gctx.createBuffer(.{
                 .label = "block outline instances",

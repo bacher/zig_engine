@@ -6,7 +6,7 @@ const GameObject = @import("game_object.zig").GameObject;
 const Scene = @import("scene.zig").Scene;
 const SpaceTree = @import("naive_space_tree.zig").SpaceTree;
 const PrimitiveModel = @import("model.zig").PrimitiveModel;
-const ChunkTransform = @import("chunk_transform.zig").ChunkTransform;
+const GPU_ChunkTransform = @import("chunk_transform.zig").GPU_ChunkTransform;
 const world_math = @import("world_math.zig");
 
 fn expectPosition(expected: world_math.Position, matrix: world_math.Mat) !void {
@@ -60,7 +60,7 @@ test "objects supplied a parent receive updates and retain sub-f32-world offsets
     root.setPosition(.{ 1e9 + 0.5, -1e9, 1e9 });
     try std.testing.expect(scene.instance_buffer.outdated_indices.isSet(0));
     try expectPosition(.{ 1e9 + 0.640625, -1e9 + 0.28125, 1e9 + 0.5625 }, object.aggregated_matrix);
-    const upload = ChunkTransform.init(&layout, object.getModelMatrix());
+    const upload = GPU_ChunkTransform.init(&layout, object.getModelMatrix());
     const relative = upload.relativeTo(&layout, layout.getChunkCoords(.{ 1e9, -1e9, 1e9 }));
     inline for (0..3) |i| try std.testing.expectApproxEqAbs((@as([3]f32, .{ 0.640625, 0.28125, 0.5625 }))[i], relative[3][i], 0.000001);
     try std.testing.expectEqual(world_math.Position{ 0.015625, 0.03125, 0.0625 }, object.position);
@@ -147,9 +147,9 @@ const SceneFixture = struct {
         };
         const tree = try SpaceTree(GameObject).init(allocator);
         errdefer tree.deinit();
-        const buffer = try allocator.alloc(ChunkTransform, 8);
+        const buffer = try allocator.alloc(GPU_ChunkTransform, 8);
         errdefer allocator.free(buffer);
-        @memset(buffer, std.mem.zeroes(ChunkTransform));
+        @memset(buffer, std.mem.zeroes(GPU_ChunkTransform));
         var dirty = try std.DynamicBitSetUnmanaged.initEmpty(allocator, 8);
         errdefer dirty.deinit(allocator);
         const free = try std.ArrayList(u32).initCapacity(allocator, 8);
