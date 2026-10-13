@@ -158,6 +158,8 @@ pub fn check(device: wgpu.Device) !void {
             {
                 const engine = try createEngine(&gctx);
                 defer engine.deinit();
+                const held = @import("held_block.zig").Renderer.init(&gctx, engine.bind_group_layouts.regular.bind_group_layout_handle, .rgba8_unorm);
+                defer held.deinit(&gctx);
                 const params: Engine.CreateTerrainHeightMapDescriptorParams = .{
                     .layers = .{ engine.uv_test_texture, engine.uv_test_texture },
                     .mixing_texture = engine.uv_test_texture,

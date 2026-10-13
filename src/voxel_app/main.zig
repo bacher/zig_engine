@@ -44,6 +44,10 @@ const block_targeting = @import("block_targeting.zig");
 const placement_preview = @import("placement_preview.zig");
 const block_diagnostics = @import("block_diagnostics.zig");
 const block_messages = @import("block_messages.zig");
+const held_block = @import("engine").held_block;
+
+// Shared camera-space held pose for player and spectator modes.
+const held_block_pose: held_block.Pose = .{};
 
 const DEBUG = true;
 
@@ -69,6 +73,7 @@ const Game = struct {
     last_missing_collision: ?ChunkCoords = null,
     recovery_warning: bool = false,
     selected_material: voxel_chunk_module.BlockType = .dirt,
+    held_block_renderer: ?held_block.Renderer = null,
     placement_validation: ?struct {
         block: [3]u32,
         material: voxel_chunk_module.BlockType,
@@ -98,6 +103,10 @@ const Game = struct {
     last_camera_chunk_coords: ?ChunkCoords = null,
     saved_game_objects: std.StringHashMapUnmanaged(*GameObject) = .empty,
     saved_game_object_groups: std.StringHashMapUnmanaged(*GameObjectGroup) = .empty,
+
+    fn heldMaterial(game: *const Game) ?voxel_chunk_module.BlockType {
+        return if (game.block_mode == .putting) game.selected_material else null;
+    }
 
     fn layout(game: *const Game) *const WorldLayout {
         return game.world.?.layout;
@@ -144,6 +153,7 @@ const Game = struct {
         if (game.world) |*world| {
             world.deinit();
         }
+        if (game.held_block_renderer) |renderer| renderer.deinit(game.engine.gctx);
         game.engine.deinit();
         game.allocator.destroy(game);
     }
@@ -821,6 +831,11 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     game.engine = engine;
+    game.held_block_renderer = held_block.Renderer.init(
+        engine.gctx,
+        engine.bind_group_layouts.regular.bind_group_layout_handle,
+        engine.gctx.swapchain_descriptor.format,
+    );
 
     const man_model_id = id: {
         const loader = try engine.initLoader("man/man.gltf");
@@ -1020,10 +1035,37 @@ fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
 }
 
 fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
-    _ = pass;
     const game: *const Game = @ptrCast(@alignCast(game_opaque));
+    if (game.heldMaterial()) |material| {
+        if (game.held_block_renderer) |*renderer| {
+            if (engine.active_scene) |scene| renderer.draw(
+                engine.gctx,
+                pass,
+                engine.bind_group_minecraft_texture.wgpu_bind_group,
+                scene.camera.clip_from_view,
+                material,
+                held_block_pose,
+            );
+        }
+    }
     block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
     drawCrosshair();
+}
+
+test "held material follows tool and selection in player and spectator modes without a target" {
+    var game: Game = .{ .allocator = std.testing.allocator, .engine = undefined };
+    for ([_]@TypeOf(game.control_mode){ .player, .spectator }) |mode| {
+        game.control_mode = mode;
+        game.block_mode = .removing;
+        try std.testing.expectEqual(null, game.heldMaterial());
+        game.block_mode = .putting;
+        for ([_]voxel_chunk_module.BlockType{ .dirt, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete }) |material| {
+            game.selected_material = material;
+            try std.testing.expectEqual(material, game.heldMaterial().?);
+        }
+        game.block_mode = .removing;
+        try std.testing.expectEqual(null, game.heldMaterial());
+    }
 }
 
 fn drawCrosshair() void {

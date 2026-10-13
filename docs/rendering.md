@@ -28,7 +28,7 @@ flowchart LR
 | SSAO | Full-screen pass reconstructs view-space positions from depth and uses the normal texture to estimate occlusion; output is `r16_float`. |
 | Final composite | Full-screen pass copies scene color or multiplies it by SSAO. Optional blur/debug display are applied here. |
 | Block outlines | Loads swapchain color and scene depth. Draws green focus edges and colored translucent cell hints as three-pixel-wide triangle pairs, with faint occluded hints and no depth writes. |
-| Overlay | If `onRender` exists, loads the swapchain color without a depth attachment, invokes the application callback, and renders GUI when enabled. |
+| Overlay | If `onRender` exists, loads the swapchain color without a depth attachment, invokes the application callback (including the voxel app's held block), and renders GUI when enabled. |
 
 The SSAO pass is still encoded when SSAO is disabled. The final shader bypasses its result in that case. GUI frame creation and the engine debug window currently occur inside the optional `onRender` branch.
 
@@ -47,6 +47,16 @@ CPU world transforms remain in `f64`. GPU paths use chunk-local matrices plus in
 The voxel app starts in removing mode, which shows green focus edges and skips placement
 preview validation. Tab switches to putting mode, which hides green focus edges and uses
 colored placement hints. Block mode is shared across player and spectator control.
+
+Putting mode draws a camera-space held block through [`held_block.zig`](../src/engine/held_block.zig)
+in the application's overlay callback, before the GUI. It shares cube geometry and atlas
+UV helpers with world voxels, so material selection includes the same side-specific textures.
+The convex cube uses back-face culling without a depth attachment and stays visible over
+terrain and cell hints. It has steady camera-space shading and does not participate in world
+shadows or SSAO. Removing mode submits no held-block draw. Its projected position, rotation,
+and scale are configured together in the voxel app's `held_block_pose`; it uses the active
+camera's projection and no world position or orientation, for identical behavior in player
+and spectator modes. The application owns and releases its renderer before engine teardown.
 
 The voxel app refreshes `Scene.highlighted_block` using the editing raycast after camera updates, optimistic edits, and subscription changes. The engine's independent [`block_outline.zig`](../src/engine/block_outline.zig) pipeline draws it after post-processing and before GUI overlays. It emits 72 procedural vertices, clips edges against the near plane, and expands them in screen space to keep their width constant when distance or window size changes. It excludes edges whose adjacent faces both face away from the camera. For each stroke pixel overlapping the target cube, the fragment shader reconstructs the cube's front surface depth to prevent the target's own sloped faces from cutting into the stroke.
 
