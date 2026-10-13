@@ -23,6 +23,7 @@ pub const Tuning = struct {
     strength: f32 = 1,
     bob_amplitude: f32 = 0.0154, // metres
     stride_length: f32 = 3.2, // metres per full left/right cycle
+    gait_reference_speed: f32 = 5, // m/s at which bob reaches its normal amplitude
     acceleration_lag: f32 = 0.52, // inertial force multiplier
     direction_lag: f32 = 0.005, // metres per m/s
     spring_frequency: f32 = 3, // Hz
@@ -84,22 +85,26 @@ pub const Motion = struct {
         self.* = .{ .tuning = self.tuning };
     }
 
-    fn synchronize(self: *Motion, sample: Sample, pitch_target: f32) void {
+    fn synchronize(self: *Motion, sample: ?Sample, pitch_target: f32) void {
         self.previous = sample;
         self.pitch_offset = pitch_target;
         self.offset.translation[1] = pitch_target * std.math.clamp(self.tuning.strength, 0, 2);
     }
 
     pub fn update(self: *Motion, input: Input, elapsed: f64) void {
-        if (!input.active or !std.math.isFinite(elapsed) or elapsed < 0.000001 or elapsed > 0.25 or
-            !finitePosition(input.position) or !std.math.isFinite(input.look_angles[0]) or !std.math.isFinite(input.look_angles[1]))
-        {
+        if (!finitePosition(input.position) or !std.math.isFinite(input.look_angles[0]) or !std.math.isFinite(input.look_angles[1])) {
             self.reset();
             return;
         }
         const sample: Sample = .{ .position = input.position, .look_angles = input.look_angles, .grounded = input.grounded };
         // Absolute pitch changes the grip height even when the camera is stationary.
         const pitch_target = -@sin(std.math.clamp(input.look_angles[1], -std.math.pi / 2.0, std.math.pi / 2.0)) * self.tuning.pitch_shift;
+        if (!input.active or !std.math.isFinite(elapsed) or elapsed < 0.000001 or elapsed > 0.25) {
+            self.reset();
+            // Keep the current grip height, but never differentiate across a pause.
+            self.synchronize(null, pitch_target);
+            return;
+        }
         const previous = self.previous orelse {
             self.synchronize(sample, pitch_target);
             return;
@@ -130,7 +135,7 @@ pub const Motion = struct {
         const velocity_view = inView(input.view_from_world, self.velocity_world);
         const acceleration_view = inView(input.view_from_world, acceleration);
         const speed = @sqrt(measured[0] * measured[0] + measured[1] * measured[1]);
-        const gait = if (input.gait_enabled) std.math.clamp(speed / 5, 0, 1.5) else 0;
+        const gait = if (input.gait_enabled) std.math.clamp(speed / @max(0.001, self.tuning.gait_reference_speed), 0, 1.5) else 0;
         self.bob_weight += (gait - self.bob_weight) * (1 - @exp(-dt / 0.12));
         if (input.gait_enabled and speed > 0.01) self.phase = @mod(self.phase + 2 * std.math.pi * speed * dt / @max(0.1, self.tuning.stride_length), 2 * std.math.pi);
 

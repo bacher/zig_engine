@@ -1141,6 +1141,20 @@ test "held pitch shift follows the active controller even when the item is hidde
             const expected = -@sin(pitch) * game.held_motion.tuning.pitch_shift;
             try std.testing.expectApproxEqAbs(expected, game.held_motion.offset.translation[1], 0.000001);
             try std.testing.expectEqualDeep(@as(held_item_motion.Vec3, @splat(0)), game.held_motion.offset.rotation_degrees);
+            fixture.input.focus_changed = true;
+            game.updateHeldMotion();
+            try std.testing.expectApproxEqAbs(expected, game.held_motion.offset.translation[1], 0.000001);
+            fixture.input.focus_changed = false;
+            fixture.input.focused = false;
+            game.updateHeldMotion();
+            try std.testing.expectApproxEqAbs(expected, game.held_motion.offset.translation[1], 0.000001);
+            fixture.input.focused = true;
+            fixture.engine.frame_delta = 0.3;
+            game.updateHeldMotion();
+            try std.testing.expectApproxEqAbs(expected, game.held_motion.offset.translation[1], 0.000001);
+            fixture.engine.frame_delta = 1.0 / 60.0;
+            game.updateHeldMotion();
+            try std.testing.expectApproxEqAbs(expected, game.held_motion.offset.translation[1], 0.000001);
         }
     }
 }

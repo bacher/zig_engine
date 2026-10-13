@@ -130,11 +130,12 @@ The CPU/WGSL layouts are part of the contract: chunk metadata is 112 bytes, face
 
 [`held_item_motion.zig`](../src/engine/held_item_motion.zig) owns the tool-independent motion
 state and outputs camera-space translation in metres and rotation in degrees.
-[`held_item_pose.zig`](../src/engine/held_item_pose.zig) composes these offsets around the item's
-centre while preserving its resting position, scale, and rotation. Neither module depends on
-block types, material selection, or placement validation. Future tool renderers can consume the
-same `Offset` and choose their own resting pose. The voxel app updates one motion state each
-frame, including when no held item is visible.
+[`held_item_pose.zig`](../src/engine/held_item_pose.zig) composes these offsets around a configurable
+model-space grip point while preserving its resting position, scale, and rotation. The `pivot`
+defaults to the unit cube's centre `(0.5, 0.5, 0.5)`; other tools can choose their own grip point.
+Neither module depends on block types, material selection, or placement validation. Future
+tool renderers can consume the same `Offset` and choose their own resting pose. The voxel app
+updates one motion state each frame, including when no held item is visible.
 
 Hybrid combines a small walking bob with acceleration-driven lag and spring recovery.
 
@@ -148,8 +149,9 @@ still points in the original direction. Direction lean is a separate, smaller sp
 component.
 
 The gait phase advances with horizontal distance travelled, and its amplitude scales with
-speed and fades when stopped or airborne. Airborne player motion retains inertia and vertical
-lean; landing adds a small downward impulse. Spectator motion samples its own moving camera,
+speed relative to `gait_reference_speed` (5 m/s by default) and fades when stopped or airborne.
+Airborne player motion retains inertia and vertical lean; landing adds a small downward impulse.
+Spectator motion samples its own moving camera,
 with horizontal flight driving the same bob and vertical flight driving the spring.
 Yaw/pitch changes add brief look sway, with angle wrapping handled across +/-pi. Absolute
 pitch also shifts the item vertically: looking down raises it to reveal more above the bottom
@@ -157,10 +159,14 @@ of the viewport, and looking up lowers it. The target is `-sin(pitch) * pitch_sh
 to +/-90 degrees, and follows with exponential smoothing. The default maximum shift is
 0.10 metres with a 0.18-second response time (63% of a change; about 95% after 0.54 seconds).
 It persists at a held angle and affects translation only, preserving the resting rotation.
+Both player and spectator controllers restrict pitch to the vertical range; the player stops
+just short of +/-90 degrees and the spectator stops at +/-90 degrees.
 Changing camera mode, losing focus, recovery teleports, invalid frame durations, and large position
 jumps reset transient motion to prevent discontinuity kicks. Initial samples and teleports
-establish the grip height for the current pitch without an inertial impulse. At rest the
-transient tail settles to exactly zero while retaining the pitch offset; looking straight
+establish the grip height for the current pitch without an inertial impulse. Focus changes and
+invalid frame durations also retain this height for valid camera samples, discarding the movement
+baseline so resuming cannot create a kick. Invalid positions or look angles clear the motion state.
+At rest the transient tail settles to exactly zero while retaining the pitch offset; looking straight
 ahead restores the exact approved pose. There is no idle breathing motion.
 
 The shared `Tuning` defaults provide these adjustment controls:
@@ -169,6 +175,7 @@ The shared `Tuning` defaults provide these adjustment controls:
 | --- | --- |
 | `strength` | Overall motion amount; zero shows the resting pose. |
 | `bob_amplitude`, `stride_length` | Walking bounce size and cadence (shorter stride means faster cycles). |
+| `gait_reference_speed` | Speed in m/s at which walking bob reaches its normal amplitude; independent of stride cadence. |
 | `acceleration_lag` | Weight felt on starts, turns, and braking. |
 | `direction_lag` | Steady lean opposite the movement direction. |
 | `spring_frequency`, `damping_ratio` | Grip stiffness/recovery speed and how much it rebounds. |
@@ -180,9 +187,10 @@ The shared `Tuning` defaults provide these adjustment controls:
 
 Regression tests cover the approved idle pose, acceleration versus braking, vertical impulses,
 settling, persistent pitch displacement and slow pitch ramps, camera turns, angle wrapping,
-pause/teleport resets, large world positions, and 30/60/120/240 FPS comparisons. Application
-tests cover actual camera and pitch sampling in both modes, blocked movement, and preserving
-motion through material selection.
+pitch preservation across pause/focus resets, invalid camera samples, spectator pitch limits,
+configurable gait speed and model pivots, large world positions, and 30/60/120/240 FPS comparisons.
+Application tests cover actual camera and pitch sampling in both modes, blocked movement,
+focus/pause transitions, and preserving motion through material selection.
 
 ## Directional shadows and light limitations
 

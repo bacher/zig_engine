@@ -33,6 +33,7 @@ test {
     _ = @import("block_outline.zig");
     _ = @import("held_block.zig");
     _ = @import("held_item_motion_tests.zig");
+    _ = @import("spectator_camera.zig");
     _ = @import("input_controller.zig");
     _ = @import("hierarchy_tests.zig");
     _ = @import("lighting_tests.zig");

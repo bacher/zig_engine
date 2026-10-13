@@ -157,6 +157,83 @@ test "focus loss, teleports and invalid frame durations reset motion without los
     try std.testing.expect(state.previous == null);
 }
 
+test "duration resets preserve held pitch and discard the movement baseline" {
+    const tuning: motion.Tuning = .{ .strength = 0.5, .pitch_shift = 0.12 };
+    for ([_]f32{ -std.math.pi / 4.0, std.math.pi / 4.0 }) |pitch| {
+        for ([_]f64{ 0, -1, 0.3, std.math.nan(f64), 1e-40 }) |elapsed| {
+            var state: motion.Motion = .{ .tuning = tuning };
+            var sample = input(.{ 0, 0, 0 });
+            sample.look_angles[1] = pitch;
+            state.update(sample, 1.0 / 60.0);
+            const resting = state.offset;
+            for (0..6) |_| {
+                sample.position[0] += 5.0 / 60.0;
+                state.update(sample, 1.0 / 60.0);
+            }
+            try std.testing.expect(@abs(state.offset.translation[0]) > 0.001);
+            state.update(sample, elapsed);
+            try std.testing.expectEqualDeep(resting, state.offset);
+            try std.testing.expectEqualDeep(tuning, state.tuning);
+            try std.testing.expect(state.previous == null);
+            // A resumed sample cannot differentiate movement during the pause.
+            sample.position[0] += 1;
+            state.update(sample, 1.0 / 60.0);
+            try std.testing.expectEqualDeep(resting, state.offset);
+        }
+    }
+}
+
+test "inactive samples retain pitch height without carrying inertia into reactivation" {
+    var state: motion.Motion = .{};
+    var sample = input(.{ 0, 0, 0 });
+    sample.look_angles[1] = -std.math.pi / 4.0;
+    state.update(sample, 1.0 / 60.0);
+    const resting = state.offset;
+    for (0..6) |_| {
+        sample.position[0] += 5.0 / 60.0;
+        state.update(sample, 1.0 / 60.0);
+    }
+    sample.active = false;
+    advance(&state, sample, 60);
+    try std.testing.expectEqualDeep(resting, state.offset);
+    try std.testing.expect(state.previous == null);
+    sample.active = true;
+    sample.position[0] += 1;
+    state.update(sample, 1.0 / 60.0);
+    try std.testing.expectEqualDeep(resting, state.offset);
+}
+
+test "invalid camera samples clear motion instead of retaining an invalid pitch" {
+    inline for (0..5) |invalid| {
+        var state: motion.Motion = .{};
+        var sample = input(.{ 0, 0, 0 });
+        sample.look_angles[1] = 0.6;
+        state.update(sample, 1.0 / 60.0);
+        if (invalid < 3) sample.position[invalid] = std.math.nan(f64) else sample.look_angles[invalid - 3] = std.math.nan(f32);
+        state.update(sample, 1.0 / 60.0);
+        try std.testing.expectEqualDeep(motion.Offset{}, state.offset);
+        try std.testing.expect(state.previous == null);
+    }
+}
+
+test "gait reference speed controls amplitude without changing distance-based cadence" {
+    var normal: motion.Motion = .{ .tuning = .{ .acceleration_lag = 0, .direction_lag = 0 } };
+    var slower_bob = normal;
+    slower_bob.tuning.gait_reference_speed = 10;
+    var sample = input(.{ 0, 0, 0 });
+    normal.update(sample, 1.0 / 60.0);
+    slower_bob.update(sample, 1.0 / 60.0);
+    for (0..120) |_| {
+        sample.position[0] += 5.0 / 60.0;
+        normal.update(sample, 1.0 / 60.0);
+        slower_bob.update(sample, 1.0 / 60.0);
+    }
+    try std.testing.expectApproxEqAbs(@as(f32, 1), normal.bob_weight, 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), slower_bob.bob_weight, 0.000001);
+    try std.testing.expectEqual(normal.phase, slower_bob.phase);
+    inline for (0..3) |axis| try std.testing.expectApproxEqAbs(normal.offset.translation[axis] * 0.5, slower_bob.offset.translation[axis], 0.000001);
+}
+
 test "pitch shift eases toward held angles and persists after transient motion settles" {
     var state: motion.Motion = .{};
     var sample = input(.{ 0, 0, 0 });
@@ -229,4 +306,19 @@ test "motion rotates around the item centre and translates in camera space" {
     try std.testing.expectApproxEqAbs(original[0] + 0.03, centre[0], 0.00001);
     try std.testing.expectApproxEqAbs(original[1] + 0.04, centre[1], 0.00001);
     try std.testing.expectApproxEqAbs(original[2] - 0.02, centre[2], 0.00001);
+}
+
+test "arbitrary model grip remains anchored when scaling and animating a held item" {
+    const projection = zmath.perspectiveFovRh(std.math.pi / 4.0, 1.5, 0.01, 200);
+    const rest: Pose = .{ .pivot = .{ 2, -3, 0.25 }, .scale = 1.4, .screen_position = .{ 0.3, -0.8 } };
+    const grip: zmath.Vec = .{ rest.pivot[0], rest.pivot[1], rest.pivot[2], 1 };
+    const original = utils.matApply(rest.viewFromItem(projection), grip);
+    const projected = utils.resolvePosition(utils.matApply(projection, original));
+    try std.testing.expectApproxEqAbs(rest.screen_position[0], projected[0], 0.00001);
+    try std.testing.expectApproxEqAbs(rest.screen_position[1], projected[1], 0.00001);
+    const animated = rest.withMotion(.{ .translation = .{ 0.03, 0.04, -0.02 }, .rotation_degrees = .{ 3, -2, 1 } });
+    const shifted = utils.matApply(animated.viewFromItem(projection), grip);
+    try std.testing.expectApproxEqAbs(original[0] + 0.03, shifted[0], 0.00001);
+    try std.testing.expectApproxEqAbs(original[1] + 0.04, shifted[1], 0.00001);
+    try std.testing.expectApproxEqAbs(original[2] - 0.02, shifted[2], 0.00001);
 }
