@@ -54,9 +54,10 @@ UV helpers with world voxels, so material selection includes the same side-speci
 The convex cube uses back-face culling without a depth attachment and stays visible over
 terrain and cell hints. It has steady camera-space shading and does not participate in world
 shadows or SSAO. Removing mode submits no held-block draw. Its projected position, rotation,
-and scale are configured together in the voxel app's `held_block_pose`; it uses the active
-camera's projection and no world position or orientation, for identical behavior in player
-and spectator modes. The application owns and releases its renderer before engine teardown.
+and scale are configured together in the voxel app's `held_block_pose`. The resting pose uses
+the active camera's projection and no world position or orientation. Shared held-item motion
+adds camera-space offsets to this pose. The application owns and releases its renderer before
+engine teardown.
 
 The voxel app refreshes `Scene.highlighted_block` using the editing raycast after camera updates, optimistic edits, and subscription changes. The engine's independent [`block_outline.zig`](../src/engine/block_outline.zig) pipeline draws it after post-processing and before GUI overlays. It emits 72 procedural vertices, clips edges against the near plane, and expands them in screen space to keep their width constant when distance or window size changes. It excludes edges whose adjacent faces both face away from the camera. For each stroke pixel overlapping the target cube, the fragment shader reconstructs the cube's front surface depth to prevent the target's own sloped faces from cutting into the stroke.
 
@@ -124,6 +125,64 @@ Chunk metadata describes eight combinations of three directions, one direction f
 Each shadow cascade draws combinations 0 and 7 for every GPU-resident voxel chunk, regardless of camera direction. Thus the same resident geometry supplies both visible and shadow passes. Chunks that have no uploaded faces are absent from that loop; distant unloaded terrain does not cast voxel shadows.
 
 The CPU/WGSL layouts are part of the contract: chunk metadata is 112 bytes, face records are four bytes, ordinary instances are 80 bytes. Changes must keep the shader declarations and upload layout synchronized.
+
+## Held-item motion
+
+[`held_item_motion.zig`](../src/engine/held_item_motion.zig) owns the tool-independent motion
+state and outputs camera-space translation in metres and rotation in degrees.
+[`held_item_pose.zig`](../src/engine/held_item_pose.zig) composes these offsets around the item's
+centre while preserving its resting position, scale, and rotation. Neither module depends on
+block types, material selection, or placement validation. Future tool renderers can consume the
+same `Offset` and choose their own resting pose. The voxel app updates one motion state each
+frame, including when no held item is visible.
+
+Hybrid combines a small walking bob with acceleration-driven lag and spring recovery.
+
+Movement velocity comes from actual camera-position differences in f64, so pressing into a
+wall does not create walking motion. A short velocity filter smooths abrupt controller starts
+and stops. Acceleration is computed in world space before transforming into camera space;
+turning the camera cannot invent a braking force. The spring follows
+`offset'' = spring_force - damping * offset' - acceleration * lag_strength`, using substeps of
+at most 1/240 second. Braking therefore reverses the inertial response even while velocity
+still points in the original direction. Direction lean is a separate, smaller speed-based
+component.
+
+The gait phase advances with horizontal distance travelled, and its amplitude scales with
+speed and fades when stopped or airborne. Airborne player motion retains inertia and vertical
+lean; landing adds a small downward impulse. Spectator motion samples its own moving camera,
+with horizontal flight driving the same bob and vertical flight driving the spring.
+Yaw/pitch changes add brief look sway, with angle wrapping handled across +/-pi. Absolute
+pitch also shifts the item vertically: looking down raises it to reveal more above the bottom
+of the viewport, and looking up lowers it. The target is `-sin(pitch) * pitch_shift`, clamped
+to +/-90 degrees, and follows with exponential smoothing. The default maximum shift is
+0.10 metres with a 0.18-second response time (63% of a change; about 95% after 0.54 seconds).
+It persists at a held angle and affects translation only, preserving the resting rotation.
+Changing camera mode, losing focus, recovery teleports, invalid frame durations, and large position
+jumps reset transient motion to prevent discontinuity kicks. Initial samples and teleports
+establish the grip height for the current pitch without an inertial impulse. At rest the
+transient tail settles to exactly zero while retaining the pitch offset; looking straight
+ahead restores the exact approved pose. There is no idle breathing motion.
+
+The shared `Tuning` defaults provide these adjustment controls:
+
+| Knob | Effect |
+| --- | --- |
+| `strength` | Overall motion amount; zero shows the resting pose. |
+| `bob_amplitude`, `stride_length` | Walking bounce size and cadence (shorter stride means faster cycles). |
+| `acceleration_lag` | Weight felt on starts, turns, and braking. |
+| `direction_lag` | Steady lean opposite the movement direction. |
+| `spring_frequency`, `damping_ratio` | Grip stiffness/recovery speed and how much it rebounds. |
+| `look_sway` | Lag during mouse look. |
+| `pitch_shift` | Maximum persistent vertical shift; more reveals more of the item when looking down. |
+| `pitch_follow_time` | Pitch response delay in seconds; smaller follows faster, larger feels smoother and heavier. |
+| `landing_strength` | Additional touchdown dip. |
+| `rotation_strength` | Angular motion independently of translation. |
+
+Regression tests cover the approved idle pose, acceleration versus braking, vertical impulses,
+settling, persistent pitch displacement and slow pitch ramps, camera turns, angle wrapping,
+pause/teleport resets, large world positions, and 30/60/120/240 FPS comparisons. Application
+tests cover actual camera and pitch sampling in both modes, blocked movement, and preserving
+motion through material selection.
 
 ## Directional shadows and light limitations
 

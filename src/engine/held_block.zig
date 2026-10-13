@@ -11,31 +11,7 @@ const BindGroup = @import("bind_group.zig").BindGroup;
 pub const shader = @embedFile("shaders/voxel/block_geometry.wgsl") ++ @embedFile("shaders/held_block.wgsl");
 pub const vertex_count = 36;
 
-pub const Pose = struct {
-    /// Projected centre: x right, y up, with visible bounds from -1 to 1.
-    screen_position: [2]f32 = .{ 0, -1.05 },
-    distance: f32 = 1.5,
-    /// Camera-space pitch, yaw, and roll, applied after orienting the block Z-up.
-    rotation_degrees: [3]f32 = .{ 12, 40, -0.1 },
-    scale: f32 = 0.5148,
-
-    pub fn viewFromBlock(pose: Pose, projection: zmath.Mat) zmath.Mat {
-        const radians = std.math.pi / 180.0;
-        // Apply the pitch after yaw so turning the cube does not lean its up axis.
-        const rotation = utils.matMul(zmath.rotationZ(pose.rotation_degrees[2] * radians), utils.matMul(
-            zmath.rotationX(pose.rotation_degrees[0] * radians),
-            utils.matMul(zmath.rotationY(pose.rotation_degrees[1] * radians), zmath.rotationX(-std.math.pi / 2.0)),
-        ));
-        return utils.matMul(zmath.translation(
-            pose.screen_position[0] * pose.distance / projection[0][0],
-            pose.screen_position[1] * pose.distance / projection[1][1],
-            -pose.distance,
-        ), utils.matMul(rotation, utils.matMul(
-            zmath.scaling(pose.scale, pose.scale, pose.scale),
-            zmath.translation(-0.5, -0.5, -0.5),
-        )));
-    }
-};
+pub const Pose = @import("held_item_pose.zig").Pose;
 
 /// Field order matches shaders/held_block.wgsl.
 pub const Uniform = extern struct {
@@ -44,7 +20,7 @@ pub const Uniform = extern struct {
     material: [4]u32,
 
     pub fn init(projection: zmath.Mat, block: BlockType, pose: Pose) Uniform {
-        const view = pose.viewFromBlock(projection);
+        const view = pose.viewFromItem(projection);
         return .{
             .clip_from_block = utils.matMul(projection, view),
             .view_from_block = view,
