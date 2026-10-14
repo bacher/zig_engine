@@ -15,7 +15,7 @@ pub fn extractChunkSideData(
     for (content.blocks.blocks, 0..) |slice, z| {
         for (slice, 0..) |row, y| {
             for (row, 0..) |block, x| {
-                if (block == .none) continue;
+                if (!block.occludesFaces()) continue;
                 const local = [3]u5{ @intCast(x), @intCast(y), @intCast(z) };
                 for (std.enums.values(voxel.Side)) |side| {
                     const index = @intFromEnum(side);
@@ -27,7 +27,7 @@ pub fn extractChunkSideData(
                         break :blk neighbors[index].contains(side, local);
                     } else blk: {
                         if (positive) adjacent[axis] += 1 else adjacent[axis] -= 1;
-                        break :blk content.getBlock(adjacent) != .none;
+                        break :blk content.getBlock(adjacent).occludesFaces();
                     };
                     if (!occluded) result.blocks_grouped_by_side[index].append(allocator, .{
                         .coords = .{ local[0], local[1], local[2] },
@@ -36,6 +36,15 @@ pub fn extractChunkSideData(
                 }
             }
         }
+    }
+    return result;
+}
+
+pub fn extractChunkGeometry(allocator: std.mem.Allocator, chunk: @import("world.zig").WorldChunk, neighbors: BoundaryMasks) voxel.ChunkSideData {
+    var result = extractChunkSideData(allocator, chunk.content, neighbors);
+    for (chunk.metadata.roads.items) |road| {
+        const local = @import("block_transformations.zig").coordinates(road.index);
+        result.custom_blocks.append(allocator, .{ .coords = .{ local[0], local[1], local[2] }, .shape = road.shape() }) catch @panic("OOM");
     }
     return result;
 }

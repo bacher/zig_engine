@@ -29,6 +29,7 @@ pub const Reason = enum {
     would_remove_support,
     would_invalidate_structure,
     support_search_limit,
+    road_support,
 };
 
 /// Target-relative coordinates remain continuous across the wrapped x seam.
@@ -74,6 +75,7 @@ pub const Reader = struct {
     layout: *const engine.WorldLayout,
     context: *anyopaque,
     block_at: *const fn (*anyopaque, [3]u32) ?BlockType,
+    custom_shape_at: ?*const fn (*anyopaque, [3]u32) ?engine.voxel_chunk.custom_block.Shape = null,
 
     pub fn normalize(self: Reader, cell: Cell) ?Cell {
         var result = cell;
@@ -491,6 +493,20 @@ pub const Validator = struct {
     }
 
     fn evaluateUncached(self: *Validator, cell: Cell, material: BlockType) ReadError!Evaluation {
+        if (material.isRoad()) {
+            const below_cell = cell - Cell{ 0, 0, 1 };
+            const below = try self.get(below_cell);
+            var supported = below != .none;
+            if (below == .custom) if (self.reader.custom_shape_at) |read_shape| {
+                const normalized = self.reader.normalize(below_cell).?;
+                if (read_shape(self.reader.context, .{ @intCast(normalized[0]), @intCast(normalized[1]), @intCast(normalized[2]) })) |shape|
+                    supported = shape == .adaptive;
+            };
+            if (supported) return .{ .supported = .{} };
+            var result = failure(.road_support, cell, 0, 1);
+            result.rejected.add(below_cell);
+            return result;
+        }
         if (material.isEarth()) return self.footprint(cell);
         if (!material.isWood() and !material.isMineralConstruction()) return .{ .supported = .{} };
         if (material == .crushed_stone) {
@@ -562,6 +578,10 @@ pub const Validator = struct {
         if (depth < 0) return false;
         self.beginCheck(cell);
         const material = try self.get(cell);
+        if (material.isRoad()) {
+            const delta = displacement(self.reader.layout, cell, edit.cell);
+            return depth == 1 and delta[0] == 0 and delta[1] == 0;
+        }
         const radius: u64 = if (material.isEarth()) blk: {
             if (depth != 1) return false;
             break :blk 1;

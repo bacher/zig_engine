@@ -98,10 +98,10 @@ pub const WorldChunkData = struct {
 
         for (0..CHUNK_SIZE) |y| {
             for (0..CHUNK_SIZE) |x| {
-                if (self.blocks[0][y][x] == .none) {
+                if (!self.blocks[0][y][x].occludesFaces()) {
                     flags.solid_bottom = false;
                 }
-                if (self.blocks[CHUNK_SIZE - 1][y][x] == .none) {
+                if (!self.blocks[CHUNK_SIZE - 1][y][x].occludesFaces()) {
                     flags.solid_top = false;
                 }
             }
@@ -109,10 +109,10 @@ pub const WorldChunkData = struct {
 
         for (0..CHUNK_SIZE) |z| {
             for (0..CHUNK_SIZE) |y| {
-                if (self.blocks[z][y][0] == .none) {
+                if (!self.blocks[z][y][0].occludesFaces()) {
                     flags.solid_left = false;
                 }
-                if (self.blocks[z][y][CHUNK_SIZE - 1] == .none) {
+                if (!self.blocks[z][y][CHUNK_SIZE - 1].occludesFaces()) {
                     flags.solid_right = false;
                 }
             }
@@ -120,10 +120,10 @@ pub const WorldChunkData = struct {
 
         for (0..CHUNK_SIZE) |z| {
             for (0..CHUNK_SIZE) |x| {
-                if (self.blocks[z][0][x] == .none) {
+                if (!self.blocks[z][0][x].occludesFaces()) {
                     flags.solid_front = false;
                 }
-                if (self.blocks[z][CHUNK_SIZE - 1][x] == .none) {
+                if (!self.blocks[z][CHUNK_SIZE - 1][x].occludesFaces()) {
                     flags.solid_back = false;
                 }
             }

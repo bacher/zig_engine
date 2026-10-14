@@ -36,7 +36,7 @@ pub const MapResponse = struct {
     done: bool = false,
     status: wgpu.BufferMapAsyncStatus = .unknown,
 
-    fn callback(status: wgpu.BufferMapAsyncStatus, userdata: ?*anyopaque) callconv(.c) void {
+    pub fn callback(status: wgpu.BufferMapAsyncStatus, userdata: ?*anyopaque) callconv(.c) void {
         const self: *MapResponse = @ptrCast(@alignCast(userdata));
         self.status = status;
         self.done = true;

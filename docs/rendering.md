@@ -148,7 +148,16 @@ Chunk metadata describes eight combinations of three directions, one direction f
 
 Each shadow cascade draws combinations 0 and 7 for every GPU-resident voxel chunk, regardless of camera direction. Thus the same resident geometry supplies both visible and shadow passes. Chunks that have no uploaded faces are absent from that loop; distant unloaded terrain does not cast voxel shadows.
 
-The CPU/WGSL layouts are part of the contract: chunk metadata is 112 bytes, face records are four bytes, ordinary instances are 80 bytes. Changes must keep the shader declarations and upload layout synchronized.
+Custom cells (block value 255) do not enter the face lists and do not occlude neighboring
+ordinary faces. Separate descriptors accompany local/service mesh payloads. A custom-only
+chunk can have zero ordinary faces. `VoxelGrid` retains its descriptors and uploads 48-byte
+records to a separate 4 MiB storage buffer. The forward pass draws each custom block
+individually after ordinary voxel/object geometry, before SSAO. Shadow cascades also submit
+individual custom draws. Both passes share the custom vertex function and restore the scene
+bindings after ordinary object rendering. Road slope planes match CPU collision; unformed
+adaptive roads use temporary inset marker geometry. See [country roads](country-roads.md).
+
+The CPU/WGSL layouts are part of the contract: chunk metadata is 112 bytes, face records are four bytes, custom block records are 48 bytes, ordinary instances are 80 bytes. Changes must keep the shader declarations and upload layout synchronized.
 
 ## Held-item motion
 

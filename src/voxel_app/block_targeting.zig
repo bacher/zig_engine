@@ -62,11 +62,27 @@ pub fn cast(world: *const World, position: Position, direction: Position) @impor
         if (exit > distance) {
             if (coordinates.fromStorage(world.layout, cell)) |block| {
                 if (try world.isBlockSolid(block)) {
-                    var placement: ?[3]u32 = null;
-                    if (entry_step) |normal| {
-                        placement = coordinates.fromStorage(world.layout, cell - normal);
+                    var hit_distance = distance;
+                    var hit_step = entry_step;
+                    if (world.customShape(block)) |shape| if (shape == .slope) {
+                        const origin: Position = @floatFromInt(cell);
+                        const fraction = shape.sweep(start - origin, forward * @as(Position, @splat(reach_limit)), @splat(0), @splat(0));
+                        if (fraction) |t| {
+                            hit_distance = t * reach_limit;
+                            const local_hit = start + forward * @as(Position, @splat(hit_distance)) - origin;
+                            if (hit_distance > 0 and @abs(local_hit[2] - shape.height(local_hit[0], local_hit[1])) < 1e-7)
+                                hit_step = Cell{ 0, 0, -1 };
+                        } else {
+                            hit_distance = std.math.inf(f64);
+                        }
+                    };
+                    if (hit_distance <= @min(exit, reach_limit) + distance_tolerance) {
+                        var placement: ?[3]u32 = null;
+                        if (hit_step) |normal| {
+                            placement = coordinates.fromStorage(world.layout, cell - normal);
+                        }
+                        return .{ .block = block, .placement = placement, .distance = hit_distance };
                     }
-                    return .{ .block = block, .placement = placement, .distance = distance };
                 }
             }
         }

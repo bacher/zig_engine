@@ -21,6 +21,7 @@ pub fn description(reason: rules.Reason) []const u8 {
         .would_remove_support => "Removal would leave an existing construction unsupported.",
         .would_invalidate_structure => "Placement would make an existing construction invalid.",
         .support_search_limit => "Support cannot be proved within the allowed search radius.",
+        .road_support => "Each road block requires solid support directly underneath.",
     };
 }
 

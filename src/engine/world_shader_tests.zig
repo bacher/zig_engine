@@ -8,6 +8,7 @@ const WorldPipelineCache = @import("world_pipeline_cache.zig").WorldPipelineCach
 const layouts_module = @import("bind_group_layouts.zig");
 const coordinate_readback = @import("world_coordinate_readback.zig");
 const terrain_pipeline = @import("pipelines/terrain_height_map_pipeline.zig");
+const custom_readback = @import("custom_block_readback.zig");
 
 // Dawn's native entry points, also used by zgpu.GraphicsContext.create.
 extern fn dniCreate() ?*anyopaque;
@@ -180,6 +181,23 @@ test "GPU coordinate readback agrees with CPU at seams, precision boundaries, an
     try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
 }
 
+test "GPU custom road vertices and normals match CPU slope collision" {
+    var uncaptured: ValidationResponse = .{};
+    var validation: ValidationResponse = .{};
+    var mapping: coordinate_readback.MapResponse = .{};
+    const gpu = try HeadlessDawn.init();
+    defer gpu.deinit();
+    gpu.device.setUncapturedErrorCallback(ValidationResponse.callback, &uncaptured);
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 128, 2, 2 } });
+    gpu.device.pushErrorScope(.validation);
+    const checked = custom_readback.check(gpu.device, &layout, &mapping);
+    _ = gpu.device.popErrorScope(ValidationResponse.callback, &validation);
+    try coordinate_readback.waitForCallback(gpu.device, &validation.done);
+    try std.testing.expectEqual(@as(usize, 0), validation.errors);
+    try checked;
+    try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
+}
+
 fn expectPipelineHandles(gctx: *zgpu.GraphicsContext, pipelines: WorldPipelines, valid: bool) !void {
     inline for (std.meta.fields(WorldPipelines)) |field| {
         try std.testing.expectEqual(valid, gctx.isResourceValid(@field(pipelines, field.name).pipeline_handle));
@@ -207,11 +225,11 @@ fn checkCompatibleLayouts(gctx: *zgpu.GraphicsContext, layouts: *const layouts_m
             try std.testing.expect(first == same);
             try std.testing.expect(first == different_yz);
             try std.testing.expectEqual(!WorldLayout.wrap_x, first == different_x);
-            try std.testing.expectEqual(@as(usize, if (WorldLayout.wrap_x) 12 else 6), gctx.render_pipeline_pool.pool.liveHandleCount());
+            try std.testing.expectEqual(@as(usize, if (WorldLayout.wrap_x) 16 else 8), gctx.render_pipeline_pool.pool.liveHandleCount());
         }
         // Other scenes released their references; this scene can still render.
         try expectPipelineHandles(gctx, first.*, true);
-        try std.testing.expectEqual(@as(usize, 6), gctx.render_pipeline_pool.pool.liveHandleCount());
+        try std.testing.expectEqual(@as(usize, 8), gctx.render_pipeline_pool.pool.liveHandleCount());
     }
     try expectPipelineHandles(gctx, released_handles, false);
     try std.testing.expectEqual(@as(usize, 0), gctx.render_pipeline_pool.pool.liveHandleCount());
@@ -260,7 +278,7 @@ fn checkCacheGrowth(gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.
 fn checkAllocationCleanup(allocator: std.mem.Allocator, gctx: *zgpu.GraphicsContext, layouts: *const layouts_module.BindGroupLayouts) !void {
     var cache = WorldPipelineCache.init(allocator, gctx);
     defer cache.deinit();
-    // Also checked on errors after any of the six shader-source allocations.
+    // Also checked on errors after any of the eight shader-source allocations.
     defer std.debug.assert(gctx.render_pipeline_pool.pool.liveHandleCount() == 0);
     defer std.debug.assert(gctx.pipeline_layout_pool.pool.liveHandleCount() == 0);
     const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 512, 256, 8 } });
@@ -274,7 +292,7 @@ fn checkAllocationCleanup(allocator: std.mem.Allocator, gctx: *zgpu.GraphicsCont
     // A failed miss must preserve the existing borrowed set and release every
     // partially constructed pipeline before returning the allocation error.
     {
-        defer std.debug.assert(gctx.render_pipeline_pool.pool.liveHandleCount() == 6);
+        defer std.debug.assert(gctx.render_pipeline_pool.pool.liveHandleCount() == 8);
         defer inline for (std.meta.fields(WorldPipelines)) |field| {
             std.debug.assert(gctx.isResourceValid(@field(pipelines, field.name).pipeline_handle));
         };

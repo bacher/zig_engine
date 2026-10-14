@@ -141,6 +141,7 @@ pub const Scene = struct {
             engine.gctx,
             voxel_grid.gpu_chunk_info_buffer,
             voxel_grid.gpu_block_buffer,
+            voxel_grid.gpu_custom_block_buffer,
         );
         errdefer voxel_bind_group.deinit(engine.gctx);
 

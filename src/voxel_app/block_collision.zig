@@ -23,6 +23,9 @@ pub fn movementCollision(block: engine.voxel_chunk.BlockType) MovementCollision 
         .planks,
         .rebar,
         .reinforced_concrete,
+        .country_road_solid,
+        .country_road_adaptive,
+        .custom,
         => .full_cube,
     };
 }
