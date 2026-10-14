@@ -36,11 +36,9 @@ pub fn withinReach(layout: *const engine.WorldLayout, position: Position, block:
             distance_squared = @reduce(.Add, center * center);
         },
         .nearest_vertex => {
-            inline for (0..8) |vertex| {
-                const offset: Position = .{ vertex & 1, (vertex >> 1) & 1, (vertex >> 2) & 1 };
-                const corner = delta + offset;
-                distance_squared = @min(distance_squared, @reduce(.Add, corner * corner));
-            }
+            // Each axis can independently choose its nearer cube endpoint.
+            const corner = @min(@abs(delta), @abs(delta + @as(Position, @splat(1))));
+            distance_squared = @reduce(.Add, corner * corner);
         },
     }
     // Allow only floating-point rounding at the storage-coordinate scale.
@@ -385,6 +383,25 @@ test "placement checks its adjacent cube even when the backing cube is out of re
         fixture.set(.{ 4, 0, 0 }, .none);
         try std.testing.expectEqual(placement, (try findTarget(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 1, 0, 0 }, .putting, mode)).?);
     }
+}
+
+test "placement reaches a backing face near the full four-metres-plus-diagonal traversal bound" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ 1, 0, 0 }, .stone);
+    const position: Position = @splat(-reach / @sqrt(@as(f64, 3)));
+    const aim: Position = .{ 1, 1 - 0.000001, 1 - 0.000001 };
+    const direction = aim - position;
+    const placement = coordinates.fromWorld(fixture.world.layout, .{ 0, 0, 0 }).?;
+    const hit = (try cast(&fixture.world, position, direction)).?;
+    try std.testing.expectEqual(coordinates.fromWorld(fixture.world.layout, .{ 1, 0, 0 }).?, hit.block);
+    try std.testing.expectEqual(placement, hit.placement.?);
+    try std.testing.expectApproxEqAbs(reach + @sqrt(@as(f64, 3)), hit.distance, 0.000002);
+    // The candidate's nearest vertex is exactly 4 m away, although the backing
+    // face is almost 5.732 m away. Its center and the backing cube are unreachable.
+    try std.testing.expectEqual(placement, (try findTarget(&fixture.world, position, direction, .putting, .nearest_vertex)).?);
+    try std.testing.expectEqual(null, try findTarget(&fixture.world, position, direction, .putting, .center));
+    try std.testing.expectEqual(null, try findTarget(&fixture.world, position, direction, .removing, .nearest_vertex));
 }
 
 test "both reach modes wrap cube distances across x after repeated world trips" {
