@@ -67,7 +67,8 @@ const Game = struct {
     simulation: ?*SimulationWorker = null,
     player: ?PlayerController = null,
     control_mode: enum { player, spectator } = .player,
-    block_mode: enum { putting, removing } = .removing,
+    block_mode: block_targeting.Mode = .removing,
+    reach_mode: block_targeting.ReachMode = .nearest_vertex,
     jump_requested: bool = false,
     /// Keyboard and mouse presses retain their order and material until the camera updates.
     tool_commands: std.ArrayList(BlockAction) = .empty,
@@ -565,13 +566,22 @@ const Game = struct {
 
     fn toggleBlockMode(game: *Game) void {
         game.block_mode = if (game.block_mode == .removing) .putting else .removing;
+        game.clearBlockFocus();
+        std.debug.print("block mode: {s}\n", .{@tagName(game.block_mode)});
+    }
+
+    fn toggleReachMode(game: *Game) void {
+        game.reach_mode = if (game.reach_mode == .nearest_vertex) .center else .nearest_vertex;
+        game.clearBlockFocus();
+    }
+
+    fn clearBlockFocus(game: *Game) void {
         game.placement_validation = null;
         game.current_placement_preview = null;
         if (game.engine.active_scene) |scene| {
             scene.highlighted_block = null;
             scene.block_overlays = .{};
         }
-        std.debug.print("block mode: {s}\n", .{@tagName(game.block_mode)});
     }
 
     fn updateBlockFocus(game: *Game) void {
@@ -591,12 +601,11 @@ const Game = struct {
         if (!input.focused or input.focus_changed) return;
         const world = if (game.world) |*world| world else return;
         const camera = scene.camera;
-        const hit = (block_targeting.cast(world, camera.position, camera.forwardDirection()) catch return) orelse return;
+        const block = (block_targeting.findTarget(world, camera.position, camera.forwardDirection(), game.block_mode, game.reach_mode) catch return) orelse return;
         if (game.block_mode == .removing) {
-            scene.highlighted_block = hit.block;
+            scene.highlighted_block = block;
             return;
         }
-        const block = hit.placement orelse return;
         if (game.placement_validation == null or
             !std.meta.eql(game.placement_validation.?.block, block) or
             game.placement_validation.?.material != game.selected_material or
@@ -625,14 +634,13 @@ const Game = struct {
         const world = if (game.world) |*world| world else return;
         world.last_edit_result = null;
         const camera = game.engine.active_scene.?.camera;
-        const hit = (block_targeting.cast(world, camera.position, camera.forwardDirection()) catch {
+        const edited_block = (block_targeting.findTarget(world, camera.position, camera.forwardDirection(), switch (action) {
+            .remove => .removing,
+            .place => .putting,
+        }, game.reach_mode) catch {
             if (DEBUG) std.debug.print("can't target block: chunks aren't received yet\n", .{});
             return;
         }) orelse return;
-        const edited_block = switch (action) {
-            .remove => hit.block,
-            .place => hit.placement orelse return,
-        };
         if (action == .place) if (game.player) |*player| {
             if (terrain_collision.overlapsBlock(player.body, player.position, game.layout(), edited_block)) {
                 game.block_action_error.show(block_diagnostics.player_overlap_message, game.engine.time);
@@ -1049,6 +1057,7 @@ fn handleKeyPress(game: *Game, key_params: KeyParams) void {
         },
         .q => game.toggleControlMode(),
         .tab => game.toggleBlockMode(),
+        .r => if (!key_params.mods.control) game.toggleReachMode(),
         // A press/release occurring between frames must still produce one jump.
         .space => if (game.control_mode == .player) {
             game.jump_requested = true;
@@ -1085,7 +1094,24 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
         }
     }
     block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
+    drawReachMode(game.reach_mode);
     drawCrosshair();
+}
+
+fn drawReachMode(mode: block_targeting.ReachMode) void {
+    const screen = zgui.io.getDisplaySize();
+    if (screen[0] <= 0 or screen[1] <= 0) return;
+    const scale = zgui.getStyle().font_scale_dpi;
+    zgui.pushFont(null, 14);
+    defer zgui.popFont();
+    const text = switch (mode) {
+        .center => "Reach: center, 4 m [R]",
+        .nearest_vertex => "Reach: nearest vertex, 4 m [R]",
+    };
+    const position: [2]f32 = .{ 16 * scale, screen[1] - 16 * scale - zgui.getFontSize() };
+    const list = zgui.getForegroundDrawList();
+    list.addTextUnformatted(.{ position[0] + scale, position[1] + scale }, zgui.colorConvertFloat4ToU32(.{ 0, 0, 0, 1 }), text);
+    list.addTextUnformatted(position, zgui.colorConvertFloat4ToU32(.{ 1, 1, 1, 0.85 }), text);
 }
 
 test "held motion sampling uses actual active-camera movement and material selection preserves motion" {
@@ -1627,6 +1653,94 @@ test "block focus clears on focus transitions or missing terrain" {
     fixture.game.updateBlockFocus();
     try std.testing.expectEqual(null, fixture.scene.highlighted_block);
     try std.testing.expectEqual(0, fixture.scene.block_overlays.count);
+}
+
+test "R switches reach for previews and actual edits in both block and control modes" {
+    const coordinates = @import("block_coordinates.zig");
+    for ([_]block_targeting.Mode{ .removing, .putting }) |mode| {
+        for ([_]bool{ false, true }) |spectating| {
+            var fixture: StreamingTest = .{};
+            fixture.init();
+            defer fixture.deinit();
+            fixture.game.control_mode = if (spectating) .spectator else .player;
+            fixture.game.block_mode = mode;
+            fixture.game.selected_material = .sand;
+            fixture.camera.updatePosition(.{ 0.5, 0.25, 0.5 });
+            try fixture.game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
+            const candidate = coordinates.fromWorld(&test_layout, .{ 0, 4, 0 }).?;
+            const backing = coordinates.fromWorld(&test_layout, .{ 0, 5, 0 }).?;
+            fixture.game.world.?.setBlockUnchecked(if (mode == .removing) candidate else backing, .stone);
+            fixture.game.world.?.pending_operations.clearRetainingCapacity();
+            fixture.game.updateBlockFocus();
+            if (mode == .removing) {
+                try std.testing.expectEqual(candidate, fixture.scene.highlighted_block.?);
+            } else {
+                try std.testing.expectEqual(candidate, fixture.game.current_placement_preview.?.block);
+                try std.testing.expectEqual(world_module.OperationStatus.success, fixture.game.current_placement_preview.?.result.status);
+            }
+            // Ctrl+R belongs to the engine's SSAO debug view.
+            handleKeyPress(&fixture.game, .{ .key = .r, .mods = .{ .control = true } });
+            try std.testing.expectEqual(.nearest_vertex, fixture.game.reach_mode);
+            handleKeyPress(&fixture.game, .{ .key = .r, .mods = .{} });
+            try std.testing.expectEqual(.center, fixture.game.reach_mode);
+            try std.testing.expectEqual(null, fixture.scene.highlighted_block);
+            try std.testing.expectEqual(null, fixture.game.current_placement_preview);
+            try std.testing.expectEqual(null, fixture.game.placement_validation);
+            try std.testing.expectEqual(0, fixture.scene.block_overlays.count);
+            fixture.game.updateBlockFocus();
+            try std.testing.expectEqual(null, fixture.scene.highlighted_block);
+            try std.testing.expectEqual(null, fixture.game.current_placement_preview);
+            handleMouseButtonPress(&fixture.game, .{ .button = .left, .mods = .{} });
+            fixture.game.updateBlockTool();
+            try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
+            handleKeyPress(&fixture.game, .{ .key = .r, .mods = .{} });
+            fixture.game.updateBlockFocus();
+            handleMouseButtonPress(&fixture.game, .{ .button = .left, .mods = .{} });
+            fixture.game.updateBlockTool();
+            try std.testing.expectEqual(1, fixture.game.world.?.pending_operations.items.len);
+            try std.testing.expectEqual(candidate, fixture.game.world.?.pending_operations.items[0].operation.block);
+            try std.testing.expectEqual(mode == .putting, try fixture.game.world.?.isBlockSolid(candidate));
+        }
+    }
+}
+
+test "removing and replacing the same slot needs no camera movement in either reach mode" {
+    const coordinates = @import("block_coordinates.zig");
+    for ([_]block_targeting.ReachMode{ .center, .nearest_vertex }) |reach_mode| {
+        for ([_]bool{ false, true }) |spectating| {
+            var fixture: StreamingTest = .{};
+            fixture.init();
+            defer fixture.deinit();
+            fixture.game.reach_mode = reach_mode;
+            fixture.game.control_mode = if (spectating) .spectator else .player;
+            fixture.game.selected_material = .sand;
+            fixture.camera.updatePosition(.{ 0.5, 0.5, 0.5 });
+            try fixture.game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
+            const candidate = coordinates.fromWorld(&test_layout, .{ 0, 4, 0 }).?;
+            const backing = coordinates.fromWorld(&test_layout, .{ 0, 5, 0 }).?;
+            fixture.game.world.?.setBlockUnchecked(candidate, .stone);
+            fixture.game.world.?.setBlockUnchecked(backing, .stone);
+            fixture.game.world.?.pending_operations.clearRetainingCapacity();
+            fixture.game.updateBlockFocus();
+            try std.testing.expectEqual(candidate, fixture.scene.highlighted_block.?);
+            handleKeyPress(&fixture.game, .{ .key = .x, .mods = .{} });
+            fixture.game.updateBlockTool();
+            fixture.game.updateBlockFocus();
+            // The backing face is 4.5 m away and its cube is not removable.
+            try std.testing.expectEqual(null, fixture.scene.highlighted_block);
+            handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
+            fixture.game.updateBlockFocus();
+            try std.testing.expectEqual(candidate, fixture.game.current_placement_preview.?.block);
+            try std.testing.expectEqual(world_module.OperationStatus.success, fixture.game.current_placement_preview.?.result.status);
+            try std.testing.expectEqualDeep(placement_preview.allowed_color, fixture.scene.block_overlays.cells[0].color);
+            handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
+            fixture.game.updateBlockTool();
+            try std.testing.expectEqual(2, fixture.game.world.?.pending_operations.items.len);
+            for (fixture.game.world.?.pending_operations.items) |pending| try std.testing.expectEqual(candidate, pending.operation.block);
+            try std.testing.expect(try fixture.game.world.?.isBlockSolid(candidate));
+            try std.testing.expect(try fixture.game.world.?.isBlockSolid(backing));
+        }
+    }
 }
 
 test "Tab separates focus and placement previews and skips structural validation in removing mode" {
@@ -2806,7 +2920,7 @@ test "streaming holds 27 block chunks, pins edits across movement, and completes
     try std.testing.expect(try fixture.game.world.?.isBlockSolid(block));
 }
 
-test "camera tools place on the hit face, remove the nearest block, and stop at four metres" {
+test "camera tools place on the hit face and enforce four-metre cube reach" {
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
@@ -2829,13 +2943,13 @@ test "camera tools place on the hit face, remove the nearest block, and stop at 
     try std.testing.expect(!try fixture.game.world.?.isBlockSolid(placement));
     try std.testing.expect(try fixture.game.world.?.isBlockSolid(target));
     try std.testing.expectEqual(2, fixture.game.world.?.pending_operations.items.len);
-    fixture.camera.updatePosition(.{ 0.5, -0.01, 0.5 });
+    fixture.camera.updatePosition(.{ 0.5, -1.01, 0.5 });
     // Load the camera's chunk so failure is caused by reach rather than missing data.
     try fixture.game.world.?.insertChunk(origin - ChunkCoords{ 0, 1, 0 }, WorldChunk.initEmpty());
     fixture.game.editBlockInView(.{ .place = fixture.game.selected_material });
     fixture.game.editBlockInView(.remove);
     try std.testing.expectEqual(2, fixture.game.world.?.pending_operations.items.len);
-    fixture.camera.updatePosition(.{ 0.5, 0, 0.5 });
+    fixture.camera.updatePosition(.{ 0.5, 0.5, 0.5 });
     fixture.game.editBlockInView(.remove);
     try std.testing.expect(!try fixture.game.world.?.isBlockSolid(target));
     try std.testing.expectEqual(3, fixture.game.world.?.pending_operations.items.len);
