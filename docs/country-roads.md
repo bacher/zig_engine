@@ -81,6 +81,15 @@ are bounded by pending edits and their changed sections, with sparse chunk metad
 There are no full-chunk baseline copies or global world scans. Internal material rollback and
 replay preserve validation stamps for unchanged chunks outside the received/rejected chunk.
 
+Alongside the explicit road scenarios, `world_data_service.zig` retains a deterministic
+client-versus-authoritative-worker regression with 32 fixed seeds and 512 local intents.
+It varies road/snow/dirt placements, removals, conflicting edits, delayed snapshots, related
+chunk ordering, and batched successful/failed replies. It compares every fully acknowledged
+prefix and the final state, using only snapshots produced by those operations. Materials,
+occupancy counts, boundary masks, road records, construction markers, and ordered timers
+must match the worker; allocator checks detect leaks. Failures print the seed and edit trace.
+The harness uses synchronous fixtures and adds no gameplay work or testing dependencies.
+
 Collision reads material and custom shape together, querying sparse road metadata only for
 cells with value 255. Standing-space and player support share the clamped-footprint surface
 calculation. A ceiling can clip an uphill lift; the valid partial lift continues through
