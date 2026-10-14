@@ -482,7 +482,7 @@ pub const WorldDataService = struct {
         defer chunk.deinit(self.allocator);
         var mesh: ChunkSideData = .{};
         if (chunk.content == .blocks and !chunk.flags.is_unreachable) {
-            mesh = mesher.extractChunkSideData(self.allocator, chunk.content, self.worker_state.neighborBoundaries(self.allocator, coords));
+            mesh = mesher.extractChunkGeometry(self.allocator, chunk, self.worker_state.neighborBoundaries(self.allocator, coords));
         }
         defer mesh.deinit(self.allocator);
         for (self.clients.items) |client| {
@@ -539,6 +539,9 @@ pub const WorldDataService = struct {
                 defer result.chunk.deinit(self.allocator);
                 if (self.is_shutting_down.load(.monotonic)) return;
                 if (result.status == .success) {
+                    for (self.worker_state.road_changes.items) |id| {
+                        if (id != position) self.publishMaterialChange(self.layout.decodeChunkId(id));
+                    }
                     var affected: [7]?ChunkCoords = @splat(null);
                     affected[6] = coords;
                     for (std.enums.values(Side)) |side| {
@@ -624,6 +627,15 @@ const ReadContext = struct {
             self.chunks.put(self.allocator, id, self.state.loadAt(self.allocator, coords)) catch @panic("OOM");
         return self.chunks.get(id).?.content.getBlock(local);
     }
+
+    fn readShape(context: *anyopaque, block: [3]u32) ?@import("engine").voxel_chunk.custom_block.Shape {
+        const self: *ReadContext = @ptrCast(@alignCast(context));
+        _ = read(context, block);
+        const coords, const local = world_module.splitBlockCoords(block);
+        const chunk = self.chunks.get(self.state.layout.encodeChunkCoords(coords)).?;
+        const road = chunk.metadata.road(transformations.index(local)) orelse return null;
+        return road.shape();
+    }
 };
 
 const WorkerState = struct {
@@ -644,11 +656,12 @@ const WorkerState = struct {
     tick: transformations.Tick = 0,
     /// Chunks without pending events are not visited by time processing.
     timed_chunks: std.AutoHashMapUnmanaged(ChunkId, void) = .empty,
+    road_changes: std.ArrayList(ChunkId) = .empty,
 
     fn findStandingSpace(self: *WorkerState, allocator: std.mem.Allocator, query: StandingSpaceRequest) standing_space.Error!standing_space.Position {
         var context: ReadContext = .{ .state = self, .allocator = allocator };
         defer context.deinit();
-        return standing_space.find(.{ .layout = self.layout, .context = &context, .block_at = ReadContext.read }, query);
+        return standing_space.find(.{ .layout = self.layout, .context = &context, .block_at = ReadContext.read, .custom_shape_at = ReadContext.readShape }, query);
     }
 
     fn boundariesAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) BoundaryMasks {
@@ -693,6 +706,7 @@ const WorkerState = struct {
         self.columns.deinit(allocator);
         self.boundary_cache.deinit(allocator);
         self.timed_chunks.deinit(allocator);
+        self.road_changes.deinit(allocator);
         self.generator.deinit(allocator);
     }
 
@@ -707,11 +721,12 @@ const WorkerState = struct {
         changed_below: ?ChunkCoords,
         diagnostics: world_module.EditResult,
     } {
+        self.road_changes.clearRetainingCapacity();
         const cells = world_module.collectConstructed(allocator, self.layout, &self.modified_chunks, operation.block);
         defer allocator.free(cells);
         var context: ReadContext = .{ .state = self, .allocator = allocator };
         defer context.deinit();
-        const diagnostics = world_module.validateEdit(allocator, .{ .layout = self.layout, .context = &context, .block_at = ReadContext.read }, cells, operation);
+        const diagnostics = world_module.validateEdit(allocator, .{ .layout = self.layout, .context = &context, .block_at = ReadContext.read, .custom_shape_at = ReadContext.readShape }, cells, operation);
         const coords, const local = world_module.splitBlockCoords(operation.block);
         const position = self.layout.encodeChunkCoords(coords);
         var chunk = if (self.modified_chunks.get(position)) |stored| stored.clone(allocator) else blk: {
@@ -723,6 +738,7 @@ const WorkerState = struct {
         var revealed_neighbors: [6]?ChunkCoords = @splat(null);
         var changed_below: ?ChunkCoords = null;
         if (status == .success) {
+            const previous_road = chunk.metadata.road(transformations.index(local));
             std.debug.assert(chunk.apply(allocator, local, operation.action) == .success);
             if (operation.action == .put) {
                 chunk.metadata.markConstructed(allocator, transformations.index(local));
@@ -758,6 +774,19 @@ const WorkerState = struct {
                 if (self.revealChunk(allocator, neighbor)) revealed_neighbors[@intFromEnum(side)] = neighbor;
             }
             changed_below = self.updateBelow(allocator, operation.block, operation.action == .put);
+            var road_reader: ReadContext = .{ .state = self, .allocator = allocator };
+            defer road_reader.deinit();
+            const road_context: @import("roads.zig").Context = .{
+                .allocator = allocator,
+                .reader = .{ .layout = self.layout, .context = &road_reader, .block_at = ReadContext.read, .custom_shape_at = ReadContext.readShape },
+                .chunks = &self.modified_chunks,
+                .changed = &self.road_changes,
+            };
+            road_context.afterEdit(operation, previous_road);
+            for (self.road_changes.items) |id| {
+                if (id != position) self.modified_chunks.getPtr(id).?.chunk_revision += 1;
+                self.mesh_revisions.put(allocator, id, self.next_mesh_revision) catch @panic("OOM");
+            }
             // Covering soil can change another cell in this same chunk too.
             chunk.deinit(allocator);
             chunk = self.modified_chunks.get(position).?.clone(allocator);
@@ -901,6 +930,82 @@ fn readStateBlock(state: *WorkerState, block: [3]u32) @import("engine").voxel_ch
     const chunk = state.loadAt(std.testing.allocator, coords);
     defer chunk.deinit(std.testing.allocator);
     return chunk.content.getBlock(local);
+}
+
+test "service publishes road formation and reversion atomically and retains custom meshes after eviction" {
+    const allocator = std.testing.allocator;
+    const service = try WorldDataService.create(std.testing.io, allocator, &test_layout, .flat);
+    defer service.destroy();
+    const editor = try service.createClient();
+    const blocks = try service.createClient();
+    const meshes = try service.createClient();
+    const z: u32 = test_layout.size_in_blocks[2] / 2;
+    const high = [3]u32{ 31, 65, z };
+    const low = [3]u32{ 44, 65, z - 1 };
+    const section_coords: ChunkCoords = .{ 1, 2, @intCast(z / CHUNK_SIZE) };
+    const low_coords: ChunkCoords = .{ 1, 2, section_coords[2] - 1 };
+    for (0..13) |i| _ = editor.submitOperation(.{ .block = .{ high[0] + @as(u32, @intCast(i)), high[1], z - 1 }, .action = .{ .put = .snow } });
+    _ = editor.submitOperation(.{ .block = .{ low[0], low[1], z - 2 }, .action = .{ .put = .snow } });
+    _ = editor.submitOperation(.{ .block = high, .action = .{ .put = .country_road_solid } });
+    for (1..13) |i| _ = editor.submitOperation(.{ .block = .{ high[0] + @as(u32, @intCast(i)), high[1], z }, .action = .{ .put = .country_road_adaptive } });
+    var edits: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&edits);
+    try waitForResponses(editor, &edits, 27);
+    for (edits.items) |response| try std.testing.expectEqual(OperationStatus.success, response.operation.?.status);
+    _ = blocks.requestChunks(.{ 1, 2 }, low_coords[2], section_coords[2] + 1);
+    const mesh_token = meshes.requestChunksInMode(.{ 1, 2 }, section_coords[2], section_coords[2] + 1, .mesh);
+    var initial_blocks: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&initial_blocks);
+    try waitForResponses(blocks, &initial_blocks, 2);
+    var initial_mesh: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&initial_mesh);
+    try waitForResponses(meshes, &initial_mesh, 1);
+    try std.testing.expectEqual(@as(usize, 12), initial_mesh.items[0].data.mesh.custom_blocks.items.len);
+    for (initial_mesh.items[0].data.mesh.custom_blocks.items) |block| try std.testing.expect(block.shape == .adaptive);
+    _ = editor.submitOperation(.{ .block = low, .action = .{ .put = .country_road_solid } });
+    try waitForResponses(editor, &edits, 28);
+    var packages: std.ArrayList(ResponsePackage) = .empty;
+    defer deinitTestPackages(&packages);
+    blocks.takePackages(&packages);
+    try std.testing.expectEqual(@as(usize, 1), packages.items.len);
+    var found_sections = false;
+    var found_endpoint = false;
+    var section_revision: u32 = 0;
+    for (packages.items[0].responses.items) |response| {
+        if (response.data != .blocks) continue;
+        if (@reduce(.And, response.coords == section_coords)) {
+            found_sections = true;
+            section_revision = response.chunk_revision;
+            for (response.data.blocks.chunk.metadata.roads.items) |road| {
+                try std.testing.expectEqual(@as(u32, 12), road.slope.?.length);
+                try std.testing.expectEqual(@import("engine").voxel_chunk.custom_block.Direction.positive_x, road.slope.?.downhill);
+            }
+        }
+        if (@reduce(.And, response.coords == low_coords)) found_endpoint = true;
+    }
+    try std.testing.expect(found_sections and found_endpoint);
+    var formed_mesh: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&formed_mesh);
+    try waitForResponses(meshes, &formed_mesh, 1);
+    for (formed_mesh.items[0].data.mesh.custom_blocks.items) |block| try std.testing.expect(block.shape == .slope);
+    meshes.evictChunk(test_layout.encodeChunkCoords(section_coords), mesh_token);
+    _ = meshes.requestChunksInMode(.{ 1, 2 }, section_coords[2], section_coords[2] + 1, .mesh);
+    var reloaded: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&reloaded);
+    try waitForResponses(meshes, &reloaded, 1);
+    try std.testing.expectEqual(section_revision, reloaded.items[0].chunk_revision);
+    for (reloaded.items[0].data.mesh.custom_blocks.items) |block| try std.testing.expect(block.shape == .slope);
+    // Service validation rejects removal of a road's direct support.
+    _ = editor.submitOperation(.{ .block = .{ 34, 65, z - 1 }, .action = .remove });
+    try waitForResponses(editor, &edits, 29);
+    try std.testing.expectEqual(OperationStatus.constraint_violation, edits.items[28].operation.?.status);
+    _ = editor.submitOperation(.{ .block = high, .action = .remove });
+    try waitForResponses(editor, &edits, 30);
+    var reverted: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&reverted);
+    try waitForResponses(meshes, &reverted, 1);
+    try std.testing.expect(reverted.items[0].chunk_revision > section_revision);
+    for (reverted.items[0].data.mesh.custom_blocks.items) |block| try std.testing.expect(block.shape == .adaptive);
 }
 
 test "client and authority agree with only the player's 3x3x3 chunks and ignore extra support beyond 28 cells" {

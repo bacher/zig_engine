@@ -8,7 +8,7 @@ Chunks remain fixed at 32 by 32 by 32 blocks. The application chooses world dime
 
 World coordinates are centered using the immutable layout's half-dimension `origin_chunk`. With the current preset, world position zero corresponds to stored block coordinates (8192, 4096, 128). Spatial chunk coordinates are signed vectors; normalize x and validate y/z before encoding a storage ID through that world's layout. Its dimension exponents determine the packed ID widths: the current preset uses 9/8/3 bits, or 20 of the available 32 bits. The cache and service retain immutable copies of the scene's validated layout. A compile-time guard rejects an engine configuration with wrapping disabled. See [world configuration](world-configuration.md) and [coordinates](coordinates.md).
 
-`WorldChunkData.blocks` is indexed `[z][y][x]` and contains one `BlockType` per block. Types include air, natural/crushed stone, loose/packed soil, grass-covered packed soil, trunks, planks, rebar, reinforced concrete, water, sand, and snow. Current occupancy tests treat every non-air type as solid; water does not have a separate transparent/fluid occupancy rule. Sparse construction indices and ordered time events live in additional chunk metadata. See [block placement and transformations](block-placement.md).
+`WorldChunkData.blocks` is indexed `[z][y][x]` and contains one `BlockType` per block. Types include air, natural/crushed stone, loose/packed soil, grass-covered packed soil, trunks, planks, rebar, reinforced concrete, water, sand, and snow. Current occupancy tests treat every non-air type as solid; water does not have a separate transparent/fluid occupancy rule. Custom cells use value 255 and sparse metadata; country roads save their formed slope ownership there. Occupancy, face occlusion, and collision are separate: custom cells stay occupied, expose neighboring ordinary faces, and use their recorded collision shape. Sparse construction indices and ordered time events also live in chunk metadata. See [block placement and transformations](block-placement.md).
 
 `WorldChunk` contains block content, solid count, flags, own boundary masks, and authoritative chunk revision. Content is either allocation-free `empty` or a dense block array. A solid chunk still stores individual blocks; there is no separate uniform-solid representation. Removing the final solid block releases the dense allocation.
 
@@ -114,7 +114,7 @@ The normal camera neighborhood uses Chebyshev distance: the largest axis chunk d
 
 For demotion from blocks to mesh, the old blocks, masks, and display remain available until the new mesh/unreachable response arrives. Then the CPU blocks and fallback masks are released. Retained demoted blocks no longer override authoritative neighbor planes because their block subscription has ended.
 
-For promotion from mesh to blocks, the old display remains until blocks and neighbor masks arrive. The application can reuse the authoritative geometry if both revisions match and there are no pending edits affecting its own or neighboring meshing inputs. Otherwise it rebuilds locally. Mesh-mode state on the main thread retains version metadata; received face arrays move directly to the upload queue.
+For promotion from mesh to blocks, the old display remains until blocks and neighbor masks arrive. The application can reuse the authoritative geometry if both revisions match and there are no pending edits affecting its own or neighboring meshing inputs. Otherwise it rebuilds locally. Mesh-mode state on the main thread retains version metadata; received face arrays and separate custom block descriptors move directly to the upload queue.
 
 A chunk with zero extracted faces still has a live subscription. It may contain solid blocks, and later edits can expose geometry. Empty chunks, zero-face chunks, and unreachable chunks are different states.
 
@@ -142,7 +142,7 @@ This optimization depends on cave-free, solid generated terrain. It is not gener
 
 ## GPU storage and capacity
 
-`VoxelGrid` owns a face buffer of 4 MiB and a separate chunk-metadata buffer with 4096 slots. Faces use four-byte local-coordinate/type records; chunk metadata uses 112 bytes. GPU vertices are generated from those records in WGSL.
+`VoxelGrid` owns a face buffer of 4 MiB and a separate chunk-metadata buffer with 4096 slots. Faces use four-byte local-coordinate/type records; chunk metadata uses 112 bytes. GPU vertices are generated from those records in WGSL. Custom blocks use another 4 MiB buffer of 48-byte records and individual draws; custom-only chunks do not require ordinary face slots. See [country roads](country-roads.md).
 
 Face allocations use power-of-two multiples of a 1024-byte slot. Sixty-four spans each contain 64 slots; a span uses one allocation size at a time until emptied. The maximum per-chunk allocation is 64 KiB, or 16384 face records. Total free bytes alone do not establish capacity because rounding, size classes, and fragmentation matter.
 

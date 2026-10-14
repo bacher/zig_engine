@@ -312,7 +312,7 @@ const Game = struct {
         const world = &game.world.?;
         for (package.responses.items) |response| {
             if (response.operation) |result| {
-                world.acknowledgeOperation(result.request_id);
+                world.acknowledgeOperationResult(result.request_id, result.status);
                 world.last_edit_result = .{ .status = result.status, .failure = result.failure, .mined_type = result.mined_type };
                 game.showBlockEditError(world.last_edit_result.?);
             }
@@ -460,6 +460,10 @@ const Game = struct {
             }
         }
         for (game.world.?.pending_operations.items) |pending| {
+            for (pending.road_undo.items) |entry| {
+                const road_coords, _ = world_module.splitBlockCoords(entry.block);
+                game.pinned_chunks.put(game.allocator, game.layout().encodeChunkCoords(road_coords), {}) catch @panic("OOM");
+            }
             const coords, const local = world_module.splitBlockCoords(pending.operation.block);
             game.pinned_chunks.put(game.allocator, game.layout().encodeChunkCoords(coords), {}) catch @panic("OOM");
             for (std.enums.values(Side)) |side| {
@@ -696,6 +700,8 @@ const Game = struct {
 
     /// Run once after edits, responses, and camera loading, before the frame's GPU upload.
     fn rebuildDirtyChunks(game: *Game) void {
+        for (game.world.?.changed_road_chunks.items) |id| game.markChunkDirtyIfLoaded(game.layout().decodeChunkId(id));
+        game.world.?.changed_road_chunks.clearRetainingCapacity();
         const voxel_grid = game.engine.active_scene.?.voxel_grid;
         const world = &game.world.?;
         defer game.dirty_chunk_ids.clearRetainingCapacity();
@@ -710,7 +716,7 @@ const Game = struct {
             if (chunk.content == .blocks and !chunk.flags.is_unreachable) {
                 voxel_grid.appendChunk(.{
                     .chunk_coords = coords,
-                    .chunk_side_data = world_engine.extractChunkSideData(game.allocator, chunk.content, game.meshNeighbors(coords)),
+                    .chunk_side_data = world_engine.extractChunkGeometry(game.allocator, chunk, game.meshNeighbors(coords)),
                 });
             }
         }
@@ -741,7 +747,7 @@ const Game = struct {
 /// Consumes the response, including stale and evicted snapshots. Acknowledgements are
 /// independent of subscription lifetime so pending edits can always be retired.
 fn applyChunkResponse(world: *World, subscriptions: *const std.AutoHashMapUnmanaged(u32, u64), response: ChunkResponse) bool {
-    if (response.operation) |result| world.acknowledgeOperation(result.request_id);
+    if (response.operation) |result| world.acknowledgeOperationResult(result.request_id, result.status);
     const token = subscriptions.get(world.layout.encodeChunkCoords(response.coords));
     if (token == null or token != response.subscription_id) {
         response.deinit(world.allocator);
@@ -1019,7 +1025,7 @@ fn handleKeyPress(game: *Game, key_params: KeyParams) void {
         .e => if (!key_params.mods.control) {
             game.queueBlockAction(.{ .place = game.selected_material });
         },
-        .one, .two, .three, .four, .five, .six => {
+        .one, .two, .three, .four, .five, .six, .seven, .eight => {
             game.selected_material = switch (key_params.key) {
                 .one => .dirt,
                 .two => .crushed_stone,
@@ -1027,6 +1033,8 @@ fn handleKeyPress(game: *Game, key_params: KeyParams) void {
                 .four => .planks,
                 .five => .rebar,
                 .six => .reinforced_concrete,
+                .seven => .country_road_solid,
+                .eight => .country_road_adaptive,
                 else => unreachable,
             };
             std.debug.print("selected material: {s}\n", .{@tagName(game.selected_material)});
@@ -1369,8 +1377,8 @@ test "tool shortcuts respect Tab mode, edit once and preserve material selection
     fixture.game.world.?.setBlockUnchecked(target, .stone);
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
 
-    const materials = [_]voxel_chunk_module.BlockType{ .dirt, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete };
-    for ([_]zglfw.Key{ .one, .two, .three, .four, .five, .six }, materials) |key, material| {
+    const materials = [_]voxel_chunk_module.BlockType{ .dirt, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive };
+    for ([_]zglfw.Key{ .one, .two, .three, .four, .five, .six, .seven, .eight }, materials) |key, material| {
         handleKeyPress(&fixture.game, .{ .key = key, .mods = .{} });
         try std.testing.expectEqual(material, fixture.game.selected_material);
     }

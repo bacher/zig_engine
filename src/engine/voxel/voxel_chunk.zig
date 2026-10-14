@@ -1,5 +1,6 @@
 const ChunkCoords = @import("../world_math.zig").ChunkCoords;
 const std = @import("std");
+pub const custom_block = @import("custom_block.zig");
 
 pub const CHUNK_SIZE = @import("../chunk_utils.zig").CHUNK_SIZE;
 
@@ -55,6 +56,18 @@ pub const BlockType = enum(u8) {
     planks,
     rebar,
     reinforced_concrete,
+    country_road_solid,
+    /// Selection/validation material; stored cells use custom plus sparse metadata.
+    country_road_adaptive,
+    custom = 255,
+
+    pub fn occludesFaces(self: BlockType) bool {
+        return self != .none and self != .custom and self != .country_road_adaptive;
+    }
+
+    pub fn isRoad(self: BlockType) bool {
+        return self == .country_road_solid or self == .country_road_adaptive or self == .custom;
+    }
 
     pub fn isEarth(self: BlockType) bool {
         return self == .dirt or self == .packed_dirt or self == .grass;
@@ -81,10 +94,11 @@ pub const BlockType = enum(u8) {
     }
 
     pub fn isPlaceable(self: BlockType) bool {
-        return self != .none and self != .stone and self != .packed_dirt and self != .grass;
+        return self != .none and self != .stone and self != .packed_dirt and self != .grass and self != .custom;
     }
 
     pub fn minedType(self: BlockType) BlockType {
+        if (self == .custom) return .country_road_adaptive;
         if (self == .stone) return .crushed_stone;
         if (self.isEarth()) return .dirt;
         return self;
@@ -136,6 +150,7 @@ pub const VoxelChunk = struct {
 
     // if null, then it means that the chunk is not resident on the GPU most likely because does not have visible faces
     gpu_residence_info: ?GpuResidenceInfo = null,
+    custom_blocks: std.ArrayList(custom_block.Draw) = .empty,
 
     pub fn init(chunk_origin: ChunkCoords) Self {
         return .{
@@ -155,9 +170,11 @@ pub const ChunkSideData = struct {
     const Self = @This();
 
     blocks_grouped_by_side: [6]BlockCoordList = @splat(BlockCoordList.empty),
+    custom_blocks: std.ArrayList(custom_block.Draw) = .empty,
 
     pub fn clone(self: Self, allocator: std.mem.Allocator) Self {
         var copy: Self = .{};
+        copy.custom_blocks.appendSlice(allocator, self.custom_blocks.items) catch @panic("OOM");
         for (self.blocks_grouped_by_side, &copy.blocks_grouped_by_side) |source, *dest| {
             dest.appendSlice(allocator, source.items) catch @panic("OOM");
         }
@@ -165,6 +182,7 @@ pub const ChunkSideData = struct {
     }
 
     pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        self.custom_blocks.deinit(allocator);
         for (&self.blocks_grouped_by_side) |*block| {
             block.deinit(allocator);
         }

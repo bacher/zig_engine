@@ -26,6 +26,7 @@ pub const VoxelBindGroupLayout = struct {
                 false,
                 0, // min_binding_size, is it okay to be zero for storage buffers?
             ),
+            zgpu.bufferEntry(2, .{ .vertex = true }, .read_only_storage, false, 0),
         });
 
         return .{
@@ -42,6 +43,7 @@ pub const VoxelBindGroupLayout = struct {
         gctx: *zgpu.GraphicsContext,
         block_array_buffer: GPUBuffer,
         chunk_side_info_array_buffer: GPUBuffer,
+        custom_block_buffer: GPUBuffer,
     ) BindGroup {
         const bind_group_handle = gctx.createBindGroup(
             bind_group_layout.bind_group_layout_handle,
@@ -60,6 +62,7 @@ pub const VoxelBindGroupLayout = struct {
                     .offset = 0,
                     .size = chunk_side_info_array_buffer.size,
                 },
+                .{ .binding = 2, .buffer_handle = custom_block_buffer.handle, .offset = 0, .size = custom_block_buffer.size },
             },
         );
 

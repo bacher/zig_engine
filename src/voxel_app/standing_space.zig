@@ -43,6 +43,19 @@ fn solid(reader: Reader, cell: Cell) Error!bool {
     return geometry.movementCollision(material) == .full_cube;
 }
 
+fn shapeAt(reader: Reader, cell: Cell) ?engine.voxel_chunk.custom_block.Shape {
+    const read_shape = reader.custom_shape_at orelse return null;
+    return read_shape(reader.context, coordinates.fromWorld(reader.layout, cell) orelse return null);
+}
+
+fn surface(reader: Reader, cell: Cell, footprint: geometry.Bounds) f64 {
+    const origin: Position = @floatFromInt(cell);
+    const shape = shapeAt(reader, cell) orelse return origin[2] + 1;
+    const low = @max(footprint.min - origin, @as(Position, @splat(0)));
+    const high = @min(footprint.max - origin, @as(Position, @splat(1)));
+    return origin[2] + shape.supportHeight(.{ low[0], low[1] }, .{ high[0], high[1] });
+}
+
 /// Each x/y candidate uses its highest real support. We do not spawn in a cave
 /// beneath a blocked surface or replace missing support with a world boundary.
 fn at(reader: Reader, request: Request, xy: [2]f64) Error!Position {
@@ -53,6 +66,8 @@ fn at(reader: Reader, request: Request, xy: [2]f64) Error!Position {
     while (z > -origin[2]) {
         z -= 1;
         var supported = false;
+        var highest: f64 = -std.math.inf(f64);
+        const footprint = bounds(xy, .{ request.support_size[0], request.support_size[1], 1 }, 0);
         var y = area.first[1];
         while (y <= area.last[1]) : (y += 1) {
             var x = area.first[0];
@@ -61,10 +76,11 @@ fn at(reader: Reader, request: Request, xy: [2]f64) Error!Position {
                 // could contain a higher obstruction and must not be skipped.
                 const occupied = try solid(reader, .{ x, y, z });
                 supported = supported or occupied;
+                if (occupied) highest = @max(highest, surface(reader, .{ x, y, z }, footprint));
             }
         }
         if (!supported) continue;
-        const feet: Position = .{ xy[0], xy[1], @floatFromInt(z + 1) };
+        const feet: Position = .{ xy[0], xy[1], highest };
         const volume = bounds(xy, request.clearance_size, feet[2]);
         const first = volume.firstCell();
         const last = volume.lastCell();
@@ -75,8 +91,13 @@ fn at(reader: Reader, request: Request, xy: [2]f64) Error!Position {
             y = first[1];
             while (y <= last[1]) : (y += 1) {
                 var x = first[0];
-                while (x <= last[0]) : (x += 1)
-                    if (try solid(reader, .{ x, y, cz })) return error.NoSpace;
+                while (x <= last[0]) : (x += 1) {
+                    const cell: Cell = .{ x, y, cz };
+                    if (try solid(reader, cell)) {
+                        if (shapeAt(reader, cell)) |shape| if (shape == .slope and volume.min[2] >= surface(reader, cell, volume) - geometry.epsilon) continue;
+                        return error.NoSpace;
+                    }
+                }
             }
         }
         return feet;

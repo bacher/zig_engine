@@ -30,6 +30,8 @@ fn getUv(side: u32, vertex_index: u32, block_type: u32) -> vec2f {
         case 10:         { /* planks */ shift = vec2(4.0, 0.0); }
         case 11:         { /* rebar: existing metal atlas tile */ shift = vec2(6.0, 1.0); }
         case 12:         { /* reinforced concrete: existing stone atlas tile */ shift = vec2(1.0, 0.0); }
+        case 13:         { /* country road */ shift = vec2(0.0, 1.0); }
+        case 14, 255:    { /* adaptive country road */ shift = vec2(4.0, 0.0); }
     }
 
     var uv = vec2(0.0, 0.0);

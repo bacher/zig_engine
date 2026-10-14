@@ -129,6 +129,8 @@ pub const WorldPipelines = struct {
     shadow_map: Pipeline,
     shadow_map_skinned: Pipeline,
     shadow_map_voxel: Pipeline,
+    custom_blocks: Pipeline,
+    shadow_map_custom_blocks: Pipeline,
 
     pub fn init(allocator: std.mem.Allocator, gctx: *zgpu.GraphicsContext, bind_group_layouts: *const BindGroupLayouts, layout: *const WorldLayout) !WorldPipelines {
         const basic_source = try layout.shaderSource(allocator, basic_pipeline_module.shader_body);
@@ -155,6 +157,15 @@ pub const WorldPipelines = struct {
         defer allocator.free(shadow_map_voxel_source);
         var shadow_map_voxel = shadow_map_voxel_pipeline_module.createShadowMapVoxelPipeline(gctx, bind_group_layouts, shadow_map_voxel_source);
         errdefer shadow_map_voxel.deinit(gctx);
+        const custom_geometry = @embedFile("shaders/voxel/block_geometry.wgsl") ++ @embedFile("shaders/voxel/custom_geometry.wgsl");
+        const custom_source = try layout.shaderSource(allocator, custom_geometry ++ @embedFile("shaders/voxel/custom_vs.wgsl"));
+        defer allocator.free(custom_source);
+        var custom_blocks = voxel_pipeline_module.createVoxelPipeline(gctx, bind_group_layouts, custom_source);
+        errdefer custom_blocks.deinit(gctx);
+        const custom_shadow_source = try layout.shaderSource(allocator, custom_geometry ++ @embedFile("shaders/shadow_map/custom_vs.wgsl"));
+        defer allocator.free(custom_shadow_source);
+        var shadow_map_custom_blocks = shadow_map_voxel_pipeline_module.createShadowMapVoxelPipeline(gctx, bind_group_layouts, custom_shadow_source);
+        errdefer shadow_map_custom_blocks.deinit(gctx);
         return .{
             .basic = basic,
             .basic_skinned = basic_skinned,
@@ -162,6 +173,8 @@ pub const WorldPipelines = struct {
             .shadow_map = shadow_map,
             .shadow_map_skinned = shadow_map_skinned,
             .shadow_map_voxel = shadow_map_voxel,
+            .custom_blocks = custom_blocks,
+            .shadow_map_custom_blocks = shadow_map_custom_blocks,
         };
     }
 
@@ -172,5 +185,7 @@ pub const WorldPipelines = struct {
         self.shadow_map.deinit(gctx);
         self.shadow_map_skinned.deinit(gctx);
         self.shadow_map_voxel.deinit(gctx);
+        self.custom_blocks.deinit(gctx);
+        self.shadow_map_custom_blocks.deinit(gctx);
     }
 };

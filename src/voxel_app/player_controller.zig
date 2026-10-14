@@ -181,8 +181,9 @@ pub const PlayerController = struct {
             if (self.climb) |climb| step = @min(step, climb.duration - climb.elapsed);
             const step_consumed = self.climb != null and self.advanceClimb(&query, step, velocity) == .consumed;
             if (!step_consumed) {
-                const mx = query.moveAxis(self.position, 0, velocity[0] * step);
-                const my = query.moveAxis(mx.position, 1, velocity[1] * step);
+                const follow_surface = self.grounded and self.vertical_velocity <= 0;
+                const mx = if (follow_surface) query.moveGroundedAxis(self.position, 0, velocity[0] * step) else query.moveAxis(self.position, 0, velocity[0] * step);
+                const my = if (follow_surface) query.moveGroundedAxis(mx.position, 1, velocity[1] * step) else query.moveAxis(mx.position, 1, velocity[1] * step);
                 self.position = my.position;
                 const supported = self.vertical_velocity <= 0 and query.moveAxis(self.position, 2, -ground_probe).collided;
                 const dz = if (supported) 0 else self.vertical_velocity * step - 0.5 * gravity * step * step;

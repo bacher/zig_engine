@@ -14,6 +14,7 @@ const boundary_mask = @import("./boundary_mask.zig");
 const WorldLayout = @import("engine").WorldLayout;
 const transformations = @import("block_transformations.zig");
 const ChunkMetadata = @import("chunk_metadata.zig").Metadata;
+const roads = @import("roads.zig");
 pub const block_rules = @import("block_rules.zig");
 
 /// Face neighbors wrap around x; missing y/z neighbors leave the world exposed.
@@ -128,7 +129,7 @@ pub const WorldChunk = struct {
             .put => |block_type| blk: {
                 std.debug.assert(block_type != .none);
                 if (existing != .none) return .already_exists;
-                break :blk block_type;
+                break :blk if (block_type == .country_road_adaptive) .custom else block_type;
             },
             .remove => blk: {
                 if (existing == .none) return .already_removed;
@@ -138,12 +139,13 @@ pub const WorldChunk = struct {
         const data = self.ensureData(allocator);
         const was_unreachable = self.flags.is_unreachable;
         data.blocks[local[2]][local[1]][local[0]] = block_type;
-        boundary_mask.update(&self.boundaries, local, block_type != .none);
+        boundary_mask.update(&self.boundaries, local, block_type.occludesFaces());
         if (block_type == .none) {
             self.metadata.remove(transformations.index(local));
             self.solid_block_count -= 1;
         } else {
             self.solid_block_count += 1;
+            if (block_type == .custom) self.metadata.roads.append(allocator, .{ .index = transformations.index(local) }) catch @panic("OOM");
         }
         if (self.solid_block_count == 0) {
             self.content.deinit(allocator);
@@ -206,6 +208,8 @@ pub const BlockOperation = struct {
 
 pub const PendingOperation = struct {
     operation: BlockOperation,
+    previous_road: ?@import("road_data.zig").Road = null,
+    road_undo: std.ArrayList(roads.Undo) = .empty,
     /// Assigned when the command is submitted to the service.
     request_id: ?u64 = null,
 };
@@ -325,6 +329,7 @@ pub const World = struct {
     last_edit_result: ?EditResult = null,
     /// Assigns distinct local stamps to chunk loads and optimistic block changes.
     validation_revision: u64 = 0,
+    changed_road_chunks: std.ArrayList(u32) = .empty,
     /// Tests count actual evaluator calls without adding runtime instrumentation.
     preview_call_counter: if (@import("builtin").is_test) ?*usize else void = if (@import("builtin").is_test) null else {},
 
@@ -338,7 +343,9 @@ pub const World = struct {
         var iterator = self.chunks.valueIterator();
         while (iterator.next()) |chunk| chunk.deinit(self.allocator);
         self.chunks.deinit(self.allocator);
+        for (self.pending_operations.items) |*pending| pending.road_undo.deinit(self.allocator);
         self.pending_operations.deinit(self.allocator);
+        self.changed_road_chunks.deinit(self.allocator);
         self.allocator.destroy(@constCast(self.layout));
     }
 
@@ -376,6 +383,39 @@ pub const World = struct {
         updated.validation_revision = self.validation_revision;
         self.chunks.put(self.allocator, position, updated) catch @panic("OOM");
         self.revealNeighbors(coords, updated.flags);
+        // A pending operation can affect sections outside the replaced chunk.
+        self.replayRoads();
+    }
+
+    pub fn replayRoads(self: *World) void {
+        for (self.pending_operations.items) |*pending| {
+            const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .undo = &pending.road_undo };
+            context.afterEdit(pending.operation, pending.previous_road);
+        }
+        self.stampRoadChanges();
+    }
+
+    fn stampRoadChanges(self: *World) void {
+        for (self.changed_road_chunks.items) |id| if (self.chunks.getPtr(id)) |chunk| {
+            self.validation_revision +%= 1;
+            chunk.validation_revision = self.validation_revision;
+        };
+    }
+
+    pub fn customShape(self: *const World, block: [3]u32) ?@import("engine").voxel_chunk.custom_block.Shape {
+        const coords, const local = splitBlockCoords(block);
+        const chunk = self.getChunk(coords) orelse return null;
+        const road = chunk.metadata.road(transformations.index(local)) orelse return null;
+        return road.shape();
+    }
+
+    fn readShape(context: *anyopaque, block: [3]u32) ?@import("engine").voxel_chunk.custom_block.Shape {
+        const self: *const World = @ptrCast(@alignCast(context));
+        return self.customShape(block);
+    }
+
+    pub fn reader(self: *const World) block_rules.Reader {
+        return .{ .layout = self.layout, .context = @constCast(self), .block_at = readBlock, .custom_shape_at = readShape };
     }
 
     /// Only a performance hint changes locally. No command or revision is needed: the
@@ -392,9 +432,24 @@ pub const World = struct {
 
     /// Retire both successful and failed commands before incorporating their snapshot.
     pub fn acknowledgeOperation(self: *World, request_id: u64) void {
-        for (self.pending_operations.items, 0..) |pending, i| {
+        self.acknowledgeOperationResult(request_id, .success);
+    }
+
+    pub fn acknowledgeOperationResult(self: *World, request_id: u64, status: OperationStatus) void {
+        for (self.pending_operations.items, 0..) |*pending, i| {
             if (pending.request_id == request_id) {
+                if (status != .success) for (pending.road_undo.items) |entry| {
+                    const coords, const local = splitBlockCoords(entry.block);
+                    const id = self.layout.encodeChunkCoords(coords);
+                    const chunk = self.chunks.getPtr(id) orelse continue;
+                    const road = chunk.metadata.roadPtr(transformations.index(local)) orelse continue;
+                    road.slope = entry.slope;
+                    if (std.mem.indexOfScalar(u32, self.changed_road_chunks.items, id) == null)
+                        self.changed_road_chunks.append(self.allocator, id) catch @panic("OOM");
+                };
+                pending.road_undo.deinit(self.allocator);
                 _ = self.pending_operations.orderedRemove(i);
+                self.stampRoadChanges();
                 return;
             }
         }
@@ -423,6 +478,10 @@ pub const World = struct {
 
     pub fn hasPendingMeshDependency(self: *const World, coords: ChunkCoords) bool {
         for (self.pending_operations.items) |pending| {
+            for (pending.road_undo.items) |entry| {
+                const road_coords, _ = splitBlockCoords(entry.block);
+                if (@reduce(.And, road_coords == coords)) return true;
+            }
             const changed, const local = splitBlockCoords(pending.operation.block);
             if (@reduce(.And, changed == coords)) return true;
             for (std.enums.values(Side)) |side| {
@@ -449,7 +508,7 @@ pub const World = struct {
         operation.validate(self.layout);
         const cells = collectConstructed(self.allocator, self.layout, &self.chunks, operation.block);
         defer self.allocator.free(cells);
-        return validateEdit(self.allocator, .{ .layout = self.layout, .context = @constCast(self), .block_at = readBlock }, cells, operation);
+        return validateEdit(self.allocator, self.reader(), cells, operation);
     }
 
     pub fn validationWindow(self: *const World, target: [3]u32) ValidationWindow {
@@ -486,11 +545,15 @@ pub const World = struct {
         operation.validate(self.layout);
         const coords, const local = splitBlockCoords(block);
         const chunk = self.chunks.getPtr(self.layout.encodeChunkCoords(coords)).?;
+        const previous_road = chunk.metadata.road(transformations.index(local));
         if (chunk.apply(self.allocator, local, operation.action) != .success) return;
         self.validation_revision +%= 1;
         chunk.validation_revision = self.validation_revision;
         self.revealNeighbors(coords, chunk.flags);
-        self.pending_operations.append(self.allocator, .{ .operation = operation }) catch @panic("OOM");
+        self.pending_operations.append(self.allocator, .{ .operation = operation, .previous_road = previous_road }) catch @panic("OOM");
+        const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .undo = &self.pending_operations.items[self.pending_operations.items.len - 1].road_undo };
+        context.afterEdit(operation, previous_road);
+        self.stampRoadChanges();
     }
 
     pub fn setBlock(self: *World, block: [3]u32, block_type: BlockType) EditResult {

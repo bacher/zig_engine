@@ -17,10 +17,14 @@ client data produces `missing_data`, never an assumption that the missing cells 
 | Tree trunk | Vertically supported wood. |
 | Planks | Wood with limited horizontal support propagation. |
 | Rebar and reinforced concrete | Share horizontal support and the mineral height group. |
+| Solid country road | Ordinary cube; requires solid support directly below. |
+| Adaptive country road | Custom cell (255); full-cube collision until a supported 4–12-section run forms a slope. |
 
 Water, sand, and snow retain their existing placement/collision behavior. They are outside
 the structural material families and cannot supply earth footprints or stable platforms.
-All new materials currently have full-cube collision. The existing atlas supplies temporary
+Construction materials and unformed adaptive roads have full-cube collision; formed roads
+follow their inclined surfaces. See [country roads](country-roads.md) for formation and
+reversion rules. The existing atlas supplies temporary
 tiles for the new construction materials; placement hints use the shared block-outline shader.
 
 Mining results include `mined_type`. There is no inventory, recipe, or dropped-item system

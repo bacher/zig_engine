@@ -58,7 +58,7 @@ pub fn extract(data: *const WorldChunkData) BoundaryMasks {
                 local[axis] = if (i % 2 == 0) 0 else CHUNK_SIZE - 1;
                 local[if (axis == 0) 1 else 0] = @intCast(bit);
                 local[if (axis == 2) 1 else 2] = @intCast(row);
-                masks[i].set(side, local, data.blocks[local[2]][local[1]][local[0]] != .none);
+                masks[i].set(side, local, data.blocks[local[2]][local[1]][local[0]].occludesFaces());
             }
         }
     }

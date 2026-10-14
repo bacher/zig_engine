@@ -655,6 +655,8 @@ pub const Engine = struct {
         const gctx = engine.gctx;
         const allocator = engine.allocator;
 
+        if (engine.active_scene) |scene| scene.voxel_grid.uploadCustomBlocks(gctx);
+
         const back_buffer_view = gctx.swapchain.getCurrentTextureView();
         defer back_buffer_view.release();
 
@@ -772,6 +774,15 @@ pub const Engine = struct {
                         for (engine.temp_buffers.rest_objects.items) |game_object| {
                             engine.drawGameObjectToShadowMap(shadow_map_pass, scene, cascade, game_object);
                         }
+
+                        shadow_map_pass.setPipeline(scene.pipelines.shadow_map_custom_blocks.pipeline_gpu);
+                        shadow_map_pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
+                            clip_from_chunk_uniform.offset, clip_from_chunk_uniform.offset,
+                            settings_uniform.offset,        clip_from_chunk_uniform.offset,
+                            camera_chunk_uniform.offset,
+                        });
+                        shadow_map_pass.setBindGroup(1, scene.voxel_bind_group.wgpu_bind_group, &.{});
+                        for (0..scene.voxel_grid.custom_block_count) |i| shadow_map_pass.draw(36, 1, 0, @intCast(i));
 
                         engine.temp_buffers.resetDrawingLists();
                     }
@@ -923,6 +934,17 @@ pub const Engine = struct {
                     for (engine.temp_buffers.rest_objects.items) |game_object| {
                         engine.drawGameObject(pass, scene, game_object);
                     }
+
+                    pass.setPipeline(scene.pipelines.custom_blocks.pipeline_gpu);
+                    pass.setBindGroup(0, scene.scene_bind_group.wgpu_bind_group, &.{
+                        clip_from_chunk_uniform.offset, view_from_chunk_uniform.offset,
+                        settings_uniform.offset,        clip_from_chunk_uniform.offset,
+                        camera_chunk_uniform.offset,
+                    });
+                    pass.setBindGroup(1, engine.bind_group_minecraft_texture.wgpu_bind_group, &.{});
+                    pass.setBindGroup(2, engine.bind_group_shadow_map.wgpu_bind_group, &.{global_light_clip_matrix_array.offset});
+                    pass.setBindGroup(3, scene.voxel_bind_group.wgpu_bind_group, &.{});
+                    for (0..scene.voxel_grid.custom_block_count) |i| pass.draw(36, 1, 0, @intCast(i));
 
                     if (DEBUG_SHOW_WIREFRAME_OBJECTS) {
                         pass.setPipeline(engine.pipelines.lines.pipeline_gpu);
