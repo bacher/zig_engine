@@ -2143,6 +2143,216 @@ test "service shutdown answers queued standing-space requests without loading te
     try std.testing.expectEqual(0, client.subscriptions.count());
 }
 
+test "seeded client reconciliation converges to the authoritative worker after interleaved road edits" {
+    const allocator = std.testing.allocator;
+    const Fixture = @import("terrain_test_fixture.zig").Fixture;
+    const coordinates = @import("block_coordinates.zig");
+    const Harness = struct {
+        const Snapshot = struct { coords: ChunkCoords, chunk: WorldChunk };
+        replies: std.ArrayList(OperationResult) = .empty,
+        snapshots: std.ArrayList(Snapshot) = .empty,
+        successes: usize = 0,
+        rejections: usize = 0,
+        road_updates: usize = 0,
+        batched_replies: bool = false,
+        pending_rebases: bool = false,
+
+        fn deinit(self: *@This()) void {
+            for (self.snapshots.items) |snapshot| snapshot.chunk.deinit(std.testing.allocator);
+            self.snapshots.deinit(std.testing.allocator);
+            self.replies.deinit(std.testing.allocator);
+        }
+
+        // Use the real authority; do not give it optimistic World replay/undo.
+        // Retain exactly the block dependencies returned by applyOperation(),
+        // rather than refreshing every chunk and hiding missing reversion updates.
+        fn apply(self: *@This(), state: *WorkerState, operation: BlockOperation, request_id: ?u64, random: std.Random) !void {
+            const result = state.applyOperation(std.testing.allocator, operation);
+            defer result.chunk.deinit(std.testing.allocator);
+            if (request_id) |id| {
+                try self.replies.append(std.testing.allocator, .{ .request_id = id, .status = result.status });
+                if (result.status == .success) self.successes += 1 else self.rejections += 1;
+            } else try std.testing.expectEqual(OperationStatus.success, result.status);
+            self.road_updates += state.road_changes.items.len;
+
+            var ids: std.ArrayList(ChunkId) = .empty;
+            defer ids.deinit(std.testing.allocator);
+            const coords, _ = world_module.splitBlockCoords(operation.block);
+            try ids.append(std.testing.allocator, state.layout.encodeChunkCoords(coords));
+            try ids.appendSlice(std.testing.allocator, state.road_changes.items);
+            if (result.changed_below) |below| try ids.append(std.testing.allocator, state.layout.encodeChunkCoords(below));
+            for (result.revealed_neighbors) |neighbor| if (neighbor) |value| {
+                try ids.append(std.testing.allocator, state.layout.encodeChunkCoords(value));
+            };
+            // Related chunk order may vary, but commands and their replies stay FIFO.
+            random.shuffle(ChunkId, ids.items);
+            for (ids.items, 0..) |id, i| {
+                if (std.mem.indexOfScalar(ChunkId, ids.items[0..i], id) != null) continue;
+                const snapshot = state.modified_chunks.get(id).?.clone(std.testing.allocator);
+                errdefer snapshot.deinit(std.testing.allocator);
+                try self.snapshots.append(std.testing.allocator, .{ .coords = state.layout.decodeChunkId(id), .chunk = snapshot });
+            }
+        }
+
+        fn deliver(self: *@This(), client: *world_module.World) !void {
+            self.batched_replies = self.batched_replies or self.replies.items.len > 1;
+            self.pending_rebases = self.pending_rebases or (self.snapshots.items.len > 0 and client.pending_operations.items.len > self.replies.items.len);
+            // Match Game.applyPackage(): retire every reply before its snapshots.
+            for (self.replies.items) |reply| client.acknowledgeOperationResult(reply.request_id, reply.status);
+            for (self.snapshots.items) |*snapshot| {
+                client.insertChunk(snapshot.coords, snapshot.chunk) catch |err| switch (err) {
+                    error.StaleChunk => snapshot.chunk.deinit(std.testing.allocator),
+                };
+                snapshot.chunk = WorldChunk.initEmpty(); // Ownership moved or freed.
+            }
+            self.replies.clearRetainingCapacity();
+            self.snapshots.clearRetainingCapacity();
+        }
+
+        fn expectConverged(client: *const world_module.World, state: *const WorkerState) !void {
+            try std.testing.expectEqual(@as(usize, 0), client.pending_operations.items.len);
+            try std.testing.expectEqual(state.modified_chunks.count(), client.chunks.count());
+            var chunks = state.modified_chunks.iterator();
+            while (chunks.next()) |entry| {
+                const expected = entry.value_ptr;
+                const actual = client.chunks.get(entry.key_ptr.*).?;
+                const expected_data = expected.content.toData();
+                const actual_data = actual.content.toData();
+                try std.testing.expectEqualSlices(u8, std.mem.asBytes(&expected_data.blocks), std.mem.asBytes(&actual_data.blocks));
+                try std.testing.expectEqual(expected.solid_block_count, actual.solid_block_count);
+                try std.testing.expectEqual(actual_data.countSolidBlocks(), actual.solid_block_count);
+                try std.testing.expectEqualDeep(expected.boundaries, actual.boundaries);
+                try std.testing.expectEqualDeep(@import("boundary_mask.zig").extract(&actual_data), actual.boundaries);
+                try std.testing.expectEqual(expected.chunk_revision, actual.chunk_revision);
+                // Sparse roads and construction markers are sets, not ordered lists.
+                try std.testing.expectEqual(expected.metadata.roads.items.len, actual.metadata.roads.items.len);
+                for (expected.metadata.roads.items) |road|
+                    try std.testing.expectEqualDeep(road, actual.metadata.road(road.index).?);
+                try std.testing.expectEqual(expected.metadata.constructed.items.len, actual.metadata.constructed.items.len);
+                for (expected.metadata.constructed.items) |index|
+                    try std.testing.expect(std.mem.indexOfScalar(transformations.BlockIndex, actual.metadata.constructed.items, index) != null);
+                try std.testing.expectEqualDeep(expected.metadata.timed.events.items, actual.metadata.timed.events.items);
+            }
+        }
+    };
+
+    var successes: usize = 0;
+    var rejections: usize = 0;
+    var road_updates: usize = 0;
+    var batched_replies = false;
+    var pending_rebases = false;
+    // Fixed seeds and a finite queue give reproducible coverage without threads,
+    // wall-clock waits, new dependencies, or any production instrumentation.
+    for (0..32) |seed| {
+        var prng = std.Random.DefaultPrng.init(seed);
+        const random = prng.random();
+        var client = try Fixture.init();
+        defer client.deinit();
+        client.fill(.{ -5, -3, -2 }, .{ 10, 4, -1 }, .stone);
+        client.set(.{ -4, 0, 0 }, .country_road_solid);
+        for (0..12) |i| client.set(.{ @as(i64, @intCast(i)) - 3, 0, 0 }, .country_road_adaptive);
+        client.set(.{ 9, 0, -1 }, .none);
+        client.set(.{ -2, -2, 0 }, .country_road_solid);
+        for ([_]i64{ -1, 1, 2 }) |y| client.set(.{ -2, y, 0 }, .country_road_adaptive);
+        client.set(.{ -2, 3, -1 }, .none);
+        client.set(.{ 8, 1, -1 }, .none);
+        for ([_]i64{ 1, 2 }) |x| {
+            const block = coordinates.fromWorld(client.world.layout, .{ x, 2, 0 }).?;
+            client.world.setBlockUnchecked(block, .dirt);
+            const coords, const local = world_module.splitBlockCoords(block);
+            const metadata = &client.world.chunks.getPtr(client.world.layout.encodeChunkCoords(coords)).?.metadata;
+            metadata.markConstructed(allocator, transformations.index(local));
+            metadata.timed.schedule(allocator, .{ .block = transformations.index(local), .kind = .compact_dirt, .due_tick = @intCast(100 + x) });
+        }
+        for (client.world.pending_operations.items) |*pending| {
+            pending.road_undo.deinit(allocator);
+            pending.road_formations.deinit(allocator);
+        }
+        client.world.pending_operations.clearRetainingCapacity();
+
+        var state: WorkerState = .{ .layout = client.world.layout, .generator = try WorldGenerator.prepare(.flat, allocator, client.world.layout) };
+        defer state.deinit(allocator);
+        var initial = client.world.chunks.iterator();
+        while (initial.next()) |entry| try state.modified_chunks.put(allocator, entry.key_ptr.*, entry.value_ptr.clone(allocator));
+        var harness: Harness = .{};
+        defer harness.deinit();
+        var operations: [16]BlockOperation = undefined;
+        var conflicts: [16]?BlockOperation = @splat(null);
+        var deliveries: [16]bool = @splat(false);
+        var queued: usize = 0;
+        var processed: usize = 0;
+        errdefer std.debug.print("reconciliation seed={d}\nlocal={any}\nconflicts={any}\ndeliveries={any}\n", .{ seed, operations[0..queued], conflicts[0..processed], deliveries });
+        const sites = [_]struct { cell: rules.Cell, road: rules.BlockType }{
+            .{ .cell = .{ -3, 1, 0 }, .road = .snow },
+            .{ .cell = .{ 8, 1, -1 }, .road = .snow },
+            .{ .cell = .{ 9, 0, -1 }, .road = .country_road_solid },
+            .{ .cell = .{ -2, 0, 0 }, .road = .country_road_adaptive },
+            .{ .cell = .{ -4, 0, 0 }, .road = .country_road_solid },
+            .{ .cell = .{ 0, 0, 0 }, .road = .country_road_adaptive },
+            .{ .cell = .{ 8, 0, 0 }, .road = .country_road_adaptive },
+            .{ .cell = .{ -2, -2, 0 }, .road = .country_road_solid },
+            .{ .cell = .{ -2, -1, 0 }, .road = .country_road_adaptive },
+            .{ .cell = .{ -2, 1, 0 }, .road = .country_road_adaptive },
+            .{ .cell = .{ -2, 2, 0 }, .road = .country_road_adaptive },
+            .{ .cell = .{ -2, 3, -1 }, .road = .country_road_solid },
+            .{ .cell = .{ 1, 2, 0 }, .road = .dirt },
+            .{ .cell = .{ 2, 2, 0 }, .road = .dirt },
+        };
+        while (queued < operations.len) {
+            // Start from the snow/endpoint/removal pattern, then vary materials,
+            // repeated cells, crossing edits, conflicts, and delivery boundaries.
+            const site = sites[if (queued < 4) queued else random.uintLessThan(usize, sites.len)];
+            const block = coordinates.fromWorld(client.world.layout, site.cell).?;
+            const operation: BlockOperation = .{
+                .block = block,
+                .action = if (try client.world.isBlockSolid(block)) .remove else .{
+                    .put = if (queued < 4 or random.boolean()) site.road else .snow,
+                },
+            };
+            try std.testing.expectEqual(OperationStatus.success, client.world.tryOperation(operation).status);
+            client.world.pending_operations.items[client.world.pending_operations.items.len - 1].request_id = queued + 1;
+            operations[queued] = operation;
+            queued += 1;
+
+            // Delay P's section snapshot until A and B are both optimistic.
+            // Deliver it separately so the endpoint conflict cannot be hidden
+            // by retiring every command before the first rebase.
+            if (queued == 3) {
+                try harness.apply(&state, operations[0], 1, random);
+                processed = 1;
+                try harness.deliver(&client.world);
+            }
+            while (queued >= 3 and processed < queued and (queued == 3 or queued == operations.len or random.boolean())) {
+                const intent = operations[processed];
+                // A is accepted; vary whether another client occupies B first.
+                if (processed != 1 and random.uintLessThan(u8, 3) == 0) {
+                    const conflict: BlockOperation = .{ .block = intent.block, .action = if (readStateBlock(&state, intent.block) == .none) .{ .put = .snow } else .remove };
+                    conflicts[processed] = conflict;
+                    try harness.apply(&state, conflict, null, random);
+                }
+                try harness.apply(&state, intent, processed + 1, random);
+                processed += 1;
+            }
+            if (queued == 3 or queued == operations.len or random.boolean()) {
+                deliveries[queued - 1] = true;
+                try harness.deliver(&client.world);
+                // Check every drained prefix too: later section snapshots must
+                // not mask a divergence that occurred earlier in the schedule.
+                if (processed == queued) try Harness.expectConverged(&client.world, &state);
+            }
+        }
+        try Harness.expectConverged(&client.world, &state);
+        successes += harness.successes;
+        rejections += harness.rejections;
+        road_updates += harness.road_updates;
+        batched_replies = batched_replies or harness.batched_replies;
+        pending_rebases = pending_rebases or harness.pending_rebases;
+    }
+    try std.testing.expect(successes > 0 and rejections > 0 and road_updates > 0);
+    try std.testing.expectEqual(@as(usize, 512), successes + rejections);
+    try std.testing.expect(batched_replies and pending_rebases);
+}
+
 test "refilling an underground hole packs soil under a ceiling, including across chunk boundaries" {
     const allocator = std.testing.allocator;
     var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, allocator, &test_layout) };

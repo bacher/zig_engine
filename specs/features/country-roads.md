@@ -77,7 +77,7 @@ Optimistic replay and cross-chunk formation must not restore stale slope ownersh
 ### Validation
 
 `zig build test test-gpu install --summary all` completed successfully: 54/54 build steps,
-533 tests passed and 1 skipped. Both applications built. GPU checks passed on Apple M4 Max
+534 tests passed and 1 skipped. Both applications built. GPU checks passed on Apple M4 Max
 with Metal for both compiled wrapping configurations. Modified Zig sources were formatted,
 and `git diff --check` passed.
 
@@ -107,6 +107,7 @@ test or rendered-image comparison was performed.
 | Footprint surface calculation | Implemented: standing-space and player collision share the clamped-footprint height helper. |
 | GPU evidence | Expanded geometry/normal/UV checks to every section of 4/7/12 runs in every direction. A full forward/shadow raster harness remains deferred because it needs new scene, texture, lighting, and image-readback fixtures. |
 | Consistency | Implemented: document eight specialized pipelines and use the GPU_ payload prefix in shader readback. |
+| Reconciliation interleavings | Implemented: 32 fixed seeds and 512 queued local intents compare the client with the actual synchronous authoritative worker after every drained prefix and at the end. Vary conflicts, materials, related snapshot order, and delivery batches; compare materials, occupancy, boundary masks, roads, construction markers, and timers without a final full refresh. Failures include the seed and command trace. The harness fails at seed 1 against the pre-fix `25b8eac` implementation and passes all seeds with ordered replay. This reuses fixtures, requires no new framework, and adds no gameplay CPU work. |
 
 The snapshot fixes rebase only pending edited cells and the road sections they changed.
 Sparse cell undo restores materials, road records, construction markers, and scheduled
