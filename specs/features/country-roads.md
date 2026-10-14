@@ -52,7 +52,7 @@ Speed boosts, additional road materials, diagonal roads, curves, junction geomet
 Use a shared custom-block shape descriptor in the engine and sparse road records in application chunk metadata. Share a road formation/reversion helper between client and service. Persist slope descriptors instead of recomputing the chosen axis at render time. Include custom draw descriptors in both local and service mesh payloads. Extend collision with convex slope volumes and grounded surface following; retain cube collision for unformed adaptive roads. Add support checks to the shared validator.
 
 ### Affected Components
-- `src/engine/voxel/` and rendering pipelines: custom shape descriptors and individual draws.
+- `src/engine/voxel/` and rendering pipelines: custom shape descriptors and instanced draws in a separate pass.
 - `src/voxel_app/world*`, chunk metadata, and block rules: storage, revisions, support, and persistent run updates.
 - `src/voxel_app/terrain_collision.zig`, player controller, and targeting: shape-aware queries and walking.
 - `src/voxel_app/main.zig`: key bindings, held items, and streamed geometry updates.
@@ -77,7 +77,7 @@ Optimistic replay and cross-chunk formation must not restore stale slope ownersh
 ### Validation
 
 `zig build test test-gpu install --summary all` completed successfully: 54/54 build steps,
-501 tests passed and 1 skipped. Both applications built. GPU checks passed on Apple M4 Max
+529 tests passed and 1 skipped. Both applications built. GPU checks passed on Apple M4 Max
 with Metal for both compiled wrapping configurations. Modified Zig sources were formatted,
 and `git diff --check` passed.
 
@@ -86,13 +86,29 @@ and `git diff --check` passed.
 | AC1 | Passed | The tool-shortcut regression in `src/voxel_app/main.zig` verifies keys 7/8 select the two road materials. Source review and application builds cover the held-item display using the selected material. |
 | AC2 | Passed | `src/voxel_app/road_tests.zig` verifies saved direction, custom cell encoding, and continuous section heights for lengths 4, 7, and 12 in all cardinal directions. |
 | AC3 | Passed | Road regressions reject lengths 3/13 and unsupported placement, preserve ambiguous crossings, check incomplete-run rollback, and verify full-cube unformed collision. |
-| AC4 | Passed | The crossing regression verifies existing snapshotted ownership survives perpendicular construction and unrelated lateral removal. |
+| AC4 | Passed | Crossing regressions verify existing and pending snapshotted ownership survives perpendicular construction, unrelated removal, and snapshot rebasing; newer authoritative ownership takes precedence. |
 | AC5 | Passed | The removal regression verifies both endpoints and first, interior, and last members revert surviving sections across chunk boundaries while keeping the removed cell empty. |
 | AC6 | Passed | The custom-cell mesh regression verifies separate draw records, no ordinary custom faces, and an exposed ordinary face across a chunk boundary; boundary-mask and enclosure checks also pass. |
 | AC7 | Passed | Direct-support regressions verify rejected placement and support removal with shared diagnostics; client/service validation checks pass. |
-| AC8 | Passed | Player regressions cover uphill/downhill travel in every direction, diagonal parallel lanes, continuous contact, jumping, fast falls, standing-space searches, and ceiling clearance. |
-| AC9 | Passed | Road snapshot/replay and rejected-edit regressions verify cross-chunk and wrapped-seam metadata. The service regression verifies atomic formation/reversion and custom mesh reload after subscription eviction. |
-| AC10 | Passed | Dawn validates visible and shadow pipelines. Production GPU geometry readback verifies vertices and normals against CPU slope planes in all directions, including the unformed marker; source review covers atlas, scene depth, lighting, and shadow draw integration. |
+| AC8 | Passed | Player regressions cover uphill/downhill travel in every direction, diagonal parallel lanes, continuous contact, jumping, fast falls, standing-space searches, ceiling clearance, and a clear uphill ceiling exit with a clipped lift. |
+| AC9 | Passed | Road snapshot/replay and rejected-edit regressions verify cross-chunk and wrapped-seam metadata, duplicate placement/removal rejection after newer snapshots, coherent pending formation, and preservation of later pending edits. The service regression verifies atomic formation/reversion and custom mesh reload after subscription eviction. |
+| AC10 | Passed | Dawn validates visible and shadow pipelines. Production GPU geometry readback verifies every section of lengths 4/7/12 in all directions, including zero-height ends, normals, actual atlas UVs, and the unformed marker; source review covers atlas, scene depth, lighting, and shadow draw integration. |
 
 Validation is automated and supplemented by source review. No interactive gameplay smoke
 test or rendered-image comparison was performed.
+
+### Refinement decisions
+
+| Improvement | Decision and rationale |
+| --- | --- |
+| Custom-buffer work | Implemented: ordinary-only chunk changes no longer dirty custom data. Per-chunk upload ranges remain deferred until profiling justifies their allocation/bookkeeping cost. |
+| Custom draw batching | Implemented: one instanced draw per pass reduces submission from 4N calls to four across the forward pass and three shadow cascades. Each block retains its own descriptor and geometry outside ordinary chunk meshes. No end-to-end frame-time claim is made. |
+| Collision metadata lookup | Implemented: read material and optional shape together, scanning sparse metadata only for custom cells. A block-index map remains deferred until dense-road profiling demonstrates a need. |
+| Footprint surface calculation | Implemented: standing-space and player collision share the clamped-footprint height helper. |
+| GPU evidence | Expanded geometry/normal/UV checks to every section of 4/7/12 runs in every direction. A full forward/shadow raster harness remains deferred because it needs new scene, texture, lighting, and image-readback fixtures. |
+| Consistency | Implemented: document eight specialized pipelines and use the GPU_ payload prefix in shader readback. |
+
+The snapshot fixes rebase only pending edits and the road sections they changed. Saved
+pending formations retain their chosen direction, with bounded endpoint/member/support
+checks before replay; a newer authoritative owner wins. There is no global world scan or
+full-chunk baseline copy. The ceiling fix reuses the existing lift, sweep, and settle queries.

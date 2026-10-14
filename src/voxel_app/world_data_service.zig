@@ -630,7 +630,7 @@ const ReadContext = struct {
 
     fn readShape(context: *anyopaque, block: [3]u32) ?@import("engine").voxel_chunk.custom_block.Shape {
         const self: *ReadContext = @ptrCast(@alignCast(context));
-        _ = read(context, block);
+        if (read(context, block) != .custom) return null;
         const coords, const local = world_module.splitBlockCoords(block);
         const chunk = self.chunks.get(self.state.layout.encodeChunkCoords(coords)).?;
         const road = chunk.metadata.road(transformations.index(local)) orelse return null;

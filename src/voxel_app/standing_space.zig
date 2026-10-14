@@ -51,9 +51,7 @@ fn shapeAt(reader: Reader, cell: Cell) ?engine.voxel_chunk.custom_block.Shape {
 fn surface(reader: Reader, cell: Cell, footprint: geometry.Bounds) f64 {
     const origin: Position = @floatFromInt(cell);
     const shape = shapeAt(reader, cell) orelse return origin[2] + 1;
-    const low = @max(footprint.min - origin, @as(Position, @splat(0)));
-    const high = @min(footprint.max - origin, @as(Position, @splat(1)));
-    return origin[2] + shape.supportHeight(.{ low[0], low[1] }, .{ high[0], high[1] });
+    return geometry.surfaceHeight(shape, cell, footprint);
 }
 
 /// Each x/y candidate uses its highest real support. We do not spawn in a cave

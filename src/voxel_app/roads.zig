@@ -16,6 +16,7 @@ pub const Context = struct {
     chunks: *world.ChunksHashMap,
     changed: *std.ArrayList(u32),
     undo: ?*std.ArrayList(Undo) = null,
+    formed: ?*std.ArrayList(data.Slope) = null,
 
     fn normalize(self: Context, cell: Cell) ?Cell {
         return self.reader.normalize(cell);
@@ -130,6 +131,28 @@ pub const Context = struct {
         return false;
     }
 
+    /// Replay a previously chosen orientation after rebasing. A later crossing
+    /// must not make that choice ambiguous, but new authoritative ownership,
+    /// missing members, unsupported cells, or changed endpoints take precedence.
+    pub fn restoreFormation(self: Context, slope: data.Slope) void {
+        const high: Cell = .{ slope.high_endpoint[0], slope.high_endpoint[1], slope.high_endpoint[2] };
+        const low = self.lowEndpoint(slope);
+        if (self.reader.get(high) != .country_road_solid or self.reader.get(low) != .country_road_solid or self.reader.get(low + Cell{ 0, 0, 1 }) != .none) return;
+        for (0..slope.length) |i| {
+            const member = self.sectionCell(slope, @intCast(i));
+            const road = self.record(member) orelse return;
+            if (self.reader.get(member) != .custom or !self.supported(member)) return;
+            const above = self.reader.get(member + Cell{ 0, 0, 1 }) orelse return;
+            if (above.isRoad()) return;
+            if (road.slope) |existing| if (!sameRun(existing, slope)) return;
+        }
+        for (0..slope.length) |i| {
+            var section = slope;
+            section.section = @intCast(i);
+            self.set(self.sectionCell(slope, @intCast(i)), section);
+        }
+    }
+
     /// previous preserves a removed section's ownership after its cell becomes air.
     pub fn afterEdit(self: Context, operation: world.BlockOperation, previous: ?data.Road) void {
         const target: Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
@@ -166,11 +189,21 @@ pub const Context = struct {
         var allowed: std.ArrayList(data.Slope) = .empty;
         defer allowed.deinit(self.allocator);
         for (candidates.items) |slope| if (!self.ambiguous(slope)) allowed.append(self.allocator, slope) catch @panic("OOM");
-        for (allowed.items) |slope| for (0..slope.length) |i| {
-            var section = slope;
-            section.section = @intCast(i);
-            self.set(self.sectionCell(slope, @intCast(i)), section);
-        };
+        for (allowed.items) |slope| {
+            for (0..slope.length) |i| {
+                var section = slope;
+                section.section = @intCast(i);
+                self.set(self.sectionCell(slope, @intCast(i)), section);
+            }
+            if (self.formed) |entries| {
+                var seen = false;
+                for (entries.items) |existing| if (sameRun(existing, slope)) {
+                    seen = true;
+                    break;
+                };
+                if (!seen) entries.append(self.allocator, slope) catch @panic("OOM");
+            }
+        }
     }
 };
 

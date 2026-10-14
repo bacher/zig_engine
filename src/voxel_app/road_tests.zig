@@ -25,6 +25,200 @@ fn row(fixture: *Fixture, high: Cell, direction: custom.Direction, n: u32) void 
     fixture.set(low, .country_road_solid);
 }
 
+fn clearPending(fixture: *Fixture) void {
+    for (fixture.world.pending_operations.items) |*pending| {
+        pending.road_undo.deinit(std.testing.allocator);
+        pending.road_formations.deinit(std.testing.allocator);
+    }
+    fixture.world.pending_operations.clearRetainingCapacity();
+}
+
+fn sectionSnapshots(client: *Fixture, authority: *Fixture, high: Cell, n: u32) !void {
+    var ids: std.ArrayList(u32) = .empty;
+    defer ids.deinit(std.testing.allocator);
+    for (1..n + 1) |i| {
+        const coords, _ = world.splitBlockCoords(storage(authority, high + Cell{ @intCast(i), 0, 0 }));
+        const id = authority.world.layout.encodeChunkCoords(coords);
+        if (std.mem.indexOfScalar(u32, ids.items, id) != null) continue;
+        try ids.append(std.testing.allocator, id);
+        var snapshot = authority.world.getChunk(coords).?.clone(std.testing.allocator);
+        snapshot.chunk_revision = 1;
+        try client.world.insertChunk(coords, snapshot);
+    }
+}
+
+test "duplicate road placement rejection preserves newer authoritative slopes" {
+    var client = try Fixture.init();
+    defer client.deinit();
+    var authority = try Fixture.init();
+    defer authority.deinit();
+    const high: Cell = .{ -4, 0, 0 };
+    const low: Cell = high + Cell{ 13, 0, -1 };
+    row(&client, high, .positive_x, 12);
+    client.set(low, .none);
+    clearPending(&client);
+    row(&authority, high, .positive_x, 12);
+    clearPending(&authority);
+
+    client.set(low, .country_road_solid);
+    client.world.pending_operations.items[0].request_id = 42;
+    try sectionSnapshots(&client, &authority, high, 12);
+    client.world.acknowledgeOperationResult(42, .already_exists);
+    const coords, _ = world.splitBlockCoords(storage(&authority, low));
+    var snapshot = authority.world.getChunk(coords).?.clone(std.testing.allocator);
+    snapshot.chunk_revision = 1;
+    try client.world.insertChunk(coords, snapshot);
+    try std.testing.expectEqual(@as(usize, 0), client.world.pending_operations.items.len);
+    for (1..13) |i| try std.testing.expect(shape(&client, high + Cell{ @intCast(i), 0, 0 }).? == .slope);
+}
+
+test "duplicate road removal rejection preserves newer authoritative reversion" {
+    var client = try Fixture.init();
+    defer client.deinit();
+    var authority = try Fixture.init();
+    defer authority.deinit();
+    const high: Cell = .{ -4, 0, 0 };
+    const low: Cell = high + Cell{ 13, 0, -1 };
+    row(&client, high, .positive_x, 12);
+    clearPending(&client);
+    row(&authority, high, .positive_x, 12);
+    authority.set(low, .none);
+    clearPending(&authority);
+
+    client.set(low, .none);
+    client.world.pending_operations.items[0].request_id = 42;
+    try sectionSnapshots(&client, &authority, high, 12);
+    client.world.acknowledgeOperationResult(42, .already_removed);
+    const coords, _ = world.splitBlockCoords(storage(&authority, low));
+    var snapshot = authority.world.getChunk(coords).?.clone(std.testing.allocator);
+    snapshot.chunk_revision = 1;
+    try client.world.insertChunk(coords, snapshot);
+    try std.testing.expectEqual(@as(usize, 0), client.world.pending_operations.items.len);
+    try std.testing.expect(!try client.world.isBlockSolid(storage(&client, low)));
+    for (1..13) |i| try std.testing.expect(shape(&client, high + Cell{ @intCast(i), 0, 0 }).? == .adaptive);
+}
+
+test "older section snapshots replay pending formation coherently across chunks and the seam" {
+    for ([_]i64{ -4, 62 }) |x| {
+        var client = try Fixture.init();
+        defer client.deinit();
+        var authority = try Fixture.init();
+        defer authority.deinit();
+        const high: Cell = .{ x, 0, 0 };
+        const low = high + Cell{ 13, 0, -1 };
+        row(&client, high, .positive_x, 12);
+        client.set(low, .none);
+        clearPending(&client);
+        row(&authority, high, .positive_x, 12);
+        authority.set(low, .none);
+        clearPending(&authority);
+        client.set(low, .country_road_solid);
+
+        for ([_]i64{ 1, 12, 1 }) |section| {
+            const coords, _ = world.splitBlockCoords(storage(&authority, high + Cell{ section, 0, 0 }));
+            try client.world.insertChunk(coords, authority.world.getChunk(coords).?.clone(std.testing.allocator));
+            try std.testing.expectEqual(@as(usize, 1), client.world.pending_operations.items.len);
+            for (1..13) |i| try std.testing.expect(shape(&client, high + Cell{ @intCast(i), 0, 0 }).? == .slope);
+        }
+    }
+}
+
+test "rebasing a rejected endpoint preserves later pending road removal and its undo" {
+    var client = try Fixture.init();
+    defer client.deinit();
+    var authority = try Fixture.init();
+    defer authority.deinit();
+    const high: Cell = .{ -4, 0, 0 };
+    const low = high + Cell{ 13, 0, -1 };
+    row(&client, high, .positive_x, 12);
+    client.set(low, .none);
+    clearPending(&client);
+    row(&authority, high, .positive_x, 12);
+    clearPending(&authority);
+    client.set(low, .country_road_solid);
+    client.world.pending_operations.items[0].request_id = 41;
+    client.set(high, .none);
+    client.world.pending_operations.items[1].request_id = 42;
+    try sectionSnapshots(&client, &authority, high, 12);
+    client.world.acknowledgeOperationResult(41, .already_exists);
+    try std.testing.expectEqual(@as(usize, 1), client.world.pending_operations.items.len);
+    for (1..13) |i| try std.testing.expect(shape(&client, high + Cell{ @intCast(i), 0, 0 }).? == .adaptive);
+    client.world.acknowledgeOperationResult(42, .constraint_violation);
+    const coords, _ = world.splitBlockCoords(storage(&authority, high));
+    var snapshot = authority.world.getChunk(coords).?.clone(std.testing.allocator);
+    snapshot.chunk_revision = 1;
+    try client.world.insertChunk(coords, snapshot);
+    try std.testing.expectEqual(@as(usize, 0), client.world.pending_operations.items.len);
+    for (1..13) |i| try std.testing.expect(shape(&client, high + Cell{ @intCast(i), 0, 0 }).? == .slope);
+}
+
+test "a pending slope keeps its chosen orientation when a later crossing is rebased" {
+    var client = try Fixture.init();
+    defer client.deinit();
+    row(&client, .{ 0, 0, 0 }, .positive_x, 4);
+    client.set(.{ 5, 0, -1 }, .none);
+    clearPending(&client);
+    client.set(.{ 5, 0, -1 }, .country_road_solid);
+    for (0..5) |i| {
+        const at: Cell = .{ 2, @as(i64, @intCast(i)) - 2, 0 };
+        client.set(at - Cell{ 0, 0, 1 }, .stone);
+        if (i == 0) client.set(at, .country_road_solid) else if (i != 2) client.set(at, .country_road_adaptive);
+    }
+    client.set(.{ 2, 3, -2 }, .stone);
+    client.set(.{ 2, 3, -1 }, .country_road_solid);
+    try client.world.insertChunk(.{ 0, 0, 0 }, world.WorldChunk.initEmpty());
+    const center = shape(&client, .{ 2, 0, 0 }).?;
+    try std.testing.expect(center == .slope);
+    try std.testing.expectEqual(custom.Direction.positive_x, center.slope.downhill);
+    try std.testing.expect(shape(&client, .{ 2, 1, 0 }).? == .adaptive);
+}
+
+test "rebasing a pending formation honors a newer authoritative crossing owner" {
+    var client = try Fixture.init();
+    defer client.deinit();
+    var authority = try Fixture.init();
+    defer authority.deinit();
+    row(&client, .{ 0, 0, 0 }, .positive_x, 4);
+    client.set(.{ 5, 0, -1 }, .none);
+    clearPending(&client);
+    client.set(.{ 5, 0, -1 }, .country_road_solid);
+    client.world.pending_operations.items[0].request_id = 42;
+    // The other client completed the perpendicular road first, then the same
+    // endpoint placement. Its chosen crossing owner must win on this client.
+    row(&authority, .{ 2, -2, 0 }, .positive_y, 4);
+    row(&authority, .{ 0, 0, 0 }, .positive_x, 4);
+    clearPending(&authority);
+    try sectionSnapshots(&client, &authority, .{ 0, 0, 0 }, 4);
+    client.world.acknowledgeOperationResult(42, .already_exists);
+    const center = shape(&client, .{ 2, 0, 0 }).?;
+    try std.testing.expect(center == .slope);
+    try std.testing.expectEqual(custom.Direction.positive_y, center.slope.downhill);
+    for ([_]i64{ 1, 3, 4 }) |x| try std.testing.expect(shape(&client, .{ x, 0, 0 }).? == .adaptive);
+}
+
+test "uphill walking keeps a clipped lift when leaving a clear ceiling" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    row(&fixture, .{ 0, 0, 0 }, .positive_x, 8);
+    fixture.set(.{ 8, 0, 2 }, .stone);
+    var player = player_module.PlayerController.init(std.testing.allocator, .{ 9.5, 0.5, 0 });
+    defer player.deinit();
+    var query: collision.Query = .{ .world = &fixture.world, .body = player.body };
+    // The trailing edge leaves the ceiling exactly when the head reaches its floor.
+    for (0..501) |i| {
+        const x = 9.5 - @as(f64, @floatFromInt(i)) / 100;
+        const z = std.math.clamp((9 - (x - player.body.half_width)) / 8, 0, 1);
+        try std.testing.expectEqual(collision.Overlap.clear, query.overlap(.{ x, 0.5, z }, true));
+    }
+    for (0..120) |i| {
+        _ = try player.update(&fixture.world, .{ .right = -1 }, 1.0 / 120.0, @as(f64, @floatFromInt(i + 1)) / 120.0);
+        try std.testing.expect(player.grounded and player.climb == null);
+        try std.testing.expectEqual(collision.Overlap.clear, query.overlap(player.position, true));
+    }
+    try std.testing.expect(player.position[0] < 5);
+    try std.testing.expect(player.position[2] > 0.5);
+}
+
 test "country roads form only 4 through 12 sections with saved orientation in every direction" {
     for (std.enums.values(custom.Direction)) |direction| {
         for ([_]u32{ 3, 4, 7, 12, 13 }) |n| {
@@ -197,8 +391,7 @@ test "road ownership survives wrapped seam snapshots and pending removal replay"
     defer fixture.deinit();
     row(&fixture, .{ 62, 0, 0 }, .positive_x, 12);
     try std.testing.expect(shape(&fixture, .{ 66, 0, 0 }).? == .slope);
-    for (fixture.world.pending_operations.items) |*pending| pending.road_undo.deinit(std.testing.allocator);
-    fixture.world.pending_operations.clearRetainingCapacity();
+    clearPending(&fixture);
     const coords, _ = world.splitBlockCoords(storage(&fixture, .{ 66, 0, 0 }));
     const snapshot = fixture.world.getChunk(coords).?.clone(std.testing.allocator);
     fixture.set(.{ 66, 0, 0 }, .none);
@@ -215,8 +408,7 @@ test "a rejected optimistic endpoint restores metadata in other chunks" {
     // Build an incomplete row and save the authoritative low-endpoint chunk.
     row(&fixture, high, .positive_x, n);
     fixture.set(high + Cell{ n + 1, 0, -1 }, .none);
-    for (fixture.world.pending_operations.items) |*pending| pending.road_undo.deinit(std.testing.allocator);
-    fixture.world.pending_operations.clearRetainingCapacity();
+    clearPending(&fixture);
     const low = storage(&fixture, high + Cell{ n + 1, 0, -1 });
     const low_coords, _ = world.splitBlockCoords(low);
     const snapshot = fixture.world.getChunk(low_coords).?.clone(std.testing.allocator);

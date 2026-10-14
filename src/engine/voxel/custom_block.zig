@@ -78,7 +78,7 @@ pub const Shape = union(enum) {
 
 pub const Draw = struct { coords: [3]u8, shape: Shape };
 
-/// 48-byte storage record; each record is submitted as an individual draw.
+/// 48-byte storage record; each instance describes one independent custom block.
 pub const GPU_CustomBlock = extern struct {
     chunk_origin: [3]i32,
     direction: u32,

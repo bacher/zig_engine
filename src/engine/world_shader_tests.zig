@@ -181,7 +181,7 @@ test "GPU coordinate readback agrees with CPU at seams, precision boundaries, an
     try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
 }
 
-test "GPU custom road vertices and normals match CPU slope collision" {
+test "GPU custom road vertices, normals and atlas UVs match every section in all directions" {
     var uncaptured: ValidationResponse = .{};
     var validation: ValidationResponse = .{};
     var mapping: coordinate_readback.MapResponse = .{};
