@@ -47,6 +47,101 @@ fn sectionSnapshots(client: *Fixture, authority: *Fixture, high: Cell, n: u32) !
     }
 }
 
+test "ordered replay keeps formation undo with the endpoint command after an earlier snow response" {
+    var client = try Fixture.init();
+    defer client.deinit();
+    var authority = try Fixture.init();
+    defer authority.deinit();
+    const high: Cell = .{ -4, 0, 0 };
+    const low: Cell = .{ 9, 0, -1 };
+    const p: Cell = .{ -3, 1, 0 };
+    const a: Cell = .{ 8, 1, -1 };
+    for ([_]*Fixture{ &client, &authority }) |fixture| {
+        row(fixture, high, .positive_x, 12);
+        fixture.set(low, .none);
+        fixture.set(p - Cell{ 0, 0, 1 }, .stone);
+        fixture.set(a - Cell{ 0, 0, 1 }, .stone);
+        clearPending(fixture);
+    }
+    try std.testing.expectEqual(world.OperationStatus.success, client.world.setBlock(storage(&client, p), .snow).status);
+    client.world.pending_operations.items[0].request_id = 1;
+    authority.set(p, .snow);
+    const p_coords, _ = world.splitBlockCoords(storage(&authority, p));
+    var p_snapshot = authority.world.getChunk(p_coords).?.clone(std.testing.allocator);
+    p_snapshot.chunk_revision = 1;
+    try std.testing.expectEqual(world.OperationStatus.success, client.world.setBlock(storage(&client, a), .snow).status);
+    client.world.pending_operations.items[1].request_id = 2;
+    try std.testing.expectEqual(@as(usize, 0), client.world.pending_operations.items[1].road_undo.items.len);
+    try std.testing.expectEqual(world.OperationStatus.success, client.world.setBlock(storage(&client, low), .country_road_solid).status);
+    client.world.pending_operations.items[2].request_id = 3;
+    client.world.acknowledgeOperation(1);
+    try client.world.insertChunk(p_coords, p_snapshot);
+    try std.testing.expectEqual(@as(usize, 0), client.world.pending_operations.items[0].road_undo.items.len);
+    try std.testing.expectEqual(@as(usize, 0), client.world.pending_operations.items[0].road_formations.items.len);
+    try std.testing.expectEqual(@as(usize, 12), client.world.pending_operations.items[1].road_undo.items.len);
+    try std.testing.expectEqual(@as(usize, 1), client.world.pending_operations.items[1].road_formations.items.len);
+
+    // Both results retire before snapshots, as in Game.applyPackage(). Only B
+    // formed the road, so accepting A must never discard B's undo records.
+    authority.set(a, .snow);
+    authority.set(low, .snow); // Another client won the endpoint cell.
+    client.world.acknowledgeOperation(2);
+    client.world.acknowledgeOperationResult(3, .already_exists);
+    const low_coords, const low_local = world.splitBlockCoords(storage(&authority, low));
+    var snapshot = authority.world.getChunk(low_coords).?.clone(std.testing.allocator);
+    snapshot.chunk_revision = 2;
+    try client.world.insertChunk(low_coords, snapshot);
+    try std.testing.expectEqual(@as(usize, 0), client.world.pending_operations.items.len);
+    try std.testing.expectEqual(engine.voxel_chunk.BlockType.snow, client.world.getChunk(low_coords).?.content.getBlock(low_local));
+    for (1..13) |i| try std.testing.expect(shape(&client, high + Cell{ @intCast(i), 0, 0 }).? == .adaptive);
+}
+
+test "accepted formation stays in the baseline when a later member removal is rejected" {
+    var client = try Fixture.init();
+    defer client.deinit();
+    const high: Cell = .{ -4, 0, 0 };
+    row(&client, high, .positive_x, 12);
+    const low = high + Cell{ 13, 0, -1 };
+    client.set(low, .none);
+    clearPending(&client);
+    client.set(low, .country_road_solid);
+    client.world.pending_operations.items[0].request_id = 1;
+    client.set(high + Cell{ 6, 0, 0 }, .none);
+    client.world.pending_operations.items[1].request_id = 2;
+    client.world.acknowledgeOperation(1);
+    client.world.acknowledgeOperationResult(2, .constraint_violation);
+    try std.testing.expectEqual(@as(usize, 0), client.world.pending_operations.items.len);
+    for (1..13) |i| try std.testing.expect(shape(&client, high + Cell{ @intCast(i), 0, 0 }).? == .slope);
+}
+
+test "ordered replay revokes saved crossing ownership before replacing its removed member" {
+    var client = try Fixture.init();
+    defer client.deinit();
+    const high: Cell = .{ 0, 0, 0 };
+    const low: Cell = .{ 5, 0, -1 };
+    const center: Cell = .{ 2, 0, 0 };
+    row(&client, high, .positive_x, 4);
+    client.set(low, .none);
+    clearPending(&client);
+    const coords, _ = world.splitBlockCoords(storage(&client, center));
+    const snapshot = client.world.getChunk(coords).?.clone(std.testing.allocator);
+    client.set(low, .country_road_solid); // A owns the x run.
+    client.set(center, .none); // B revokes A's ownership.
+    for (0..5) |i| {
+        const at: Cell = .{ 2, @as(i64, @intCast(i)) - 2, 0 };
+        if (i == 2) continue;
+        client.set(at - Cell{ 0, 0, 1 }, .stone);
+        client.set(at, if (i == 0) .country_road_solid else .country_road_adaptive);
+    }
+    client.set(.{ 2, 3, -2 }, .stone);
+    client.set(.{ 2, 3, -1 }, .country_road_solid);
+    client.set(center, .country_road_adaptive); // C completes an ambiguous crossing.
+    try std.testing.expect(shape(&client, center).? == .adaptive);
+    try client.world.insertChunk(coords, snapshot);
+    for (1..5) |i| try std.testing.expect(shape(&client, high + Cell{ @intCast(i), 0, 0 }).? == .adaptive);
+    try std.testing.expect(shape(&client, .{ 2, 1, 0 }).? == .adaptive);
+}
+
 test "duplicate road placement rejection preserves newer authoritative slopes" {
     var client = try Fixture.init();
     defer client.deinit();
