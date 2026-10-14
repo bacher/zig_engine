@@ -53,6 +53,14 @@ pub const Bounds = struct {
     }
 };
 
+/// Highest custom surface under the part of a footprint inside this cell.
+pub fn surfaceHeight(shape: engine.voxel_chunk.custom_block.Shape, cell: Cell, footprint: Bounds) f64 {
+    const origin: Position = @floatFromInt(cell);
+    const low = @max(footprint.min - origin, @as(Position, @splat(0)));
+    const high = @min(footprint.max - origin, @as(Position, @splat(1)));
+    return origin[2] + shape.supportHeight(.{ low[0], low[1] }, .{ high[0], high[1] });
+}
+
 pub const HorizontalCells = struct { first: [2]i64, last: [2]i64 };
 
 fn firstOverlappingCell(min: f64) i64 {

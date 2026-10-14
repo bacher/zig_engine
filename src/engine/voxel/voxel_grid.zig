@@ -147,8 +147,8 @@ pub const VoxelGrid = struct {
 
     pub fn clearChunks(self: *Self) void {
         for (self.chunks.items) |*chunk| chunk.custom_blocks.deinit(self.allocator);
+        self.custom_dirty = self.custom_dirty or self.custom_block_count > 0;
         self.custom_block_count = 0;
-        self.custom_dirty = true;
         for (self.chunks_to_upload.items) |*chunk| {
             chunk.chunk_side_data.deinit(self.allocator);
         }
@@ -161,13 +161,11 @@ pub const VoxelGrid = struct {
     }
 
     pub fn appendChunk(self: *Self, chunk: VoxelChunkUpload) void {
-        self.custom_dirty = true;
         self.chunks_to_upload.append(self.allocator, chunk) catch @panic("OOM");
     }
 
     /// Removes a chunk (if it's loaded) from the voxel grid and releases the GPU memory slot.
     pub fn removeChunk(self: *Self, chunk_coords: ChunkCoords) void {
-        self.custom_dirty = true;
         // Multiple packages can replace a mesh before the frame's upload. Cancel the
         // previous queued ownership as well as any resident geometry.
         var queued: usize = 0;
@@ -184,6 +182,7 @@ pub const VoxelGrid = struct {
                     self.gpu_block_buffer_manager.freeBlock(info.data_slot_index);
                 }
 
+                self.custom_dirty = self.custom_dirty or chunk.custom_blocks.items.len > 0;
                 chunk.custom_blocks.deinit(self.allocator);
                 _ = self.chunks.swapRemove(i);
                 return;
@@ -221,6 +220,7 @@ pub const VoxelGrid = struct {
         }
 
         for (self.chunks_to_upload.items) |*upload_chunk| {
+            self.custom_dirty = self.custom_dirty or upload_chunk.chunk_side_data.custom_blocks.items.len > 0;
             var total_data_size_total: usize = 0;
             for (upload_chunk.chunk_side_data.blocks_grouped_by_side) |side| {
                 total_data_size_total += side.items.len;
@@ -318,23 +318,27 @@ pub const VoxelGrid = struct {
 
     /// Removals still reach the GPU when ordinary uploads are held by capacity pressure.
     pub fn uploadCustomBlocks(self: *Self, gctx: *zgpu.GraphicsContext) void {
-        if (self.custom_dirty) {
-            self.custom_upload.clearRetainingCapacity();
-            for (self.chunks.items) |chunk| for (chunk.custom_blocks.items) |block| {
-                const slope = if (block.shape == .slope) block.shape.slope else null;
-                self.custom_upload.append(self.allocator, .{
-                    .chunk_origin = chunk.chunk_origin,
-                    .direction = if (slope) |s| @intFromEnum(s.downhill) else 0,
-                    .local_origin = .{ @floatFromInt(block.coords[0]), @floatFromInt(block.coords[1]), @floatFromInt(block.coords[2]) },
-                    .adaptive = @intFromBool(slope == null),
-                    .high = if (slope) |s| @floatCast(s.high) else 1,
-                    .low = if (slope) |s| @floatCast(s.low) else 1,
-                }) catch @panic("OOM");
-            };
-            self.custom_block_count = @intCast(self.custom_upload.items.len);
-            if (self.custom_block_count > 0) gctx.queue.writeBuffer(self.gpu_custom_block_buffer.buffer, 0, custom.GPU_CustomBlock, self.custom_upload.items);
-            self.custom_dirty = false;
-        }
+        if (!self.prepareCustomBlocks()) return;
+        if (self.custom_block_count > 0) gctx.queue.writeBuffer(self.gpu_custom_block_buffer.buffer, 0, custom.GPU_CustomBlock, self.custom_upload.items);
+    }
+
+    fn prepareCustomBlocks(self: *Self) bool {
+        if (!self.custom_dirty) return false;
+        self.custom_upload.clearRetainingCapacity();
+        for (self.chunks.items) |chunk| for (chunk.custom_blocks.items) |block| {
+            const slope = if (block.shape == .slope) block.shape.slope else null;
+            self.custom_upload.append(self.allocator, .{
+                .chunk_origin = chunk.chunk_origin,
+                .direction = if (slope) |s| @intFromEnum(s.downhill) else 0,
+                .local_origin = .{ @floatFromInt(block.coords[0]), @floatFromInt(block.coords[1]), @floatFromInt(block.coords[2]) },
+                .adaptive = @intFromBool(slope == null),
+                .high = if (slope) |s| @floatCast(s.high) else 1,
+                .low = if (slope) |s| @floatCast(s.low) else 1,
+            }) catch @panic("OOM");
+        };
+        self.custom_block_count = @intCast(self.custom_upload.items.len);
+        self.custom_dirty = false;
+        return true;
     }
 };
 
@@ -448,4 +452,34 @@ test "perspective offsets address the correct faces for every combination of emp
             try std.testing.expectEqual(face_index, perspective.faces_count_per_view[view]);
         }
     }
+}
+
+test "ordinary chunk changes leave custom uploads clean while resident road removal refreshes draws" {
+    const allocator = std.testing.allocator;
+    var grid: VoxelGrid = .{ .allocator = allocator, .gpu_chunk_info_buffer = undefined, .gpu_block_buffer = undefined, .custom_block_count = 1 };
+    defer {
+        for (grid.chunks.items) |*chunk| chunk.custom_blocks.deinit(allocator);
+        for (grid.chunks_to_upload.items) |*chunk| chunk.chunk_side_data.deinit(allocator);
+        grid.chunks.deinit(allocator);
+        grid.chunks_to_upload.deinit(allocator);
+        grid.custom_upload.deinit(allocator);
+    }
+    const road_coords: ChunkCoords = .{ 1, 1, 1 };
+    var road: VoxelChunk = .{ .chunk_origin = road_coords };
+    try road.custom_blocks.append(allocator, .{ .coords = .{ 0, 0, 0 }, .shape = .adaptive });
+    try grid.chunks.append(allocator, road);
+    grid.appendChunk(.{ .chunk_coords = .{ 2, 1, 1 }, .chunk_side_data = .{} });
+    grid.removeChunk(.{ 2, 1, 1 });
+    try grid.chunks.append(allocator, .{ .chunk_origin = .{ 3, 1, 1 } });
+    grid.removeChunk(.{ 3, 1, 1 });
+    try std.testing.expect(!grid.custom_dirty);
+    try std.testing.expectEqual(@as(u32, 1), grid.custom_block_count);
+    try std.testing.expect(!grid.prepareCustomBlocks());
+    grid.removeChunk(road_coords);
+    try std.testing.expect(grid.custom_dirty);
+    // With no custom records left, this retires the draws independently of any
+    // queued ordinary upload or available GPU face-buffer capacity.
+    try std.testing.expect(grid.prepareCustomBlocks());
+    try std.testing.expect(!grid.custom_dirty);
+    try std.testing.expectEqual(@as(u32, 0), grid.custom_block_count);
 }

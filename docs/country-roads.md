@@ -47,16 +47,38 @@ the cell floor to the inclined surface.
 
 Custom cells neither emit ordinary voxel faces nor hide neighboring ordinary faces.
 Boundary masks and enclosure flags follow the same rule. Both local and authoritative mesh
-payloads carry separate custom draw descriptors. The renderer draws each descriptor
-individually after ordinary geometry, with scene depth, atlas textures, normals,
-post-processing, and directional shadows. Custom-only chunks remain renderable even when
-they have no ordinary faces.
+payloads carry separate custom draw descriptors. Each descriptor defines one independent
+block, submitted as an instance after ordinary geometry, with scene depth, atlas textures,
+normals, post-processing, and directional shadows. Custom-only chunks remain renderable
+even when they have no ordinary faces.
 
 Custom descriptors use a separate 4 MiB GPU buffer with 48-byte records. They do not consume
 ordinary voxel face slots. Upload preflight checks both buffers; removals refresh custom
-draws even if ordinary uploads are waiting for capacity.
+draws even if ordinary uploads are waiting for capacity. Custom records are rebuilt only
+when resident custom descriptors change; ordinary-only chunk changes leave the buffer clean.
+Instances share one draw per pass, for four draws across the forward pass and three shadow
+cascades, regardless of the number of road cells. Their geometry stays outside chunk meshes.
 
 Formation and reversion update every affected chunk's revision and travel in the service's
 atomic response packages. Saved orientations survive subscription eviction in service
 memory. Optimistic edits pin affected road chunks, preserve undo metadata for rejected
 commands, and replay after snapshots. Disk persistence remains unimplemented.
+
+Before an accepted snapshot replaces any chunk, pending road changes are undone in reverse
+order across all their affected sections. The commands then replay against the updated
+baseline, rebuilding their undo records. Rejections use the same rebase for remaining
+commands. This keeps cross-chunk runs coherent and prevents old undo data from overwriting
+newer authoritative ownership. Pending formations retain their chosen direction when later
+crossings make the final pattern ambiguous; a newer authoritative crossing owner takes
+precedence. The extra work is bounded by pending edits and their
+changed sections, and runs when snapshots or rejections arrive.
+
+Collision reads material and custom shape together, querying sparse road metadata only for
+cells with value 255. Standing-space and player support share the clamped-footprint surface
+calculation. A ceiling can clip an uphill lift; the valid partial lift continues through
+horizontal sweeping and settling, so a player can leave the ceiling when the path is clear.
+
+GPU geometry readback covers every section of 4-, 7-, and 12-section runs in all directions,
+including zero-height ends, and verifies actual atlas UVs and normals. A full raster/image
+regression harness, per-chunk upload ranges, and a road-index map are deferred: they add
+resource or bookkeeping complexity, and the latter two need profiling evidence first.

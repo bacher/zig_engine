@@ -40,7 +40,7 @@ Colorized primitives and window boxes use their own pipeline/bindings. A window 
 
 Skyboxes use camera rotation and projection, omitting translation. The dedicated cubemap skybox is drawn separately before voxels and the queried ordinary objects. Skyboxes are excluded from shadow casting.
 
-CPU world transforms remain in `f64`. GPU paths use chunk-local matrices plus integer chunk coordinates, with a camera/cascade chunk origin. Integer chunk subtraction and optional x wrapping happen before conversion to meters. The application selects wrapping at compile time. Scenes acquire a reference to six specialized pipelines in the engine cache: unwrapped scenes share one set, and wrapped scenes share by x width. Unwrapped shaders omit periodic arithmetic and width/mask constants. Common pipelines stay engine-owned. See [world configuration](world-configuration.md) and [coordinates](coordinates.md); using an absolute-world `f32` matrix would break the large-position guarantees.
+CPU world transforms remain in `f64`. GPU paths use chunk-local matrices plus integer chunk coordinates, with a camera/cascade chunk origin. Integer chunk subtraction and optional x wrapping happen before conversion to meters. The application selects wrapping at compile time. Scenes acquire a reference to eight specialized pipelines in the engine cache: unwrapped scenes share one set, and wrapped scenes share by x width. Unwrapped shaders omit periodic arithmetic and width/mask constants. Common pipelines stay engine-owned. See [world configuration](world-configuration.md) and [coordinates](coordinates.md); using an absolute-world `f32` matrix would break the large-position guarantees.
 
 ## Zig/WGSL type naming agreement
 
@@ -151,9 +151,9 @@ Each shadow cascade draws combinations 0 and 7 for every GPU-resident voxel chun
 Custom cells (block value 255) do not enter the face lists and do not occlude neighboring
 ordinary faces. Separate descriptors accompany local/service mesh payloads. A custom-only
 chunk can have zero ordinary faces. `VoxelGrid` retains its descriptors and uploads 48-byte
-records to a separate 4 MiB storage buffer. The forward pass draws each custom block
-individually after ordinary voxel/object geometry, before SSAO. Shadow cascades also submit
-individual custom draws. Both passes share the custom vertex function and restore the scene
+records to a separate 4 MiB storage buffer. The forward pass submits custom blocks as
+separate instances in one draw after ordinary voxel/object geometry, before SSAO. Each shadow cascade also uses one
+instanced custom draw. Both passes share the custom vertex function and restore the scene
 bindings after ordinary object rendering. Road slope planes match CPU collision; unformed
 adaptive roads use temporary inset marker geometry. See [country roads](country-roads.md).
 
@@ -279,4 +279,4 @@ Frame statistics include candidate object count, uploaded instance-range size, v
 - [`world_shader_tests.zig`](../src/engine/world_shader_tests.zig), [`world_coordinate_readback.zig`](../src/engine/world_coordinate_readback.zig): headless production-pipeline validation, cache lifetimes, and numerical GPU/CPU coordinate comparison through compute/readback.
 - [`voxel_tests.zig`](../src/engine/voxel_tests.zig): face/upload data and allocator behavior without creating a GPU device.
 
-`zig build test` exercises the registered CPU tests under both application wrapping configurations. `zig build test-gpu` separately validates the six specialized pipelines and their cache sharing, reference lifetimes, and allocation cleanup with headless Dawn in each compiled wrapping mode. It also validates the height-map pipeline, covering every pipeline that embeds the shared shadow sampler, and executes the production coordinate helper to compare GPU readback with CPU results at seams, half-period ties, f32 precision boundaries, and signed i32 limits, using three world widths. These checks do not replace a runtime visual check of rendering, alpha/shadow agreement, SSAO, or resize.
+`zig build test` exercises the registered CPU tests under both application wrapping configurations. `zig build test-gpu` separately validates the eight specialized pipelines and their cache sharing, reference lifetimes, and allocation cleanup with headless Dawn in each compiled wrapping mode. It also validates the height-map pipeline, covering every pipeline that embeds the shared shadow sampler, and executes the production coordinate helper to compare GPU readback with CPU results at seams, half-period ties, f32 precision boundaries, and signed i32 limits, using three world widths. These checks do not replace a runtime visual check of rendering, alpha/shadow agreement, SSAO, or resize.

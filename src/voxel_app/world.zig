@@ -210,6 +210,9 @@ pub const PendingOperation = struct {
     operation: BlockOperation,
     previous_road: ?@import("road_data.zig").Road = null,
     road_undo: std.ArrayList(roads.Undo) = .empty,
+    /// Chosen before later edits can introduce an ambiguous crossing. Unlike undo
+    /// baselines, these ownership snapshots survive a rebase until acknowledged.
+    road_formations: std.ArrayList(@import("road_data.zig").Slope) = .empty,
     /// Assigned when the command is submitted to the service.
     request_id: ?u64 = null,
 };
@@ -343,7 +346,10 @@ pub const World = struct {
         var iterator = self.chunks.valueIterator();
         while (iterator.next()) |chunk| chunk.deinit(self.allocator);
         self.chunks.deinit(self.allocator);
-        for (self.pending_operations.items) |*pending| pending.road_undo.deinit(self.allocator);
+        for (self.pending_operations.items) |*pending| {
+            pending.road_undo.deinit(self.allocator);
+            pending.road_formations.deinit(self.allocator);
+        }
         self.pending_operations.deinit(self.allocator);
         self.changed_road_chunks.deinit(self.allocator);
         self.allocator.destroy(@constCast(self.layout));
@@ -357,16 +363,24 @@ pub const World = struct {
     /// Replaces the cache with authoritative data, then replays pending commands in order.
     pub fn insertChunk(self: *World, coords: ChunkCoords, chunk: WorldChunk) error{StaleChunk}!void {
         const position = self.layout.encodeChunkCoords(coords);
+        if (self.chunks.get(position)) |previous| {
+            if (chunk.chunk_revision < previous.chunk_revision) return error.StaleChunk;
+        }
+        // Undo the entire pending road overlay before replacing any part of its
+        // baseline. Replaying against mixed authoritative/optimistic sections can
+        // otherwise split a run, or save stale metadata for a later rejection.
+        self.rollbackRoads();
         var updated = chunk;
         if (self.chunks.getPtr(position)) |previous| {
-            if (chunk.chunk_revision < previous.chunk_revision) return error.StaleChunk;
             // An in-flight snapshot must never undo an optimistic reveal.
             updated.flags.is_unreachable = updated.flags.is_unreachable and previous.flags.is_unreachable;
             previous.deinit(self.allocator);
         }
-        for (self.pending_operations.items) |pending| {
+        for (self.pending_operations.items) |*pending| {
             const pending_coords, const local = splitBlockCoords(pending.operation.block);
             if (self.layout.encodeChunkCoords(pending_coords) == position) {
+                if (pending.operation.action == .remove and updated.content.getBlock(local) == .custom)
+                    pending.previous_road = updated.metadata.road(transformations.index(local));
                 _ = updated.apply(self.allocator, local, pending.operation.action);
                 if (pending.operation.action == .put)
                     updated.metadata.markConstructed(self.allocator, transformations.index(local));
@@ -387,9 +401,32 @@ pub const World = struct {
         self.replayRoads();
     }
 
+    /// Restore the current authoritative road baseline in reverse edit order.
+    /// Undo records are regenerated after each snapshot, so none outlive the
+    /// baseline they describe. Work is limited to sections changed by pending edits.
+    fn rollbackRoads(self: *World) void {
+        var i = self.pending_operations.items.len;
+        while (i > 0) {
+            i -= 1;
+            const pending = &self.pending_operations.items[i];
+            for (pending.road_undo.items) |entry| {
+                const coords, const local = splitBlockCoords(entry.block);
+                const id = self.layout.encodeChunkCoords(coords);
+                const chunk = self.chunks.getPtr(id) orelse continue;
+                const road = chunk.metadata.roadPtr(transformations.index(local)) orelse continue;
+                if (std.meta.eql(road.slope, entry.slope)) continue;
+                road.slope = entry.slope;
+                if (std.mem.indexOfScalar(u32, self.changed_road_chunks.items, id) == null)
+                    self.changed_road_chunks.append(self.allocator, id) catch @panic("OOM");
+            }
+            pending.road_undo.clearRetainingCapacity();
+        }
+    }
+
     pub fn replayRoads(self: *World) void {
         for (self.pending_operations.items) |*pending| {
-            const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .undo = &pending.road_undo };
+            const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .undo = &pending.road_undo, .formed = &pending.road_formations };
+            for (pending.road_formations.items) |slope| context.restoreFormation(slope);
             context.afterEdit(pending.operation, pending.previous_road);
         }
         self.stampRoadChanges();
@@ -405,6 +442,7 @@ pub const World = struct {
     pub fn customShape(self: *const World, block: [3]u32) ?@import("engine").voxel_chunk.custom_block.Shape {
         const coords, const local = splitBlockCoords(block);
         const chunk = self.getChunk(coords) orelse return null;
+        if (chunk.content.getBlock(local) != .custom) return null;
         const road = chunk.metadata.road(transformations.index(local)) orelse return null;
         return road.shape();
     }
@@ -438,18 +476,11 @@ pub const World = struct {
     pub fn acknowledgeOperationResult(self: *World, request_id: u64, status: OperationStatus) void {
         for (self.pending_operations.items, 0..) |*pending, i| {
             if (pending.request_id == request_id) {
-                if (status != .success) for (pending.road_undo.items) |entry| {
-                    const coords, const local = splitBlockCoords(entry.block);
-                    const id = self.layout.encodeChunkCoords(coords);
-                    const chunk = self.chunks.getPtr(id) orelse continue;
-                    const road = chunk.metadata.roadPtr(transformations.index(local)) orelse continue;
-                    road.slope = entry.slope;
-                    if (std.mem.indexOfScalar(u32, self.changed_road_chunks.items, id) == null)
-                        self.changed_road_chunks.append(self.allocator, id) catch @panic("OOM");
-                };
+                if (status != .success) self.rollbackRoads();
                 pending.road_undo.deinit(self.allocator);
+                pending.road_formations.deinit(self.allocator);
                 _ = self.pending_operations.orderedRemove(i);
-                self.stampRoadChanges();
+                if (status != .success) self.replayRoads();
                 return;
             }
         }
@@ -551,7 +582,8 @@ pub const World = struct {
         chunk.validation_revision = self.validation_revision;
         self.revealNeighbors(coords, chunk.flags);
         self.pending_operations.append(self.allocator, .{ .operation = operation, .previous_road = previous_road }) catch @panic("OOM");
-        const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .undo = &self.pending_operations.items[self.pending_operations.items.len - 1].road_undo };
+        const pending = &self.pending_operations.items[self.pending_operations.items.len - 1];
+        const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .undo = &pending.road_undo, .formed = &pending.road_formations };
         context.afterEdit(operation, previous_road);
         self.stampRoadChanges();
     }

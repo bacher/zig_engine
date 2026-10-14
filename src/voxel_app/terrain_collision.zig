@@ -36,30 +36,28 @@ pub const Query = struct {
     /// Only contact queries report missing data; recovery searches remain quiet.
     missing_chunk: ?engine.ChunkCoords = null,
 
-    fn shapeAt(self: *const Query, cell: Cell) ?custom.Shape {
-        return self.world.customShape(coordinates.fromWorld(self.world.layout, cell) orelse return null);
-    }
-
     fn shapeContact(self: *const Query, shape: custom.Shape, cell: Cell, feet: Position, delta: Position) ?f64 {
         return shape.sweep(feet - @as(Position, @floatFromInt(cell)), delta, .{ -self.body.half_width, -self.body.half_width, 0 }, .{ self.body.half_width, self.body.half_width, self.body.height });
     }
 
-    fn surfaceHeight(_: *const Query, shape: custom.Shape, cell: Cell, bounds: Bounds) f64 {
-        const origin: Position = @floatFromInt(cell);
-        const low = @max(bounds.min - origin, @as(Position, @splat(0)));
-        const high = @min(bounds.max - origin, @as(Position, @splat(1)));
-        return origin[2] + shape.supportHeight(.{ low[0], low[1] }, .{ high[0], high[1] });
-    }
+    const CellState = struct { occupancy: Overlap, shape: ?custom.Shape = null };
 
-    fn cellState(self: *Query, cell: Cell, report_missing: bool) Overlap {
+    fn cellState(self: *Query, cell: Cell, report_missing: bool) CellState {
         // The finite y/z edges are walls. X follows the voxel application's topology.
-        const block = coordinates.fromWorld(self.world.layout, cell) orelse return .solid;
+        const block = coordinates.fromWorld(self.world.layout, cell) orelse return .{ .occupancy = .solid };
         const chunk_coords, const local = @import("world.zig").splitBlockCoords(block);
         const chunk = self.world.getChunk(chunk_coords) orelse {
             if (report_missing) self.missing_chunk = self.missing_chunk orelse chunk_coords;
-            return .missing;
+            return .{ .occupancy = .missing };
         };
-        return if (movementCollision(chunk.content.getBlock(local)) == .full_cube) .solid else .clear;
+        const material = chunk.content.getBlock(local);
+        // One chunk/material lookup per cell; sparse road metadata is only read
+        // for the custom sentinel, never for ordinary terrain or air.
+        const road = if (material == .custom) chunk.metadata.road(@import("block_transformations.zig").index(local)) else null;
+        return .{
+            .occupancy = if (movementCollision(material) == .full_cube) .solid else .clear,
+            .shape = if (road) |r| r.shape() else null,
+        };
     }
 
     pub fn overlap(self: *Query, feet: Position, report_missing: bool) Overlap {
@@ -73,10 +71,11 @@ pub const Query = struct {
             while (y <= last[1]) : (y += 1) {
                 var x = first[0];
                 while (x <= last[0]) : (x += 1) {
-                    switch (self.cellState(.{ x, y, z }, report_missing)) {
+                    const state = self.cellState(.{ x, y, z }, report_missing);
+                    switch (state.occupancy) {
                         .solid => {
-                            if (self.shapeAt(.{ x, y, z })) |shape| {
-                                if (shape == .slope and bounds.min[2] >= self.surfaceHeight(shape, .{ x, y, z }, bounds) - epsilon) continue;
+                            if (state.shape) |shape| {
+                                if (shape == .slope and bounds.min[2] >= geometry.surfaceHeight(shape, .{ x, y, z }, bounds) - epsilon) continue;
                             }
                             result = .solid;
                         },
@@ -111,7 +110,9 @@ pub const Query = struct {
                 var x = first[0];
                 while (x <= last[0]) : (x += 1) {
                     const cell = Cell{ x, y, z };
-                    if (self.shapeAt(cell)) |shape| if (shape == .slope) {
+                    const state = self.cellState(cell, false);
+                    if (state.occupancy == .clear) continue;
+                    if (state.shape) |shape| if (shape == .slope) {
                         if (self.shapeContact(shape, cell, feet, delta)) |fraction| {
                             const time = fraction * duration;
                             if (contact == null or time < contact.?) contact = time;
@@ -132,7 +133,8 @@ pub const Query = struct {
                         }
                     }
                     if (enter >= leave or (contact != null and enter > contact.?)) continue;
-                    if (self.cellState(cell, true) != .clear) contact = enter;
+                    if (state.occupancy == .missing) _ = self.cellState(cell, true);
+                    contact = enter;
                 }
             }
         }
@@ -156,7 +158,9 @@ pub const Query = struct {
                 var x = first[0];
                 while (x <= last[0]) : (x += 1) {
                     const cell = Cell{ x, y, z };
-                    if (self.shapeAt(cell)) |shape| if (shape == .slope) {
+                    const state = self.cellState(cell, false);
+                    if (state.occupancy == .clear) continue;
+                    if (state.shape) |shape| if (shape == .slope) {
                         var delta: Position = @splat(0);
                         delta[axis] = distance;
                         if (self.shapeContact(shape, cell, feet, delta)) |fraction| {
@@ -169,7 +173,7 @@ pub const Query = struct {
                     const gap = if (distance > 0) face - body_bounds.max[axis] else face + 1 - body_bounds.min[axis];
                     if (distance > 0 and (gap < -epsilon or gap > allowed)) continue;
                     if (distance < 0 and (gap > epsilon or gap < allowed)) continue;
-                    if (self.cellState(cell, true) == .clear) continue;
+                    if (state.occupancy == .missing) _ = self.cellState(cell, true);
                     allowed = if (distance > 0) @max(0, gap) else @min(0, gap);
                 }
             }
@@ -193,9 +197,11 @@ pub const Query = struct {
                 var x = area.first[0];
                 while (x <= area.last[0]) : (x += 1) {
                     const cell: Cell = .{ x, y, z };
-                    if (coordinates.fromWorld(self.world.layout, cell) == null or self.cellState(cell, true) != .solid) continue;
-                    const shape = self.shapeAt(cell);
-                    const height = if (shape) |s| self.surfaceHeight(s, cell, footprint) else @as(f64, @floatFromInt(z + 1));
+                    if (coordinates.fromWorld(self.world.layout, cell) == null) continue;
+                    const state = self.cellState(cell, true);
+                    if (state.occupancy != .solid) continue;
+                    const shape = state.shape;
+                    const height = if (shape) |s| geometry.surfaceHeight(s, cell, footprint) else @as(f64, @floatFromInt(z + 1));
                     if (height < lower - epsilon or height > upper + epsilon) continue;
                     const is_slope = if (shape) |s| s == .slope else false;
                     if (result == null or height > result.?.height + epsilon) {
@@ -219,7 +225,9 @@ pub const Query = struct {
         const target = self.groundSurface(destination, feet[2] - reach, feet[2] + reach) orelse return self.moveAxis(feet, axis, distance);
         if (!current.slope and !target.slope) return self.moveAxis(feet, axis, distance);
         const raised = self.moveAxis(feet, 2, @max(0, target.height - feet[2]));
-        if (raised.collided) return self.moveAxis(feet, axis, distance);
+        // A ceiling may clip the lift just as the trailing edge leaves it. Keep
+        // that valid partial rise; the horizontal sweep still clips against the
+        // slope, and settling preserves both ceiling clearance and ground contact.
         const horizontal = self.moveAxis(raised.position, axis, distance);
         const actual = self.groundSurface(horizontal.position, feet[2] - reach, feet[2] + reach) orelse return horizontal;
         const settled = self.moveAxis(horizontal.position, 2, actual.height - horizontal.position[2]);

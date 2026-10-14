@@ -782,7 +782,7 @@ pub const Engine = struct {
                             camera_chunk_uniform.offset,
                         });
                         shadow_map_pass.setBindGroup(1, scene.voxel_bind_group.wgpu_bind_group, &.{});
-                        for (0..scene.voxel_grid.custom_block_count) |i| shadow_map_pass.draw(36, 1, 0, @intCast(i));
+                        if (scene.voxel_grid.custom_block_count > 0) shadow_map_pass.draw(36, scene.voxel_grid.custom_block_count, 0, 0);
 
                         engine.temp_buffers.resetDrawingLists();
                     }
@@ -944,7 +944,7 @@ pub const Engine = struct {
                     pass.setBindGroup(1, engine.bind_group_minecraft_texture.wgpu_bind_group, &.{});
                     pass.setBindGroup(2, engine.bind_group_shadow_map.wgpu_bind_group, &.{global_light_clip_matrix_array.offset});
                     pass.setBindGroup(3, scene.voxel_bind_group.wgpu_bind_group, &.{});
-                    for (0..scene.voxel_grid.custom_block_count) |i| pass.draw(36, 1, 0, @intCast(i));
+                    if (scene.voxel_grid.custom_block_count > 0) pass.draw(36, scene.voxel_grid.custom_block_count, 0, 0);
 
                     if (DEBUG_SHOW_WIREFRAME_OBJECTS) {
                         pass.setPipeline(engine.pipelines.lines.pipeline_gpu);

@@ -142,7 +142,7 @@ This optimization depends on cave-free, solid generated terrain. It is not gener
 
 ## GPU storage and capacity
 
-`VoxelGrid` owns a face buffer of 4 MiB and a separate chunk-metadata buffer with 4096 slots. Faces use four-byte local-coordinate/type records; chunk metadata uses 112 bytes. GPU vertices are generated from those records in WGSL. Custom blocks use another 4 MiB buffer of 48-byte records and individual draws; custom-only chunks do not require ordinary face slots. See [country roads](country-roads.md).
+`VoxelGrid` owns a face buffer of 4 MiB and a separate chunk-metadata buffer with 4096 slots. Faces use four-byte local-coordinate/type records; chunk metadata uses 112 bytes. GPU vertices are generated from those records in WGSL. Custom blocks use another 4 MiB buffer of 48-byte records and instanced draws; custom-only chunks do not require ordinary face slots. See [country roads](country-roads.md).
 
 Face allocations use power-of-two multiples of a 1024-byte slot. Sixty-four spans each contain 64 slots; a span uses one allocation size at a time until emptied. The maximum per-chunk allocation is 64 KiB, or 16384 face records. Total free bytes alone do not establish capacity because rounding, size classes, and fragmentation matter.
 
