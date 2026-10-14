@@ -312,6 +312,14 @@ const Game = struct {
         const world = &game.world.?;
         for (package.responses.items) |response| {
             if (response.operation) |result| {
+                // Rejection now restores material before snapshots are installed.
+                // Invalidate its face dependencies before the old boundary is lost.
+                if (result.status != .success) {
+                    for (world.pending_operations.items) |pending| if (pending.request_id == result.request_id) {
+                        game.markChunksAroundBlockDirty(pending.operation.block);
+                        break;
+                    };
+                }
                 world.acknowledgeOperationResult(result.request_id, result.status);
                 world.last_edit_result = .{ .status = result.status, .failure = result.failure, .mined_type = result.mined_type };
                 game.showBlockEditError(world.last_edit_result.?);

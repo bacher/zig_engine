@@ -206,9 +206,49 @@ pub const BlockOperation = struct {
     }
 };
 
+/// Sparse baseline for the one cell a command can change. Road transitions keep
+/// their own section undo; together these restore materials AND metadata.
+const CellState = struct {
+    material: BlockType,
+    road: ?@import("road_data.zig").Road,
+    timed: ?transformations.Event,
+    constructed: bool,
+
+    fn capture(chunk: *const WorldChunk, local: [3]u5) CellState {
+        const index = transformations.index(local);
+        var timed: ?transformations.Event = null;
+        for (chunk.metadata.timed.events.items) |event| if (event.block == index) {
+            timed = event;
+            break;
+        };
+        return .{
+            .material = chunk.content.getBlock(local),
+            .road = chunk.metadata.road(index),
+            .timed = timed,
+            .constructed = std.mem.indexOfScalar(transformations.BlockIndex, chunk.metadata.constructed.items, index) != null,
+        };
+    }
+
+    fn restore(self: CellState, allocator: std.mem.Allocator, chunk: *WorldChunk, local: [3]u5) void {
+        const existing = chunk.content.getBlock(local);
+        if (existing != self.material) {
+            if (existing != .none) _ = chunk.apply(allocator, local, .remove);
+            if (self.material != .none) _ = chunk.apply(allocator, local, .{
+                .put = if (self.material == .custom) .country_road_adaptive else self.material,
+            });
+        }
+        const index = transformations.index(local);
+        chunk.metadata.remove(index);
+        if (self.road) |road| chunk.metadata.roads.append(allocator, road) catch @panic("OOM");
+        if (self.timed) |event| chunk.metadata.timed.schedule(allocator, event);
+        if (self.constructed) chunk.metadata.markConstructed(allocator, index);
+    }
+};
+
 pub const PendingOperation = struct {
     operation: BlockOperation,
-    previous_road: ?@import("road_data.zig").Road = null,
+    cell_undo: ?CellState = null,
+    mark_constructed: bool = false,
     road_undo: std.ArrayList(roads.Undo) = .empty,
     /// Chosen before later edits can introduce an ambiguous crossing. Unlike undo
     /// baselines, these ownership snapshots survive a rebase until acknowledged.
@@ -366,25 +406,15 @@ pub const World = struct {
         if (self.chunks.get(position)) |previous| {
             if (chunk.chunk_revision < previous.chunk_revision) return error.StaleChunk;
         }
-        // Undo the entire pending road overlay before replacing any part of its
-        // baseline. Replaying against mixed authoritative/optimistic sections can
-        // otherwise split a run, or save stale metadata for a later rejection.
-        self.rollbackRoads();
+        // Restore the baseline across ALL pending cells/sections, including chunks
+        // other than this snapshot's. Later materials must not be visible when an
+        // earlier command captures removal ownership or evaluates formation.
+        self.rollbackPending();
         var updated = chunk;
         if (self.chunks.getPtr(position)) |previous| {
             // An in-flight snapshot must never undo an optimistic reveal.
             updated.flags.is_unreachable = updated.flags.is_unreachable and previous.flags.is_unreachable;
             previous.deinit(self.allocator);
-        }
-        for (self.pending_operations.items) |*pending| {
-            const pending_coords, const local = splitBlockCoords(pending.operation.block);
-            if (self.layout.encodeChunkCoords(pending_coords) == position) {
-                if (pending.operation.action == .remove and updated.content.getBlock(local) == .custom)
-                    pending.previous_road = updated.metadata.road(transformations.index(local));
-                _ = updated.apply(self.allocator, local, pending.operation.action);
-                if (pending.operation.action == .put)
-                    updated.metadata.markConstructed(self.allocator, transformations.index(local));
-            }
         }
         // Loads and neighboring snapshots can arrive in either order. Account for walls
         // already opened in the cache, including edits that haven't reached the service.
@@ -398,13 +428,13 @@ pub const World = struct {
         self.chunks.put(self.allocator, position, updated) catch @panic("OOM");
         self.revealNeighbors(coords, updated.flags);
         // A pending operation can affect sections outside the replaced chunk.
-        self.replayRoads();
+        self.replayPending();
     }
 
-    /// Restore the current authoritative road baseline in reverse edit order.
+    /// Restore the current authoritative material/metadata baseline in reverse edit order.
     /// Undo records are regenerated after each snapshot, so none outlive the
     /// baseline they describe. Work is limited to sections changed by pending edits.
-    fn rollbackRoads(self: *World) void {
+    fn rollbackPending(self: *World) void {
         var i = self.pending_operations.items.len;
         while (i > 0) {
             i -= 1;
@@ -420,16 +450,42 @@ pub const World = struct {
                     self.changed_road_chunks.append(self.allocator, id) catch @panic("OOM");
             }
             pending.road_undo.clearRetainingCapacity();
+            if (pending.cell_undo) |state| {
+                const coords, const local = splitBlockCoords(pending.operation.block);
+                if (self.chunks.getPtr(self.layout.encodeChunkCoords(coords))) |chunk| {
+                    state.restore(self.allocator, chunk, local);
+                }
+            }
+            pending.cell_undo = null;
         }
     }
 
-    pub fn replayRoads(self: *World) void {
-        for (self.pending_operations.items) |*pending| {
-            const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .undo = &pending.road_undo, .formed = &pending.road_formations };
-            for (pending.road_formations.items) |slope| context.restoreFormation(slope);
-            context.afterEdit(pending.operation, pending.previous_road);
-        }
+    fn replayPending(self: *World) void {
+        for (self.pending_operations.items) |*pending| self.applyPending(pending, false);
         self.stampRoadChanges();
+    }
+
+    /// One ordered replay step: capture ownership, mutate material, then restore
+    /// saved formations and evaluate the road transition against this exact state.
+    fn applyPending(self: *World, pending: *PendingOperation, stamp_material: bool) void {
+        const coords, const local = splitBlockCoords(pending.operation.block);
+        const chunk = self.chunks.getPtr(self.layout.encodeChunkCoords(coords)) orelse return;
+        const before = CellState.capture(chunk, local);
+        if (chunk.apply(self.allocator, local, pending.operation.action) == .success) {
+            pending.cell_undo = before;
+            if (pending.mark_constructed and pending.operation.action == .put)
+                chunk.metadata.markConstructed(self.allocator, transformations.index(local));
+            // Rollback/replay is internal to a rebase. Outside the replaced or
+            // rejected chunk, unchanged materials retain their validation stamp.
+            if (stamp_material) {
+                self.validation_revision +%= 1;
+                chunk.validation_revision = self.validation_revision;
+            }
+            self.revealNeighbors(coords, chunk.flags);
+        }
+        const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .undo = &pending.road_undo, .formed = &pending.road_formations };
+        for (pending.road_formations.items) |slope| context.restoreFormation(slope);
+        context.afterEdit(pending.operation, before.road);
     }
 
     fn stampRoadChanges(self: *World) void {
@@ -476,11 +532,21 @@ pub const World = struct {
     pub fn acknowledgeOperationResult(self: *World, request_id: u64, status: OperationStatus) void {
         for (self.pending_operations.items, 0..) |*pending, i| {
             if (pending.request_id == request_id) {
-                if (status != .success) self.rollbackRoads();
+                if (status != .success) {
+                    self.rollbackPending();
+                    const coords, _ = splitBlockCoords(pending.operation.block);
+                    if (self.chunks.getPtr(self.layout.encodeChunkCoords(coords))) |chunk| {
+                        self.validation_revision +%= 1;
+                        chunk.validation_revision = self.validation_revision;
+                    }
+                }
+                // The service acknowledges this client's commands in submission
+                // order. An accepted prefix is the new baseline; later commands'
+                // cell/section undo already includes its effects.
                 pending.road_undo.deinit(self.allocator);
                 pending.road_formations.deinit(self.allocator);
                 _ = self.pending_operations.orderedRemove(i);
-                if (status != .success) self.replayRoads();
+                if (status != .success) self.replayPending();
                 return;
             }
         }
@@ -560,6 +626,7 @@ pub const World = struct {
             .remove => .none,
         });
         if (operation.action == .put) {
+            self.pending_operations.items[self.pending_operations.items.len - 1].mark_constructed = true;
             const coords, const local = splitBlockCoords(operation.block);
             self.chunks.getPtr(self.layout.encodeChunkCoords(coords)).?.metadata.markConstructed(self.allocator, transformations.index(local));
         }
@@ -576,15 +643,11 @@ pub const World = struct {
         operation.validate(self.layout);
         const coords, const local = splitBlockCoords(block);
         const chunk = self.chunks.getPtr(self.layout.encodeChunkCoords(coords)).?;
-        const previous_road = chunk.metadata.road(transformations.index(local));
-        if (chunk.apply(self.allocator, local, operation.action) != .success) return;
-        self.validation_revision +%= 1;
-        chunk.validation_revision = self.validation_revision;
-        self.revealNeighbors(coords, chunk.flags);
-        self.pending_operations.append(self.allocator, .{ .operation = operation, .previous_road = previous_road }) catch @panic("OOM");
+        const existing = chunk.content.getBlock(local);
+        if ((operation.action == .put and existing != .none) or (operation.action == .remove and existing == .none)) return;
+        self.pending_operations.append(self.allocator, .{ .operation = operation }) catch @panic("OOM");
         const pending = &self.pending_operations.items[self.pending_operations.items.len - 1];
-        const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .undo = &pending.road_undo, .formed = &pending.road_formations };
-        context.afterEdit(operation, previous_road);
+        self.applyPending(pending, true);
         self.stampRoadChanges();
     }
 
@@ -968,6 +1031,43 @@ test "failed remove and unrelated worker edits survive reconciliation" {
     try std.testing.expectEqual(BlockType.grass, chunk.content.getBlock(.{ 1, 2, 3 }));
     try std.testing.expectEqual(BlockType.stone, chunk.content.getBlock(.{ 4, 5, 6 }));
     try std.testing.expectEqual(2, chunk.solid_block_count);
+}
+
+test "material rollback restores authoritative construction and ordered timers after repeated cell edits" {
+    var world = try World.init(std.testing.allocator, &test_layout);
+    defer world.deinit();
+    const coords = ChunkCoords{ 0, 0, 0 };
+    const local = [3]u5{ 1, 2, 3 };
+    const index = transformations.index(local);
+    var authority = WorldChunk.initEmpty();
+    defer authority.deinit(std.testing.allocator);
+    _ = authority.apply(std.testing.allocator, local, .{ .put = .dirt });
+    _ = authority.apply(std.testing.allocator, .{ 4, 5, 6 }, .{ .put = .dirt });
+    authority.metadata.markConstructed(std.testing.allocator, index);
+    authority.metadata.timed.schedule(std.testing.allocator, .{ .block = index, .kind = .compact_dirt, .due_tick = 30 });
+    authority.metadata.timed.schedule(std.testing.allocator, .{ .block = transformations.index(.{ 4, 5, 6 }), .kind = .compact_dirt, .due_tick = 20 });
+    try world.insertChunk(coords, authority.clone(std.testing.allocator));
+    world.setBlockUnchecked(.{ 1, 2, 3 }, .none);
+    world.pending_operations.items[0].request_id = 1;
+    world.setBlockUnchecked(.{ 1, 2, 3 }, .snow);
+    world.pending_operations.items[1].request_id = 2;
+
+    // A newer baseline must replace every part of the removed cell's undo,
+    // including its timer, while the later put remains visible during replay.
+    authority.metadata.timed.schedule(std.testing.allocator, .{ .block = index, .kind = .grow_grass, .due_tick = 10 });
+    authority.chunk_revision = 2;
+    try world.insertChunk(coords, authority.clone(std.testing.allocator));
+    try std.testing.expectEqual(BlockType.snow, world.getChunk(coords).?.content.getBlock(local));
+    const window = world.validationWindow(.{ 1, 2, 3 });
+    world.acknowledgeOperationResult(1, .constraint_violation);
+    try std.testing.expect(!window.isCurrent(&world));
+    world.acknowledgeOperationResult(2, .already_exists);
+    const chunk = world.getChunk(coords).?;
+    try std.testing.expectEqual(BlockType.dirt, chunk.content.getBlock(local));
+    try std.testing.expectEqualSlices(transformations.BlockIndex, authority.metadata.constructed.items, chunk.metadata.constructed.items);
+    try std.testing.expectEqualDeep(authority.metadata.timed.events.items, chunk.metadata.timed.events.items);
+    try std.testing.expectEqualDeep(boundary_mask.extract(chunk.content.blocks), chunk.boundaries);
+    try std.testing.expectEqual(chunk.content.blocks.countSolidBlocks(), chunk.solid_block_count);
 }
 
 test "older authoritative snapshots cannot undo a newer revision" {

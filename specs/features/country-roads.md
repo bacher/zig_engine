@@ -77,7 +77,7 @@ Optimistic replay and cross-chunk formation must not restore stale slope ownersh
 ### Validation
 
 `zig build test test-gpu install --summary all` completed successfully: 54/54 build steps,
-529 tests passed and 1 skipped. Both applications built. GPU checks passed on Apple M4 Max
+533 tests passed and 1 skipped. Both applications built. GPU checks passed on Apple M4 Max
 with Metal for both compiled wrapping configurations. Modified Zig sources were formatted,
 and `git diff --check` passed.
 
@@ -91,7 +91,7 @@ and `git diff --check` passed.
 | AC6 | Passed | The custom-cell mesh regression verifies separate draw records, no ordinary custom faces, and an exposed ordinary face across a chunk boundary; boundary-mask and enclosure checks also pass. |
 | AC7 | Passed | Direct-support regressions verify rejected placement and support removal with shared diagnostics; client/service validation checks pass. |
 | AC8 | Passed | Player regressions cover uphill/downhill travel in every direction, diagonal parallel lanes, continuous contact, jumping, fast falls, standing-space searches, ceiling clearance, and a clear uphill ceiling exit with a clipped lift. |
-| AC9 | Passed | Road snapshot/replay and rejected-edit regressions verify cross-chunk and wrapped-seam metadata, duplicate placement/removal rejection after newer snapshots, coherent pending formation, and preservation of later pending edits. The service regression verifies atomic formation/reversion and custom mesh reload after subscription eviction. |
+| AC9 | Passed | Road snapshot/replay and rejected-edit regressions verify cross-chunk and wrapped-seam metadata, duplicate placement/removal rejection after newer snapshots, coherent pending formation, and preservation of later pending edits. Ordered replay regressions reproduce the delayed snow response followed by endpoint rejection and removed/replaced crossing ownership, verify accepted formations survive later rejection, and preserve authoritative construction markers/timers. Existing boundary invalidation and validation-window tests cover immediate material rollback. The service regression verifies atomic formation/reversion and custom mesh reload after subscription eviction. |
 | AC10 | Passed | Dawn validates visible and shadow pipelines. Production GPU geometry readback verifies every section of lengths 4/7/12 in all directions, including zero-height ends, normals, actual atlas UVs, and the unformed marker; source review covers atlas, scene depth, lighting, and shadow draw integration. |
 
 Validation is automated and supplemented by source review. No interactive gameplay smoke
@@ -108,7 +108,12 @@ test or rendered-image comparison was performed.
 | GPU evidence | Expanded geometry/normal/UV checks to every section of 4/7/12 runs in every direction. A full forward/shadow raster harness remains deferred because it needs new scene, texture, lighting, and image-readback fixtures. |
 | Consistency | Implemented: document eight specialized pipelines and use the GPU_ payload prefix in shader readback. |
 
-The snapshot fixes rebase only pending edits and the road sections they changed. Saved
-pending formations retain their chosen direction, with bounded endpoint/member/support
-checks before replay; a newer authoritative owner wins. There is no global world scan or
-full-chunk baseline copy. The ceiling fix reuses the existing lift, sweep, and settle queries.
+The snapshot fixes rebase only pending edited cells and the road sections they changed.
+Sparse cell undo restores materials, road records, construction markers, and scheduled
+timers before each command replays its material mutation and road transition together.
+Removal ownership is captured immediately before its mutation, and formations/undo remain
+with the command that caused them. Saved pending formations retain their chosen direction,
+with bounded endpoint/member/support checks before replay; a newer authoritative owner wins.
+There is no global world scan or full-chunk baseline copy. Unchanged material chunks outside
+the received/rejected chunk retain their validation stamps, and rejection dirties the edited
+cell's face dependencies. The ceiling fix reuses the existing lift, sweep, and settle queries.

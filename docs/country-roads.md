@@ -64,14 +64,22 @@ atomic response packages. Saved orientations survive subscription eviction in se
 memory. Optimistic edits pin affected road chunks, preserve undo metadata for rejected
 commands, and replay after snapshots. Disk persistence remains unimplemented.
 
-Before an accepted snapshot replaces any chunk, pending road changes are undone in reverse
-order across all their affected sections. The commands then replay against the updated
-baseline, rebuilding their undo records. Rejections use the same rebase for remaining
-commands. This keeps cross-chunk runs coherent and prevents old undo data from overwriting
-newer authoritative ownership. Pending formations retain their chosen direction when later
-crossings make the final pattern ambiguous; a newer authoritative crossing owner takes
-precedence. The extra work is bounded by pending edits and their
-changed sections, and runs when snapshots or rejections arrive.
+Before an accepted snapshot replaces any chunk, pending changes are undone in reverse order
+across all their edited cells and affected road sections. Each edited cell retains a sparse
+baseline containing its material, road record, construction marker, and scheduled timer.
+Commands then replay in order: capture the cell's current road ownership, apply its material
+mutation, and restore/evaluate its road transition before advancing to the next command.
+Undo records are rebuilt against that baseline. Earlier commands cannot acquire formations
+caused by later materials, and removing a member revokes ownership before a later replacement
+can form a crossing. Rejections use the same rebase for remaining commands and invalidate
+the edited cell's neighboring meshes. Successful acknowledgments retire commands in service
+submission order, retaining their effects as the baseline for later pending commands.
+
+Pending formations retain their chosen direction when later crossings make the final pattern
+ambiguous; a newer authoritative crossing owner takes precedence. The extra work and storage
+are bounded by pending edits and their changed sections, with sparse chunk metadata lookups.
+There are no full-chunk baseline copies or global world scans. Internal material rollback and
+replay preserve validation stamps for unchanged chunks outside the received/rejected chunk.
 
 Collision reads material and custom shape together, querying sparse road metadata only for
 cells with value 255. Standing-space and player support share the clamped-footprint surface
