@@ -7,6 +7,45 @@ const coordinates = @import("block_coordinates.zig");
 const Cell = coordinates.Cell;
 
 pub const reach: f64 = 4;
+pub const Mode = enum { putting, removing };
+
+// A hit on either the occupied cube or its face-adjacent placement cube cannot
+// be farther than one cube diagonal from a reachable vertex. This bounds the
+// traversal without rejecting a candidate by its hit-face distance.
+const ray_limit = reach + @sqrt(@as(f64, 3));
+
+fn storagePosition(layout: *const engine.WorldLayout, position: Position) Position {
+    var start = position + @as(Position, @floatFromInt(layout.origin_chunk)) * @as(Position, @splat(engine.chunk_utils.CHUNK_SIZE));
+    start[0] = @mod(start[0], @as(f64, @floatFromInt(layout.size_in_blocks[0])));
+    return start;
+}
+
+/// Measure the candidate cube's nearest vertex, independently of the aimed face.
+/// Wrapped x uses the nearest copy of the cube, even after repeated world trips.
+pub fn withinReach(layout: *const engine.WorldLayout, position: Position, block: [3]u32) bool {
+    inline for (0..3) |axis| if (!std.math.isFinite(position[axis])) return false;
+    const start = storagePosition(layout, position);
+    var delta = @as(Position, @floatFromInt(@as(@Vector(3, u32), block))) - start;
+    const width: f64 = @floatFromInt(layout.size_in_blocks[0]);
+    delta[0] = @mod(delta[0] + 0.5 + width / 2, width) - width / 2 - 0.5;
+    // Each axis can independently choose its nearer cube endpoint.
+    const corner = @min(@abs(delta), @abs(delta + @as(Position, @splat(1))));
+    const distance_squared = @reduce(.Add, corner * corner);
+    // Allow only floating-point rounding at the storage-coordinate scale.
+    const tolerance = 8 * std.math.floatEps(f64) * @max(reach, @reduce(.Max, @abs(start)));
+    return std.math.isFinite(distance_squared) and distance_squared <= (reach + tolerance) * (reach + tolerance);
+}
+
+/// Shared by highlighting and actual actions: find the first occupied cell,
+/// select the edited cube, then apply its four-metre nearest-vertex reach check.
+pub fn findTarget(world: *const World, position: Position, direction: Position, mode: Mode) @import("world.zig").ChunkNotReceivedError!?[3]u32 {
+    const hit = (try cast(world, position, direction)) orelse return null;
+    const block = switch (mode) {
+        .removing => hit.block,
+        .putting => hit.placement orelse return null,
+    };
+    return if (withinReach(world.layout, position, block)) block else null;
+}
 
 pub const Hit = struct {
     block: [3]u32,
@@ -15,24 +54,23 @@ pub const Hit = struct {
     distance: f64,
 };
 
-/// Walk voxel boundaries in distance order, stopping at the first occupied cell.
+/// Walk voxel boundaries in distance order within the conservative ray limit,
+/// stopping at the first occupied cell. Hit distance does not decide tool reach.
 /// Unknown chunks stop the ray rather than allowing edits through unloaded terrain.
 pub fn cast(world: *const World, position: Position, direction: Position) @import("world.zig").ChunkNotReceivedError!?Hit {
     const length = @sqrt(@reduce(.Add, direction * direction));
     if (!std.math.isFinite(length) or length == 0) return null;
     inline for (0..3) |axis| if (!std.math.isFinite(position[axis])) return null;
     const forward = direction / @as(Position, @splat(length));
-    var start = position + @as(Position, @floatFromInt(world.layout.origin_chunk)) * @as(Position, @splat(engine.chunk_utils.CHUNK_SIZE));
-    // Keep periodic positions small before converting to integer cell coordinates.
-    start[0] = @mod(start[0], @as(f64, @floatFromInt(world.layout.size_in_blocks[0])));
+    const start = storagePosition(world.layout, position);
     // Allow eight f64 epsilon units at the storage-coordinate scale for origin
     // conversion, normalization and DDA accumulation. Use the same allowance for
-    // the inclusive reach limit and mathematically tied boundary crossings.
-    const distance_tolerance = 8 * std.math.floatEps(f64) * @max(reach, @reduce(.Max, @abs(start)));
-    const reach_limit = reach + distance_tolerance;
+    // the inclusive traversal limit and mathematically tied boundary crossings.
+    const distance_tolerance = 8 * std.math.floatEps(f64) * @max(ray_limit, @reduce(.Max, @abs(start)));
+    const traversal_limit = ray_limit + distance_tolerance;
     // Even a spectator far outside the finite world cannot reach it from here.
     inline for (1..3) |axis| {
-        if (start[axis] < -reach_limit or start[axis] > @as(f64, @floatFromInt(world.layout.size_in_blocks[axis])) + reach_limit) return null;
+        if (start[axis] < -traversal_limit or start[axis] > @as(f64, @floatFromInt(world.layout.size_in_blocks[axis])) + traversal_limit) return null;
     }
     var cell: Cell = @intFromFloat(@floor(start));
     var step: Cell = @splat(0);
@@ -56,7 +94,7 @@ pub fn cast(world: *const World, position: Position, direction: Position) @impor
     }
 
     var distance: f64 = 0;
-    while (distance <= reach_limit) {
+    while (distance <= traversal_limit) {
         const exit = @reduce(.Min, next);
         // At an exact boundary, ignore the cell behind a negative-pointing ray.
         if (exit > distance) {
@@ -66,9 +104,9 @@ pub fn cast(world: *const World, position: Position, direction: Position) @impor
                     var hit_step = entry_step;
                     if (world.customShape(block)) |shape| if (shape == .slope) {
                         const origin: Position = @floatFromInt(cell);
-                        const fraction = shape.sweep(start - origin, forward * @as(Position, @splat(reach_limit)), @splat(0), @splat(0));
+                        const fraction = shape.sweep(start - origin, forward * @as(Position, @splat(traversal_limit)), @splat(0), @splat(0));
                         if (fraction) |t| {
-                            hit_distance = t * reach_limit;
+                            hit_distance = t * traversal_limit;
                             const local_hit = start + forward * @as(Position, @splat(hit_distance)) - origin;
                             if (hit_distance > 0 and @abs(local_hit[2] - shape.height(local_hit[0], local_hit[1])) < 1e-7)
                                 hit_step = Cell{ 0, 0, -1 };
@@ -76,7 +114,7 @@ pub fn cast(world: *const World, position: Position, direction: Position) @impor
                             hit_distance = std.math.inf(f64);
                         }
                     };
-                    if (hit_distance <= @min(exit, reach_limit) + distance_tolerance) {
+                    if (hit_distance <= @min(exit, traversal_limit) + distance_tolerance) {
                         var placement: ?[3]u32 = null;
                         if (hit_step) |normal| {
                             placement = coordinates.fromStorage(world.layout, cell - normal);
@@ -86,7 +124,7 @@ pub fn cast(world: *const World, position: Position, direction: Position) @impor
                 }
             }
         }
-        if (exit > reach_limit) return null;
+        if (exit > traversal_limit) return null;
         distance = exit;
         entry_step = null;
         // Skip cells touched only at an edge/corner. Choose a deterministic face at ties.
@@ -139,14 +177,17 @@ test "rays target the nearest block and its adjacent face in all six directions"
     try std.testing.expectEqual(null, try cast(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 0, 1, 0 }));
 }
 
-test "reach is four metres to the hit face, inclusive, regardless of direction length" {
+test "ray intersections beyond four metres remain available for candidate reach checks" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     fixture.set(.{ 4, 0, 0 }, .stone);
     try expectHit(&fixture.world, .{ 0, 0.5, 0.5 }, .{ 10, 0, 0 }, .{ 4, 0, 0 }, .{ 3, 0, 0 }, 4);
-    try std.testing.expectEqual(null, try cast(&fixture.world, .{ -0.0001, 0.5, 0.5 }, .{ 1, 0, 0 }));
+    try expectHit(&fixture.world, .{ -0.0001, 0.5, 0.5 }, .{ 1, 0, 0 }, .{ 4, 0, 0 }, .{ 3, 0, 0 }, 4.0001);
     fixture.set(.{ 4, 0, 0 }, .none);
     fixture.set(.{ 4, 4, 0 }, .stone);
+    try expectHit(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 1, 1, 0 }, .{ 4, 4, 0 }, .{ 3, 4, 0 }, 3.5 * @sqrt(@as(f64, 2)));
+    fixture.set(.{ 4, 4, 0 }, .none);
+    fixture.set(.{ 5, 5, 0 }, .stone);
     try std.testing.expectEqual(null, try cast(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 1, 1, 0 }));
     fixture.set(.{ 3, 3, 0 }, .stone);
     try expectHit(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 1, 1, 0 }, .{ 3, 3, 0 }, .{ 2, 3, 0 }, 2.5 * @sqrt(@as(f64, 2)));
@@ -272,10 +313,102 @@ test "zero-distance boundary hits retain placement faces for both signs on every
     }
 }
 
-test "diagonal hits at exactly four metres tolerate rounding but reject blocks beyond reach" {
+test "diagonal ray hits retain their face when crossing the former four-metre cutoff" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     fixture.set(.{ 3, 3, 0 }, .stone);
     try expectHit(&fixture.world, .{ 0.6, 0.1, 0.5 }, .{ 3, 4, 0 }, .{ 3, 3, 0 }, .{ 2, 3, 0 }, 4);
-    try std.testing.expectEqual(null, try cast(&fixture.world, .{ 0.6 - 0.000001, 0.1, 0.5 }, .{ 3, 4, 0 }));
+    try expectHit(&fixture.world, .{ 0.6 - 0.000001, 0.1, 0.5 }, .{ 3, 4, 0 }, .{ 3, 3, 0 }, .{ 2, 3, 0 }, 4 + 0.000001 / 0.6);
+}
+
+test "every nearest vertex includes four metres and excludes points just beyond" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const layout = fixture.world.layout;
+    const block = coordinates.fromWorld(layout, .{ 0, 0, 0 }).?;
+    inline for (0..8) |vertex| {
+        const corner: Position = .{ vertex & 1, (vertex >> 1) & 1, (vertex >> 2) & 1 };
+        const outward = (corner * @as(Position, @splat(2)) - @as(Position, @splat(1))) / @as(Position, @splat(@sqrt(@as(f64, 3))));
+        try std.testing.expect(withinReach(layout, corner + outward * @as(Position, @splat(4)), block));
+        try std.testing.expect(!withinReach(layout, corner + outward * @as(Position, @splat(4.000001)), block));
+    }
+    inline for (0..3) |axis| {
+        for ([_]f64{ -1, 1 }) |sign| {
+            var position: Position = @splat(0);
+            position[axis] = if (sign < 0) -4 else 5;
+            try std.testing.expect(withinReach(layout, position, block));
+            position[axis] += sign * 0.000001;
+            try std.testing.expect(!withinReach(layout, position, block));
+        }
+    }
+    try std.testing.expect(!withinReach(layout, .{ std.math.nan(f64), 0, 0 }, block));
+    try std.testing.expect(!withinReach(layout, .{ 0, std.math.inf(f64), 0 }, block));
+    try std.testing.expect(!withinReach(layout, .{ 0, std.math.floatMax(f64), 0 }, block));
+}
+
+test "removal reach measures the cube regardless of its aimed face" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ 3, 2, 0 }, .stone);
+    const block = coordinates.fromWorld(fixture.world.layout, .{ 3, 2, 0 }).?;
+    // Both visible faces belong to the same cube, but the second hit is beyond 4 m.
+    for ([_]Position{ .{ 3, 2.1, 0.5 }, .{ 3.9, 2, 0.9 } }) |direction| {
+        try std.testing.expectEqual(block, (try findTarget(&fixture.world, .{ 0, 0, 0 }, direction, .removing)).?);
+    }
+    try std.testing.expect((try cast(&fixture.world, .{ 0, 0, 0 }, .{ 3.9, 2, 0.9 })).?.distance > reach);
+}
+
+test "placement checks its adjacent cube even when the backing cube is out of reach" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ 5, 0, 0 }, .stone);
+    const placement = coordinates.fromWorld(fixture.world.layout, .{ 4, 0, 0 }).?;
+    try std.testing.expectEqual(placement, (try findTarget(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 10, 0, 0 }, .putting)).?);
+    try std.testing.expectEqual(null, try findTarget(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing));
+    fixture.set(.{ 4, 0, 0 }, .stone);
+    try std.testing.expectEqual(placement, (try findTarget(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing)).?);
+    fixture.set(.{ 4, 0, 0 }, .none);
+    try std.testing.expectEqual(placement, (try findTarget(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 1, 0, 0 }, .putting)).?);
+}
+
+test "placement reaches a backing face near the full four-metres-plus-diagonal traversal bound" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ 1, 0, 0 }, .stone);
+    const position: Position = @splat(-reach / @sqrt(@as(f64, 3)));
+    const aim: Position = .{ 1, 1 - 0.000001, 1 - 0.000001 };
+    const direction = aim - position;
+    const placement = coordinates.fromWorld(fixture.world.layout, .{ 0, 0, 0 }).?;
+    const hit = (try cast(&fixture.world, position, direction)).?;
+    try std.testing.expectEqual(coordinates.fromWorld(fixture.world.layout, .{ 1, 0, 0 }).?, hit.block);
+    try std.testing.expectEqual(placement, hit.placement.?);
+    try std.testing.expectApproxEqAbs(reach + @sqrt(@as(f64, 3)), hit.distance, 0.000002);
+    // The candidate's nearest vertex is exactly 4 m away, although the backing
+    // face is almost 5.732 m away and its cube is unreachable.
+    try std.testing.expectEqual(placement, (try findTarget(&fixture.world, position, direction, .putting)).?);
+    try std.testing.expectEqual(null, try findTarget(&fixture.world, position, direction, .removing));
+}
+
+test "nearest-vertex reach wraps cube distances across x after repeated world trips" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ -64, 0, 0 }, .stone);
+    const block = coordinates.fromWorld(fixture.world.layout, .{ -64, 0, 0 }).?;
+    for ([_]f64{ 0, 128, -256, 128 * 10000000000.0 }) |trip| {
+        try std.testing.expectEqual(block, (try findTarget(&fixture.world, .{ 60.5 + trip, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing)).?);
+        try std.testing.expectEqual(null, try findTarget(&fixture.world, .{ 59.5 + trip, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing));
+    }
+    // The upper x vertices of the last stored cube wrap too.
+    const reverse = coordinates.fromWorld(fixture.world.layout, .{ 63, 0, 0 }).?;
+    try std.testing.expect(withinReach(fixture.world.layout, .{ -63.5, 0.5, 0.5 }, reverse));
+}
+
+test "an occupied out-of-reach cube occludes further targets and unknown data still stops targeting" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ 4, 0, 0 }, .stone);
+    fixture.set(.{ 5, 0, 0 }, .stone);
+    try std.testing.expectEqual(null, try findTarget(&fixture.world, .{ 0, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing));
+    fixture.world.removeChunk(fixture.world.layout.getChunkCoords(.{ 0.5, 0.5, 0.5 }));
+    try std.testing.expectError(error.ChunkNotReceived, findTarget(&fixture.world, .{ 0, 0.5, 0.5 }, .{ 1, 0, 0 }, .putting));
 }

@@ -106,9 +106,31 @@ bounds. Loading extra chunks cannot extend a legal support route or change the d
 
 With 32-cell chunks, a target within four cells of the player's cell on each axis has its
 whole window inside the player's loaded 3x3x3 chunk neighborhood. This assumes those chunks
-have arrived; missing cells inside the window still produce `missing_data`. The camera tool
-reaches four metres to the hit face; edits still require every cell used by their support
-checks to have arrived.
+have arrived; missing cells inside the window still produce `missing_data`. Camera reach
+measures the edited cube as described below. At an exact cell boundary, nearest-vertex
+reach can include a cube whose lower cell coordinate is five indices away, so its support
+window may extend beyond that loaded neighborhood. Edits still require every cell used
+by their support checks to have arrived.
+
+## Camera reach
+
+Reach is inclusive: at least one of the edited cube's eight vertices must be within
+four metres of the camera.
+
+Both modes first find the first occupied cube under the crosshair. Removing measures that
+cube; putting measures the face-adjacent candidate cube. The hit face itself is not subject
+to the four-metre check. Ray traversal is bounded by four metres plus one cube diagonal,
+which includes every potentially reachable candidate. Unknown chunks
+still stop the ray. Cube distances use the nearest wrapped x copy.
+
+Highlighting and actual keyboard/mouse edits call the same targeting function and
+nearest-vertex reach check in player and spectator control. The world service checks
+occupancy and building rules; it has no camera state and does not independently check reach.
+
+Removing a reachable cube and aiming at a block directly behind it allows placement into
+the same slot without moving: removal and placement measure the same cube. Replacement
+still requires a face-adjacent target, received support data, valid construction, and no
+player overlap. An isolated removed cube is not remembered as an empty-air target.
 
 ## Edits and diagnostics
 
@@ -121,7 +143,7 @@ existing overhang. Natural terrain cells are not themselves revalidated as const
 Operation results carry status, an optional mined material, and an optional failure:
 reason, underlying cause, affected cell, measured value, limit, and up to 32 involved cell
 coordinates with an explicit truncation flag. The client retains the latest preview/result.
-In putting mode, while aiming at a reachable block, an opaque cyan cube outline previews an allowed
+In putting mode, while aiming at a face with a reachable adjacent candidate, an opaque cyan cube outline previews an allowed
 placement; an opaque red outline marks a rejected placement. Both match the green removal
 target's three-pixel width and opacity. Translucent orange outlines show the affected
 construction and involved cells, including empty spaces that need support. Putting mode
@@ -223,11 +245,13 @@ lifetime, as do other world edits.
 
 ## Tools and validation
 
-Keys 1-6 select loose soil, crushed stone, trunk, planks, rebar, and reinforced concrete.
+Keys 1-8 select loose soil, crushed stone, trunk, planks, rebar, reinforced concrete, solid
+country road, and adaptive country road.
 Tab toggles removing (the initial mode) and putting, independently of player/spectator
 control. Left click performs the active mode's action. In putting mode E places against
 the hit face of the first occupied block; in removing mode X mines that block. The opposite
-mode's keyboard shortcut is ignored. Reach is four metres to the hit face, and each press edits once.
+mode's keyboard shortcut is ignored. Reach is four metres to the edited cube's nearest vertex,
+and each press edits once.
 Unknown chunks and empty air produce no edit. Player-overlap checks and structural validation
 still apply to actual edits. Green edges show focus only in removing mode; putting mode
 shows colored translucent outlines for placement and
@@ -240,6 +264,10 @@ time catch-up, inclusive support windows, stacked overhangs, conservative depend
 root-specific caches, translated/wrapped constructions, and client/service agreement with
 only a 3x3x3 neighborhood. Preview tests count actual validation invocations to verify reuse,
 relevant invalidation, distant streaming changes, and per-frame player-overlap updates.
+Targeting tests cover the inclusive boundary at every vertex, aimed-face independence,
+backing faces beyond reach, the full traversal bound, wrapped distances, and unchanged-camera
+removal and replacement. Game tests check preview/action agreement in player and spectator
+control.
 `zig build test-gpu` checks the shared voxel shader pipelines when a graphics adapter is available.
 
 `zig build bench-outlines -Doptimize=ReleaseFast` measures CPU instance preparation for one
