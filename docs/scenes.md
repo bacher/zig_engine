@@ -113,7 +113,6 @@ The default scene has a spectator controller:
 | Tab in the voxel app | Toggle putting/removing; initially removing, preserved across player/spectator control changes. |
 | Left click in the voxel app | Perform the active block mode's action within four metres. |
 | E / X in the voxel app | Place against the hit face in putting mode / mine the focused block in removing mode. Each shortcut is ignored in the other mode. |
-| R in the voxel app | Switch four-metre reach between the edited cube's nearest vertex (default) and center. The active rule appears at bottom left. |
 
 Movement uses a base speed of 5 world units per second and elapsed frame time. There is no collision, gravity, or terrain constraint in `SpectatorCamera`; it can move through solid terrain. Pitch is not explicitly clamped.
 

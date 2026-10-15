@@ -8,7 +8,6 @@ const Cell = coordinates.Cell;
 
 pub const reach: f64 = 4;
 pub const Mode = enum { putting, removing };
-pub const ReachMode = enum { center, nearest_vertex };
 
 // A hit on either the occupied cube or its face-adjacent placement cube cannot
 // be farther than one cube diagonal from a reachable vertex. This bounds the
@@ -21,40 +20,31 @@ fn storagePosition(layout: *const engine.WorldLayout, position: Position) Positi
     return start;
 }
 
-/// Measure the candidate cube, independently of which face the ray hit.
+/// Measure the candidate cube's nearest vertex, independently of the aimed face.
 /// Wrapped x uses the nearest copy of the cube, even after repeated world trips.
-pub fn withinReach(layout: *const engine.WorldLayout, position: Position, block: [3]u32, mode: ReachMode) bool {
+pub fn withinReach(layout: *const engine.WorldLayout, position: Position, block: [3]u32) bool {
     inline for (0..3) |axis| if (!std.math.isFinite(position[axis])) return false;
     const start = storagePosition(layout, position);
     var delta = @as(Position, @floatFromInt(@as(@Vector(3, u32), block))) - start;
     const width: f64 = @floatFromInt(layout.size_in_blocks[0]);
     delta[0] = @mod(delta[0] + 0.5 + width / 2, width) - width / 2 - 0.5;
-    var distance_squared = std.math.inf(f64);
-    switch (mode) {
-        .center => {
-            const center = delta + @as(Position, @splat(0.5));
-            distance_squared = @reduce(.Add, center * center);
-        },
-        .nearest_vertex => {
-            // Each axis can independently choose its nearer cube endpoint.
-            const corner = @min(@abs(delta), @abs(delta + @as(Position, @splat(1))));
-            distance_squared = @reduce(.Add, corner * corner);
-        },
-    }
+    // Each axis can independently choose its nearer cube endpoint.
+    const corner = @min(@abs(delta), @abs(delta + @as(Position, @splat(1))));
+    const distance_squared = @reduce(.Add, corner * corner);
     // Allow only floating-point rounding at the storage-coordinate scale.
     const tolerance = 8 * std.math.floatEps(f64) * @max(reach, @reduce(.Max, @abs(start)));
     return std.math.isFinite(distance_squared) and distance_squared <= (reach + tolerance) * (reach + tolerance);
 }
 
 /// Shared by highlighting and actual actions: find the first occupied cell,
-/// select the edited cube, then apply the active four-metre distance rule.
-pub fn findTarget(world: *const World, position: Position, direction: Position, mode: Mode, reach_mode: ReachMode) @import("world.zig").ChunkNotReceivedError!?[3]u32 {
+/// select the edited cube, then apply its four-metre nearest-vertex reach check.
+pub fn findTarget(world: *const World, position: Position, direction: Position, mode: Mode) @import("world.zig").ChunkNotReceivedError!?[3]u32 {
     const hit = (try cast(world, position, direction)) orelse return null;
     const block = switch (mode) {
         .removing => hit.block,
         .putting => hit.placement orelse return null,
     };
-    return if (withinReach(world.layout, position, block, reach_mode)) block else null;
+    return if (withinReach(world.layout, position, block)) block else null;
 }
 
 pub const Hit = struct {
@@ -331,7 +321,7 @@ test "diagonal ray hits retain their face when crossing the former four-metre cu
     try expectHit(&fixture.world, .{ 0.6 - 0.000001, 0.1, 0.5 }, .{ 3, 4, 0 }, .{ 3, 3, 0 }, .{ 2, 3, 0 }, 4 + 0.000001 / 0.6);
 }
 
-test "center and every nearest vertex include four metres and exclude points just beyond" {
+test "every nearest vertex includes four metres and excludes points just beyond" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     const layout = fixture.world.layout;
@@ -339,22 +329,21 @@ test "center and every nearest vertex include four metres and exclude points jus
     inline for (0..8) |vertex| {
         const corner: Position = .{ vertex & 1, (vertex >> 1) & 1, (vertex >> 2) & 1 };
         const outward = (corner * @as(Position, @splat(2)) - @as(Position, @splat(1))) / @as(Position, @splat(@sqrt(@as(f64, 3))));
-        try std.testing.expect(withinReach(layout, corner + outward * @as(Position, @splat(4)), block, .nearest_vertex));
-        try std.testing.expect(!withinReach(layout, corner + outward * @as(Position, @splat(4.000001)), block, .nearest_vertex));
-        const center: Position = @splat(0.5);
-        try std.testing.expect(withinReach(layout, center + outward * @as(Position, @splat(4)), block, .center));
-        try std.testing.expect(!withinReach(layout, center + outward * @as(Position, @splat(4.000001)), block, .center));
+        try std.testing.expect(withinReach(layout, corner + outward * @as(Position, @splat(4)), block));
+        try std.testing.expect(!withinReach(layout, corner + outward * @as(Position, @splat(4.000001)), block));
     }
     inline for (0..3) |axis| {
-        var position: Position = @splat(0.5);
-        position[axis] += 4;
-        try std.testing.expect(withinReach(layout, position, block, .center));
-        position[axis] += 0.000001;
-        try std.testing.expect(!withinReach(layout, position, block, .center));
+        for ([_]f64{ -1, 1 }) |sign| {
+            var position: Position = @splat(0);
+            position[axis] = if (sign < 0) -4 else 5;
+            try std.testing.expect(withinReach(layout, position, block));
+            position[axis] += sign * 0.000001;
+            try std.testing.expect(!withinReach(layout, position, block));
+        }
     }
-    try std.testing.expect(!withinReach(layout, .{ std.math.nan(f64), 0, 0 }, block, .center));
-    try std.testing.expect(!withinReach(layout, .{ 0, std.math.inf(f64), 0 }, block, .nearest_vertex));
-    try std.testing.expect(!withinReach(layout, .{ 0, std.math.floatMax(f64), 0 }, block, .center));
+    try std.testing.expect(!withinReach(layout, .{ std.math.nan(f64), 0, 0 }, block));
+    try std.testing.expect(!withinReach(layout, .{ 0, std.math.inf(f64), 0 }, block));
+    try std.testing.expect(!withinReach(layout, .{ 0, std.math.floatMax(f64), 0 }, block));
 }
 
 test "removal reach measures the cube regardless of its aimed face" {
@@ -364,8 +353,7 @@ test "removal reach measures the cube regardless of its aimed face" {
     const block = coordinates.fromWorld(fixture.world.layout, .{ 3, 2, 0 }).?;
     // Both visible faces belong to the same cube, but the second hit is beyond 4 m.
     for ([_]Position{ .{ 3, 2.1, 0.5 }, .{ 3.9, 2, 0.9 } }) |direction| {
-        try std.testing.expectEqual(block, (try findTarget(&fixture.world, .{ 0, 0, 0 }, direction, .removing, .nearest_vertex)).?);
-        try std.testing.expectEqual(null, try findTarget(&fixture.world, .{ 0, 0, 0 }, direction, .removing, .center));
+        try std.testing.expectEqual(block, (try findTarget(&fixture.world, .{ 0, 0, 0 }, direction, .removing)).?);
     }
     try std.testing.expect((try cast(&fixture.world, .{ 0, 0, 0 }, .{ 3.9, 2, 0.9 })).?.distance > reach);
 }
@@ -375,14 +363,12 @@ test "placement checks its adjacent cube even when the backing cube is out of re
     defer fixture.deinit();
     fixture.set(.{ 5, 0, 0 }, .stone);
     const placement = coordinates.fromWorld(fixture.world.layout, .{ 4, 0, 0 }).?;
-    for ([_]ReachMode{ .center, .nearest_vertex }) |mode| {
-        try std.testing.expectEqual(placement, (try findTarget(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 10, 0, 0 }, .putting, mode)).?);
-        try std.testing.expectEqual(null, try findTarget(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing, mode));
-        fixture.set(.{ 4, 0, 0 }, .stone);
-        try std.testing.expectEqual(placement, (try findTarget(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing, mode)).?);
-        fixture.set(.{ 4, 0, 0 }, .none);
-        try std.testing.expectEqual(placement, (try findTarget(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 1, 0, 0 }, .putting, mode)).?);
-    }
+    try std.testing.expectEqual(placement, (try findTarget(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 10, 0, 0 }, .putting)).?);
+    try std.testing.expectEqual(null, try findTarget(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing));
+    fixture.set(.{ 4, 0, 0 }, .stone);
+    try std.testing.expectEqual(placement, (try findTarget(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing)).?);
+    fixture.set(.{ 4, 0, 0 }, .none);
+    try std.testing.expectEqual(placement, (try findTarget(&fixture.world, .{ 0.5, 0.5, 0.5 }, .{ 1, 0, 0 }, .putting)).?);
 }
 
 test "placement reaches a backing face near the full four-metres-plus-diagonal traversal bound" {
@@ -398,27 +384,23 @@ test "placement reaches a backing face near the full four-metres-plus-diagonal t
     try std.testing.expectEqual(placement, hit.placement.?);
     try std.testing.expectApproxEqAbs(reach + @sqrt(@as(f64, 3)), hit.distance, 0.000002);
     // The candidate's nearest vertex is exactly 4 m away, although the backing
-    // face is almost 5.732 m away. Its center and the backing cube are unreachable.
-    try std.testing.expectEqual(placement, (try findTarget(&fixture.world, position, direction, .putting, .nearest_vertex)).?);
-    try std.testing.expectEqual(null, try findTarget(&fixture.world, position, direction, .putting, .center));
-    try std.testing.expectEqual(null, try findTarget(&fixture.world, position, direction, .removing, .nearest_vertex));
+    // face is almost 5.732 m away and its cube is unreachable.
+    try std.testing.expectEqual(placement, (try findTarget(&fixture.world, position, direction, .putting)).?);
+    try std.testing.expectEqual(null, try findTarget(&fixture.world, position, direction, .removing));
 }
 
-test "both reach modes wrap cube distances across x after repeated world trips" {
+test "nearest-vertex reach wraps cube distances across x after repeated world trips" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     fixture.set(.{ -64, 0, 0 }, .stone);
     const block = coordinates.fromWorld(fixture.world.layout, .{ -64, 0, 0 }).?;
     for ([_]f64{ 0, 128, -256, 128 * 10000000000.0 }) |trip| {
-        for ([_]ReachMode{ .center, .nearest_vertex }) |mode| {
-            try std.testing.expectEqual(block, (try findTarget(&fixture.world, .{ 60.5 + trip, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing, mode)).?);
-            try std.testing.expectEqual(null, try findTarget(&fixture.world, .{ 59.5 + trip, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing, mode));
-        }
+        try std.testing.expectEqual(block, (try findTarget(&fixture.world, .{ 60.5 + trip, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing)).?);
+        try std.testing.expectEqual(null, try findTarget(&fixture.world, .{ 59.5 + trip, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing));
     }
     // The upper x vertices of the last stored cube wrap too.
     const reverse = coordinates.fromWorld(fixture.world.layout, .{ 63, 0, 0 }).?;
-    try std.testing.expect(withinReach(fixture.world.layout, .{ -63.5, 0.5, 0.5 }, reverse, .nearest_vertex));
-    try std.testing.expect(withinReach(fixture.world.layout, .{ -63.5, 0.5, 0.5 }, reverse, .center));
+    try std.testing.expect(withinReach(fixture.world.layout, .{ -63.5, 0.5, 0.5 }, reverse));
 }
 
 test "an occupied out-of-reach cube occludes further targets and unknown data still stops targeting" {
@@ -426,12 +408,7 @@ test "an occupied out-of-reach cube occludes further targets and unknown data st
     defer fixture.deinit();
     fixture.set(.{ 4, 0, 0 }, .stone);
     fixture.set(.{ 5, 0, 0 }, .stone);
-    for ([_]ReachMode{ .center, .nearest_vertex }) |mode| {
-        try std.testing.expectEqual(null, try findTarget(&fixture.world, .{ 0, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing, mode));
-        fixture.world.removeChunk(fixture.world.layout.getChunkCoords(.{ 0.5, 0.5, 0.5 }));
-        try std.testing.expectError(error.ChunkNotReceived, findTarget(&fixture.world, .{ 0, 0.5, 0.5 }, .{ 1, 0, 0 }, .putting, mode));
-        try fixture.world.insertChunk(fixture.world.layout.getChunkCoords(.{ 0.5, 0.5, 0.5 }), @import("world.zig").WorldChunk.initEmpty());
-        fixture.set(.{ 4, 0, 0 }, .stone);
-        fixture.set(.{ 5, 0, 0 }, .stone);
-    }
+    try std.testing.expectEqual(null, try findTarget(&fixture.world, .{ 0, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing));
+    fixture.world.removeChunk(fixture.world.layout.getChunkCoords(.{ 0.5, 0.5, 0.5 }));
+    try std.testing.expectError(error.ChunkNotReceived, findTarget(&fixture.world, .{ 0, 0.5, 0.5 }, .{ 1, 0, 0 }, .putting));
 }

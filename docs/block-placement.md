@@ -114,23 +114,18 @@ by their support checks to have arrived.
 
 ## Camera reach
 
-R switches between two inclusive four-metre checks, shown at the bottom left of the screen:
-
-- **Nearest vertex (default):** at least one of the edited cube's eight vertices must be
-  within four metres of the camera.
-- **Center:** the edited cube's center must be within four metres of the camera.
+Reach is inclusive: at least one of the edited cube's eight vertices must be within
+four metres of the camera.
 
 Both modes first find the first occupied cube under the crosshair. Removing measures that
 cube; putting measures the face-adjacent candidate cube. The hit face itself is not subject
 to the four-metre check. Ray traversal is bounded by four metres plus one cube diagonal,
-which includes every potentially reachable candidate under either rule. Unknown chunks
+which includes every potentially reachable candidate. Unknown chunks
 still stop the ray. Cube distances use the nearest wrapped x copy.
 
-Highlighting and actual keyboard/mouse edits call the same targeting function with the
-current reach rule. Switching rules clears focus and cached previews before reevaluating
-the target. The rule persists across block modes and player/spectator control. Ctrl+R
-retains its SSAO debug shortcut. The world service checks occupancy and building rules;
-it has no camera state and does not independently check reach.
+Highlighting and actual keyboard/mouse edits call the same targeting function and
+nearest-vertex reach check in player and spectator control. The world service checks
+occupancy and building rules; it has no camera state and does not independently check reach.
 
 Removing a reachable cube and aiming at a block directly behind it allows placement into
 the same slot without moving: removal and placement measure the same cube. Replacement
@@ -250,12 +245,13 @@ lifetime, as do other world edits.
 
 ## Tools and validation
 
-Keys 1-6 select loose soil, crushed stone, trunk, planks, rebar, and reinforced concrete.
+Keys 1-8 select loose soil, crushed stone, trunk, planks, rebar, reinforced concrete, solid
+country road, and adaptive country road.
 Tab toggles removing (the initial mode) and putting, independently of player/spectator
 control. Left click performs the active mode's action. In putting mode E places against
 the hit face of the first occupied block; in removing mode X mines that block. The opposite
-mode's keyboard shortcut is ignored. Reach is four metres to the edited cube's nearest vertex
-or center, selected with R, and each press edits once.
+mode's keyboard shortcut is ignored. Reach is four metres to the edited cube's nearest vertex,
+and each press edits once.
 Unknown chunks and empty air produce no edit. Player-overlap checks and structural validation
 still apply to actual edits. Green edges show focus only in removing mode; putting mode
 shows colored translucent outlines for placement and
@@ -268,10 +264,10 @@ time catch-up, inclusive support windows, stacked overhangs, conservative depend
 root-specific caches, translated/wrapped constructions, and client/service agreement with
 only a 3x3x3 neighborhood. Preview tests count actual validation invocations to verify reuse,
 relevant invalidation, distant streaming changes, and per-frame player-overlap updates.
-Targeting tests cover both reach rules, the inclusive boundary at every vertex, aimed-face
-independence, backing faces beyond reach, wrapped distances, and unchanged-camera removal
-and replacement. Game tests check that R updates both previews and actual actions in player
-and spectator control without interfering with Ctrl+R.
+Targeting tests cover the inclusive boundary at every vertex, aimed-face independence,
+backing faces beyond reach, the full traversal bound, wrapped distances, and unchanged-camera
+removal and replacement. Game tests check preview/action agreement in player and spectator
+control.
 `zig build test-gpu` checks the shared voxel shader pipelines when a graphics adapter is available.
 
 `zig build bench-outlines -Doptimize=ReleaseFast` measures CPU instance preparation for one
