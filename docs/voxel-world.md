@@ -170,6 +170,10 @@ The service retains committed modified chunks, pending timed chunk state, perman
 
 There is no disk persistence. Edits survive client eviction/reloading during one service lifetime and disappear when the application/service is destroyed. Modified-state storage is not bounded by the streaming box.
 
+The agreed [persistence-v1 design](../specs/features/world-persistence.md) specifies COW snapshots, 60-second WAL autosave attempts, 10-minute compaction, and save-on-exit. Manual-save UI is deferred. The autosave interval is not a maximum loss window: only durably completed snapshots establish saved progress. The design includes exact binary layouts, bounded resource-failure handling, shutdown choices, and a local macOS/APFS durability contract; implementation has not started. Pool/queue defaults and latency thresholds will be selected through the documented measurement plan. Whole-system memory admission and player/simulation load priorities remain the separate [resource-budgeting follow-up](../specs/features/resource-budgeting.md).
+
+The planned [persistence-v1 timer contract](../specs/features/world-persistence.md#lazy-timer-pass-boundary) fixes the tick and eligible resident chunks at each timer-pass boundary. Chunks loaded during a pass wait for a later normal pass; existing finite soil-transition chains may catch up using current terrain. Saves retain pending timers and original deadlines, including overdue work. This is a design specification, not implemented persistence behavior; broader scheduling remains follow-up work.
+
 Stop every client worker before destroying the service. Shutdown closes the request mailbox, drains submitted edits while skipping pending loads, waits for the service worker, and frees endpoints and queued replies. The voxel game's teardown stops the simulation first and submits any remaining local commands before service destruction.
 
 ## Tools and simulation example
