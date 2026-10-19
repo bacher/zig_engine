@@ -51,6 +51,12 @@ chunk limits or measured memory guarantees. Active materialized blocks alone occ
 312.5 MiB; 2,000-4,000 raw block payloads occupy 62.5-125 MiB before metadata/framing.
 Metadata, meshes, replicas, retained dirty chunks, and work buffers add to those figures.
 Missed saves can accumulate more dirty chunks than one normal interval or the active set.
+Removing COW bounds neither this retained world state nor total process memory. With base-only
+reloads, the exact current revision must reach the installed base before it can be evicted;
+a WAL commit alone is insufficient. Retaining 100 additional distinct materialized chunks
+per second for ten minutes without reclamation adds 60,000 * 32 KiB = about 1.83 GiB in block
+arrays alone. This is an illustration of net retention, not a measured update rate or a cost
+per repeated edit to the same chunk. Metadata, client copies, and other pins add further cost.
 
 Decision status as of 2026-10-19:
 
@@ -90,6 +96,11 @@ Decision status as of 2026-10-19:
   pipeline before considering a separate whole-capture buffering mode. Encode and write
   concurrently; a capture that fits available capacity can release its sources even during
   a write stall. Larger caps are experiments, not shipping defaults or upfront allocations.
+- CONFIRMED by the user: pending timers alone need not retain a chunk when every timer is
+  explicitly lazy. Eviction still requires the exact current version in the installed base
+  and clearance of other pins. R77 supersedes the blanket timer pin; classification of the
+  existing timer kinds remains a proposal in Q52. Existing next-normal-pass catch-up remains
+  the baseline while the requested reload-timing clarification is pending.
 - RETAINED: unaffected PR #28 decisions, including the durable format, recovery, compaction,
   base-only reloads, mutation atomicity, offline-time policy, and local budget controls.
 - DERIVED correctness requirements: one capture boundary, synchronized source release,
@@ -268,13 +279,13 @@ mechanisms without overriding those contracts.
   ownership after process exit/crash. Do not lock only the replaceable base file.
 - R28: Eviction must preserve timer scheduling and construction/road validation. Load all
   required persisted dependencies before validating or committing an edit; absence from
-  the resident map is not proof of absent construction/road metadata. Once normally loaded,
-  chunks with pending terrain transformations stay resident in the initial implementation.
+  the resident map is not proof of absent construction/road metadata. Pending lazy timers
+  do not themselves pin a chunk; R77 defines eligibility and non-lazy timer retention.
   Do not discover/preload all timer-bearing chunks when opening a saved world. Restore their
   original timer records when ordinary streaming or gameplay dependency reads load them,
-  then use due-event processing with R47's fixed pass boundary. Persistence scanning, recovery, and compaction
-  alone do not activate timers or create live resident chunks. Broader scheduled-event
-  semantics and independent deadline scheduling with advance loading are follow-up work.
+  then use due-event processing with R47's fixed pass boundary. Persistence scanning, recovery,
+  and compaction alone do not activate timers or create live resident chunks. Broader scheduled-
+  event semantics and independent deadline scheduling with advance loading are follow-up work.
 - R29: Release each frozen source as soon as its complete captured state has an independently
   owned encoded representation, before unrelated disk waits. A writer must never retain an
   alias to mutable chunk storage. Once all source holds are released, resume simulation even
@@ -683,6 +694,20 @@ mechanisms without overriding those contracts.
   treating the baseline as validated. Alternative capture policies and larger campaigns remain
   follow-ups; no production NPC implementation or unbounded event tracing is required.
 
+- R77: Permit eviction of a chunk whose pending timers are all explicitly lazy when R24's
+  installed-base revision and other pin conditions hold, even when a lazy deadline is overdue.
+  Lazy means execution may be deferred while nonresident until ordinary loading makes the
+  chunk eligible for R47 processing, using original deadlines and current conditions. It is
+  a property of timer-kind semantics, not merely a distant deadline, player distance, or an
+  empty subscription set. A recognized kind not explicitly classified lazy retains a timer
+  residency pin while pending; unsupported serialized kinds remain load errors. V1 needs no
+  global wakeup/loading scheduler or new serialized lazy flag. Remove resident due-index
+  membership on eviction and restore it once on ordinary load. Revalidate timer incarnation
+  and residency after waits; selected/executing timer operations retain scoped ownership pins
+  until their operation safely completes or defers. A dormant lazy event alone holds no pin.
+  Timer consumption, replacement, or cancellation advances persistent revision under R48,
+  including metadata-only changes, before subsequent eviction can use base equality.
+
 ## Clarifications
 
 - Q1: Persist generated or only changed chunks?
@@ -733,7 +758,7 @@ mechanisms without overriding those contracts.
   A11: CONFIRMED: base-only indexed loading avoids runtime WAL replay. Exact installed-base
   revision equality plus ownership/gameplay pins establishes reloadability (R24-R26/R48).
   R41 stages dependency waits explicitly; loading/pin APIs remain implementation choices.
-  Loaded pending terrain timers stay resident, without eager startup activation (Q16).
+  Timer residency follows R77; startup still avoids eager activation (Q16).
 - Q12: When should advanced persistence optimizations be implemented?
   A12: RETAINED: defer nibble counts, mutation overlays/replay-on-read, heuristic encoded
   caches, independent deadline scheduling, and adaptive contention feedback. Basic background
@@ -754,10 +779,10 @@ mechanisms without overriding those contracts.
   durable, present retry/cancel-exit/quit-with-unsaved-changes choices. Do not report normal
   fully compacted completion for either failure case.
 - Q16: Must world startup load all chunks with unfinished timers?
-  A16: CONFIRMED by the user: no. Saved timer-bearing chunks load through ordinary world
-  access. Loaded pending timers prevent eviction; unloaded saved timers do not cause
-  eager loading or global timer activation. Preserve their saved records and use existing
-  timer processing when loaded. Revisit this logic when more scheduled events are added.
+  A16: CONFIRMED by the user: no. Ordinary access activates saved timers; persistence-only
+  reads do not. REVISED: R77 permits eviction with only lazy pending timers. A non-lazy
+  pending kind retains residency once loaded until a future scheduler supports unloading it.
+  This does not promise global activation of nonresident future simulation events.
 - Q17: Must a committed snapshot fit a base smaller than 4 GiB?
   A17: CONFIRMED: remove the 4-GiB restriction rather than add a compacted-size preflight.
   R14 and the [large-file contract](../formats/world-persistence-v1.md#large-file-format-and-arithmetic)
@@ -955,6 +980,16 @@ mechanisms without overriding those contracts.
   fallback for overdue saving. More capacity absorbs bursts; it cannot fix sustained storage
   overload or slow encoding. R76 makes the evidence needed to choose defaults part of v1.
 
+- Q52: Which timers are lazy, and when does reload catch-up run?
+  A52: CONFIRMED: chunks with only lazy timers may unload subject to durable-state and other
+  pin requirements. PROPOSAL pending user clarification: classify both existing kinds,
+  compact_dirt and grow_grass, as lazy. Keep R47's existing next-normal-pass timing: restore
+  timers during load, without applying them inside decoding or forcing catch-up before the
+  chunk is exposed. Earlier commands may affect current-state evaluation. Laziness allows
+  residency-dependent execution timing/outcomes; it does not promise historical equivalence.
+  Catch-up before first exposure would require a separately agreed load barrier. Future
+  economy events require their own classification/scheduling design, not automatic laziness.
+
 ## Acceptance Criteria
 
 - AC1: GIVEN an edit changes several chunks WHEN captured during repeated edits THEN each
@@ -1024,16 +1059,18 @@ mechanisms without overriding those contracts.
   available, the failure is reported, and retained base/WAL files recover that snapshot.
 - AC26: GIVEN a final snapshot that could not be made durable WHEN exit is requested THEN
   the user can retry, cancel exit, or explicitly quit with unsaved changes.
-- AC27: GIVEN a resident chunk with pending terrain transformations WHEN eviction is
-  considered THEN the initial implementation retains it until those transformations are
-  consumed/cancelled and the other eviction conditions are satisfied.
+- AC27: GIVEN a resident chunk whose pending timers are all explicitly lazy WHEN its exact
+  current revision is in the installed base and other pins clear THEN it is eviction-eligible
+  even with overdue deadlines, and removing residency removes its live due-index membership.
+  WAL-only durability, a newer live revision, or a pending non-lazy timer still blocks eviction.
 - AC28: GIVEN saved nonresident chunks with pending terrain transformations WHEN opening,
   recovering, or compacting a world THEN those persistence operations do not materialize
   live chunks or activate their timers solely because unfinished timers exist.
 - AC29: GIVEN a saved timer-bearing chunk not loaded at startup WHEN ordinary streaming or
   gameplay dependency access later loads it THEN its original timer records are restored,
-  pending timers pin it, and existing due-event processing handles them without resetting
-  their deadlines.
+  lazy timers acquire no blanket residency pin, and R47 handles eligible overdue work in a
+  later normal pass without resetting deadlines. Repeated load/evict cycles do not duplicate
+  timer registration or effects; processing advances persistent revision before eviction.
 - AC30: GIVEN base files, WAL segments, and transactions extending beyond 2^32 bytes WHEN
   written, validated, recovered, compacted, and read by index THEN sizes and offsets retain
   all bits and records on either side of that boundary are addressed correctly. Exercise
@@ -1455,6 +1492,12 @@ mechanisms without overriding those contracts.
   correctness evidence, not hardware timings. Multi-cycle runs report trends and overload,
   including failed/cancelled attempts rather than only successful saves.
 
+- AC135: GIVEN a timer pass or dependency wait racing with eviction/reload WHEN work resumes
+  THEN scoped operation pins protect active readers/operations and stale residency or cancelled/
+  replaced timer observations cannot execute. A recognized non-lazy kind in a mixed timer set
+  prevents eviction; missing lazy classification is not permission to unload. After a lazy
+  timer changes blocks or metadata, an older installed-base revision cannot permit eviction.
+
 ## Constraints
 
 The v1 durability target is local APFS on macOS under R63-R65. Keep persistence algorithms
@@ -1469,8 +1512,9 @@ subject to platform/filesystem capacity. Actual autosave loss and latency depend
 Runtime chunk reads use the base, not journals; versions newer than the base are retained
 in RAM. Cache budgets are soft while correctness pins prevent eviction. A stable world lock
 is independent of the replaceable base and temporary/WAL files.
-Timer residency pins apply only after ordinary chunk loading. Opening a world does not
-eagerly load saved timer-bearing chunks or activate a global scheduled-event system.
+Timer-kind residency pins apply under R77 after ordinary loading; pending lazy timers alone
+retain no residency. Opening a world does not eagerly load saved timer-bearing chunks or
+activate a global scheduled-event system.
 
 ## Out of Scope
 
@@ -1543,6 +1587,7 @@ wording in place. New requirements start at R67 and new criteria at AC117.
 | R32-R35; Q20-Q22 | Keep logical field categories, empty metadata, budget accounting, and fallible preparation; retain the existing `WorldChunk` layout and restricted views. Defer custom pools; remove the mandatory physical split, combined owner/block slot, and version cloning. |
 | R37-R43; Q24-Q26 | Keep in-place mutation, atomicity, resource failure, command prefixes and shutdown ordering; distinguish capture-pending work from terminal rejection. |
 | R47/R18; Q29 | Retain original terrain deadlines, fixed-pass semantics and no offline time; pause dispatch for capture and preserve current-conditions catch-up. |
+| R28/R77; Q16/Q52 | Replace blanket retention of loaded timer-bearing chunks with eligibility for all-lazy timer sets; keep exact-base and other pin requirements. |
 | R36/R66; resource-budgeting R8/R11 and Q3/Q5/Q7 | Include minimal capture gating/priority now; account for source pins/output/debt and measure latency; keep global pressure control a follow-up. |
 | R1/R3-R4/R7-R17/R21-R28/R30/R44-R46/R48-R65, except policy references clarified above | Retain snapshot atomicity, serialized layouts/codecs/checksums, WAL/base lineage, durability/recovery, eviction and shutdown contracts. |
 | Future simulation-thread direct writes | Consider separately; not implied by same-process placement and not needed for persistence v1. |
@@ -1805,6 +1850,14 @@ saved, so do not display the unsaved-state warning for this case. Fatal startup 
 failures remain R55's stderr/nonzero-exit path and do not enter this shutdown dialog.
 
 ### Lazy Timer Pass Boundary
+
+R77 permits all-lazy timer sets to leave residency; it does not create a background scheduler
+for unloaded chunks. The service removes their live due-index entries together with residency
+and registers restored queues once on ordinary load. Keep selected work protected by scoped
+operation pins and revalidate identity/incarnation after waits; an old list entry must not
+reload a deliberately evicted lazy chunk merely to execute a deadline. Releasing/defering
+an operation's pin never discards its saved event. Catch-up follows the existing pass rule
+below rather than changing terrain as a side effect of decoding.
 
 While capture holds sources, do not start a terrain-timer pass. Existing executing operations
 finish before the snapshot boundary. On resume, original deadlines remain due against the
@@ -2175,6 +2228,8 @@ saving/compaction active under otherwise comparable conditions:
 | Repeated capture cancellation and resume | Useful progress before refreezing; overdue-save escalation without resetting unsaved age |
 | Save-priority mode with finite slow writes, stalled writes, and actual failures | Eventual success when I/O progresses and workspace suffices; responsive exceptional-pause status, bounded queues, and honest failure |
 | Intentionally tiny budgets and injected allocation failures | Bounded failure paths, backpressure, and recovery without exhausting system RAM |
+| Distinct-chunk churn beyond active regions, with delayed compaction | Retention until the exact current base revision is installed, net resident growth, and separation of world memory from capture-output capacity |
+| All-lazy and mixed timer sets, repeated eviction/reload, and timer-pass races | Eligible lazy chunks reclaim memory; non-lazy/transient pins remain effective; deadlines, at-most-once effects, and revision checks survive reload |
 
 Use monotonic timestamps and bounded counters/histograms, correlated by capture identity.
 Report p95/p99 and observed maxima as well as typical values; include cancelled/failed attempts.
@@ -2186,7 +2241,7 @@ The required measurements are:
 | Output and storage | Byte occupancy/high-water mark including writer-owned buffers, encoder time blocked by full output, bytes written, write duration/throughput, final flush/synchronization duration, and repair time; distinguishes temporary buffering pressure from sustained I/O limits. |
 | Durable progress and freshness | Successful commit count/rate, time since last durable success, R73 unsaved age, capture-to-durable-ack delay, and current age of the latest acknowledged capture boundary. Preserve boundary timestamps across delayed acknowledgments; these are diagnostic clocks, not changes to R73 escalation. |
 | Gameplay and catch-up | Frame/input and authoritative-operation latency, original-request-to-terminal delay, normal/exceptional simulation pause durations, exceptional-pause count/time fraction, deferred actions, catch-up debt and service CPU/capacity. |
-| Memory and backlog | Allocated/reserved working capacity, queued/predicted work, live source pins, dirty chunk count/capacity, base/timer retention, process memory, allocation counts, and copied bytes by cause; shows growth beyond the output queue. |
+| Memory and backlog | Allocated/reserved working capacity, queued/predicted work, live source pins, dirty chunk count/capacity, base/timer retention, process memory, allocation counts, and copied bytes by cause; shows growth beyond the output queue. Split retained residency by waiting-for-current-base, timer-policy, and transient ownership/operation reasons, with overlapping pins identified rather than double-counted. Record net growth and retention age. |
 | Cancellation and retries | Attempt/cancellation counts, reasons, retry frequency, and request-to-safe-handoff latency; separates useful completion from repeated abandoned work. |
 
 Boundary age uses real time of the captured boundary, not saved logical ticks or time of
@@ -2336,11 +2391,18 @@ WAL records and dirty candidates still support persistence bookkeeping, but thei
 presence or stale entries do not independently determine eviction. Untouched generated chunks
 continue to use generator fallback under their existing pin rules; absence from the base is
 not proof that a modified chunk is safely regenerable.
-Keep normally loaded timer-bearing chunks pinned for the initial design; do not preload
-them solely because a saved timer exists. Restore original timer queues on ordinary load
-and use existing due-event handling. Preload persisted construction and road dependencies
+Apply R77's timer-kind policy within the pin predicate: all-lazy pending events, including
+overdue ones, do not add a residency pin; a pending non-lazy kind does. An active timer pass
+or dependency operation still has scoped ownership. Restore original queues on ordinary
+load and use R47 due-event handling. Preload persisted construction and road dependencies
 before an edit rather than silently ignoring nonresident metadata. Persistence-only reads
 for integrity checking/recovery/compaction do not register gameplay chunks or timers.
+
+This relaxation helps only after the exact current revision is base-backed. A lazy timer
+that fires or is cancelled makes its modified chunk ineligible until the new revision reaches
+the installed base. Repeated edits can keep it ahead of compaction indefinitely; earlier
+compaction is a pressure response, not an unconditional resident-memory bound. Measure base
+retention separately from timer-policy and transient-operation pins under R76.
 
 ### Platform Durability Contract (v1)
 
@@ -2534,12 +2596,11 @@ durability by itself; report that distinction in validation results.
   for metadata-only edits. This is conditional on that future decision: v1 has no persistence
   COW and one capture unit. Measure avoided copies against added ownership complexity before
   splitting it; do not introduce this machinery preemptively.
-- An independent scheduler could retain just transformation deadlines and arrange loading
-  before execution, permitting eviction of timer-bearing block data. Preserve logical-time
-  deadlines and define how late I/O affects execution before adopting it. The initial
-  implementation keeps already-loaded chunks with pending terrain transformations resident
-  and does not preload unfinished timers at startup. Revisit activation, loading, and timer
-  semantics together when additional kinds of scheduled events are introduced.
+- A future independent scheduler could retain deadlines separately and arrange loading before
+  execution for non-lazy events. Define late-I/O and global activation semantics before using
+  it to release their timer residency pins. R77 already permits all-lazy timer chunks to
+  unload without such a scheduler; v1 still does not preload unfinished timers at startup.
+  Future economy events need explicit semantics and must not inherit terrain laziness.
 
 ### Affected Components
 
@@ -2646,6 +2707,8 @@ during implementation planning. None authorize starting implementation in this p
   Track dependency-wait/ready/terminal stages and preserve command order across async loads.
   Define timer passes with a fixed tick/resident due-chunk list, preserve finite local
   catch-up, and save overdue/deferred timer state without recursive catch-up passes.
+  Implement R77 timer-kind eviction eligibility, resident due-index removal/restoration,
+  and scoped operation pins; resolve Q52's lazy-kind classification before implementation.
 - [ ] T5: Implement segment rotation and streaming background compaction with source checksum/
   lineage verification and safe publication; inject source corruption during consumed reads.
 - [ ] T6: Integrate load/save lifecycle, autosave/final-save, player restore, and save status.
@@ -2670,7 +2733,10 @@ during implementation planning. None authorize starting implementation in this p
   and freedom from deadline busy loops across capture epochs and mode changes.
   Cover AC133/AC134 with independent write/synchronization gates, fitting and oversized captures,
   and deterministic metric-attribution checks. Keep replayable seeds/traces and explicit
-  critical-boundary cases in the regular CPU test suite.
+  critical-boundary cases in the regular CPU test suite. Cover revised AC27/AC29 and AC135
+  with all-lazy and mixed timer sets, repeated reloads, original overdue deadlines, stale
+  due-index entries, and metadata-only revisions that break base equality. Model the non-lazy
+  policy case in the harness without adding a new serialized gameplay kind solely for testing.
 - [ ] T7: Measure snapshot/edit latency, memory use, and compaction interference; tune budgets.
   Compare worker CPU, allocations, copied bytes, and latency against baseline with saving
   inactive/active, separating gate/preparation, source waiting, existing client copies, encoding,

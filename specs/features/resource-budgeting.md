@@ -25,7 +25,8 @@ The user targets approximately 10,000 active chunks and 2,000-4,000 distinct cha
 per 60-second save interval on a 16 GB machine, with smaller worlds on 8 GB machines. See
 world-persistence.md R74 for the measurement contract. Raw active block storage is 312.5 MiB;
 a normal interval's raw block payloads are 62.5-125 MiB. Neither estimate includes metadata,
-rendering/client copies or inactive dirty/timer-pinned chunks, nor establishes a safe RAM cap.
+rendering/client copies or inactive dirty chunks and timer/operation pins, nor establishes
+a safe RAM cap.
 
 A radius of 2 chunks on each axis gives a 5x5x5 region: 125 chunks per player and 2,000 for
 16 disjoint regions. Their 32-KiB block arrays alone occupy 62.5 MiB. Radius 3 gives 7x7x7,
@@ -38,8 +39,15 @@ deduplicate data.
 Persistence permits eviction only after the exact current version is in the installed base
 and ownership/gameplay pins clear. Equality of monotonic live and installed-base persistent
 revisions establishes reloadability; eviction does not inspect WAL segments or require extra
-dirty/pending-WAL checks. Loaded timer-bearing chunks remain pinned initially.
+dirty/pending-WAL checks. Under persistence R77, explicitly lazy pending timers alone do
+not pin a chunk; pending non-lazy kinds and active operation/ownership pins still retain it.
 Admission control must prevent indefinite growth when these chunks cannot be evicted.
+For example, retaining 100 additional distinct materialized chunks per second for ten minutes
+without reclamation adds about 1.83 GiB of block arrays alone; this counts net retained chunks,
+not repeated edits to the same chunks. Metadata and other storage add to it. Measure retained
+world capacity and age separately from capture-output memory before attributing growth to
+allocator overhead. Early compaction can help, but installation of an older revision does
+not make a newer live version evictable.
 The temporary demo simulation does not define the future scheduler or actor-state schema.
 
 The planned workload is approximately 99.9% simulation-initiated chunk updates: players guide
@@ -169,12 +177,13 @@ budget and persistence decisions remain in force.
   General NPC progress representation, conservation/eligibility rules, and fair scheduling
   remain future simulation work; persistence must cover that state when introduced. The user
   explicitly defers economic event ordering across postponed work to the simulation spec;
-  current-conditions catch-up alone does not guarantee unchanged economic outcomes. Existing
-  timer residency and no-offline-time decisions remain unchanged.
+  current-conditions catch-up alone does not guarantee unchanged economic outcomes. Timer
+  residency now follows persistence R77's all-lazy exception; no-offline-time policy remains.
 - Q6: May simulation borrow unused player-reserved capacity?
   A6: UNRESOLVED. Borrowing is safe only if the policy can reclaim the capacity in time;
-  dirty/timer-pinned simulation chunks may be non-evictable. Define guarantees before allowing
-  borrowing, and define the response when the active player target cannot fit the ceiling.
+  dirty simulation chunks or non-lazy/active timer pins may prevent eviction. Define guarantees
+  before allowing borrowing, and define the response when the active player target cannot
+  fit the ceiling.
 - Q7: What local failure and waiting behavior is settled during persistence planning?
   A7: RETAINED for actual allocation failure: at most one useful ownership-handoff retry
   for player edits, then explicit rejection and optimistic reconciliation; no silent replay.
@@ -205,9 +214,10 @@ budget and persistence decisions remain in force.
   queues remain bounded, and players receive coalesced throttling status.
 - AC6: GIVEN capacity returns after pressure WHEN resuming work THEN hysteresis and paced
   scheduling prevent rapid throttle/resume oscillation and an unbounded catch-up burst.
-- AC7: GIVEN dirty, timer-pinned, snapshot-owned, or in-flight chunks WHEN the target shrinks
-  THEN no correctness pin or durable-state requirement is violated and growth is restricted
-  while safe reclamation/persistence progress remains possible.
+- AC7: GIVEN dirty chunks or chunks held by non-lazy timers, snapshots, or active operations
+  WHEN the target shrinks THEN no correctness pin or durable-state requirement is violated,
+  and growth is restricted while safe reclamation/persistence progress remains possible. All-lazy timers
+  alone do not block reclamation once exact-base equality and other pin conditions permit it.
 - AC8: GIVEN disjoint regions for 16 modeled players WHEN exercising the agreed supported
   radius and memory envelope THEN player access meets its measured residency/latency target;
   undersized configurations degrade explicitly rather than overrunning memory unchecked.
@@ -229,7 +239,7 @@ budget and persistence decisions remain in force.
 The OS can reclaim/page application memory; budgets reduce risk rather than guarantee zero
 swap. Free-memory sampling is advisory and racy, not a reservation from the OS. Avoid locking
 large world allocations into physical memory as the default solution. Preserve persistence
-atomicity, base-only reloads, and the initial timer-pin policy. Budget restrictions must not
+atomicity, base-only reloads, and persistence R77's timer-kind eligibility. Budget restrictions must not
 silently alter terrain, lose edits, or turn missing data into generated/empty substitutes.
 
 ## Out of Scope
@@ -266,7 +276,9 @@ persistence COW is implemented in this baseline.
 
 Whole-system pressure observation, protected player residency budgets, movement gating, and
 richer throttling UI remain here. Local limits do not establish a process-wide RAM ceiling;
-removing COW does not bound dirty world growth, timer pins, client replicas, or encoded output.
+removing COW does not bound dirty world growth, non-lazy/active timer pins, client replicas,
+or encoded output. All-lazy timers can unload only once their current version is base-backed
+and other pins clear; their absence from the residency map does not consume their events.
 Keep source pins, pending mutations, and independent output distinct in accounting. Preserve
 working capacity for completion/cleanup even when ordinary admissions stop.
 
@@ -297,8 +309,8 @@ borrowing, proximity policy, and future actor-state design remain open as identi
 ### Risks
 
 Fixed chunk-count limits understate dynamic costs. Player requests may depend on more chunks
-than their visible region. Dirty/timer-pinned chunks may prevent reclamation indefinitely;
-admission must react before reaching that condition. Low memory can coincide with slow
+than their visible region. Dirty chunks and non-lazy timer pins may prevent reclamation
+indefinitely; admission must react before reaching that condition. Low memory can coincide with slow
 storage, so compaction alone cannot guarantee rapid recovery. Lowering a target cannot
 instantly reclaim existing allocations. Incorrect cache-absence handling can break collision.
 
