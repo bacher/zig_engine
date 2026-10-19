@@ -21,6 +21,12 @@ terrain-validation dependencies. The current application is single-player; the p
 target is up to 16 players, potentially in disjoint regions. Generated and persisted chunks
 both consume resources and must pass the same admission policy.
 
+The user targets approximately 10,000 active chunks and 2,000-4,000 distinct changed chunks
+per 60-second save interval on a 16 GB machine, with smaller worlds on 8 GB machines. See
+world-persistence.md R74 for the measurement contract. Raw active block storage is 312.5 MiB;
+a normal interval's raw block payloads are 62.5-125 MiB. Neither estimate includes metadata,
+rendering/client copies or inactive dirty/timer-pinned chunks, nor establishes a safe RAM cap.
+
 A radius of 2 chunks on each axis gives a 5x5x5 region: 125 chunks per player and 2,000 for
 16 disjoint regions. Their 32-KiB block arrays alone occupy 62.5 MiB. Radius 3 gives 7x7x7,
 343 per player, 5,488 total, and 171.5 MiB of raw blocks. These are examples, not total-memory
@@ -44,8 +50,11 @@ Simulation runs in the service process; player interaction must also work over a
 
 CONFIRMED on 2026-10-19: persistence starts without COW, pauses all simulation during capture,
 and keeps conflicting player edits pending while prioritizing their sources, with safe capture
-cancellation after a bounded wait. Resume simulation on source release, not disk durability,
-and catch up against current conditions while retaining logical progress. Exact historical
+cancellation after a bounded wait in normal mode. The user also confirms eventual priority
+for save completion and an exceptional visible pause of world-changing actions, including
+player edits, with responsive rendering/camera/UI. Persistence R73 owns this escalation;
+normal timeout cancellations must not indefinitely starve saving. Resume on source release,
+not disk durability, and catch up against current conditions while retaining logical progress. Exact historical
 replay is not required. This supersedes the earlier COW baseline and the previously open
 catch-up-versus-paused-progress policy. Concrete catch-up scheduling/actor state, numerical
 limits, and later near-player continuation remain proposals or future design work. Unaffected
@@ -66,7 +75,9 @@ budget and persistence decisions remain in force.
   Protect capacity for player proximity and required gameplay dependencies; throttle
   simulation loads first. Player priority does not authorize exceeding the global ceiling.
   Support a future target of 16 separated players on machines meeting a measured memory
-  requirement; the estimate above does not guarantee that every machine can support it.
+  requirement; the estimates above do not guarantee that every machine can support it.
+  Evaluate the persistence R74 workload on 16 GB and measured smaller worlds on 8 GB;
+  support for 16 separated players still depends on the measured complete workload.
 - R4: Attribute each load/pin to its player or simulation reason. Deduplicate shared chunks,
   charge physical storage once, and promote effective priority when a player needs a chunk
   also requested by simulation. Removing one reason must not invalidate remaining users.
@@ -120,7 +131,10 @@ budget and persistence decisions remain in force.
   notifications, epoch/revision identities, capacity counters, and stress traces. This feature
   adds system-wide admission/pressure policy rather than redefining the capture boundary or
   holding simulation until WAL durability. Capture wait and memory-pressure wait remain
-  distinct reasons; resumption clears only the reasons actually resolved.
+  distinct reasons; resumption clears only the reasons actually resolved. Reuse persistence
+  R73's overdue-save priority and visible exceptional pause. Save priority does not raise
+  memory limits or itself keep gameplay paused after source release; actual pressure can
+  independently require admission backpressure.
 
 ## Clarifications
 
@@ -137,7 +151,8 @@ budget and persistence decisions remain in force.
   priorities, movement gating, and richer simulation-throttling UI. It does not delay the
   capture-related pause/resume and player-pending contract needed for persistence correctness.
 - Q4: Which numerical limits apply?
-  A4: UNRESOLVED: RAM fraction/headroom, configured ceiling, minimum supported machine,
+  A4: CONFIRMED targets: 16 GB for the persistence R74 workload and smaller worlds on 8 GB.
+  UNRESOLVED: RAM fraction/headroom, configured ceiling, measured supported world sizes,
   player/simulation shares, maximum radius, in-flight limits, and pressure hysteresis.
   Propose a conservative RAM-derived startup ceiling capped by configuration/effective
   limits, with runtime pressure reducing admissions. Choose values using representative
@@ -160,11 +175,14 @@ budget and persistence decisions remain in force.
   A7: RETAINED for actual allocation failure: at most one useful ownership-handoff retry
   for player edits, then explicit rejection and optimistic reconciliation; no silent replay.
   REVISED: ordinary capture contention is nonterminal pending work, with priority encoding
-  and an elapsed limit followed by safe cancellation, not a terminal rejection per retry.
+  and normally an elapsed limit followed by safe cancellation, not a terminal rejection
+  per retry. CONFIRMED exception: persistence R73 may visibly pause world-changing actions
+  and continue an overdue save past normal wait limits; memory bounds and UI responsiveness
+  still apply, and failed storage is reported rather than treated as successful saving.
   Simulation dispatch pauses during capture, retains progress, and resumes with backpressure.
   Distinguish capture contention, budget exhaustion, allocator failure, and invalid requests.
   Reserve completion/status resources before admission. See world-persistence.md R38-R41
-  and R67-R72. Player movement gating on failed loads remains a separate follow-up behavior.
+  and R67-R74. Player movement gating on failed loads remains a separate follow-up behavior.
 
 ## Acceptance Criteria
 
@@ -194,8 +212,9 @@ budget and persistence decisions remain in force.
   source pins twice; actual COW duplicates are charged only if a later policy creates them.
   Untracked process memory is exposed separately.
 - AC10: GIVEN capture and memory pressure both defer simulation WHEN capture sources clear
-  THEN the capture reason clears independently of WAL durability, while remaining pressure
-  gates still apply. Resumption preserves logical progress and paced backpressure.
+  THEN the capture/exceptional-saving-pause reason clears independently of WAL durability,
+  even while save priority remains active. Remaining pressure gates still apply; resumption
+  preserves logical progress and paced backpressure.
 - AC11: GIVEN a multi-chunk operation crossing player-priority regions WHEN some dependencies
   lack admission THEN the whole operation remains unapplied, no distant COW is introduced,
   and source/priority hints cannot bypass final service-authorized admission.
@@ -234,7 +253,8 @@ Provisional follow-up design; exact policies and limits remain open.
 Persistence first supplies bounded metadata/encoding storage, capture-output/manifest limits,
 capacity counters, structured failures, safe source release, status, and early save/compaction.
 It also supplies the minimal all-simulation capture gate, pending player requests, priority
-encoding, elapsed-wait cancellation, bounded queues, paced resume, and the existing genuine
+encoding, normal elapsed-wait cancellation, overdue-save escalation with visible exceptional
+pause, bounded queues, paced resume, and the existing genuine
 allocation-failure retry/rejection policy. No persistence COW is implemented in this baseline.
 
 Whole-system pressure observation, protected player residency budgets, movement gating, and
@@ -252,8 +272,9 @@ an explicit exclusive ownership/publication contract and is not implied by share
 
 Reuse persistence's R66 workload matrix, measured limits, reference-model harness, and traceable
 stress scenarios. Include distinct-chunk simulation churn, stalled output, moving/disjoint
-players, cross-chunk work, catch-up debt, and repeated cancellation. Experimental memory
-values are not global RAM ceilings or preallocation requirements. Numeric limits, fairness,
+players, cross-chunk work, catch-up debt, repeated cancellation and save-priority completion
+under finite slow I/O. Include the R74 16 GB target and measured smaller 8 GB worlds.
+Experimental memory values are not global RAM ceilings or preallocation requirements. Numeric limits, fairness,
 borrowing, proximity policy, and future actor-state design remain open as identified above.
 
 ### Affected Components

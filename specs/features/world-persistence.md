@@ -4,11 +4,13 @@ created: 2026-10-15
 status: draft
 ---
 
-# Persist consistent world snapshots with bounded simulation pauses
+# Persist consistent world snapshots without copy-on-write
 
 ## Intent
 
-Save a recoverable world while player interaction and rendering remain responsive.
+Save a recoverable world while normal player interaction and rendering remain responsive.
+If saving falls behind, permit an exceptional, visible pause of world-changing actions to
+prioritize save completion; rendering, camera, UI, and service completions remain responsive.
 Capture a consistent boundary without persistence copy-on-write (COW): pause simulation
 while source chunks are being captured, and defer conflicting player mutations until their
 captured versions are safe to release. Append changed chunk images to a snapshot journal
@@ -42,12 +44,25 @@ blueprints. These systems are not implemented and remain outside persistence v1.
 Simulation runs in the world-service process. Player interactions must also work over a
 network; the current in-process endpoint is not a wire-level retry/deduplication protocol.
 
+The initial measurement target is approximately 10,000 simultaneously active chunks and
+2,000-4,000 distinct changed chunks per 60-second save interval on a 16 GB machine, with
+smaller worlds supported on 8 GB machines. These are workload/hardware targets, not hard
+chunk limits or measured memory guarantees. Active materialized blocks alone occupy
+312.5 MiB; 2,000-4,000 raw block payloads occupy 62.5-125 MiB before metadata/framing.
+Metadata, meshes, replicas, retained dirty chunks, and work buffers add to those figures.
+Missed saves can accumulate more dirty chunks than one normal interval or the active set.
+
 Decision status as of 2026-10-19:
 
 - CONFIRMED by the user: distant chunks must not use persistence COW; start v1 with no
   persistence COW anywhere and pause all simulation, including near-player simulation,
   during capture. Keep player edits pending with optimistic visuals, prioritize their
-  chunks, and use a bounded wait followed by safe capture cancellation when needed.
+  chunks, and normally use a bounded wait followed by safe capture cancellation when needed.
+- CONFIRMED by the user: eventually prioritize completing an overdue save. Allow an
+  exceptional visible pause of world-changing actions, including player edits, while
+  rendering, camera, and UI remain responsive. Normal wait limits must not cause an endless
+  cancellation loop. This explicitly qualifies the normal no-noticeable-freeze target;
+  thresholds and the concrete escalation mechanism remain measurement/design choices.
 - CONFIRMED by the user: catch up postponed simulation against current world conditions,
   preserving elapsed logical time and preventing duplicate effects. Exact historical
   replay of skipped ticks is not required.
@@ -81,7 +96,9 @@ Decision status as of 2026-10-19:
   authoritative worker; no disk I/O, compression, or whole-world block copy may run there.
   Measure capture bookkeeping, interaction latency, and visible near-player simulation pauses
   before claiming the no-noticeable-freeze requirement is met. The initial global pause is
-  a design to evaluate, not evidence that arbitrarily long pauses are invisible.
+  a design to evaluate, not evidence that arbitrarily long pauses are invisible. R73 permits
+  an exceptional visible pause of world-changing actions when saving falls behind; rendering,
+  camera, UI, and completion handling remain responsive in that mode.
 - R3: Save only persistent differences from generated terrain. Persist world identity,
   dimensions/topology, chunk size, generator identity/version/seed/settings, world tick,
   and a monotonic u64 snapshot sequence independent of world tick.
@@ -106,6 +123,7 @@ Decision status as of 2026-10-19:
   V1 provides autosave and save-on-exit; manual-save UI is deferred. The 60-second cadence
   is an attempt schedule, not a maximum loss-window guarantee: only successful durable
   snapshots establish saved progress, and slow/failed saves can extend the unsaved interval.
+  Escalate under R73 rather than indefinitely sacrificing save completion to cancellation.
 - R7: Commit an entire snapshot as one validated journal transaction. Include the sequence,
   world tick, persistent world/player records, record count/extent, and integrity evidence.
   A save succeeds only after the transaction and its commit footer have been synchronized
@@ -169,8 +187,10 @@ Decision status as of 2026-10-19:
   the basic controls are insufficient. Priority cannot guarantee absence of contention.
 - R20: Use bounded reusable live-chunk/metadata storage and independently owned capture-output
   buffers; v1 has no persistence COW reserve. Account for the capture manifest, source pins,
-  output capacity, and pending work. On capture-budget exhaustion or excessive capture wait,
-  safely cancel/retry the save, preserve dirty state, and expose failure/status. A cancellation
+  output capacity, and pending work. Normally cancel safely on excessive capture wait; R73
+  overrides automatic wait-time cancellation when saving is overdue. A full output queue
+  uses bounded backpressure; genuine inability to obtain required working capacity still
+  fails safely, preserves dirty state, and reports the cause in either mode. A cancellation
   request alone does not grant mutable ownership. Accepted cancellation prevents new snapshot
   reads, allows an active read to reach a safe bounded stop, and releases source ownership
   through a synchronized handoff before affected mutations retry. Do not wait for unrelated
@@ -307,8 +327,10 @@ Decision status as of 2026-10-19:
   its frozen write dependencies and retry admission after meaningful source-release progress.
   Use a configurable elapsed wait limit, not a fixed number of timer-based retries; do not
   reset it on notifications, newly discovered dependencies, or a change of capture epoch. If the
-  limit expires, request safe capture cancellation, process its ownership handoff, then
-  revalidate and prepare the operation; never replay already-applied effects. Pure capture
+  limit expires in normal mode, request safe capture cancellation, process its ownership
+  handoff, then revalidate and prepare the operation; never replay already-applied effects.
+  In R73 save-priority mode, retain the request with visible status and bounded backpressure
+  instead of automatically cancelling solely for this elapsed limit. Pure capture
   contention must not become a terminal resource rejection merely because a retry timer fires.
   Genuine preparation allocation failure retains the previous policy: at most one automatic
   retry after a useful ownership handoff, then explicit `resource_exhausted`; reject directly
@@ -533,7 +555,8 @@ Decision status as of 2026-10-19:
   or preallocations; separately reserve bounded output for records larger than a stream buffer.
   Compare gameplay/stress workloads with saving inactive, including tail latency, simulation
   pause/debt, player confirmation delay, gate overhead, memory occupancy, and cancellation
-  handoff. Select capture and player-wait limits from baseline/frame-budget evidence. Use
+  handoff. Select normal capture/player-wait limits and the R73 escalation threshold from
+  baseline/frame-budget and save-progress evidence; include R74 workloads. Use
   tiny configured budgets and injected failures rather than exhausting physical RAM.
 
 - R67: Document the expected simulation-heavy workload (approximately 99.9% of chunk updates)
@@ -546,8 +569,10 @@ Decision status as of 2026-10-19:
   operations before establishing the boundary; do not stop a mutation halfway through.
   Keep world logical time, rendering, player input, and completion handling running under
   their normal pause rules. Resume once all capture sources are released, whether capture
-  completed or was cancelled; do not wait for WAL durability or compaction. Bound the pause
-  operationally with a configurable cancellation policy and measured handoff latency.
+  completed or was cancelled; do not wait for WAL durability or compaction. Normally bound
+  the pause with configurable cancellation and measured handoff latency. R73 permits a
+  longer visible capture pause for overdue saving, without adding a durability wait to
+  source ownership. Other independent memory-pressure gates can still prevent resumption.
 - R69: Preserve deferred logical-time progress and catch up against current conditions when
   simulation resumes. Do not equate saved world tick with completed simulation progress or
   silently discard skipped time. Pace catch-up and bound its retained representation;
@@ -575,6 +600,27 @@ Decision status as of 2026-10-19:
   pending dirty tracking by current identity without erasing intervening mutations. Service
   completions carry sufficient generation/revision identity to ignore stale releases.
 
+- R73: Eventually prioritize completing an overdue save instead of repeatedly cancelling
+  it for normal player/capture wait limits. Use a configurable elapsed unsaved-age threshold
+  while dirty work exists; starting/retrying/encoding a save or releasing sources does not
+  count as durable success or reset that age. Permit an exceptional visible pause of
+  world-changing actions, including player edits, while keeping rendering, camera, UI,
+  read dispatch, and completion processing responsive. Enter between complete operations; preserve
+  admitted request identities, ordering, and bounded pending/prediction capacity. Do not
+  block commands required to establish the selected save boundary behind the new gate.
+  Continue streaming within the same budgets and retain player-source priority. Clear the
+  capture-related mutation pause on safe source release; track save priority separately
+  until durable success. Actual allocation/I/O/repair failure still follows safe failure
+  paths; an indefinitely stalled device cannot be promised eventual completion. Preserve
+  explicit shutdown choices and R30 cancellation safety. Final shutdown saving is likewise
+  exempt from automatic cancellation solely for normal gameplay wait limits.
+- R74: Evaluate approximately 10,000 simultaneously active chunks and 2,000-4,000 distinct
+  changed chunks per 60-second interval on a 16 GB machine, plus smaller worlds on 8 GB
+  machines. Select/report the smaller workload through measurement; these targets neither
+  reserve all machine RAM nor cap legitimate metadata or accumulated dirty state. Exercise
+  both normal and overdue saving, maximum-record cases, and accumulation beyond one interval.
+  Record total memory and base/timer retention alongside capture-output costs.
+
 ## Clarifications
 
 - Q1: Persist generated or only changed chunks?
@@ -593,8 +639,9 @@ Decision status as of 2026-10-19:
   explicitly defers manual-save UI. The schedule does not guarantee at most 60 seconds of
   loss: changes since the last durable snapshot can be lost, ordinarily including the save
   interval plus encoding/write time, and longer during delays/failures. Report last-success
-  status rather than claiming a fixed recovery window. Final save/compaction and failure
-  interactions follow Q15/Q38. No manual-save decision remains open for v1.
+  status rather than claiming a fixed recovery window. R73 now prevents endless automatic
+  cancellation at the expense of an exceptional visible saving pause. Final save/compaction
+  and failure interactions follow Q15/Q38. No manual-save decision remains open for v1.
 - Q6: What should happen to the demonstration simulation's private put/remove phase?
   A6: CONFIRMED by the user: exclude the temporary demonstration worker's private state.
   Its committed terrain changes remain world state. No actor continuation guarantee.
@@ -605,7 +652,9 @@ Decision status as of 2026-10-19:
   A request to cancel is not a source-release acknowledgment. Defer mutations until active
   readers relinquish ownership, independently of stalled WAL writes/repair. R38 distinguishes
   ordinary capture waits from genuine allocation failures. Numerical limits follow R66.
-  No promise of zero allocation or zero latency under arbitrary pressure.
+  R73 changes the automatic cancellation policy for overdue saves without weakening safe
+  ownership handoff or capacity limits. No promise of zero allocation or zero latency under
+  arbitrary pressure.
 - Q8: How are player state and world edits given a common ordering boundary?
   A8: CONFIRMED by the user: publish small player checkpoint records to the authoritative
   service in order with player commands. Each record carries its preceding player-command
@@ -855,8 +904,9 @@ Decision status as of 2026-10-19:
 - Q41: Which choices are newly agreed, and which remain proposals?
   A41: CONFIRMED on 2026-10-19: start without persistence COW, pause all simulation during
   capture, keep player edits pending with optimistic visuals, prioritize their chunks,
-  and safely cancel capture after a bounded wait if needed. Catch up against current
-  conditions. The approximately 99.9% simulation-update assumption and wire-compatible
+  and normally cancel capture safely after a bounded wait if needed. Q46 records the later
+  confirmed exception for overdue saving. Catch up against current conditions. The
+  approximately 99.9% simulation-update assumption and wire-compatible
   player interactions come from the user's requirements. Concrete state/queue APIs, numeric
   thresholds, and the evaluation gates below are proposals or measurement work; none are
   claims of measured responsiveness. Unaffected confirmed decisions remain in force.
@@ -864,7 +914,8 @@ Decision status as of 2026-10-19:
   A42: No. DERIVED from the selected policy: it lasts only while captured source contents
   must stay unchanged. Resume after normal release or accepted cancellation's safe handoff.
   Bounded output buffers can fill behind slow disk writes and extend capture; prioritize
-  players and cancel safely rather than assuming encoding and disk throughput are independent.
+  players and normally cancel safely rather than assuming encoding and disk throughput are
+  independent. Under R73, accept a visible capture pause so an overdue save can progress.
 - Q43: Must catch-up reconstruct every historical intermediate world?
   A43: CONFIRMED by the user: no; use current conditions while preserving logical-time
   progress and preventing duplicate effects. Future courier transfers must conserve goods
@@ -878,12 +929,28 @@ Decision status as of 2026-10-19:
   Any later lease must cover dependencies and authoritative publication, not only block bytes.
 - Q45: What remains open before calling the design validated?
   A45: UNRESOLVED by measurements: acceptable player confirmation latency and observable
-  near-player simulation pause; maximum capture duration; cancellation/checkpoint backoff;
-  catch-up service capacity; and buffer/queue sizes. The global-pause baseline must be tested
-  against the no-noticeable-freeze requirement. If it fails, revisit per-chunk scheduling,
+  near-player simulation pause in normal mode; normal capture duration and overdue-save
+  escalation threshold; cancellation/checkpoint backoff; catch-up service capacity; and
+  buffer/queue sizes for the R74 target workloads. The global-pause baseline must be tested
+  against the normal no-noticeable-freeze requirement, with the explicit Q46 exceptional
+  saving pause assessed separately. If normal operation fails, revisit per-chunk scheduling,
   near-player continuation, eager capture, or selective near-player COW rather than silently
   weakening that requirement. No finite-memory policy guarantees uninterrupted successful
   saves and edits under an indefinitely stalled disk or unbounded workload.
+
+- Q46: May overdue saving visibly pause world-changing actions?
+  A46: CONFIRMED by the user on 2026-10-19: eventually prioritize completing a save and allow
+  an exceptional saving pause, including player edits, with responsive rendering, camera,
+  and UI. This supersedes cancellation-at-any-cost during active play. The R73 elapsed-age
+  policy prevents retry attempts from resetting escalation; numeric thresholds and concrete
+  mode/gate APIs remain proposals to tune. Source release and WAL durability remain distinct.
+  Storage failure is still reported, never converted into a false success or unlimited memory.
+- Q47: What workload and machine sizes should the first usable version target?
+  A47: CONFIRMED by the user: about 10,000 simultaneously active chunks, 2,000-4,000 distinct
+  changes per 60-second save interval, and 16 GB RAM, with smaller worlds on 8 GB machines.
+  The smaller-world size and memory/latency defaults remain measurement work under R66/R74.
+  Whole-capture buffering and deferring the existing custom-pool requirement remain review
+  proposals; this clarification does not adopt them or change the bounded streaming baseline.
 
 ## Acceptance Criteria
 
@@ -1298,8 +1365,9 @@ Decision status as of 2026-10-19:
 - AC118: GIVEN an advisory writable observation WHEN capture begins before mutation admission
   THEN the actual service gate detects the new epoch and defers the whole operation.
   Newly discovered road/revelation/timer dependencies cannot bypass admission.
-- AC119: GIVEN stalled disk I/O and full output buffers WHEN the player-wait or capture limit
-  expires THEN accepted cancellation releases sources after bounded safe reader steps
+- AC119: GIVEN normal-mode capture, stalled disk I/O, and full output buffers WHEN the
+  player-wait or capture limit expires before R73 escalation THEN accepted cancellation
+  releases sources after bounded safe reader steps
   without waiting for disk repair, UI/service completions remain responsive, and the writer
   cannot append a commit footer for the cancelled attempt.
 - AC120: GIVEN a released source, intervening mutations, and a delayed old completion WHEN
@@ -1318,8 +1386,9 @@ Decision status as of 2026-10-19:
   the future NPC scheduler is represented by test workloads, not implemented here.
 - AC124: GIVEN raw/high-entropy blocks, metadata near supported limits, or many dirty chunks
   WHEN collecting a snapshot THEN bounded output/manifest capacity is respected, no 1-2 KiB
-  average-size assumption becomes a correctness limit, and overflow/backpressure follows
-  safe cancellation without partial authoritative effects.
+  average-size assumption becomes a correctness limit, and backpressure stays bounded.
+  Normal cancellation and R73 continued streaming preserve authoritative atomicity; actual
+  inability to reserve required working capacity reports failure without overrunning budgets.
 
 - AC125: GIVEN a captured snapshot view WHEN the authoritative chunk map grows or relocates
   entries THEN encoding remains valid through pinned backing buffers and copied descriptors/
@@ -1329,6 +1398,30 @@ Decision status as of 2026-10-19:
   small scalars and buffer descriptors are copied; no full chunk header, derived caches,
   persistent-owner object, or all-air block allocation is created solely for capture.
   View/manifest capacity remains accounted for under the capture budget.
+
+- AC127: GIVEN repeated normal capture cancellations and dirty work WHEN elapsed unsaved
+  age reaches the configured threshold THEN save priority survives retries and normal wait
+  deadlines no longer cancel the attempt. With finite progressing I/O, sufficient bounded
+  workspace, and no injected failure, the fixed captured transaction becomes WAL-durable.
+  Encoding/source-release notifications alone cannot reset age or report successful saving.
+- AC128: GIVEN entry into save-priority mode WHEN player and simulation work compete THEN
+  executing operations finish atomically, required pre-boundary commands remain serviceable,
+  and deferred requests retain identity/order/optimistic state within bounded capacities.
+  New work receives backpressure before admission; rendering/camera/UI remain responsive and
+  show the exceptional pause. Source release clears this pause before WAL synchronization;
+  escalation after all sources were released introduces no new mutation pause.
+- AC129: GIVEN save-priority mode and stalled or failed storage WHEN progress stops THEN
+  visible status and existing exit choices remain serviceable, no durability acknowledgment
+  is invented, no unlimited queue grows, and actual failures retain safe handoff/repair rules.
+  A failed working-capacity reservation cannot be fixed by bypassing its budget.
+- AC130: GIVEN the R74 16 GB workload and measured smaller 8 GB workloads WHEN evaluating
+  normal saves, accumulated dirty state, and metadata-heavy cases THEN record successful
+  save age/rate, pause duration, confirmation delay, and total/capture/pinned memory separately;
+  publish the measured supported envelope rather than inferring it from block bytes alone.
+- AC131: GIVEN a final shutdown save with progressing I/O WHEN its duration exceeds normal
+  gameplay capture/player-wait limits THEN it continues within the same budgets, with the
+  existing responsive shutdown status and explicit choices; the elapsed limit alone does
+  not create an endless cancel/retry loop or override a commit already in progress.
 
 ## Constraints
 
@@ -1375,7 +1468,8 @@ gating on denied loads, and simulation-throttling UI are covered by the separate
 
 ## Plan
 
-The no-COW/global-pause starting policy and current-conditions catch-up are confirmed.
+The no-COW/global-pause starting policy, current-conditions catch-up, scale targets, and
+exceptional visible pause for overdue saving are confirmed.
 Unchanged format/durability sections retain their prior confirmed status. The new capture
 mechanics, transport outline, and evaluation stages are implementation proposals constrained
 by the requirements above. Concrete interfaces and measured defaults remain implementation
@@ -1462,7 +1556,8 @@ wording in place. New requirements start at R67 and new criteria at AC117.
 ### Alternatives, Costs, and Upgrade Boundaries
 
 The selected first version is no COW, all-simulation capture pause, and asynchronous player
-mutation deferral with priority encoding and safe cancellation. The alternatives below remain
+mutation deferral with priority encoding, normal safe cancellation, and R73 escalation for
+overdue saving. The alternatives below remain
 proposals; relative complexity is a design assessment, not measured CPU cost or an estimate
 of implementation days. Every alternative still needs atomic mutations, dirty revisions,
 source lifetime safety, bounded output, recovery, and failure reporting.
@@ -1471,7 +1566,7 @@ source lifetime safety, bounded output, recovery, and failure reporting.
 | --- | --- | --- | --- |
 | Simulation submits; service returns deferred | Low to moderate above the common mutation gate | Producer need not predict capture; naturally covers discovered dependencies | Wasted computation; bounded retry state, revalidation and wakeup/backoff required; do not turn waits into failed gameplay actions. |
 | Simulation checks per-chunk readiness before starting | Moderate | Avoids much wasted work; resumes independent chunks early | Check is advisory and races with capture; atomic write-set admission remains mandatory. Cross-chunk work and changing dependencies complicate scheduling. |
-| Pause all simulation during capture | Lowest scheduler complexity; selected first | One dispatch gate; no simulation COW; easy controlled baseline | Unrelated and near-player simulation also pauses; slow capture creates visible pauses and catch-up debt. A whole-capture deadline and paced resume are required. |
+| Pause all simulation during capture | Lowest scheduler complexity; selected first | One dispatch gate; no simulation COW; easy controlled baseline | Unrelated and near-player simulation also pauses; slow capture creates visible pauses and catch-up debt. Normal capture deadlines, overdue-save escalation, and paced resume are required. |
 | Pause distant simulation; continue near players | Moderate to high | Can preserve nearby activity | Need radius/priority policy, movement hysteresis, deduplicated player regions, and mixed near/far dependency handling. Near activity needs its own gate/eager/COW policy. |
 | Terminally reject player edits and let clients retry | Small server mechanism, substantial end-to-end protocol work | No duplicated source; small server wait state | Extra round trips, optimistic rollback/flicker, reordered dependent edits, stale intent, duplicate effects on lost replies; fixed retry counts cannot survive arbitrary capture duration. Not selected. |
 | Keep admitted player edits pending; prioritize background capture | Moderate; selected first | Preserves one request/prediction; no round trip retry loop or synchronous encoding on authority | Confirmation can lag; bounds, ordering, output backpressure and cancellation must be explicit. Does not prove delays invisible. |
@@ -1558,13 +1653,16 @@ These are proposed implementation stages after separate implementation authoriza
    correctness infrastructure without selecting an optimized live capture policy.
 2. Integrate the selected no-COW capture policy: one mutation authority, frozen manifest,
    global simulation dispatch pause, independent encoded output, pending player requests,
-   priority encoding, bounded wait/cancellation, and paced resume. Cancellation and bounded
-   queues are part of this first usable baseline, not postponed safety work. Exercise current
+   priority encoding, normal bounded wait/cancellation, R73 save-priority escalation, and
+   paced resume. Safe cancellation, bounded queues, and eventual-save policy are part of
+   this first usable baseline, not postponed safety work. Exercise current
    soil timers plus synthetic couriers/workers/builders as stress workloads; do not implement
    the production NPC systems.
 3. Measure against saving-inactive operation using the same input traces and fault schedules.
-   Validate the no-noticeable-freeze requirement through frame/input time, player confirmation
+   Validate the normal no-noticeable-freeze requirement through frame/input time, player confirmation
    delay/corrections, and visible near-player simulation pause, not average encoding throughput.
+   Separately exercise exceptional saving pauses and prove finite slow I/O can complete a
+   save without deadline cancellation loops. Use R74 scale targets and smaller 8 GB cases.
    If the baseline meets targets, keep it. If it fails, report the specific limiting resource.
 4. If unrelated simulation loses too much time, replace only global dispatch gating with
    per-chunk readiness scheduling plus the same authoritative admission check. If nearby
@@ -1685,7 +1783,9 @@ Use one simple dialog with phase text: "Finishing pending actions...", "Saving..
 gameplay/simulation producers while shutting down, but keep the UI, dependency loaders,
 completion handling, and necessary persistence workers responsive. A terminal rejection
 counts as a resolved command; future and resource-deferred timers saved in metadata do not
-need to run merely to finish shutdown.
+need to run merely to finish shutdown. Normal gameplay capture/player-wait deadlines do
+not automatically cancel the final save; use the explicit choices below and retain the same
+working-memory limits, failure handling, and safe ownership rules.
 
 If a dependency read actually fails with a transient error, retry that nonterminal I/O/
 preparation step once after a provisional one-second delay. Do not retry corruption or
@@ -2323,11 +2423,12 @@ encoding is acceptable only if cancellation/release remains safe at bounded work
 A failed allocation leaves the source immutable until normal release or cancellation.
 
 A full output queue can stall further encoding. Prioritizing a player's sources cannot bypass
-that limit by growing memory or aliasing live data. Check player-wait and whole-capture elapsed
-limits independently of writer progress. On expiry request cancellation; do not terminally
-reject an admitted player edit solely because the capture wait limit elapsed. A global capture
-limit is needed even when no player submits an edit, so background simulation is not held
-indefinitely by a stalled save. Specific limits/yield granularity are measured under R66.
+that limit by growing memory or aliasing live data. In normal mode, check player-wait and
+whole-capture elapsed limits independently of writer progress and request safe cancellation
+on expiry. Do not terminally reject an admitted edit solely for elapsed capture waiting.
+The global limit covers pauses without player edits. R73 save priority overrides these
+automatic cancellations when saving is overdue; it continues with bounded backpressure and
+visible status. Specific limits/yield granularity are measured under R66.
 
 Treat source ownership and WAL cleanup as separate conditions. Serialize cancellation acceptance
 with new-read admission and entry into commit-footer writing. Once accepted, prevent new reads,
@@ -2348,20 +2449,60 @@ failed manifest's candidates back without overwriting newer identities. Do not r
 attempt from later live versions: start a fresh capture only after the writer is ready.
 
 Before another capture, let unblocked player work and a paced simulation slice progress.
-Coalesce replacement attempts and back off repeated failures. Player responsiveness can cost
-save progress; expose repeated cancellations and last successful durable save time. R6 already
-allows a longer unsaved interval. Finite memory, unbounded I/O stalls, uninterrupted successful
-mutations, and a fixed durability deadline cannot all be guaranteed at once.
+Coalesce replacement attempts and back off actual failures. Expose cancellation counts and
+last successful durable save time. R73 prevents normal responsiveness deadlines from
+indefinitely defeating save progress; R6 still does not promise a fixed recovery window.
+
+### Overdue Saving and Exceptional Pause
+
+The user permits an exceptional visible pause of world-changing actions to complete an
+overdue save. A proposed coordinator uses normal and save-priority modes, with one watchdog
+checking normal wait deadlines and elapsed unsaved age. Track monotonic age while dirty work
+exists: use time since the latest durable save, or the first subsequent dirty transition if
+the world was clean in between. Retrying, partial writes, encoding, and source release do not
+reset it. Numeric thresholds are selected under R66, not fixed by this document.
+
+On escalation, keep a viable active capture instead of aborting it merely to change modes.
+If cancellation is already accepted, finish its handoff/required repair before a fresh
+attempt; do not revive a cancelled transaction. Gate new world-changing work between
+complete operations, preserving queued requests and any commands required by the chosen
+save/checkpoint boundary. Loading/read dispatch, completions, rendering, camera, and UI stay
+active; disk-dependent requests may still await I/O. If the overdue attempt has already
+released all sources and is only writing/synchronizing, do not introduce a new mutation pause.
+Show a stable status such as "Saving: world changes temporarily paused". Bound admitted work
+and client predictions; refuse/backpressure new submissions before capacity is exhausted.
+Do not turn a retained pending request into a terminal rejection or silently replay it.
+
+Keep encoding/streaming within the same bounded workspace and prioritize pending players'
+sources. A full output queue waits for writer progress instead of repeatedly cancelling on
+the normal timeout. An actual inability to reserve the minimum record/manifest/completion
+workspace is still a reported resource failure, not permission to exceed the budget. Do
+not require the entire encoded capture to fit in RAM or split a consistent snapshot into
+independently committed subsets. Prioritization changes neither the boundary nor the format.
+
+Clear the capture-related mutation pause when all sources are safely released, even if the
+WAL write/synchronization is still running. Save priority and unsaved-age tracking continue
+until successful durability; they are not reasons to keep source ownership or pause gameplay
+afterward. Independent pressure gates may still apply. Resume with existing revalidation,
+ordering and paced catch-up. Storage errors release sources safely and follow R23 repair;
+failed repair suspends appends rather than cycling captures. Indefinitely stalled storage
+has no completion guarantee: keep status and the existing explicit exit choices usable.
+Automatic escalation is not permission to fake success, drop work, or ignore accepted
+cancellation/commit boundaries. Final shutdown saving follows the same exemption from normal
+gameplay timeouts, with its existing wait/cancel-exit/quit choices.
 
 ### Player Pending State, Retries, and Resource Failure
 
 Capture contention is an ordinary pending state. Retain the request and optimistic effect;
 promote its required frozen write sources and retry admission on meaningful release progress.
-The elapsed player-wait limit initiates safe capture cancellation, not a terminal rejection
-or a speculative second application. For multi-chunk writes, prioritize the complete blocked
-set. Revalidate after release and preserve required command order. No fixed number of retries
-can cover an arbitrarily long capture; bounded elapsed waiting plus cancellation supplies the
-escape path. Rendering/input and service completions remain responsive while the request waits.
+In normal mode the elapsed player-wait limit initiates safe capture cancellation, not a
+terminal rejection or a speculative second application. R73 save priority instead permits
+longer visible waiting with bounded backpressure; it does not reset request wait timestamps.
+For multi-chunk writes, prioritize the complete blocked set. Revalidate after release and
+preserve required command order. No fixed number of retries
+can cover an arbitrarily long capture. Normal cancellation supplies an escape path; overdue
+saving explicitly trades action latency for completion. Rendering/input and service
+completions remain responsive while the request waits.
 
 If preparation then genuinely lacks allocation capacity, keep the prior failure policy: one
 automatic retry after a useful ownership handoff, otherwise `resource_exhausted`, no partial
@@ -2561,7 +2702,8 @@ is required. The architectural limits and failure semantics already apply before
 | Pending work | Bound both request count and retained bytes; coalesce save triggers; reserve completion capacity | Queue occupancy, waiting time, retained memory, producer backpressure |
 | Shutdown retry/status timing | Provisional one-second transient-read retry and five-second delayed-status indication under R60/R61 | Useful retry outcomes and clear/responsive feedback |
 | Simulation resume/retry timing | Source/resource-release signals, paced dispatch, bounded backoff; no per-frame retry loop | Pause/debt duration, catch-up service capacity, redundant work |
-| Player wait and whole-capture limits | Elapsed limits trigger safe cancellation, not replay or automatic terminal rejection | Confirmation lag, visible near-player pauses, safe handoff latency, save progress |
+| Player wait and whole-capture limits | Normal elapsed limits trigger safe cancellation; R73 overrides automatic timeout cancellation for overdue saving | Confirmation lag, normal/exceptional pause duration, safe handoff latency |
+| Overdue-save escalation | Configurable elapsed unsaved age; attempts/source release do not reset it | Successful save age/rate, time in save-priority mode, action backpressure |
 | Cancellation responsiveness | Check between bounded encoding steps; safe release without unrelated disk waits | Request-to-ownership-handoff latency, including metadata-heavy chunks |
 
 For initial sweeps, try additional capture-working-memory budgets of 16, 32, and 64 MiB, and
@@ -2571,6 +2713,11 @@ appropriate persistence working-memory budget, including per-record staging abov
 stream-buffer size; report capture-pinned live capacity separately without double-counting it;
 varying one knob does not exempt other allocations from accounting. Existing live-world
 memory and the future whole-system controller remain separate from this experiment.
+
+Use R74's 10,000 active chunks and 2,000/4,000 changed chunks per interval as target cases
+on 16 GB hardware, plus measured smaller worlds on 8 GB hardware. Include accumulation
+beyond one interval; active chunks do not bound dirty or timer-pinned residency. These
+counts do not define allocation caps or guarantee that arbitrary metadata/meshes fit.
 
 Use this workload matrix, comparing each workload with saving inactive and with periodic
 saving/compaction active under otherwise comparable conditions:
@@ -2583,14 +2730,16 @@ saving/compaction active under otherwise comparable conditions:
 | Raw/high-entropy blocks and maximum/heavy metadata | Output capacity, encode tail latency, size-class waste, cancellation extremes |
 | Slow/stalled writes, full output queue, and overlapping compaction | Backpressure, source release independent of disk, UI responsiveness, eventual repair |
 | Moving/separated players and cross-chunk operations | Priority changes, no partial publication, dependency footprint; input for later proximity policy |
-| Repeated capture cancellation and resume | Useful gameplay/catch-up progress before refreezing; visible prolonged unsaved interval |
+| Repeated capture cancellation and resume | Useful progress before refreezing; overdue-save escalation without resetting unsaved age |
+| Save-priority mode with finite slow writes, stalled writes, and actual failures | Eventual success when I/O progresses and workspace suffices; responsive exceptional-pause status, bounded queues, and honest failure |
 | Intentionally tiny budgets and injected allocation failures | Bounded failure paths, backpressure, and recovery without exhausting system RAM |
 
 Measure frame time and authoritative-operation latency, with p95, p99, and observed maxima
 as well as typical values. Separately record capture bookkeeping, source hold time, player
 confirmation delay, global/near-player simulation pause, catch-up debt/CPU, encoding time,
 worker CPU, copied bytes by cause, allocation counts, pool/queue occupancy, retained capacity, save
-cancellations, retry frequency, and cancellation request-to-handoff latency. Separate queue
+cancellations, retry frequency, cancellation request-to-handoff latency, successful save
+age/rate, and time/actions deferred in save-priority mode. Separate queue
 waiting from execution and gate/preparation from existing client copies. For a later COW
 experiment, report its detach/copy/retention costs separately and measure saving-inactive
 overhead with the policy enabled but unused. Measure eager encoding with metadata and
@@ -2664,7 +2813,8 @@ The two-pool budgeting and fallible/reservable metadata policies otherwise remai
 ### Memory Budgeting Integration Boundary
 
 Persistence v1 owns the minimal capture-related simulation gate, player-pending contract,
-priority encoding, and paced release/resume. The broader controller builds on these hooks.
+priority encoding, R73 overdue-save escalation/status, and paced release/resume. The broader
+controller builds on these hooks; the exceptional saving pause is part of persistence v1.
 Initially implement configurable bounds and capacity/retention counters for persistence
 pools and working buffers, structured allocation failures, cancellation/status, and early
 checkpoint/compaction triggers. Preserve bounded working capacity for completion/cleanup
@@ -2834,6 +2984,14 @@ durability by itself; report that distinction in validation results.
 
 ### Potential Improvements
 
+- Evaluate buffering a complete encoded capture before disk writes against bounded streaming.
+  R74 makes this plausible for ordinary saves: 2,000-4,000 raw block payloads use 62.5-125 MiB
+  before metadata. Experimental 64/128/256 MiB output budgets are hypotheses, not defaults
+  or reservations. Metadata-heavy records and accumulated dirty state can exceed them;
+  1-2 KiB average encoded chunks are not a bound. Any adopted policy needs a reviewed bounded
+  overflow path and the same consistent boundary. Do not add a second capture pipeline to v1
+  merely for this experiment. Deferring the custom pools, coalescing pending notifications,
+  and extracting format tables are also review proposals, not adopted requirement changes.
 - Add a manual Save action using the same ordered snapshot and durability pipeline, with
   explicit completion/failure feedback. V1 uses autosave and save-on-exit only.
 - Add and validate Linux/Windows durability adapters with platform-specific synchronization,
@@ -2962,7 +3120,9 @@ or hash-map relocation; reading packed live flags can race even when only derive
 Copy the selected scalars/descriptors at capture and pin their backing payloads under R33.
 Pools do not eliminate encoding, client copying, or live-world growth. Player state needs explicit ordering/ownership. Pending optimism can hide short waits
 but cannot guarantee invisible long delays. Cancellation needs a safe encoder handoff that
-can progress independently of stalled I/O; repeated cancellation may prevent save progress.
+can progress independently of stalled I/O. R73 prevents deadline cancellation starvation
+but allows a visible exceptional pause; actual storage failure can still prevent saving.
+Active-chunk estimates do not bound metadata, accumulated dirty state, or timer retention.
 Catching up requires spare processing capacity and current-state revalidation.
 File length alone does not detect corruption. Rename without required file/directory
 synchronization does not establish
@@ -3006,7 +3166,8 @@ during implementation planning. None authorize starting implementation in this p
 - [ ] T5: Implement segment rotation and streaming background compaction with source checksum/
   lineage verification and safe publication; inject source corruption during consumed reads.
 - [ ] T6: Integrate load/save lifecycle, autosave/final-save, player restore, and save status.
-  Integrate capture-pending player state, priority encoding, elapsed-wait cancellation, genuine
+  Integrate capture-pending player state, priority encoding, normal elapsed-wait cancellation,
+  R73 overdue-save escalation and visible exceptional pause, genuine
   resource retry/rejection and optimistic reconciliation; global simulation capture gating,
   paced resume, deferral/backpressure; and pre-reserved completion/status reporting.
   Gate player checkpoints/save barriers on resolved command prefixes and drain outstanding
@@ -3020,17 +3181,19 @@ during implementation planning. None authorize starting implementation in this p
   history and verify corruption handling separately. Include progressive release followed by
   cross-chunk edits, stale completion epochs, stalled output and cancellation, pending-player
   status/retransmission models, paused/resumed timer progress, and view safety during header
-  relocation/derived-flag updates under AC117-AC126 and AC43. Keep replayable seeds/traces
-  and explicit critical-boundary cases in the regular CPU test suite.
+  relocation/derived-flag updates under AC117-AC126 and AC43. Add AC127-AC131 coverage for
+  escalation, bounded backpressure, finite slow/stalled I/O, source release, and shutdown.
+  Keep replayable seeds/traces and explicit critical-boundary cases in the regular CPU test suite.
 - [ ] T7: Measure snapshot/edit latency, memory use, and compaction interference; tune budgets.
   Compare worker CPU, allocations, copied bytes, and latency against baseline with saving
   inactive/active, separating gate/preparation, source waiting, existing client copies, encoding,
   and cancellation work. Measure player confirmation/correction and near-player simulation
   pauses, plus catch-up debt and overload behavior; validate the chosen baseline before
   proposing additional capture policies.
-  Run the R66 workload matrix and candidate parameter sweeps. Select and record default
-  pool budgets/geometry, queue limits, retry/backoff parameters, and cancellation/latency
-  regression thresholds from the evidence, including p95/p99/maxima and occupancy results.
+  Run the R66 workload matrix and candidate parameter sweeps at R74 target scales, including
+  smaller 8 GB workloads, successful-save age/rate and exceptional pauses. Select and record
+  default pool budgets/geometry, queue limits, retry/backoff and escalation parameters, and
+  cancellation/latency regression thresholds, including p95/p99/maxima and occupancy results.
   Verify pressure behavior with tiny configured budgets/fault injection, not physical OOM.
 - [ ] T-val: Run acceptance criteria verification, crash/failure injection, relevant CPU
   regression tests, and application builds; document durability/performance limits.
