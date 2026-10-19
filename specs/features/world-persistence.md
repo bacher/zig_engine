@@ -51,6 +51,10 @@ Decision status as of 2026-10-19:
 - CONFIRMED by the user: catch up postponed simulation against current world conditions,
   preserving elapsed logical time and preventing duplicate effects. Exact historical
   replay of skipped ticks is not required.
+- CONFIRMED by the user: retain the current `WorldChunk` ownership and field arrangement
+  initially. Persistent/derived/runtime categories remain logical serialization contracts;
+  capture uses a restricted snapshot view, not a separately owned persistent object. Defer
+  physical regrouping and version ownership until a demonstrated need justifies them.
 - RETAINED: unaffected PR #28 decisions, including the durable format, recovery, compaction,
   base-only reloads, mutation atomicity, offline-time policy, and local budget controls.
 - DERIVED correctness requirements: one capture boundary, synchronized source release,
@@ -92,7 +96,9 @@ Decision status as of 2026-10-19:
   its complete write set. Defer a conflicting operation without partial effects; permit
   mutation once all required captured sources are released. Enumeration/freezing and mutation
   admission share the service's ordering authority. A later read of a mutated chunk cannot
-  substitute for its missing boundary version.
+  substitute for its missing boundary version. The common mutation/source-release gate is
+  a logical lifetime contract, not a requirement to regroup fields into a physical owner;
+  build the restricted snapshot view under R33 at this same boundary.
 - R6: Attempt autosaves every 60 seconds and base compaction every 600 seconds using
   monotonic real elapsed time while the world is open, including pause. Memory pressure
   may request an earlier checkpoint and compaction to make more chunks evictable. Allow
@@ -245,28 +251,35 @@ Decision status as of 2026-10-19:
   required authoritative order and preventing duplicate effects. A cross-chunk operation
   cannot publish one side while waiting for another. Snapshots see only complete operations.
 - R32: Optimize the common case of absent dynamic metadata. Roads, timers, and construction
-  markers initially use separate backing allocations from the metadata pool, owned by the
-  same persistent chunk unit as its blocks and flags. Empty arrays require no backing
+  markers initially use separate backing allocations from the metadata pool, owned through
+  the existing inline `WorldChunk.metadata` descriptors. Empty arrays require no backing
   allocation; copy live entries rather than unused capacity when a genuine copy is needed.
-  Keep fixed array descriptors inline in the persistent owner, not separately allocated.
+  Do not separately allocate the descriptors or move them into a new persistent owner.
   A contiguous metadata payload remains a deferred optimization.
-- R33: Separate persistent chunk contents from derived/runtime state. One persistent owner
-  contains blocks, gameplay metadata, historical flags, and persistent content identity.
-  Live `WorldChunk` holds that owner plus inline derived/runtime fields. Snapshot handles
-  and encoder APIs expose only frozen persistent data. Keep boundary masks, solid-block
-  counts, derived face flags, and client validation revisions outside capture ownership.
-  Mutations keep live caches consistent with persistent contents at every observable
-  operation boundary; failure leaves both unchanged. Derived-only changes do not acquire
-  persistent mutation permission or mark persistent content dirty. This separation does
-  not require general reference counting or multiple persistent versions in v1.
-- R34: Retain two storage pools under one persistent owner: fixed slots for materialized
-  chunk storage and page-based power-of-two size classes for metadata backing allocations.
-  Grow by adding pages within an explicit budget without relocating live allocations.
-  Treat 64 bytes as a provisional minimum metadata class, subject to measurement. Define
-  a largest pooled class independently of gameplay metadata limits; larger valid requests
-  use dedicated allocations charged to the same budget. Account for allocated capacity,
-  including unused page space, size-class rounding, pool bookkeeping, and temporary old/new
-  allocations during growth. Track live-world storage, capture-pinned storage, and additional
+- R33: Retain the current `WorldChunk` ownership and field arrangement initially; define
+  persistent, derived, and runtime fields logically rather than requiring a physical split.
+  Construct a restricted snapshot view at the authoritative capture boundary: copy chunk ID,
+  persistent revision, capture epoch, and historical flags by value; borrow const block and
+  metadata buffers with their pointer/length descriptors copied into the view. Preserve an
+  explicit allocation-free empty-block representation. Keep every borrowed allocation stable,
+  immutable, and alive until synchronized source release. The encoder must not read live
+  `WorldChunk` headers, packed flags, array descriptors, derived caches, or runtime fields.
+  Do not introduce a separate persistent owner, extra owner indirection, general reference
+  counting, or a whole-`WorldChunk` header copy solely for capture. Required revision and
+  bookkeeping changes elsewhere in this spec still apply. Mutations keep live caches and
+  persistent contents consistent at operation boundaries; failure leaves both unchanged.
+  Derived-only changes remain outside the persistent mutation gate and dirty tracking,
+  preserving historical flag bits. Inline grouping for readability is optional; independently
+  owned persistent versions and physical regrouping are deferred until justified.
+- R34: Retain two storage pools: fixed slots for materialized `WorldChunkData` block buffers
+  and page-based power-of-two size classes for metadata backing allocations. Keep the existing
+  `WorldChunk` header/descriptors in their current owner; do not require a combined block-plus-
+  persistent-owner slot. Grow by adding pages within an explicit budget without relocating
+  live allocations. Treat 64 bytes as a provisional minimum metadata class, subject to
+  measurement. Define a largest pooled class independently of gameplay metadata limits;
+  larger valid requests use dedicated allocations charged to the same budget. Account for
+  backing capacity, page slack, class rounding, bookkeeping, transient growth allocations,
+  and snapshot-view/manifest storage. Track live-world storage, capture pins, and additional
   encoded output separately without charging the same frozen allocation twice.
 - R35: Make metadata copying, growth, and mutation preparation fallible and reservable.
   Replace panic-on-OOM paths involved in these operations with propagated allocation errors
@@ -636,7 +649,7 @@ Decision status as of 2026-10-19:
   caches, and independent deadline scheduling. Implement basic background priority, bounded
   streaming, and cancellation/yield points initially; adaptive contention feedback remains
   a follow-up. REVISED: the initial design has no persistence COW. Keep blocks, metadata,
-  and flags in one persistent capture unit and release sources promptly after encoding.
+  and flags under one per-chunk capture/mutation gate and release sources promptly after encoding.
   Selective COW, synchronous encode-before-write, and per-chunk simulation scheduling are
   optional later policies evaluated with the same correctness/performance harness.
 - Q13: May memory pressure trigger saving and compaction before their normal intervals?
@@ -678,26 +691,30 @@ Decision status as of 2026-10-19:
   limits below are implementation proposals to validate under R66.
 - Q20: Should all metadata arrays share one contiguous backing allocation?
   A20: RETAINED: initially allocate each nonempty array separately and prioritize empty
-  metadata. Keep fixed descriptors inline with the persistent owner and use a fixed slot
-  for materialized block storage plus its header; all-air chunks do not need a block buffer.
-  Exact layout/alignment remains implementation work. A contiguous variable metadata payload
-  remains a potential improvement. REVISED: one capture ownership unit does not imply a
-  COW clone or independent block/metadata version lifetimes.
-- Q21: Should WAL snapshots share the complete live `WorldChunk`?
-  A21: RETAINED: separate persistent contents from derived/runtime fields in persistence v1.
-  Keep live caches inline without independent allocation/reference counting, and split
-  historical `is_unreachable` from derived face flags. REVISED: the encoder sees a frozen
-  persistent unit; mutation waits for its release instead of creating another version.
-  Complete gameplay/client copies still need their own consistent caches and remain distinct
-  from persistence capture.
+  metadata; all-air chunks do not need a block buffer. REVISED/CONFIRMED by the user: retain
+  the inline `WorldChunk.metadata` descriptors and existing block-pointer representation.
+  Remove the requirement to colocate a new persistent owner/header with the block payload
+  in one pool slot. The two-pool policy remains; concrete slot alignment/bookkeeping follows
+  R34/R66. A contiguous variable metadata payload remains a potential improvement.
+- Q21: Does capture require physically splitting the live `WorldChunk`?
+  A21: REVISED/CONFIRMED by the user: no. Retain its current ownership and field arrangement
+  initially. Keep persistent/derived/runtime categories in the serialization contract and
+  expose a restricted snapshot view under R33. At the boundary, copy small persistent values
+  and buffer descriptors into the view; pin the borrowed backing allocations until release.
+  Historical `is_unreachable` may stay in the existing packed flags: capture its value on
+  the authoritative worker so the encoder never reads storage shared with mutable face flags.
+  No separate persistent owner or header copy is needed. Inline field grouping is optional;
+  future COW ownership can be introduced behind the capture interface if justified. Ordinary
+  gameplay/client copies retain their own consistent contents and caches.
 - Q22: How should pools grow, handle large metadata, and account for memory?
-  A22: RETAINED: two pools, one persistent owner, page-based classes, separate nonempty
-  arrays, bounded growth, and a provisional 64-byte minimum metadata class. Above the
-  largest class, use budgeted dedicated allocations; semantic limits remain R51/R54.
-  Count page slack, class rounding, and transient growth allocations. Make copy/growth
-  paths fallible/reservable. REVISED: report capture-pinned live storage without charging
-  it twice, plus additional encoded-output storage; there are no snapshot COW duplicates
-  in v1. Geometry and budgets remain measurement decisions.
+  A22: RETAINED: two pools, page-based classes, separate nonempty arrays, bounded growth,
+  and a provisional 64-byte minimum metadata class. Above the largest class, use budgeted
+  dedicated allocations; semantic limits remain R51/R54. Count page slack, class rounding,
+  and transient growth allocations. Make copy/growth paths fallible/reservable. REVISED:
+  block slots hold existing `WorldChunkData` buffers rather than a combined persistent owner.
+  Count snapshot views/manifests and encoded output; report pins without charging existing
+  live storage twice. V1 has no snapshot COW duplicates. Geometry/budgets remain measurement
+  decisions, and live metadata descriptors remain inline in `WorldChunk`.
 - Q23: Does this iteration implement whole-system budgeting and priorities?
   A23: RETAINED: global pressure controls, player-protected residency, movement gating, and
   richer throttling UI follow persistence as a separate feature. REVISED: persistence v1
@@ -927,7 +944,7 @@ Decision status as of 2026-10-19:
 - AC22: GIVEN persisted constructions/roads or timer metadata WHEN a chunk is loaded through
   normal world access THEN validation dependencies and road ownership are restored and its
   saved timers enter existing processing, without requiring global timer-chunk activation.
-- AC23: GIVEN a frozen persistent unit WHEN any player, simulation, timer, metadata,
+- AC23: GIVEN a chunk frozen for capture WHEN any player, simulation, timer, metadata,
   or historical-flag path requests mutation THEN it passes the same complete-write-set
   gate, cannot initiate persistence COW, and mutates in place only after safe release.
 - AC24: GIVEN memory pressure before the next scheduled checkpoint/compaction WHEN an early
@@ -991,13 +1008,15 @@ Decision status as of 2026-10-19:
 - AC41: GIVEN a chunk without dynamic metadata WHEN initialized or genuinely copied
   THEN its empty arrays allocate no backing storage. Adding entries to one array does not
   reserve worst-case capacity for the others; capture itself does not clone these arrays.
-- AC42: GIVEN a captured persistent unit WHEN its source is released and a mutation
-  completes THEN the encoder/writer has no alias to mutable contents, the live caches match
-  the new contents, and preparation failure leaves both unchanged. The encoder cannot access
-  mutable runtime fields and capture ownership does not retain a separate cache version.
-- AC43: GIVEN a frozen persistent unit WHEN only derived/runtime state changes THEN
+- AC42: GIVEN a captured snapshot view WHEN its sources are released and a mutation
+  completes THEN the encoder/writer no longer uses borrowed buffers, its independent output
+  retains the captured contents, and live caches match the new contents. Preparation failure
+  leaves both unchanged; the view exposes no live header, derived cache, or runtime field.
+- AC43: GIVEN an active snapshot view WHEN only derived/runtime state changes THEN
   persistent identity/dirtiness is unchanged and no persistent mutation gate is needed.
-  Updating historical `is_unreachable` follows the normal persistent mutation gate.
+  Derived face-flag updates preserve the historical bit; the encoder uses its boundary-time
+  copied historical value and never reads the live packed flags. Changing historical
+  `is_unreachable` itself still follows the persistent mutation gate.
 - AC44: GIVEN a persisted chunk WHEN loaded into gameplay THEN derived boundary masks, block
   count, and face flags are reconstructed from its contents, historical flags are restored,
   and client validation state is initialized by its runtime owner. Gameplay/client copies
@@ -1302,6 +1321,15 @@ Decision status as of 2026-10-19:
   average-size assumption becomes a correctness limit, and overflow/backpressure follows
   safe cancellation without partial authoritative effects.
 
+- AC125: GIVEN a captured snapshot view WHEN the authoritative chunk map grows or relocates
+  entries THEN encoding remains valid through pinned backing buffers and copied descriptors/
+  scalars, without dereferencing a relocated `WorldChunk` header. Borrowed buffers cannot be
+  freed, reused, resized, or mutated before synchronized source release.
+- AC126: GIVEN materialized and all-air chunks WHEN capture constructs their views THEN only
+  small scalars and buffer descriptors are copied; no full chunk header, derived caches,
+  persistent-owner object, or all-air block allocation is created solely for capture.
+  View/manifest capacity remains accounted for under the capture budget.
+
 ## Constraints
 
 The v1 durability target is local APFS on macOS under R63-R65. Keep persistence algorithms
@@ -1424,7 +1452,7 @@ wording in place. New requirements start at R67 and new criteria at AC117.
 | Existing decisions | Effect of the revised requirement |
 | --- | --- |
 | R2, R5, R20, R29, R31; Q7/Q12/Q19 | Replace mandatory COW with frozen-source admission, pending mutations, safe release, and capture limits. |
-| R32-R35; Q20-Q22 | Keep empty-metadata optimization, persistent/runtime separation, two bounded pools, and fallible preparation; remove mandatory version cloning; do not add generic refcounts preemptively. |
+| R32-R35; Q20-Q22 | Keep logical field categories, empty metadata, two bounded pools, and fallible preparation; retain the existing `WorldChunk` layout and use a restricted view. Remove the mandatory physical split, combined owner/block slot, and version cloning. |
 | R37-R43; Q24-Q26 | Keep in-place mutation, atomicity, resource failure, command prefixes and shutdown ordering; distinguish capture-pending work from terminal rejection. |
 | R47/R18; Q29 | Retain original terrain deadlines, fixed-pass semantics and no offline time; pause dispatch for capture and preserve current-conditions catch-up. |
 | R36/R66; resource-budgeting R8/R11 and Q3/Q5/Q7 | Include minimal capture gating/priority now; account for source pins/output/debt and measure latency; keep global pressure control a follow-up. |
@@ -1552,8 +1580,9 @@ obtain a read-only persistent source; produce independently owned encoded record
 sources; report terminal command outcomes and durable acknowledgments separately. Do not bake
 scheduler/COW/lock-state fields into chunk disk records or require generic reference-counted
 objects in every reader. The existing explicit record format and whole-snapshot transaction
-can remain unchanged across these policies. Persistent/runtime separation, stable revisions,
-atomic complete-write-set publication, and reference-model tests are useful for every option.
+can remain unchanged across these policies. Logical field classification, restricted snapshot
+views, stable revisions, atomic publication of complete write sets, and reference-model tests
+are useful for every option.
 
 Disk IDs, checksum domains, and durability semantics are the harder compatibility commitments;
 this requirement change gives no reason to reopen them. A later NPC state schema is a real
@@ -2400,31 +2429,55 @@ is an accepted guarantee until benchmarked. Investigate regressions before broad
 
 ### Persistent Contents and Live Chunk State
 
-Retain the persistent/runtime separation from PR #28; remove its mandatory COW lifetime:
+CONFIRMED revision: retain the current `WorldChunk` ownership and field arrangement for the
+first version. The earlier physical split existed to isolate COW storage and is no longer
+required. Preserve the logical categories below; optional inline substructs may improve
+readability but must not introduce a new allocation/ownership layer solely for capture.
 
-| Owner | Fields |
-| --- | --- |
-| Persistent chunk unit, immutable while capture owns its source | Blocks, roads/timers/construction metadata, historical flags, persistent content identity |
-| Live `WorldChunk`, owned by service or client | Current persistent unit; inline boundary masks, solid-block count, face-solidness flags, validation revision |
+| Logical category | Existing contents | Snapshot access |
+| --- | --- | --- |
+| Persistent payload | Blocks and roads/timers/construction metadata | Const borrows of pinned backing buffers; copy buffer descriptors into the view. |
+| Persistent identity/history | Chunk ID, persistent revision, historical `is_unreachable` | Copy small values into the view at the authoritative boundary. |
+| Derived state | Boundary masks, solid-block count, face-solidness flags | Exclude from the view; reconstruct on load. |
+| Runtime state | Client validation revision and other session bookkeeping | Exclude from persisted data; carry only capture epoch identity needed for safe release. |
 
-Split historical `is_unreachable` from derived face flags. Persistent identity covers metadata
-and historical-flag changes; client validation revisions remain separate runtime state.
-Blocks and metadata have one capture/mutation lifetime. A captured handle includes its epoch
-and revision and exposes const persistent data only. It does not grant permission to read live
-caches, does not create a second persistent version, and need not use general reference counting.
-The service owns stable source lifetimes and receives synchronized completion handoffs.
+The authoritative worker constructs a small restricted snapshot view at the same boundary
+that freezes the candidate set. `ChunkSnapshotView` is an illustrative API name, not a fixed
+layout. It contains the copied identity/history/epoch values and an explicit empty-block case
+or a const block-buffer reference, plus const slices of live metadata entries. These slices
+copy their pointer/length descriptors; they do not borrow the mutable `ArrayList` descriptors
+inside `WorldChunk`. The view is not a by-value copy of the full `WorldChunk` header and does
+not contain derived caches or unrestricted access to the live chunk.
 
-After source release and successful preparation, mutate the current unit in place and update
-live caches within the same authoritative operation. On failure, both remain unchanged. The
-independent encoded record continues to describe the old captured revision. Derived-only cache
-changes do not require persistent mutation permission or dirty the save. Loading reconstructs
-caches from persistent data. Ordinary client/subscription copies retain their own consistent
-contents/caches and cannot alias mutable authority; their existing cost is separate from capture.
+Keep every borrowed buffer and any transitively referenced payload stable, immutable, and
+alive until safe source release, under the service's capture pins and mutation gate. Freeing,
+reusing, resizing, or replacing borrowed storage is prohibited during that interval. Capture
+handles and release messages identify chunk/revision/epoch rather than retaining a raw pointer
+to a hash-map entry. The map may relocate `WorldChunk` headers during unrelated insertion;
+that must not invalidate captured backing-buffer references or copied scalar values. Snapshot
+view/manifest storage itself must also stay valid until its consumer finishes. Const pointers
+alone neither extend lifetimes nor prevent concurrent mutation.
 
-Keep the ownership/encoder boundary narrow so later selective COW can supply an immutable old
-unit through the same capture interface. Do not implement generic version trees or maintain
-unused COW reference counts merely to keep that option open. Any future policy must cover the
-same complete persistent unit and operation atomicity unless a separate design changes it.
+Historical `is_unreachable` may remain packed with derived face flags in live `WorldChunk`.
+Extract its value on the authoritative worker when constructing the view; the encoder never
+reads that live packed storage. Different bits can share the same read/modify/write unit,
+so treating them as logically separate does not by itself make concurrent access safe.
+Derived flag updates remain service-owned and preserve the historical bit. A persistent flag
+mutation still passes the same admission gate as block/metadata mutations; copying the scalar
+into the view does not introduce an independent mutation policy for it.
+
+After source release and successful preparation, mutate existing storage in place and update
+live caches within the same authoritative operation. Failure leaves both unchanged. The
+independent encoded record keeps the captured revision; loading rebuilds derived caches from
+persistent data. Ordinary gameplay/client copies still require consistent owned contents and
+caches and remain separate from persistence capture. R48's persistent revision requirements
+still apply; retaining the field arrangement does not prohibit required identity/bookkeeping.
+
+There is no new persistent-owner allocation, owner indirection, refcounted version, or combined
+block/header slot solely for capture. Later COW can supply a restricted view of a retained old
+version through this same encoder boundary if evidence justifies that change. Defer physical
+regrouping and independently owned persistent versions until then; the disk format does not
+depend on either choice.
 
 ### Metadata Semantics and Size Bounds
 
@@ -2556,10 +2609,12 @@ tradeoffs or required design changes with the user rather than silently weakenin
 
 ### Metadata Allocation Layout
 
-Use a fixed-slot pool for materialized chunk storage and a separate variable-size metadata
-pool for roads, timer events, and construction markers. Empty arrays have no backing
-allocation. Each nonempty array has its own backing allocation initially; all allocations
-belong to one persistent unit and must be acquired/released with the atomicity rules above.
+Use a fixed-slot pool for materialized `WorldChunkData` block buffers and a separate
+variable-size metadata pool for roads, timer events, and construction markers. Keep the
+existing ownership: `WorldChunk.content` refers to blocks, and inline `WorldChunk.metadata`
+descriptors own the separate nonempty arrays. Empty arrays have no backing allocation.
+All persistent writes and source releases follow the common admission/atomicity rules;
+these rules do not require a physically separate persistent owner.
 Metadata pages serve power-of-two size classes, provisionally starting at 64 bytes, then
 128, 256, and so on. Each array allocation is contiguous; growth need not extend it in place.
 Acquire a larger allocation, copy its live entries, and release the old allocation only
@@ -2593,17 +2648,18 @@ after snapshot cancellation.
 On the current aarch64 Zig 0.16 build, `Metadata` is 72 bytes aligned to 8: three 24-byte
 array descriptors (pointer, length, capacity), with the timer queue wrapping one array.
 It is already inline in `WorldChunk`, not separately heap-allocated. The full `WorldChunk`
-header is currently 872 bytes, including 768 bytes of derived boundary masks; this is not
-the proposed persistent-version header. Derived/client-only state stays in the live owner
-outside the frozen persistent unit, as specified above.
+header is currently 872 bytes, including 768 bytes of derived boundary masks. Retain this
+field arrangement initially, apart from identity/bookkeeping required elsewhere. These are
+baseline layout observations, not a serialized schema or a mandated size for future builds.
+Capture copies only selected scalars and descriptors, not the whole header or its caches.
 
-For the planned persistent owner, use one fixed slot containing the 32,768-byte block payload
-plus the fixed metadata/version header. Blocks plus the current metadata descriptors alone
-occupy 32,840 bytes before additional ownership/version fields and alignment. Use an explicit
-aligned slot stride, rather than rounding this combined object up to a 64-KiB size class.
-Do not force all-air chunks to materialize a block buffer just to hold their metadata.
-The fixed pool's payload remains 32 KiB; its complete slot may be slightly larger. This
-colocation is distinct from packing the variable metadata arrays into one allocation.
+Block pool slots serve the existing 32,768-byte `WorldChunkData` payload, with alignment and
+pool bookkeeping accounted for separately. Do not require the former combined block-plus-
+persistent-owner slot or colocate metadata descriptors/version ownership with those blocks.
+All-air chunks retain their allocation-free block representation even when they have metadata.
+Charge the existing chunk headers, metadata backing capacity, and restricted snapshot views
+once in their respective budgets; a view's borrows do not create duplicate payload storage.
+The two-pool budgeting and fallible/reservable metadata policies otherwise remain unchanged.
 
 ### Memory Budgeting Integration Boundary
 
@@ -2852,7 +2908,8 @@ durability by itself; report that distinction in validation results.
 - `src/voxel_app/world_data_service.zig`: snapshot barriers, frozen-source ownership and admission, dirty
   tracking, durable lookup, mutation gateways, and checkpoint completion.
 - `src/voxel_app/world.zig`, `world_chunk_data.zig`, `chunk_metadata.zig`, `roads.zig`:
-  capture gating of all persistent state and separation from transient/derived state.
+  capture gating of persistent fields and restricted snapshot views, preserving current
+  `WorldChunk` ownership/layout and excluding transient/derived fields from serialization.
 - New application persistence modules: binary codec, base index, journal framing/recovery,
   save coordinator, pool ownership, filesystem publication, and compaction.
 - `src/voxel_app/main.zig`, `player_controller.zig`, `simulation_worker.zig`: lifecycle,
@@ -2871,9 +2928,11 @@ During implementation, choose whether their in-memory identities are separate u6
 or replace/widen authoritative u32 chunk revisions. Either choice must prevent wrap,
 reset on reload, or reuse of older identities, and must cover metadata-only changes. Eviction uses
 live/installed-base revision equality plus pins, without separate per-WAL eligibility tracking.
-Split `WorldChunk` into a live owner with inline derived/runtime fields and a reference to
-its persistent version. Separate historical flags from derived face flags. Keep fixed
-metadata descriptors within the persistent owner and variable arrays separately allocated.
+Retain `WorldChunk`'s existing field arrangement, block-pointer representation, inline metadata
+descriptors, and derived/runtime fields. Do not add an independently owned persistent object
+or physically split packed flags solely for capture. Introduce restricted views with copied
+persistent identity/history and descriptors borrowing pinned backing buffers under R33.
+Required persistent revision and service-side capture bookkeeping remain in scope.
 
 ### API Changes
 
@@ -2883,8 +2942,9 @@ resolve persisted chunk; admit complete mutation write sets; report source relea
 checkpoint completion; request compaction; and drain/final-save shutdown. Narrow codec/file APIs should support
 in-memory buffers and fault-injected storage tests without graphics or a running UI.
 Expose separate WAL-commit/base-install events and an exclusive world-open/close lifetime.
-Distinguish persistent snapshot handles from complete gameplay/client chunk copies; encoder
-interfaces accept only frozen persistent sources. Mutation interfaces maintain contents and
+Distinguish restricted snapshot views from complete gameplay/client chunk copies. Encoder
+interfaces accept only views with copied scalars/descriptors and const borrowed payloads;
+they cannot access live chunk headers or caches. Mutation interfaces maintain contents and
 live caches together without exposing intermediate states.
 Carry client/session command sequences and checkpoint dependency watermarks in service
 messages; expose operation stages/resolved-prefix progress for save barriers and shutdown.
@@ -2897,8 +2957,10 @@ therefore cause runtime undefined behavior even when the file's checksums match.
 Missing one direct metadata mutation defeats capture isolation. Capturing only a global time
 variable does not freeze a consistent object graph. O(dirty) manifest capture can still stall
 large worlds. Global simulation pauses can be visible; output backpressure couples source
-hold times to disk throughput. Pools do not eliminate encoding, client copying, or live-world
-growth. Player state needs explicit ordering/ownership. Pending optimism can hide short waits
+hold times to disk throughput. Borrowing live headers/array descriptors can race with updates
+or hash-map relocation; reading packed live flags can race even when only derived bits change.
+Copy the selected scalars/descriptors at capture and pin their backing payloads under R33.
+Pools do not eliminate encoding, client copying, or live-world growth. Player state needs explicit ordering/ownership. Pending optimism can hide short waits
 but cannot guarantee invisible long delays. Cancellation needs a safe encoder handoff that
 can progress independently of stalled I/O; repeated cancellation may prevent save progress.
 Catching up requires spare processing capacity and current-state revalidation.
@@ -2917,8 +2979,9 @@ during implementation planning. None authorize starting implementation in this p
 
 - [ ] T1: Translate the agreed contracts into module boundaries, ownership/message APIs,
   operation-specific reservation paths, and storage/fault-injection interfaces. Specify the
-  fixed owner/all-air allocation layouts and explicit material constants under R49. Use
-  R66 for measured parameters; preserve the agreed binary layouts and failure policies.
+  restricted snapshot view and existing block/all-air allocation lifetimes; assign explicit
+  material constants under R49. Use R66 for measured parameters; preserve the agreed binary
+  layouts and failure policies.
 - [ ] T2: Implement the agreed container, descriptor, chunk/global/player codecs, and
   checksum coverage with strict validation, byte-layout fixtures, and round-trip tests.
 - [ ] T3: Implement framed journal commits, indexes, storage synchronization, and recovery.
@@ -2928,8 +2991,10 @@ during implementation planning. None authorize starting implementation in this p
   and crash tests covering initialization before the first periodic compaction.
 - [ ] T4: Integrate service snapshot boundaries, frozen-source admission, bounded capture output, dirty
   acknowledgments, generation-safe base loading, and base-backed eviction/dependency pins.
-  Separate persistent versions from live derived fields and preserve cache consistency
-  across edits, failed preparation, loading, and gameplay/client copies.
+  Preserve the current `WorldChunk` layout and construct restricted views with copied
+  identity/history/descriptors and pinned const block/metadata buffers. Exclude live headers,
+  packed flags, and caches from encoder access; preserve cache consistency across edits,
+  failed preparation, loading, and gameplay/client copies.
   Implement bounded page-based metadata allocation, budgeted oversized allocations, and
   fallible/reservable metadata operations with partial-allocation cleanup. Expose configurable
   local limits, capacity counters, and resource-failure/status hooks for later RAM budgeting.
@@ -2954,8 +3019,9 @@ during implementation planning. None authorize starting implementation in this p
   rotation, compaction, eviction/reload, and crashes; compare recovery with the reference
   history and verify corruption handling separately. Include progressive release followed by
   cross-chunk edits, stale completion epochs, stalled output and cancellation, pending-player
-  status/retransmission models, and paused/resumed timer progress under AC117-AC124. Keep
-  replayable seeds/traces and explicit critical-boundary cases in the regular CPU test suite.
+  status/retransmission models, paused/resumed timer progress, and view safety during header
+  relocation/derived-flag updates under AC117-AC126 and AC43. Keep replayable seeds/traces
+  and explicit critical-boundary cases in the regular CPU test suite.
 - [ ] T7: Measure snapshot/edit latency, memory use, and compaction interference; tune budgets.
   Compare worker CPU, allocations, copied bytes, and latency against baseline with saving
   inactive/active, separating gate/preparation, source waiting, existing client copies, encoding,
