@@ -86,6 +86,10 @@ Decision status as of 2026-10-19:
   Start with existing allocators behind capacity accounting and reservations; preserve
   fallible preparation, empty arrays, and stable borrowed buffers. Pool geometry, including
   the earlier 64-byte minimum class, is no longer a v1 requirement or tuning default.
+- CONFIRMED by the user: evaluate larger output capacity within the same bounded streaming
+  pipeline before considering a separate whole-capture buffering mode. Encode and write
+  concurrently; a capture that fits available capacity can release its sources even during
+  a write stall. Larger caps are experiments, not shipping defaults or upfront allocations.
 - RETAINED: unaffected PR #28 decisions, including the durable format, recovery, compaction,
   base-only reloads, mutation atomicity, offline-time policy, and local budget controls.
 - DERIVED correctness requirements: one capture boundary, synchronized source release,
@@ -576,8 +580,12 @@ mechanisms without overriding those contracts.
   pins, encoded output, and transient copies. Bound pending work by both item count and bytes,
   coalesce save triggers, and reserve completion capacity. Use R34 capacity/overhead accounting
   with existing allocators; custom pool geometry is deferred. Test capture-working budgets of
-  16/32/64 MiB and streaming buffers of 64/256/1,024 KiB as experimental inputs, not defaults
-  or preallocations; separately reserve bounded output for records larger than a stream buffer.
+  16/32/64 MiB, then output-capacity caps of 64/128/256 MiB with an explicitly sufficient total
+  working budget. Vary streaming buffers of 64/256/1,024 KiB separately. These are experimental
+  inputs, not defaults or preallocations. Include queued and writer-owned output, encoding
+  scratch, and large-record staging in accounting; reserve manifest/completion capacity too.
+  Keep one concurrent encode/write pipeline with existing bounded overflow/backpressure
+  behavior; fitting a complete capture must not require a second buffering mode.
   Compare gameplay/stress workloads with saving inactive, including tail latency, simulation
   pause/debt, player confirmation delay, gate overhead, memory occupancy, and cancellation
   handoff. Select normal capture/player-wait limits and the R73 escalation threshold from
@@ -664,6 +672,16 @@ mechanisms without overriding those contracts.
   policy from wakeup selection until they become actionable again, avoiding busy loops.
   No dedicated watchdog thread or general simulation timer framework is required; numeric
   limits remain governed by R66.
+
+- R76: Include bounded instrumentation and a repeatable evaluation harness in persistence v1,
+  reusing production capture, writer, and recovery paths. Record the measurement plan's phase
+  durations, output pressure, durable progress/freshness, gameplay delays, and memory separately,
+  with capture identities and reproducible workload/storage settings. Exercise independent
+  write and synchronization delays, full/oversized output, and repeated save/compaction cycles.
+  Use deterministic tests for correctness and real elapsed-time runs for performance; a fake
+  clock cannot establish latency on hardware. Choose v1 defaults from these results before
+  treating the baseline as validated. Alternative capture policies and larger campaigns remain
+  follow-ups; no production NPC implementation or unbounded event tracing is required.
 
 ## Clarifications
 
@@ -929,6 +947,13 @@ mechanisms without overriding those contracts.
   A50: CONFIRMED: client optimism can cover brief waits without a new pending message.
   R71 keeps pending primarily internal and coalesces longer-delay status while retaining
   required visible saving/failure status. Networking and reconnect machinery remain deferred.
+
+- Q51: Should absorbing a whole capture require a separate buffering pipeline?
+  A51: CONFIRMED by the user: first evaluate larger output capacity in the existing concurrent
+  encode/write pipeline (R66). It can absorb a fitting capture without waiting for stalled
+  writes, while larger captures use the same bounded streaming behavior. R73 remains the
+  fallback for overdue saving. More capacity absorbs bursts; it cannot fix sustained storage
+  overload or slow encoding. R76 makes the evidence needed to choose defaults part of v1.
 
 ## Acceptance Criteria
 
@@ -1416,6 +1441,19 @@ mechanisms without overriding those contracts.
   stays serviceable during paused simulation or blocked writer I/O. Already handled deadlines
   and normal limits overridden by save priority do not cause repeated wakeups/cancellations;
   any requested cancellation still respects R30 ownership and commit boundaries.
+
+- AC133: GIVEN the same streaming pipeline with independently delayed writes and synchronization
+  WHEN a capture fits the available output and working capacity THEN all sources can release
+  before delayed writes complete, without an early durability acknowledgment. For an oversized
+  capture, filling output retains the same boundary and bounded memory; normal cancellation
+  or save-priority streaming follows R20/R73 without restarting solely to change buffering mode.
+  After sources clear, a delayed final synchronization does not extend the capture pause.
+- AC134: GIVEN replayable workloads and independently controlled write/synchronization delays
+  WHEN running the R76 evaluation scenarios THEN reports contain the defined phase, pressure,
+  freshness, gameplay, and memory metrics plus workload/configuration/seed provenance. Known
+  injected stalls are attributed to the correct phases; fake-clock results are identified as
+  correctness evidence, not hardware timings. Multi-cycle runs report trends and overload,
+  including failed/cancelled attempts rather than only successful saves.
 
 ## Constraints
 
@@ -2110,13 +2148,13 @@ is required. The architectural limits and failure semantics already apply before
 | Overdue-save escalation | Configurable elapsed unsaved age; attempts/source release do not reset it | Successful save age/rate, time in save-priority mode, action backpressure |
 | Cancellation responsiveness | Check between bounded encoding steps; safe release without unrelated disk waits | Request-to-ownership-handoff latency, including metadata-heavy chunks |
 
-For initial sweeps, try additional capture-working-memory budgets of 16, 32, and 64 MiB, and
-streaming buffers of 64, 256, and 1,024 KiB. These are experiment inputs, not shipping
-defaults, guarantees, or upfront allocation requirements. Account for buffers within the
-appropriate persistence working-memory budget, including per-record staging above normal
-stream-buffer size; report capture-pinned live capacity separately without double-counting it;
-varying one knob does not exempt other allocations from accounting. Existing live-world
-memory and the future whole-system controller remain separate from this experiment.
+Use R66's small working-budget sweeps, then compare 64/128/256 MiB output caps in the same
+concurrent pipeline. Select/report a total working budget that covers each output cap plus
+manifest, scratch, staging, and completion needs; a larger queue cannot bypass that budget.
+Count output until its final consumer releases it, including buffers removed from the queue
+but still owned by the writer. Pins retain live storage without creating another allocation.
+Vary I/O buffer size separately from total retained output capacity. Allocate on demand;
+these experiments do not set shipping defaults or a process-wide memory ceiling.
 
 Use R74's 10,000 active chunks and 2,000/4,000 changed chunks per interval as target cases
 on 16 GB hardware, plus measured smaller worlds on 8 GB hardware. Include accumulation
@@ -2138,18 +2176,58 @@ saving/compaction active under otherwise comparable conditions:
 | Save-priority mode with finite slow writes, stalled writes, and actual failures | Eventual success when I/O progresses and workspace suffices; responsive exceptional-pause status, bounded queues, and honest failure |
 | Intentionally tiny budgets and injected allocation failures | Bounded failure paths, backpressure, and recovery without exhausting system RAM |
 
-Measure frame time and authoritative-operation latency, with p95, p99, and observed maxima
-as well as typical values. Separately record capture bookkeeping, source hold time, player
-confirmation delay, global/near-player simulation pause, catch-up debt/CPU, encoding time,
-worker CPU, copied bytes by cause, allocation counts, allocated capacity, queue occupancy, retained capacity, save
-cancellations, retry frequency, cancellation request-to-handoff latency, successful save
-age/rate, and time/actions deferred in save-priority mode. Separate queue
-waiting from execution and gate/preparation from existing client copies. For a later COW
-experiment, report its detach/copy/retention costs separately and measure saving-inactive
-overhead with the policy enabled but unused. Measure eager encoding with metadata and
-multiple write dependencies, not only a hot 32 KiB memcpy-versus-RLE loop.
-Do not use averages alone to judge pauses. Record hardware/build configuration, workload,
-settings, and run duration so results and regressions can be reproduced.
+Use monotonic timestamps and bounded counters/histograms, correlated by capture identity.
+Report p95/p99 and observed maxima as well as typical values; include cancelled/failed attempts.
+The required measurements are:
+
+| Measurement | Definition and decision it supports |
+| --- | --- |
+| Capture and encoding | Boundary bookkeeping, per-source hold duration, last-source-release time, encoder active CPU/wall time excluding queue waits, encoded bytes and record-size distribution; distinguishes encoding cost from blocked output. |
+| Output and storage | Byte occupancy/high-water mark including writer-owned buffers, encoder time blocked by full output, bytes written, write duration/throughput, final flush/synchronization duration, and repair time; distinguishes temporary buffering pressure from sustained I/O limits. |
+| Durable progress and freshness | Successful commit count/rate, time since last durable success, R73 unsaved age, capture-to-durable-ack delay, and current age of the latest acknowledged capture boundary. Preserve boundary timestamps across delayed acknowledgments; these are diagnostic clocks, not changes to R73 escalation. |
+| Gameplay and catch-up | Frame/input and authoritative-operation latency, original-request-to-terminal delay, normal/exceptional simulation pause durations, exceptional-pause count/time fraction, deferred actions, catch-up debt and service CPU/capacity. |
+| Memory and backlog | Allocated/reserved working capacity, queued/predicted work, live source pins, dirty chunk count/capacity, base/timer retention, process memory, allocation counts, and copied bytes by cause; shows growth beyond the output queue. |
+| Cancellation and retries | Attempt/cancellation counts, reasons, retry frequency, and request-to-safe-handoff latency; separates useful completion from repeated abandoned work. |
+
+Boundary age uses real time of the captured boundary, not saved logical ticks or time of
+acknowledgment. A recent durable acknowledgment can cover old state. If the world remains
+clean, growing boundary age alone does not mean unsaved work; report dirty state alongside it.
+Separate useful execution from queue waiting and capture gate/preparation from existing client
+copies. Later COW/eager-encoding experiments reuse these measurements, including metadata and
+multi-chunk dependencies; a hot memcpy-versus-RLE microbenchmark is insufficient. Retain
+worker CPU measurements across stages; later COW evaluation separately reports detach/copy/
+retention costs and saving-inactive overhead while the policy is enabled but unused.
+
+Evaluate storage sensitivity through these explicit scenarios:
+
+| Scenario | Controlled input | Evidence expected |
+| --- | --- | --- |
+| Brief write stall | Hold write completion for a finite interval with output sized below and above the captured payload/workspace needs | Queue pressure explains any extra source-hold time; a fitting capture releases sources during the stall. |
+| Sustained slow writes | Rate-limit writes through several finite throughput levels, including below offered workload demand | Save priority permits fixed attempts to finish when I/O progresses; repeated cycles expose backlog/pause growth rather than claiming steady-state capacity. |
+| Slow final synchronization | Allow writes, hold only the final durability completion | Sources and simulation release independently; durability remains pending and freshness lag is visible. |
+| Oversized capture | Raw blocks, heavy/maximal metadata, and accumulated dirty chunks exceeding output capacity | The same pipeline backpressures within budget and follows normal/priority policy without a second mode or partial snapshot commit. |
+| Repeated cycles | Sustained simulation plus player bursts, periodic saves, and compaction overlap | Successful-save rate, boundary freshness, memory/backlog, and catch-up trends show whether the system keeps up. |
+
+Implement short deterministic cases using a controllable storage adapter and coordinator
+clock, with separate gates for writes and synchronization and explicit release/failure points.
+Reuse the reference-model oracle for recovered contents and ownership/atomicity checks. Keep
+these cases in the regular test suite without long real sleeps. Include permanent stalls and
+actual failures to verify responsive status and bounded failure behavior, not eventual success.
+
+For performance, run production paths on real storage with optional off-thread latency/rate
+injection and real elapsed time. Use identical workload traces/seeds across budget settings
+and a saving-inactive baseline. Run enough save and compaction cycles to report trends; record
+cycle counts and warm-up separately. Scaled-down fake-clock tests do not substitute for target
+scale or preserve storage/workload ratios automatically. Report hardware, build, workload,
+seed, configuration, duration, injected schedule, and results in a machine-readable artifact.
+Native filesystem tests still establish the supported adapter behavior separately.
+
+Instrumentation, short deterministic cases, and a reproducible benchmark runner belong to
+T4/T9/T7 in v1. Target-scale evaluation selects initial defaults; it need not run on every CI
+change. Larger soak campaigns and new capture policies are follow-ups using the same runner.
+Increase output capacity only when queue waits dominate and memory headroom permits it;
+encoding-dominated pauses need a different optimization. Sustained throughput/freshness or
+compaction deficits require addressing the service rate or workload, not merely a larger queue.
 
 Establish the current baseline and intended frame budget before setting numerical latency
 regression thresholds; no hard cancellation/frame-time promise is assumed in advance.
@@ -2388,13 +2466,12 @@ durability by itself; report that distinction in validation results.
   and oversized allocations in accounting, preserve fallible preparation and capture-buffer
   stability, and keep semantic limits independent of pool thresholds. The allocator interface
   permits this upgrade without a save-format or capture-contract change.
-- Evaluate buffering a complete encoded capture before disk writes against bounded streaming.
-  R74 makes this plausible for ordinary saves: 2,000-4,000 raw block payloads use 62.5-125 MiB
-  before metadata. Experimental 64/128/256 MiB output budgets are hypotheses, not defaults
-  or reservations. Metadata-heavy records and accumulated dirty state can exceed them;
-  1-2 KiB average encoded chunks are not a bound. Any adopted policy needs a reviewed bounded
-  overflow path and the same consistent boundary. Do not add a second capture pipeline to v1
-  merely for this experiment.
+- Consider a separate whole-capture buffering mode only if R66/R76 measurements demonstrate
+  an advantage over increasing capacity in the existing concurrent streaming pipeline.
+  Ordinary raw blocks for 2,000-4,000 chunks use 62.5-125 MiB before metadata/framing; heavy
+  metadata and accumulated dirty state can exceed that. A 1-2 KiB average is not a bound.
+  Any later mode needs a reviewed bounded overflow path and the same consistent boundary;
+  the capacity sweep and measurement infrastructure already belong to v1.
 - Add a manual Save action using the same ordered snapshot and durability pipeline, with
   explicit completion/failure feedback. V1 uses autosave and save-on-exit only.
 - Add and validate Linux/Windows durability adapters with platform-specific synchronization,
@@ -2563,6 +2640,7 @@ during implementation planning. None authorize starting implementation in this p
   Add budget accounting/reservations to existing block/metadata allocation paths and
   fallible metadata operations with partial-allocation cleanup; defer custom pools. Expose
   configurable local limits, capacity counters, and resource-failure/status hooks for later RAM budgeting.
+  Add R76 phase timestamps and bounded pressure/freshness instrumentation at those boundaries.
   Reuse validation/discovery results and bounded operation scratch storage; preserve in-place
   mutation for exclusive prepared chunks and use private staging only where necessary.
   Track dependency-wait/ready/terminal stages and preserve command order across async loads.
@@ -2590,7 +2668,9 @@ during implementation planning. None authorize starting implementation in this p
   escalation, bounded backpressure, finite slow/stalled I/O, source release, and shutdown.
   Add AC132 coverage for deadline selection, retained wait timestamps, release-driven retries,
   and freedom from deadline busy loops across capture epochs and mode changes.
-  Keep replayable seeds/traces and explicit critical-boundary cases in the regular CPU test suite.
+  Cover AC133/AC134 with independent write/synchronization gates, fitting and oversized captures,
+  and deterministic metric-attribution checks. Keep replayable seeds/traces and explicit
+  critical-boundary cases in the regular CPU test suite.
 - [ ] T7: Measure snapshot/edit latency, memory use, and compaction interference; tune budgets.
   Compare worker CPU, allocations, copied bytes, and latency against baseline with saving
   inactive/active, separating gate/preparation, source waiting, existing client copies, encoding,
@@ -2601,6 +2681,9 @@ during implementation planning. None authorize starting implementation in this p
   smaller 8 GB workloads, successful-save age/rate and exceptional pauses. Select and record
   default allocation budgets, queue limits, retry/backoff and escalation parameters, and
   cancellation/latency regression thresholds, including p95/p99/maxima and occupancy results.
-  Verify pressure behavior with tiny configured budgets/fault injection, not physical OOM.
+  Provide the R76 repeatable benchmark runner and machine-readable reports, including larger
+  output-capacity sweeps and multi-cycle save/compaction trends. Compare the same traces and
+  report real-time versus deterministic evidence separately. Verify pressure behavior with
+  tiny configured budgets/fault injection, not physical OOM.
 - [ ] T-val: Run acceptance criteria verification, crash/failure injection, relevant CPU
   regression tests, and application builds; document durability/performance limits.
