@@ -105,10 +105,11 @@ Decision status as of 2026-10-19:
   explicitly lazy. Eviction still requires the exact current version in the installed base
   and clearance of other pins. Both existing block timer kinds, dirt compaction and grass
   growth, are confirmed lazy. R77 supersedes the blanket timer pin. CONFIRMED: ordinary
-  loading applies overdue block timers before first exposure, using deterministic chunk-local
-  transitions; authoritative edits maintain eligibility, including across chunk boundaries.
-  R78 replaces next-pass-only handling for newly loaded chunks, while R47 retains fixed
-  resident passes. This changes timer activation timing, not the binary format.
+  loading restores/registers block timers; catch-up runs in the next eligible block-timer
+  pass under R47/R78. Outdated terrain may be exposed and edited before that pass; edits
+  maintain eligibility atomically, including across chunk boundaries, and timer execution
+  revalidates current state. This supersedes catch-up-before-exposure without changing the
+  binary format or promising execution in the next frame.
 - RETAINED: unaffected PR #28 decisions, including the durable format, recovery, compaction,
   base-only reloads, mutation atomicity, offline-time policy, and local budget controls.
 - DERIVED correctness requirements: one capture boundary, synchronized source release,
@@ -451,8 +452,8 @@ mechanisms without overriding those contracts.
   once with R78's local transition logic, revalidating current state/incarnation after waits.
   Keep T fixed throughout the pass; do not consume cancelled/replaced events from stale
   observations. Chunks loaded after selection do not expand that list or launch recursive
-  passes; their separate R78 activation catches up before exposure. Preserve finite dirt-to-
-  packed-dirt-to-grass catch-up: follow-up deadlines derive from the original deadline and
+  passes; they become eligible for a later pass under R78. Preserve finite dirt-to-packed-
+  dirt-to-grass catch-up: follow-up deadlines derive from the original deadline and
   may execute in the same pass if due by T and locally eligible. Work due after T waits for
   a later pass even if time advances. Resource/capture deferral publishes no partial operation
   and preserves pending state under R31/R39. No pass is added solely to drain all timers
@@ -630,8 +631,8 @@ mechanisms without overriding those contracts.
   simulation resumes. Do not equate saved world tick with completed simulation progress or
   silently discard skipped time. Pace catch-up and bound its retained representation;
   do not run an unlimited burst or allocate a record for every skipped tick. R47's fixed
-  resident block-timer pass and R78's load-time catch-up share the finite local transition
-  logic and preserve original deadlines.
+  resident block-timer pass also handles R78 catch-up after loading, using finite local
+  transition logic and preserving original deadlines.
   General NPC progress/debt representation, conservation rules, cross-chunk scheduling,
   and economic event ordering belong to the future simulation design. Persist the state
   that design requires when it is introduced.
@@ -706,8 +707,8 @@ mechanisms without overriding those contracts.
 
 - R77: Permit eviction of a chunk whose pending timers are all explicitly lazy when R24's
   installed-base revision and other pin conditions hold, even when a lazy deadline is overdue.
-  Lazy means execution may be deferred while nonresident until R78 catch-up during ordinary
-  loading, using original deadlines and local conditions before first exposure. It is
+  Lazy means execution may be deferred while nonresident until an eligible block-timer pass
+  after ordinary loading under R78, using original deadlines and current local conditions. It is
   a property of timer-kind semantics, not merely a distant deadline, player distance, or an
   empty subscription set. Both existing kinds, compact_dirt and grow_grass, are lazy. A
   recognized kind not explicitly classified lazy retains a timer residency pin while pending; unsupported serialized kinds remain load errors. V1 needs no
@@ -718,26 +719,27 @@ mechanisms without overriding those contracts.
   Timer consumption, replacement, or cancellation advances persistent revision under R48,
   including metadata-only changes, before subsequent eviction can use base equality.
 
-- R78: Before publishing an ordinarily loaded chunk as ready to players, meshes/collision,
-  or dependent gameplay operations, catch up its overdue lazy block timers to one fixed
-  logical cutoff T assigned at activation admission by world-service authority. Use the same
-  chunk-local transition logic as resident passes, in stable (deadline, cell-index) order.
-  Check current event identity and expected material; derive follow-up deadlines from the
-  original deadline and process the finite local chain through T. Timer execution must not
-  read/load adjacent chunks or invoke general multi-chunk simulation/placement validation.
-  All authoritative edits affecting eligibility must schedule, replace, or cancel affected
-  timers atomically with their full write set, including exposure changes across boundaries;
-  preserve current cover/uncover gameplay semantics. Audit all mutation paths before removing
-  execution-time neighbor checks. No new serialized eligibility flag is required for v1.
-  Decode into owned unpublished state, then perform catch-up as an authoritative activation
-  stage, not a side effect of the storage codec. Publish completed results, revisions, caches,
-  and timer registration together after R26 stale-load checks and R31 resource preparation.
-  Bounded work slices may delay readiness but cannot expose partial catch-up. Block-timer
-  execution, including activation catch-up, defers while the capture gate holds sources;
-  keep completion handling responsive and retain bounded waiting work. Resolve dependencies
-  needed for a save boundary before starting capture under R42/R43. Preserve R48 revision/
-  dirty tracking for timer effects and metadata-only consumption. Persistence-only recovery,
-  verification, and compaction reads do not execute timers. Do not add offline elapsed time.
+- R78: Ordinary loading restores saved block/timer state and registers pending timers once
+  under R26's stale-load/publication rules. Chunk readiness does not wait for overdue timer
+  catch-up. Run catch-up in the next eligible block-timer pass under R47; loads after pass
+  selection wait for a later pass. Capture, backlog, or resource pressure may postpone work
+  beyond the next frame. Use bounded, fair processing while chunks remain resident and
+  execution is permitted; retain unprocessed due work without resetting its deadlines.
+  Players, meshes/collision, and dependent commands may observe pre-catch-up terrain; edits
+  admitted before timer execution take effect in authoritative order. Recheck current event
+  identity/incarnation and expected material so stale timers cannot overwrite newer edits.
+  Execute chunk-local transitions in stable (deadline, cell-index) order through the pass's
+  fixed cutoff T, deriving follow-up deadlines from the original deadline. Timer execution
+  must not read/load adjacent chunks or invoke general multi-chunk simulation/placement
+  validation. All authoritative edits affecting eligibility must schedule, replace, or cancel
+  affected timers atomically with their full write set, including exposure changes across
+  boundaries; preserve current cover/uncover gameplay semantics. Audit all mutation paths
+  before removing execution-time neighbor checks. No serialized eligibility flag is required.
+  Timer operations follow R31's resource preparation and atomic publication, R68's capture
+  gate, and R48's revision/dirty tracking, including metadata-only consumption. Registration
+  alone does not consume a timer or dirty unchanged saved state. Persistence-only recovery,
+  verification, and compaction reads do not register live timers or execute them. No extra
+  timer pass is required for chunk readiness or a save boundary; add no offline elapsed time.
 
 ## Clarifications
 
@@ -873,8 +875,9 @@ mechanisms without overriding those contracts.
 - Q29: What timer eligibility and catch-up behavior belongs in persistence v1?
   A29: RETAINED: fixed resident-pass tick/list, original deadlines, finite soil-transition
   chains, no recursive draining before saving, and no offline elapsed-time catch-up.
-  REVISED/CONFIRMED: R78 also catches up lazy block timers during ordinary loading before
-  exposure. Execution uses local state with eligibility maintained by authoritative edits.
+  REVISED/CONFIRMED: ordinary loading restores/registers lazy block timers; R78 catches them
+  up in the next eligible block-timer pass without delaying readiness. Execution uses local
+  state with eligibility maintained by authoritative edits, including edits before catch-up.
   Block timers remain distinct from broader NPC simulation, whose scheduling is deferred.
 - Q30: Must eviction inspect active/sealed WALs or maintain separate pending-WAL eligibility?
   A30: CONFIRMED by the user: no. Compare the current persistent chunk revision with its
@@ -1014,14 +1017,17 @@ mechanisms without overriding those contracts.
   overload or slow encoding. R76 makes the evidence needed to choose defaults part of v1.
 
 - Q52: Which timers are lazy, and when does reload catch-up run?
-  A52: CONFIRMED: compact_dirt and grow_grass are lazy. Apply overdue transitions before the
-  ordinarily loaded chunk is exposed, using R78's deterministic local kernel and fixed cutoff.
-  The prior next-pass rule could expose old terrain briefly; the new rule exposes the completed
-  result through that cutoff. Deadlines after it remain pending and may visibly fire later.
-  Eligibility maintenance moves to edits, including cross-chunk cover/uncover changes; this
-  preserves gameplay rules without timer-time neighbor reads. Larger timer queues can delay
-  loading, and catch-up can make the chunk dirty again. Future economy events need their own
-  scheduling contract and do not inherit these local block-timer semantics.
+  A52: CONFIRMED: compact_dirt and grow_grass are lazy. Ordinary loading restores/registers
+  timers; catch-up runs in the next eligible block-timer pass under R47/R78. The user accepts
+  outdated terrain being visible, even beyond a frame or two. This supersedes catch-up before
+  exposure and removes a separate load-time execution stage. Edits may precede overdue timer
+  execution and must atomically maintain eligibility; local event/material checks prevent
+  stale effects. Identical state, cutoffs, and ordered edits are deterministic; changing the
+  edit/timer order may change outcomes. Original deadlines and finite catch-up chains remain.
+  Capture, backlog, and resource pressure may delay execution; fair bounded passes retain
+  due work. Future economy events need their own scheduling contract and do not inherit
+  these local block-timer semantics.
+
 ## Acceptance Criteria
 
 - AC1: GIVEN an edit changes several chunks WHEN captured during repeated edits THEN each
@@ -1100,9 +1106,10 @@ mechanisms without overriding those contracts.
   live chunks or activate their timers solely because unfinished timers exist.
 - AC29: GIVEN a saved lazy-timer chunk not loaded at startup WHEN ordinary streaming or
   gameplay dependency access later loads it THEN its original deadlines are restored and
-  R78 catch-up finishes through the activation cutoff before first exposure. Repeated loads
-  do not duplicate registration/effects; timer mutations advance persistent revision and
-  lazy events alone add no blanket residency pin.
+  timers are registered once without catch-up delaying readiness. Due work becomes eligible
+  under R47/R78. Repeated loads do not duplicate registration/effects; registration alone
+  does not change persistent revision, and lazy events alone add no blanket residency pin.
+
 - AC30: GIVEN base files, WAL segments, and transactions extending beyond 2^32 bytes WHEN
   written, validated, recovered, compacted, and read by index THEN sizes and offsets retain
   all bits and records on either side of that boundary are addressed correctly. Exercise
@@ -1243,12 +1250,13 @@ mechanisms without overriding those contracts.
 - AC67: GIVEN a compatible valid chunk record WHEN moved from a WAL into a new base or to a
   different base offset THEN its record checksum remains valid without re-encoding, while
   container checksums and WAL lineage remain independently required.
-- AC68: GIVEN a resident pass selecting A at tick T WHEN another ordinary load activates B
+- AC68: GIVEN a resident pass selecting A at tick T WHEN another ordinary load publishes B
   with overdue block timers THEN B is not added to A's fixed pass and no recursive pass is
-  launched. B uses its own fixed activation cutoff and completes local catch-up before any
-  ready response or dependent operation observes it. Captures contain complete published
-  operations; persistence-only reads preserve saved timers without activating B.
-- AC69: GIVEN resident or load-time catch-up with an overdue dirt-compaction timer WHEN
+  launched. B can be observed/edited before catch-up and becomes eligible for a later pass.
+  Captures contain complete published operations and may retain overdue timers;
+  persistence-only reads preserve saved timers without registering or executing them.
+
+- AC69: GIVEN an eligible block-timer pass with an overdue dirt-compaction timer WHEN
   its grass-growth follow-up is also due by the fixed cutoff T and locally eligible THEN both
   transitions may complete using the original deadline relationship. A follow-up after T
   remains pending even if world time advances during processing or resource waits.
@@ -1532,16 +1540,21 @@ mechanisms without overriding those contracts.
   prevents eviction; missing lazy classification is not permission to unload. After a lazy
   timer changes blocks or metadata, an older installed-base revision cannot permit eviction.
 
-- AC136: GIVEN a loaded loose-dirt chunk with compaction and its eligible grass follow-up
-  overdue by activation cutoff T WHEN catch-up takes several work slices THEN no ready
-  block/mesh/collision response exposes the pre-catch-up or intermediate packed-dirt state;
-  first exposure is grass. If only compaction is due by T, first exposure is packed dirt
-  with the original future grass deadline. A blocked/failed activation stays unready and
-  follows existing failure policy rather than exposing partial work.
+- AC136: GIVEN an ordinarily loaded loose-dirt chunk with overdue compaction and an eligible
+  grass follow-up WHEN capture, backlog, or resource pressure postpones its timer work THEN
+  the chunk may become ready and expose saved terrain with the original timers still pending.
+  Once execution is permitted, fair bounded passes make progress while it remains resident.
+  Without intervening edits, a pass cutoff T covering both deadlines produces grass; if only
+  compaction is due by T, packed dirt retains the original future grass deadline. If an edit
+  first cancels/replaces a timer or changes eligibility, stale work has no effect. Deferred
+  work remains pending; no partial authoritative timer operation is published.
+
 - AC137: GIVEN identical local block/timer state and cutoff T WHEN repeating catch-up or
   comparing one large step with incremental cutoffs through T without intervening edits
   THEN logical block/timer results agree and repeated catch-up at T has no additional effect.
-  Publication revision counts may differ with grouping but remain monotonic. Cover/uncover
+  Replaying identical cutoffs and ordered edits also agrees; different edit/timer ordering
+  need not produce equal outcomes. Publication revision counts may differ with grouping
+  but remain monotonic. Cover/uncover
   edits across a chunk boundary maintain eligibility atomically; timer execution performs
   no neighboring reads/loads. Stale concurrent load results cannot overwrite newer state.
 
@@ -1633,7 +1646,7 @@ wording in place. New requirements start at R67 and new criteria at AC117.
 | R2, R5, R20, R29, R31; Q7/Q12/Q19 | Replace mandatory COW with frozen-source admission, pending mutations, safe release, and capture limits. |
 | R32-R35; Q20-Q22 | Keep logical field categories, empty metadata, budget accounting, and fallible preparation; retain the existing `WorldChunk` layout and restricted views. Defer custom pools; remove the mandatory physical split, combined owner/block slot, and version cloning. |
 | R37-R43; Q24-Q26 | Keep in-place mutation, atomicity, resource failure, command prefixes and shutdown ordering; distinguish capture-pending work from terminal rejection. |
-| R47/R78/R18; Q29/Q52 | Retain fixed resident passes and no offline time; add local load-time catch-up before first exposure and edit-time eligibility maintenance. |
+| R47/R78/R18; Q29/Q52 | Restore/register timers on load; catch up in the next eligible fixed resident pass, allowing edits first; retain local execution, edit-time eligibility maintenance, and no offline time. |
 | R28/R77; Q16/Q52 | Replace blanket retention of loaded timer-bearing chunks with eligibility for all-lazy timer sets; keep exact-base and other pin requirements. |
 | R36/R66; resource-budgeting R8/R11 and Q3/Q5/Q7 | Include minimal capture gating/priority now; account for source pins/output/debt and measure latency; keep global pressure control a follow-up. |
 | R1/R3-R4/R7-R17/R21-R28/R30/R44-R46/R48-R65, except policy references clarified above | Retain snapshot atomicity, serialized layouts/codecs/checksums, WAL/base lineage, durability/recovery, eviction and shutdown contracts. |
@@ -1901,30 +1914,28 @@ failures remain R55's stderr/nonzero-exit path and do not enter this shutdown di
 
 ### Lazy Timer Pass Boundary
 
-Block timers use one local transition kernel in two places: fixed resident passes (R47)
-and ordinary chunk activation before readiness (R78). R77 removes unloaded lazy chunks
-from the live due index; only normal access activates them again. Persistence-only reads
-leave saved block/timer state unchanged. No global deadline-loading scheduler is introduced.
+Block timers execute only in fixed resident passes (R47/R78). Ordinary loading restores
+saved block/timer state and registers timers once under the existing stale-load/publication
+rules; it does not run timers or wait for catch-up before reporting readiness. R77 removes
+evicted lazy chunks from the live due index; normal access registers them again.
+Persistence-only reads leave saved state unchanged without live timer registration.
+No global deadline-loading scheduler is introduced.
 
-For ordinary loading, decode and validate into owned unpublished storage. Admit activation
-through world-service ordering, select its fixed logical cutoff T, and catch up before
-publishing the chunk to subscribers, mesh/collision builders, or dependent commands. Register
-remaining timers once. Bound work slices and keep completions responsive; the chunk remains
-unready until the entire activation is safely publishable. Reuse the existing generation,
-revision, admission, and allocation-failure contracts for stale/failed loads and retries.
+Each pass fixes logical cutoff T and its eligible resident-chunk list at pass start. Later
+loads become eligible for a later pass, without expanding the selected list or launching a
+recursive pass. Use stable (deadline, cell-index) order and original follow-up deadlines.
+Bound work and schedule fairly while residency and execution permissions hold; preserve
+unprocessed due work across deferrals. The next eligible pass is not a next-frame promise.
+The existing two-stage soil chain is finite; future recurring timers need their own bounded
+catch-up contract.
 
-The resident pass fixes T and its eligible-chunk list at pass start. Later loads use their
-own activation cutoff without joining or recursively expanding that pass. Timers use stable
-(deadline, cell-index) order and the original follow-up deadline. The existing two-stage
-soil chain is finite; future recurring timers need a separately bounded catch-up contract.
-For unchanged local inputs, repeated evaluation at T is idempotent, and incremental cutoffs
-through T yield the same logical contents as one large catch-up. Different intervening edits
-or cutoffs are different inputs, not a promise of identical historical outcomes.
-
-For example, compaction due at 100 followed by grass due at 200 produces grass on first
-exposure when the activation cutoff is 250. At cutoff 150 it exposes packed dirt and retains
-the deadline of 200. Internal transitions are not individually published during loading.
-Future deadlines can expire after the selected cutoff and run normally once resident.
+For example, a loaded loose-dirt block may be visible before compaction due at 100 and grass
+due at 200 execute. With no intervening edit, a pass at cutoff 250 produces grass; a pass at
+150 produces packed dirt and retains the deadline of 200. An edit can precede either pass
+and change the applicable result. Current event identity/material checks prevent stale
+work from overwriting that edit. With identical state, cutoffs, and ordered edits, execution
+is deterministic. Without intervening edits, evaluation at T is idempotent and incremental
+cutoffs through T produce the same logical contents as one large catch-up.
 
 Current code checks the block above during timer execution. Replace that dependency only
 after auditing eligibility maintenance in every authoritative mutation path: covering soil
@@ -1933,13 +1944,12 @@ appropriate transition. Cross-boundary effects remain part of the edit's atomic 
 Timer execution needs only local event/material checks and local follow-up scheduling.
 It must not recursively load a neighbor or invoke broader simulation validation.
 
-Both resident and activation block-timer execution defer while capture holds sources;
-existing executing operations finish before capture. A load waiting for the gate remains
-unready rather than publishing old terrain, and normal/overdue save policy governs release.
-Save-barrier dependencies resolve before capture so capture cannot wait on its own gate.
-Timer mutation/consumption dirties the published revision; an older base no longer permits
-eviction. Neither loading nor capture adds offline wall time or resets timer deadlines.
-Do not run extra resident passes merely to eliminate overdue state before saving.
+Timer execution defers while capture holds sources; existing executing operations finish
+before capture. Loading follows normal publication rules without a timer catch-up gate.
+Timer mutation/consumption dirties the published revision; registration alone leaves saved
+contents and revision unchanged. An older base cannot permit eviction after timer mutations.
+Neither loading nor capture adds offline wall time or resets deadlines. No extra pass is
+required to eliminate overdue state before saving or before exposing a loaded chunk.
 
 ### Recovery Failure Classification
 
@@ -2277,7 +2287,7 @@ saving/compaction active under otherwise comparable conditions:
 | Save-priority mode with finite slow writes, stalled writes, and actual failures | Eventual success when I/O progresses and workspace suffices; responsive exceptional-pause status, bounded queues, and honest failure |
 | Intentionally tiny budgets and injected allocation failures | Bounded failure paths, backpressure, and recovery without exhausting system RAM |
 | Distinct-chunk churn beyond active regions, with delayed compaction | Retention until the exact current base revision is installed, net resident growth, and separation of world memory from capture-output capacity |
-| All-lazy and mixed timer sets, repeated eviction/reload, load-time catch-up, and timer-pass races | Reclamation and pins remain correct; record activation latency/work, first-exposure contents, and renewed dirty retention after catch-up |
+| All-lazy and mixed timer sets, repeated eviction/reload, deferred catch-up, and timer-pass/edit races | Reclamation and pins remain correct; record load readiness, overdue wait/pass work, fair progress after deferral, and renewed dirty retention after timer execution |
 
 Use monotonic timestamps and bounded counters/histograms, correlated by capture identity.
 Report p95/p99 and observed maxima as well as typical values; include cancelled/failed attempts.
@@ -2756,8 +2766,8 @@ during implementation planning. None authorize starting implementation in this p
   Define timer passes with a fixed tick/resident due-chunk list, preserve finite local
   catch-up, and save overdue/deferred timer state without recursive catch-up passes.
   Implement R77 timer-kind eviction eligibility, resident due-index removal/restoration,
-  and scoped operation pins. Integrate R78's shared local timer kernel and activation-before-
-  exposure stage; audit edit-time eligibility maintenance across every mutation path.
+  and scoped operation pins. Integrate R78 registration on load and catch-up in the next
+  eligible block-timer pass; audit edit-time eligibility maintenance across every mutation path.
 - [ ] T5: Implement segment rotation and streaming background compaction with source checksum/
   lineage verification and safe publication; inject source corruption during consumed reads.
 - [ ] T6: Integrate load/save lifecycle, autosave/final-save, player restore, and save status.
@@ -2786,8 +2796,9 @@ during implementation planning. None authorize starting implementation in this p
   with all-lazy and mixed timer sets, repeated reloads, original overdue deadlines, stale
   due-index entries, and metadata-only revisions that break base equality. Model the non-lazy
   policy case in the harness without adding a new serialized gameplay kind solely for testing.
-  Add AC136/AC137 coverage for first-exposure state, bounded activation slices, idempotence,
-  incremental/large-step equivalence, cross-boundary edits, and no timer-time neighbor loads.
+  Add AC136/AC137 coverage for readiness before catch-up, fair bounded pass progress, edits
+  before timer execution, idempotence, incremental/large-step equivalence, cross-boundary
+  edits, and no timer-time neighbor loads.
 - [ ] T7: Measure snapshot/edit latency, memory use, and compaction interference; tune budgets.
   Compare worker CPU, allocations, copied bytes, and latency against baseline with saving
   inactive/active, separating gate/preparation, source waiting, existing client copies, encoding,

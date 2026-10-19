@@ -173,10 +173,11 @@ budget and persistence decisions remain in force.
   A5: REVISED/CONFIRMED: preserve logical progress and catch up against current conditions,
   without exact historical replay. Retain bounded pending/event state with backpressure;
   consume timers/inputs only on successful application. Persistence v1 pauses all simulation
-  for capture. Local block timers are distinct: world-persistence.md R47/R78 use a shared
-  finite transition kernel for resident passes and load-time catch-up before first exposure.
-  Bounded work slices can delay chunk readiness; partial catch-up is not exposed. Pace resumed
-  work and retain debt rather than creating an unlimited burst or silently discarding time.
+  for capture. Local block timers are distinct: world-persistence.md R47/R78 restore/register
+  them on load and catch up in the next eligible block-timer pass without delaying readiness.
+  Edits may precede catch-up; eligibility and event identity must be revalidated. Pace resumed
+  work with fair bounded passes and retain debt rather than creating an unlimited burst or
+  silently discarding time.
   General NPC progress representation, conservation/eligibility rules, and fair scheduling
   remain future simulation work; persistence must cover that state when introduced. The user
   explicitly defers economic event ordering across postponed work to the simulation spec;
