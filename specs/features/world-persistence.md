@@ -66,6 +66,10 @@ Decision status as of 2026-10-19:
 - CONFIRMED by the user: use one coordinator watchdog for capture-related deadlines and
   overdue-save escalation. Preserve original player-wait timestamps across retries and
   capture epochs; retry waiting admissions on meaningful source-release progress (R75).
+- CONFIRMED by the user: normal gameplay deadlines do not automatically cancel the final
+  shutdown save. Keep memory limits and responsive completion handling; retain the existing
+  wait/cancel-exit/quit choices. Cancel exit restores gameplay capture policy through safe
+  ownership handoff, including overdue-save priority when still applicable.
 - CONFIRMED by the user: catch up postponed simulation against current world conditions,
   preserving elapsed logical time and preventing duplicate effects. Exact historical
   replay of skipped ticks is not required. Economic event ordering across deferred work
@@ -525,8 +529,10 @@ Decision status as of 2026-10-19:
   while the original request is still running. Retry becomes available only for a failed
   step after its outstanding work is resolved. Keep waits and retries off the UI thread.
 - R62: Cancel exit resumes gameplay while preserving completed effects and outstanding work;
-  it does not roll back actions or replay terminal requests. Respect R30 for any commit
-  already in progress. Explicit Quit without saving accepts loss since the last durable
+  it does not roll back actions or replay terminal requests. Restore gameplay capture policy
+  through safe ownership handoff, retaining request wait timestamps and unsaved age; R73
+  save priority still applies when warranted. Respect R30 for any commit already in progress.
+  Explicit Quit without saving accepts loss since the last durable
   snapshot, retains base/WAL files, and must not wait indefinitely on a stalled worker.
   If safe worker shutdown cannot finish, process exit uses the supported crash-recovery
   contract without destructive cleanup or claiming final-save success. A durable final WAL
@@ -640,9 +646,10 @@ Decision status as of 2026-10-19:
   without separate timer-based retry loops per request or chunk. Deadline handling must
   remain serviceable while simulation is paused or the writer is blocked on I/O; it requests
   cancellation through R30's safe handoff and never assumes a deadline releases ownership.
-  Exclude deadlines already acted upon or overridden by save priority from wakeup selection
-  until they become actionable again, avoiding busy loops. No dedicated watchdog thread or
-  general simulation timer framework is required; numeric limits remain governed by R66.
+  Exclude deadlines already acted upon or overridden by save priority or final-shutdown
+  policy from wakeup selection until they become actionable again, avoiding busy loops.
+  No dedicated watchdog thread or general simulation timer framework is required; numeric
+  limits remain governed by R66.
 
 ## Clarifications
 
@@ -986,6 +993,13 @@ Decision status as of 2026-10-19:
   Preserve each request's original wait timestamp across retries and capture epochs. R75
   defines the contract; timer APIs, deadline data structures, and numeric thresholds remain
   engineering choices. This does not select future simulation event scheduling.
+
+- Q49: Do normal gameplay deadlines cancel the final shutdown save?
+  A49: CONFIRMED by the user: no. Producers are stopped; let the final save continue within
+  the same memory limits while completion handling and the existing wait/cancel-exit/quit
+  choices remain responsive. Actual failures retain their existing handling. Cancel exit
+  restores gameplay capture policy through safe ownership handoff, preserving wait timestamps,
+  unsaved age, and R30 commit boundaries; overdue-save priority remains applicable under R73.
 
 ## Acceptance Criteria
 
@@ -1357,6 +1371,8 @@ Decision status as of 2026-10-19:
 - AC107: GIVEN a failed or delayed shutdown WHEN Cancel exit is selected THEN gameplay
   resumes with completed effects and outstanding operations preserved. Any active commit
   resolves under R30, and stale shutdown completions cannot subsequently terminate gameplay.
+  Gameplay capture policy is restored through safe ownership handoff without resetting request
+  wait timestamps or unsaved age; overdue-save priority still applies when warranted.
 - AC108: GIVEN a stalled shutdown worker WHEN the player explicitly selects Quit without
   saving THEN exit does not wait indefinitely or destructively clean up persistence files.
   Restart follows the supported crash-recovery guarantees for previously durable snapshots.
@@ -1458,7 +1474,8 @@ Decision status as of 2026-10-19:
 - AC131: GIVEN a final shutdown save with progressing I/O WHEN its duration exceeds normal
   gameplay capture/player-wait limits THEN it continues within the same budgets, with the
   existing responsive shutdown status and explicit choices; the elapsed limit alone does
-  not create an endless cancel/retry loop or override a commit already in progress.
+  not create an endless cancel/retry loop or override a commit already in progress. The R75
+  watchdog excludes these overridden deadlines from wakeup selection during final saving.
 
 - AC132: GIVEN multiple capture-blocked requests with different original wait timestamps
   WHEN source releases, retries, new dependencies, capture epochs, and save-priority mode
@@ -1858,7 +1875,11 @@ Cancel exit resumes producers through the coordinator without resetting operatio
 or duplicating effects. Invalidate the old exit intent so delayed final-save/compaction
 completions cannot unexpectedly close the resumed game. Respect the existing ownership
 handoff and commit-cancellation boundaries: a commit already begun must still resolve, and
-successful durability acknowledgments remain valid after exit is cancelled.
+successful durability acknowledgments remain valid after exit is cancelled. Restore gameplay
+capture policy through that safe handoff, retaining original request wait timestamps and
+unsaved age. Removing the shutdown exemption does not disable R73 overdue-save priority.
+Normal gameplay deadlines become actionable again only where the restored policy permits;
+their expiry never authorizes premature source reuse or cancellation of an active commit.
 
 Explicit Quit without saving must not block indefinitely joining a stalled disk worker.
 Finish safe shutdown where possible; if workers cannot finish, terminate with the same
