@@ -46,6 +46,9 @@ const block_diagnostics = @import("block_diagnostics.zig");
 const block_messages = @import("block_messages.zig");
 const held_block = @import("engine").held_block;
 const held_item_motion = @import("engine").held_item_motion;
+const persistence_format = @import("persistence/format.zig");
+const persistence_storage = @import("persistence/storage.zig");
+const persistence_launch = @import("persistence/launch.zig");
 
 // Shared camera-space held pose for player and spectator modes.
 const held_block_pose: held_block.Pose = .{};
@@ -57,7 +60,7 @@ const CHUNK_LOAD_RADIUS = 3;
 const BLOCK_LOAD_RADIUS = 1;
 
 const Game = struct {
-    const MeshVersion = struct { chunk_revision: u32, mesh_revision: u64 };
+    const MeshVersion = struct { chunk_revision: u64, mesh_revision: u64 };
     const BoundarySnapshot = struct { masks: world_engine.BoundaryMasks, mesh_revision: u64 };
     allocator: std.mem.Allocator,
     engine: *Engine,
@@ -65,6 +68,15 @@ const Game = struct {
     world_data: ?*WorldDataService = null,
     world_client: ?*world_data_service.Client = null,
     simulation: ?*SimulationWorker = null,
+    persistence_store: ?*persistence_storage.Store = null,
+    player_id: u64 = 1,
+    next_autosave_at: f64 = 60,
+    next_compaction_at: f64 = 600,
+    exit_requested: bool = false,
+    exit_intent: ?u64 = null,
+    close_ready: bool = false,
+    exit_progress: u64 = 0,
+    exit_progress_at: f64 = 0,
     player: ?PlayerController = null,
     control_mode: enum { player, spectator } = .player,
     block_mode: block_targeting.Mode = .removing,
@@ -180,7 +192,7 @@ const Game = struct {
             return;
         }
 
-        if (std.math.isFinite(game.engine.frame_delta) and game.engine.frame_delta > 0) {
+        if (!game.exit_requested and std.math.isFinite(game.engine.frame_delta) and game.engine.frame_delta > 0) {
             game.fractional_ticks += game.engine.frame_delta * @as(f64, @floatFromInt(transformations.ticks_per_second));
             const ticks: transformations.Tick = @intFromFloat(@floor(game.fractional_ticks));
             game.fractional_ticks -= @as(f64, @floatFromInt(ticks));
@@ -193,9 +205,12 @@ const Game = struct {
         const has_new_chunks = game.receiveChunks();
         // Synchronize blocks first, then resolve local movement against that cache.
         // Player input remains independent of mesh work and GPU upload capacity.
-        if (game.player != null) game.updatePlayer(has_new_chunks);
-        game.updateBlockTool();
+        if (!game.exit_requested) {
+            if (game.player != null) game.updatePlayer(has_new_chunks);
+            game.updateBlockTool();
+        }
         game.flushBlockOperations();
+        game.updatePersistence();
         game.updateChunksAroundCamera(has_new_chunks);
         game.updateBlockFocus();
         game.rebuildDirtyChunks();
@@ -212,6 +227,86 @@ const Game = struct {
         }
         game.gpu_capacity_warning = false;
         grid.uploadToGPU(game.engine.gctx);
+    }
+
+    fn checkpoint(game: *Game) void {
+        // Position may depend on optimistic terrain. Do not publish it ahead of
+        // an edit that has not entered the authority's command prefix yet.
+        for (game.world.?.pending_operations.items) |pending| {
+            if (pending.request_id == null) return;
+        }
+        const player = if (game.player) |player| player else return;
+        game.world_client.?.publishCheckpoint(.{
+            .id = game.player_id,
+            .feet = .{ player.position[0], player.position[1], player.position[2] },
+            .yaw = player.yaw,
+            .pitch = player.pitch,
+        });
+    }
+
+    fn updatePersistence(game: *Game) void {
+        if (game.persistence_store == null) return;
+        const service = game.world_data.?;
+        if (game.exit_requested and game.exit_intent == null) {
+            // Admission can be bounded while a prior capture is in flight. Keep
+            // pumping completions until every existing optimistic intent is sent.
+            for (game.world.?.pending_operations.items) |pending| {
+                if (pending.request_id == null) return;
+            }
+            game.checkpoint();
+            game.exit_intent = service.requestSave(true);
+        }
+        if (game.exit_intent) |intent| {
+            const status = service.persistenceStatus();
+            if (status.intent_id != intent) return;
+            if (status.progress_generation != game.exit_progress) {
+                game.exit_progress = status.progress_generation;
+                game.exit_progress_at = game.engine.time;
+            }
+            const saved_but_finalization_failed = status.phase == .failed and !status.active and
+                status.target_sequence != 0 and status.durable_sequence >= status.target_sequence;
+            if (status.phase == .complete or saved_but_finalization_failed) {
+                if (saved_but_finalization_failed) std.debug.print("Final snapshot is durable; base finalization failed ({s}). WAL retained for recovery.\n", .{status.error_name orelse "unknown"});
+                game.close_ready = true;
+                game.engine.window_context.window.setShouldClose(true);
+            }
+            return;
+        }
+        game.checkpoint();
+        if (game.engine.time >= game.next_autosave_at) {
+            _ = service.requestSave(false);
+            game.next_autosave_at = game.engine.time + 60;
+        }
+        if (game.engine.time >= game.next_compaction_at) {
+            service.requestCompaction();
+            game.next_compaction_at = game.engine.time + 600;
+        }
+    }
+
+    fn beginExit(game: *Game) void {
+        if (game.exit_requested) return;
+        game.exit_requested = true;
+        if (game.simulation) |simulation| simulation.pauseDispatch();
+        game.flushBlockOperations();
+        // updatePersistence publishes the final checkpoint after all local intents
+        // have entered the authority's ordered queue.
+        game.updatePersistence();
+        game.exit_progress = 0;
+        game.exit_progress_at = game.engine.time;
+        game.engine.input_controller.cursor_capture = .never;
+        game.engine.active_scene.?.spectator_enabled = false;
+        game.jump_requested = false;
+        if (game.player) |*player| player.resetJumpInput();
+    }
+
+    fn cancelExit(game: *Game) void {
+        if (game.exit_intent) |intent| game.world_data.?.cancelSaveIntent(intent);
+        game.exit_intent = null;
+        game.exit_requested = false;
+        game.close_ready = false;
+        game.engine.input_controller.cursor_capture = if (game.control_mode == .player) .always else .while_left_button;
+        game.engine.active_scene.?.spectator_enabled = game.control_mode == .spectator;
+        if (game.simulation) |simulation| simulation.resumeDispatch();
     }
 
     fn updatePlayer(game: *Game, terrain_changed: bool) void {
@@ -289,7 +384,11 @@ const Game = struct {
         const world = &game.world.?;
         for (world.pending_operations.items) |*pending| {
             if (pending.request_id == null) {
-                pending.request_id = game.world_client.?.submitOperation(pending.operation);
+                pending.request_id = game.world_client.?.trySubmitOperation(pending.operation) catch {
+                    // Preserve the original optimistic order and retry admission
+                    // after completions free capacity. No identity was assigned.
+                    break;
+                };
             }
         }
     }
@@ -345,7 +444,15 @@ const Game = struct {
                         (if (world.getChunk(response.coords)) |chunk| chunk.boundaries else null)
                     else
                         null;
-                    world.insertChunk(response.coords, snapshot.chunk) catch {
+                    world.insertChunk(response.coords, snapshot.chunk) catch |err| {
+                        if (err == error.OutOfMemory) {
+                            // Keep the subscription identity for normal eviction, but
+                            // invalidate its mode so the next streaming pass requests
+                            // a fresh authoritative snapshot. No payload or extra queue
+                            // survives the failed rebase, and acknowledgments stay retired.
+                            _ = game.chunk_modes.remove(id);
+                            _ = game.block_snapshot_tokens.remove(id);
+                        }
                         response.deinit(game.allocator);
                         continue;
                     };
@@ -440,7 +547,7 @@ const Game = struct {
     fn requestChunkMode(game: *Game, coords: ChunkCoords, mode: world_data_service.Representation) void {
         const id = game.layout().encodeChunkCoords(coords);
         if (game.chunk_subscriptions.contains(id) and game.chunk_modes.get(id) == mode) return;
-        const token = game.world_client.?.requestChunksInMode(.{ coords[0], coords[1] }, coords[2], coords[2] + 1, mode);
+        const token = game.world_client.?.tryRequestChunksInMode(.{ coords[0], coords[1] }, coords[2], coords[2] + 1, mode) catch return;
         game.chunk_subscriptions.put(game.allocator, id, token) catch @panic("OOM");
         game.chunk_modes.put(game.allocator, id, mode) catch @panic("OOM");
     }
@@ -619,6 +726,10 @@ const Game = struct {
     fn queueBlockAction(game: *Game, action: BlockAction) void {
         // Commands capture the active mode at press time, like their material.
         if ((action == .place) != (game.block_mode == .putting)) return;
+        if (game.tool_commands.items.len >= 64) {
+            game.block_action_error.show("Too many pending edits. Try again shortly.", game.engine.time);
+            return;
+        }
         game.tool_commands.append(game.allocator, action) catch |err| {
             std.debug.print("can't queue block edit: {s}\n", .{@errorName(err)});
         };
@@ -777,9 +888,52 @@ const BlockAction = union(enum) {
 };
 
 fn initWorld(game: *Game) !void {
-    game.world_data = try WorldDataService.create(game.engine.io, game.allocator, game.engine.active_scene.?.layout, .{ .terrain = .{ .seed = 12345 } });
+    const generator = if (game.persistence_store) |store| try savedGenerator(store.descriptor) else world_generator.WorldGenerator{ .terrain = .{ .seed = 12345 } };
+    game.world_data = if (game.persistence_store) |store|
+        try WorldDataService.createPersistent(game.engine.io, game.allocator, game.engine.active_scene.?.layout, generator, store, .{})
+    else
+        try WorldDataService.create(game.engine.io, game.allocator, game.engine.active_scene.?.layout, generator);
     game.world = try World.init(game.allocator, game.engine.active_scene.?.layout);
+    game.world.?.pending_operation_limit = 256;
+    game.world.?.simulation_tick = game.world_data.?.restoredTick();
     game.world_client = try game.world_data.?.createClient();
+}
+
+fn savedGenerator(bytes: []const u8) !world_generator.WorldGenerator {
+    const descriptor = try persistence_format.decodeDescriptor(bytes);
+    if (descriptor.generator_id == 0) return .flat;
+    const settings = try persistence_format.decodeTerrainSettings(descriptor.settings);
+    return .{ .terrain = .{ .seed = descriptor.seed, .params = .{
+        .noise_scale = settings.noise_scale,
+        .octaves = settings.octaves,
+        .lacunarity = settings.lacunarity,
+        .persistence = settings.persistence,
+        .base_height = settings.base_height,
+        .height_amplitude = settings.height_amplitude,
+        .dirt_depth = settings.dirt_depth,
+    } } };
+}
+
+fn openSelectedWorld(init: std.process.Init, options: persistence_launch.Options, path: [:0]const u8) !persistence_storage.Store {
+    if (options.mode == .open) return persistence_storage.Store.open(init.gpa, path, .{});
+    var uuid: [16]u8 = undefined;
+    try init.io.randomSecure(&uuid);
+    const settings = persistence_format.encodeTerrainSettings(.{});
+    const descriptor = try persistence_format.encodeDescriptor(init.gpa, .{
+        .dimensions = consts.WORLD_SETTINGS.size_in_chunks,
+        .generator_id = 1,
+        .seed = 12345,
+        .settings = &settings,
+    });
+    defer init.gpa.free(descriptor);
+    const global = persistence_format.encodeGlobal(0);
+    return persistence_storage.Store.create(init.gpa, path, .{
+        .world_uuid = uuid,
+        .descriptor = descriptor,
+        .global = &global,
+        .players = &.{},
+        .player_count = 0,
+    }, .{});
 }
 
 /// Chebyshev distance between the chunk and the camera chunk, in chunks. The x axis wraps.
@@ -829,6 +983,28 @@ fn fitBoxIntoWorld(layout: *const WorldLayout, box: ChunkBox) ChunkBox {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    const options = persistence_launch.parse(args[1..]) catch |err| {
+        std.debug.print("Invalid arguments: {s}\n{s}\n", .{ @errorName(err), persistence_launch.usage });
+        return err;
+    };
+    if (options.help) {
+        std.debug.print("{s}\n", .{persistence_launch.usage});
+        return;
+    }
+    // Resolve before asset startup changes cwd; opening and creation remain distinct.
+    const original_cwd = try std.process.currentPathAlloc(init.io, allocator);
+    defer allocator.free(original_cwd);
+    const resolved_path = try std.fs.path.resolve(allocator, &.{ original_cwd, options.path });
+    defer allocator.free(resolved_path);
+    const save_path = try allocator.dupeZ(u8, resolved_path);
+    defer allocator.free(save_path);
+    var store: ?persistence_storage.Store = if (options.mode == .ephemeral) null else openSelectedWorld(init, options, save_path) catch |err| {
+        std.debug.print("Cannot {s} world at {s}: {s}. Existing save files are retained.\nUse --create-world PATH only to create a new world.\n", .{ if (options.mode == .create) "create" else "open", save_path, @errorName(err) });
+        return err;
+    };
+    defer if (store) |*saved| saved.deinit();
+    if (options.mode == .ephemeral) std.debug.print("Ephemeral world: changes will not be saved.\n", .{});
 
     // Change current working directory to where the executable is located.
     {
@@ -848,6 +1024,8 @@ pub fn main(init: std.process.Init) !void {
 
     const game: *Game = try .init(allocator);
     defer game.deinit();
+    game.player_id = options.player_id;
+    game.persistence_store = if (store) |*saved| saved else null;
 
     const engine = Engine.init(
         init.io,
@@ -863,6 +1041,7 @@ pub fn main(init: std.process.Init) !void {
             .onRender = onRender,
             .onKeyPress = onKeyPress,
             .onMouseButtonPress = onMouseButtonPress,
+            .onCloseRequest = onCloseRequest,
         },
     );
     game.engine = engine;
@@ -883,20 +1062,32 @@ pub fn main(init: std.process.Init) !void {
         });
     };
 
-    const scene = try engine.createScene(consts.WORLD_SETTINGS);
+    const settings: @import("engine").WorldSettings = if (store) |*saved|
+        .{ .size_in_chunks = (try persistence_format.decodeDescriptor(saved.descriptor)).dimensions }
+    else
+        consts.WORLD_SETTINGS;
+    const scene = try engine.createScene(settings);
     defer scene.deinit();
     defer game.stopWorkers();
 
     try initWorld(game);
     const body: terrain_collision.Body = .{};
-    const spawn = try game.world_client.?.findStandingSpace(.{
-        .preferred_xy = .{ -2.06, -2.96 },
-        .clearance_size = .{ 2, 2, 3 },
-        .support_size = .{ 2 * body.half_width, 2 * body.half_width },
-        .search_radius = 8,
-    });
+    const saved_player = game.world_data.?.restoredPlayer(game.player_id);
+    const spawn = if (saved_player) |saved|
+        try game.world_client.?.resolveRestoredPosition(saved.feet, body)
+    else
+        try game.world_client.?.findStandingSpace(.{
+            .preferred_xy = .{ -2.06, -2.96 },
+            .clearance_size = .{ 2, 2, 3 },
+            .support_size = .{ 2 * body.half_width, 2 * body.half_width },
+            .search_radius = 8,
+        });
     game.player = PlayerController.init(allocator, spawn);
-    game.player.?.grounded = true;
+    if (saved_player) |saved| {
+        game.player.?.yaw = saved.yaw;
+        game.player.?.pitch = saved.pitch;
+        // Fresh controller state discards velocity, climbing, and transient history.
+    } else game.player.?.grounded = true;
     game.simulation = try SimulationWorker.create(game.world_data.?);
     scene.spectator_enabled = false;
     engine.input_controller.cursor_capture = .always;
@@ -1005,6 +1196,13 @@ pub fn main(init: std.process.Init) !void {
     try engine.runLoop();
 }
 
+fn onCloseRequest(_: *Engine, game_opaque: *anyopaque) bool {
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
+    if (game.persistence_store == null or game.close_ready) return true;
+    game.beginExit();
+    return false;
+}
+
 fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
 
@@ -1030,6 +1228,7 @@ fn onKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque) v
 }
 
 fn handleKeyPress(game: *Game, key_params: KeyParams) void {
+    if (game.exit_requested) return;
     switch (key_params.key) {
         .x => game.queueBlockAction(.remove),
         .e => if (!key_params.mods.control) {
@@ -1066,6 +1265,7 @@ fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams, game_opaque: *
 }
 
 fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
+    if (game.exit_requested) return;
     if (params.button == .left) game.queueBlockAction(switch (game.block_mode) {
         .putting => .{ .place = game.selected_material },
         .removing => .remove,
@@ -1073,7 +1273,7 @@ fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
 }
 
 fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
-    const game: *const Game = @ptrCast(@alignCast(game_opaque));
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
     if (game.heldMaterial()) |material| {
         if (game.held_block_renderer) |*renderer| {
             if (engine.active_scene) |scene| renderer.draw(
@@ -1088,6 +1288,42 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
     }
     block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
     drawCrosshair();
+    drawPersistence(game);
+}
+
+fn drawPersistence(game: *Game) void {
+    if (game.persistence_store == null) return;
+    const status = game.world_data.?.persistenceStatus();
+    if (!game.exit_requested and !status.overdue and status.phase != .failed) return;
+    zgui.setNextWindowPos(.{ .x = game.engine.screen_size[0] / 2, .y = game.engine.screen_size[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
+    _ = zgui.begin("World saving", .{ .flags = .{ .always_auto_resize = true, .no_collapse = true, .no_saved_settings = true } });
+    defer zgui.end();
+    if (game.exit_requested) {
+        zgui.textUnformatted(if (game.exit_intent == null or status.pending_commands != 0) "Finishing pending actions..." else if (status.phase == .compacting) "Finalizing save..." else "Saving...");
+        const delayed = game.engine.time - game.exit_progress_at >= 5;
+        if (status.phase == .failed or delayed) {
+            if (status.error_name) |name| zgui.text("Save failed: {s}", .{name}) else zgui.textUnformatted("Still waiting for storage or pending actions...");
+            if (game.exit_intent != null and status.phase == .failed and !status.active) {
+                if (zgui.button("Retry", .{})) {
+                    game.exit_intent = game.world_data.?.requestSave(true);
+                    game.exit_progress_at = game.engine.time;
+                }
+            } else if (zgui.button("Keep waiting", .{})) game.exit_progress_at = game.engine.time;
+            zgui.sameLine(.{});
+            if (zgui.button("Cancel exit", .{})) game.cancelExit();
+            zgui.textUnformatted("Quitting now may lose changes since the last durable save.");
+            if (zgui.button("Quit without saving", .{})) {
+                // Explicit user choice: do not join a potentially stalled disk worker
+                // or recycle memory it owns. Recovery uses the crash-safe WAL contract.
+                std.process.exit(0);
+            }
+        }
+    } else if (status.error_name) |name| {
+        zgui.text("Saving failed: {s}", .{name});
+        zgui.textUnformatted("Unsaved changes remain in memory.");
+    } else {
+        zgui.textUnformatted("Saving is behind. World-changing actions may wait while saving catches up.");
+    }
 }
 
 test "held motion sampling uses actual active-camera movement and material selection preserves motion" {
@@ -2522,7 +2758,7 @@ const StreamingTest = struct {
     }
 };
 
-fn singleTestBlock(local: [3]u5, revision: u32) WorldChunk {
+fn singleTestBlock(local: [3]u5, revision: u64) WorldChunk {
     var chunk = WorldChunk.initEmpty();
     _ = chunk.apply(std.testing.allocator, local, .{ .put = .stone });
     chunk.chunk_revision = revision;
@@ -3214,4 +3450,125 @@ test "different runtime layouts stream, edit, and evict across their own x seams
         try std.testing.expect(!fixture.game.world.?.hasChunk(local));
         try std.testing.expect(!fixture.game.chunk_subscriptions.contains(layout.encodeChunkCoords(neighbor)));
     }
+}
+
+test {
+    _ = @import("persistence/lifecycle_tests.zig");
+    _ = @import("persistence_service_tests.zig");
+}
+
+test "shutdown cannot save ahead of optimistic edits that have not been admitted" {
+    const allocator = std.testing.allocator;
+    var uuid: [16]u8 = undefined;
+    std.c.arc4random_buf(&uuid, uuid.len);
+    const path = try std.fmt.allocPrintSentinel(allocator, "/private/tmp/persistence-app-drain-{x}", .{uuid}, 0);
+    defer allocator.free(path);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    const descriptor = try persistence_format.encodeDescriptor(allocator, .{
+        .dimensions = test_layout.size_in_chunks,
+        .generator_id = 0,
+        .seed = 0,
+        .settings = &.{},
+    });
+    defer allocator.free(descriptor);
+    const global = persistence_format.encodeGlobal(0);
+    var store = try persistence_storage.Store.create(allocator, path, .{
+        .world_uuid = uuid,
+        .descriptor = descriptor,
+        .global = &global,
+        .players = &.{},
+        .player_count = 0,
+    }, .{});
+    defer store.deinit();
+    // Zero authority slots deterministically exercises the not-admitted state.
+    const service = try WorldDataService.createPersistent(std.testing.io, allocator, &test_layout, .flat, &store, .{ .pending_commands = 0 });
+    defer service.destroy();
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    const game = &fixture.game;
+    game.world_client = try service.createClient();
+    game.world_data = service;
+    game.persistence_store = &store;
+    game.player = PlayerController.init(allocator, .{ 0, 0, 0 });
+    game.world.?.setBlockUnchecked(StreamingTest.toolTarget(), .none);
+    game.flushBlockOperations();
+    try std.testing.expectEqual(@as(usize, 1), game.world.?.pending_operations.items.len);
+    try std.testing.expectEqual(null, game.world.?.pending_operations.items[0].request_id);
+    try std.testing.expectEqual(@as(u64, 0), game.world_client.?.last_operation_id);
+    game.beginExit();
+    try std.testing.expect(game.exit_requested);
+    try std.testing.expectEqual(null, game.exit_intent);
+    try std.testing.expectEqual(@as(u64, 0), service.persistenceStatus().intent_id);
+    // Canceling this drain restores controls without discarding the intent.
+    game.cancelExit();
+    try std.testing.expect(!game.exit_requested);
+    try std.testing.expectEqual(@as(usize, 1), game.world.?.pending_operations.items.len);
+}
+
+test "persistent service initialization releases partial ownership at every allocation failure" {
+    const allocator = std.testing.allocator;
+    var uuid: [16]u8 = undefined;
+    std.c.arc4random_buf(&uuid, uuid.len);
+    const path = try std.fmt.allocPrintSentinel(allocator, "/private/tmp/persistence-service-init-{x}", .{uuid}, 0);
+    defer allocator.free(path);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    const descriptor = try persistence_format.encodeDescriptor(allocator, .{
+        .dimensions = test_layout.size_in_chunks,
+        .generator_id = 0,
+        .seed = 0,
+        .settings = &.{},
+    });
+    defer allocator.free(descriptor);
+    const global = persistence_format.encodeGlobal(12);
+    const player = try persistence_format.encodePlayer(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+    var store = try persistence_storage.Store.create(allocator, path, .{
+        .world_uuid = uuid,
+        .descriptor = descriptor,
+        .global = &global,
+        .players = &player,
+        .player_count = 1,
+    }, .{});
+    defer store.deinit();
+    const Probe = struct {
+        fn run(a: std.mem.Allocator, saved: *persistence_storage.Store) !void {
+            const service = try WorldDataService.createPersistent(std.testing.io, a, &test_layout, .flat, saved, .{});
+            defer service.destroy();
+            try std.testing.expectEqual(@as(u64, 12), service.restoredTick());
+            try std.testing.expectEqual(@as(u64, 1), service.restoredPlayer(1).?.id);
+        }
+    };
+    try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{&store});
+}
+
+test "snapshot rebase allocation failure renews subscription and accepts replacement" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
+    defer service.destroy();
+    game.world_client = try service.createClient();
+    const coords = test_layout.origin_chunk;
+    const id = test_layout.encodeChunkCoords(coords);
+    try fixture.subscribe(coords, 99, .blocks);
+    var snapshot = WorldChunk.initEmpty();
+    snapshot.chunk_revision = 5;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    game.world.?.allocator = failing.allocator();
+    fixture.apply(&.{.{ .coords = coords, .subscription_id = 99, .chunk_revision = 5, .data = .{ .blocks = .{ .chunk = snapshot } } }}) catch |err| {
+        game.world.?.allocator = std.testing.allocator;
+        return err;
+    };
+    game.world.?.allocator = std.testing.allocator;
+    try std.testing.expect(!game.world.?.hasChunk(coords));
+    try std.testing.expectEqual(@as(?u64, 99), game.chunk_subscriptions.get(id));
+    try std.testing.expectEqual(@as(?world_data_service.Representation, null), game.chunk_modes.get(id));
+    game.requestChunkMode(coords, .blocks);
+    const fresh = game.chunk_subscriptions.get(id).?;
+    try std.testing.expect(fresh != 99);
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = fresh, .chunk_revision = 5, .data = .{ .blocks = .{ .chunk = snapshot } } }});
+    try std.testing.expectEqual(@as(u64, 5), game.world.?.getChunk(coords).?.chunk_revision);
+    try std.testing.expectEqual(@as(usize, 0), game.world.?.pending_operations.items.len);
 }

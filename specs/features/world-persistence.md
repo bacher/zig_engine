@@ -1,7 +1,7 @@
 ---
 service: zig_engine
 created: 2026-10-15
-status: draft
+status: in-progress
 ---
 
 # Persist consistent world snapshots without copy-on-write
@@ -16,8 +16,8 @@ while source chunks are being captured, and defer conflicting player mutations u
 captured versions are safe to release. Append changed chunk images to a snapshot journal
 and periodically compact committed journal segments into a base save.
 This revision supersedes the conflicting COW decisions in
-[PR #28](https://github.com/bacher/zig_engine/pull/28). Implementation remains
-unauthorized. Whole-system RAM budgeting follows persistence v1 in
+[PR #28](https://github.com/bacher/zig_engine/pull/28). Implementation is authorized as of
+2026-10-19, on a branch based on PR #29. Whole-system RAM budgeting follows persistence v1 in
 [Resource budgeting](resource-budgeting.md).
 
 ## Context
@@ -120,7 +120,7 @@ Decision status as of 2026-10-19:
   and baseline evaluation; numerical defaults and optimization choices follow that evidence.
   These do not block finalizing the design and do not establish measured responsiveness.
   Direct simulation-thread mutation leases and the future NPC catch-up/state model remain
-  deferred. Finalizing this spec does not authorize implementation.
+  deferred. The user subsequently authorized implementation on top of PR #29.
 
 ## Requirements
 
@@ -1611,7 +1611,7 @@ Unchanged format/durability sections retain their prior confirmed status. The pl
 how to implement and evaluate the agreed contracts; concrete interfaces, data structures,
 and sequencing remain engineering choices. R66/R76 require baseline evaluation; later
 optimization stages remain conditional proposals. Q45 lists the evidence needed to validate
-the implementation. This plan does not authorize starting implementation.
+the implementation. The user authorized this implementation after the design review.
 
 ### Approach
 
@@ -1747,7 +1747,7 @@ remains explicitly excluded. No elapsed time while the application is closed is 
 
 ### Staged Evaluation Without Format Changes
 
-After separate implementation authorization, stages 1-3 implement and evaluate the agreed
+With implementation authorized, stages 1-3 implement and evaluate the agreed
 baseline. Stages 4-5 are conditional follow-up proposals, not requirements to add complexity:
 
 1. Build/test the agreed codec, WAL/base formats, storage adapter, recovery, compaction,
@@ -2736,21 +2736,24 @@ the replaceable base alone does not provide continuous exclusive ownership.
 ## Tasks
 
 Proposed implementation tasks under the confirmed starting policy; sequencing may be refined
-during implementation planning. None authorize starting implementation in this planning conversation.
+during implementation planning. Implementation is now authorized; mark tasks complete only with
+implementation and validation evidence. The [validation report](../../docs/persistence-validation.md)
+and [criterion evidence map](../../docs/persistence-acceptance.md) distinguish verified behavior
+from incomplete test/evaluation campaigns; unchecked evaluation tasks are not waived.
 
-- [ ] T1: Translate the agreed contracts into module boundaries, ownership/message APIs,
+- [x] T1: Translate the agreed contracts into module boundaries, ownership/message APIs,
   operation-specific reservation paths, and storage/fault-injection interfaces. Specify the
   restricted snapshot view and existing block/all-air allocation lifetimes; assign explicit
   material constants under R49. Use R66 for measured parameters; preserve the agreed binary
   layouts and failure policies.
-- [ ] T2: Implement the agreed container, descriptor, chunk/global/player codecs, and
+- [x] T2: Implement the agreed container, descriptor, chunk/global/player codecs, and
   checksum coverage with strict validation, byte-layout fixtures, and round-trip tests.
-- [ ] T3: Implement framed journal commits, indexes, storage synchronization, and recovery.
+- [x] T3: Implement framed journal commits, indexes, storage synchronization, and recovery.
   Implement the macOS/APFS storage adapter and R63-R65 barrier order, with explicit failures
   for unsupported primitives and native filesystem tests alongside the fault-injected model.
   Establish snapshot zero and the first segment durably, with distinct create/open paths
   and crash tests covering initialization before the first periodic compaction.
-- [ ] T4: Integrate service snapshot boundaries, frozen-source admission, bounded capture output, dirty
+- [x] T4: Integrate service snapshot boundaries, frozen-source admission, bounded capture output, dirty
   acknowledgments, generation-safe base loading, and base-backed eviction/dependency pins.
   Preserve the current `WorldChunk` layout and construct restricted views with copied
   identity/history/descriptors and pinned const block/metadata buffers. Exclude live headers,
@@ -2768,9 +2771,9 @@ during implementation planning. None authorize starting implementation in this p
   Implement R77 timer-kind eviction eligibility, resident due-index removal/restoration,
   and scoped operation pins. Integrate R78 registration on load and catch-up in the next
   eligible block-timer pass; audit edit-time eligibility maintenance across every mutation path.
-- [ ] T5: Implement segment rotation and streaming background compaction with source checksum/
+- [x] T5: Implement segment rotation and streaming background compaction with source checksum/
   lineage verification and safe publication; inject source corruption during consumed reads.
-- [ ] T6: Integrate load/save lifecycle, autosave/final-save, player restore, and save status.
+- [x] T6: Integrate load/save lifecycle, autosave/final-save, player restore, and save status.
   Integrate capture-pending player state, priority encoding, normal elapsed-wait cancellation,
   R73 overdue-save escalation and visible exceptional pause, the R75 coordinator watchdog,
   genuine resource retry/rejection and optimistic reconciliation; global simulation capture gating,
@@ -2779,7 +2782,7 @@ during implementation planning. None authorize starting implementation in this p
   dependency I/O before final capture.
   Add the single shutdown phase/error dialog, bounded dependency-read retry, delayed-status
   choices, safe cancel-exit handling, and explicit unsaved-exit path under R60-R62.
-- [ ] T8: Add stable exclusive world ownership before recovery through final shutdown.
+- [x] T8: Add stable exclusive world ownership before recovery through final shutdown.
 - [ ] T9: Implement the bounded v1 reference-model harness and deterministic fault-injected
   storage. Exercise production paths across edits, snapshot/ownership transitions, commits,
   rotation, compaction, eviction/reload, and crashes; compare recovery with the reference

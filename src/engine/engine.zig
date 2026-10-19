@@ -110,6 +110,8 @@ pub const Engine = struct {
         onRender: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder, argument: *anyopaque) void,
         onKeyPress: ?*const fn (engine: *Engine, key_params: KeyParams, argument: *anyopaque) void = null,
         onMouseButtonPress: ?*const fn (engine: *Engine, params: MouseButtonParams, argument: *anyopaque) void = null,
+        /// Return false to keep rendering while the application completes asynchronous shutdown.
+        onCloseRequest: ?*const fn (engine: *Engine, argument: *anyopaque) bool = null,
     };
 
     gctx: *zgpu.GraphicsContext,
@@ -1692,6 +1694,11 @@ pub const Engine = struct {
         );
     }
 
+    pub fn requestClose(engine: *Engine) bool {
+        if (engine.callbacks.onCloseRequest) |callback| return callback(engine, engine.callbacks.argument);
+        return true;
+    }
+
     pub fn runLoop(engine: *Engine) !void {
         if (engine.active_scene) |scene| {
             try scene.prepareForRendering();
@@ -1702,8 +1709,9 @@ pub const Engine = struct {
         while (true) {
             zglfw.pollEvents();
 
-            if (window.shouldClose() or engine.input_controller.isKeyPressed(.escape) or engine.input_controller.wasKeyPressed(.escape)) {
-                break;
+            if (window.shouldClose() or engine.input_controller.wasKeyPressed(.escape)) {
+                if (engine.requestClose()) break;
+                window.setShouldClose(false);
             }
 
             // slowOperation();
@@ -1894,4 +1902,25 @@ fn getGlobalLightClipMatrixArray(
 
 fn getTerrainHeightMapElementsCountForSide(side: u32) u32 {
     return (side * 2 + 4) * side;
+}
+
+test "application may defer close for async saving and later permit it" {
+    const Probe = struct {
+        ready: bool = false,
+        calls: usize = 0,
+        fn close(_: *Engine, context: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            return self.ready;
+        }
+    };
+    var probe: Probe = .{};
+    var engine: Engine = undefined;
+    engine.callbacks = .{ .argument = &probe, .onUpdate = null, .onRender = null, .onCloseRequest = Probe.close };
+    try std.testing.expect(!engine.requestClose());
+    probe.ready = true;
+    try std.testing.expect(engine.requestClose());
+    try std.testing.expectEqual(@as(usize, 2), probe.calls);
+    engine.callbacks.onCloseRequest = null;
+    try std.testing.expect(engine.requestClose());
 }

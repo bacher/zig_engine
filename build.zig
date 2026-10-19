@@ -138,6 +138,7 @@ pub fn build(b: *std.Build) void {
     // such a dependency.
     const run_cmd = b.addRunArtifact(demo_exe);
     const run_voxel_cmd = b.addRunArtifact(voxel_exe);
+    if (b.args) |args| run_voxel_cmd.addArgs(args);
 
     // By making the run step depend on the install step, it will be run from the
     // installation directory rather than directly from within the cache directory.
@@ -157,6 +158,21 @@ pub fn build(b: *std.Build) void {
 
     const run_voxel_step = b.step("run_voxel", "Run the voxel app");
     run_voxel_step.dependOn(&run_voxel_cmd.step);
+
+    const persistence_benchmark = b.addExecutable(.{
+        .name = "persistence-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/persistence_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    persistence_benchmark.root_module.linkLibrary(voxel_engine_lib);
+    persistence_benchmark.root_module.addImport("engine", voxel_engine_lib.root_module);
+    const persistence_run = b.addRunArtifact(persistence_benchmark);
+    if (b.args) |args| persistence_run.addArgs(args);
+    b.step("bench-persistence", "Measure bounded capture, WAL, and compaction on a new disposable world").dependOn(&persistence_run.step);
 
     const placement_benchmark = b.addExecutable(.{
         .name = "block-placement-benchmark",
@@ -192,6 +208,31 @@ pub fn build(b: *std.Build) void {
     const voxel_exe_unit_tests = b.addTest(.{
         .root_module = voxel_exe.root_module,
     });
+
+    const world_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/world.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    world_unit_tests.root_module.linkLibrary(voxel_engine_lib);
+    world_unit_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
+    world_unit_tests.root_module.addImport("zmath", zmath.module("root"));
+    b.step("test-world", "Run chunk, road, timer, and optimistic world tests without the application lifecycle").dependOn(&b.addRunArtifact(world_unit_tests).step);
+
+    const capture_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/persistence_capture_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    capture_unit_tests.root_module.linkLibrary(voxel_engine_lib);
+    capture_unit_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
+    capture_unit_tests.root_module.addImport("zmath", zmath.module("root"));
+    b.step("test-capture", "Run capture concurrency and storage lifecycle tests without application startup").dependOn(&b.addRunArtifact(capture_unit_tests).step);
 
     const engine_utils_unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -262,6 +303,17 @@ pub fn build(b: *std.Build) void {
     const run_slot_buffer_manager_unit_tests = b.addRunArtifact(slot_buffer_manager_unit_tests);
 
     const test_step = b.step("test", "Run unit tests for both application wrapping modes");
+    const persistence_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/persistence/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    const run_persistence_tests = b.addRunArtifact(persistence_tests);
+    b.step("test-persistence", "Run CPU persistence format, storage, and launch tests").dependOn(&run_persistence_tests.step);
+    test_step.dependOn(&run_persistence_tests.step);
     const gpu_test_step = b.step("test-gpu", "Validate world pipelines and coordinate arithmetic for both compiled wrapping modes with headless Dawn");
     for (engines) |library| {
         const engine_config = library.root_module.import_table.get("engine_config").?;

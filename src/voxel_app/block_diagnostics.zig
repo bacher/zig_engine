@@ -40,6 +40,7 @@ pub fn errorMessageForResult(result: world.EditResult, buffer: *[message_capacit
         .already_exists => "This cell is already occupied.",
         .already_removed => "This block has already been removed.",
         .missing_data => "Required world cells have not loaded.",
+        .resource_exhausted => "The world cannot accept this edit yet. Try again shortly.",
         .constraint_violation => "The block edit violates construction constraints.",
     };
 }

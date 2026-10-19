@@ -62,7 +62,7 @@ pub const WorldChunk = struct {
     solid_block_count: u16,
     /// Authoritative revision, advanced only by the world-data service for content or flag changes.
     /// Optimistic edits never change it. 0 means no edits have been committed yet.
-    chunk_revision: u32 = 0,
+    chunk_revision: u64 = 0,
     /// Client-cache stamp assigned by World, including optimistic edits and reloads.
     /// Independent of the service's authoritative chunk_revision.
     validation_revision: u64 = 0,
@@ -89,15 +89,20 @@ pub const WorldChunk = struct {
         };
     }
 
-    pub fn clone(self: WorldChunk, allocator: std.mem.Allocator) WorldChunk {
+    pub fn tryClone(self: WorldChunk, allocator: std.mem.Allocator) !WorldChunk {
         var copy = self;
-        copy.metadata = self.metadata.clone(allocator);
+        copy.metadata = try self.metadata.tryClone(allocator);
+        errdefer copy.metadata.deinit(allocator);
         if (self.content == .blocks) {
-            const data = allocator.create(WorldChunkData) catch @panic("OOM");
+            const data = try allocator.create(WorldChunkData);
             data.* = self.content.blocks.*;
             copy.content = .{ .blocks = data };
         }
         return copy;
+    }
+
+    pub fn clone(self: WorldChunk, allocator: std.mem.Allocator) WorldChunk {
+        return self.tryClone(allocator) catch @panic("OOM");
     }
 
     pub fn deinit(self: WorldChunk, allocator: std.mem.Allocator) void {
@@ -113,8 +118,12 @@ pub const WorldChunk = struct {
     }
 
     pub fn ensureData(self: *WorldChunk, allocator: std.mem.Allocator) *WorldChunkData {
+        return self.tryEnsureData(allocator) catch @panic("OOM");
+    }
+
+    pub fn tryEnsureData(self: *WorldChunk, allocator: std.mem.Allocator) !*WorldChunkData {
         if (self.content == .empty) {
-            const data = allocator.create(WorldChunkData) catch @panic("OOM");
+            const data = try allocator.create(WorldChunkData);
             data.* = WorldChunkData.initEmpty();
             self.content = .{ .blocks = data };
         }
@@ -124,6 +133,39 @@ pub const WorldChunk = struct {
     /// Applies the same preconditions to authoritative commands and optimistic replay.
     /// Revision assignment belongs to the service, not this data manipulation helper.
     pub fn apply(self: *WorldChunk, allocator: std.mem.Allocator, local: [3]u5, action: BlockAction) OperationStatus {
+        return self.tryApply(allocator, local, action) catch @panic("OOM");
+    }
+
+    pub fn tryApply(self: *WorldChunk, allocator: std.mem.Allocator, local: [3]u5, action: BlockAction) !OperationStatus {
+        const status = try self.prepareApply(allocator, local, action);
+        if (status != .success) return status;
+        return self.applyPrepared(allocator, local, action);
+    }
+
+    /// Reserve every fallible resource before the first semantic write. Call on
+    /// detached staging chunks when preparing an authoritative multi-chunk edit.
+    pub fn prepareApply(self: *WorldChunk, allocator: std.mem.Allocator, local: [3]u5, action: BlockAction) !OperationStatus {
+        const existing = self.content.getBlock(local);
+        switch (action) {
+            .put => |material| {
+                std.debug.assert(material != .none);
+                if (existing != .none) return .already_exists;
+                if (material == .custom or material == .country_road_adaptive)
+                    try self.metadata.roads.ensureUnusedCapacity(allocator, 1);
+            },
+            .remove => if (existing == .none) return .already_removed,
+        }
+        _ = try self.tryEnsureData(allocator);
+        return .success;
+    }
+
+    /// No allocation. The matching prepareApply must have succeeded without an
+    /// intervening mutation; allocator is used only to release empty block storage.
+    pub fn applyPrepared(self: *WorldChunk, allocator: std.mem.Allocator, local: [3]u5, action: BlockAction) OperationStatus {
+        return self.applyPreparedPolicy(allocator, local, action, false);
+    }
+
+    fn applyPreparedPolicy(self: *WorldChunk, allocator: std.mem.Allocator, local: [3]u5, action: BlockAction, retain_empty: bool) OperationStatus {
         const existing = self.content.getBlock(local);
         const block_type: BlockType = switch (action) {
             .put => |block_type| blk: {
@@ -136,7 +178,8 @@ pub const WorldChunk = struct {
                 break :blk .none;
             },
         };
-        const data = self.ensureData(allocator);
+        std.debug.assert(self.content == .blocks);
+        const data = self.content.blocks;
         const was_unreachable = self.flags.is_unreachable;
         data.blocks[local[2]][local[1]][local[0]] = block_type;
         boundary_mask.update(&self.boundaries, local, block_type.occludesFaces());
@@ -145,11 +188,13 @@ pub const WorldChunk = struct {
             self.solid_block_count -= 1;
         } else {
             self.solid_block_count += 1;
-            if (block_type == .custom) self.metadata.roads.append(allocator, .{ .index = transformations.index(local) }) catch @panic("OOM");
+            if (block_type == .custom) self.metadata.roads.appendAssumeCapacity(.{ .index = transformations.index(local) });
         }
         if (self.solid_block_count == 0) {
-            self.content.deinit(allocator);
-            self.content = .empty;
+            if (!retain_empty) {
+                self.content.deinit(allocator);
+                self.content = .empty;
+            }
             self.flags = .{};
         } else self.flags = boundary_mask.getFlags(&self.boundaries);
         // Face flags describe our blocks; reachability describes neighboring walls.
@@ -188,7 +233,7 @@ pub const BlockAction = union(enum) {
     remove,
 };
 
-pub const OperationStatus = enum { success, already_exists, already_removed, constraint_violation, missing_data };
+pub const OperationStatus = enum { success, already_exists, already_removed, constraint_violation, missing_data, resource_exhausted };
 pub const EditResult = struct {
     status: OperationStatus,
     failure: ?block_rules.Failure = null,
@@ -232,16 +277,16 @@ const CellState = struct {
     fn restore(self: CellState, allocator: std.mem.Allocator, chunk: *WorldChunk, local: [3]u5) void {
         const existing = chunk.content.getBlock(local);
         if (existing != self.material) {
-            if (existing != .none) _ = chunk.apply(allocator, local, .remove);
-            if (self.material != .none) _ = chunk.apply(allocator, local, .{
+            if (existing != .none) _ = chunk.applyPreparedPolicy(allocator, local, .remove, true);
+            if (self.material != .none) _ = chunk.applyPreparedPolicy(allocator, local, .{
                 .put = if (self.material == .custom) .country_road_adaptive else self.material,
-            });
+            }, true);
         }
         const index = transformations.index(local);
         chunk.metadata.remove(index);
-        if (self.road) |road| chunk.metadata.roads.append(allocator, road) catch @panic("OOM");
-        if (self.timed) |event| chunk.metadata.timed.schedule(allocator, event);
-        if (self.constructed) chunk.metadata.markConstructed(allocator, index);
+        if (self.road) |road| chunk.metadata.roads.appendAssumeCapacity(road);
+        if (self.timed) |event| chunk.metadata.timed.scheduleAssumeCapacity(event);
+        if (self.constructed) chunk.metadata.markConstructedAssumeCapacity(index);
     }
 };
 
@@ -255,6 +300,7 @@ pub const PendingOperation = struct {
     road_formations: std.ArrayList(@import("road_data.zig").Slope) = .empty,
     /// Assigned when the command is submitted to the service.
     request_id: ?u64 = null,
+    resolved_status: ?OperationStatus = null,
 };
 
 /// Includes absent chunks, clipped finite bounds, and deduplicated wrapped IDs.
@@ -308,7 +354,12 @@ pub const ValidationWindow = struct {
 /// Read construction indices only from chunks intersecting the target's fixed window.
 /// This visits at most 27 chunk IDs, independently of retained edits elsewhere in the world.
 pub fn collectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayout, chunks: *const ChunksHashMap, target: [3]u32) []block_rules.Cell {
+    return tryCollectConstructed(allocator, layout, chunks, target) catch @panic("OOM");
+}
+
+pub fn tryCollectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayout, chunks: *const ChunksHashMap, target: [3]u32) ![]block_rules.Cell {
     var cells: std.ArrayList(block_rules.Cell) = .empty;
+    errdefer cells.deinit(allocator);
     const center: block_rules.Cell = .{ target[0], target[1], target[2] };
     const window = validationChunks(layout, target);
     for (window.ids[0..window.count]) |id| {
@@ -322,7 +373,7 @@ pub fn collectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayo
                 @as(i64, coords[2]) * CHUNK_SIZE + local[2],
             };
             if (block_rules.distance(layout, cell, center) <= block_rules.Limits.support_radius)
-                cells.append(allocator, cell) catch @panic("OOM");
+                try cells.append(allocator, cell);
         }
     }
     const Order = struct {
@@ -337,7 +388,7 @@ pub fn collectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayo
         }
     };
     std.mem.sort(block_rules.Cell, cells.items, Order{ .layout = layout, .center = center }, Order.lessThan);
-    return cells.toOwnedSlice(allocator) catch @panic("OOM");
+    return try cells.toOwnedSlice(allocator);
 }
 
 pub fn validateEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, constructed: []const block_rules.Cell, operation: BlockOperation) EditResult {
@@ -357,6 +408,7 @@ pub fn validateEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, co
     defer validator.deinit();
     var failure = if (material != .none) validator.checkPlacement(cell, material) else null;
     if (failure == null) failure = validator.checkDependents(constructed, material == .none);
+    if (validator.allocation_failed) return .{ .status = .resource_exhausted };
     if (failure) |reason| return .{ .status = if (reason.reason == .missing_data) .missing_data else .constraint_violation, .failure = reason };
     return .{ .status = .success, .mined_type = if (material == .none) existing.minedType() else null };
 }
@@ -368,6 +420,10 @@ pub const World = struct {
     allocator: std.mem.Allocator,
     chunks: ChunksHashMap = .empty,
     pending_operations: std.ArrayList(PendingOperation) = .empty,
+    pending_operation_limit: usize = 4096,
+    pending_byte_limit: usize = 8 * 1024 * 1024,
+    pending_accounted_count: usize = 0,
+    pending_dynamic_bytes: usize = 0,
     simulation_tick: transformations.Tick = 0,
     last_edit_result: ?EditResult = null,
     /// Assigns distinct local stamps to chunk loads and optimistic block changes.
@@ -401,7 +457,7 @@ pub const World = struct {
 
     /// Takes ownership on success. Subscription tokens must be checked by the caller first.
     /// Replaces the cache with authoritative data, then replays pending commands in order.
-    pub fn insertChunk(self: *World, coords: ChunkCoords, chunk: WorldChunk) error{StaleChunk}!void {
+    pub fn insertChunk(self: *World, coords: ChunkCoords, chunk: WorldChunk) !void {
         const position = self.layout.encodeChunkCoords(coords);
         if (self.chunks.get(position)) |previous| {
             if (chunk.chunk_revision < previous.chunk_revision) return error.StaleChunk;
@@ -409,7 +465,9 @@ pub const World = struct {
         // Restore the baseline across ALL pending cells/sections, including chunks
         // other than this snapshot's. Later materials must not be visible when an
         // earlier command captures removal ownership or evaluates formation.
-        self.rollbackPending();
+        try self.chunks.ensureUnusedCapacity(self.allocator, 1);
+        try self.rollbackPending();
+        self.retireResolved();
         var updated = chunk;
         if (self.chunks.getPtr(position)) |previous| {
             // An in-flight snapshot must never undo an optimistic reveal.
@@ -425,7 +483,7 @@ pub const World = struct {
         }
         self.validation_revision +%= 1;
         updated.validation_revision = self.validation_revision;
-        self.chunks.put(self.allocator, position, updated) catch @panic("OOM");
+        self.chunks.putAssumeCapacity(position, updated);
         self.revealNeighbors(coords, updated.flags);
         // A pending operation can affect sections outside the replaced chunk.
         self.replayPending();
@@ -434,7 +492,31 @@ pub const World = struct {
     /// Restore the current authoritative material/metadata baseline in reverse edit order.
     /// Undo records are regenerated after each snapshot, so none outlive the
     /// baseline they describe. Work is limited to sections changed by pending edits.
-    fn rollbackPending(self: *World) void {
+    fn rollbackPending(self: *World) !void {
+        const Reserve = struct { roads: usize = 0, constructed: usize = 0, timers: usize = 0, blocks: bool = false };
+        var required: std.AutoHashMapUnmanaged(u32, Reserve) = .empty;
+        defer required.deinit(self.allocator);
+        var undo_count: usize = 0;
+        for (self.pending_operations.items) |pending| {
+            undo_count += pending.road_undo.items.len;
+            if (pending.cell_undo) |state| {
+                const coords, _ = splitBlockCoords(pending.operation.block);
+                const entry = try required.getOrPut(self.allocator, self.layout.encodeChunkCoords(coords));
+                if (!entry.found_existing) entry.value_ptr.* = .{};
+                entry.value_ptr.roads += @intFromBool(state.road != null);
+                entry.value_ptr.constructed += @intFromBool(state.constructed);
+                entry.value_ptr.timers += @intFromBool(state.timed != null);
+                entry.value_ptr.blocks = entry.value_ptr.blocks or state.material != .none;
+            }
+        }
+        try self.changed_road_chunks.ensureUnusedCapacity(self.allocator, undo_count);
+        var reserves = required.iterator();
+        while (reserves.next()) |entry| if (self.chunks.getPtr(entry.key_ptr.*)) |chunk| {
+            const need = entry.value_ptr.*;
+            try chunk.metadata.reserve(self.allocator, need.roads, need.constructed, need.timers);
+            if (need.blocks) _ = try chunk.tryEnsureData(self.allocator);
+        };
+
         var i = self.pending_operations.items.len;
         while (i > 0) {
             i -= 1;
@@ -447,7 +529,7 @@ pub const World = struct {
                 if (std.meta.eql(road.slope, entry.slope)) continue;
                 road.slope = entry.slope;
                 if (std.mem.indexOfScalar(u32, self.changed_road_chunks.items, id) == null)
-                    self.changed_road_chunks.append(self.allocator, id) catch @panic("OOM");
+                    self.changed_road_chunks.appendAssumeCapacity(id);
             }
             pending.road_undo.clearRetainingCapacity();
             if (pending.cell_undo) |state| {
@@ -461,31 +543,96 @@ pub const World = struct {
     }
 
     fn replayPending(self: *World) void {
-        for (self.pending_operations.items) |*pending| self.applyPending(pending, false);
+        for (self.pending_operations.items) |*pending| {
+            if (pending.resolved_status != null) continue;
+            self.tryApplyPending(pending, false) catch {
+                self.last_edit_result = .{ .status = .resource_exhausted };
+                break;
+            };
+        }
         self.stampRoadChanges();
+        for (self.pending_operations.items) |pending| {
+            const coords, _ = splitBlockCoords(pending.operation.block);
+            self.releaseEmptyBacking(self.layout.encodeChunkCoords(coords));
+        }
+    }
+
+    fn releaseEmptyBacking(self: *World, id: u32) void {
+        if (self.chunks.getPtr(id)) |chunk| if (chunk.solid_block_count == 0 and chunk.content == .blocks) {
+            chunk.content.deinit(self.allocator);
+            chunk.content = .empty;
+        };
+    }
+
+    fn retireResolved(self: *World) void {
+        var i: usize = 0;
+        while (i < self.pending_operations.items.len) {
+            const pending = &self.pending_operations.items[i];
+            if (pending.resolved_status == null) {
+                i += 1;
+                continue;
+            }
+            const coords, _ = splitBlockCoords(pending.operation.block);
+            self.releaseEmptyBacking(self.layout.encodeChunkCoords(coords));
+            pending.road_undo.deinit(self.allocator);
+            pending.road_formations.deinit(self.allocator);
+            _ = self.pending_operations.orderedRemove(i);
+            self.pending_accounted_count = std.math.maxInt(usize);
+        }
     }
 
     /// One ordered replay step: capture ownership, mutate material, then restore
     /// saved formations and evaluate the road transition against this exact state.
-    fn applyPending(self: *World, pending: *PendingOperation, stamp_material: bool) void {
+    fn tryApplyPending(self: *World, pending: *PendingOperation, stamp_material: bool) !void {
         const coords, const local = splitBlockCoords(pending.operation.block);
         const chunk = self.chunks.getPtr(self.layout.encodeChunkCoords(coords)) orelse return;
         const before = CellState.capture(chunk, local);
-        if (chunk.apply(self.allocator, local, pending.operation.action) == .success) {
+        const can_apply = switch (pending.operation.action) {
+            .put => before.material == .none,
+            .remove => before.material != .none,
+        };
+        const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .virtual_edit = if (can_apply) pending.operation else null, .max_plan_changes = self.pending_byte_limit / @sizeOf(roads.Undo) };
+        var plan = try context.planReplay(pending.operation, before.road, pending.road_formations.items);
+        defer plan.deinit(self.allocator);
+        const undo_capacity = @max(pending.road_undo.capacity, plan.changes.len);
+        const formed_capacity = pending.road_formations.items.len + @min(plan.changes.len, 20);
+        const projected = self.pendingOperationBytes() - pending.road_undo.capacity * @sizeOf(roads.Undo) - pending.road_formations.capacity * @sizeOf(@import("road_data.zig").Slope) + undo_capacity * @sizeOf(roads.Undo) + @max(pending.road_formations.capacity, formed_capacity) * @sizeOf(@import("road_data.zig").Slope);
+        if (projected > self.pending_byte_limit) return error.Capacity;
+        defer self.pending_accounted_count = std.math.maxInt(usize);
+        try pending.road_undo.ensureTotalCapacityPrecise(self.allocator, plan.changes.len);
+        try pending.road_formations.ensureTotalCapacityPrecise(self.allocator, formed_capacity);
+        try plan.reserveCommit(context);
+        if (can_apply) {
+            if (pending.mark_constructed and pending.operation.action == .put) try chunk.metadata.constructed.ensureUnusedCapacity(self.allocator, 1);
+            _ = try chunk.prepareApply(self.allocator, local, pending.operation.action);
+        }
+        pending.road_undo.clearRetainingCapacity();
+        for (plan.changes) |change| {
+            const block: [3]u32 = .{ @intCast(change.cell[0]), @intCast(change.cell[1]), @intCast(change.cell[2]) };
+            const changed_coords, const changed_local = splitBlockCoords(block);
+            if (self.chunks.get(self.layout.encodeChunkCoords(changed_coords))) |changed_chunk| {
+                if (changed_chunk.metadata.road(transformations.index(changed_local))) |road| pending.road_undo.appendAssumeCapacity(.{ .block = block, .slope = road.slope });
+            }
+            if (change.slope) |slope| {
+                var seen = false;
+                for (pending.road_formations.items) |formed| if (std.meta.eql(formed.high_endpoint, slope.high_endpoint) and formed.downhill == slope.downhill and formed.length == slope.length) {
+                    seen = true;
+                    break;
+                };
+                if (!seen) pending.road_formations.appendAssumeCapacity(slope);
+            }
+        }
+        if (can_apply) {
+            _ = chunk.applyPrepared(self.allocator, local, pending.operation.action);
             pending.cell_undo = before;
-            if (pending.mark_constructed and pending.operation.action == .put)
-                chunk.metadata.markConstructed(self.allocator, transformations.index(local));
-            // Rollback/replay is internal to a rebase. Outside the replaced or
-            // rejected chunk, unchanged materials retain their validation stamp.
+            if (pending.mark_constructed and pending.operation.action == .put) chunk.metadata.markConstructedAssumeCapacity(transformations.index(local));
             if (stamp_material) {
                 self.validation_revision +%= 1;
                 chunk.validation_revision = self.validation_revision;
             }
             self.revealNeighbors(coords, chunk.flags);
         }
-        const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .undo = &pending.road_undo, .formed = &pending.road_formations };
-        for (pending.road_formations.items) |slope| context.restoreFormation(slope);
-        context.afterEdit(pending.operation, before.road);
+        plan.applyPrepared(context);
     }
 
     fn stampRoadChanges(self: *World) void {
@@ -533,7 +680,11 @@ pub const World = struct {
         for (self.pending_operations.items, 0..) |*pending, i| {
             if (pending.request_id == request_id) {
                 if (status != .success) {
-                    self.rollbackPending();
+                    pending.resolved_status = status;
+                    self.rollbackPending() catch {
+                        self.last_edit_result = .{ .status = .resource_exhausted };
+                        return;
+                    };
                     const coords, _ = splitBlockCoords(pending.operation.block);
                     if (self.chunks.getPtr(self.layout.encodeChunkCoords(coords))) |chunk| {
                         self.validation_revision +%= 1;
@@ -546,6 +697,7 @@ pub const World = struct {
                 pending.road_undo.deinit(self.allocator);
                 pending.road_formations.deinit(self.allocator);
                 _ = self.pending_operations.orderedRemove(i);
+                self.pending_accounted_count = std.math.maxInt(usize);
                 if (status != .success) self.replayPending();
                 return;
             }
@@ -603,7 +755,7 @@ pub const World = struct {
             counter.* += 1;
         };
         operation.validate(self.layout);
-        const cells = collectConstructed(self.allocator, self.layout, &self.chunks, operation.block);
+        const cells = tryCollectConstructed(self.allocator, self.layout, &self.chunks, operation.block) catch return .{ .status = .resource_exhausted };
         defer self.allocator.free(cells);
         return validateEdit(self.allocator, self.reader(), cells, operation);
     }
@@ -617,38 +769,112 @@ pub const World = struct {
 
     /// Gameplay entry point. Preview and authority use the same rules; unknown client
     /// dependencies produce missing_data rather than being interpreted as empty cells.
+    pub fn pendingOperationBytes(self: *const World) usize {
+        var dynamic = self.pending_dynamic_bytes;
+        if (self.pending_accounted_count != self.pending_operations.items.len) {
+            dynamic = 0;
+            for (self.pending_operations.items) |pending| dynamic += pending.road_undo.capacity * @sizeOf(roads.Undo) + pending.road_formations.capacity * @sizeOf(@import("road_data.zig").Slope);
+        }
+        return self.pending_operations.capacity * @sizeOf(PendingOperation) + dynamic;
+    }
+
+    pub fn canQueueOperation(self: *World) bool {
+        if (self.pending_accounted_count != self.pending_operations.items.len) {
+            self.pending_dynamic_bytes = self.pendingOperationBytes() - self.pending_operations.capacity * @sizeOf(PendingOperation);
+            self.pending_accounted_count = self.pending_operations.items.len;
+        }
+        return self.pending_operations.items.len < self.pending_operation_limit and self.pendingOperationBytes() < self.pending_byte_limit;
+    }
+
     pub fn tryOperation(self: *World, operation: BlockOperation) EditResult {
+        if (!self.canQueueOperation()) {
+            const rejected: EditResult = .{ .status = .resource_exhausted };
+            self.last_edit_result = rejected;
+            return rejected;
+        }
         const result = self.previewOperation(operation);
         self.last_edit_result = result;
         if (result.status != .success) return result;
-        self.setBlockUnchecked(operation.block, switch (operation.action) {
-            .put => |value| value,
-            .remove => .none,
-        });
-        if (operation.action == .put) {
-            self.pending_operations.items[self.pending_operations.items.len - 1].mark_constructed = true;
-            const coords, const local = splitBlockCoords(operation.block);
-            self.chunks.getPtr(self.layout.encodeChunkCoords(coords)).?.metadata.markConstructed(self.allocator, transformations.index(local));
+        const status = self.enqueueOptimistic(operation, operation.action == .put) catch .resource_exhausted;
+        if (status != .success) {
+            const rejected: EditResult = .{ .status = status };
+            self.last_edit_result = rejected;
+            return rejected;
         }
         return result;
     }
 
-    /// Low-level optimistic replay/fixture helper. Gameplay calls tryOperation; every
-    /// queued intent is checked again by the service before it can become authoritative.
-    pub fn setBlockUnchecked(self: *World, block: [3]u32, block_type: BlockType) void {
-        const operation = BlockOperation{
-            .block = block,
-            .action = if (block_type == .none) .remove else .{ .put = block_type },
-        };
+    /// Prepare every allocation and road section change before mutating any
+    /// optimistic block, metadata, flag, stamp, or pending command contents.
+    fn enqueueOptimistic(self: *World, operation: BlockOperation, mark_constructed: bool) !OperationStatus {
         operation.validate(self.layout);
-        const coords, const local = splitBlockCoords(block);
-        const chunk = self.chunks.getPtr(self.layout.encodeChunkCoords(coords)).?;
+        if (!self.canQueueOperation()) return error.Capacity;
+        const coords, const local = splitBlockCoords(operation.block);
+        const id = self.layout.encodeChunkCoords(coords);
+        const chunk = self.chunks.getPtr(id) orelse return .missing_data;
         const existing = chunk.content.getBlock(local);
-        if ((operation.action == .put and existing != .none) or (operation.action == .remove and existing == .none)) return;
-        self.pending_operations.append(self.allocator, .{ .operation = operation }) catch @panic("OOM");
-        const pending = &self.pending_operations.items[self.pending_operations.items.len - 1];
-        self.applyPending(pending, true);
+        if (operation.action == .put and existing != .none) return .already_exists;
+        if (operation.action == .remove and existing == .none) return .already_removed;
+        const before = CellState.capture(chunk, local);
+        const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .virtual_edit = operation, .max_plan_changes = self.pending_byte_limit / @sizeOf(roads.Undo) };
+        var plan = try context.planAfterEdit(operation, before.road);
+        defer plan.deinit(self.allocator);
+        const planned_pending_capacity = @max(self.pending_operations.capacity, self.pending_operations.items.len + 1);
+        const predicted_bytes = self.pendingOperationBytes() - self.pending_operations.capacity * @sizeOf(PendingOperation) + planned_pending_capacity * @sizeOf(PendingOperation) + plan.changes.len * @sizeOf(roads.Undo) + @as(usize, @min(plan.changes.len, 20)) * @sizeOf(@import("road_data.zig").Slope);
+        if (predicted_bytes > self.pending_byte_limit) return error.Capacity;
+        var pending: PendingOperation = .{ .operation = operation, .cell_undo = before, .mark_constructed = mark_constructed };
+        errdefer {
+            pending.road_undo.deinit(self.allocator);
+            pending.road_formations.deinit(self.allocator);
+        }
+        try pending.road_undo.ensureTotalCapacityPrecise(self.allocator, plan.changes.len);
+        try pending.road_formations.ensureTotalCapacityPrecise(self.allocator, @min(plan.changes.len, 20));
+        for (plan.changes) |change| {
+            const block: [3]u32 = .{ @intCast(change.cell[0]), @intCast(change.cell[1]), @intCast(change.cell[2]) };
+            const changed_coords, const changed_local = splitBlockCoords(block);
+            if (self.chunks.get(self.layout.encodeChunkCoords(changed_coords))) |changed_chunk| {
+                if (changed_chunk.metadata.road(transformations.index(changed_local))) |road|
+                    pending.road_undo.appendAssumeCapacity(.{ .block = block, .slope = road.slope });
+            }
+            if (change.slope) |slope| {
+                var seen = false;
+                for (pending.road_formations.items) |formed| {
+                    if (std.meta.eql(formed.high_endpoint, slope.high_endpoint) and formed.downhill == slope.downhill and formed.length == slope.length) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (!seen) pending.road_formations.appendAssumeCapacity(slope);
+            }
+        }
+        const next_capacity = @max(self.pending_operations.capacity, self.pending_operations.items.len + 1);
+        const retained = self.pendingOperationBytes() - self.pending_operations.capacity * @sizeOf(PendingOperation) + next_capacity * @sizeOf(PendingOperation) + pending.road_undo.capacity * @sizeOf(roads.Undo) + pending.road_formations.capacity * @sizeOf(@import("road_data.zig").Slope);
+        if (retained > self.pending_byte_limit) return error.Capacity;
+        try self.pending_operations.ensureTotalCapacityPrecise(self.allocator, self.pending_operations.items.len + 1);
+        try plan.reserveCommit(context);
+        if (mark_constructed) try chunk.metadata.constructed.ensureUnusedCapacity(self.allocator, 1);
+        const status = try chunk.prepareApply(self.allocator, local, operation.action);
+        std.debug.assert(status == .success);
+        // All remaining operations are allocation-free.
+        _ = chunk.applyPrepared(self.allocator, local, operation.action);
+        if (mark_constructed) chunk.metadata.markConstructedAssumeCapacity(transformations.index(local));
+        plan.applyPrepared(context);
+        self.validation_revision +%= 1;
+        chunk.validation_revision = self.validation_revision;
+        self.revealNeighbors(coords, chunk.flags);
+        self.pending_operations.appendAssumeCapacity(pending);
+        self.pending_dynamic_bytes += pending.road_undo.capacity * @sizeOf(roads.Undo) + pending.road_formations.capacity * @sizeOf(@import("road_data.zig").Slope);
+        self.pending_accounted_count = self.pending_operations.items.len;
         self.stampRoadChanges();
+        return .success;
+    }
+
+    /// Low-level fixture/replay helper uses the same bounded failure-safe
+    /// admission. Gameplay additionally performs placement validation.
+    pub fn setBlockUnchecked(self: *World, block: [3]u32, block_type: BlockType) void {
+        const operation: BlockOperation = .{ .block = block, .action = if (block_type == .none) .remove else .{ .put = block_type } };
+        const status = self.enqueueOptimistic(operation, false) catch .resource_exhausted;
+        if (status == .resource_exhausted) self.last_edit_result = .{ .status = status };
     }
 
     pub fn setBlock(self: *World, block: [3]u32, block_type: BlockType) EditResult {
@@ -761,7 +987,7 @@ test "edits to unreceived chunks fail without queueing or changing cached chunks
     try std.testing.expect(!world.getChunk(.{ 0, 0, WORLD_SIZE[2] - 1 }).?.isDirty());
 }
 
-fn createSolidChunk(revision: u32) WorldChunk {
+fn createSolidChunk(revision: u64) WorldChunk {
     const world_chunk_data = std.testing.allocator.create(WorldChunkData) catch @panic("OOM");
     world_chunk_data.* = WorldChunkData.initSolid();
     var chunk = WorldChunk.initBlocks(world_chunk_data);
@@ -1334,4 +1560,101 @@ test "construction collection deduplicates chunks in the smallest wrapped world"
     try std.testing.expectEqual(2, cells.len);
     try std.testing.expectEqualDeep(block_rules.Cell{ 0, 33, 33 }, cells[0]);
     try std.testing.expectEqualDeep(block_rules.Cell{ 32, 33, 33 }, cells[1]);
+}
+
+fn exerciseFallibleChunkPreparation(allocator: std.mem.Allocator) !void {
+    var source = WorldChunk.initEmpty();
+    defer source.deinit(allocator);
+    try std.testing.expectEqual(OperationStatus.success, try source.tryApply(allocator, .{ 1, 2, 3 }, .{ .put = .country_road_adaptive }));
+    const cell = transformations.index(.{ 1, 2, 3 });
+    try source.metadata.tryMarkConstructed(allocator, cell);
+    try source.metadata.timed.trySchedule(allocator, .{ .block = cell, .kind = .grow_grass, .due_tick = 44 });
+    var staged = try source.tryClone(allocator);
+    defer staged.deinit(allocator);
+    try staged.metadata.reserve(allocator, 0, 1, 1);
+    try std.testing.expectEqual(OperationStatus.success, try staged.prepareApply(allocator, .{ 1, 2, 3 }, .remove));
+    try std.testing.expectEqual(OperationStatus.success, staged.applyPrepared(allocator, .{ 1, 2, 3 }, .remove));
+    try std.testing.expectEqual(BlockType.custom, source.content.getBlock(.{ 1, 2, 3 }));
+    try std.testing.expectEqual(@as(usize, 1), source.metadata.roads.items.len);
+    try std.testing.expectEqual(@as(usize, 0), staged.metadata.roads.items.len);
+    try std.testing.expectEqual(BlockType.none, staged.content.getBlock(.{ 1, 2, 3 }));
+}
+test "fallible chunk staging preserves source through every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseFallibleChunkPreparation, .{});
+}
+
+test {
+    _ = @import("timer_kernel.zig");
+}
+
+fn exerciseOptimisticAdmission(allocator: std.mem.Allocator) !void {
+    var client = try World.init(allocator, &test_layout);
+    defer client.deinit();
+    try client.insertChunk(.{ 0, 0, 0 }, WorldChunk.initEmpty());
+    client.allocator = allocator;
+    const before_stamp = client.validation_revision;
+    const result = client.enqueueOptimistic(.{ .block = .{ 1, 1, 1 }, .action = .{ .put = .country_road_adaptive } }, true) catch |err| {
+        const source = client.getChunk(.{ 0, 0, 0 }).?;
+        try std.testing.expectEqual(BlockType.none, source.content.getBlock(.{ 1, 1, 1 }));
+        try std.testing.expectEqual(@as(usize, 0), source.metadata.roads.items.len);
+        try std.testing.expectEqual(@as(usize, 0), source.metadata.constructed.items.len);
+        try std.testing.expectEqual(@as(usize, 0), client.pending_operations.items.len);
+        try std.testing.expectEqual(before_stamp, client.validation_revision);
+        return err;
+    };
+    try std.testing.expectEqual(OperationStatus.success, result);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_operations.items.len);
+    try std.testing.expect(client.pendingOperationBytes() <= client.pending_byte_limit);
+}
+test "optimistic admission prepares every allocation before changing client state" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseOptimisticAdmission, .{});
+}
+test "full optimistic count or byte budget rejects before mutation or validation" {
+    var client = try World.init(std.testing.allocator, &test_layout);
+    defer client.deinit();
+    try client.insertChunk(.{ 0, 0, 0 }, WorldChunk.initEmpty());
+    var calls: usize = 0;
+    client.preview_call_counter = &calls;
+    client.pending_operation_limit = 0;
+    const op: BlockOperation = .{ .block = .{ 1, 1, 1 }, .action = .{ .put = .dirt } };
+    try std.testing.expectEqual(OperationStatus.resource_exhausted, client.tryOperation(op).status);
+    try std.testing.expectEqual(@as(usize, 0), calls);
+    client.pending_operation_limit = 1;
+    client.pending_byte_limit = 1;
+    client.setBlockUnchecked(op.block, .dirt);
+    try std.testing.expectEqual(OperationStatus.resource_exhausted, client.last_edit_result.?.status);
+    try std.testing.expectEqual(BlockType.none, client.getChunk(.{ 0, 0, 0 }).?.content.getBlock(.{ 1, 1, 1 }));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_operations.items.len);
+}
+
+test "snapshot rollback allocates before mutating optimistic state" {
+    // Only fail the rollback preflight; replay intentionally reports deferred
+    // pressure as resource_exhausted rather than discarding received authority.
+    var client = try World.init(std.testing.allocator, &test_layout);
+    defer client.deinit();
+    try client.insertChunk(.{ 0, 0, 0 }, WorldChunk.initEmpty());
+    client.setBlockUnchecked(.{ 1, 1, 1 }, .dirt);
+    const stamp = client.validation_revision;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    client.allocator = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, client.insertChunk(.{ 0, 0, 0 }, WorldChunk.initEmpty()));
+    try std.testing.expectEqual(BlockType.dirt, client.getChunk(.{ 0, 0, 0 }).?.content.getBlock(.{ 1, 1, 1 }));
+    try std.testing.expectEqual(stamp, client.validation_revision);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_operations.items.len);
+}
+test "rejected optimistic command survives resource pressure then retires on safe rebase" {
+    var client = try World.init(std.testing.allocator, &test_layout);
+    defer client.deinit();
+    try client.insertChunk(.{ 0, 0, 0 }, WorldChunk.initEmpty());
+    client.setBlockUnchecked(.{ 1, 1, 1 }, .dirt);
+    client.pending_operations.items[0].request_id = 1;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    client.allocator = failing.allocator();
+    client.acknowledgeOperationResult(1, .constraint_violation);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_operations.items.len);
+    try std.testing.expectEqual(OperationStatus.constraint_violation, client.pending_operations.items[0].resolved_status.?);
+    client.allocator = std.testing.allocator;
+    try client.insertChunk(.{ 0, 0, 0 }, WorldChunk.initEmpty());
+    try std.testing.expectEqual(@as(usize, 0), client.pending_operations.items.len);
+    try std.testing.expectEqual(BlockType.none, client.getChunk(.{ 0, 0, 0 }).?.content.getBlock(.{ 1, 1, 1 }));
 }

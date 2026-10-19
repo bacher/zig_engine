@@ -39,26 +39,31 @@ pub const Side = enum(u8) {
     }
 };
 
+comptime {
+    if (@sizeOf(BlockType) != 1 or @sizeOf([32][32][32]BlockType) != 32768)
+        @compileError("persistence v1 requires byte-sized block storage");
+}
+
 pub const BlockType = enum(u8) {
     none = 0,
     /// Natural rock. Mining yields crushed stone; players cannot place this type.
-    stone,
+    stone = 1,
     /// Loose soil. Generated soil uses packed_dirt instead.
-    dirt,
+    dirt = 2,
     /// Packed soil with a grass surface; not a separately placeable material.
-    grass,
-    water,
-    sand,
-    snow,
-    packed_dirt,
-    crushed_stone,
-    tree_trunk,
-    planks,
-    rebar,
-    reinforced_concrete,
-    country_road_solid,
+    grass = 3,
+    water = 4,
+    sand = 5,
+    snow = 6,
+    packed_dirt = 7,
+    crushed_stone = 8,
+    tree_trunk = 9,
+    planks = 10,
+    rebar = 11,
+    reinforced_concrete = 12,
+    country_road_solid = 13,
     /// Selection/validation material; stored cells use custom plus sparse metadata.
-    country_road_adaptive,
+    country_road_adaptive = 14,
     custom = 255,
 
     pub fn occludesFaces(self: BlockType) bool {
@@ -173,10 +178,15 @@ pub const ChunkSideData = struct {
     custom_blocks: std.ArrayList(custom_block.Draw) = .empty,
 
     pub fn clone(self: Self, allocator: std.mem.Allocator) Self {
+        return self.tryClone(allocator) catch @panic("OOM");
+    }
+
+    pub fn tryClone(self: Self, allocator: std.mem.Allocator) !Self {
         var copy: Self = .{};
-        copy.custom_blocks.appendSlice(allocator, self.custom_blocks.items) catch @panic("OOM");
+        errdefer copy.deinit(allocator);
+        try copy.custom_blocks.appendSlice(allocator, self.custom_blocks.items);
         for (self.blocks_grouped_by_side, &copy.blocks_grouped_by_side) |source, *dest| {
-            dest.appendSlice(allocator, source.items) catch @panic("OOM");
+            try dest.appendSlice(allocator, source.items);
         }
         return copy;
     }

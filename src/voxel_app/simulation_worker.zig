@@ -14,13 +14,22 @@ const consts = @import("./consts.zig");
 pub const SimulationWorker = struct {
     client: *Client,
     worker: Io.Future(void),
+    paused: std.atomic.Value(bool) = .init(false),
 
     pub fn create(service: *WorldDataService) !*SimulationWorker {
         const self = try service.allocator.create(SimulationWorker);
         errdefer service.allocator.destroy(self);
         self.* = .{ .client = try service.createClient(), .worker = undefined };
+        self.client.simulation = true;
         self.worker = try service.io.concurrent(run, .{self});
         return self;
+    }
+
+    pub fn pauseDispatch(self: *SimulationWorker) void {
+        self.paused.store(true, .release);
+    }
+    pub fn resumeDispatch(self: *SimulationWorker) void {
+        self.paused.store(false, .release);
     }
 
     /// Stop before destroying the service, which owns this worker's endpoint.
@@ -84,7 +93,14 @@ pub const SimulationWorker = struct {
         };
         var action: world.BlockAction = .{ .put = .dirt };
         while (true) {
-            const id = client.submitOperation(.{ .block = block, .action = action });
+            while (self.paused.load(.acquire) or service.simulationPaused()) try Io.sleep(service.io, .fromMilliseconds(10), .awake);
+            const id = client.trySubmitOperation(.{ .block = block, .action = action }) catch |err| switch (err) {
+                error.Busy, error.OutOfMemory => {
+                    try Io.sleep(service.io, .fromMilliseconds(100), .awake);
+                    continue;
+                },
+                error.ServiceStopped => return,
+            };
             const status = try self.waitForOperation(&responses, id);
             action = nextAction(action, status);
             try Io.sleep(service.io, .fromSeconds(2), .awake);

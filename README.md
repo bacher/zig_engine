@@ -9,8 +9,11 @@ The package declares Zig 0.16.0 as its minimum version. External dependencies ar
 ```shell
 zig build             # Build/install the library, both applications, and content
 zig build run         # Run the demo application
-zig build run_voxel   # Run the voxel application
+zig build run_voxel -- --create-world saves/my-world # Create a saved voxel world
+zig build run_voxel -- --world saves/my-world        # Reopen it
+zig build run_voxel -- --ephemeral                   # Run without saving
 zig build test        # Run registered unit/regression tests
+zig build test-persistence # Run CPU persistence format/storage tests
 zig build test-gpu    # Optional headless Dawn GPU checks (requires graphics adapter)
 ```
 
@@ -29,6 +32,7 @@ The subsystem documents describe the current implementation, extracted from exis
 | [Scenes, objects, and input](docs/scenes.md) | Scene contents, transform hierarchy, instance updates, current visibility index, controls, and lifetime. |
 | [Rendering](docs/rendering.md) | Pass sequence, geometry paths, shadows, SSAO, GPU layouts, and current rendering limitations. |
 | [Assets and animation](docs/assets-animation.md) | glTF subset, shared models, textures, per-object playback, and resource ownership. |
+| [Persistence](docs/persistence.md) | Save selection, lifecycle, durability, memory, and validation commands. |
 | [Voxel world](docs/voxel-world.md) | Generation, service protocol, optimistic edits, streaming, masks, revisions, persistence, and capacity. |
 | [Coordinates and rendering precision](docs/coordinates.md) | f64 CPU positions, signed chunks, camera-relative GPU coordinates, wrapping, and regression coverage. |
 | [World configuration](docs/world-configuration.md) | Runtime dimensions, compile-time optional x wrapping, immutable layouts, shader specialization, and validation. |
@@ -56,7 +60,7 @@ The player starts standing on the current block surface. Before the first frame,
 
 The world-data service owns authoritative blocks and revisions. The main thread applies edits optimistically and reconciles them against subscribed snapshots. The normal neighborhood retains blocks in a 3×3×3 core and requests surrounding geometry within a 7×7×7 box; outstanding edits pin chunks during reconciliation. Both local and service meshes use neighbor boundary masks and the same exposed-face extractor.
 
-The fixed GPU face buffer is 4 MiB. Capacity pressure reduces the outer box to 5×5×5; uploads remain pending if that still cannot fit. Modified blocks and permanent reveal flags survive subscription eviction in service memory. Disk persistence is not implemented. A separate simulation worker edits one surface block through its own service endpoint.
+The fixed GPU face buffer is 4 MiB. Capacity pressure reduces the outer box to 5×5×5; uploads remain pending if that still cannot fit. Saved worlds retain modified blocks, historical reveal flags, construction/road metadata, lazy block timers, world time, and player checkpoints. Autosave attempts run every 60 seconds, with base compaction every 10 minutes and a final save on exit. See [persistence](docs/persistence.md) for explicit world creation/opening and failure behavior. A separate simulation worker edits one surface block through its own service endpoint.
 
 See [voxel world, streaming, and editing](docs/voxel-world.md) for the full protocol, handoff, meshing, and shutdown behavior.
 
