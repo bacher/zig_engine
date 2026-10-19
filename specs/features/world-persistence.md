@@ -99,6 +99,11 @@ Decision status as of 2026-10-19:
 
 ## Requirements
 
+These requirements are normative. The referenced [format contract](../formats/world-persistence-v1.md)
+provides their exact binary definitions. Clarifications record decision rationale and status;
+acceptance criteria verify the requirements; the plan describes implementation sequencing and
+mechanisms without overriding those contracts.
+
 - R1: Capture a boundary between complete authoritative transactions, including every
   affected chunk and completed timer operations at the capture boundary. Preserve pending
   timers and their original deadlines, including overdue timers awaiting a later pass or
@@ -468,13 +473,13 @@ Decision status as of 2026-10-19:
   acceptance under R49 still applies; extension rules never authorize silent reinterpretation
   of existing bytes or bypass rejection of unsupported file versions.
 - R53: Use the confirmed chunk-record, metadata-section, codec-ID, and checksum-domain
-  layouts below without native padding. Block codecs are u8 numbers: raw 0, standard RLE 1;
+  layouts in the [format contract](../formats/world-persistence-v1.md) without native padding. Block codecs are u8 numbers: raw 0, standard RLE 1;
   reject reserved/unknown values 2-255 at per-record dispatch. Persist chunk revisions as
   u64 and historical `is_unreachable` as persistent flag bit 0. Initial metadata sections
   use schema version 1, required flag bit 0, and tags 1 custom blocks, 2 construction
   markers, 3 pending transformations. Emit nonempty sections once in ascending tag order;
   absence means an empty collection, subject to custom-cell correspondence requirements.
-- R54: Use the schema-1 metadata payload layouts and byte limits below: 2-byte construction
+- R54: Use the schema-1 [metadata layouts and byte limits](../formats/world-persistence-v1.md#metadata-semantics-and-size-bounds): 2-byte construction
   markers, 11-byte pending transformations, and 2-byte unformed or 23-byte formed adaptive
   road records. Section payload maxima are respectively 65,536, 360,448, and 753,664 bytes.
   Including three 9-byte section headers, the initial combined metadata bound is 1,179,675
@@ -501,7 +506,7 @@ Decision status as of 2026-10-19:
   may include a valid final commit whose acknowledgment was lost. Report reproducible seeds
   and operation/fault sequences. Deliberate committed-corruption cases verify R55 instead
   of assuming the crash-durability guarantee still holds.
-- R57: Use the confirmed binary container layouts below, starting at save-format version 1:
+- R57: Use the confirmed [binary container layouts](../formats/world-persistence-v1.md#binary-container-layouts), starting at save-format version 1:
   120-byte base and WAL segment headers, an 84-byte transaction header, and a 56-byte commit
   footer. Base index and chunk records are sorted by chunk ID, players by player ID, with
   unique identities and exact count/extent agreement. WAL transactions contain complete
@@ -509,13 +514,13 @@ Decision status as of 2026-10-19:
   so encoding streams without WAL backpatching. Follow record framing, never magic scanning.
 - R58: Persist the immutable world descriptor's layout, topology, generator identity/version,
   seed, explicit settings, and tick rate. Do not substitute current generator defaults.
-  Serialize global state and player records using the layouts below, with IEEE-754
+  Serialize global state and player records using the [format layouts](../formats/world-persistence-v1.md#global-and-player-records), with IEEE-754
   little-endian floats, f64 player feet positions, f32 yaw/pitch, and an initially empty
   framed inventory. Retain all historical players; the future concurrent-player limit is
   not a lifetime record-count limit. Session command watermarks govern capture eligibility
   but are not serialized as persistent session counters.
 - R59: Use BLAKE3-256 for chunk, WAL-header, transaction, initial-anchor, and base checksums
-  with the exact domain-separated coverage below. Validate the immutable segment header even
+  with the exact [domain-separated coverage](../formats/world-persistence-v1.md#snapshot-integrity). Validate the immutable segment header even
   when it contains no transactions. Bind each transaction to the complete validated segment
   header and its preceding committed snapshot. Preserve the incorporated logical digest
   during compaction while recomputing the finalized base's physical checksum. Derive snapshot
@@ -685,36 +690,19 @@ Decision status as of 2026-10-19:
   A6: CONFIRMED by the user: exclude the temporary demonstration worker's private state.
   Its committed terrain changes remain world state. No actor continuation guarantee.
 - Q7: What is the capture memory budget and exhaustion policy?
-  A7: REVISED by the user on 2026-10-19: v1 uses no persistence COW reserve. Budget the
-  manifest, encoding/output buffers, and waiting operations, while accounting for source
-  retention. Keep the confirmed safe-cancellation and no-partial-publication guarantees.
-  A request to cancel is not a source-release acknowledgment. Defer mutations until active
-  readers relinquish ownership, independently of stalled WAL writes/repair. R38 distinguishes
-  ordinary capture waits from genuine allocation failures. Numerical limits follow R66.
-  R73 changes the automatic cancellation policy for overdue saves without weakening safe
-  ownership handoff or capacity limits. No promise of zero allocation or zero latency under
-  arbitrary pressure.
+  A7: REVISED: no persistence COW reserve in v1. Source retention and independent encoded
+  output have different lifetimes; cancellation can release capture holds without reclaiming
+  live-world storage. R20/R29/R31/R38 govern capacity and handoff, R66 tuning, and R73 overdue
+  saving. No promise of zero allocation or zero latency under arbitrary pressure.
 - Q8: How are player state and world edits given a common ordering boundary?
-  A8: CONFIRMED by the user: publish small player checkpoint records to the authoritative
-  service in order with player commands. Each record carries its preceding player-command
-  dependency sequence and becomes eligible when the required prefix is applied or rejected.
-  Capture the latest eligible record at the snapshot boundary, never the optimistic chunk
-  cache. Dequeued operations waiting for I/O remain unresolved; see Q26.
+  A8: CONFIRMED: ordered player checkpoints under R42 give player state and terrain one
+  authority. Client optimism cannot establish that boundary; dequeuing an I/O-waiting command
+  is not completion (R41/R43).
 - Q9: What is the exact binary encoding contract?
-  A9: CONFIRMED by the user: runs split at 255, explicitly length-framed encoded sections,
-  no nibble counts initially, and chained WAL checksums. Little-endian integers, explicit
-  field widths, and metadata extension rules are confirmed in Q34. Stable material IDs follow
-  R49; BLAKE3-256 is confirmed for all checksums, with snapshot hashes streamed over new bytes.
-  CONFIRMED initial block codecs: standard byte-pair RLE and raw fallback under R15; palette
-  order/three-material handling are deferred with palette encoding. Q35 confirms chunk-record
-  framing, codec IDs, metadata headers/tags, and checksum-domain bytes. Q37 confirms full
-  containers, world/player records, and checksum coverage. Q36 confirms initial metadata
-  payload layouts and byte limits. Assigning explicit constants to the existing material
-  meanings under R49 is implementation work, not an undecided format strategy.
-  Metadata entry-count/uniqueness rules are confirmed in R51.
-  Stable enum/version policy is confirmed in Q32.
-  Confirmed eight-byte magic values are `ZGWORLD\0` and `ZGWAL\0\0\0`, with initial write/
-  minimum-readable versions 1. Reject unsupported versions and required sections/custom types.
+  A9: CONFIRMED: the [format contract](../formats/world-persistence-v1.md) is the canonical
+  reference for all agreed framing, codecs, payloads, IDs, magic values, and checksum coverage.
+  R15/R49-R54/R57-R59 retain the corresponding requirements. Assigning explicit constants to
+  existing material meanings under R49 is implementation work, not an open format decision.
 - Q10: What happens after corruption, a missing journal, or repeated storage failures?
   A10: CONFIRMED v1 policy by the user: incomplete final WAL appends are routine recovery;
   committed corruption, missing committed dependencies, or ambiguous damage preserve the
@@ -724,22 +712,16 @@ Decision status as of 2026-10-19:
   Ordinary write/compaction failures retain their existing retry/status contracts;
   shutdown-draining UI/retry behavior is confirmed in Q38.
 - Q11: How are persisted nonresident chunks supplied to synchronous validation readers?
-  A11: CONFIRMED by the user: permit eviction only once the exact latest state is in the
-  installed base, established by equality of monotonic live and installed-base revisions
-  together with ownership/gameplay pin checks; no WAL inspection is needed. Propagate persistence status
-  to the service. Runtime loads read indexed base records without replaying WALs. CONFIRMED:
-  explicit dependency-wait/ready/validate-and-commit stages under R41; concrete loading/pin
-  interfaces remain implementation design. CONFIRMED: keep chunks
-  with pending terrain transformations resident once loaded, without preloading timer-bearing
-  chunks at world startup. Treat unsaved and pending-snapshot versions as newer state too.
+  A11: CONFIRMED: base-only indexed loading avoids runtime WAL replay. Exact installed-base
+  revision equality plus ownership/gameplay pins establishes reloadability (R24-R26/R48).
+  R41 stages dependency waits explicitly; loading/pin APIs remain implementation choices.
+  Loaded pending terrain timers stay resident, without eager startup activation (Q16).
 - Q12: When should advanced persistence optimizations be implemented?
   A12: RETAINED: defer nibble counts, mutation overlays/replay-on-read, heuristic encoded
-  caches, and independent deadline scheduling. Implement basic background priority, bounded
-  streaming, and cancellation/yield points initially; adaptive contention feedback remains
-  a follow-up. REVISED: the initial design has no persistence COW. Keep blocks, metadata,
-  and flags under one per-chunk capture/mutation gate and release sources promptly after encoding.
-  Selective COW, synchronous encode-before-write, and per-chunk simulation scheduling are
-  optional later policies evaluated with the same correctness/performance harness.
+  caches, independent deadline scheduling, and adaptive contention feedback. Basic background
+  priority, bounded streaming, and cancellation/yield points remain v1. Selective COW, eager
+  encoding, and per-chunk simulation scheduling are later experiments using the same harness;
+  see Alternatives and Potential Improvements.
 - Q13: May memory pressure trigger saving and compaction before their normal intervals?
   A13: CONFIRMED by the user: permit an earlier checkpoint/compaction request under memory
   pressure and coalesce redundant triggers. With base-only reloads, recent modified chunks
@@ -759,94 +741,61 @@ Decision status as of 2026-10-19:
   eager loading or global timer activation. Preserve their saved records and use existing
   timer processing when loaded. Revisit this logic when more scheduled events are added.
 - Q17: Must a committed snapshot fit a base smaller than 4 GiB?
-  A17: CONFIRMED by the user: remove the 4-GiB restriction and use u64 chunk file offsets
-  instead of adding a prospective compacted-size check. Widen related aggregate sizes and
-  counts as described below; chunk IDs remain u32. Normal bounds and arithmetic validation
-  still apply.
+  A17: CONFIRMED: remove the 4-GiB restriction rather than add a compacted-size preflight.
+  R14 and the [large-file contract](../formats/world-persistence-v1.md#large-file-format-and-arithmetic)
+  widen offsets and aggregate arithmetic while retaining u32 chunk IDs.
 - Q18: Must every WAL transaction scan or repair the file, and when is cancellation too late?
-  A18: CONFIRMED by the user: repair only after a failed/cancelled append that may have left
-  bytes. Remember the last synchronized offset, sequence, and checksum in memory; truncate
-  and synchronize the existing segment without a WAL scan. Suspend new appends/rotation
-  until repair succeeds. Once commit-footer writing begins, finish resolving the commit
-  attempt instead of reporting cancellation. Startup may recover an unacknowledged valid
-  final transaction if a crash preceded durable repair.
+  A18: CONFIRMED: repair uncertain appends from the remembered synchronized boundary,
+  keeping scans and repair off the normal path (R23). Footer writing is the R30 commit point
+  after which cancellation cannot be reported; a valid unacknowledged final transaction may
+  still be recovered after a crash. The WAL Failure Repair section explains the sequence.
 - Q19: How are capture failure policy and implementation choices separated?
-  A19: RETAINED: lightweight advance reservation with selective staging and the genuine
-  allocation-failure policy in Q25. Include metadata/publication capacity. REVISED: replace
-  COW preparation with full-write-set capture admission; there is no detachment path in v1.
-  Let released player work and a paced simulation slice progress before a replacement
-  capture can freeze their data again. Concrete queues, notifications, and cancellation
-  limits below are implementation proposals to validate under R66.
+  A19: REVISED: full-write-set admission replaces COW detachment; lightweight reservation
+  and selective staging remain (R31/R37). R38 distinguishes capture contention from actual
+  allocation failure. The capture plan and AC121 retain progress between captures; R66
+  covers measured limits.
 - Q20: Should all metadata arrays share one contiguous backing allocation?
-  A20: RETAINED: initially allocate each nonempty array separately and prioritize empty
-  metadata; all-air chunks do not need a block buffer. REVISED/CONFIRMED by the user: retain
-  the inline `WorldChunk.metadata` descriptors and existing block-pointer representation.
-  Remove the requirement to colocate a new persistent owner/header with the block payload
-  in one allocation. R34 now defers custom pools and uses existing allocators with budget
-  accounting. A contiguous variable metadata payload remains a potential improvement.
+  A20: RETAINED: separate nonempty arrays and allocation-free empty storage. REVISED/CONFIRMED:
+  retain inline metadata descriptors and the existing block pointer (R32-R34). A combined
+  persistent-owner/block allocation is unnecessary without COW; contiguous metadata remains
+  an optional later optimization.
 - Q21: Does capture require physically splitting the live `WorldChunk`?
-  A21: REVISED/CONFIRMED by the user: no. Retain its current ownership and field arrangement
-  initially. Keep persistent/derived/runtime categories in the serialization contract and
-  expose a restricted snapshot view under R33. At the boundary, copy small persistent values
-  and buffer descriptors into the view; pin the borrowed backing allocations until release.
-  Historical `is_unreachable` may stay in the existing packed flags: capture its value on
-  the authoritative worker so the encoder never reads storage shared with mutable face flags.
-  No separate persistent owner or header copy is needed. Inline field grouping is optional;
-  future COW ownership can be introduced behind the capture interface if justified. Ordinary
-  gameplay/client copies retain their own consistent contents and caches.
+  A21: REVISED/CONFIRMED: no physical split initially (R32/R33). Restricted views isolate
+  encoder access without changing live ownership. Copying historical packed flags at the
+  boundary also avoids races with derived-bit updates; see Persistent Contents and Live Chunk
+  State. Inline grouping is optional; future version ownership requires separate justification.
 - Q22: How should allocation, growth, and memory accounting work initially?
-  A22: REVISED/CONFIRMED by the user: defer custom pools to a potential improvement. Retain
-  existing allocation mechanisms, separate nonempty metadata arrays, empty-array/all-air
-  optimization, stable capture buffers, and fallible/reservable preparation. Count allocated
-  capacities and temporary old/new overlap, views/manifests, and encoded output; pins do not
-  duplicate live storage. Report known overhead and unmeasured allocator costs separately
-  under R34, with headroom/process telemetry. The former two-pool policy and provisional
-  64-byte minimum class are withdrawn. Semantic limits remain R51/R54; budgets are tuned
-  under R66. No save format or `WorldChunk` ownership change is needed.
+  A22: REVISED/CONFIRMED: existing allocators and budget accounting first (R34/R35).
+  Custom pools and the former provisional 64-byte class are deferred until allocation cost
+  or fragmentation is measured. Capacity accounting differs from process residency; semantic
+  limits (R51/R54) and format compatibility do not depend on pool geometry.
 - Q23: Does this iteration implement whole-system budgeting and priorities?
-  A23: RETAINED: global pressure controls, player-protected residency, movement gating, and
-  richer throttling UI follow persistence as a separate feature. REVISED: persistence v1
-  includes the minimal all-simulation capture gate and priority for encoder work needed to
-  unblock pending player edits. Those are capture policies, not the full future residency
-  scheduler or near-player simulation policy. See [Resource budgeting](resource-budgeting.md).
+  A23: RETAINED: whole-system budgeting is the separate [follow-up](resource-budgeting.md).
+  Persistence v1's capture gate and player-source priority are required to make no-COW
+  capture usable; they do not choose a global residency or near-player scheduler (R36).
 - Q24: How much normal-path work should allocation-failure safety introduce?
-  A24: CONFIRMED by the user: preserve atomicity with lightweight resource preparation rather
-  than a general rollback framework. Mutate exclusive chunks in place, reuse validation/
-  discovery results, and keep compact operation descriptions in reusable scratch storage.
-  Reserve capacity before mutation; use private staging only where dynamic effects require
-  it. Do not add unconditional whole-chunk copies or duplicate full validation just for OOM
-  handling. Concrete preparation mechanisms require code-level design and measurement;
-  there is no measured percentage or latency guarantee yet. Configured budget exhaustion
-  must also be handled safely even when physical RAM is not exhausted.
+  A24: CONFIRMED: lightweight preparation and in-place mutation under R31/R37 avoid a general
+  rollback framework. Existing validation work can often supply reservation information;
+  exact mechanisms and overhead still need measurement. Configured budget exhaustion needs
+  the same atomicity as physical allocation failure.
 - Q25: What if memory is still unavailable after capture cancellation?
-  A25: RETAINED for genuine allocation failures: one automatic player retry after a useful
-  ownership handoff, then explicit rejection/reconciliation; skip ineffective cancellation.
-  Simulation remains pending with bounded state, backpressure, and resource signals/backoff.
-  Preserve timers and dirty state; distinguish budget, allocator, and semantic failures and
-  reserve completion capacity. REVISED: ordinary capture contention is a nonterminal wait
-  governed by elapsed time and safe release, not this one-retry failure allowance. Applied
-  and terminal rejected commands are never silently replayed.
+  A25: RETAINED: genuine allocation failure uses R38's one-useful-handoff retry allowance;
+  ordinary capture contention is an elapsed wait, not a failed allocation. Cancelling capture
+  is useful only when release can help. R39/R40 govern simulation deferral and failure status.
 - Q26: How do asynchronous dependencies affect command/checkpoint/save ordering?
-  A26: CONFIRMED by the user: load dependencies before mutation, then validate and commit
-  atomically against current authoritative state, preserving required command order. Model
-  dependency waits explicitly; dequeuing is not completion. Player records name a preceding
-  command sequence and become eligible after those commands are applied or rejected. Here
-  an accepted outcome means the operation was applied, not merely admitted to a queue.
-  Final shutdown must drain I/O-waiting operations as well as queued/ready work.
+  A26: CONFIRMED: dependency loading is part of the command lifetime (R41-R43). Here an
+  accepted terminal outcome means applied, not admitted to a queue. This distinction keeps
+  checkpoints and shutdown from treating unresolved I/O as completed gameplay.
 - Q27: What anchors journals before the first periodic compaction of a new world?
   A27: CONFIRMED by the user: install a small durable snapshot-zero base with world/generator/
   layout/initial state and its chain anchor, then establish the first WAL. No WAL snapshot
   may be acknowledged before that base is durable. Keep explicit creation separate from
   opening an existing world whose base is missing; never silently replace the missing base.
 - Q28: Must compaction revalidate inputs, and should individual chunk records be checksummed?
-  A28: CONFIRMED by the user: verify base/WAL source integrity before publishing a newly
-  checksummed output. Direct encoded copies remain valid only under that verification.
-  CONFIRMED by the user: per-chunk record checksums for independent indexed-read verification,
-  covering chunk identity/content version, framing/codec, persistent flags, encoded blocks,
-  and metadata. CONFIRMED initial choice: BLAKE3-256 footer and coverage/layout described below.
-  Chunk field widths and checksum-domain bytes are confirmed in Q35 and the layout tables below.
-  These record checksums supplement the base physical checksum
-  and WAL transaction chain; they cannot replace transaction-wide completeness/ordering checks.
+  A28: CONFIRMED: source verification prevents compaction from making corrupted data look
+  valid merely by checksumming its output (R45). Per-record checksums enable indexed reads
+  without scanning the base; they supplement transaction completeness and ordering (R46).
+  Exact bytes are in the [chunk layout](../formats/world-persistence-v1.md#chunk-record-layout).
 - Q29: What timer eligibility and catch-up behavior belongs in persistence v1?
   A29: RETAINED: fixed pass tick and resident due-chunk list; newly loaded chunks wait for
   the next pass; preserve finite overdue soil-transition chains and original deadlines,
@@ -886,43 +835,26 @@ Decision status as of 2026-10-19:
   layouts and byte limits; future schemas derive limits from records/counts, independently
   of allocation policy.
 - Q34: What are the compatibility and extension rules for binary sections?
-  A34: CONFIRMED by the user: little-endian integers, explicit field widths, and versioned,
-  length-delimited metadata sections. Reject unknown required sections/custom types; skip
-  unknown sections only when explicitly declared optional and safe to ignore. Never silently
-  reinterpret existing bytes after a format change. Section-header widths/tags are confirmed
-  in Q35; the current/minimum readable version policy still applies.
+  A34: CONFIRMED: explicit versioned framing under R52 allows only declared safe optional
+  extensions. A length does not make unknown gameplay data ignorable or bypass the overall
+  file-version gate; see the [extension contract](../formats/world-persistence-v1.md#section-compatibility-and-extensions).
 - Q35: Which concrete binary framing and IDs should the initial format use?
-  A35: CONFIRMED by the user: numeric u8 block codecs (raw 0, standard RLE 1), the chunk
-  record field order/widths below with 58 bytes of fixed overhead, and 9-byte metadata
-  headers with tags 1-3, schema version 1, and a required flag. Empty collections omit
-  their sections; nonempty sections appear once in ascending tag order. Use the specified
-  zero-terminated ASCII checksum-domain prefixes and a fixed 16-byte world UUID in chunk
-  hash input. Full container headers follow Q37; metadata payloads follow Q36.
+  A35: CONFIRMED: the [format contract](../formats/world-persistence-v1.md) records the R53
+  chunk framing, codec IDs, metadata headers/tags, and checksum-domain bytes. Fixed framing
+  permits bounded streaming and unambiguous validation without native struct layout.
 - Q36: What are the concrete metadata payload layouts and resulting byte limits?
-  A36: CONFIRMED by the user: serialize construction markers as u16 cell indices and timers
-  as u16 cell index, u8 kind, and u64 deadline, with counts inferred from section length.
-  Adaptive-road custom records contain a u8 type and u8 state; formed slopes additionally
-  retain their high endpoint as three u32 coordinates, u8 downhill direction, u32 formation
-  length, and u32 section index. Derive heights as today rather than storing floats. Preserve
-  formation ownership for later edits. These layouts yield the section and combined bounds
-  in R54; they do not imply worst-case preallocation. Recalculate bounds for future schemas.
+  A36: CONFIRMED: schema-1 [metadata layouts and bounds](../formats/world-persistence-v1.md#metadata-semantics-and-size-bounds)
+  implement R54. Road ownership fields enable later edits; derived heights need no stored
+  floats. Serialized maxima describe valid data, not worst-case preallocation.
 - Q37: What are the base/WAL containers, world/player records, and full checksum coverage?
-  A37: CONFIRMED by the user: use the exact fixed/versioned headers, world descriptor,
-  global/player records, streaming WAL transaction/footer, and BLAKE3-256 coverage below.
-  Base layout is header, descriptor, global state, chunk index, player records, chunk records,
-  and physical checksum. Each WAL transaction carries full global/player state plus changed
-  chunks. Its total byte length is written in the commit footer, without backpatching WAL
-  bytes. Include all generator settings and preserve historical players. Snapshot zero hashes
-  the canonical logical contents; compaction preserves the incorporated logical digest.
+  A37: CONFIRMED: R57-R59 and the [format contract](../formats/world-persistence-v1.md)
+  define containers, world/player records, and checksum coverage. Footer lengths permit WAL
+  streaming without backpatching; logical snapshot digests survive physical compaction.
 - Q38: What minimal UI and retry behavior should shutdown draining failures have?
-  A38: CONFIRMED by the user: one responsive dialog for finishing pending actions, saving,
-  and finalizing. Retry transient failed dependency I/O once after a provisional one second;
-  then expose Retry, Cancel exit, or Quit without saving. After a provisional five seconds
-  without progress, show Keep waiting instead of Retry while work is still in flight.
-  Never duplicate outstanding work, silently replay rejected edits, or discard actions on
-  a timeout. Cancel exit preserves state and resumes gameplay. Explicit unsaved exit may
-  use process-interruption semantics if a worker is stalled, retaining recoverable files.
-  Final-WAL success followed by compaction failure permits reported exit with WAL retained.
+  A38: CONFIRMED: one responsive shutdown dialog under R60-R62. Delay indicates uncertainty,
+  not failure, so waiting work must not be duplicated. The Shutdown Status section retains
+  the phase/choice table and provisional retry/status timings; Q49 records the later deadline
+  exemption. Final-save versus compaction failure remains the distinction in Q15.
 - Q39: What platform and filesystem durability assumptions apply to v1?
   A39: CONFIRMED by the user: local macOS/APFS with the storage primitives and ordering
   below, including F_FULLFSYNC for the device-cache barrier. Acknowledged state survives
@@ -942,20 +874,14 @@ Decision status as of 2026-10-19:
   only if measurements reveal a meaningful gameplay tradeoff or require a design change.
 
 - Q41: Which choices are newly agreed, and which remain proposals?
-  A41: CONFIRMED on 2026-10-19: start without persistence COW, pause all simulation during
-  capture, keep player edits pending with optimistic visuals, prioritize their chunks,
-  and normally cancel capture safely after a bounded wait if needed. Q46 records the later
-  confirmed exception for overdue saving. Catch up against current conditions. The
-  approximately 99.9% simulation-update assumption and wire-compatible
-  player interactions come from the user's requirements. Concrete state/queue APIs, numeric
-  thresholds, and the evaluation gates below are proposals or measurement work; none are
-  claims of measured responsiveness. Unaffected confirmed decisions remain in force.
+  A41: CONFIRMED starting policy and later approvals are collected in Context. Concrete
+  state/queue APIs and the evaluation stages remain proposals, and numeric limits require
+  measurement under R66. None establish measured responsiveness; Q45 lists unresolved
+  performance questions. Unaffected confirmed decisions remain in force.
 - Q42: Does a global pause last through WAL synchronization or compaction?
-  A42: No. DERIVED from the selected policy: it lasts only while captured source contents
-  must stay unchanged. Resume after normal release or accepted cancellation's safe handoff.
-  Bounded output buffers can fill behind slow disk writes and extend capture; prioritize
-  players and normally cancel safely rather than assuming encoding and disk throughput are
-  independent. Under R73, accept a visible capture pause so an overdue save can progress.
+  A42: DERIVED: source release, not WAL durability, ends the capture pause (R68). Slow
+  storage can nevertheless extend capture by filling bounded output buffers. That coupling
+  motivates normal cancellation and the explicit overdue-saving exception (R73).
 - Q43: Must catch-up reconstruct every historical intermediate world?
   A43: CONFIRMED by the user: no; use current conditions while preserving logical-time
   progress and preventing duplicate effects. Future courier transfers must conserve goods
@@ -983,39 +909,26 @@ Decision status as of 2026-10-19:
   saves and edits under an indefinitely stalled disk or unbounded workload.
 
 - Q46: May overdue saving visibly pause world-changing actions?
-  A46: CONFIRMED by the user on 2026-10-19: eventually prioritize completing a save and allow
-  an exceptional saving pause, including player edits, with responsive rendering, camera,
-  and UI. This supersedes cancellation-at-any-cost during active play. The R73 elapsed-age
-  policy prevents retry attempts from resetting escalation; numeric thresholds and concrete
-  mode/gate APIs remain proposals to tune. Source release and WAL durability remain distinct.
-  Storage failure is still reported, never converted into a false success or unlimited memory.
+  A46: CONFIRMED on 2026-10-19: eventual save completion can justify an exceptional visible
+  action pause. This qualifies the normal responsiveness target rather than asserting an
+  invisible long wait. R73 defines escalation; thresholds and concrete mode/gate APIs remain
+  measurement/design choices, and failed storage cannot be forced to succeed.
 - Q47: What workload and machine sizes should the first usable version target?
-  A47: CONFIRMED by the user: about 10,000 simultaneously active chunks, 2,000-4,000 distinct
-  changes per 60-second save interval, and 16 GB RAM, with smaller worlds on 8 GB machines.
-  The smaller-world size and memory/latency defaults remain measurement work under R66/R74.
-  Whole-capture buffering remains a review proposal; the bounded streaming baseline stays.
-  Custom pools are now explicitly deferred under the separate user-confirmed Q22 decision.
-
+  A47: CONFIRMED: R74 records the 10,000-active / 2,000-4,000-changed-chunk target on 16 GB
+  and smaller worlds on 8 GB. Smaller-world size and defaults need measurement. Whole-capture
+  buffering remains a proposal; custom pools are deferred under Q22.
 - Q48: Does each capture or pending player request need its own timer/retry loop?
-  A48: CONFIRMED by the user: use one coordinator watchdog checking the earliest applicable
-  capture-related deadline, and retry waiting admissions on meaningful source-release events.
-  Preserve each request's original wait timestamp across retries and capture epochs. R75
-  defines the contract; timer APIs, deadline data structures, and numeric thresholds remain
-  engineering choices. This does not select future simulation event scheduling.
-
+  A48: CONFIRMED: one coordinator watchdog under R75 avoids per-request timer/retry loops
+  while preserving elapsed-wait fairness across epochs. Timer APIs and deadline data
+  structures remain engineering choices, separate from simulation event scheduling.
 - Q49: Do normal gameplay deadlines cancel the final shutdown save?
-  A49: CONFIRMED by the user: no. Producers are stopped; let the final save continue within
-  the same memory limits while completion handling and the existing wait/cancel-exit/quit
-  choices remain responsive. Actual failures retain their existing handling. Cancel exit
-  restores gameplay capture policy through safe ownership handoff, preserving wait timestamps,
-  unsaved age, and R30 commit boundaries; overdue-save priority remains applicable under R73.
-
+  A49: CONFIRMED: stopped producers remove the gameplay reason for short capture deadlines
+  during final saving. R73 retains the shutdown exemption; R62/R75 govern safe restoration
+  of gameplay policy when exit is cancelled, without resetting waits or overdue-save age.
 - Q50: Must every capture wait produce a client-visible pending message?
-  A50: CONFIRMED by the user: no. Keep pending primarily an internal state in v1; brief waits
-  retain the existing optimistic operation until a terminal response arrives. Longer-delay
-  status may be coalesced; required exceptional-saving and failure status remains visible.
-  Preserve identities, ordering, bounded outstanding work, and pending/rejected distinctions.
-  Networking, reconnect handling, and a persisted deduplication ledger remain deferred.
+  A50: CONFIRMED: client optimism can cover brief waits without a new pending message.
+  R71 keeps pending primarily internal and coalesces longer-delay status while retaining
+  required visible saving/failure status. Networking and reconnect machinery remain deferred.
 
 ## Acceptance Criteria
 
@@ -1560,65 +1473,26 @@ starting implementation.
 
 ### Approach
 
-New-world initialization first follows the snapshot-zero protocol below; existing-world
-opening validates and recovers the existing history rather than taking the creation path.
-
-1. Establish an authoritative snapshot boundary after a complete request batch and its
-   timer pass under R47, before accepting the next batch. Pending/overdue timers, including
-   deferred operations and newly loaded chunks, remain represented under R1/R39. Do not
-   extend the pass to drain all overdue work. Assign snapshot sequence/world tick.
-   Completion is defined by terminal operation outcomes, not queue removal; satisfy the
-   save barrier's required command prefix and player-checkpoint dependencies before capture.
-   Pause new simulation dispatch and finish already executing authoritative operations.
-   Swap the dirty candidate set, freeze its chunk identities/revisions, and copy small
-   global/player state under the same authority. This is O(number of candidates), so measure
-   the worker cost. Blocks/metadata/flags stay immutable until source release; v1 does not
-   detach/copy them. Player operations on writable sources can continue; conflicting complete
-   write sets remain pending. Save barriers are resolved before establishing this boundary,
-   not by waiting for post-boundary edits that are themselves capture-blocked.
-2. The persistence worker encodes only captured changed chunks and appends one framed
-   transaction to the active segment. A commit covers the entire captured set and global
-   state; its hash includes the prior committed hash and protected transaction bytes.
-   Flush/sync before acknowledging. Prioritize sources needed by pending player edits.
-   Release sources progressively after complete encoding into independent owned output,
-   before unrelated disk waits; resume simulation when the last source hold clears.
-   Failed attempts keep changes eligible for a fresh snapshot. Repair a possibly written suffix by truncation and synchronization
-   before subsequent appends or rotation, even if the failed attempt wrote a complete footer.
-3. The service receives completion messages, advances its durable watermark, and reconciles
-   dirty identities by captured version. Centralize writable access for every mutation path,
-   including road helpers, flag revelation, metadata-only timer changes, and transformations.
-   WAL-durable chunks remain resident until the base-install acknowledgment proves that
-   their exact current version can be reloaded from the installed base.
-4. At a committed boundary, establish a new active segment durably. Seal older segments and
-   dispatch immutable input handles and a target sequence to one background compactor.
-5. The compactor merges the base index with latest committed overrides through that sequence.
-   Verify source base/WAL integrity while copying compatible encoded records without decoding
-   untouched chunks. Write a complete new base, validate/sync/install it only after input
-   verification succeeds, and publish an immutable generation/index handle to the service.
-   Retire only incorporated segments after directory durability. The service reconciles
-   base-backed versions and may evict eligible chunks; new edits in the active WAL remain
-   resident. Readers using older file-generation handles can finish safely.
-6. Startup validates the base and journal chain and classifies any failure under R55 before
-   publishing recovery output. Apply recoverable journals before entering gameplay. Ignore
-   only a clearly incomplete final append with no dependent successor. Preserve evidence
-   and exit with a save-path/error message to stderr and nonzero status for committed
-   corruption, missing dependencies, or ambiguous damage. Do not load an older snapshot or
-   run the normal final-save path after fatal recovery failure.
-   Commit records identify the previous committed sequence; abandoned snapshot attempts may
-   consume sequence numbers without creating a broken dependency. Check dependency links,
-   not numerical adjacency of attempted snapshots.
-7. Treat encoded chunk caching as optional: unchanged durable chunks already have reusable
-   encoded records on disk. Add a bounded in-memory cache only if profiling justifies it;
-   key it by persistent content identity including metadata, not age or mesh revision.
-8. Shutdown stops simulation/command producers, drains accepted operations and ordered player
-   state including outstanding dependency loads, waits for any current saver/compactor,
-   writes the final snapshot, and compacts all
-   remaining committed segments. Publish/sync the final base before removing journals.
-   A durable final snapshot permits exit with reported compaction failure and retained WALs.
-   A final snapshot durability failure requires retry/cancel-exit/explicit-unsaved-exit choices.
-9. Memory pressure can coalesce an early checkpoint followed by compaction instead of
-   waiting for the normal intervals. Background work keeps the same concurrency limits,
-   bounded buffers, and cancellation/yield behavior.
+1. Initialize a new world's durable snapshot zero, or validate/recover an existing world.
+   Keep creation and opening distinct; see New-World Initialization and Recovery Failure
+   Classification.
+2. Resolve the save barrier and eligible player checkpoints, then capture between complete
+   authoritative operations under R1/R41-R43/R47. Pause simulation dispatch, freeze the dirty
+   manifest, and copy small global/player state. The candidate bookkeeping is O(number of
+   candidates) and needs measurement; the capture protocol is detailed below.
+3. Encode the frozen sources into independent bounded output, prioritizing player dependencies,
+   and stream one WAL transaction. Process source-release and durable acknowledgments as
+   separate events. Use R75's watchdog with R73's normal/priority policy; the capture and WAL
+   repair sections define cancellation and failure handling.
+4. At a committed boundary, establish the next active segment and compact sealed inputs into
+   a verified new base. Publish its immutable generation/index handle before reconciling
+   base-backed revisions and eviction. Existing readers may finish through older handles;
+   see Compaction Source Verification and Residency and Persistence Feedback.
+5. On shutdown, stop producers, drain admitted operations and eligible player state, finish
+   current persistence work, save, and compact. Shutdown Status defines responsive choices.
+6. Coalesce periodic and pressure-triggered work under the same concurrency/capacity limits.
+   Encoded records on disk already support reuse; any optional in-memory cache needs measured
+   benefit and persistent-content identity including metadata, not age or mesh revision.
 
 ### Decision Impact Relative to PR #28
 
@@ -1788,7 +1662,7 @@ For explicit creation:
 2. Assign snapshot sequence 0 and derive a domain-separated initial logical digest from the
    canonical initial persistent state, including world identity and generator/layout settings.
    Define the digest input without its own digest field or the physical file checksum to avoid
-   circular hashing. Use the exact Snapshot Integrity anchor encoding below.
+   circular hashing. Use the exact [snapshot-zero anchor encoding](../formats/world-persistence-v1.md#snapshot-integrity).
    Store this sequence/digest as the base's incorporated snapshot identity; maintain the base's
    independent physical checksum and declared-size validation as usual.
 3. Write and validate a temporary base in the world directory, synchronize it, and atomically
@@ -1811,7 +1685,7 @@ failures may leave a recoverable base even when creation was not reported succes
 
 ### Asynchronous Operations and Checkpoint Eligibility
 
-Represent an operation's lifetime explicitly:
+Implement R41-R43 with an explicit operation lifetime:
 
 ```text
 Waiting for dependencies / capture / resources
@@ -1820,43 +1694,24 @@ Waiting for dependencies / capture / resources
                   +-- revalidate after additional dependencies or waits
 ```
 
-Dependencies are loaded outside the authoritative worker's mutation path and pinned while
-needed. The worker continues servicing load/ownership completions while commands wait.
-Becoming ready does not itself grant permission to overtake earlier commands whose order
-must be preserved. Validate against current authoritative contents at execution time, reuse
-still-valid preparation results, and commit with R31 atomicity. Further dependency discovery
-or resource deferral produces no partial effects. R26's generation/stale-completion rules
-apply throughout. Load errors produce an explicit failure or retained wait/retry state;
-missing data never means empty terrain or permission to skip validation.
+Load dependencies outside the mutation path and pin them while needed. Returning to ready
+reuses valid preparation but does not permit overtaking required command order. Apply R26's
+generation checks and R31's atomicity at publication; service completions remain runnable.
 
-A capture wait retains the logical operation and its command identity. Do not repeatedly
-submit a new command, retire its optimistic effect, or advance its resolved prefix on a
-pending notification. Required command ordering remains intact; only independent work whose
-ordering allows it may proceed. Simulation dispatch is gated before it floods the service
-queue. Completion processing, cancellation, and player reads remain runnable.
+Track command sequences within each client/session, separately from snapshot sequences,
+world ticks, and chunk revisions. Checkpoint messages carry a dependency watermark; retain
+bounded checkpoint state until the whole required prefix resolves. A highest-completed ID
+with a gap is not a resolved prefix. The latest eligible checkpoint supplies captured player
+state; the pending/terminal outcome contract is R71.
 
-Distinguish request admission, terminal command outcome, and durable WAL acknowledgment.
-Only an applied or explicitly rejected operation resolves its command dependency. Track
-player-command sequences within their client/session, separately from snapshot sequences,
-world ticks, and chunk revisions. Player checkpoint messages include a dependency watermark;
-the service retains bounded pending checkpoint state and makes a record eligible only when
-the entire required command prefix is resolved. A highest-completed ID with a gap is not a
-resolved prefix. Use the latest eligible record at capture; optimistic terrain is never a
-snapshot source. Rejection still resolves ordering and follows normal client reconciliation.
+Retain an ordered save request's required boundary across dependency waits. An explicitly
+requested snapshot of an earlier completed prefix can use only player records eligible for
+that prefix and cannot claim unresolved commands are included.
 
-When a save request is ordered after commands, retain its required boundary across dependency
-waits. Do not silently fulfill it with an earlier state just because earlier commands left
-the inbound queue. A snapshot of an earlier completed prefix, if requested as such, can use
-only player records eligible for that prefix and must not claim the waiting commands are
-included. Snapshot capture itself stays between complete operations.
-
-Shutdown stops new producers but keeps loaders and completion handling available until
-admitted commands have resolved and the final player checkpoint is eligible. Count queued,
-waiting, ready, and executing work when deciding whether draining is finished. A load failure
-must resolve explicitly or keep shutdown in a reported failure/wait state. Future scheduled
-events and resource-deferred timers represented in persistent metadata need not all execute
-before exit; preserve their pending records. Do not discard an admitted command by treating
-it as a saved timer unless its pending state is actually represented by that policy.
+Draining counts queued, waiting, ready, and executing operations. A persisted future timer
+need not execute to finish shutdown, but an admitted command cannot be discarded as a timer
+unless its state is actually represented by that persistence policy. R60-R62 own shutdown
+failure handling.
 
 ### Shutdown Status, Retry, and Exit Choices
 
@@ -1947,413 +1802,6 @@ world time records the clock, while timer metadata records outstanding work.
 This is a persistence-v1 scheduling clarification. Global timer discovery, generalized event
 chains, fairness, general catch-up limits, and an independent scheduler remain deferred.
 
-### Large-File Format and Arithmetic
-
-The initial format uses the following widths; no 4-GiB save-size preflight is required.
-
-| Field | Serialized width |
-| --- | --- |
-| Chunk ID | u32, unchanged from the world layout |
-| Absolute file offset, including chunk index and WAL positions | u64 |
-| Declared base-file size; aggregate section/index/transaction byte length | u64 |
-| Aggregate counts, including chunk-index entries, WAL records, and players | u64 |
-| Bounded individual chunk-record, block-payload, and metadata-section byte lengths | u32 |
-| Block type and literal RLE count | u8, unchanged |
-
-Each on-disk chunk index entry is exactly 12 bytes: a u32 chunk ID followed by a u64
-absolute offset from the beginning of the base file, with no native alignment padding.
-Bounded per-chunk lengths do not limit the combined file size. Their totals must fit the
-individual record framing; enforce codec-specific bounds before allocation. Other bounded
-record fields retain explicitly specified widths when the exact section layouts are frozen.
-
-The current world layout permits 2^32 distinct chunks. IDs fit u32, but their count needs
-u64. Widen operands before computing dimension products, count * entry_size, or accumulated
-output lengths. Use checked u64 arithmetic for file extents, WAL commit boundaries, read/
-write cursors, and compaction accounting. Validate a range using offset <= file_size and
-length <= file_size - offset (or an equivalent checked addition), including nested sections.
-Do not increment a u32 chunk ID as a loop counter past its maximum value.
-
-Keep file positions separate from in-buffer indices. Check conversions to usize and any
-signed or narrower platform file-offset type; neither truncation nor floating-point size
-accounting is valid. Stream payloads/checksums in bounded buffers, and check index/cache
-allocation arithmetic and resource limits separately from on-disk sizes. Large-file support
-does not require loading the entire file into memory. Report platform/filesystem limits and
-I/O failures through the existing save/load failure paths without discarding durable files.
-
-### Enum IDs and Reader Compatibility
-
-Use explicit material enum values rather than relying on declaration order, and numeric u8
-codec IDs as assigned below.
-Keep air at 0 and custom-cell storage at 255. The current application also has a placement-only
-adaptive-road material; existing behavior stores those cells as custom plus metadata, not as
-the placement selector. Preserve that distinction in the encoder.
-
-Each base/WAL file records the version it was written with. Engine constants define
-`current_write_version` and `minimum_readable_version`. Accept only the supported inclusive
-range, with actual decoding support for every accepted version. These are distinct from
-snapshot sequences, world ticks, and generator versions. The minimum is an engine support
-policy; a second per-file version field is not required for this initial design.
-
-For example, adding a material in format 2 can leave the minimum at 1: the updated engine
-reads versions 1 and 2 but writes version 2. An engine supporting only version 1 rejects
-version 2 before interpreting any chunk bytes. An incompatible change in version 3 without
-legacy decoding sets the minimum to 3. A version bump alone does not implement compatibility:
-when layout/defaults change, retain the required old decoding logic or raise the minimum.
-
-Initially perform no material-enum membership checks, either per raw cell or per RLE run.
-Retain file/record checksums and structural bounds, and reject unsupported codec IDs at the
-per-record dispatch point. Once version/integrity checks succeed and decoding yields exactly
-32,768 bytes, reinterpret the owned buffer directly as `[32][32][32]BlockType` in x-fast order.
-For standard RLE, expand material bytes and initialize omitted trailing air without first
-converting each run's material to an enum. Validate custom metadata using byte-level custom
-markers before publishing the typed chunk. Temporary decoding buffers do not change the
-enum-based runtime representation.
-
-Verify the assumed one-byte `BlockType` layout and array size at compile time, and preserve
-required alignment and buffer ownership/lifetime. A cast must not leave the live chunk pointing
-into recycled I/O scratch storage. The accepted trust assumption is that a compatible writer
-emitted valid values and verified bytes retain them. Version/checksum checks do not logically
-establish membership in the exhaustive enum. Invalid values from a writer bug, an incorrect
-compatibility declaration, or a file with matching recomputed checksums can still produce
-undefined behavior; safe handling of that case is explicitly not guaranteed in v1.
-
-### Section Compatibility and Extensions
-
-All serialized integers use little-endian encoding and explicit widths. Section layouts are
-wire contracts, not native Zig structs: omit compiler padding and serialize each field in
-the defined order. Each metadata section has this confirmed layout:
-
-| Field, in order | Encoding |
-|---|---|
-| Section type | u16 |
-| Section schema version | u16 |
-| Section flags | u8 |
-| Payload length, excluding header | u32 |
-| Payload | Declared number of bytes |
-
-The header is exactly 9 bytes. Flag bit 0 means required; other bits are reserved and
-initially zero. Initial section schema versions are 1, with these stable type assignments:
-
-| Section type | Meaning |
-|---|---|
-| 0 | Invalid/reserved |
-| 1 | Custom-block records |
-| 2 | Construction markers |
-| 3 | Pending transformations |
-
-All three initial section types are required to understand when present. Emit only nonempty
-sections, once each, in ascending type order; reject duplicates or out-of-order sections.
-An absent section denotes an empty collection. Custom records must still match custom cells
-exactly, so their section cannot be absent when custom cells exist. The enclosing metadata
-payload length determines the end; there is no terminator or section count. Payload schemas
-and their derived byte limits are defined under Metadata Semantics and Size Bounds.
-
-Each metadata section identifies its type and schema version, declares whether it is required
-or optional, and gives its payload byte length. Parse known supported sections with their
-declared schema and require exact payload consumption. Unknown types or unsupported schema
-versions fail when required. Only sections explicitly defined as optional and safe to ignore
-may be skipped; length framing alone is not permission to discard unknown state. A section's
-schema defines whether absence is allowed and the resulting defaults; do not invent defaults
-for missing required gameplay data.
-
-Even skipped payloads remain within validated section/record bounds and enclosing checksum
-coverage. Check their lengths before seeking/advancing. Optionality is a format compatibility
-promise that gameplay remains valid without interpreting that extension; it is not a general
-guarantee of lossless preservation of unknown data when rewriting saves. Custom-block types
-are required semantic data and must be recognized; the material-enum trust policy does not
-permit skipping unknown custom payloads or guessing their sizes.
-
-The file-version gate runs before section interpretation. An older engine still rejects a
-newer overall save version even if that file's new sections happen to be optional. An updated
-engine may read supported older schemas or skip permitted optional extensions, but must never
-apply a new interpretation to old bytes without explicit version-aware decoding. Incompatible
-changes follow R49's minimum-readable-version policy.
-
-### Initial Block Encoding
-
-Use standard byte-pair RLE or raw bytes only, with numeric u8 codec IDs:
-
-| Codec ID | Meaning |
-|---|---|
-| 0 | Raw: exactly 32,768 block bytes |
-| 1 | Standard RLE: `(u8 material, u8 count)` pairs |
-| 2-255 | Reserved; reject at per-record dispatch |
-
-Flatten blocks in x-fast `[z][y][x]` order;
-there are exactly 32,768 cells. Standard emits a material byte and a literal count in 1-255
-for each run fragment. Adjacent fragments may have the same material when splitting a long
-run. Zero is never a count/sentinel. The explicit payload length delimits the pairs.
-
-Standard may omit trailing air; the decoder initializes the remainder to air. A zero-byte
-standard payload denotes an all-air chunk, still an explicit override when indexed. Validate
-that payload length is even and the sum of counts does not exceed 32,768; explicit cells plus
-implicit trailing air must fill the chunk exactly. Raw requires all 32,768 material bytes,
-including trailing air. Apply R49/R50's version and enum policy and validate custom-cell
-metadata in both modes; no separate full-block material-ID scan is required.
-
-Select standard if its encoded block payload is <=32,768 bytes; select raw otherwise. Codec
-selection does not need a separate histogram pass or persistent per-chunk statistics. Encode
-with bounded scratch storage, stopping the RLE attempt once committed output would exceed
-the raw size. When omitting trailing air, defer a pending air run until a subsequent non-air
-cell proves it is internal; omitted final air must not incorrectly trigger the raw fallback.
-On fallback, use the original immutable block array for raw output. Metadata/framing/checksum
-remain the same in either case; release snapshot ownership only after all required reads finish.
-
-### Binary Container Layouts
-
-The initial save-format version is 1, with engine current-write/minimum-readable versions
-both initially 1. All integer fields are explicitly sized and little-endian; f32/f64 use
-their IEEE-754 little-endian bit representation. Serialize fields individually without
-native struct padding. UUIDs are fixed 16-byte sequences carried unchanged between records
-and hash inputs, not text or platform-native UUID structs. Header sizes must match the
-supported version's layout; a length alone does not authorize unknown fields or schemas.
-
-#### Base file
-
-The physical order is:
-
-```text
-Base header
-World descriptor
-Global state
-Chunk index
-Player records
-Chunk records
-Base physical checksum (32 bytes)
-```
-
-| Header field, in order | Encoding |
-| --- | --- |
-| Magic: `ZGWORLD\0` | 8 bytes |
-| Save-format version | u32 |
-| Header size | u32, initially 120 |
-| Total file size, including checksum | u64 |
-| World UUID | 16 bytes |
-| Incorporated snapshot sequence | u64 |
-| Incorporated snapshot digest | 32 bytes |
-| World descriptor byte length | u32 |
-| Global-state byte length | u32 |
-| Chunk count | u64 |
-| Player count | u64 |
-| Player-record section byte length | u64 |
-| Chunk-record section byte length | u64 |
-
-The header is exactly 120 bytes. Section positions follow from these lengths and the
-`chunk_count * 12` index length, using checked arithmetic; no separate section directory
-is stored. The total must equal the actual file size, including the final 32-byte checksum.
-Sections and records must consume their extents exactly, without overlaps, gaps, or trailing
-unaccounted bytes. The index and base chunk records are sorted by chunk ID with no duplicates;
-each index identity and absolute offset must select the matching complete chunk record.
-Player records are sorted by player ID with no duplicates.
-
-Compaction writes a seekable temporary file: reserve the index, stream records, and finalize
-index offsets and header lengths before computing the base physical checksum. Initially use
-a final bounded streaming read of finalized bytes for that checksum. This adds a read but
-avoids retaining the whole base in memory. Source verification under R45 remains required;
-hashing the output does not replace it. Validate/synchronize the finished candidate before
-installation, and preserve the incorporated logical snapshot digest independently of this
-new physical checksum.
-
-#### Immutable world descriptor
-
-| Field, in order | Encoding |
-| --- | --- |
-| Descriptor schema version | u16, initially 1 |
-| Coordinate/chunk-ID layout version | u16, initially 1 |
-| Chunk edge length | u16, initially 32 |
-| World dimensions in chunks, X/Y/Z | [3]u32 |
-| Topology flags | u8; bit 0 = wrap X, other bits initially zero |
-| Generator ID | u16; 0 flat, 1 terrain |
-| Generator implementation version | u32, initially 1 |
-| Seed | u64 |
-| Generator-settings byte length | u32 |
-| Generator settings | Declared bytes |
-| Logical ticks per second | u32, initially 60 |
-
-The descriptor occupies 41 bytes plus settings. Layout version 1 defines the existing
-centered coordinate convention and chunk-ID packing; reconstruct derived masks/shifts from
-validated dimensions rather than serializing them. Reject unsupported layout, chunk size,
-topology, tick rate, generator identity/version, or settings. In particular, a saved topology
-must match what the running engine supports. Settings are immutable for the world's lifetime.
-Do not substitute runtime defaults for saved values. Changes to generator behavior that
-alter generated terrain require advancing the generator implementation version and retaining
-compatible generation or an explicit migration under Q1.
-
-Terrain generator version 1 settings are exactly 39 bytes, in this order:
-
-| Field | Encoding |
-| --- | --- |
-| noise_scale | f64 |
-| octaves | u8 |
-| lacunarity | f64 |
-| persistence | f64 |
-| base_height_present | u8; 0 automatic, 1 explicit |
-| base_height | u32; zero when automatic |
-| height_amplitude | f64 |
-| dirt_depth | u8 |
-
-Preserve the automatic-height choice rather than substituting today's explicit default.
-Validate settings with the supported generator's parameter/layout rules. Flat generation
-uses seed zero and an empty settings payload. Terrain descriptors therefore occupy 80 bytes,
-and flat descriptors 41 bytes, for these initial schemas.
-
-#### Global and player records
-
-Global schema 1 contains `u16 schema_version = 1` followed by `u64 world_tick`, exactly
-10 bytes. Future persistent globals require an explicit schema/format change. Resume this
-tick without adding offline time; the tick rate is in the immutable descriptor.
-
-Each player record has this layout:
-
-| Field, in order | Encoding |
-| --- | --- |
-| Total player-record size, including its size field | u32 |
-| Player schema version | u16, initially 1 |
-| Player ID | u64 |
-| Feet position, X/Y/Z | [3]f64 |
-| Yaw and pitch, radians | [2]f32 |
-| Inventory schema version | u16 |
-| Inventory payload length | u32 |
-| Inventory payload | Declared bytes |
-
-Empty-inventory records occupy 52 bytes. Initially inventory schema and length are both
-zero; inventory contents await a future supported schema. Reject unsupported schemas and
-nonfinite coordinates/angles. Restore feet position/view under R17's motion-reset and
-authoritative collision-validation rules. The record has no individual checksum: its
-container's physical checksum or transaction digest covers it.
-
-Persist all known players, including offline players, sorted by unique player ID. The
-future 16-player concurrency limit is not a limit on historical records. Each WAL transaction
-contains complete global state and the complete player array, plus only changed chunks.
-Player eligibility still follows R42; client/session command dependency watermarks are
-resolved before capture and are not serialized as persistent session counters. Validate
-record counts and exact section consumption before publishing recovered state.
-
-#### WAL segment and transaction framing
-
-Each segment begins with this immutable header:
-
-| Field, in order | Encoding |
-| --- | --- |
-| Magic: `ZGWAL\0\0\0` | 8 bytes |
-| Save-format version | u32 |
-| Header size | u32, initially 120 |
-| World UUID | 16 bytes |
-| Segment UUID | 16 bytes |
-| Predecessor snapshot sequence | u64 |
-| Predecessor snapshot digest | 32 bytes |
-| Header checksum | 32 bytes |
-
-The header is exactly 120 bytes. Generate a new unique segment UUID at rotation. There is
-no mutable total-WAL-size field. The predecessor is the committed snapshot immediately
-before this segment; its first transaction must name that predecessor, and each subsequent
-transaction must name the preceding commit. Recovery follows validated links rather than
-filenames, modification times, or numerical adjacency of attempted snapshot sequences.
-Verify the header checksum even when no transactions follow. Establish and synchronize the
-header and directory entry under the existing creation/rotation durability contract.
-
-Each transaction consists of header, complete global state, complete player array, changed
-chunk records, and commit footer. The transaction header is exactly 84 bytes:
-
-| Field, in order | Encoding |
-| --- | --- |
-| Begin marker: `ZGTXBEG1` | 8 bytes |
-| Snapshot sequence | u64 |
-| Previous committed sequence | u64 |
-| Previous committed digest | 32 bytes |
-| Global-state byte length | u32 |
-| Player count | u64 |
-| Player-record section byte length | u64 |
-| Changed-chunk count | u64 |
-
-The commit footer is exactly 56 bytes:
-
-| Field, in order | Encoding |
-| --- | --- |
-| Commit marker: `ZGTXEND1` | 8 bytes |
-| Total transaction size, including header and footer | u64 |
-| Snapshot sequence, repeated | u64 |
-| Transaction digest | 32 bytes |
-
-The changed-chunk count is known at capture, while compressed sizes become known during
-encoding. Put the total transaction size only in the footer, allowing streaming without
-WAL backpatching or retaining all encoded chunks. Release snapshot references under R29.
-Parse the declared global/player sections and exactly the declared number of length-framed
-chunk records before expecting a footer; never search payload bytes for magic markers.
-Reject duplicate chunk IDs within a transaction. Chunk records use the identical base/WAL
-representation already defined; WAL chunk ordering need not match the sorted base order.
-
-The footer's size must equal bytes consumed from the transaction start through its digest,
-and its repeated sequence must match the header. Validate all framing, predecessor links,
-checksums, and payload semantics before accepting a recoverable snapshot. A marker alone
-does not establish a commit. Writer success still requires synchronization before
-acknowledgment; partial writes and failure repair remain governed by R23/R30/R55.
-
-### Snapshot Integrity
-
-Use these literal ASCII checksum-domain prefixes, each including exactly one trailing zero
-byte (`\0` below denotes that byte, not two printable characters):
-
-| Checksum purpose | Domain prefix |
-|---|---|
-| Chunk record | `ZGW-CHUNK-1\0` |
-| WAL segment header | `ZGW-WALHDR-1\0` |
-| WAL transaction | `ZGW-WALTX-1\0` |
-| Snapshot-zero anchor | `ZGW-INIT-1\0` |
-| Base physical checksum | `ZGW-BASE-1\0` |
-
-Prefixes are hash inputs, not repeated serialized record fields. The suffix `1` versions
-the hashing contract, independently of the overall save-format version; adding a material
-does not itself change these prefixes. Use BLAKE3-256 for all five checksum purposes; the
-algorithm is a format contract, not a runtime setting. Exact coverage, with `||` meaning
-byte concatenation, is:
-
-| Digest | BLAKE3-256 input |
-| --- | --- |
-| Chunk | Chunk domain prefix `||` world UUID `||` record bytes preceding its checksum |
-| WAL header | WAL-header domain prefix `||` header bytes preceding its checksum (88 bytes initially) |
-| WAL transaction | Transaction domain prefix `||` complete validated WAL header (120 bytes initially, including its checksum) `||` transaction bytes preceding its digest |
-| Base physical | Base domain prefix `||` every base-file byte preceding its final 32-byte checksum |
-| Snapshot-zero anchor | Initial-anchor domain prefix `||` canonical initial fields listed below |
-
-Transaction coverage includes its header, global state, full player records, chunk records
-with their checksums, and the commit footer's marker, total length, and repeated sequence.
-Only its final digest is excluded. The included segment header binds world, segment, format,
-and segment predecessor; the transaction header binds the immediately previous committed
-sequence/digest. Verify the segment header independently before using it in this input.
-The base physical checksum includes the finalized header, incorporated logical digest,
-descriptor, global state, index, and all player/chunk records with their record checksums.
-
-Use one chained digest per committed snapshot transaction. Validate footer identity/length
-as well as the digest. Append hashing processes the fixed segment header and new transaction
-bytes, without rereading prior transactions; recovery verifies each retained transaction.
-The chain proves a valid linked prefix; stored predecessor digests cannot replace validation
-of earlier payloads. Base compaction preserves the incorporated logical snapshot digest as
-the chain anchor, while a separate physical checksum protects the rewritten base contents.
-
-The snapshot-zero anchor hashes the following concatenation in order, with all integer
-fields encoded little-endian and all variable contents using the confirmed record schemas:
-
-```text
-ZGW-INIT-1\0 (including its trailing zero byte)
-World UUID (16 bytes)
-Save-format version (u32)
-Snapshot sequence (u64 = 0)
-World descriptor length (u32), followed by descriptor bytes
-Global-state length (u32), followed by global-state bytes
-Player count (u64)
-Player-section length (u64), followed by player records sorted by player ID
-Initial override count (u64), followed by chunk records sorted by chunk ID
-```
-
-The domain is included once. Counts, record lengths, and canonical ordering make the input
-unambiguous. Initial chunks retain their independent checksums, which do not depend on this
-anchor. Exclude physical offsets/index, base total size, the anchor field itself, and the
-base physical checksum to avoid self-reference and physical-placement dependencies. An
-untouched generated world has zero initial overrides. Store the resulting digest in the
-snapshot-zero base and reference it from the first WAL segment; install both with the
-existing synchronization protocol before acknowledging journal snapshots.
-
 ### Recovery Failure Classification
 
 Validate framing, bounds, checksums, and predecessor links before deciding that recovery can
@@ -2410,36 +1858,8 @@ a reusable record digest to physical offsets or segment/snapshot identity. The b
 still protects the index mapping, and WAL commit digests still protect snapshot completeness
 and sequence. Corrupt indexed reads fail visibly without falling back to generated terrain.
 
-The initial chunk-record checksum layout is confirmed: a 32-byte BLAKE3-256 footer inside
-the length-framed chunk record, using the same record representation in base and WAL.
-The exact hash input is `domain_prefix || world_uuid || record_bytes_before_checksum`.
-Use `ZGW-CHUNK-1\0` including its trailing zero and the fixed 16-byte world UUID representation
-from the validated container, never a textual UUID or native struct representation. Include
-all record lengths; exclude the checksum itself. The record layout is:
-
-| Field, in order | Encoding |
-|---|---|
-| Total record size, including checksum | u32 |
-| Chunk ID | u32 |
-| Persistent chunk revision | u64 |
-| Persistent flags | u8 |
-| Block codec | u8 |
-| Block payload length | u32 |
-| Block payload | Declared number of bytes |
-| Metadata payload length | u32 |
-| Metadata sections | Declared number of bytes |
-| Chunk checksum | 32-byte BLAKE3-256 |
-
-Fixed overhead is exactly 58 bytes, with no padding. Persistent flag bit 0 stores historical
-`is_unreachable`; remaining bits are reserved and initially zero. Base and WAL use identical
-records. Index entries remain `(u32 ChunkId, u64 offset)`, exactly 12 bytes, and are not part
-of the chunk hash input. The container supplies world identity; offsets and segment/snapshot
-identities are excluded so compatible records can retain their checksum when copied.
-Source checksum verification remains required during copying.
-
-A footer permits streaming without backpatching the checksum. Preserve this algorithm and
-layout as part of the format-version contract, not a runtime setting. Hash-cost measurements and
-alternative algorithms are follow-up improvements, not prerequisites for this initial choice.
+Chunk framing and checksum bytes are defined in the
+[format contract](../formats/world-persistence-v1.md#chunk-record-layout).
 
 ### WAL Failure Repair and Cancellation
 
@@ -2541,72 +1961,37 @@ indefinitely defeating save progress; R6 still does not promise a fixed recovery
 
 ### Overdue Saving and Exceptional Pause
 
-The user permits an exceptional visible pause of world-changing actions to complete an
-overdue save. The confirmed R75 coordinator watchdog checks normal capture/player-wait
-limits and elapsed unsaved age, selecting the earliest actionable deadline for the current
-mode. Track monotonic age while dirty work exists: use time since the latest durable save,
-or the first subsequent dirty transition if the world was clean in between. Retrying, partial writes, encoding, and source release do not
-reset it. Numeric thresholds are selected under R66, not fixed by this document.
+Implement R73 with normal and save-priority modes under the R75 watchdog. Track unsaved age
+from the latest durable save, or the first subsequent dirty transition if the world was
+clean in between. Numerical thresholds follow R66.
 
-On escalation, keep a viable active capture instead of aborting it merely to change modes.
-If cancellation is already accepted, finish its handoff/required repair before a fresh
-attempt; do not revive a cancelled transaction. Gate new world-changing work between
-complete operations, preserving queued requests and any commands required by the chosen
-save/checkpoint boundary. Loading/read dispatch, completions, rendering, camera, and UI stay
-active; disk-dependent requests may still await I/O. If the overdue attempt has already
-released all sources and is only writing/synchronizing, do not introduce a new mutation pause.
-Show a stable status such as "Saving: world changes temporarily paused". Bound admitted work
-and client predictions; refuse/backpressure new submissions before capacity is exhausted.
-Do not turn a retained pending request into a terminal rejection or silently replay it.
+On escalation, keep a viable active capture. If cancellation was already accepted, finish
+its handoff and required repair before a fresh attempt; a mode change cannot revive it.
+Enter the mutation gate between complete operations, leaving commands needed for the chosen
+save/checkpoint boundary runnable. If sources have already been released and only writing/
+synchronization remains, do not introduce a new mutation pause. A suitable status is
+"Saving: world changes temporarily paused"; coalesce it under R71.
 
-Keep encoding/streaming within the same bounded workspace and prioritize pending players'
-sources. A full output queue waits for writer progress instead of repeatedly cancelling on
-the normal timeout. An actual inability to reserve the minimum record/manifest/completion
-workspace is still a reported resource failure, not permission to exceed the budget. Do
-not require the entire encoded capture to fit in RAM or split a consistent snapshot into
-independently committed subsets. Prioritization changes neither the boundary nor the format.
+A full output queue waits for writer progress in this mode. A failed reservation for minimum
+record/manifest/completion workspace is still an actual resource failure. Streaming keeps
+its existing budgets and whole-snapshot commit; escalation requires neither whole-capture
+buffering nor independently committed subsets.
 
-Clear the capture-related mutation pause when all sources are safely released, even if the
-WAL write/synchronization is still running. Save priority and unsaved-age tracking continue
-until successful durability; they are not reasons to keep source ownership or pause gameplay
-afterward. Independent pressure gates may still apply. Resume with existing revalidation,
-ordering and paced catch-up. Storage errors release sources safely and follow R23 repair;
-failed repair suspends appends rather than cycling captures. Indefinitely stalled storage
-has no completion guarantee: keep status and the existing explicit exit choices usable.
-Automatic escalation is not permission to fake success, drop work, or ignore accepted
-cancellation/commit boundaries. Final shutdown saving follows the same exemption from normal
-gameplay timeouts, with its existing wait/cancel-exit/quit choices.
+Keep save priority separate from source ownership: source release clears the capture gate,
+while durable success clears overdue-save tracking. Independent pressure gates may still
+apply. R23 owns storage repair; failed repair suspends appends rather than cycling captures.
+The Shutdown Status section owns final-save and explicit exit choices.
 
 ### Player Pending State, Retries, and Resource Failure
 
-Capture contention is an ordinary pending state. Retain the request and optimistic effect;
-promote its required frozen write sources and retry admission on meaningful release progress.
-In normal mode the elapsed player-wait limit initiates safe capture cancellation, not a
-terminal rejection or a speculative second application. R73 save priority instead permits
-longer visible waiting with bounded backpressure; it does not reset request wait timestamps.
-For multi-chunk writes, prioritize the complete blocked set. Revalidate after release and
-preserve required command order. No fixed number of retries
-can cover an arbitrarily long capture. Normal cancellation supplies an escape path; overdue
-saving explicitly trades action latency for completion. Rendering/input and service
-completions remain responsive while the request waits.
+R38-R40 define admission waits, genuine allocation failures, and bounded progress; R71
+owns client outcome semantics. Prioritize the complete blocked write set, then revalidate
+on meaningful source-release progress. Releasing a pin alone does not free live-world
+storage, so a genuine allocation failure benefits from handoff only if memory is reclaimable.
 
-If preparation then genuinely lacks allocation capacity, keep the prior failure policy: one
-automatic retry after a useful ownership handoff, otherwise `resource_exhausted`, no partial
-effects, optimistic reconciliation, and concise status. Do not replay a terminal rejected
-request later. With no releasable capture retention, reject directly. Cancellation does not
-free live-world memory merely because it removes a pin; only eligible allocations/output can
-actually be reclaimed. Already applied requests are not retried.
-
-The current client reconciles terminal failures, but is not already a general retry protocol.
-Its acknowledgment path removes both successful and failed requests. Keep capture-pending
-primarily inside the service in v1: defer the terminal response during a brief wait, leaving
-that same optimistic operation outstanding. No new per-request pending message is required.
-For longer delays, coalesce advisory status rather than notifying on each wait/retry; keep
-required exceptional-saving and failure status visible. Any nonterminal status must bypass
-terminal acknowledgment handling and cannot retire predictions or resolve command prefixes.
-Neither service progress nor client correctness depends on receiving a pending notification.
-Model stable `(session, request)` identities and a resolved command prefix now; wire encoding,
-reconnect handling, and a persisted deduplication ledger remain future networking work.
+The current client's acknowledgment path retires both successful and failed requests. V1
+can therefore keep brief waits internal by withholding the terminal response. Any advisory
+status uses a separate path that does not retire predictions or resolve checkpoint prefixes.
 The future wire contract must distinguish:
 
 | Outcome | Meaning for client and authority |
@@ -2617,20 +2002,16 @@ The future wire contract must distinguish:
 | Not admitted/busy | Authority retained no executable request; explicit resubmission/status rules are needed. |
 | Unknown after timeout/disconnect | Query or resend the same identity within a supported session; never assume failure or mint a new identity blindly. |
 
-Retry-after hints and in-process wakeups are advisory. Recheck readiness when acting, include
-capture generations to prevent missed/stale wakeups, and provide bounded backoff when a signal
-is lost. Bound both server waiting state and client predictions; backpressure/reject before
-admission when capacity is unavailable. A future bounded deduplication cache cannot silently
-forget an ID while its session may still retransmit it; expiry needs an explicit stale-session
-outcome/resynchronization contract. Do not promise exactly-once execution across crashes with
-unpersisted request IDs.
+Readiness hints/wakeups are advisory; recheck admission and capture generation when acting.
+Use R75's coordinator and bounded backoff for a lost signal, not a timer/retry loop per request.
+A future deduplication cache cannot silently forget identities while their session may still
+retransmit them; expiry needs explicit stale-session/resynchronization behavior. Wire encoding,
+reconnect machinery, and persisted deduplication remain deferred.
 
-Simulation retains compact pending progress or existing events, pauses dispatch, and catches
-up gradually after release. It must not emit a request per skipped tick. Diagnostic reasons
-separate capture contention, configured-budget exhaustion, allocator failure, and invalid data.
-Reserve completion/status capacity before admission. No policy promises recovery from arbitrary
-process-wide OOM. Player-visible frame time, confirmation lag, and corrections are distinct
-metrics: an optimistic view can conceal a short wait but cannot prove prolonged delays invisible.
+Keep capture contention, configured-budget exhaustion, allocator failure, and invalid data
+separate in diagnostics. Measure frame time, confirmation lag, and corrections separately:
+optimistic visuals alone do not establish that a prolonged wait is invisible. Simulation
+resume/catch-up follows R68/R69 and its dedicated plan section.
 
 ### Mutation Preparation and Normal-Path Performance
 
@@ -2711,74 +2092,6 @@ block/header slot solely for capture. Later COW can supply a restricted view of 
 version through this same encoder boundary if evidence justifies that change. Defer physical
 regrouping and independently owned persistent versions until then; the disk format does not
 depend on either choice.
-
-### Metadata Semantics and Size Bounds
-
-The initial independent section limits are:
-
-| Section | Entry limit | Identity/correspondence rule |
-| --- | --- | --- |
-| Construction markers | 32,768 per chunk | Unique cell index in 0-32,767 |
-| Pending transformations | 32,768 per chunk | Unique cell index in 0-32,767, irrespective of event kind |
-| Custom-block records | Number of custom cells, at most 32,768 | One record per byte-255 cell in x-fast block order |
-
-Uniqueness is local to a section. A construction marker and a timer for the same cell are
-valid together; do not impose a shared 32,768-entry limit across all sections. Multiple
-timer records for one cell are invalid; rescheduling replaces the prior pending event
-under the existing gameplay semantics. Custom record association follows block order,
-rather than requiring a second stored cell-index list. Validate the schema of each custom
-type and reject missing, extra, truncated, or unsupported records.
-
-Schema version 1 uses these payload records, in the stated field order, little-endian and
-without padding:
-
-| Section | Entry fields | Serialized entry size |
-| --- | --- | --- |
-| Construction markers | Cell index u16 | 2 bytes |
-| Pending transformations | Cell index u16, transformation kind u8, deadline tick u64 | 11 bytes |
-| Custom blocks: unformed adaptive road | Custom type u8, road state u8 | 2 bytes |
-| Custom blocks: formed adaptive road | Custom type u8, road state u8, high endpoint [3]u32, downhill direction u8, formation length u32, section index u32 | 23 bytes |
-
-Construction and timer payloads contain no additional entry count: divide the section length
-by 2 or 11 respectively, rejecting a remainder or count above 32,768 before allocation.
-Cell indices use x-fast order and must be below 32,768 despite their u16 storage width.
-Transformation kinds are explicitly 0 compact_dirt and 1 grow_grass; reject unknown kinds.
-
-Custom type 0 denotes an adaptive road. Road state 0 is unformed/adaptive and has no further
-fields; state 1 is a formed slope and has the remaining 21 bytes listed above. Reject unknown
-types/states. Direction IDs are 0 positive_x, 1 negative_x, 2 positive_y, 3 negative_y;
-reject other values. The high endpoint uses world block coordinates in x/y/z order and must
-fit the saved world layout. A formed length must be positive and the section index must be
-less than that length. Retain the formation ownership fields for correct later edits; derive
-heights from length and section as in the current road model, without storing floats. Custom
-cell indices remain implicit in block order. Parse exactly the expected number of custom
-records and consume the section exactly, rejecting truncation or extra bytes.
-
-The initial serialized bounds are:
-
-| Section | Maximum entries | Maximum payload | Including its 9-byte header |
-| --- | ---: | ---: | ---: |
-| Construction markers | 32,768 | 65,536 bytes | 65,545 bytes |
-| Pending transformations | 32,768 | 360,448 bytes | 360,457 bytes |
-| Custom blocks (all formed roads) | 32,768 | 753,664 bytes | 753,673 bytes |
-
-The conservative combined bound is `32,768 * (2 + 11 + 23) + 3 * 9 = 1,179,675` bytes,
-about 1.125 MiB. It allows every section to reach its independent limit and does not assert
-that every such combination is valid gameplay state. All existing semantic checks remain
-required. Empty collections omit their sections, so entirely empty metadata is zero bytes.
-These caps concern serialized data, not native array capacity or expected chunk usage;
-never preallocate the maximum solely because it is permitted. For reference, the maximum
-initial chunk-record bound is `58 + 32,768 + 1,179,675 = 1,212,501` bytes.
-
-Use checked arithmetic and retain the u32 local-length/record framing constraints. Native
-struct padding and allocated capacities do not determine serialized size. Validate
-declared lengths/counts before allocating and require exact section consumption. Derive
-version-specific byte bounds again when custom types or section schemas change; these
-initial caps must not accidentally reject future supported schemas or optional extensions.
-
-Existing allocators serve valid metadata within the allocation budget; allocation strategy
-and budget do not change semantic limits. The trusted material-enum policy in R50 does not
-waive these metadata structural checks.
 
 ### Parameter Tuning and Measurement Plan
 
@@ -3081,8 +2394,7 @@ durability by itself; report that distinction in validation results.
   or reservations. Metadata-heavy records and accumulated dirty state can exceed them;
   1-2 KiB average encoded chunks are not a bound. Any adopted policy needs a reviewed bounded
   overflow path and the same consistent boundary. Do not add a second capture pipeline to v1
-  merely for this experiment. Extracting format tables remains a review proposal, not an
-  adopted requirement change.
+  merely for this experiment.
 - Add a manual Save action using the same ordered snapshot and durability pipeline, with
   explicit completion/failure feedback. V1 uses autosave and save-on-exit only.
 - Add and validate Linux/Windows durability adapters with platform-specific synchronization,
