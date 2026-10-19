@@ -70,6 +70,10 @@ Decision status as of 2026-10-19:
   initially. Persistent/derived/runtime categories remain logical serialization contracts;
   capture uses a restricted snapshot view, not a separately owned persistent object. Defer
   physical regrouping and version ownership until a demonstrated need justifies them.
+- CONFIRMED by the user: defer custom block/metadata pools to a potential improvement.
+  Start with existing allocators behind capacity accounting and reservations; preserve
+  fallible preparation, empty arrays, and stable borrowed buffers. Pool geometry, including
+  the earlier 64-byte minimum class, is no longer a v1 requirement or tuning default.
 - RETAINED: unaffected PR #28 decisions, including the durable format, recovery, compaction,
   base-only reloads, mutation atomicity, offline-time policy, and local budget controls.
 - DERIVED correctness requirements: one capture boundary, synchronized source release,
@@ -271,8 +275,8 @@ Decision status as of 2026-10-19:
   required authoritative order and preventing duplicate effects. A cross-chunk operation
   cannot publish one side while waiting for another. Snapshots see only complete operations.
 - R32: Optimize the common case of absent dynamic metadata. Roads, timers, and construction
-  markers initially use separate backing allocations from the metadata pool, owned through
-  the existing inline `WorldChunk.metadata` descriptors. Empty arrays require no backing
+  markers initially use separate budgeted backing allocations from existing allocators,
+  owned through the existing inline `WorldChunk.metadata` descriptors. Empty arrays require no backing
   allocation; copy live entries rather than unused capacity when a genuine copy is needed.
   Do not separately allocate the descriptors or move them into a new persistent owner.
   A contiguous metadata payload remains a deferred optimization.
@@ -291,21 +295,23 @@ Decision status as of 2026-10-19:
   Derived-only changes remain outside the persistent mutation gate and dirty tracking,
   preserving historical flag bits. Inline grouping for readability is optional; independently
   owned persistent versions and physical regrouping are deferred until justified.
-- R34: Retain two storage pools: fixed slots for materialized `WorldChunkData` block buffers
-  and page-based power-of-two size classes for metadata backing allocations. Keep the existing
-  `WorldChunk` header/descriptors in their current owner; do not require a combined block-plus-
-  persistent-owner slot. Grow by adding pages within an explicit budget without relocating
-  live allocations. Treat 64 bytes as a provisional minimum metadata class, subject to
-  measurement. Define a largest pooled class independently of gameplay metadata limits;
-  larger valid requests use dedicated allocations charged to the same budget. Account for
-  backing capacity, page slack, class rounding, bookkeeping, transient growth allocations,
-  and snapshot-view/manifest storage. Track live-world storage, capture pins, and additional
-  encoded output separately without charging the same frozen allocation twice.
+- R34: Use existing allocators for materialized `WorldChunkData` buffers and separate
+  metadata arrays, with configurable capacity accounting and reservations. Defer custom
+  pools with fixed slots or page-based size classes until measured costs justify them.
+  Keep the existing `WorldChunk` ownership and stable borrowed allocations under R33;
+  unrelated allocations and growth must not relocate a captured buffer. Charge allocated
+  capacity rather than used length, including spare array capacity, known bookkeeping,
+  snapshot views/manifests, and simultaneous old/new storage during growth or copies.
+  Track reservations, live storage, capture pins, and encoded output without counting the
+  same allocation twice. Account for known allocator overhead where available; identify
+  unmeasured overhead/fragmentation separately, leave conservative headroom, and use process
+  telemetry rather than claiming these counters bound physical/process memory. Reservations
+  enforce local admission limits but do not guarantee that the underlying allocation succeeds.
 - R35: Make metadata copying, growth, and mutation preparation fallible and reservable.
   Replace panic-on-OOM paths involved in these operations with propagated allocation errors
   and cleanup of partially acquired resources. Include all required metadata capacity in
   operation preparation under R31. Derive semantic entry/payload limits from supported
-  gameplay and actual structures, independently of allocator size classes; enforce them
+  gameplay and actual structures, independently of allocation policy; enforce them
   consistently when mutating and loading. Entry-count limits are defined in R51; serialized
   byte limits are defined in R54; select allocation budgets through R66.
 - R36: Persistence v1 provides configurable local capacity limits/counters, structured
@@ -440,7 +446,7 @@ Decision status as of 2026-10-19:
   record per custom cell in x-fast block order, with no missing/extra records and at most
   32,768 records. Derive section and combined metadata byte limits from finalized serialized
   record sizes, framing, and allowed counts/type payload limits using checked arithmetic.
-  Apply these semantic rules during mutation and loading independently of pool size classes.
+  Apply these semantic rules during mutation and loading independently of allocation policy.
 - R52: Use explicitly sized little-endian integer fields throughout base/WAL framing and
   metadata records. Metadata sections carry a stable type identifier, schema version,
   required/optional declaration, and explicit payload byte length. Reject unknown required
@@ -549,8 +555,8 @@ Decision status as of 2026-10-19:
 - R66: Choose and record v1 tuning defaults through the measurement plan below. Keep memory
   budgets bounded, configurable, and lazily allocated; account for backing capacity, source
   pins, encoded output, and transient copies. Bound pending work by both item count and bytes,
-  coalesce save triggers, and reserve completion capacity. Keep pool geometry internal and
-  retain the provisional 64-byte minimum metadata class. Test capture-working budgets of
+  coalesce save triggers, and reserve completion capacity. Use R34 capacity/overhead accounting
+  with existing allocators; custom pool geometry is deferred. Test capture-working budgets of
   16/32/64 MiB and streaming buffers of 64/256/1,024 KiB as experimental inputs, not defaults
   or preallocations; separately reserve bounded output for records larger than a stream buffer.
   Compare gameplay/stress workloads with saving inactive, including tail latency, simulation
@@ -743,8 +749,8 @@ Decision status as of 2026-10-19:
   metadata; all-air chunks do not need a block buffer. REVISED/CONFIRMED by the user: retain
   the inline `WorldChunk.metadata` descriptors and existing block-pointer representation.
   Remove the requirement to colocate a new persistent owner/header with the block payload
-  in one pool slot. The two-pool policy remains; concrete slot alignment/bookkeeping follows
-  R34/R66. A contiguous variable metadata payload remains a potential improvement.
+  in one allocation. R34 now defers custom pools and uses existing allocators with budget
+  accounting. A contiguous variable metadata payload remains a potential improvement.
 - Q21: Does capture require physically splitting the live `WorldChunk`?
   A21: REVISED/CONFIRMED by the user: no. Retain its current ownership and field arrangement
   initially. Keep persistent/derived/runtime categories in the serialization contract and
@@ -755,15 +761,15 @@ Decision status as of 2026-10-19:
   No separate persistent owner or header copy is needed. Inline field grouping is optional;
   future COW ownership can be introduced behind the capture interface if justified. Ordinary
   gameplay/client copies retain their own consistent contents and caches.
-- Q22: How should pools grow, handle large metadata, and account for memory?
-  A22: RETAINED: two pools, page-based classes, separate nonempty arrays, bounded growth,
-  and a provisional 64-byte minimum metadata class. Above the largest class, use budgeted
-  dedicated allocations; semantic limits remain R51/R54. Count page slack, class rounding,
-  and transient growth allocations. Make copy/growth paths fallible/reservable. REVISED:
-  block slots hold existing `WorldChunkData` buffers rather than a combined persistent owner.
-  Count snapshot views/manifests and encoded output; report pins without charging existing
-  live storage twice. V1 has no snapshot COW duplicates. Geometry/budgets remain measurement
-  decisions, and live metadata descriptors remain inline in `WorldChunk`.
+- Q22: How should allocation, growth, and memory accounting work initially?
+  A22: REVISED/CONFIRMED by the user: defer custom pools to a potential improvement. Retain
+  existing allocation mechanisms, separate nonempty metadata arrays, empty-array/all-air
+  optimization, stable capture buffers, and fallible/reservable preparation. Count allocated
+  capacities and temporary old/new overlap, views/manifests, and encoded output; pins do not
+  duplicate live storage. Report known overhead and unmeasured allocator costs separately
+  under R34, with headroom/process telemetry. The former two-pool policy and provisional
+  64-byte minimum class are withdrawn. Semantic limits remain R51/R54; budgets are tuned
+  under R66. No save format or `WorldChunk` ownership change is needed.
 - Q23: Does this iteration implement whole-system budgeting and priorities?
   A23: RETAINED: global pressure controls, player-protected residency, movement gating, and
   richer throttling UI follow persistence as a separate feature. REVISED: persistence v1
@@ -844,7 +850,8 @@ Decision status as of 2026-10-19:
   per cell, at most 32,768 entries per section, and rejection of duplicate/out-of-range cell
   indices. The limits are independent, so a cell may occur in both sections. Custom records
   correspond exactly to custom cells in block order. R54/Q36 now define the exact serialized
-  layouts and byte limits; future schemas derive limits from records/counts, not pool classes.
+  layouts and byte limits; future schemas derive limits from records/counts, independently
+  of allocation policy.
 - Q34: What are the compatibility and extension rules for binary sections?
   A34: CONFIRMED by the user: little-endian integers, explicit field widths, and versioned,
   length-delimited metadata sections. Reject unknown required sections/custom types; skip
@@ -949,8 +956,8 @@ Decision status as of 2026-10-19:
   A47: CONFIRMED by the user: about 10,000 simultaneously active chunks, 2,000-4,000 distinct
   changes per 60-second save interval, and 16 GB RAM, with smaller worlds on 8 GB machines.
   The smaller-world size and memory/latency defaults remain measurement work under R66/R74.
-  Whole-capture buffering and deferring the existing custom-pool requirement remain review
-  proposals; this clarification does not adopt them or change the bounded streaming baseline.
+  Whole-capture buffering remains a review proposal; the bounded streaming baseline stays.
+  Custom pools are now explicitly deferred under the separate user-confirmed Q22 decision.
 
 ## Acceptance Criteria
 
@@ -1088,17 +1095,17 @@ Decision status as of 2026-10-19:
   count, and face flags are reconstructed from its contents, historical flags are restored,
   and client validation state is initialized by its runtime owner. Gameplay/client copies
   retain caches consistent with their own contents, including after optimistic edits.
-- AC45: GIVEN occupied metadata pages WHEN another allocation requires a new page or a larger
-  size class THEN existing live allocations retain their addresses, the request respects
-  the capacity budget, and growth succeeds without requiring adjacent free slots. Failure
-  leaves existing contents and ownership intact.
-- AC46: GIVEN a semantically valid metadata request larger than the largest pooled class
-  WHEN memory budget permits THEN a dedicated allocation serves it without imposing the
-  pool threshold as a gameplay limit. Budget exhaustion returns an allocation failure;
-  invalid entry/payload sizes are rejected under the separate semantic limits.
+- AC45: GIVEN existing metadata arrays and a budgeted allocator WHEN an unborrowed array
+  needs growth THEN preparation reserves the simultaneous old/new capacities before copying,
+  unrelated live allocations retain valid addresses, and failure preserves existing contents
+  and valid ownership. An array borrowed by capture cannot be resized/freed until source release.
+- AC46: GIVEN a semantically valid metadata request within R51/R54 limits WHEN available
+  budget and the underlying allocator permit it THEN existing allocation mechanisms serve
+  it without a new pool/class-size restriction. Budget exhaustion or allocation failure
+  follows the resource-failure path; invalid entry/payload sizes fail semantic validation.
 - AC47: GIVEN metadata copying or growth WHEN allocation failure is injected at each
   step THEN no OOM panic, leak, partial mutation, or capture corruption occurs. Accounting
-  includes backing capacity and transient growth allocations without double-counting pins.
+  includes allocated capacity and transient growth allocations without double-counting pins.
 - AC48: GIVEN an admitted edit with exclusive ownership and prepared capacity WHEN
   it completes THEN it mutates in place without an additional whole-chunk copy for capture
   or failure handling. Existing client-replica copies are measured separately.
@@ -1227,8 +1234,8 @@ Decision status as of 2026-10-19:
   require exactly 32,768 records.
 - AC82: GIVEN metadata counts/lengths near schema limits WHEN validating THEN derive byte
   bounds from serialized record sizes/type limits and framing with checked arithmetic, rejecting
-  overflow or inconsistent lengths. A semantically valid payload exceeding the pooled class
-  threshold remains valid and uses the budgeted dedicated-allocation path when capacity permits.
+  overflow or inconsistent lengths. Allocation strategy and budget do not change semantic
+  validity; allocation proceeds only when budget and underlying memory are available.
 - AC83: GIVEN known integer field values WHEN encoding/decoding base, WAL, and metadata
   fixtures THEN bytes match the specified little-endian widths independently of host byte
   order, alignment, or native struct padding.
@@ -1350,10 +1357,12 @@ Decision status as of 2026-10-19:
   saving-inactive baseline and comparable saving/compaction runs, including frame/operation
   p95/p99 and observed maxima, capture/copy/encoding costs, memory/queue occupancy, and
   cancellation handoff. Record selected defaults and regression thresholds with their evidence.
-- AC115: GIVEN lazily grown pools and bounded work queues WHEN exercising configured limits
-  THEN capacity/slack/transient copies and retained queue bytes remain accounted for,
-  triggers coalesce, completion resources remain available, and pressure follows the agreed
-  failure paths. Experiment budget sizes do not force preallocation or become metadata limits.
+- AC115: GIVEN existing allocators with budget accounting and bounded work queues WHEN
+  exercising configured limits THEN allocated/spare capacity, transient copies, reservations,
+  and retained queue bytes are tracked without double counting. Known allocator overhead and
+  unmeasured overhead/fragmentation are distinguished from those counters and process telemetry.
+  Triggers coalesce, completion resources remain available, and pressure follows the agreed
+  failure paths. Budget sizes do not force preallocation or become semantic metadata limits.
 - AC116: GIVEN allocation-failure and reserve-exhaustion scenarios WHEN verifying robustness
   THEN tiny configured budgets and injected failures exercise them reproducibly without
   deliberately exhausting physical RAM or forcing swap. Performance tuning must preserve
@@ -1453,8 +1462,9 @@ optimistic client state; unversioned procedural regeneration; and saving the tem
 demonstration simulation's private state. Runtime loading of chunks from WAL records is
 also out of scope under the confirmed eviction policy. Persistence COW, synchronous encoding
 on the mutation worker, direct simulation-thread mutation leases, and an independent deadline
-scheduler with advance loading are deferred alternatives. Future NPC scheduling, inventories,
-and persistent actor/progress schemas are not implemented by this feature.
+scheduler with advance loading are deferred alternatives. Custom block/metadata pools and
+their page/size-class geometry are potential improvements outside persistence v1. Future NPC
+scheduling, inventories, and persistent actor/progress schemas are not implemented here.
 Global discovery/preloading of unfinished timers and a redesigned scheduled-event system
 are also deferred. A replacement-segment fallback for failed WAL append/repair is out of scope.
 Dedicated uniform/palette codecs, maintained material-count statistics, and general-purpose
@@ -1546,7 +1556,7 @@ wording in place. New requirements start at R67 and new criteria at AC117.
 | Existing decisions | Effect of the revised requirement |
 | --- | --- |
 | R2, R5, R20, R29, R31; Q7/Q12/Q19 | Replace mandatory COW with frozen-source admission, pending mutations, safe release, and capture limits. |
-| R32-R35; Q20-Q22 | Keep logical field categories, empty metadata, two bounded pools, and fallible preparation; retain the existing `WorldChunk` layout and use a restricted view. Remove the mandatory physical split, combined owner/block slot, and version cloning. |
+| R32-R35; Q20-Q22 | Keep logical field categories, empty metadata, budget accounting, and fallible preparation; retain the existing `WorldChunk` layout and restricted views. Defer custom pools; remove the mandatory physical split, combined owner/block slot, and version cloning. |
 | R37-R43; Q24-Q26 | Keep in-place mutation, atomicity, resource failure, command prefixes and shutdown ordering; distinguish capture-pending work from terminal rejection. |
 | R47/R18; Q29 | Retain original terrain deadlines, fixed-pass semantics and no offline time; pause dispatch for capture and preserve current-conditions catch-up. |
 | R36/R66; resource-budgeting R8/R11 and Q3/Q5/Q7 | Include minimal capture gating/priority now; account for source pins/output/debt and measure latency; keep global pressure control a follow-up. |
@@ -2679,15 +2689,14 @@ never preallocate the maximum solely because it is permitted. For reference, the
 initial chunk-record bound is `58 + 32,768 + 1,179,675 = 1,212,501` bytes.
 
 Use checked arithmetic and retain the u32 local-length/record framing constraints. Native
-struct padding and allocator slot capacities do not determine serialized size. Validate
+struct padding and allocated capacities do not determine serialized size. Validate
 declared lengths/counts before allocating and require exact section consumption. Derive
 version-specific byte bounds again when custom types or section schemas change; these
 initial caps must not accidentally reject future supported schemas or optional extensions.
 
-Pool thresholds only select an allocation strategy. Larger valid metadata may use a dedicated
-allocation under the same memory budget; neither that budget nor the largest pooled class
-changes the semantic limits. The trusted material-enum policy in R50 does not waive these
-metadata structural checks.
+Existing allocators serve valid metadata within the allocation budget; allocation strategy
+and budget do not change semantic limits. The trusted material-enum policy in R50 does not
+waive these metadata structural checks.
 
 ### Parameter Tuning and Measurement Plan
 
@@ -2698,7 +2707,7 @@ is required. The architectural limits and failure semantics already apply before
 | Parameter | Initial policy | Evidence for selecting defaults |
 | --- | --- | --- |
 | Capture working-memory budgets | Bounded, configurable, lazy allocation; count output/manifest capacity separately from live source pins | Peak occupancy, player wait, simulation lag, cancellation rate |
-| Pool geometry | Provisional 64-byte minimum metadata class; internal page-size and largest-class settings | Allocation-size distribution, occupancy, rounding/page slack, allocation frequency |
+| Allocation accounting | Existing allocators; charge capacities/reservations and transient overlap, report known/unmeasured overhead separately | Allocation-size distribution, spare capacity, allocation frequency/latency, process memory; evidence for later pools |
 | Pending work | Bound both request count and retained bytes; coalesce save triggers; reserve completion capacity | Queue occupancy, waiting time, retained memory, producer backpressure |
 | Shutdown retry/status timing | Provisional one-second transient-read retry and five-second delayed-status indication under R60/R61 | Useful retry outcomes and clear/responsive feedback |
 | Simulation resume/retry timing | Source/resource-release signals, paced dispatch, bounded backoff; no per-frame retry loop | Pause/debt duration, catch-up service capacity, redundant work |
@@ -2727,7 +2736,7 @@ saving/compaction active under otherwise comparable conditions:
 | Normal movement and occasional edits | Typical frame time, streaming, and autosave interference |
 | Rapid construction across several chunks | Admission/preparation overhead, full-dependency waiting, atomic mutation behavior |
 | Sustained simulation over many distinct chunks (99.9% updates), plus a player burst | Dirty-set growth, global-pause cost, backlog, cancellation, and priority behavior |
-| Raw/high-entropy blocks and maximum/heavy metadata | Output capacity, encode tail latency, size-class waste, cancellation extremes |
+| Raw/high-entropy blocks and maximum/heavy metadata | Output capacity, encode tail latency, spare allocation capacity, cancellation extremes |
 | Slow/stalled writes, full output queue, and overlapping compaction | Backpressure, source release independent of disk, UI responsiveness, eventual repair |
 | Moving/separated players and cross-chunk operations | Priority changes, no partial publication, dependency footprint; input for later proximity policy |
 | Repeated capture cancellation and resume | Useful progress before refreezing; overdue-save escalation without resetting unsaved age |
@@ -2737,7 +2746,7 @@ saving/compaction active under otherwise comparable conditions:
 Measure frame time and authoritative-operation latency, with p95, p99, and observed maxima
 as well as typical values. Separately record capture bookkeeping, source hold time, player
 confirmation delay, global/near-player simulation pause, catch-up debt/CPU, encoding time,
-worker CPU, copied bytes by cause, allocation counts, pool/queue occupancy, retained capacity, save
+worker CPU, copied bytes by cause, allocation counts, allocated capacity, queue occupancy, retained capacity, save
 cancellations, retry frequency, cancellation request-to-handoff latency, successful save
 age/rate, and time/actions deferred in save-priority mode. Separate queue
 waiting from execution and gate/preparation from existing client copies. For a later COW
@@ -2758,41 +2767,35 @@ tradeoffs or required design changes with the user rather than silently weakenin
 
 ### Metadata Allocation Layout
 
-Use a fixed-slot pool for materialized `WorldChunkData` block buffers and a separate
-variable-size metadata pool for roads, timer events, and construction markers. Keep the
-existing ownership: `WorldChunk.content` refers to blocks, and inline `WorldChunk.metadata`
-descriptors own the separate nonempty arrays. Empty arrays have no backing allocation.
-All persistent writes and source releases follow the common admission/atomicity rules;
-these rules do not require a physically separate persistent owner.
-Metadata pages serve power-of-two size classes, provisionally starting at 64 bytes, then
-128, 256, and so on. Each array allocation is contiguous; growth need not extend it in place.
-Acquire a larger allocation, copy its live entries, and release the old allocation only
-when ownership allows. Add independently allocated pages within the budget, preserving
-existing allocation addresses. Reuse available slots/pages rather than requiring adjacent
-free slots in a globally contiguous buffer. `DynamicSlotBufferManager` provides a useful
-size-class/availability model, but its fixed span limit and global slot-index representation
-are not requirements for this CPU pool. Select page sizes and class thresholds through R66.
+Use the existing allocator interfaces for materialized `WorldChunkData` buffers and the
+separate roads, timer, and construction arrays. Add capacity accounting and reservation
+checks at their owning allocation/preparation paths; no custom block or metadata pool is
+required in v1. Keep `WorldChunk.content` and inline `WorldChunk.metadata` descriptors in
+their existing owner. Empty arrays and all-air block storage allocate nothing. Reuse useful
+array/scratch capacity through existing mechanisms; do not introduce a new allocator cache
+solely for persistence.
 
-Choose the largest pooled allocation class independently of the largest valid chunk
-metadata. Requests above that class use dedicated, properly aligned allocations under the
-same budget. Apply the entry-count and serialized byte limits above; metadata can exceed the
-32-KiB block payload. Crossing a pooling threshold must not invalidate an otherwise valid
-chunk. Empty arrays still allocate nothing, including no minimum-size slot.
+Keep borrowed buffers immutable, stable, and alive under R33 until safe source release.
+Once writable, an array may grow by acquiring new storage, copying live entries, and
+releasing its old allocation. Reserve the simultaneous old/new capacities first. Preparation
+must obtain all required backing storage before authoritative publication under R31; a
+budget reservation alone does not make a later allocator call infallible. Propagate errors,
+clean up partial acquisitions, and retain valid original contents/caches on failure.
 
-Budget backing capacity, not just used payload: include fixed-slot/page slack, class rounding,
-allocator bookkeeping, dedicated allocations, and temporary old/new storage during growth
-or genuine client/staging copies. Count each backing allocation once; distinguish occupied
-live storage (including capture-pinned sources), additional encoded output, and reusable
-capacity. Do not charge source pins twice or add slot occupancy on top of its charged page.
-Separately account for encoding buffers and other persistence work under R20. Select total budgets and reserve sizes
-through R66. Pool expansion can still invoke the system allocator; bounded pooling does not
-promise allocation-free execution under arbitrary demand.
+Charge allocated capacities, including unused array capacity and known bookkeeping, rather
+than only live entry bytes. Include growth/client-copy overlap, chunk headers, snapshot
+views/manifests, and independently owned encoded output in their appropriate budgets.
+Convert reservations to allocated charges without counting both for the same storage;
+source pins describe retained live allocations and are not another allocation charge.
+Where allocator overhead or fragmentation cannot be measured exactly, identify it as
+untracked/estimated overhead, leave conservative headroom, and expose process telemetry.
+Capacity counters do not establish a process-wide physical-memory ceiling. Freeing an
+allocation may release its logical charge without immediately reducing process residency.
 
-Current metadata helpers can panic on OOM. Make clone/growth/preparation return errors and
-support reserving capacity before authoritative mutation. On partial acquisition failure,
-release newly acquired resources and preserve the source version and live caches. This
-implements R31's atomicity contract; R38-R40 define the outcome if resources remain unavailable
-after snapshot cancellation.
+Semantic entry/serialized byte limits remain R51/R54 and apply independently of allocation
+strategy. Metadata may exceed the 32-KiB block payload. Allocate validated required capacity
+within budget, not the maximum merely because the schema permits it. R38-R40/R73 retain
+the existing resource-failure, safe cancellation, and overdue-save policies.
 
 On the current aarch64 Zig 0.16 build, `Metadata` is 72 bytes aligned to 8: three 24-byte
 array descriptors (pointer, length, capacity), with the timer queue wrapping one array.
@@ -2802,13 +2805,11 @@ field arrangement initially, apart from identity/bookkeeping required elsewhere.
 baseline layout observations, not a serialized schema or a mandated size for future builds.
 Capture copies only selected scalars and descriptors, not the whole header or its caches.
 
-Block pool slots serve the existing 32,768-byte `WorldChunkData` payload, with alignment and
-pool bookkeeping accounted for separately. Do not require the former combined block-plus-
-persistent-owner slot or colocate metadata descriptors/version ownership with those blocks.
-All-air chunks retain their allocation-free block representation even when they have metadata.
-Charge the existing chunk headers, metadata backing capacity, and restricted snapshot views
-once in their respective budgets; a view's borrows do not create duplicate payload storage.
-The two-pool budgeting and fallible/reservable metadata policies otherwise remain unchanged.
+Materialized blocks retain the existing 32,768-byte `WorldChunkData` allocation. All-air
+chunks retain their allocation-free block representation even when they have metadata.
+No combined block/header allocation, persistent-owner object, or custom slot geometry is
+required. Later pools can sit behind these allocation interfaces without changing the
+snapshot view or save format; adopt them only on measured evidence.
 
 ### Memory Budgeting Integration Boundary
 
@@ -2816,7 +2817,7 @@ Persistence v1 owns the minimal capture-related simulation gate, player-pending 
 priority encoding, R73 overdue-save escalation/status, and paced release/resume. The broader
 controller builds on these hooks; the exceptional saving pause is part of persistence v1.
 Initially implement configurable bounds and capacity/retention counters for persistence
-pools and working buffers, structured allocation failures, cancellation/status, and early
+allocations and working buffers, structured allocation failures, cancellation/status, and early
 checkpoint/compaction triggers. Preserve bounded working capacity for completion/cleanup
 and streaming persistence so exhaustion can be resolved without allocating another full
 snapshot. Report pinned/non-evictable memory separately from safely reclaimable capacity.
@@ -2984,14 +2985,22 @@ durability by itself; report that distinction in validation results.
 
 ### Potential Improvements
 
+- Custom block/metadata pools are explicitly deferred. Measure allocation frequency/latency,
+  size distributions, unused capacity, fragmentation, and process residency first. If they
+  justify it, compare fixed slots for block buffers and page-based size classes for metadata
+  against the existing budgeted allocators. Choose geometry from those measurements; the
+  former 64-byte minimum class is not a preset. Include page slack, rounding, bookkeeping,
+  and oversized allocations in accounting, preserve fallible preparation and capture-buffer
+  stability, and keep semantic limits independent of pool thresholds. The allocator interface
+  permits this upgrade without a save-format or capture-contract change.
 - Evaluate buffering a complete encoded capture before disk writes against bounded streaming.
   R74 makes this plausible for ordinary saves: 2,000-4,000 raw block payloads use 62.5-125 MiB
   before metadata. Experimental 64/128/256 MiB output budgets are hypotheses, not defaults
   or reservations. Metadata-heavy records and accumulated dirty state can exceed them;
   1-2 KiB average encoded chunks are not a bound. Any adopted policy needs a reviewed bounded
   overflow path and the same consistent boundary. Do not add a second capture pipeline to v1
-  merely for this experiment. Deferring the custom pools, coalescing pending notifications,
-  and extracting format tables are also review proposals, not adopted requirement changes.
+  merely for this experiment. Coalescing pending notifications and extracting format
+  tables remain review proposals, not adopted requirement changes.
 - Add a manual Save action using the same ordered snapshot and durability pipeline, with
   explicit completion/failure feedback. V1 uses autosave and save-on-exit only.
 - Add and validate Linux/Windows durability adapters with platform-specific synchronization,
@@ -3069,7 +3078,7 @@ durability by itself; report that distinction in validation results.
   capture gating of persistent fields and restricted snapshot views, preserving current
   `WorldChunk` ownership/layout and excluding transient/derived fields from serialization.
 - New application persistence modules: binary codec, base index, journal framing/recovery,
-  save coordinator, pool ownership, filesystem publication, and compaction.
+  save coordinator, allocation ownership, filesystem publication, and compaction.
 - `src/voxel_app/main.zig`, `player_controller.zig`, `simulation_worker.zig`: lifecycle,
   authoritative player checkpoint publication, restored state, scheduling, stopping existing
   producers for shutdown, and visible save status/errors. No demo-worker state serialization.
@@ -3118,7 +3127,9 @@ large worlds. Global simulation pauses can be visible; output backpressure coupl
 hold times to disk throughput. Borrowing live headers/array descriptors can race with updates
 or hash-map relocation; reading packed live flags can race even when only derived bits change.
 Copy the selected scalars/descriptors at capture and pin their backing payloads under R33.
-Pools do not eliminate encoding, client copying, or live-world growth. Player state needs explicit ordering/ownership. Pending optimism can hide short waits
+Allocation budgets do not eliminate encoding, client copying, or live-world growth.
+Unmeasured allocator overhead/fragmentation needs headroom and process telemetry.
+Player state needs explicit ordering/ownership. Pending optimism can hide short waits
 but cannot guarantee invisible long delays. Cancellation needs a safe encoder handoff that
 can progress independently of stalled I/O. R73 prevents deadline cancellation starvation
 but allows a visible exceptional pause; actual storage failure can still prevent saving.
@@ -3155,9 +3166,9 @@ during implementation planning. None authorize starting implementation in this p
   identity/history/descriptors and pinned const block/metadata buffers. Exclude live headers,
   packed flags, and caches from encoder access; preserve cache consistency across edits,
   failed preparation, loading, and gameplay/client copies.
-  Implement bounded page-based metadata allocation, budgeted oversized allocations, and
-  fallible/reservable metadata operations with partial-allocation cleanup. Expose configurable
-  local limits, capacity counters, and resource-failure/status hooks for later RAM budgeting.
+  Add budget accounting/reservations to existing block/metadata allocation paths and
+  fallible metadata operations with partial-allocation cleanup; defer custom pools. Expose
+  configurable local limits, capacity counters, and resource-failure/status hooks for later RAM budgeting.
   Reuse validation/discovery results and bounded operation scratch storage; preserve in-place
   mutation for exclusive prepared chunks and use private staging only where necessary.
   Track dependency-wait/ready/terminal stages and preserve command order across async loads.
@@ -3192,7 +3203,7 @@ during implementation planning. None authorize starting implementation in this p
   proposing additional capture policies.
   Run the R66 workload matrix and candidate parameter sweeps at R74 target scales, including
   smaller 8 GB workloads, successful-save age/rate and exceptional pauses. Select and record
-  default pool budgets/geometry, queue limits, retry/backoff and escalation parameters, and
+  default allocation budgets, queue limits, retry/backoff and escalation parameters, and
   cancellation/latency regression thresholds, including p95/p99/maxima and occupancy results.
   Verify pressure behavior with tiny configured budgets/fault injection, not physical OOM.
 - [ ] T-val: Run acceptance criteria verification, crash/failure injection, relevant CPU

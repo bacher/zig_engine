@@ -111,12 +111,14 @@ budget and persistence decisions remain in force.
 - R10: Use separate throttle/resume thresholds and recovery delays to avoid oscillation.
   Resume queued work gradually and fairly when headroom returns, without a burst of loads
   immediately recreating pressure. Never change semantic world contents merely to reduce RAM.
-- R11: Account for memory beyond block arrays: metadata/pool capacity, derived caches,
+- R11: Account for memory beyond block arrays: metadata backing capacity, derived caches,
   client replicas, capture manifests/output, persistence catalogs/buffers, meshes, assets,
   and GPU staging/resources as appropriate. Count a frozen source as existing live storage
   with a pin, not a second allocation; count independent encoded output and temporary growth
   separately. Track usage/reservations without double-counting shared or unified-memory
-  residency. Include process telemetry to expose untracked memory; CPU/GPU limits may differ.
+  residency. Account for known allocator overhead and distinguish unmeasured overhead/
+  fragmentation from tracked capacities; leave headroom and expose process telemetry for
+  untracked memory. Custom persistence pools are deferred. CPU/GPU limits may differ.
   If selective COW is later adopted, account for its actual duplicate storage explicitly.
 - R12: Keep bounded working capacity available for completion/cleanup and persistence progress.
   Stopping admissions must not also prevent releasing resources or processing the completion
@@ -207,10 +209,11 @@ budget and persistence decisions remain in force.
 - AC8: GIVEN disjoint regions for 16 modeled players WHEN exercising the agreed supported
   radius and memory envelope THEN player access meets its measured residency/latency target;
   undersized configurations degrade explicitly rather than overrunning memory unchecked.
-- AC9: GIVEN pool slack, frozen sources, encoded output, meshes, and queued reads WHEN
-  measuring pressure THEN backing/reserved capacity is accounted for without charging live
+- AC9: GIVEN spare allocation capacity, frozen sources, encoded output, meshes, and queued
+  reads WHEN measuring pressure THEN backing/reserved capacity is accounted for without charging live
   source pins twice; actual COW duplicates are charged only if a later policy creates them.
-  Untracked process memory is exposed separately.
+  Known allocator overhead and unmeasured overhead/fragmentation are identified separately
+  alongside process telemetry; tracked capacity is not presented as exact process residency.
 - AC10: GIVEN capture and memory pressure both defer simulation WHEN capture sources clear
   THEN the capture/exceptional-saving-pause reason clears independently of WAL durability,
   even while save priority remains active. Remaining pressure gates still apply; resumption
@@ -255,7 +258,9 @@ capacity counters, structured failures, safe source release, status, and early s
 It also supplies the minimal all-simulation capture gate, pending player requests, priority
 encoding, normal elapsed-wait cancellation, overdue-save escalation with visible exceptional
 pause, bounded queues, paced resume, and the existing genuine
-allocation-failure retry/rejection policy. No persistence COW is implemented in this baseline.
+allocation-failure retry/rejection policy. Existing allocators supply block/metadata storage
+with capacity accounting; custom pools are deferred until measurements justify them. No
+persistence COW is implemented in this baseline.
 
 Whole-system pressure observation, protected player residency budgets, movement gating, and
 richer throttling UI remain here. Local limits do not establish a process-wide RAM ceiling;
@@ -283,7 +288,7 @@ borrowing, proximity policy, and future actor-state design remain open as identi
   residency/eviction, and structured failures.
 - Player control/streaming: proximity demand, movement gating, and safe destinations.
 - Future simulation scheduler: deferral, cancellation, fairness, and producer backpressure.
-- Persistence coordinator/pools: accounting, pressure requests, and reclaimable-version feedback.
+- Persistence coordinator/allocation paths: accounting, pressure requests, and reclaimable-version feedback.
 - Engine allocators/rendering: asset, mesh, GPU/staging accounting and bounded work queues.
 - Platform/UI integration: memory-pressure observations and degradation status.
 
