@@ -36,11 +36,12 @@ transient. World ticks are u64 at 60 ticks/second; per-chunk revisions currently
 Several edits can occur during one tick. Player state currently belongs to the main thread;
 the demonstration simulation also has private execution state.
 
-The intended future workload is approximately 99.9% simulation-initiated chunk updates.
-Players guide the simulation and cannot directly perform massive world changes. This is a
-planning assumption, not a measured ratio, a hard limit, or permission to omit worst-case
-workloads. Couriers can span chunks; workers consume inputs at benches; builders follow
-blueprints. These systems are not implemented and remain outside persistence v1.
+The intended late-game workload is approximately 99.9% simulation-initiated chunk updates,
+when players mostly guide automation. Earlier play includes substantial manual building;
+manual actions are difficult to scale, not forbidden. As described in
+[Game vision](../../docs/game-vision.md), this is a planning assumption, not a measured ratio,
+a hard limit, or permission to omit manual-building and worst-case workloads. Couriers can
+span chunks; workers consume inputs at benches; builders follow blueprints. These systems are not implemented and remain outside persistence v1.
 Simulation runs in the world-service process. In this discussion, block timers are distinct
 from the broader simulation: they are local scheduled block transitions, while simulation
 covers more involved work that may span chunks. Existing capture gates for block timers
@@ -113,11 +114,12 @@ Decision status as of 2026-10-19:
 - DERIVED correctness requirements: one capture boundary, synchronized source release,
   complete mutation write-set admission, bounded pending work, and separation of pending
   admission from terminal rejection and durability.
-- PROPOSED implementation details: the capture states, scheduling/notification mechanisms,
-  and staged evaluation plan below. Numerical latency/work limits remain measurement
-  decisions under R66. Direct simulation-thread mutation leases and the future NPC
-  catch-up/state model are not approved implementations. Draft status records those
-  remaining details; it does not reopen unaffected confirmed decisions.
+- IMPLEMENTATION CHOICES: concrete capture state/queue APIs and scheduling data structures
+  remain engineering decisions within the agreed contracts. R66/R76 require measurement
+  and baseline evaluation; numerical defaults and optimization choices follow that evidence.
+  These do not block finalizing the design and do not establish measured responsiveness.
+  Direct simulation-thread mutation leases and the future NPC catch-up/state model remain
+  deferred. Finalizing this spec does not authorize implementation.
 
 ## Requirements
 
@@ -945,9 +947,10 @@ mechanisms without overriding those contracts.
 
 - Q41: Which choices are newly agreed, and which remain proposals?
   A41: CONFIRMED starting policy and later approvals are collected in Context. Concrete
-  state/queue APIs and the evaluation stages remain proposals, and numeric limits require
-  measurement under R66. None establish measured responsiveness; Q45 lists unresolved
-  performance questions. Unaffected confirmed decisions remain in force.
+  state/queue APIs remain implementation choices. Baseline instrumentation and evaluation
+  are required by R66/R76; numeric limits require measurement. Later optimized policies
+  remain proposals. Q45 distinguishes design readiness from performance validation.
+  Unaffected confirmed decisions remain in force.
 - Q42: Does a global pause last through WAL synchronization or compaction?
   A42: DERIVED: source release, not WAL durability, ends the capture pause (R68). Slow
   storage can nevertheless extend capture by filling bounded output buffers. That coupling
@@ -964,14 +967,16 @@ mechanisms without overriding those contracts.
   outcomes across persistence delays. Local block timers follow the separate R47/R78 rules.
 - Q44: Can simulation mutate service chunks directly from another thread?
   A44: The same-process clarification permits considering that optimization; it does not
-  establish its synchronization design. PROPOSAL: retain the existing service mutation worker
-  initially, allow in-process intent/batch submission, and defer exclusive mutation leases.
+  establish its synchronization design. R70 retains the existing service mutation worker
+  in v1 and defers exclusive mutation leases. In-process intent/batch submission is compatible
+  with that contract; the concrete API is an implementation choice.
   Any later lease must cover dependencies and authoritative publication, not only block bytes.
-- Q45: What remains open before calling the design validated?
-  A45: UNRESOLVED by measurements: acceptable player confirmation latency and observable
-  near-player simulation pause in normal mode; normal capture duration and overdue-save
+- Q45: What needs measurement before calling the implementation validated?
+  A45: REQUIRED IMPLEMENTATION EVIDENCE under R66/R76: acceptable player confirmation
+  latency and observable near-player simulation pause in normal mode; normal capture duration and overdue-save
   escalation threshold; cancellation/checkpoint backoff; catch-up service capacity; and
-  buffer/queue sizes for the R74 target workloads. The global-pause baseline must be tested
+  buffer/queue sizes for the R74 target workloads. These are tuning and validation work,
+  not unanswered v1 policy questions. The global-pause baseline must be tested
   against the normal no-noticeable-freeze requirement, with the explicit Q46 exceptional
   saving pause assessed separately. If normal operation fails, revisit per-chunk scheduling,
   near-player continuation, eager capture, or selective near-player COW rather than silently
@@ -985,8 +990,9 @@ mechanisms without overriding those contracts.
   measurement/design choices, and failed storage cannot be forced to succeed.
 - Q47: What workload and machine sizes should the first usable version target?
   A47: CONFIRMED: R74 records the 10,000-active / 2,000-4,000-changed-chunk target on 16 GB
-  and smaller worlds on 8 GB. Smaller-world size and defaults need measurement. Whole-capture
-  buffering remains a proposal; custom pools are deferred under Q22.
+  and smaller worlds on 8 GB. Smaller-world size and defaults need measurement. Larger
+  output-capacity experiments in the same pipeline are agreed under Q51; a separate
+  whole-capture buffering mode and custom pools remain deferred.
 - Q48: Does each capture or pending player request need its own timer/retry loop?
   A48: CONFIRMED: one coordinator watchdog under R75 avoids per-request timer/retry loops
   while preserving elapsed-wait fairness across epochs. Timer APIs and deadline data
@@ -1588,11 +1594,11 @@ gating on denied loads, and simulation-throttling UI are covered by the separate
 
 The no-COW/global-pause starting policy, current-conditions catch-up, scale targets, and
 exceptional visible pause for overdue saving are confirmed.
-Unchanged format/durability sections retain their prior confirmed status. The new capture
-mechanics, transport outline, and evaluation stages are implementation proposals constrained
-by the requirements above. Concrete interfaces and measured defaults remain implementation
-work; unresolved gameplay/performance choices are listed in Q45. This plan does not authorize
-starting implementation.
+Unchanged format/durability sections retain their prior confirmed status. The plan describes
+how to implement and evaluate the agreed contracts; concrete interfaces, data structures,
+and sequencing remain engineering choices. R66/R76 require baseline evaluation; later
+optimization stages remain conditional proposals. Q45 lists the evidence needed to validate
+the implementation. This plan does not authorize starting implementation.
 
 ### Approach
 
@@ -1714,9 +1720,11 @@ including the capacity lost during repeated capture pauses. Report lag and apply
 no scheduling rule can guarantee recovery under indefinitely insufficient capacity.
 
 Current-conditions catch-up intentionally does not reproduce every historical intermediate
-world. A courier must not remove goods from A and add them to B twice or in different
-transactions. Worker output requires eligible inputs and cannot blindly multiply a production
-rate by all skipped time if inputs only arrived later. A builder rechecks remaining blueprint
+world. Courier pickup and delivery occur at different times: each transfer must atomically
+conserve goods across its affected state, including carried cargo, and must not be applied
+twice. Cargo and journey progress between transfers must be persistable when that feature
+is introduced; the journey is not one long transaction. Worker output requires eligible inputs
+and cannot blindly multiply a production rate by all skipped time if inputs only arrived later. A builder rechecks remaining blueprint
 work/resources and records completed progress once. A resumed player edit or another actor may
 have invalidated earlier plans; revalidation can change what work is still possible. Actor
 identity, inventory, resource eligibility, cross-chunk transfers, and progress must eventually
@@ -1726,7 +1734,8 @@ remains explicitly excluded. No elapsed time while the application is closed is 
 
 ### Staged Evaluation Without Format Changes
 
-These are proposed implementation stages after separate implementation authorization:
+After separate implementation authorization, stages 1-3 implement and evaluate the agreed
+baseline. Stages 4-5 are conditional follow-up proposals, not requirements to add complexity:
 
 1. Build/test the agreed codec, WAL/base formats, storage adapter, recovery, compaction,
    dirty identities, and reference-model harness using immutable test inputs. This establishes

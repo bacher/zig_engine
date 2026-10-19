@@ -315,8 +315,8 @@ nonfinite coordinates/angles. Restore feet position/view under R17's motion-rese
 authoritative collision-validation rules. The record has no individual checksum: its
 container's physical checksum or transaction digest covers it.
 
-Persist all known players, including offline players, sorted by unique player ID. The
-future 16-player concurrency limit is not a limit on historical records. Each WAL transaction
+Persist all known players, including offline players, sorted by unique player ID. A
+simultaneous-player target does not limit historical records. Each WAL transaction
 contains complete global state and the complete player array, plus only changed chunks.
 Player eligibility still follows R42; client/session command dependency watermarks are
 resolved before capture and are not serialized as persistent session counters. Validate

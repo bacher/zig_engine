@@ -17,9 +17,10 @@ during the current planning discussion.
 ## Context
 
 World chunks are loaded for player proximity and simulation operations, including their
-terrain-validation dependencies. The current application is single-player; the planning
-target is up to 16 players, potentially in disjoint regions. Generated and persisted chunks
-both consume resources and must pass the same admission policy.
+terrain-validation dependencies. The current application is single-player; the
+eventual target in [Game vision](../../docs/game-vision.md) is up to 32 players, potentially
+in disjoint regions. That is a long-term target, not a persistence-v1 capacity guarantee.
+Generated and persisted chunks both consume resources and must pass the same admission policy.
 
 The user targets approximately 10,000 active chunks and 2,000-4,000 distinct changed chunks
 per 60-second save interval on a 16 GB machine, with smaller worlds on 8 GB machines. See
@@ -31,8 +32,8 @@ a safe RAM cap.
 A radius of 2 chunks on each axis gives a 5x5x5 region: 125 chunks per player and 2,000 for
 16 disjoint regions. Their 32-KiB block arrays alone occupy 62.5 MiB. Radius 3 gives 7x7x7,
 343 per player, 5,488 total, and 171.5 MiB of raw blocks. These are examples, not total-memory
-guarantees: metadata, dependency halos, service/client copies, capture output, caches, meshes,
-GPU resources, and queued/in-flight work add costs. Persistence v1 no longer uses COW;
+guarantees or a 16-player cap: metadata, dependency halos, service/client copies, capture
+output, caches, meshes, GPU resources, and queued/in-flight work add costs. Persistence v1 no longer uses COW;
 source pins retain existing live storage rather than duplicating it. Shared regions should
 deduplicate data.
 
@@ -50,10 +51,11 @@ allocator overhead. Early compaction can help, but installation of an older revi
 not make a newer live version evictable.
 The temporary demo simulation does not define the future scheduler or actor-state schema.
 
-The planned workload is approximately 99.9% simulation-initiated chunk updates: players guide
-the simulation and cannot directly cause massive changes. Couriers span chunks, workers
-consume inputs at benches, and builders follow blueprints; none are implemented here. Treat
-this ratio as a planning assumption, not an admission or worst-case capacity guarantee.
+The planned late-game workload is approximately 99.9% simulation-initiated chunk updates,
+with players mostly guiding automation; earlier play includes substantial manual building.
+Couriers span chunks, workers consume inputs at benches, and builders follow blueprints;
+none are implemented here. Treat this ratio as a planning assumption, not an admission or
+worst-case capacity guarantee.
 Simulation runs in the service process; player interaction must also work over a wire.
 
 CONFIRMED on 2026-10-19: persistence starts without COW, pauses all simulation during capture,
@@ -246,7 +248,7 @@ silently alter terrain, lose edits, or turn missing data into generated/empty su
 ## Out of Scope
 
 Implementation during current planning; the complete feature in persistence v1; multiplayer
-networking; a new simulation/scheduled-event system; unconditional support for 16 players on
+networking; a new simulation/scheduled-event system; unconditional support for 32 players on
 every machine; guaranteeing no OS paging; replacing world data with lossy representations.
 
 ## Plan
