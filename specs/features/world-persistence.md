@@ -63,9 +63,13 @@ Decision status as of 2026-10-19:
   rendering, camera, and UI remain responsive. Normal wait limits must not cause an endless
   cancellation loop. This explicitly qualifies the normal no-noticeable-freeze target;
   thresholds and the concrete escalation mechanism remain measurement/design choices.
+- CONFIRMED by the user: use one coordinator watchdog for capture-related deadlines and
+  overdue-save escalation. Preserve original player-wait timestamps across retries and
+  capture epochs; retry waiting admissions on meaningful source-release progress (R75).
 - CONFIRMED by the user: catch up postponed simulation against current world conditions,
   preserving elapsed logical time and preventing duplicate effects. Exact historical
-  replay of skipped ticks is not required.
+  replay of skipped ticks is not required. Economic event ordering across deferred work
+  is explicitly deferred to the future simulation spec.
 - CONFIRMED by the user: retain the current `WorldChunk` ownership and field arrangement
   initially. Persistent/derived/runtime categories remain logical serialization contracts;
   capture uses a restricted snapshot view, not a separately owned persistent object. Defer
@@ -584,8 +588,9 @@ Decision status as of 2026-10-19:
   silently discard skipped time. Pace catch-up and bound its retained representation;
   do not run an unlimited burst or allocate a record for every skipped tick. R47's fixed
   terrain-timer pass and finite local transition chain remain intact, with original deadlines.
-  General NPC progress/debt representation, conservation rules, and cross-chunk scheduling
-  belong to the future simulation design and must be persisted when that state is introduced.
+  General NPC progress/debt representation, conservation rules, cross-chunk scheduling,
+  and economic event ordering belong to the future simulation design. Persist the state
+  that design requires when it is introduced.
   This does not add offline elapsed time or serialize the demo worker's private phase.
 - R70: Keep mutation and capture correctness under world-service authority. A writable flag
   or global capture notification is advisory to producers, not permission to mutate. The
@@ -626,6 +631,18 @@ Decision status as of 2026-10-19:
   reserve all machine RAM nor cap legitimate metadata or accumulated dirty state. Exercise
   both normal and overdue saving, maximum-record cases, and accumulation beyond one interval.
   Record total memory and base/timer retention alongside capture-output costs.
+
+- R75: Use one logical coordinator watchdog for normal whole-capture/player-wait deadlines
+  and R73 overdue-save escalation, driven by monotonic real elapsed time independently of
+  simulation ticks. Check the earliest applicable deadline under the current mode; preserve
+  each request's original wait timestamp across retries, notifications, newly discovered
+  dependencies, and capture epochs. Retry admission on meaningful source-release progress,
+  without separate timer-based retry loops per request or chunk. Deadline handling must
+  remain serviceable while simulation is paused or the writer is blocked on I/O; it requests
+  cancellation through R30's safe handoff and never assumes a deadline releases ownership.
+  Exclude deadlines already acted upon or overridden by save priority from wakeup selection
+  until they become actionable again, avoiding busy loops. No dedicated watchdog thread or
+  general simulation timer framework is required; numeric limits remain governed by R66.
 
 ## Clarifications
 
@@ -929,6 +946,10 @@ Decision status as of 2026-10-19:
   atomically across their full affected state, workers cannot manufacture output for periods
   without eligible inputs, and builders must revalidate blueprints/resources. These are
   future simulation constraints, not an NPC implementation or a new save schema in this PR.
+  CONFIRMED deferral: decide economic event ordering in the future simulation spec, including
+  whether a delivery due before food expiry must be processed first after a capture pause.
+  Current-conditions catch-up does not settle that ordering or guarantee unchanged economic
+  outcomes across persistence delays. R47 terrain-timer semantics remain unchanged.
 - Q44: Can simulation mutate service chunks directly from another thread?
   A44: The same-process clarification permits considering that optimization; it does not
   establish its synchronization design. PROPOSAL: retain the existing service mutation worker
@@ -958,6 +979,13 @@ Decision status as of 2026-10-19:
   The smaller-world size and memory/latency defaults remain measurement work under R66/R74.
   Whole-capture buffering remains a review proposal; the bounded streaming baseline stays.
   Custom pools are now explicitly deferred under the separate user-confirmed Q22 decision.
+
+- Q48: Does each capture or pending player request need its own timer/retry loop?
+  A48: CONFIRMED by the user: use one coordinator watchdog checking the earliest applicable
+  capture-related deadline, and retry waiting admissions on meaningful source-release events.
+  Preserve each request's original wait timestamp across retries and capture epochs. R75
+  defines the contract; timer APIs, deadline data structures, and numeric thresholds remain
+  engineering choices. This does not select future simulation event scheduling.
 
 ## Acceptance Criteria
 
@@ -1431,6 +1459,14 @@ Decision status as of 2026-10-19:
   gameplay capture/player-wait limits THEN it continues within the same budgets, with the
   existing responsive shutdown status and explicit choices; the elapsed limit alone does
   not create an endless cancel/retry loop or override a commit already in progress.
+
+- AC132: GIVEN multiple capture-blocked requests with different original wait timestamps
+  WHEN source releases, retries, new dependencies, capture epochs, and save-priority mode
+  changes occur THEN one coordinator selects the earliest actionable deadline without
+  resetting those timestamps, retries admission on meaningful source-release progress, and
+  stays serviceable during paused simulation or blocked writer I/O. Already handled deadlines
+  and normal limits overridden by save priority do not cause repeated wakeups/cancellations;
+  any requested cancellation still respects R30 ownership and commit boundaries.
 
 ## Constraints
 
@@ -2466,10 +2502,10 @@ indefinitely defeating save progress; R6 still does not promise a fixed recovery
 ### Overdue Saving and Exceptional Pause
 
 The user permits an exceptional visible pause of world-changing actions to complete an
-overdue save. A proposed coordinator uses normal and save-priority modes, with one watchdog
-checking normal wait deadlines and elapsed unsaved age. Track monotonic age while dirty work
-exists: use time since the latest durable save, or the first subsequent dirty transition if
-the world was clean in between. Retrying, partial writes, encoding, and source release do not
+overdue save. The confirmed R75 coordinator watchdog checks normal capture/player-wait
+limits and elapsed unsaved age, selecting the earliest actionable deadline for the current
+mode. Track monotonic age while dirty work exists: use time since the latest durable save,
+or the first subsequent dirty transition if the world was clean in between. Retrying, partial writes, encoding, and source release do not
 reset it. Numeric thresholds are selected under R66, not fixed by this document.
 
 On escalation, keep a viable active capture instead of aborting it merely to change modes.
@@ -3178,8 +3214,8 @@ during implementation planning. None authorize starting implementation in this p
   lineage verification and safe publication; inject source corruption during consumed reads.
 - [ ] T6: Integrate load/save lifecycle, autosave/final-save, player restore, and save status.
   Integrate capture-pending player state, priority encoding, normal elapsed-wait cancellation,
-  R73 overdue-save escalation and visible exceptional pause, genuine
-  resource retry/rejection and optimistic reconciliation; global simulation capture gating,
+  R73 overdue-save escalation and visible exceptional pause, the R75 coordinator watchdog,
+  genuine resource retry/rejection and optimistic reconciliation; global simulation capture gating,
   paced resume, deferral/backpressure; and pre-reserved completion/status reporting.
   Gate player checkpoints/save barriers on resolved command prefixes and drain outstanding
   dependency I/O before final capture.
@@ -3194,6 +3230,8 @@ during implementation planning. None authorize starting implementation in this p
   status/retransmission models, paused/resumed timer progress, and view safety during header
   relocation/derived-flag updates under AC117-AC126 and AC43. Add AC127-AC131 coverage for
   escalation, bounded backpressure, finite slow/stalled I/O, source release, and shutdown.
+  Add AC132 coverage for deadline selection, retained wait timestamps, release-driven retries,
+  and freedom from deadline busy loops across capture epochs and mode changes.
   Keep replayable seeds/traces and explicit critical-boundary cases in the regular CPU test suite.
 - [ ] T7: Measure snapshot/edit latency, memory use, and compaction interference; tune budgets.
   Compare worker CPU, allocations, copied bytes, and latency against baseline with saving

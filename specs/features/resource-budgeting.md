@@ -167,7 +167,9 @@ budget and persistence decisions remain in force.
   world-persistence.md R47. Newly loaded chunks wait for a later normal pass. Pace resumed
   work and retain debt rather than creating an unlimited burst or silently discarding time.
   General NPC progress representation, conservation/eligibility rules, and fair scheduling
-  remain future simulation work; persistence must cover that state when introduced. Existing
+  remain future simulation work; persistence must cover that state when introduced. The user
+  explicitly defers economic event ordering across postponed work to the simulation spec;
+  current-conditions catch-up alone does not guarantee unchanged economic outcomes. Existing
   timer residency and no-offline-time decisions remain unchanged.
 - Q6: May simulation borrow unused player-reserved capacity?
   A6: UNRESOLVED. Borrowing is safe only if the policy can reclaim the capacity in time;
