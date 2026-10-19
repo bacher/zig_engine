@@ -41,8 +41,12 @@ Players guide the simulation and cannot directly perform massive world changes. 
 planning assumption, not a measured ratio, a hard limit, or permission to omit worst-case
 workloads. Couriers can span chunks; workers consume inputs at benches; builders follow
 blueprints. These systems are not implemented and remain outside persistence v1.
-Simulation runs in the world-service process. Player interactions must also work over a
-network; the current in-process endpoint is not a wire-level retry/deduplication protocol.
+Simulation runs in the world-service process. In this discussion, block timers are distinct
+from the broader simulation: they are local scheduled block transitions, while simulation
+covers more involved work that may span chunks. Existing capture gates for block timers
+remain explicit in R47/R69; the terminology does not itself change scheduling policy.
+Player interactions must also work over a network; the current in-process endpoint is not a
+wire-level retry/deduplication protocol.
 
 The initial measurement target is approximately 10,000 simultaneously active chunks and
 2,000-4,000 distinct changed chunks per 60-second save interval on a 16 GB machine, with
@@ -98,9 +102,10 @@ Decision status as of 2026-10-19:
   a write stall. Larger caps are experiments, not shipping defaults or upfront allocations.
 - CONFIRMED by the user: pending timers alone need not retain a chunk when every timer is
   explicitly lazy. Eviction still requires the exact current version in the installed base
-  and clearance of other pins. R77 supersedes the blanket timer pin; classification of the
-  existing timer kinds remains a proposal in Q52. Existing next-normal-pass catch-up remains
-  the baseline while the requested reload-timing clarification is pending.
+  and clearance of other pins. Both existing block timer kinds, dirt compaction and grass
+  growth, are confirmed lazy. R77 supersedes the blanket timer pin. Applying overdue block
+  timers before first exposure during loading is under discussion in Q52; R47 remains the
+  scheduling baseline until that change's dependency and ordering contract is agreed.
 - RETAINED: unaffected PR #28 decisions, including the durable format, recovery, compaction,
   base-only reloads, mutation atomicity, offline-time policy, and local budget controls.
 - DERIVED correctness requirements: one capture boundary, synchronized source release,
@@ -699,7 +704,8 @@ mechanisms without overriding those contracts.
   Lazy means execution may be deferred while nonresident until ordinary loading makes the
   chunk eligible for R47 processing, using original deadlines and current conditions. It is
   a property of timer-kind semantics, not merely a distant deadline, player distance, or an
-  empty subscription set. A recognized kind not explicitly classified lazy retains a timer
+  empty subscription set. Both existing kinds, compact_dirt and grow_grass, are lazy. A
+  recognized kind not explicitly classified lazy retains a timer
   residency pin while pending; unsupported serialized kinds remain load errors. V1 needs no
   global wakeup/loading scheduler or new serialized lazy flag. Remove resident due-index
   membership on eviction and restore it once on ordinary load. Revalidate timer incarnation
@@ -981,14 +987,15 @@ mechanisms without overriding those contracts.
   overload or slow encoding. R76 makes the evidence needed to choose defaults part of v1.
 
 - Q52: Which timers are lazy, and when does reload catch-up run?
-  A52: CONFIRMED: chunks with only lazy timers may unload subject to durable-state and other
-  pin requirements. PROPOSAL pending user clarification: classify both existing kinds,
-  compact_dirt and grow_grass, as lazy. Keep R47's existing next-normal-pass timing: restore
-  timers during load, without applying them inside decoding or forcing catch-up before the
-  chunk is exposed. Earlier commands may affect current-state evaluation. Laziness allows
-  residency-dependent execution timing/outcomes; it does not promise historical equivalence.
-  Catch-up before first exposure would require a separately agreed load barrier. Future
-  economy events require their own classification/scheduling design, not automatic laziness.
+  A52: CONFIRMED: compact_dirt and grow_grass are both lazy, with unloading subject to durable
+  state and other pins. The user distinguishes local block timers from broader simulation
+  and prefers processing overdue block timers during loading without adjacent-chunk reads.
+  UNDER DISCUSSION: deterministic load-time processing before first exposure, and its effect
+  on R47's existing next-pass rule and capture gating. Current grass growth/compaction checks
+  exposure above the block, which can cross a chunk boundary. Making execution chunk-local
+  requires maintaining eligibility when authoritative edits change exposure, or revising that
+  gameplay rule; this choice and load/publication ordering are not yet adopted. Future economy
+  events require their own classification/scheduling design, not automatic terrain laziness.
 
 ## Acceptance Criteria
 
@@ -2708,7 +2715,8 @@ during implementation planning. None authorize starting implementation in this p
   Define timer passes with a fixed tick/resident due-chunk list, preserve finite local
   catch-up, and save overdue/deferred timer state without recursive catch-up passes.
   Implement R77 timer-kind eviction eligibility, resident due-index removal/restoration,
-  and scoped operation pins; resolve Q52's lazy-kind classification before implementation.
+  and scoped operation pins; resolve Q52's proposed load-time processing contract before
+  implementing that scheduling change.
 - [ ] T5: Implement segment rotation and streaming background compaction with source checksum/
   lineage verification and safe publication; inject source corruption during consumed reads.
 - [ ] T6: Integrate load/save lifecycle, autosave/final-save, player restore, and save status.
