@@ -66,6 +66,10 @@ Decision status as of 2026-10-19:
 - CONFIRMED by the user: use one coordinator watchdog for capture-related deadlines and
   overdue-save escalation. Preserve original player-wait timestamps across retries and
   capture epochs; retry waiting admissions on meaningful source-release progress (R75).
+- CONFIRMED by the user: keep capture-pending primarily internal in v1. Brief waits need
+  no new client notification; retain the optimistic operation until its terminal response.
+  Coalesce status for longer delays while preserving required visible saving/failure status,
+  stable identities, ordering, bounded outstanding work, and pending/rejected distinctions.
 - CONFIRMED by the user: normal gameplay deadlines do not automatically cancel the final
   shutdown save. Keep memory limits and responsive completion handling; retain the existing
   wait/cancel-exit/quit choices. Cancel exit restores gameplay capture policy through safe
@@ -606,9 +610,14 @@ Decision status as of 2026-10-19:
   publication. V1 retains the single authoritative mutation worker; such leases are deferred.
 - R71: Define pending, applied, terminal rejected, and not-admitted outcomes independently of
   transport. Use stable session/request identities and resolved command prefixes; nonterminal
-  notifications cannot retire optimistic edits or make player checkpoints eligible. Future
-  wire retransmission must deduplicate the same logical request and distinguish unknown
-  outcome from rejection, with bounded state and explicit session expiry/resynchronization.
+  notifications cannot retire optimistic edits or make player checkpoints eligible. Keep
+  capture-pending primarily internal in v1: brief waits need no new notification, and the
+  client retains its outstanding optimistic operation until the terminal response. Coalesce
+  nonterminal status for longer delays instead of notifying on every wait or retry; retain
+  required visible saving/failure status. Status is advisory and never required for admission
+  progress or correctness. Future wire retransmission must deduplicate the same logical
+  request and distinguish unknown outcome from rejection, with bounded state and explicit
+  session expiry/resynchronization.
   Persistence v1 does not implement networking or promise retry deduplication across process
   restarts without a future persisted operation ledger.
 - R72: Preserve one boundary even with progressive release or prioritized encoding. After a
@@ -1000,6 +1009,13 @@ Decision status as of 2026-10-19:
   choices remain responsive. Actual failures retain their existing handling. Cancel exit
   restores gameplay capture policy through safe ownership handoff, preserving wait timestamps,
   unsaved age, and R30 commit boundaries; overdue-save priority remains applicable under R73.
+
+- Q50: Must every capture wait produce a client-visible pending message?
+  A50: CONFIRMED by the user: no. Keep pending primarily an internal state in v1; brief waits
+  retain the existing optimistic operation until a terminal response arrives. Longer-delay
+  status may be coalesced; required exceptional-saving and failure status remains visible.
+  Preserve identities, ordering, bounded outstanding work, and pending/rejected distinctions.
+  Networking, reconnect handling, and a persisted deduplication ledger remain deferred.
 
 ## Acceptance Criteria
 
@@ -1429,10 +1445,13 @@ Decision status as of 2026-10-19:
 - AC121: GIVEN capture completion or cancellation WHEN all source holds clear THEN all
   simulation classes may resume through paced dispatch even while WAL synchronization or
   repair continues; another save cannot immediately repause work before useful progress.
-- AC122: GIVEN a capture-pending player command WHEN status notifications, delayed replies,
-  or modeled retransmissions occur THEN the logical request remains unique, its optimistic
-  effect stays pending until a terminal result, and dependent checkpoints cannot pass the
-  unresolved prefix. Terminal resource rejection still removes the optimistic effect.
+- AC122: GIVEN a capture-pending player command WHEN a brief wait sends no notification,
+  a longer delay produces coalesced status, or delayed replies/modeled retransmissions occur
+  THEN the logical request remains unique, its optimistic effect stays pending until a
+  terminal result, and dependent checkpoints cannot pass the unresolved prefix. Status does
+  not resolve or replay the command; waiting/prediction capacity stays bounded without
+  per-retry notifications. Required exceptional-saving/failure status remains visible.
+  Terminal resource rejection still removes the optimistic effect.
 - AC123: GIVEN simulated capture delays and current-world changes WHEN catch-up resumes THEN
   retained logical progress is processed against current conditions without duplicate effects,
   a queue entry per skipped tick, or an unlimited burst. Existing R47 timer tests still pass;
@@ -2579,10 +2598,16 @@ free live-world memory merely because it removes a pin; only eligible allocation
 actually be reclaimed. Already applied requests are not retried.
 
 The current client reconciles terminal failures, but is not already a general retry protocol.
-Its acknowledgment path removes both successful and failed requests. A nonterminal `pending`
-notification must use a distinct path. Model stable `(session, request)` identities and a
-resolved command prefix now; wire encoding, reconnect handling, and a persisted deduplication
-ledger remain future networking work. The future wire contract must distinguish:
+Its acknowledgment path removes both successful and failed requests. Keep capture-pending
+primarily inside the service in v1: defer the terminal response during a brief wait, leaving
+that same optimistic operation outstanding. No new per-request pending message is required.
+For longer delays, coalesce advisory status rather than notifying on each wait/retry; keep
+required exceptional-saving and failure status visible. Any nonterminal status must bypass
+terminal acknowledgment handling and cannot retire predictions or resolve command prefixes.
+Neither service progress nor client correctness depends on receiving a pending notification.
+Model stable `(session, request)` identities and a resolved command prefix now; wire encoding,
+reconnect handling, and a persisted deduplication ledger remain future networking work.
+The future wire contract must distinguish:
 
 | Outcome | Meaning for client and authority |
 | --- | --- |
@@ -3056,8 +3081,8 @@ durability by itself; report that distinction in validation results.
   or reservations. Metadata-heavy records and accumulated dirty state can exceed them;
   1-2 KiB average encoded chunks are not a bound. Any adopted policy needs a reviewed bounded
   overflow path and the same consistent boundary. Do not add a second capture pipeline to v1
-  merely for this experiment. Coalescing pending notifications and extracting format
-  tables remain review proposals, not adopted requirement changes.
+  merely for this experiment. Extracting format tables remains a review proposal, not an
+  adopted requirement change.
 - Add a manual Save action using the same ordered snapshot and durability pipeline, with
   explicit completion/failure feedback. V1 uses autosave and save-on-exit only.
 - Add and validate Linux/Windows durability adapters with platform-specific synchronization,
