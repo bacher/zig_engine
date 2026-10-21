@@ -23,7 +23,7 @@ Simulation and block timers pause while snapshot sources are held. The encoder r
 
 Closing the window or pressing Escape stops producers and drains existing edits before publishing the final player checkpoint and save. The final capture is exempt from ordinary gameplay wait deadlines. After a failure or five seconds without meaningful progress, the dialog provides retry/wait, cancel exit, or explicit quit without saving. Quitting without saving may lose changes since the last durable snapshot. A durable WAL remains recoverable if final compaction fails.
 
-Saved player state includes identity, feet position, yaw, and pitch. Velocity, climbing state, and transient movement history are reset on startup. Restored collision is checked against authoritative terrain before gameplay starts.
+Saved player state includes identity, feet position, yaw, pitch, and the material in the one-slot inventory. Inventory changes belong to authoritative terrain transfers and are captured in the same snapshot. Movement checkpoints preserve the service-owned inventory. Velocity, climbing state, partial interaction holds, pending client predictions, and transient movement history are reset on startup. Format 2 writes inventory schema 1; supported format 1 saves load with empty inventories. Restored collision is checked against authoritative terrain before gameplay starts.
 
 ## Storage and ownership
 

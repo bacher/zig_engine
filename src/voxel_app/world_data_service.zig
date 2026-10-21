@@ -117,6 +117,7 @@ pub const OperationResult = struct {
     failure: ?rules.Failure = null,
     mined_type: ?@import("engine").voxel_chunk.BlockType = null,
     counted: bool = false,
+    player_inventory: ?struct { player_id: u64, material: ?rules.BlockType } = null,
 };
 
 pub const Representation = enum { blocks, mesh };
@@ -182,6 +183,7 @@ const LoadedChunk = struct { id: u32, revision: u64, result: anyerror!WorldChunk
 
 const Request = union(enum) {
     register: *Client,
+    register_player: format.Player,
     load_chunks: struct {
         client: *Client,
         request_id: u64,
@@ -221,6 +223,7 @@ pub const Client = struct {
     last_operation_id: u64 = 0,
     checkpoint_mutex: Io.Mutex = .init,
     checkpoint_queued: bool = false,
+    registered_player_id: ?u64 = null,
     latest_checkpoint: ?PlayerCheckpoint = null,
     eligible_checkpoint: ?PlayerCheckpoint = null,
 
@@ -269,6 +272,12 @@ pub const Client = struct {
     pub fn publishCheckpoint(self: *Client, player: format.Player) void {
         self.checkpoint_mutex.lockUncancelable(self.service.io);
         defer self.checkpoint_mutex.unlock(self.service.io);
+        if (self.registered_player_id != player.id) {
+            // Unlike movement checkpoints, initialization cannot be coalesced
+            // behind the first transfer that needs this player's empty slot.
+            self.service.requests.tryPush(self.service.io, self.service.allocator, .{ .register_player = player }) catch return;
+            self.registered_player_id = player.id;
+        }
         self.latest_checkpoint = .{ .player = player, .after_request = self.last_operation_id };
         if (!self.checkpoint_queued) {
             self.service.requests.tryPush(self.service.io, self.service.allocator, .{ .checkpoint = self }) catch return;
@@ -524,7 +533,7 @@ pub const WorldDataService = struct {
             self.status.durable_sequence = saved.sequence;
             var player_reader: format.Reader = .{ .bytes = saved.players };
             for (0..@intCast(saved.player_count)) |_| {
-                const player = try format.decodePlayer(try player_reader.take(52));
+                const player = try format.readPlayer(&player_reader);
                 try self.players.put(allocator, player.id, player);
                 try self.restored_players.put(allocator, player.id, player);
             }
@@ -962,6 +971,18 @@ pub const WorldDataService = struct {
 
     fn processAdmitted(self: *WorldDataService, request: Request) void {
         switch (request) {
+            .register_player => |initial| {
+                if (!self.players.contains(initial.id)) {
+                    var player = initial;
+                    player.inventory = null;
+                    self.players.put(self.allocator, player.id, player) catch {
+                        self.failPersistence(error.OutOfMemory);
+                        return;
+                    };
+                    self.player_generation +%= 1;
+                    self.lifecycle.unsaved_work = true;
+                }
+            },
             .chunk_loaded => |loaded| {
                 _ = self.read_pending.remove(loaded.id);
                 if (loaded.result) |chunk| {
@@ -1097,13 +1118,22 @@ pub const WorldDataService = struct {
                     self.pending.insert(self.allocator, 0, .{ .request = request, .since = self.processing_since orelse persistence.now(self.io) }) catch @panic("OOM");
                     return;
                 }
+                if (result.status == .success) {
+                    if (edit.operation.player) |transfer| {
+                        // The player record exists and was checked before the terrain
+                        // commit. This part of the same service turn cannot allocate.
+                        const player = self.players.getPtr(transfer.id).?;
+                        player.inventory = if (edit.operation.action == .remove) @intFromEnum(result.diagnostics.mined_type.?) else null;
+                        self.player_generation +%= 1;
+                    }
+                    self.lifecycle.unsaved_work = true;
+                }
                 if (self.is_shutting_down.load(.monotonic)) {
                     if (edit.counted) _ = self.outstanding_operations.fetchSub(1, .release);
                     edit.client.resolved_request = edit.request_id;
                     return;
                 }
                 if (result.status == .success) {
-                    self.lifecycle.unsaved_work = true;
                     for (self.worker_state.road_changes.items) |id| {
                         if (id != position) self.publishMaterialChange(self.layout.decodeChunkId(id));
                     }
@@ -1139,6 +1169,11 @@ pub const WorldDataService = struct {
                     self.blockResponse(coords, if (sub) |value| value.id else null, result.chunk);
                 if (response.data == .blocks) reply_moved = true;
                 response.operation = .{ .request_id = edit.request_id, .status = result.status, .failure = result.diagnostics.failure, .mined_type = result.diagnostics.mined_type, .counted = edit.counted };
+                if (edit.operation.player) |transfer| {
+                    const player = self.players.get(transfer.id);
+                    const material = if (player) |p| p.inventory else null;
+                    response.operation.?.player_inventory = .{ .player_id = transfer.id, .material = if (material) |raw| @enumFromInt(raw) else null };
+                }
                 edit.client.pending.responses.appendAssumeCapacity(response);
                 edit.client.resolved_request = edit.request_id;
                 self.status.confirmed_operations +%= 1;
@@ -1167,8 +1202,12 @@ pub const WorldDataService = struct {
         const checkpoint = client.eligible_checkpoint orelse return;
         if (client.resolved_request < checkpoint.after_request) return;
         const old = self.players.get(checkpoint.player.id);
-        if (old == null or !std.meta.eql(old.?, checkpoint.player)) {
-            self.players.put(self.allocator, checkpoint.player.id, checkpoint.player) catch {
+        var player = checkpoint.player;
+        // Checkpoints publish movement only. A delayed optimistic client checkpoint
+        // must never overwrite inventory owned by accepted world operations.
+        player.inventory = if (old) |saved| saved.inventory else null;
+        if (old == null or !std.meta.eql(old.?, player)) {
+            self.players.put(self.allocator, player.id, player) catch {
                 self.failPersistence(error.OutOfMemory);
                 return;
             };
@@ -1400,7 +1439,7 @@ pub const WorldDataService = struct {
         // a conservative peak including old/new hash-table and ring overlap.
         var preflight_bytes = try std.math.add(usize, self.limits.output_bytes, @sizeOf(persistence.Job));
         preflight_bytes = try std.math.add(usize, preflight_bytes, scratch_peak);
-        preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.mul(usize, self.players.count(), 60));
+        preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.mul(usize, self.players.count(), format.player_record_size + @sizeOf(u64)));
         preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.mul(usize, source_count, 2 * @sizeOf(persistence.Source) + 2 + @sizeOf([]u8)));
         const ring_target = try std.math.add(usize, source_count, 4);
         const ring_peak = try std.math.add(usize, self.completion_ring.capacity, @max(self.completion_ring.capacity, ring_target));
@@ -1425,7 +1464,7 @@ pub const WorldDataService = struct {
         self.completion_head = 0;
         try self.wal_revisions.ensureUnusedCapacity(self.allocator, @intCast(sources.items.len));
         try self.source_holds.ensureUnusedCapacity(self.allocator, @intCast(sources.items.len));
-        const players = try self.allocator.alloc(u8, try std.math.mul(usize, self.players.count(), 52));
+        const players = try self.allocator.alloc(u8, try std.math.mul(usize, self.players.count(), format.player_record_size));
         errdefer self.allocator.free(players);
         const player_ids = try self.allocator.alloc(u64, self.players.count());
         defer self.allocator.free(player_ids);
@@ -1439,8 +1478,8 @@ pub const WorldDataService = struct {
         var offset: usize = 0;
         for (player_ids) |id| {
             const encoded = try format.encodePlayer(self.players.get(id).?);
-            @memcpy(players[offset..][0..52], &encoded);
-            offset += 52;
+            @memcpy(players[offset..][0..format.player_record_size], &encoded);
+            offset += format.player_record_size;
         }
         const job = try self.allocator.create(persistence.Job);
         errdefer self.allocator.destroy(job);
@@ -2032,11 +2071,25 @@ const WorkerState = struct {
         defer allocator.free(cells);
         var context: ReadContext = .{ .state = self, .allocator = allocator };
         defer context.deinit();
-        const diagnostics = world_module.validateEdit(allocator, .{ .layout = self.layout, .context = &context, .block_at = ReadContext.read, .custom_shape_at = ReadContext.readShape }, cells, operation);
+        var diagnostics = world_module.validateEdit(allocator, .{ .layout = self.layout, .context = &context, .block_at = ReadContext.read, .custom_shape_at = ReadContext.readShape }, cells, operation);
         if (context.failure) |err| return err;
         if (self.persistence_service) |service| if (service.read_discovered) return error.DependencyPending;
         const coords, const local = world_module.splitBlockCoords(operation.block);
         const position = self.layout.encodeChunkCoords(coords);
+        if (operation.player) |transfer| {
+            const service = self.persistence_service orelse return error.MissingPlayer;
+            const player = service.players.get(transfer.id);
+            const matches = if (player) |p| switch (operation.action) {
+                .remove => p.inventory == null,
+                .put => |material| p.inventory == @as(?u8, @intFromEnum(material)),
+            } else false;
+            if (!matches) {
+                diagnostics = .{ .status = .inventory_mismatch };
+            } else if (diagnostics.status == .success and operation.action == .remove) {
+                const history = if (self.modified_chunks.get(position)) |chunk| chunk.cell_changes else @import("cell_changes.zig").History{};
+                if (!history.unchangedSince(transformations.index(local), transfer.expected_sequence)) diagnostics = .{ .status = .target_changed };
+            }
+        }
         if (diagnostics.status != .success) {
             const chunk = if (self.modified_chunks.get(position)) |stored| try stored.tryClone(allocator) else blk: {
                 const generator = ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] });
@@ -2197,6 +2250,7 @@ const WorkerState = struct {
         target.flags = source.flags;
         target.solid_block_count = source.solid_block_count;
         target.chunk_revision = source.chunk_revision;
+        target.cell_changes = source.cell_changes;
         target.boundaries = source.boundaries;
         target.metadata.roads.clearRetainingCapacity();
         target.metadata.roads.appendSliceAssumeCapacity(source.metadata.roads.items);
@@ -3738,11 +3792,14 @@ const PersistenceFixture = struct {
         return error.TestSaveTimeout;
     }
     fn operation(client: *Client, command: BlockOperation) !OperationStatus {
+        return (try operationResult(client, command)).status;
+    }
+    fn operationResult(client: *Client, command: BlockOperation) !OperationResult {
         const id = try client.trySubmitOperation(command);
         var replies: std.ArrayList(ChunkResponse) = .empty;
         defer deinitResponses(&replies);
         while (try client.waitResponses(&replies)) {
-            for (replies.items) |reply| if (reply.operation) |result| if (result.request_id == id) return result.status;
+            for (replies.items) |reply| if (reply.operation) |result| if (result.request_id == id) return result;
             for (replies.items) |reply| reply.deinit(std.testing.allocator);
             replies.clearRetainingCapacity();
         }
@@ -3766,8 +3823,8 @@ test "public service commits ordered players and reloads exact base revisions wi
     // An unsubscribed all-lazy timer does not pin an exact base version.
     try std.testing.expectEqual(@as(usize, 0), status.retained_base_mismatch_chunks);
     var player_reader: format.Reader = .{ .bytes = f.store.players };
-    try std.testing.expectEqual(@as(u64, 2), (try format.decodePlayer(try player_reader.take(52))).id);
-    try std.testing.expectEqual(@as(u64, 9), (try format.decodePlayer(try player_reader.take(52))).id);
+    try std.testing.expectEqual(@as(u64, 2), (try format.readPlayer(&player_reader)).id);
+    try std.testing.expectEqual(@as(u64, 9), (try format.readPlayer(&player_reader)).id);
     const token = client.requestChunks(.{ 0, 0 }, 1, 2);
     var replies: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&replies);
@@ -4237,4 +4294,98 @@ test "synchronous dependency preparation OOM schedules bounded final retry" {
     try std.testing.expect(!service.requireBase(f.layout.encodeChunkCoords(.{ 0, 0, 1 })));
     try std.testing.expect(!service.status.active);
     try std.testing.expect(service.lifecycle.queued.?.retry == .exhausted);
+}
+
+test "player transfers own inventory across checkpoints saves and game restarts" {
+    const f = try PersistenceFixture.init(.{});
+    defer f.deinit();
+    var client = try f.service.createClient();
+    client.publishCheckpoint(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0, .inventory = 6 });
+    const source = [3]u32{ 10, 10, 47 };
+    const empty = [3]u32{ 10, 10, 48 };
+    try std.testing.expectEqual(OperationStatus.inventory_mismatch, try PersistenceFixture.operation(client, .{ .block = empty, .action = .{ .put = .snow }, .player = .{ .id = 1, .expected_sequence = 0 } }));
+    const mined = try PersistenceFixture.operationResult(client, .{ .block = source, .action = .remove, .player = .{ .id = 1, .expected_sequence = 0 } });
+    try std.testing.expectEqual(OperationStatus.success, mined.status);
+    try std.testing.expectEqual(rules.BlockType.crushed_stone, mined.mined_type.?);
+    try std.testing.expectEqual(rules.BlockType.crushed_stone, mined.player_inventory.?.material.?);
+    try std.testing.expectEqual(OperationStatus.inventory_mismatch, try PersistenceFixture.operation(client, .{ .block = .{ 11, 10, 47 }, .action = .remove, .player = .{ .id = 1, .expected_sequence = 1 } }));
+    try std.testing.expectEqual(OperationStatus.inventory_mismatch, try PersistenceFixture.operation(client, .{ .block = empty, .action = .{ .put = .snow }, .player = .{ .id = 1, .expected_sequence = 1 } }));
+    // Coalesced movement state cannot replace the authoritative carried material.
+    client.publishCheckpoint(.{ .id = 1, .feet = .{ 1, 2, 3 }, .yaw = 0.5, .pitch = 0, .inventory = 6 });
+    const saved = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.complete, saved.phase);
+    try std.testing.expectEqual(@as(?u8, 8), (try format.decodePlayer(f.store.players)).inventory);
+    f.service.destroy();
+    f.store.deinit();
+    f.store = try storage.Store.open(std.testing.allocator, f.path, .{});
+    f.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .flat, &f.store, .{});
+    try std.testing.expectEqual(@as(?u8, 8), f.service.restoredPlayer(1).?.inventory);
+    client = try f.service.createClient();
+    const placed = try PersistenceFixture.operationResult(client, .{ .block = source, .action = .{ .put = .crushed_stone }, .player = .{ .id = 1, .expected_sequence = 1 } });
+    try std.testing.expectEqual(OperationStatus.success, placed.status);
+    try std.testing.expectEqual(null, placed.player_inventory.?.material);
+    try std.testing.expectEqual(persistence.Phase.complete, (try f.waitSave(f.service.requestSave(true))).phase);
+    f.service.destroy();
+    f.store.deinit();
+    f.store = try storage.Store.open(std.testing.allocator, f.path, .{});
+    f.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .flat, &f.store, .{});
+    try std.testing.expectEqual(null, f.service.restoredPlayer(1).?.inventory);
+    const encoded = (try f.store.readChunk(std.testing.allocator, f.layout.encodeChunkCoords(.{ 0, 0, 1 }))).?;
+    defer std.testing.allocator.free(encoded);
+    var chunk = try format.decodeChunk(std.testing.allocator, f.store.world_uuid, encoded, f.store.dimensions);
+    defer chunk.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u8, @intFromEnum(rules.BlockType.crushed_stone)), chunk.blocks[15 * 1024 + 10 * 32 + 10]);
+}
+
+test "player extraction rejects a replacement even when the replacement has the same material" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
+    defer service.destroy();
+    const player = try service.createClient();
+    const npc = try service.createClient();
+    player.publishCheckpoint(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+    const block = [3]u32{ 10, 10, test_layout.size_in_blocks[2] - 1 };
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = block, .action = .{ .put = .sand } }));
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = block, .action = .remove }));
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = block, .action = .{ .put = .sand } }));
+    const result = try PersistenceFixture.operationResult(player, .{ .block = block, .action = .remove, .player = .{ .id = 1, .expected_sequence = 1 } });
+    try std.testing.expectEqual(OperationStatus.target_changed, result.status);
+    try std.testing.expectEqual(null, result.player_inventory.?.material);
+    const retry = try PersistenceFixture.operationResult(player, .{ .block = block, .action = .remove, .player = .{ .id = 1, .expected_sequence = 3 } });
+    try std.testing.expectEqual(OperationStatus.success, retry.status);
+    try std.testing.expectEqual(rules.BlockType.sand, retry.player_inventory.?.material.?);
+}
+
+test "saving before a player consumes its acknowledgement captures inventory and terrain together" {
+    const f = try PersistenceFixture.init(.{});
+    defer f.deinit();
+    const client = try f.service.createClient();
+    client.publishCheckpoint(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+    const source = [3]u32{ 10, 10, 47 };
+    _ = try client.trySubmitOperation(.{ .block = source, .action = .remove, .player = .{ .id = 1, .expected_sequence = 0 } });
+    // This can coalesce with the first movement checkpoint before registration runs.
+    client.publishCheckpoint(.{ .id = 1, .feet = .{ 1, 2, 3 }, .yaw = 0, .pitch = 0 });
+    try std.testing.expectEqual(persistence.Phase.complete, (try f.waitSave(f.service.requestSave(true))).phase);
+    try std.testing.expectEqual(@as(usize, 1), f.service.outstanding_operations.load(.acquire));
+    try std.testing.expectEqual(@as(?u8, 8), (try format.decodePlayer(f.store.players)).inventory);
+    const encoded = (try f.store.readChunk(std.testing.allocator, f.layout.encodeChunkCoords(.{ 0, 0, 1 }))).?;
+    defer std.testing.allocator.free(encoded);
+    var chunk = try format.decodeChunk(std.testing.allocator, f.store.world_uuid, encoded, f.store.dimensions);
+    defer chunk.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u8, 0), chunk.blocks[15 * 1024 + 10 * 32 + 10]);
+}
+
+test "player extraction accepts unrelated NPC edits within the same chunk" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
+    defer service.destroy();
+    const player = try service.createClient();
+    const npc = try service.createClient();
+    player.publishCheckpoint(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+    const source = [3]u32{ 10, 10, test_layout.size_in_blocks[2] - 1 };
+    const other = [3]u32{ 11, 10, source[2] };
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = source, .action = .{ .put = .sand } }));
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = other, .action = .{ .put = .snow } }));
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = other, .action = .remove }));
+    const result = try PersistenceFixture.operationResult(player, .{ .block = source, .action = .remove, .player = .{ .id = 1, .expected_sequence = 1 } });
+    try std.testing.expectEqual(OperationStatus.success, result.status);
+    try std.testing.expectEqual(rules.BlockType.sand, result.player_inventory.?.material.?);
 }

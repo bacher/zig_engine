@@ -109,7 +109,9 @@ pub const Engine = struct {
         onUpdate: ?*const fn (engine: *Engine, argument: *anyopaque) void,
         onRender: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder, argument: *anyopaque) void,
         onKeyPress: ?*const fn (engine: *Engine, key_params: KeyParams, argument: *anyopaque) void = null,
+        onKeyRelease: ?*const fn (engine: *Engine, key_params: KeyParams, argument: *anyopaque) void = null,
         onMouseButtonPress: ?*const fn (engine: *Engine, params: MouseButtonParams, argument: *anyopaque) void = null,
+        onMouseButtonRelease: ?*const fn (engine: *Engine, params: MouseButtonParams, argument: *anyopaque) void = null,
         /// Return false to keep rendering while the application completes asynchronous shutdown.
         onCloseRequest: ?*const fn (engine: *Engine, argument: *anyopaque) bool = null,
     };
@@ -335,7 +337,9 @@ pub const Engine = struct {
         const input_controller = InputController(Engine).init(allocator, window_context.window, .{
             .context = engine,
             .on_key_press = onKeyPress,
+            .on_key_release = onKeyRelease,
             .on_mouse_button_press = onMouseButtonPress,
+            .on_mouse_button_release = onMouseButtonRelease,
         }) catch @panic("InputController can't be initialized");
         input_controller.listenWindowEvents();
 
@@ -523,6 +527,16 @@ pub const Engine = struct {
         if (engine.callbacks.onKeyPress) |callback| {
             callback(engine, key_params, engine.callbacks.argument);
         }
+    }
+
+    fn onKeyRelease(engine: *Engine, params: KeyParams) void {
+        if (engine.callbacks.onKeyRelease) |callback|
+            callback(engine, params, engine.callbacks.argument);
+    }
+
+    fn onMouseButtonRelease(engine: *Engine, params: MouseButtonParams) void {
+        if (engine.callbacks.onMouseButtonRelease) |callback|
+            callback(engine, params, engine.callbacks.argument);
     }
 
     fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams) void {
@@ -1737,20 +1751,35 @@ pub const Engine = struct {
     }
 };
 
-test "engine forwards mouse presses and their modifiers to the application" {
+test "engine forwards mouse presses and input releases to the application" {
     const Probe = struct {
         received: ?MouseButtonParams = null,
+        released: ?MouseButtonParams = null,
+        key_released: ?KeyParams = null,
         fn press(_: *Engine, params: MouseButtonParams, argument: *anyopaque) void {
             const self: *@This() = @ptrCast(@alignCast(argument));
             self.received = params;
         }
+        fn mouseRelease(_: *Engine, params: MouseButtonParams, argument: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(argument));
+            self.released = params;
+        }
+        fn keyRelease(_: *Engine, params: KeyParams, argument: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(argument));
+            self.key_released = params;
+        }
     };
     var probe: Probe = .{};
     var engine: Engine = undefined;
-    engine.callbacks = .{ .argument = &probe, .onUpdate = null, .onRender = null, .onMouseButtonPress = Probe.press };
+    engine.callbacks = .{ .argument = &probe, .onUpdate = null, .onRender = null, .onMouseButtonPress = Probe.press, .onMouseButtonRelease = Probe.mouseRelease, .onKeyRelease = Probe.keyRelease };
     const params: MouseButtonParams = .{ .button = .left, .mods = .{ .control = true } };
     Engine.onMouseButtonPress(&engine, params);
     try std.testing.expectEqualDeep(params, probe.received.?);
+    Engine.onMouseButtonRelease(&engine, params);
+    try std.testing.expectEqualDeep(params, probe.released.?);
+    const key: KeyParams = .{ .key = .e, .mods = .{} };
+    Engine.onKeyRelease(&engine, key);
+    try std.testing.expectEqualDeep(key, probe.key_released.?);
 }
 
 test "SSAO debug shortcuts require Ctrl and Ctrl E exits the debug view" {

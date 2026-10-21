@@ -36,6 +36,7 @@ const ChunkResponse = world_data_service.ChunkResponse;
 const SimulationWorker = @import("./simulation_worker.zig").SimulationWorker;
 const player_module = @import("player_controller.zig");
 const PlayerController = player_module.PlayerController;
+const player_interaction = @import("player_interaction.zig");
 const terrain_collision = @import("terrain_collision.zig");
 const consts = @import("./consts.zig");
 const world_engine = @import("./world_engine_glue.zig");
@@ -80,6 +81,7 @@ const Game = struct {
     player: ?PlayerController = null,
     control_mode: enum { player, spectator } = .player,
     block_mode: block_targeting.Mode = .removing,
+    block_interaction: player_interaction.Interaction = .{},
     jump_requested: bool = false,
     /// Keyboard and mouse presses retain their order and material until the camera updates.
     tool_commands: std.ArrayList(BlockAction) = .empty,
@@ -119,7 +121,13 @@ const Game = struct {
     saved_game_object_groups: std.StringHashMapUnmanaged(*GameObjectGroup) = .empty,
 
     fn heldMaterial(game: *const Game) ?voxel_chunk_module.BlockType {
+        if (game.control_mode == .player) return game.block_interaction.inventory;
         return if (game.block_mode == .putting) game.selected_material else null;
+    }
+
+    fn blockMode(game: *const Game) block_targeting.Mode {
+        if (game.control_mode == .spectator) return game.block_mode;
+        return if (game.block_interaction.inventory == null) .removing else .putting;
     }
 
     fn updateHeldMotion(game: *Game) void {
@@ -245,6 +253,9 @@ const Game = struct {
     }
 
     fn updatePersistence(game: *Game) void {
+        // Register/update player movement even in ephemeral worlds. Inventory is
+        // changed only by authoritative transfers, never by these checkpoints.
+        if (!game.exit_requested) game.checkpoint();
         if (game.persistence_store == null) return;
         const service = game.world_data.?;
         if (game.exit_requested and game.exit_intent == null) {
@@ -272,7 +283,6 @@ const Game = struct {
             }
             return;
         }
-        game.checkpoint();
         if (game.engine.time >= game.next_autosave_at) {
             _ = service.requestSave(false);
             game.next_autosave_at = game.engine.time + 60;
@@ -286,6 +296,7 @@ const Game = struct {
     fn beginExit(game: *Game) void {
         if (game.exit_requested) return;
         game.exit_requested = true;
+        game.block_interaction.cancelHold();
         // Quiesce NPC admission before the final save can enter the service queue.
         // Already admitted NPC commands precede that save; later ones await resume.
         if (game.simulation) |simulation| simulation.pauseDispatch();
@@ -361,6 +372,8 @@ const Game = struct {
         const player = if (game.player) |*player| player else return;
         const scene = game.engine.active_scene.?;
         game.held_motion.reset();
+        game.block_interaction.cancelHold();
+        game.clearBlockFocus();
         game.jump_requested = false;
         player.resetJumpInput();
         if (game.control_mode == .player) {
@@ -391,6 +404,9 @@ const Game = struct {
                     // after completions free capacity. No identity was assigned.
                     break;
                 };
+                if (pending.operation.player != null) {
+                    game.block_interaction.markSubmitted(pending.request_id.?);
+                }
             }
         }
     }
@@ -422,6 +438,10 @@ const Game = struct {
                     };
                 }
                 world.acknowledgeOperationResult(result.request_id, result.status);
+                if (game.block_interaction.acknowledge(game.player_id, result)) {
+                    game.block_interaction.finishReconciliation(world.pending_operations.items);
+                    game.clearBlockFocus();
+                }
                 world.last_edit_result = .{ .status = result.status, .failure = result.failure, .mined_type = result.mined_type };
                 game.showBlockEditError(world.last_edit_result.?);
             }
@@ -668,8 +688,77 @@ const Game = struct {
     fn updateBlockTool(game: *Game) void {
         const input = game.engine.input_controller;
         defer game.tool_commands.clearRetainingCapacity();
-        if (!input.focused or input.focus_changed) return;
+        if (!input.focused or input.focus_changed) {
+            game.block_interaction.loseFocus();
+            return;
+        }
+        if (game.control_mode == .player) {
+            game.updatePlayerBlockTool();
+            return;
+        }
         for (game.tool_commands.items) |command| game.editBlockInView(command);
+    }
+
+    fn updatePlayerBlockTool(game: *Game) void {
+        const interaction = &game.block_interaction;
+        const world = if (game.world) |*world| world else return;
+        interaction.finishReconciliation(world.pending_operations.items);
+        const camera = game.engine.active_scene.?.camera;
+        const mode = game.blockMode();
+        const target = (block_targeting.findTarget(world, camera.position, camera.forwardDirection(), mode) catch null);
+        if (interaction.requested) |source| {
+            interaction.requested = null;
+            // Observer edits may still be reconciling when returning to the player.
+            if (interaction.pending != null or world.pending_operations.items.len != 0) return;
+            const block = target orelse return;
+            const coords, const local = world_module.splitBlockCoords(block);
+            const chunk = world.getChunk(coords) orelse return;
+            interaction.holding = .{
+                .source = source,
+                .operation = .{
+                    .block = block,
+                    .action = if (interaction.inventory) |material| .{ .put = material } else .remove,
+                    .player = .{ .id = game.player_id, .expected_sequence = chunk.cell_changes.sequence },
+                },
+                .material = chunk.content.getBlock(local),
+            };
+            // The press happened during this frame; its preceding delta is not work.
+            return;
+        }
+        const hold = if (interaction.holding) |*hold| hold else return;
+        if (target == null or !std.meta.eql(target.?, hold.operation.block)) {
+            interaction.cancelHold();
+            return;
+        }
+        const coords, const local = world_module.splitBlockCoords(hold.operation.block);
+        const chunk = world.getChunk(coords) orelse {
+            interaction.cancelHold();
+            return;
+        };
+        if (!chunk.cell_changes.unchangedSince(transformations.index(local), hold.operation.player.?.expected_sequence) or chunk.content.getBlock(local) != hold.material) {
+            interaction.cancelHold();
+            return;
+        }
+        if (hold.operation.action == .put) if (game.player) |*player| {
+            if (terrain_collision.overlapsBlock(player.body, player.position, game.layout(), hold.operation.block)) {
+                interaction.cancelHold();
+                return;
+            }
+        };
+        const elapsed = game.engine.frame_delta;
+        if (std.math.isFinite(elapsed) and elapsed > 0) hold.elapsed += elapsed;
+        if (hold.elapsed < hold.duration()) return;
+
+        const operation = hold.operation;
+        const result = world.tryOperation(operation);
+        interaction.completePrediction(result);
+        if (result.status != .success) {
+            game.showBlockEditError(result);
+            return;
+        }
+        if (game.player) |*player| player.terrainChanged();
+        game.clearBlockFocus();
+        game.markChunksAroundBlockDirty(operation.block);
     }
 
     fn toggleBlockMode(game: *Game) void {
@@ -704,28 +793,31 @@ const Game = struct {
         if (!input.focused or input.focus_changed) return;
         const world = if (game.world) |*world| world else return;
         const camera = scene.camera;
-        const block = (block_targeting.findTarget(world, camera.position, camera.forwardDirection(), game.block_mode) catch return) orelse return;
-        if (game.block_mode == .removing) {
+        const mode = game.blockMode();
+        const material = game.heldMaterial() orelse game.selected_material;
+        const block = (block_targeting.findTarget(world, camera.position, camera.forwardDirection(), mode) catch return) orelse return;
+        if (mode == .removing) {
             scene.highlighted_block = block;
             return;
         }
         if (game.placement_validation == null or
             !std.meta.eql(game.placement_validation.?.block, block) or
-            game.placement_validation.?.material != game.selected_material or
+            game.placement_validation.?.material != material or
             !game.placement_validation.?.window.isCurrent(world))
         {
             game.placement_validation = .{
                 .block = block,
-                .material = game.selected_material,
+                .material = material,
                 .window = world.validationWindow(block),
-                .result = world.previewOperation(.{ .block = block, .action = .{ .put = game.selected_material } }),
+                .result = world.previewOperation(.{ .block = block, .action = .{ .put = material } }),
             };
         }
-        preview = .{ .block = block, .material = game.selected_material, .result = game.placement_validation.?.result };
+        preview = .{ .block = block, .material = material, .result = game.placement_validation.?.result };
         if (game.player) |*player| preview.?.overlaps_player = terrain_collision.overlapsBlock(player.body, player.position, game.layout(), block);
     }
 
     fn queueBlockAction(game: *Game, action: BlockAction) void {
+        if (game.control_mode != .spectator) return;
         // Commands capture the active mode at press time, like their material.
         if ((action == .place) != (game.block_mode == .putting)) return;
         if (game.tool_commands.items.len >= 64) {
@@ -1042,7 +1134,9 @@ pub fn main(init: std.process.Init) !void {
             .onUpdate = onUpdate,
             .onRender = onRender,
             .onKeyPress = onKeyPress,
+            .onKeyRelease = onKeyRelease,
             .onMouseButtonPress = onMouseButtonPress,
+            .onMouseButtonRelease = onMouseButtonRelease,
             .onCloseRequest = onCloseRequest,
         },
     );
@@ -1088,8 +1182,10 @@ pub fn main(init: std.process.Init) !void {
     if (saved_player) |saved| {
         game.player.?.yaw = saved.yaw;
         game.player.?.pitch = saved.pitch;
+        game.block_interaction.inventory = if (saved.inventory) |raw| @enumFromInt(raw) else null;
         // Fresh controller state discards velocity, climbing, and transient history.
     } else game.player.?.grounded = true;
+    game.checkpoint();
     game.simulation = try SimulationWorker.create(game.world_data.?);
     scene.spectator_enabled = false;
     engine.input_controller.cursor_capture = .always;
@@ -1232,11 +1328,12 @@ fn onKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque) v
 fn handleKeyPress(game: *Game, key_params: KeyParams) void {
     if (game.exit_requested) return;
     switch (key_params.key) {
-        .x => game.queueBlockAction(.remove),
+        .x => if (game.control_mode == .spectator) game.queueBlockAction(.remove),
         .e => if (!key_params.mods.control) {
-            game.queueBlockAction(.{ .place = game.selected_material });
+            if (game.control_mode == .player) game.block_interaction.press(.key) else game.queueBlockAction(.{ .place = game.selected_material });
         },
         .one, .two, .three, .four, .five, .six, .seven, .eight => {
+            if (game.control_mode != .spectator) return;
             game.selected_material = switch (key_params.key) {
                 .one => .dirt,
                 .two => .crushed_stone,
@@ -1251,13 +1348,31 @@ fn handleKeyPress(game: *Game, key_params: KeyParams) void {
             std.debug.print("selected material: {s}\n", .{@tagName(game.selected_material)});
         },
         .q => game.toggleControlMode(),
-        .tab => game.toggleBlockMode(),
+        .tab => if (game.control_mode == .spectator) game.toggleBlockMode(),
         // A press/release occurring between frames must still produce one jump.
         .space => if (game.control_mode == .player) {
             game.jump_requested = true;
         },
         else => {},
     }
+}
+
+fn onKeyRelease(_: *Engine, params: KeyParams, game_opaque: *anyopaque) void {
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
+    handleKeyRelease(game, params);
+}
+
+fn handleKeyRelease(game: *Game, params: KeyParams) void {
+    if (params.key == .e) game.block_interaction.release(.key);
+}
+
+fn onMouseButtonRelease(_: *Engine, params: MouseButtonParams, game_opaque: *anyopaque) void {
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
+    handleMouseButtonRelease(game, params);
+}
+
+fn handleMouseButtonRelease(game: *Game, params: MouseButtonParams) void {
+    if (params.button == .left) game.block_interaction.release(.mouse);
 }
 
 fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams, game_opaque: *anyopaque) void {
@@ -1268,6 +1383,10 @@ fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams, game_opaque: *
 
 fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
     if (game.exit_requested) return;
+    if (game.control_mode == .player) {
+        if (params.button == .left) game.block_interaction.press(.mouse);
+        return;
+    }
     if (params.button == .left) game.queueBlockAction(switch (game.block_mode) {
         .putting => .{ .place = game.selected_material },
         .removing => .remove,
@@ -1348,6 +1467,7 @@ test "held motion sampling uses actual active-camera movement and material selec
     }
     try std.testing.expect(@abs(game.held_motion.offset.translation[1]) + @abs(game.held_motion.offset.translation[2]) > 0.001);
     const previous = game.held_motion.previous;
+    game.control_mode = .spectator;
     handleKeyPress(game, .{ .key = .three, .mods = .{} });
     try std.testing.expectEqual(previous, game.held_motion.previous);
     try std.testing.expectEqual(voxel_chunk_module.BlockType.tree_trunk, game.selected_material);
@@ -1415,20 +1535,24 @@ test "held pitch shift follows the active controller even when the item is hidde
     }
 }
 
-test "held material follows tool and selection in player and spectator modes without a target" {
+test "held material follows player inventory and observer selection without a target" {
     var game: Game = .{ .allocator = std.testing.allocator, .engine = undefined };
-    for ([_]@TypeOf(game.control_mode){ .player, .spectator }) |mode| {
-        game.control_mode = mode;
-        game.block_mode = .removing;
+    for ([_]block_targeting.Mode{ .removing, .putting }) |mode| {
+        game.block_mode = mode;
+        game.block_interaction.inventory = null;
         try std.testing.expectEqual(null, game.heldMaterial());
-        game.block_mode = .putting;
-        for ([_]voxel_chunk_module.BlockType{ .dirt, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete }) |material| {
-            game.selected_material = material;
-            try std.testing.expectEqual(material, game.heldMaterial().?);
-        }
-        game.block_mode = .removing;
-        try std.testing.expectEqual(null, game.heldMaterial());
+        game.block_interaction.inventory = .crushed_stone;
+        game.selected_material = .tree_trunk;
+        try std.testing.expectEqual(voxel_chunk_module.BlockType.crushed_stone, game.heldMaterial().?);
     }
+    game.control_mode = .spectator;
+    game.block_mode = .putting;
+    for ([_]voxel_chunk_module.BlockType{ .dirt, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete }) |material| {
+        game.selected_material = material;
+        try std.testing.expectEqual(material, game.heldMaterial().?);
+    }
+    game.block_mode = .removing;
+    try std.testing.expectEqual(null, game.heldMaterial());
 }
 
 fn drawCrosshair() void {
@@ -1548,7 +1672,11 @@ test "Q excursions start at player eyes and return to the frozen player position
     game.player.?.yaw = 0.5;
     game.player.?.pitch = 0.2;
     game.player.?.auto_climb = true;
+    game.block_interaction.inventory = .sand;
+    game.block_interaction.holding = .{ .source = .key, .operation = .{ .block = .{ 0, 0, 0 }, .action = .{ .put = .sand } }, .material = .none, .elapsed = 0.5 };
     game.toggleControlMode();
+    try std.testing.expectEqual(null, game.block_interaction.holding);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, game.block_interaction.inventory.?);
     try std.testing.expectEqual(.removing, game.block_mode);
     const eyes = camera.position;
     try std.testing.expectEqualDeep(Position{ 1.5, 2.5, 4.6 }, eyes);
@@ -1561,6 +1689,7 @@ test "Q excursions start at player eyes and return to the frozen player position
     game.block_mode = .putting;
     game.toggleControlMode();
     try std.testing.expectEqual(.putting, game.block_mode);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, game.block_interaction.inventory.?);
     try std.testing.expectEqualDeep(eyes, camera.position);
     try std.testing.expectEqualDeep(Position{ 1.5, 2.5, 3 }, game.player.?.position);
     try std.testing.expect(!scene.spectator_enabled);
@@ -1568,6 +1697,7 @@ test "Q excursions start at player eyes and return to the frozen player position
     try std.testing.expectEqual(@as(@TypeOf(input.cursor_capture), .always), input.cursor_capture);
     game.toggleControlMode();
     try std.testing.expectEqual(.putting, game.block_mode);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, game.block_interaction.inventory.?);
     try std.testing.expectEqualDeep(eyes, camera.position);
 }
 
@@ -1613,6 +1743,7 @@ test "tool shortcuts respect Tab mode, edit once and preserve material selection
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
+    fixture.game.control_mode = .spectator;
     const input = &fixture.input;
     fixture.camera.updatePosition(.{ 0.5, 0.5, 0.5 });
     const origin = test_layout.origin_chunk;
@@ -1801,13 +1932,17 @@ test "mouse look and removal in the same frame use the new player and spectator 
         if (spectating) fixture.game.control_mode = .spectator;
         // Event polling queues X while the view still points along +y. The mouse
         // delta turns it toward +x during the current frame's camera update.
-        handleKeyPress(&fixture.game, .{ .key = .x, .mods = .{} });
+        handleKeyPress(&fixture.game, .{ .key = if (spectating) .x else .e, .mods = .{} });
         try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
         fixture.input.cursor_position_delta = .{ math.pi / 0.01, 0 };
         fixture.input.cursor_left_button_pressed = true;
         if (spectating) spectator.update(0.016);
         fixture.game.updatePlayer(false);
         fixture.game.updateBlockTool();
+        if (!spectating) {
+            fixture.engine.frame_delta = player_interaction.extraction_seconds;
+            fixture.game.updateBlockTool();
+        }
 
         const operations = fixture.game.world.?.pending_operations.items;
         try std.testing.expectEqual(1, operations.len);
@@ -1878,6 +2013,7 @@ test "nearest-vertex previews and actions agree in both block and control modes 
             defer fixture.deinit();
             fixture.game.control_mode = if (spectating) .spectator else .player;
             fixture.game.block_mode = mode;
+            if (!spectating and mode == .putting) fixture.game.block_interaction.inventory = .sand;
             fixture.game.selected_material = .sand;
             fixture.camera.updatePosition(.{ 0.5, 0.25, 0.5 });
             try fixture.game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
@@ -1905,10 +2041,15 @@ test "nearest-vertex previews and actions agree in both block and control modes 
             handleMouseButtonPress(&fixture.game, .{ .button = .left, .mods = .{} });
             fixture.game.updateBlockTool();
             try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
+            handleMouseButtonRelease(&fixture.game, .{ .button = .left, .mods = .{} });
             fixture.camera.updatePosition(.{ 0.5, 0.25, 0.5 });
             fixture.game.updateBlockFocus();
             handleMouseButtonPress(&fixture.game, .{ .button = .left, .mods = .{} });
             fixture.game.updateBlockTool();
+            if (!spectating) {
+                fixture.engine.frame_delta = if (mode == .putting) player_interaction.placement_seconds else player_interaction.extraction_seconds;
+                fixture.game.updateBlockTool();
+            }
             try std.testing.expectEqual(1, fixture.game.world.?.pending_operations.items.len);
             try std.testing.expectEqual(candidate, fixture.game.world.?.pending_operations.items[0].operation.block);
             try std.testing.expectEqual(mode == .putting, try fixture.game.world.?.isBlockSolid(candidate));
@@ -1916,116 +2057,110 @@ test "nearest-vertex previews and actions agree in both block and control modes 
     }
 }
 
-test "removing and replacing the same slot needs no camera movement in player or spectator control" {
+test "observer removes and replaces the same slot without camera movement" {
     const coordinates = @import("block_coordinates.zig");
-    for ([_]bool{ false, true }) |spectating| {
-        var fixture: StreamingTest = .{};
-        fixture.init();
-        defer fixture.deinit();
-        fixture.game.control_mode = if (spectating) .spectator else .player;
-        fixture.game.selected_material = .sand;
-        fixture.camera.updatePosition(.{ 0.5, 0.5, 0.5 });
-        try fixture.game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
-        const candidate = coordinates.fromWorld(&test_layout, .{ 0, 4, 0 }).?;
-        const backing = coordinates.fromWorld(&test_layout, .{ 0, 5, 0 }).?;
-        fixture.game.world.?.setBlockUnchecked(candidate, .stone);
-        fixture.game.world.?.setBlockUnchecked(backing, .stone);
-        fixture.game.world.?.pending_operations.clearRetainingCapacity();
-        fixture.game.updateBlockFocus();
-        try std.testing.expectEqual(candidate, fixture.scene.highlighted_block.?);
-        handleKeyPress(&fixture.game, .{ .key = .x, .mods = .{} });
-        fixture.game.updateBlockTool();
-        fixture.game.updateBlockFocus();
-        // The backing face is 4.5 m away and its cube is not removable.
-        try std.testing.expectEqual(null, fixture.scene.highlighted_block);
-        handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
-        fixture.game.updateBlockFocus();
-        try std.testing.expectEqual(candidate, fixture.game.current_placement_preview.?.block);
-        try std.testing.expectEqual(world_module.OperationStatus.success, fixture.game.current_placement_preview.?.result.status);
-        try std.testing.expectEqualDeep(placement_preview.allowed_color, fixture.scene.block_overlays.cells[0].color);
-        handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
-        fixture.game.updateBlockTool();
-        try std.testing.expectEqual(2, fixture.game.world.?.pending_operations.items.len);
-        for (fixture.game.world.?.pending_operations.items) |pending| try std.testing.expectEqual(candidate, pending.operation.block);
-        try std.testing.expect(try fixture.game.world.?.isBlockSolid(candidate));
-        try std.testing.expect(try fixture.game.world.?.isBlockSolid(backing));
-    }
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    fixture.game.control_mode = .spectator;
+    fixture.game.selected_material = .sand;
+    fixture.camera.updatePosition(.{ 0.5, 0.5, 0.5 });
+    try fixture.game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
+    const candidate = coordinates.fromWorld(&test_layout, .{ 0, 4, 0 }).?;
+    const backing = coordinates.fromWorld(&test_layout, .{ 0, 5, 0 }).?;
+    fixture.game.world.?.setBlockUnchecked(candidate, .stone);
+    fixture.game.world.?.setBlockUnchecked(backing, .stone);
+    fixture.game.world.?.pending_operations.clearRetainingCapacity();
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(candidate, fixture.scene.highlighted_block.?);
+    handleKeyPress(&fixture.game, .{ .key = .x, .mods = .{} });
+    fixture.game.updateBlockTool();
+    fixture.game.updateBlockFocus();
+    // The backing face is 4.5 m away and its cube is not removable.
+    try std.testing.expectEqual(null, fixture.scene.highlighted_block);
+    handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(candidate, fixture.game.current_placement_preview.?.block);
+    try std.testing.expectEqual(world_module.OperationStatus.success, fixture.game.current_placement_preview.?.result.status);
+    try std.testing.expectEqualDeep(placement_preview.allowed_color, fixture.scene.block_overlays.cells[0].color);
+    handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
+    fixture.game.updateBlockTool();
+    try std.testing.expectEqual(2, fixture.game.world.?.pending_operations.items.len);
+    for (fixture.game.world.?.pending_operations.items) |pending| try std.testing.expectEqual(candidate, pending.operation.block);
+    try std.testing.expect(try fixture.game.world.?.isBlockSolid(candidate));
+    try std.testing.expect(try fixture.game.world.?.isBlockSolid(backing));
 }
 
-test "Tab separates focus and placement previews and skips structural validation in removing mode" {
-    for ([_]bool{ false, true }) |spectating| {
-        var fixture: StreamingTest = .{};
-        fixture.init();
-        defer fixture.deinit();
-        try fixture.prepareToolTest();
-        fixture.game.control_mode = if (spectating) .spectator else .player;
-        fixture.game.selected_material = .tree_trunk;
-        const target = StreamingTest.toolTarget();
-        const below_chunk = test_layout.origin_chunk - ChunkCoords{ 0, 0, 1 };
-        try fixture.game.world.?.insertChunk(below_chunk, WorldChunk.initEmpty());
-        fixture.game.world.?.setBlockUnchecked(.{ target[0], target[1] - 1, target[2] - 1 }, .stone);
-        fixture.game.world.?.pending_operations.clearRetainingCapacity();
+test "observer Tab separates focus and placement previews and skips removal validation" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    fixture.game.control_mode = .spectator;
+    fixture.game.selected_material = .tree_trunk;
+    const target = StreamingTest.toolTarget();
+    const below_chunk = test_layout.origin_chunk - ChunkCoords{ 0, 0, 1 };
+    try fixture.game.world.?.insertChunk(below_chunk, WorldChunk.initEmpty());
+    fixture.game.world.?.setBlockUnchecked(.{ target[0], target[1] - 1, target[2] - 1 }, .stone);
+    fixture.game.world.?.pending_operations.clearRetainingCapacity();
 
-        var validation_calls: usize = 0;
-        fixture.game.world.?.preview_call_counter = &validation_calls;
-        fixture.game.updateBlockFocus();
-        try std.testing.expectEqual(target, fixture.scene.highlighted_block.?);
-        try std.testing.expectEqual(0, fixture.scene.block_overlays.count);
-        try std.testing.expectEqual(null, fixture.game.placement_validation);
-        try std.testing.expectEqual(null, fixture.game.current_placement_preview);
-        try std.testing.expectEqual(0, validation_calls);
+    var validation_calls: usize = 0;
+    fixture.game.world.?.preview_call_counter = &validation_calls;
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(target, fixture.scene.highlighted_block.?);
+    try std.testing.expectEqual(0, fixture.scene.block_overlays.count);
+    try std.testing.expectEqual(null, fixture.game.placement_validation);
+    try std.testing.expectEqual(null, fixture.game.current_placement_preview);
+    try std.testing.expectEqual(0, validation_calls);
 
-        handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
-        fixture.game.updateBlockFocus();
-        try std.testing.expectEqual(null, fixture.scene.highlighted_block);
-        try std.testing.expectEqual(1, fixture.scene.block_overlays.count);
-        try std.testing.expectEqual(world_module.OperationStatus.success, fixture.game.current_placement_preview.?.result.status);
-        try std.testing.expectEqual(1, validation_calls);
+    handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(null, fixture.scene.highlighted_block);
+    try std.testing.expectEqual(1, fixture.scene.block_overlays.count);
+    try std.testing.expectEqual(world_module.OperationStatus.success, fixture.game.current_placement_preview.?.result.status);
+    try std.testing.expectEqual(1, validation_calls);
 
-        handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
-        try std.testing.expectEqual(0, fixture.scene.block_overlays.count);
-        try std.testing.expectEqual(null, fixture.game.placement_validation);
-        try std.testing.expectEqual(null, fixture.game.current_placement_preview);
-        fixture.game.world.?.removeChunk(below_chunk);
-        fixture.game.updateBlockFocus();
-        try std.testing.expectEqual(target, fixture.scene.highlighted_block.?);
-        try std.testing.expectEqual(1, validation_calls);
+    handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
+    try std.testing.expectEqual(0, fixture.scene.block_overlays.count);
+    try std.testing.expectEqual(null, fixture.game.placement_validation);
+    try std.testing.expectEqual(null, fixture.game.current_placement_preview);
+    fixture.game.world.?.removeChunk(below_chunk);
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(target, fixture.scene.highlighted_block.?);
+    try std.testing.expectEqual(1, validation_calls);
 
-        handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
-        fixture.game.updateBlockFocus();
-        try std.testing.expectEqual(null, fixture.scene.highlighted_block);
-        try std.testing.expectEqual(world_module.OperationStatus.missing_data, fixture.game.current_placement_preview.?.result.status);
-        try std.testing.expectEqual(2, validation_calls);
-        fixture.input.focused = false;
-        fixture.game.updateBlockFocus();
-        try std.testing.expectEqual(null, fixture.scene.highlighted_block);
-        try std.testing.expectEqual(0, fixture.scene.block_overlays.count);
-        try std.testing.expectEqual(null, fixture.game.placement_validation);
-        try std.testing.expectEqual(null, fixture.game.current_placement_preview);
-    }
+    handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(null, fixture.scene.highlighted_block);
+    try std.testing.expectEqual(world_module.OperationStatus.missing_data, fixture.game.current_placement_preview.?.result.status);
+    try std.testing.expectEqual(2, validation_calls);
+    fixture.input.focused = false;
+    fixture.game.updateBlockFocus();
+    try std.testing.expectEqual(null, fixture.scene.highlighted_block);
+    try std.testing.expectEqual(0, fixture.scene.block_overlays.count);
+    try std.testing.expectEqual(null, fixture.game.placement_validation);
+    try std.testing.expectEqual(null, fixture.game.current_placement_preview);
 }
 
-test "left click removes once per press in the initial mode in player and spectator control" {
-    for ([_]bool{ false, true }) |spectating| {
-        var fixture: StreamingTest = .{};
-        fixture.init();
-        defer fixture.deinit();
-        try fixture.prepareToolTest();
-        fixture.game.control_mode = if (spectating) .spectator else .player;
-        handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
-        handleMouseButtonPress(&fixture.game, .{ .button = .right, .mods = .{} });
-        try std.testing.expectEqual(0, fixture.game.tool_commands.items.len);
-        for (0..2) |_| handleMouseButtonPress(&fixture.game, .{ .button = .left, .mods = .{} });
-        fixture.game.updateBlockTool();
-        const operations = fixture.game.world.?.pending_operations.items;
-        try std.testing.expectEqual(2, operations.len);
-        try std.testing.expect(operations[0].operation.action == .remove);
-        try std.testing.expect(operations[1].operation.action == .remove);
-        try std.testing.expectEqual(StreamingTest.toolTarget(), operations[0].operation.block);
-        try std.testing.expectEqual(operations[0].operation.block[1] + 1, operations[1].operation.block[1]);
-        fixture.game.updateBlockTool();
-        try std.testing.expectEqual(2, fixture.game.world.?.pending_operations.items.len);
-    }
+test "observer left click removes instantly once per press" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    fixture.game.control_mode = .spectator;
+    handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
+    handleMouseButtonPress(&fixture.game, .{ .button = .right, .mods = .{} });
+    try std.testing.expectEqual(0, fixture.game.tool_commands.items.len);
+    for (0..2) |_| handleMouseButtonPress(&fixture.game, .{ .button = .left, .mods = .{} });
+    fixture.game.updateBlockTool();
+    const operations = fixture.game.world.?.pending_operations.items;
+    try std.testing.expectEqual(2, operations.len);
+    try std.testing.expect(operations[0].operation.action == .remove);
+    try std.testing.expect(operations[1].operation.action == .remove);
+    try std.testing.expectEqual(StreamingTest.toolTarget(), operations[0].operation.block);
+    try std.testing.expectEqual(operations[0].operation.block[1] + 1, operations[1].operation.block[1]);
+    fixture.game.updateBlockTool();
+    try std.testing.expectEqual(2, fixture.game.world.?.pending_operations.items.len);
 }
 
 test "placement preview shows missing footprint cells and refreshes after edits, snapshots and material selection" {
@@ -2661,12 +2796,55 @@ const StreamingTest = struct {
 
     fn prepareToolTest(self: *StreamingTest) !void {
         self.camera.updatePosition(.{ 0.5, 0.5, 0.5 });
+        self.game.control_mode = .spectator;
         self.game.selected_material = .sand;
         try self.game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
         const target = toolTarget();
         self.game.world.?.setBlockUnchecked(target, .stone);
         self.game.world.?.setBlockUnchecked(.{ target[0], target[1] + 1, target[2] }, .stone);
         self.game.world.?.pending_operations.clearRetainingCapacity();
+    }
+
+    fn preparePlayerToolTest(self: *StreamingTest) !void {
+        try self.prepareToolTest();
+        self.game.control_mode = .player;
+        self.changeToolMaterial(.sand);
+        self.engine.frame_delta = 0;
+    }
+
+    fn changeToolMaterial(self: *StreamingTest, material: voxel_chunk_module.BlockType) void {
+        const coords, const local = world_module.splitBlockCoords(toolTarget());
+        self.game.world.?.chunks.getPtr(self.game.layout().encodeChunkCoords(coords)).?.changeType(local, material);
+    }
+
+    fn acknowledgePlayer(self: *StreamingTest, request_id: u64, status: world_module.OperationStatus, inventory: ?voxel_chunk_module.BlockType) !void {
+        const pending = &self.game.world.?.pending_operations.items[0];
+        pending.request_id = request_id;
+        self.game.block_interaction.markSubmitted(request_id);
+        const coords, _ = world_module.splitBlockCoords(pending.operation.block);
+        try self.apply(&.{.{
+            .coords = coords,
+            .subscription_id = null,
+            .operation = .{ .request_id = request_id, .status = status, .player_inventory = .{ .player_id = self.game.player_id, .material = inventory } },
+            .data = .acknowledgement,
+        }});
+    }
+
+    fn serviceOperation(client: *world_data_service.Client, operation: world_module.BlockOperation) !world_data_service.OperationResult {
+        const request_id = try client.trySubmitOperation(operation);
+        var responses: std.ArrayList(ChunkResponse) = .empty;
+        defer {
+            for (responses.items) |response| response.deinit(std.testing.allocator);
+            responses.deinit(std.testing.allocator);
+        }
+        while (try client.waitResponses(&responses)) {
+            for (responses.items) |response| if (response.operation) |result| {
+                if (result.request_id == request_id) return result;
+            };
+            for (responses.items) |response| response.deinit(std.testing.allocator);
+            responses.clearRetainingCapacity();
+        }
+        return error.ServiceStopped;
     }
 
     fn initWithLayout(self: *StreamingTest, layout: *const WorldLayout) void {
@@ -2677,6 +2855,7 @@ const StreamingTest = struct {
         self.scene.camera = &self.camera;
         self.engine.active_scene = &self.scene;
         self.engine.time = 0;
+        self.engine.frame_delta = 0;
         self.input = .{
             .allocator = std.testing.allocator,
             .window = undefined,
@@ -3488,14 +3667,19 @@ test "shutdown cannot save ahead of optimistic edits that have not been admitted
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    try fixture.prepareToolTest();
+    try fixture.preparePlayerToolTest();
     const game = &fixture.game;
     game.world_client = try service.createClient();
     game.world_data = service;
     game.persistence_store = &store;
     game.player = PlayerController.init(allocator, .{ 0, 0, 0 });
-    game.world.?.setBlockUnchecked(StreamingTest.toolTarget(), .none);
+    game.block_interaction.press(.key);
+    game.updateBlockTool();
+    fixture.engine.frame_delta = 3;
+    game.updateBlockTool();
     game.flushBlockOperations();
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, game.heldMaterial().?);
+    try std.testing.expectEqual(null, game.block_interaction.pending.?.request_id);
     try std.testing.expectEqual(@as(usize, 1), game.world.?.pending_operations.items.len);
     try std.testing.expectEqual(null, game.world.?.pending_operations.items[0].request_id);
     try std.testing.expectEqual(@as(u64, 0), game.world_client.?.last_operation_id);
@@ -3506,6 +3690,8 @@ test "shutdown cannot save ahead of optimistic edits that have not been admitted
     // Canceling this drain restores controls without discarding the intent.
     game.cancelExit();
     try std.testing.expect(!game.exit_requested);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, game.heldMaterial().?);
+    try std.testing.expect(game.block_interaction.pending != null);
     try std.testing.expectEqual(@as(usize, 1), game.world.?.pending_operations.items.len);
 }
 
@@ -3573,4 +3759,268 @@ test "snapshot rebase allocation failure renews subscription and accepts replace
     try fixture.apply(&.{.{ .coords = coords, .subscription_id = fresh, .chunk_revision = 5, .data = .{ .blocks = .{ .chunk = snapshot } } }});
     try std.testing.expectEqual(@as(u64, 5), game.world.?.getChunk(coords).?.chunk_revision);
     try std.testing.expectEqual(@as(usize, 0), game.world.?.pending_operations.items.len);
+}
+
+test "player holds E or mouse for three seconds to extract and one second to place" {
+    for ([_]player_interaction.Source{ .key, .mouse }) |source| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        try fixture.preparePlayerToolTest();
+        const game = &fixture.game;
+        const target = StreamingTest.toolTarget();
+        game.block_interaction.press(source);
+        game.updateBlockTool();
+        fixture.engine.frame_delta = 2.5;
+        game.updateBlockTool();
+        try std.testing.expect(try game.world.?.isBlockSolid(target));
+        try std.testing.expectEqual(null, game.heldMaterial());
+        try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
+        fixture.engine.frame_delta = 0.5;
+        game.updateBlockTool();
+        try std.testing.expect(!try game.world.?.isBlockSolid(target));
+        try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, game.heldMaterial().?);
+        try std.testing.expectEqual(.putting, game.blockMode());
+        try fixture.acknowledgePlayer(1, .success, .sand);
+        // Holding through completion and acknowledgement does not start placement.
+        fixture.engine.frame_delta = 10;
+        game.updateBlockTool();
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+        try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
+        game.block_interaction.release(source);
+        game.block_interaction.press(source);
+        game.updateBlockTool();
+        fixture.engine.frame_delta = 0.75;
+        game.updateBlockTool();
+        try std.testing.expect(!try game.world.?.isBlockSolid(target));
+        try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, game.heldMaterial().?);
+        fixture.engine.frame_delta = 0.25;
+        game.updateBlockTool();
+        try std.testing.expect(try game.world.?.isBlockSolid(target));
+        try std.testing.expectEqual(null, game.heldMaterial());
+        try std.testing.expectEqual(.removing, game.blockMode());
+        try fixture.acknowledgePlayer(2, .success, null);
+        game.updateBlockTool();
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+    }
+}
+
+test "early release and same-frame repress restart work without editing terrain or inventory" {
+    for ([_]bool{ false, true }) |placing| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        try fixture.preparePlayerToolTest();
+        const game = &fixture.game;
+        if (placing) game.block_interaction.inventory = .sand;
+        handleKeyPress(game, .{ .key = .e, .mods = .{} });
+        game.updateBlockTool();
+        fixture.engine.frame_delta = if (placing) 0.75 else 2.5;
+        game.updateBlockTool();
+        handleKeyRelease(game, .{ .key = .e, .mods = .{} });
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+        handleKeyPress(game, .{ .key = .e, .mods = .{} });
+        game.updateBlockTool();
+        try std.testing.expectEqual(@as(f64, 0), game.block_interaction.holding.?.elapsed);
+        game.updateBlockTool();
+        try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
+        try std.testing.expectEqual(if (placing) @as(?voxel_chunk_module.BlockType, .sand) else null, game.heldMaterial());
+        handleKeyRelease(game, .{ .key = .e, .mods = .{} });
+        handleMouseButtonPress(game, .{ .button = .left, .mods = .{} });
+        game.updateBlockTool();
+        handleMouseButtonRelease(game, .{ .button = .left, .mods = .{} });
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+    }
+}
+
+test "player inventory preserves mining conversions and blocks Tab X and material shortcuts" {
+    for ([_]voxel_chunk_module.BlockType{ .stone, .grass, .packed_dirt, .sand }) |material| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        try fixture.preparePlayerToolTest();
+        const game = &fixture.game;
+        fixture.changeToolMaterial(material);
+        handleKeyPress(game, .{ .key = .tab, .mods = .{} });
+        handleKeyPress(game, .{ .key = .three, .mods = .{} });
+        handleKeyPress(game, .{ .key = .x, .mods = .{} });
+        handleKeyPress(game, .{ .key = .e, .mods = .{ .control = true } });
+        game.updateBlockTool();
+        try std.testing.expectEqual(.removing, game.blockMode());
+        try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, game.selected_material);
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+        handleKeyPress(game, .{ .key = .e, .mods = .{} });
+        game.updateBlockTool();
+        fixture.engine.frame_delta = 3;
+        game.updateBlockTool();
+        try std.testing.expectEqual(material.minedType(), game.heldMaterial().?);
+        handleKeyPress(game, .{ .key = .tab, .mods = .{} });
+        handleKeyPress(game, .{ .key = .eight, .mods = .{} });
+        try std.testing.expectEqual(.putting, game.blockMode());
+        try std.testing.expectEqual(material.minedType(), game.heldMaterial().?);
+    }
+}
+
+test "changing target range terrain or focus cancels player work without automatic restart" {
+    for (0..6) |cause| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        try fixture.preparePlayerToolTest();
+        const game = &fixture.game;
+        handleKeyPress(game, .{ .key = .e, .mods = .{} });
+        game.updateBlockTool();
+        fixture.engine.frame_delta = 2;
+        game.updateBlockTool();
+        switch (cause) {
+            0 => fixture.camera.updateView(zmath.rotationY(math.pi / 2.0)),
+            1 => {
+                try game.world.?.insertChunk(test_layout.origin_chunk - ChunkCoords{ 0, 1, 0 }, WorldChunk.initEmpty());
+                fixture.camera.updatePosition(.{ 0.5, -5, 0.5 });
+            },
+            2 => fixture.changeToolMaterial(.snow),
+            3 => fixture.input.focused = false,
+            4 => fixture.input.focus_changed = true,
+            5 => game.world.?.removeChunk(test_layout.origin_chunk),
+            else => unreachable,
+        }
+        game.updateBlockTool();
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+        try std.testing.expectEqual(null, game.block_interaction.inventory);
+        try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
+        fixture.input.focused = true;
+        fixture.input.focus_changed = false;
+        game.updateBlockTool();
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+    }
+}
+
+test "inventory waits for acknowledgement and rejection restores extraction and placement" {
+    for ([_]bool{ false, true }) |placing| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        try fixture.preparePlayerToolTest();
+        const game = &fixture.game;
+        if (placing) game.block_interaction.inventory = .sand;
+        game.block_interaction.press(.key);
+        game.updateBlockTool();
+        fixture.engine.frame_delta = if (placing) 1 else 3;
+        game.updateBlockTool();
+        try std.testing.expect(game.block_interaction.pending != null);
+        const before = if (placing) @as(?voxel_chunk_module.BlockType, .sand) else null;
+        try std.testing.expectEqual(if (placing) null else @as(?voxel_chunk_module.BlockType, .sand), game.heldMaterial());
+        game.block_interaction.release(.key);
+        game.block_interaction.press(.mouse);
+        fixture.engine.frame_delta = 100;
+        game.updateBlockTool();
+        try std.testing.expectEqual(1, game.world.?.pending_operations.items.len);
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+        // The result is processed even without a matching terrain subscription.
+        try fixture.acknowledgePlayer(42, if (placing) .already_exists else .already_removed, before);
+        try std.testing.expectEqual(before, game.heldMaterial());
+        try std.testing.expectEqual(null, game.block_interaction.pending);
+        try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
+        game.updateBlockTool();
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+        game.block_interaction.release(.mouse);
+        game.block_interaction.press(.mouse);
+        game.updateBlockTool();
+        try std.testing.expect(game.block_interaction.holding != null);
+    }
+}
+
+test "real service reconciles NPC-winning extraction and placement conflicts" {
+    for ([_]bool{ false, true }) |placing| {
+        const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
+        defer service.destroy();
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        const game = &fixture.game;
+        game.world_client = try service.createClient();
+        const npc = try service.createClient();
+        const target = StreamingTest.toolTarget();
+        const backing = [3]u32{ target[0], target[1] + 1, target[2] };
+        _ = try StreamingTest.serviceOperation(npc, .{ .block = target, .action = .{ .put = .sand } });
+        _ = try StreamingTest.serviceOperation(npc, .{ .block = backing, .action = .{ .put = .sand } });
+        game.world_client.?.publishCheckpoint(.{ .id = game.player_id, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+        const coords = test_layout.origin_chunk;
+        const token = game.world_client.?.requestChunks(.{ coords[0], coords[1] }, coords[2], coords[2] + 1);
+        try fixture.subscribe(coords, token, .blocks);
+        try fixture.waitAndApplyPackages();
+        fixture.camera.updatePosition(.{ 0.5, 0.5, 0.5 });
+        if (placing) {
+            game.block_interaction.press(.key);
+            game.updateBlockTool();
+            fixture.engine.frame_delta = 3;
+            game.updateBlockTool();
+            game.flushBlockOperations();
+            while (game.block_interaction.pending != null) try fixture.waitAndApplyPackages();
+            game.block_interaction.release(.key);
+            try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, game.heldMaterial().?);
+        }
+        // Delay receiving the NPC's update until after the optimistic player commit.
+        _ = try StreamingTest.serviceOperation(npc, .{ .block = target, .action = if (placing) .{ .put = .snow } else .remove });
+        game.block_interaction.press(.mouse);
+        game.updateBlockTool();
+        fixture.engine.frame_delta = if (placing) 1 else 3;
+        game.updateBlockTool();
+        try std.testing.expectEqual(if (placing) null else @as(?voxel_chunk_module.BlockType, .sand), game.heldMaterial());
+        game.flushBlockOperations();
+        while (game.block_interaction.pending != null) try fixture.waitAndApplyPackages();
+        try std.testing.expectEqual(if (placing) @as(?voxel_chunk_module.BlockType, .sand) else null, game.heldMaterial());
+        const chunk = game.world.?.getChunk(coords).?;
+        const local = world_module.splitBlockCoords(target)[1];
+        try std.testing.expectEqual(if (placing) voxel_chunk_module.BlockType.snow else .none, chunk.content.getBlock(local));
+        try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
+    }
+}
+
+test "invalid local placement retains the carried block without submitting a transfer" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.preparePlayerToolTest();
+    const game = &fixture.game;
+    game.block_interaction.inventory = .dirt;
+    game.block_interaction.press(.mouse);
+    game.updateBlockTool();
+    fixture.engine.frame_delta = 1;
+    game.updateBlockTool();
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.dirt, game.heldMaterial().?);
+    try std.testing.expectEqual(null, game.block_interaction.pending);
+    try std.testing.expectEqual(null, game.block_interaction.holding);
+    try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
+    try std.testing.expect(game.block_action_error.message(0) != null);
+}
+
+test "player work survives unrelated cell edits and cancels a same-material replacement" {
+    for ([_]bool{ false, true }) |replace_target| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        try fixture.preparePlayerToolTest();
+        const game = &fixture.game;
+        const target = StreamingTest.toolTarget();
+        game.block_interaction.press(.key);
+        game.updateBlockTool();
+        fixture.engine.frame_delta = 1;
+        game.updateBlockTool();
+        const coords, const local = world_module.splitBlockCoords(target);
+        var snapshot = try game.world.?.getChunk(coords).?.tryClone(std.testing.allocator);
+        if (replace_target) {
+            try std.testing.expectEqual(world_module.OperationStatus.success, snapshot.apply(std.testing.allocator, local, .remove));
+            try std.testing.expectEqual(world_module.OperationStatus.success, snapshot.apply(std.testing.allocator, local, .{ .put = .sand }));
+        } else {
+            try std.testing.expectEqual(world_module.OperationStatus.success, snapshot.apply(std.testing.allocator, .{ 10, 10, 10 }, .{ .put = .snow }));
+        }
+        snapshot.chunk_revision += 1;
+        try game.world.?.insertChunk(coords, snapshot);
+        fixture.engine.frame_delta = 2;
+        game.updateBlockTool();
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+        try std.testing.expectEqual(if (replace_target) null else @as(?voxel_chunk_module.BlockType, .sand), game.heldMaterial());
+        try std.testing.expectEqual(@as(usize, if (replace_target) 0 else 1), game.world.?.pending_operations.items.len);
+    }
 }
