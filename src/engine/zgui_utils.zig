@@ -98,6 +98,13 @@ pub fn beginFrame(window: *zglfw.Window) void {
 pub fn drawInGameMenu(engine: *Engine) void {
     if (!engine.menu.open) return;
     const screen = zgui.io.getDisplaySize();
+    if (engine.gameplayPaused()) {
+        zgui.getBackgroundDrawList().addRectFilled(.{
+            .pmin = .{ 0, 0 },
+            .pmax = screen,
+            .col = zgui.colorConvertFloat4ToU32(.{ 0, 0, 0, 0.5 }),
+        });
+    }
     const scale = zgui.getStyle().font_scale_dpi;
     zgui.setNextWindowPos(.{ .x = screen[0] / 2, .y = screen[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
     _ = zgui.begin("Game menu", .{ .flags = .{
