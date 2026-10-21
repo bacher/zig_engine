@@ -162,6 +162,7 @@ pub fn check(device: wgpu.Device) !void {
                 defer held.deinit(&gctx);
                 const hands = @import("empty_hands.zig").Renderer.init(&gctx, engine.bind_group_layouts.regular, engine.uv_test_texture, engine.texture_sampler, .rgba8_unorm);
                 defer hands.deinit(&gctx);
+                try checkHeldDraws(&gctx, engine, &held, &hands);
                 const params: Engine.CreateTerrainHeightMapDescriptorParams = .{
                     .layers = .{ engine.uv_test_texture, engine.uv_test_texture },
                     .mixing_texture = engine.uv_test_texture,
@@ -183,6 +184,39 @@ pub fn check(device: wgpu.Device) !void {
             try std.testing.expect(gctx.isResourceValid(height_texture.texture_handle));
         }
         try std.testing.expectEqualDeep(context_baseline, counts(&gctx));
+    }
+}
+
+/// Exercise the production previews with the 3D overlay's fresh depth attachment.
+fn checkHeldDraws(gctx: *zgpu.GraphicsContext, engine: *Engine, held: *const @import("held_block.zig").Renderer, hands: *const @import("empty_hands.zig").Renderer) !void {
+    const color = ScreenTexture.init(gctx, 8, 8, .rgba8_unorm);
+    defer color.deinit(gctx);
+    const projection = @import("zmath").perspectiveFovRh(std.math.pi / 4.0, 1, 0.01, 200);
+    const materials = [_]?@import("voxel/voxel_chunk.zig").BlockType{ .planks, .country_road_adaptive, .custom, null };
+    for (materials) |material| {
+        const encoder = gctx.device.createCommandEncoder(null);
+        defer encoder.release();
+        const colors = [_]wgpu.RenderPassColorAttachment{.{ .view = color.view, .load_op = .clear, .store_op = .store }};
+        const pass = encoder.beginRenderPass(.{
+            .color_attachments = &colors,
+            .color_attachment_count = colors.len,
+            .depth_stencil_attachment = &.{
+                .view = engine.depth_texture.view,
+                .depth_load_op = .clear,
+                .depth_clear_value = 1,
+                .depth_store_op = .discard,
+            },
+        });
+        defer pass.release();
+        if (material) |block| {
+            held.draw(gctx, pass, engine.bind_group_minecraft_texture.wgpu_bind_group, projection, block, .{});
+        } else {
+            hands.draw(gctx, pass, projection, .{});
+        }
+        pass.end();
+        const commands = encoder.finish(null);
+        defer commands.release();
+        gctx.queue.submit(&.{commands});
     }
 }
 

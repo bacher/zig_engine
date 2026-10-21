@@ -1,4 +1,4 @@
-//! Camera-space block drawn in the application's depth-free overlay pass.
+//! Camera-space block drawn in the application's depth-tested 3D overlay pass.
 const std = @import("std");
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
@@ -8,8 +8,11 @@ const BlockType = @import("voxel/voxel_chunk.zig").BlockType;
 const Pipeline = @import("pipeline.zig").Pipeline;
 const BindGroup = @import("bind_group.zig").BindGroup;
 
-pub const shader = @embedFile("shaders/voxel/block_geometry.wgsl") ++ @embedFile("shaders/held_block.wgsl");
-pub const vertex_count = 36;
+pub const shader = @embedFile("shaders/voxel/block_geometry.wgsl") ++ @embedFile("shaders/voxel/adaptive_geometry.wgsl") ++ @embedFile("shaders/held_block.wgsl");
+
+pub fn vertexCount(block: BlockType) u32 {
+    return if (block == .country_road_adaptive or block == .custom) @import("voxel/custom_block.zig").adaptive_vertex_count else 36;
+}
 
 pub const Pose = @import("held_item_pose.zig").Pose;
 
@@ -63,8 +66,8 @@ pub const Renderer = struct {
         const targets = [_]wgpu.ColorTargetState{.{ .format = format }};
         const pipeline = gctx.createRenderPipeline(pipeline_layout, .{
             .label = "held block",
-            // A convex cube only needs its front faces in this depth-free pass.
             .primitive = .{ .topology = .triangle_list, .front_face = .ccw, .cull_mode = .back },
+            .depth_stencil = &.{ .format = .depth32_float, .depth_write_enabled = true, .depth_compare = .less },
             .vertex = .{ .module = module, .entry_point = "vs" },
             .fragment = &.{ .module = module, .entry_point = "fs", .targets = &targets, .target_count = targets.len },
         });
@@ -89,7 +92,7 @@ pub const Renderer = struct {
         pass.setPipeline(renderer.pipeline.pipeline_gpu);
         pass.setBindGroup(0, renderer.binding.wgpu_bind_group, null);
         pass.setBindGroup(1, atlas, null);
-        pass.draw(vertex_count, 1, 0, 0);
+        pass.draw(vertexCount(block), 1, 0, 0);
     }
 };
 

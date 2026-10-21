@@ -14,13 +14,11 @@ struct HeldVertex {
 }
 
 @vertex fn vs(@builtin(vertex_index) index: u32) -> HeldVertex {
-    let side = index / 6u;
-    let vertex = index % 6u;
-    let position = vec4f(vec3f(getPosition(side, vertex)), 1.0);
+    let vertex = blockVertex(index, held.material.x);
     return HeldVertex(
-        held.clip_from_block * position,
-        getUv(side, vertex, held.material.x),
-        (held.view_from_block * vec4f(getNormal(side), 0.0)).xyz,
+        held.clip_from_block * vertex.position,
+        vertex.uv,
+        (held.view_from_block * vec4f(vertex.normal, 0.0)).xyz,
     );
 }
 

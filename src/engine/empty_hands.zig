@@ -1,4 +1,4 @@
-//! Two camera-space arms drawn in the depth-free held-item overlay pass.
+//! Two camera-space arms drawn in the depth-tested held-item overlay pass.
 const std = @import("std");
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
@@ -68,6 +68,7 @@ pub const Renderer = struct {
         const pipeline = gctx.createRenderPipeline(pipeline_layout, .{
             .label = "empty hands",
             .primitive = .{ .topology = .triangle_list, .front_face = .ccw, .cull_mode = .back },
+            .depth_stencil = &.{ .format = .depth32_float, .depth_write_enabled = true, .depth_compare = .less },
             .vertex = .{ .module = module, .entry_point = "vs" },
             .fragment = &.{ .module = module, .entry_point = "fs", .targets = &targets, .target_count = targets.len },
         });

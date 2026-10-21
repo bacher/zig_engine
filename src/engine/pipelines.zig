@@ -157,7 +157,7 @@ pub const WorldPipelines = struct {
         defer allocator.free(shadow_map_voxel_source);
         var shadow_map_voxel = shadow_map_voxel_pipeline_module.createShadowMapVoxelPipeline(gctx, bind_group_layouts, shadow_map_voxel_source);
         errdefer shadow_map_voxel.deinit(gctx);
-        const custom_geometry = @embedFile("shaders/voxel/block_geometry.wgsl") ++ @embedFile("shaders/voxel/custom_geometry.wgsl");
+        const custom_geometry = @embedFile("shaders/voxel/block_geometry.wgsl") ++ @embedFile("shaders/voxel/adaptive_geometry.wgsl") ++ @embedFile("shaders/voxel/custom_geometry.wgsl");
         const custom_source = try layout.shaderSource(allocator, custom_geometry ++ @embedFile("shaders/voxel/custom_vs.wgsl"));
         defer allocator.free(custom_source);
         var custom_blocks = voxel_pipeline_module.createVoxelPipeline(gctx, bind_group_layouts, custom_source);

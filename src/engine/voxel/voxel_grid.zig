@@ -49,6 +49,7 @@ pub const VoxelGrid = struct {
     gpu_block_buffer: GPUBuffer,
     gpu_custom_block_buffer: GPUBuffer = undefined,
     custom_block_count: u32 = 0,
+    custom_slope_count: u32 = 0,
     custom_dirty: bool = false,
     custom_upload: std.ArrayList(custom.GPU_CustomBlock) = .empty,
 
@@ -149,6 +150,7 @@ pub const VoxelGrid = struct {
         for (self.chunks.items) |*chunk| chunk.custom_blocks.deinit(self.allocator);
         self.custom_dirty = self.custom_dirty or self.custom_block_count > 0;
         self.custom_block_count = 0;
+        self.custom_slope_count = 0;
         for (self.chunks_to_upload.items) |*chunk| {
             chunk.chunk_side_data.deinit(self.allocator);
         }
@@ -325,6 +327,7 @@ pub const VoxelGrid = struct {
     fn prepareCustomBlocks(self: *Self) bool {
         if (!self.custom_dirty) return false;
         self.custom_upload.clearRetainingCapacity();
+        self.custom_slope_count = 0;
         for (self.chunks.items) |chunk| for (chunk.custom_blocks.items) |block| {
             const slope = if (block.shape == .slope) block.shape.slope else null;
             self.custom_upload.append(self.allocator, .{
@@ -335,10 +338,21 @@ pub const VoxelGrid = struct {
                 .high = if (slope) |s| @floatCast(s.high) else 1,
                 .low = if (slope) |s| @floatCast(s.low) else 1,
             }) catch @panic("OOM");
+            // Keep formed sections first so they retain their 36-vertex draw.
+            if (slope != null) {
+                std.mem.swap(custom.GPU_CustomBlock, &self.custom_upload.items[self.custom_slope_count], &self.custom_upload.items[self.custom_upload.items.len - 1]);
+                self.custom_slope_count += 1;
+            }
         };
         self.custom_block_count = @intCast(self.custom_upload.items.len);
         self.custom_dirty = false;
         return true;
+    }
+
+    pub fn drawCustomBlocks(self: *const Self, pass: wgpu.RenderPassEncoder) void {
+        if (self.custom_slope_count > 0) pass.draw(custom.slope_vertex_count, self.custom_slope_count, 0, 0);
+        const adaptive_count = self.custom_block_count - self.custom_slope_count;
+        if (adaptive_count > 0) pass.draw(custom.adaptive_vertex_count, adaptive_count, 0, self.custom_slope_count);
     }
 };
 
@@ -481,5 +495,43 @@ test "ordinary chunk changes leave custom uploads clean while resident road remo
     // queued ordinary upload or available GPU face-buffer capacity.
     try std.testing.expect(grid.prepareCustomBlocks());
     try std.testing.expect(!grid.custom_dirty);
+    try std.testing.expectEqual(@as(u32, 0), grid.custom_block_count);
+}
+
+test "custom uploads group formed and unformed geometry and reset after reversion" {
+    const allocator = std.testing.allocator;
+    var grid: VoxelGrid = .{ .allocator = allocator, .gpu_chunk_info_buffer = undefined, .gpu_block_buffer = undefined, .custom_dirty = true };
+    defer {
+        grid.clearChunks();
+        grid.chunks.deinit(allocator);
+        grid.chunks_to_upload.deinit(allocator);
+        grid.custom_upload.deinit(allocator);
+    }
+    for (0..2) |chunk| {
+        try grid.chunks.append(allocator, .{ .chunk_origin = .{ @intCast(chunk), 0, 0 } });
+        for (0..4) |i| try grid.chunks.items[chunk].custom_blocks.append(allocator, .{
+            .coords = .{ @intCast(i), 0, 0 },
+            .shape = if (i % 2 == 0) .adaptive else .{ .slope = .{ .downhill = .positive_x, .high = 0.75, .low = 0.5 } },
+        });
+    }
+    try std.testing.expect(grid.prepareCustomBlocks());
+    try std.testing.expectEqual(@as(u32, 8), grid.custom_block_count);
+    try std.testing.expectEqual(@as(u32, 4), grid.custom_slope_count);
+    for (grid.custom_upload.items, 0..) |record, i| {
+        try std.testing.expectEqual(@as(u32, @intFromBool(i >= 4)), record.adaptive);
+        const x: u32 = @intFromFloat(record.local_origin[0]);
+        try std.testing.expectEqual(record.adaptive == 0, x % 2 == 1);
+        if (record.adaptive == 0) try std.testing.expectEqual(@as(f32, 0.75), record.high);
+    }
+    for (grid.chunks.items) |*chunk| for (chunk.custom_blocks.items) |*block| {
+        block.shape = .adaptive;
+    };
+    grid.custom_dirty = true;
+    try std.testing.expect(grid.prepareCustomBlocks());
+    try std.testing.expectEqual(@as(u32, 0), grid.custom_slope_count);
+    try std.testing.expectEqual(@as(u32, 8), grid.custom_block_count);
+    grid.clearChunks();
+    try std.testing.expectEqual(@as(u32, 0), grid.custom_slope_count);
+    try std.testing.expect(grid.prepareCustomBlocks());
     try std.testing.expectEqual(@as(u32, 0), grid.custom_block_count);
 }

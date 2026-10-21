@@ -17,7 +17,8 @@ flowchart LR
     Color --> Final[Final composite]
     SSAO --> Final
     Final --> Focus[Block outlines and translucent cell hints]
-    Focus --> Overlay[Application and GUI overlay]
+    Focus --> Held[Camera-space 3D overlay]
+    Held --> Overlay[Application and GUI overlay]
     Overlay --> Present[Submit and present]
 ```
 
@@ -28,7 +29,8 @@ flowchart LR
 | SSAO | Full-screen pass reconstructs view-space positions from depth and uses the normal texture to estimate occlusion; output is `r16_float`. |
 | Final composite | Full-screen pass copies scene color or multiplies it by SSAO. Optional blur/debug display are applied here. |
 | Block outlines | Loads swapchain color and scene depth. Draws green focus edges and colored translucent cell hints as three-pixel-wide triangle pairs, with faint occluded hints and no depth writes. |
-| Overlay | If `onRender` exists, loads the swapchain color without a depth attachment, invokes the application callback (including the voxel app's held block), and renders GUI when enabled. |
+| 3D overlay | If `onRenderOverlay3D` exists, loads swapchain color and clears the reused scene depth attachment for camera-space geometry, including held blocks and empty hands. |
+| Overlay | If `onRender` exists, loads the swapchain color without a depth attachment, invokes the application callback, and renders GUI when enabled. |
 
 The SSAO pass is still encoded when SSAO is disabled. The final shader bypasses its result in that case. GUI frame creation and the engine debug window currently occur inside the optional `onRender` branch.
 
@@ -72,12 +74,16 @@ The voxel app starts in removing mode, which shows green focus edges and skips p
 preview validation. Tab switches to putting mode, which hides green focus edges and uses
 colored placement hints. Block mode is shared across player and spectator control.
 
-Putting mode draws a camera-space held block through [`held_block.zig`](../src/engine/held_block.zig)
-in the application's overlay callback, before the GUI. It shares cube geometry and atlas
-UV helpers with world voxels, so material selection includes the same side-specific textures.
-The convex cube uses back-face culling without a depth attachment and stays visible over
-terrain and cell hints. It has steady camera-space shading and does not participate in world
-shadows or SSAO. Removing mode submits no held-block draw. Its projected position, rotation,
+The player carrying a block, or the spectator in putting mode, draws a camera-space held
+block through [`held_block.zig`](../src/engine/held_block.zig) in the application's 3D overlay
+callback, before the GUI. Ordinary materials share cube geometry and atlas UV helpers with
+world voxels. Adaptive roads share the placed block's faceted model, normals, and UVs through
+[`adaptive_geometry.wgsl`](../src/engine/shaders/voxel/adaptive_geometry.wgsl), including its
+uneven top around three quarters of a block high. The 3D overlay clears the scene depth
+attachment after all world-depth consumers finish. Held geometry uses back-face culling
+and depth testing for self-occlusion, staying visible over terrain and cell hints. It has
+steady camera-space shading and does not participate in world shadows or SSAO. Spectator
+removing mode submits no held-block draw. Its projected position, rotation,
 and scale are configured together in the voxel app's `held_block_pose`. The resting pose uses
 the active camera's projection and no world position or orientation. Shared held-item motion
 adds camera-space offsets to this pose. The application owns and releases its renderer before

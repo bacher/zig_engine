@@ -1138,6 +1138,7 @@ pub fn main(init: std.process.Init) !void {
             .argument = game,
             .onUpdate = onUpdate,
             .onRender = onRender,
+            .onRenderOverlay3D = onRenderOverlay3D,
             .onKeyPress = onKeyPress,
             .onKeyRelease = onKeyRelease,
             .onMouseButtonPress = onMouseButtonPress,
@@ -1406,7 +1407,7 @@ fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
     });
 }
 
-fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
+fn onRenderOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
     if (game.heldMaterial()) |material| {
         if (game.held_block_renderer) |*renderer| {
@@ -1424,6 +1425,10 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
             if (engine.active_scene) |scene| renderer.draw(engine.gctx, pass, scene.camera.clip_from_view, game.held_motion.offset);
         }
     }
+}
+
+fn onRender(engine: *Engine, _: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
     block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
     drawCrosshair();
     drawPersistence(game);
