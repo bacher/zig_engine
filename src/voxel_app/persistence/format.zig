@@ -1,6 +1,6 @@
-//! Version-one wire codecs. All wire storage is bytes, never native struct layout.
+//! Versioned wire codecs. All wire storage is bytes, never native struct layout.
 const std = @import("std");
-pub const current_write_version: u32 = 1;
+pub const current_write_version: u32 = 2;
 pub const minimum_readable_version: u32 = 1;
 pub const Uuid = [16]u8;
 pub const Digest = [32]u8;
@@ -244,25 +244,32 @@ pub fn decodeGlobal(bytes: []const u8) Error!u64 {
     try r.done();
     return tick;
 }
-pub const Player = struct { id: u64, feet: [3]f64, yaw: f32, pitch: f32 };
+pub const player_record_size = 53;
+pub const Player = struct { id: u64, feet: [3]f64, yaw: f32, pitch: f32, inventory: ?u8 = null };
 fn validatePlayer(player: Player) Error!void {
     for (player.feet) |v| {
         if (!std.math.isFinite(v)) return error.InvalidFormat;
     }
     if (!std.math.isFinite(player.yaw) or !std.math.isFinite(player.pitch)) return error.InvalidFormat;
+    // Persist only placeable inventory materials, including the adaptive-road item.
+    if (player.inventory) |material| switch (material) {
+        2, 4, 5, 6, 8...14 => {},
+        else => return error.InvalidFormat,
+    };
 }
-pub fn encodePlayer(player: Player) Error![52]u8 {
+pub fn encodePlayer(player: Player) Error![player_record_size]u8 {
     try validatePlayer(player);
-    var out: [52]u8 = undefined;
+    var out: [player_record_size]u8 = undefined;
     var p: usize = 0;
-    put(u32, &out, &p, 52);
+    put(u32, &out, &p, player_record_size);
     put(u16, &out, &p, 1);
     put(u64, &out, &p, player.id);
     for (player.feet) |v| put(u64, &out, &p, @bitCast(v));
     put(u32, &out, &p, @bitCast(player.yaw));
     put(u32, &out, &p, @bitCast(player.pitch));
-    put(u16, &out, &p, 0);
-    put(u32, &out, &p, 0);
+    put(u16, &out, &p, 1);
+    put(u32, &out, &p, 1);
+    put(u8, &out, &p, player.inventory orelse 0);
     return out;
 }
 pub fn decodePlayer(bytes: []const u8) Error!Player {
@@ -274,18 +281,35 @@ pub fn decodePlayer(bytes: []const u8) Error!Player {
     for (&out.feet) |*v| v.* = @bitCast(try r.int(u64));
     out.yaw = @bitCast(try r.int(u32));
     out.pitch = @bitCast(try r.int(u32));
-    if (try r.int(u16) != 0 or try r.int(u32) != 0) return error.UnsupportedVersion;
+    const inventory_schema = try r.int(u16);
+    const inventory_length = try r.int(u32);
+    out.inventory = switch (inventory_schema) {
+        0 => if (inventory_length == 0) null else return error.InvalidFormat,
+        1 => blk: {
+            if (inventory_length != 1) return error.InvalidFormat;
+            const material = try r.int(u8);
+            break :blk if (material == 0) null else material;
+        },
+        else => return error.UnsupportedVersion,
+    };
     try r.done();
     try validatePlayer(out);
     return out;
 }
+pub fn readPlayer(reader: *Reader) Error!Player {
+    const start = reader.pos;
+    const length = try reader.int(u32);
+    if (length < 52 or length > player_record_size) return error.InvalidFormat;
+    _ = try reader.take(length - 4);
+    return decodePlayer(reader.bytes[start..reader.pos]);
+}
 pub fn validatePlayers(bytes: []const u8, count: u64) Error!void {
-    if (try mul(count, 52) != bytes.len) return error.InvalidFormat;
+    if (count > bytes.len / 52) return error.InvalidFormat;
     var previous: ?u64 = null;
     var r: Reader = .{ .bytes = bytes };
     var i: u64 = 0;
     while (i < count) : (i += 1) {
-        const player = try decodePlayer(try r.take(52));
+        const player = try readPlayer(&r);
         if (previous) |id| {
             if (player.id <= id) return error.InvalidFormat;
         }
@@ -710,3 +734,34 @@ test "all metadata sections may reach independent bounds and full wire record ca
 }
 
 pub const max_chunk_record_bytes = maximum_chunk_size;
+
+test "inventory schema roundtrips all carried materials and migrates legacy empty players" {
+    for ([_]?u8{ null, 2, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14 }) |material| {
+        const player: Player = .{ .id = 4, .feet = .{ 1, 2, 3 }, .yaw = 0.5, .pitch = 0.25, .inventory = material };
+        const encoded = try encodePlayer(player);
+        try std.testing.expectEqualDeep(player, try decodePlayer(&encoded));
+        try validatePlayers(&encoded, 1);
+    }
+    const encoded = try encodePlayer(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+    var legacy = encoded[0..52].*;
+    var offset: usize = 0;
+    put(u32, &legacy, &offset, 52);
+    offset = 46;
+    put(u16, &legacy, &offset, 0);
+    put(u32, &legacy, &offset, 0);
+    try std.testing.expectEqual(null, (try decodePlayer(&legacy)).inventory);
+    try validatePlayers(&legacy, 1);
+    var invalid = encoded;
+    invalid[46] = 2;
+    try std.testing.expectError(error.UnsupportedVersion, decodePlayer(&invalid));
+    for ([_]u8{ 1, 3, 7, 15, 255 }) |material| {
+        invalid = encoded;
+        invalid[52] = material;
+        try std.testing.expectError(error.InvalidFormat, decodePlayer(&invalid));
+    }
+    invalid = encoded;
+    invalid[48] = 2;
+    try std.testing.expectError(error.InvalidFormat, decodePlayer(&invalid));
+    try std.testing.expectError(error.InvalidFormat, decodePlayer(encoded[0..52]));
+    try std.testing.expectError(error.InvalidFormat, validatePlayers(&encoded, std.math.maxInt(u64)));
+}

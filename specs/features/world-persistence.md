@@ -221,8 +221,10 @@ mechanisms without overriding those contracts.
   versioned metadata sections; custom-cell records alone are insufficient. Apply R51's
   per-section uniqueness, correspondence, and size limits.
 - R17: Persist an array of players with Steam-compatible u64 IDs, f64 world positions,
-  view orientation, and an explicitly framed inventory extension. Inventory contents and
-  multiplayer gameplay are future work. Restore position/view, reset motion safely, and
+  view orientation, and an explicitly framed inventory extension. Inventory schema 1
+  persists the one carried material atomically with accepted terrain transfers; supported
+  legacy schema 0 loads an empty slot. Multiplayer gameplay remains future work.
+  Restore position/view, reset motion safely, and
   validate/resolve the restored player's collision against authoritative loaded terrain.
 - R18: Resume from the saved world tick without adding offline elapsed time. Timer deadlines
   retain their saved relationship to world time. Autosave interval is separate from this
@@ -1375,7 +1377,8 @@ mechanisms without overriding those contracts.
   of substituting defaults; global state restores the saved tick without offline advancement.
 - AC100: GIVEN player records including offline players WHEN a base or WAL snapshot is
   round-tripped THEN feet positions, view angles, and identities survive with the specified
-  float widths and 52-byte empty-inventory framing. Reject nonfinite coordinates/angles;
+  float widths, legacy 52-byte empty-inventory framing, and current 53-byte one-slot
+  inventory framing. Reject nonfinite coordinates/angles;
   movement reset and collision validation still apply. Do not cap historical players at 16.
 - AC101: GIVEN a WAL with streamed chunks of initially unknown encoded sizes WHEN writing
   and recovering THEN the header is 120 bytes, transaction header 84 bytes, and commit footer
@@ -1581,8 +1584,8 @@ activate a global scheduled-event system.
 Manual-save UI is deferred; v1 uses autosave and save-on-exit.
 Linux/Windows durability adapters and durability guarantees for network filesystems or
 actively cloud-synchronized save directories are deferred.
-Implementation during the current planning iteration; multiplayer networking; an inventory
-implementation; offline simulation catch-up; nibble RLE; delta chunk journals; per-chunk
+Multiplayer networking; inventory beyond the player's single carried block;
+offline simulation catch-up; nibble RLE; delta chunk journals; per-chunk
 mutation overlays/replay-on-read; heuristic encoded caching; adaptive I/O throttling unless
 profiling requires it; startup through a WAL overlay; serializing rendering caches or
 optimistic client state; unversioned procedural regeneration; and saving the temporary

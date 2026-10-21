@@ -1,9 +1,9 @@
-# World persistence v1 format contract
+# World persistence format contract
 
 This is the normative format reference for the
 [world-persistence feature spec](../features/world-persistence.md). It contains the existing
-binary layouts, encoding rules, compatibility policy, checksums, and metadata bounds,
-extracted without changing the format. All R/Q identifiers refer to that feature spec;
+binary layouts, encoding rules, compatibility policy, checksums, and metadata bounds
+for supported versions 1 and 2. All R/Q identifiers refer to that feature spec;
 requirement and acceptance-criterion IDs remain there. Runtime ownership, cancellation,
 recovery procedures, and platform durability remain in the feature spec.
 
@@ -194,8 +194,11 @@ alternative algorithms are follow-up improvements, not prerequisites for this in
 
 ## Binary Container Layouts
 
-The initial save-format version is 1, with engine current-write/minimum-readable versions
-both initially 1. All integer fields are explicitly sized and little-endian; f32/f64 use
+The initial save-format version was 1. The current writer uses version 2 and the minimum
+readable version remains 1. Version 2 adds inventory schema 1 below; chunk, descriptor,
+global, and container framing are unchanged. Recovery supports both versions, including
+a version-1 base followed by version-2 journals. Snapshot-zero compaction retains its
+original header version and anchor; later snapshots write version 2. All integer fields are explicitly sized and little-endian; f32/f64 use
 their IEEE-754 little-endian bit representation. Serialize fields individually without
 native struct padding. UUIDs are fixed 16-byte sequences carried unchanged between records
 and hash inputs, not text or platform-native UUID structs. Header sizes must match the
@@ -309,11 +312,19 @@ Each player record has this layout:
 | Inventory payload length | u32 |
 | Inventory payload | Declared bytes |
 
-Empty-inventory records occupy 52 bytes. Initially inventory schema and length are both
-zero; inventory contents await a future supported schema. Reject unsupported schemas and
-nonfinite coordinates/angles. Restore feet position/view under R17's motion-reset and
-authoritative collision-validation rules. The record has no individual checksum: its
-container's physical checksum or transaction digest covers it.
+Legacy inventory schema 0 has a zero payload length and occupies 52 bytes in total;
+reading it initializes an empty slot. Current inventory schema 1 has a one-byte payload,
+so every newly encoded player record occupies 53 bytes. Payload byte 0 denotes an empty
+slot; bytes 2, 4, 5, 6, and 8 through 14 are the placeable carried materials. Reject other
+values, unsupported inventory schemas, incorrect payload lengths, and nonfinite
+coordinates/angles. Player schema remains 1. Read each player using its declared record
+length, then validate exactly the declared player count in ascending ID order.
+
+Restore feet position/view under R17's motion-reset and authoritative collision-validation
+rules, and restore the inventory slot for that player ID. Partial holds and optimistic
+predictions have no persistent representation. Accepted terrain/inventory transfers are
+captured together; rejected edits cannot alter the saved slot. The record has no individual
+checksum: its container's physical checksum or transaction digest covers it.
 
 Persist all known players, including offline players, sorted by unique player ID. A
 simultaneous-player target does not limit historical records. Each WAL transaction

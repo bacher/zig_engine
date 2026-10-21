@@ -39,6 +39,8 @@ pub const Store = struct {
     digest: Digest,
     base: io.File,
     base_sequence: u64,
+    /// Preserve the snapshot-zero anchor's format version when compacting v1 saves.
+    base_format_version: u32 = format.current_write_version,
     index: std.AutoHashMap(u32, Location),
     segments: std.ArrayList(Segment) = .empty,
     active: ?usize = null,
@@ -72,7 +74,7 @@ pub const Store = struct {
         if (initial.players.len > limits.max_players_bytes) return error.Capacity;
         var hash = hasher("ZGW-INIT-1\x00");
         hash.update(&initial.world_uuid);
-        hashInt(&hash, u32, 1);
+        hashInt(&hash, u32, format.current_write_version);
         hashInt(&hash, u64, 0);
         hashInt(&hash, u32, @intCast(initial.descriptor.len));
         hash.update(initial.descriptor);
@@ -146,7 +148,8 @@ pub const Store = struct {
         errdefer if (!owned) base.close();
         var header: [120]u8 = undefined;
         try base.read(&header, 0);
-        if (!std.mem.eql(u8, header[0..8], "ZGWORLD\x00") or get(u32, &header, 8) != 1 or get(u32, &header, 12) != 120) return error.UnsupportedFormat;
+        const version = get(u32, &header, 8);
+        if (!std.mem.eql(u8, header[0..8], "ZGWORLD\x00") or version < format.minimum_readable_version or version > format.current_write_version or get(u32, &header, 12) != 120) return error.UnsupportedFormat;
         const size = try base.size();
         if (get(u64, &header, 16) != size) return error.Corruption;
         try verifyFile(base, size, "ZGW-BASE-1\x00", null);
@@ -172,10 +175,11 @@ pub const Store = struct {
         try format.validatePlayers(players, player_count);
         var self: Store = .{ .allocator = a, .directory = dir, .limits = limits, .world_uuid = header[24..40].*, .dimensions = desc.dimensions, .descriptor = descriptor, .global = global, .players = players, .player_count = player_count, .sequence = get(u64, &header, 40), .digest = header[48..80].*, .base = base, .base_sequence = get(u64, &header, 40), .index = std.AutoHashMap(u32, Location).init(a) };
         owned = true;
+        self.base_format_version = version;
         errdefer self.deinit();
         var anchor = hasher("ZGW-INIT-1\x00");
         anchor.update(&self.world_uuid);
-        hashInt(&anchor, u32, 1);
+        hashInt(&anchor, u32, version);
         hashInt(&anchor, u64, 0);
         hashInt(&anchor, u32, descriptor_len);
         anchor.update(descriptor);
@@ -404,7 +408,7 @@ pub const Store = struct {
         errdefer if (!adopted) file.close();
         var header: [120]u8 = @splat(0);
         @memcpy(header[0..8], "ZGWAL\x00\x00\x00");
-        put(u32, &header, 8, 1);
+        put(u32, &header, 8, format.current_write_version);
         put(u32, &header, 12, 120);
         @memcpy(header[16..32], &self.world_uuid);
         @memcpy(header[32..48], &uuid);
@@ -452,6 +456,7 @@ pub const Store = struct {
         const players = try a.dupe(u8, self.players);
         errdefer a.free(players);
         var frozen: Store = .{ .allocator = a, .directory = dir, .limits = self.limits, .world_uuid = self.world_uuid, .dimensions = self.dimensions, .descriptor = descriptor, .global = global, .players = players, .player_count = self.player_count, .sequence = self.sequence, .digest = self.digest, .base = base, .base_sequence = self.base_sequence, .index = std.AutoHashMap(u32, Location).init(a) };
+        frozen.base_format_version = self.base_format_version;
         errdefer {
             frozen.index.deinit();
             for (frozen.segments.items) |segment| {
@@ -575,7 +580,8 @@ pub const Store = struct {
             errdefer file.close();
             var header: [120]u8 = undefined;
             try file.read(&header, 0);
-            if (!std.mem.eql(u8, header[0..8], "ZGWAL\x00\x00\x00") or get(u32, &header, 8) != 1 or get(u32, &header, 12) != 120 or !std.mem.eql(u8, header[16..32], &self.world_uuid)) return error.Corruption;
+            const version = get(u32, &header, 8);
+            if (!std.mem.eql(u8, header[0..8], "ZGWAL\x00\x00\x00") or version < format.minimum_readable_version or version > format.current_write_version or get(u32, &header, 12) != 120 or !std.mem.eql(u8, header[16..32], &self.world_uuid)) return error.Corruption;
             var h = hasher("ZGW-WALHDR-1\x00");
             h.update(header[0..88]);
             var digest: Digest = undefined;
@@ -828,7 +834,7 @@ pub const Store = struct {
         }
         var header: [120]u8 = @splat(0);
         @memcpy(header[0..8], "ZGWORLD\x00");
-        put(u32, &header, 8, 1);
+        put(u32, &header, 8, if (self.sequence == 0) self.base_format_version else format.current_write_version);
         put(u32, &header, 12, 120);
         put(u64, &header, 16, try add(cursor, 32));
         @memcpy(header[24..40], &self.world_uuid);
@@ -1527,7 +1533,7 @@ test "modeled crash never publishes half a multi-chunk snapshot or its global/pl
     defer f.deinit();
     var blocks: [32768]u8 = @splat(0);
     blocks[0] = 255;
-    const player1 = try format.encodePlayer(.{ .id = 1, .feet = .{ 1, 2, 3 }, .yaw = 0, .pitch = 0 });
+    const player1 = try format.encodePlayer(.{ .id = 1, .feet = .{ 1, 2, 3 }, .yaw = 0, .pitch = 0, .inventory = 2 });
     const tick1 = format.encodeGlobal(60);
     try f.store.beginSnapshot(1, &tick1, &player1, 1, 2);
     for (0..2) |section| {
@@ -1538,7 +1544,7 @@ test "modeled crash never publishes half a multi-chunk snapshot or its global/pl
         try f.store.appendChunk(record);
     }
     _ = try f.store.commitSnapshot();
-    const player2 = try format.encodePlayer(.{ .id = 1, .feet = .{ 9, 9, 9 }, .yaw = 1, .pitch = 1 });
+    const player2 = try format.encodePlayer(.{ .id = 1, .feet = .{ 9, 9, 9 }, .yaw = 1, .pitch = 1, .inventory = 8 });
     const tick2 = format.encodeGlobal(120);
     try f.store.beginSnapshot(2, &tick2, &player2, 1, 2);
     @memset(&blocks, 0);
@@ -1554,6 +1560,7 @@ test "modeled crash never publishes half a multi-chunk snapshot or its global/pl
     try std.testing.expectEqual(@as(u64, 60), try format.decodeGlobal(f.store.global));
     const player = try format.decodePlayer(f.store.players);
     try std.testing.expectEqual(@as(f64, 1), player.feet[0]);
+    try std.testing.expectEqual(@as(?u8, 2), player.inventory);
     for (0..2) |section| {
         const record = (try f.store.readChunk(a, @intCast(section))).?;
         defer a.free(record);
@@ -1751,4 +1758,63 @@ test "nested creation propagates mkdir namespace and fullflush failures without 
             try std.testing.expectEqualSlices(u8, before, after);
         }
     }
+}
+
+test "legacy v1 snapshot zero and WAL migrate to persistent one-slot inventory" {
+    const a = std.testing.allocator;
+    var model = io.Model.init(a);
+    defer model.deinit();
+    io.test_model = &model;
+    defer io.test_model = null;
+    var f = try Fixture.init();
+    defer f.deinit();
+    // Construct the exact v1 player record and snapshot-zero identity. Empty v1
+    // journals are retained to exercise mixed-version recovery and compaction.
+    const current = try format.encodePlayer(.{ .id = 1, .feet = .{ 1, 2, 3 }, .yaw = 0, .pitch = 0 });
+    var legacy = current[0..52].*;
+    put(u32, &legacy, 0, 52);
+    put(u16, &legacy, 46, 0);
+    put(u32, &legacy, 48, 0);
+    a.free(f.store.players);
+    f.store.players = try a.dupe(u8, &legacy);
+    f.store.player_count = 1;
+    f.store.base_format_version = 1;
+    var anchor = hasher("ZGW-INIT-1\x00");
+    anchor.update(&f.store.world_uuid);
+    hashInt(&anchor, u32, 1);
+    hashInt(&anchor, u64, 0);
+    hashInt(&anchor, u32, @intCast(f.store.descriptor.len));
+    anchor.update(f.store.descriptor);
+    hashInt(&anchor, u32, @intCast(f.store.global.len));
+    anchor.update(f.store.global);
+    hashInt(&anchor, u64, 1);
+    hashInt(&anchor, u64, legacy.len);
+    anchor.update(&legacy);
+    hashInt(&anchor, u64, 0);
+    anchor.final(&f.store.digest);
+    try f.store.writeBase(f.store.base);
+    try f.store.base.sync();
+    for (f.store.segments.items) |*segment| {
+        put(u32, &segment.header, 8, 1);
+        @memcpy(segment.header[56..88], &f.store.digest);
+        var header_hash = hasher("ZGW-WALHDR-1\x00");
+        header_hash.update(segment.header[0..88]);
+        header_hash.final(segment.header[88..120]);
+        try segment.file.write(&segment.header, 0);
+        try segment.file.sync();
+    }
+    f.store.deinit();
+    f.store = try Store.open(a, f.path, .{});
+    try std.testing.expectEqual(null, (try format.decodePlayer(f.store.players)).inventory);
+    // Reopening must also validate the old snapshot-zero anchor after compaction.
+    f.store.deinit();
+    f.store = try Store.open(a, f.path, .{});
+    const carried = try format.encodePlayer(.{ .id = 1, .feet = .{ 1, 2, 3 }, .yaw = 0, .pitch = 0, .inventory = 8 });
+    const tick = format.encodeGlobal(1);
+    try f.store.beginSnapshot(1, &tick, &carried, 1, 0);
+    _ = try f.store.commitSnapshot();
+    f.store.deinit();
+    f.store = try Store.open(a, f.path, .{});
+    try std.testing.expectEqual(@as(?u8, 8), (try format.decodePlayer(f.store.players)).inventory);
+    try std.testing.expectEqual(@as(u64, 1), f.store.sequence);
 }

@@ -69,6 +69,8 @@ pub const WorldChunk = struct {
     /// Cached own boundary occupancy, including optimistic edits. Never sent to the GPU.
     boundaries: boundary_mask.BoundaryMasks = @splat(.{}),
     metadata: ChunkMetadata = .{},
+    /// Not persisted: old holds are discarded on load. Clones carry this history.
+    cell_changes: @import("cell_changes.zig").History = .{},
 
     pub fn initEmpty() WorldChunk {
         return .{
@@ -114,7 +116,9 @@ pub const WorldChunk = struct {
     /// Material-only changes preserve occupancy and enclosure flags.
     pub fn changeType(self: *WorldChunk, local: [3]u5, block_type: BlockType) void {
         std.debug.assert(self.content.getBlock(local) != .none and block_type != .none);
+        if (self.content.getBlock(local) == block_type) return;
         self.content.blocks.blocks[local[2]][local[1]][local[0]] = block_type;
+        self.cell_changes.record(transformations.index(local));
     }
 
     pub fn ensureData(self: *WorldChunk, allocator: std.mem.Allocator) *WorldChunkData {
@@ -182,6 +186,7 @@ pub const WorldChunk = struct {
         const data = self.content.blocks;
         const was_unreachable = self.flags.is_unreachable;
         data.blocks[local[2]][local[1]][local[0]] = block_type;
+        self.cell_changes.record(transformations.index(local));
         boundary_mask.update(&self.boundaries, local, block_type.occludesFaces());
         if (block_type == .none) {
             self.metadata.remove(transformations.index(local));
@@ -233,7 +238,7 @@ pub const BlockAction = union(enum) {
     remove,
 };
 
-pub const OperationStatus = enum { success, already_exists, already_removed, constraint_violation, missing_data, resource_exhausted };
+pub const OperationStatus = enum { success, already_exists, already_removed, constraint_violation, missing_data, resource_exhausted, inventory_mismatch, target_changed };
 pub const EditResult = struct {
     status: OperationStatus,
     failure: ?block_rules.Failure = null,
@@ -244,6 +249,8 @@ pub const EditResult = struct {
 pub const BlockOperation = struct {
     block: [3]u32,
     action: BlockAction,
+    /// Player transfers are checked by the authority; observer/NPC edits omit this.
+    player: ?struct { id: u64, expected_sequence: u64 } = null,
 
     pub fn validate(self: BlockOperation, layout: *const WorldLayout) void {
         for (0..3) |axis| std.debug.assert(self.block[axis] < layout.size_in_blocks[axis]);
@@ -258,6 +265,7 @@ const CellState = struct {
     road: ?@import("road_data.zig").Road,
     timed: ?transformations.Event,
     constructed: bool,
+    cell_changes: @import("cell_changes.zig").History,
 
     fn capture(chunk: *const WorldChunk, local: [3]u5) CellState {
         const index = transformations.index(local);
@@ -271,6 +279,7 @@ const CellState = struct {
             .road = chunk.metadata.road(index),
             .timed = timed,
             .constructed = std.mem.indexOfScalar(transformations.BlockIndex, chunk.metadata.constructed.items, index) != null,
+            .cell_changes = chunk.cell_changes,
         };
     }
 
@@ -287,6 +296,7 @@ const CellState = struct {
         if (self.road) |road| chunk.metadata.roads.appendAssumeCapacity(road);
         if (self.timed) |event| chunk.metadata.timed.scheduleAssumeCapacity(event);
         if (self.constructed) chunk.metadata.markConstructedAssumeCapacity(index);
+        chunk.cell_changes = self.cell_changes;
     }
 };
 

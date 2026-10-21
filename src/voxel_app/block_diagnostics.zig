@@ -42,6 +42,8 @@ pub fn errorMessageForResult(result: world.EditResult, buffer: *[message_capacit
         .missing_data => "Required world cells have not loaded.",
         .resource_exhausted => "The world cannot accept this edit yet. Try again shortly.",
         .constraint_violation => "The block edit violates construction constraints.",
+        .inventory_mismatch => "The carried block does not match this action.",
+        .target_changed => "The target changed. Try again.",
     };
 }
 
