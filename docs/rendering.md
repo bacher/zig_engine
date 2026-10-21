@@ -83,6 +83,15 @@ the active camera's projection and no world position or orientation. Shared held
 adds camera-space offsets to this pose. The application owns and releases its renderer before
 engine teardown.
 
+With an empty player inventory, [`empty_hands.zig`](../src/engine/empty_hands.zig) draws two
+4:4:12 cuboids in the same overlay pass, at the lower left and right. Each arm maps the
+corresponding base arm region of the 64×64 `content/default-skin.png` skin, using nearest
+sampling and the held block's steady camera-space lighting. Both arms consume the existing
+held-item motion offset around their own resting grips. They appear only in player mode
+with empty inventory; carrying a block replaces them with the held block, and spectator
+removing mode draws neither. The application owns the skin texture and releases it after
+the hands renderer and before engine teardown.
+
 The voxel app refreshes `Scene.highlighted_block` using the editing raycast after camera updates, optimistic edits, and subscription changes. The engine's independent [`block_outline.zig`](../src/engine/block_outline.zig) pipeline draws it after post-processing and before GUI overlays. It emits 72 procedural vertices, clips edges against the near plane, and expands them in screen space to keep their width constant when distance or window size changes. It excludes edges whose adjacent faces both face away from the camera. For each stroke pixel overlapping the target cube, the fragment shader reconstructs the cube's front surface depth to prevent the target's own sloped faces from cutting into the stroke.
 
 The shader also extends each edge's visible adjacent face planes across the narrow stroke margin to keep coplanar neighboring blocks from trimming it. This continuation is limited to 0.25 metres beyond the unit face bounds: a small screen-space margin can otherwise extrapolate metres forward at grazing angles and leak through foreground blocks. Plane intersections outside that bounded neighborhood leave the reconstructed target/edge depth unchanged. This deliberately allows the outer stroke to be clipped on nearly edge-on coplanar surfaces when preserving it would require a more distant intersection. Scene depth still hides the outline behind other geometry; an eight-epsilon f32 allowance handles depth rounding, and the pass never writes scene depth. The pipeline reads each cell's transforms, viewport, masks, and color from a shared read-only instance buffer. The outline's storage cell is rebased to the camera chunk, including the wrapped x seam, before conversion to f32. No voxel face or shadow shader contains highlighting logic.

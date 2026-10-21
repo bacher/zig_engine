@@ -46,6 +46,7 @@ const placement_preview = @import("placement_preview.zig");
 const block_diagnostics = @import("block_diagnostics.zig");
 const block_messages = @import("block_messages.zig");
 const held_block = @import("engine").held_block;
+const empty_hands = @import("engine").empty_hands;
 const held_item_motion = @import("engine").held_item_motion;
 const persistence_format = @import("persistence/format.zig");
 const persistence_storage = @import("persistence/storage.zig");
@@ -89,6 +90,8 @@ const Game = struct {
     recovery_warning: bool = false,
     selected_material: voxel_chunk_module.BlockType = .dirt,
     held_block_renderer: ?held_block.Renderer = null,
+    empty_hands_renderer: ?empty_hands.Renderer = null,
+    player_skin: ?@import("engine").TextureDescriptor = null,
     held_motion: held_item_motion.Motion = .{},
     placement_validation: ?struct {
         block: [3]u32,
@@ -191,6 +194,8 @@ const Game = struct {
             world.deinit();
         }
         if (game.held_block_renderer) |renderer| renderer.deinit(game.engine.gctx);
+        if (game.empty_hands_renderer) |renderer| renderer.deinit(game.engine.gctx);
+        if (game.player_skin) |skin| skin.deinit(game.engine.gctx);
         game.engine.deinit();
         game.allocator.destroy(game);
     }
@@ -1146,6 +1151,14 @@ pub fn main(init: std.process.Init) !void {
         engine.bind_group_layouts.regular.bind_group_layout_handle,
         engine.gctx.swapchain_descriptor.format,
     );
+    game.player_skin = try engine.loadTexture(content_dir ++ "/default-skin.png", .{});
+    game.empty_hands_renderer = empty_hands.Renderer.init(
+        engine.gctx,
+        engine.bind_group_layouts.regular,
+        game.player_skin.?,
+        engine.texture_sampler,
+        engine.gctx.swapchain_descriptor.format,
+    );
 
     const man_model_id = id: {
         const loader = try engine.initLoader("man/man.gltf");
@@ -1405,6 +1418,10 @@ fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaq
                 material,
                 held_block_pose.withMotion(game.held_motion.offset),
             );
+        }
+    } else if (game.control_mode == .player) {
+        if (game.empty_hands_renderer) |*renderer| {
+            if (engine.active_scene) |scene| renderer.draw(engine.gctx, pass, scene.camera.clip_from_view, game.held_motion.offset);
         }
     }
     block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
