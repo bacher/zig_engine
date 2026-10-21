@@ -14,7 +14,7 @@ zig build test
 zig build
 ```
 
-Final full CPU run: **572 passed, 1 skipped** across 573 tests. The skip is the existing wrap-only coordinate test in the unwrapped configuration. The focused capture target also passed 43/43 tests.
+Final full CPU run: **588 passed, 1 skipped** across 589 tests. The skip is the existing wrap-only coordinate test in the unwrapped configuration. The focused capture target also passed 47/47 tests.
 
 The focused targets isolate codec/storage, capture concurrency, and world/timer/client logic. The full suite also exercises the authoritative service and application lifecycle. Tests use temporary worlds and deterministic failure injection; they do not write the default player save.
 
@@ -30,6 +30,18 @@ The focused targets isolate codec/storage, capture concurrency, and world/timer/
 | Client and shutdown | World/application/service tests: bounded optimistic edits, reconciliation, allocation-failed snapshot renewal, final-save admission fence, persisted players, initialization cleanup. |
 
 The storage model and capture tests execute production paths with controlled faults. They are not a physical power-loss test, an exhaustive scheduler exploration, or a substitute for service-level integration tests.
+
+## PR review regressions
+
+The follow-up to [review comment 6308773667](https://github.com/bacher/zig_engine/pull/30#issuecomment-6308773667) adds focused coverage for these changes:
+
+- Simulation pause now synchronizes with command admission. A gated dispatch test verifies that a preempted producer cannot enqueue after final-save selection; resuming admits the edit and the next save contains it.
+- Save requests establish their pending-command fence before restarting both query reads and mutation dependency discovery. Tests cover a dependency failure before final saving, one delayed automatic retry, explicit retry, and permanent corruption. The resumed edit is checked in decoded durable storage. Additional cases cover failed read-only queries, queued save identity after an older writer finishes, and synchronous dependency-preparation allocation failure.
+- First-run creation makes missing parent directories and confirms directory barriers before acknowledging creation. Native fault tests cover mkdir, ancestor synchronization and full-flush failures while retaining installed evidence.
+- Dense timer restoration reserves and appends validated events, then sorts once. A 32,768-event regression checks uniqueness, original deadlines/kinds and deadline/cell ordering.
+- Encoded-output dequeue advances a head index without shifting descriptors. A stalled, failing write verifies that writer-owned bytes remain charged and cleanup frees only unconsumed entries.
+
+Save request, drain selection, retry and failure handling now share focused transition helpers. A separate lifecycle state-machine module remains a possible refactor; these fixes retain the existing encoder/storage separation. The broader integration and hardware validation gaps below remain open.
 
 ## Native application smoke check
 

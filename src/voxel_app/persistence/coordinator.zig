@@ -103,7 +103,10 @@ pub const Job = struct {
     canceled: std.atomic.Value(bool) = .init(false),
     mutex: Io.Mutex = .init,
     changed: Io.Condition = .init,
+    // A job enqueues at most one record per source, so a monotonic head uses
+    // the reserved descriptor array without compaction, wraparound, or growth.
     output: std.ArrayList([]u8) = .empty,
+    output_head: usize = 0,
     output_bytes: usize = 0,
     peak_bytes: usize = 0,
     released: []bool = &.{},
@@ -212,7 +215,7 @@ pub const Job = struct {
     pub fn deinit(self: *Job) void {
         self.writer.await(self.io);
         self.encoder.await(self.io);
-        for (self.output.items) |bytes| self.allocator.free(bytes);
+        for (self.output.items[self.output_head..]) |bytes| self.allocator.free(bytes);
         self.output.deinit(self.allocator);
         if (self.installed_catalog) |*catalog| catalog.deinit();
         self.allocator.free(self.released);
@@ -330,15 +333,16 @@ pub const Job = struct {
         try self.store.beginSnapshot(self.sequence, &global, self.players, self.player_count, self.sources.len);
         while (true) {
             self.mutex.lockUncancelable(self.io);
-            while (self.output.items.len == 0 and !self.encoder_finished)
+            while (self.output_head == self.output.items.len and !self.encoder_finished)
                 self.changed.waitUncancelable(self.io, &self.mutex);
-            if (self.output.items.len == 0) {
+            if (self.output_head == self.output.items.len) {
                 const failure = self.encoder_error;
                 self.mutex.unlock(self.io);
                 if (failure) |err| return err;
                 break;
             }
-            const record = self.output.orderedRemove(0);
+            const record = self.output.items[self.output_head];
+            self.output_head += 1;
             // Bytes remain charged while the writer owns them.
             self.mutex.unlock(self.io);
             defer {

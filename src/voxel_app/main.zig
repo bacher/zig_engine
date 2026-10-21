@@ -286,6 +286,8 @@ const Game = struct {
     fn beginExit(game: *Game) void {
         if (game.exit_requested) return;
         game.exit_requested = true;
+        // Quiesce NPC admission before the final save can enter the service queue.
+        // Already admitted NPC commands precede that save; later ones await resume.
         if (game.simulation) |simulation| simulation.pauseDispatch();
         game.flushBlockOperations();
         // updatePersistence publishes the final checkpoint after all local intents

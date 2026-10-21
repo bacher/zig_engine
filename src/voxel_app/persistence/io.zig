@@ -14,7 +14,7 @@ const c = @cImport({
     @cInclude("errno.h");
 });
 pub const Error = error{ Io, Busy, UnsupportedDurability, UnexpectedEof, AlreadyExists, MissingWorld, InvalidPath, Cancelled };
-pub const Operation = enum { read, write, truncate, full_sync, directory_sync, rename, remove };
+pub const Operation = enum { read, write, truncate, full_sync, directory_sync, rename, remove, make_directory };
 /// Deterministic, bounded per-store fault script; useful without crashing or
 /// corrupting unrelated files. Set after=N to fail the Nth matching operation.
 pub const Faults = struct {
@@ -145,6 +145,9 @@ pub const Directory = struct {
             if (errno() == c.ENOENT) return error.MissingWorld;
             return error.Io;
         }
+        return own(fd);
+    }
+    fn own(fd: c_int) Error!Directory {
         errdefer _ = c.close(fd);
         const lock_fd = c.openat(fd, "world.lock", c.O_RDWR | c.O_CREAT | c.O_CLOEXEC | c.O_NOFOLLOW, @as(c_uint, 0o600));
         if (lock_fd < 0) return error.Io;
@@ -244,6 +247,82 @@ pub const Directory = struct {
         return list.toOwnedSlice(allocator);
     }
 };
+/// Holds the namespace chain until the installed world file can flush its device.
+/// Existing parent symlinks resolve normally; retained FDs keep later operations
+/// on those resolved directories. The world leaf itself must not be a symlink.
+/// On failure, retain created directories and evidence rather than deleting them.
+pub const CreationPath = struct {
+    allocator: std.mem.Allocator,
+    directories: std.ArrayList(c_int) = .empty,
+    barrier_start: usize = 0,
+    faults: ?*Faults,
+    pub fn init(a: std.mem.Allocator, path: [:0]const u8, faults: ?*Faults) !CreationPath {
+        var self: CreationPath = .{ .allocator = a, .faults = faults };
+        errdefer self.deinit();
+        if (test_model != null) return self; // Model covers the world namespace only.
+        if (path.len == 0) return error.InvalidPath;
+        try self.directories.ensureUnusedCapacity(a, 1);
+        const root = c.open(if (std.fs.path.isAbsolute(path)) "/" else ".", c.O_RDONLY | c.O_DIRECTORY | c.O_CLOEXEC | c.O_NOFOLLOW);
+        if (root < 0) return error.Io;
+        self.directories.appendAssumeCapacity(root);
+        var first_created: ?usize = null;
+        var components = std.mem.tokenizeScalar(u8, path, '/');
+        while (components.next()) |component| {
+            const name = try a.dupeZ(u8, component);
+            defer a.free(name);
+            try self.directories.ensureUnusedCapacity(a, 1);
+            const parent = self.directories.items[self.directories.items.len - 1];
+            const flags = c.O_RDONLY | c.O_DIRECTORY | c.O_CLOEXEC | (if (components.peek() == null) @as(c_int, c.O_NOFOLLOW) else @as(c_int, 0));
+            var child = c.openat(parent, name, flags);
+            if (child < 0) {
+                if (errno() != c.ENOENT) return error.Io;
+                try fault(faults, .make_directory);
+                if (c.mkdirat(parent, name, @as(c_uint, 0o700)) != 0 and errno() != c.EEXIST) return error.Io;
+                child = c.openat(parent, name, flags);
+                if (child < 0) return error.Io;
+                // Include the existing parent too: it contains the first new name.
+                if (first_created == null) first_created = self.directories.items.len;
+            }
+            self.directories.appendAssumeCapacity(child);
+        }
+        self.barrier_start = if (first_created) |index| index - 1 else self.directories.items.len -| 2;
+        return self;
+    }
+    pub fn openDirectory(self: *const CreationPath) Error!Directory {
+        if (self.directories.items.len == 0) return Directory.open("");
+        const fd = c.dup(self.directories.items[self.directories.items.len - 1]);
+        if (fd < 0) return error.Io;
+        return Directory.own(fd);
+    }
+    pub fn deinit(self: *CreationPath) void {
+        for (self.directories.items) |fd| _ = c.close(fd);
+        self.directories.deinit(self.allocator);
+    }
+    pub fn sync(self: *const CreationPath, installed: File) Error!void {
+        if (installed.model != null) return installed.sync();
+        var device: c.struct_stat = undefined;
+        if (c.fstat(installed.fd, &device) != 0) return error.Io;
+        var index = self.directories.items.len;
+        while (index > 0) {
+            index -= 1;
+            const fd = self.directories.items[index];
+            var directory: c.struct_stat = undefined;
+            if (c.fstat(fd, &directory) != 0) return error.Io;
+            // A full flush of the world file cannot confirm another device.
+            if (directory.st_dev != device.st_dev) {
+                if (index >= self.barrier_start) return error.UnsupportedDurability;
+                break; // Existing ancestors above this filesystem's mount point.
+            }
+            try fault(self.faults, .directory_sync);
+            if (c.fsync(fd) != 0) return error.Io;
+        }
+        // Include existing same-device ancestors too: an earlier failed create
+        // may have left their new names without a confirmed flush. Bottom-up
+        // directory fsyncs precede the same-device hardware flush.
+        try installed.sync();
+    }
+};
+
 pub fn makeDirectory(path: [:0]const u8) Error!void {
     if (test_model != null) return;
     if (c.mkdir(path, 0o700) != 0 and errno() != c.EEXIST) return error.Io;
@@ -251,16 +330,6 @@ pub fn makeDirectory(path: [:0]const u8) Error!void {
 pub fn removeDirectory(path: [:0]const u8) void {
     if (test_model != null) return;
     _ = c.rmdir(path);
-}
-pub fn syncParent(path: [:0]const u8, file: File, allocator: std.mem.Allocator) !void {
-    if (file.model != null) return file.sync();
-    const parent = try allocator.dupeZ(u8, std.fs.path.dirname(path) orelse ".");
-    defer allocator.free(parent);
-    const fd = c.open(parent, c.O_RDONLY | c.O_DIRECTORY | c.O_CLOEXEC);
-    if (fd < 0) return error.Io;
-    defer _ = c.close(fd);
-    if (c.fsync(fd) != 0) return error.Io;
-    try file.sync();
 }
 
 pub const Priority = struct {
@@ -281,4 +350,15 @@ pub fn enterBackgroundPriority() Error!Priority {
         if (std.c.pthread_set_qos_class_self_np(.BACKGROUND, 0) != 0) return error.Io;
     }
     return priority;
+}
+
+test "creation path cannot confirm directory durability through a different device" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    var path = try CreationPath.init(std.testing.allocator, "/private/tmp", null);
+    defer path.deinit();
+    const fd = c.open("/dev/null", c.O_RDONLY | c.O_CLOEXEC);
+    if (fd < 0) return error.Io;
+    const other_device: File = .{ .fd = fd };
+    defer other_device.close();
+    try std.testing.expectError(error.UnsupportedDurability, path.sync(other_device));
 }

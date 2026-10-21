@@ -11,7 +11,7 @@ zig build run_voxel -- --world saves/my-world --player-id 2
 zig build run_voxel -- --ephemeral
 ```
 
-Opening never implicitly creates or replaces a world. Without arguments, the app opens `saves/default`; create it explicitly first. Paths are relative to the launch directory, before asset startup changes the working directory. Creation refuses an existing save. `--ephemeral` deliberately keeps changes only in memory. Player identity is a local u64 (default 1); networking, authentication, and Steam identity are deferred.
+Opening never implicitly creates or replaces a world. Without arguments, the app opens `saves/default`; create it explicitly first. Paths are relative to the launch directory, before asset startup changes the working directory. Creation creates missing parent directories and refuses an existing save or orphaned persistence artifacts. Existing parent-directory aliases such as macOS `/tmp` work normally; the world directory itself cannot be a symlink. Creation succeeds only after the new directory entries and initial base pass their required durability barriers. A failure can leave empty directories or recovery evidence, which creation preserves. `--ephemeral` deliberately keeps changes only in memory. Player identity is a local u64 (default 1); networking, authentication, and Steam identity are deferred.
 
 Opening takes exclusive ownership through `world.lock`, validates and recovers storage, and uses the saved world dimensions/generator settings. Invalid or incompatible saves report an error with the selected path. Do not delete or edit journals to work around an error: they may contain the only recoverable version. Back up a world while its owning process is closed.
 

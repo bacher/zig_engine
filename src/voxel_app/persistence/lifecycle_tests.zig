@@ -4,7 +4,7 @@ const format = @import("format.zig");
 const storage = @import("storage.zig");
 const adapter = @import("io.zig");
 const coordinator = @import("coordinator.zig");
-const Mode = enum { write_stall, sync_stall, write_failure, sync_failure, footer_cancel, before_cancel, priority, tiny_output, tiny_working, manifest_limit };
+const Mode = enum { write_stall, sync_stall, write_failure, queued_write_failure, sync_failure, footer_cancel, before_cancel, priority, tiny_output, tiny_working, manifest_limit };
 const Gate = struct {
     io: std.Io,
     operation: adapter.Operation,
@@ -81,18 +81,18 @@ fn scenario(mode: Mode) !void {
     try store.rotate();
     var gate: Gate = .{
         .io = io,
-        .operation = if (mode == .write_stall or mode == .write_failure or mode == .footer_cancel or mode == .before_cancel) .write else .full_sync,
+        .operation = if (mode == .write_stall or mode == .write_failure or mode == .queued_write_failure or mode == .footer_cancel or mode == .before_cancel) .write else .full_sync,
         // Header, global, empty players, chunk; the fifth adapter write is footer.
-        .skip_writes = if (mode == .footer_cancel) 4 else 0,
+        .skip_writes = if (mode == .footer_cancel) 4 else if (mode == .queued_write_failure) 3 else 0,
     };
-    const stalls = mode == .write_stall or mode == .sync_stall or mode == .footer_cancel or mode == .before_cancel;
-    var faults: adapter.Faults = .{ .operation = gate.operation, .enabled = mode == .write_failure or mode == .sync_failure, .hook = if (stalls) Gate.hook else null, .context = &gate };
+    const stalls = mode == .queued_write_failure or mode == .write_stall or mode == .sync_stall or mode == .footer_cancel or mode == .before_cancel;
+    var faults: adapter.Faults = .{ .operation = gate.operation, .enabled = mode == .write_failure or mode == .sync_failure or mode == .queued_write_failure, .after = if (mode == .queued_write_failure) 3 else 0, .hook = if (stalls) Gate.hook else null, .context = &gate };
     store.setFaults(&faults);
     defer store.setFaults(null);
     var blocks: [32768]u8 = undefined;
     for (&blocks, 0..) |*cell, i| cell.* = @intCast(i % 2 + 1);
     var first_blocks = blocks;
-    const count: usize = if (mode == .priority) 80 else if (mode == .write_stall) 64 else 1;
+    const count: usize = if (mode == .priority) 80 else if (mode == .write_stall or mode == .queued_write_failure) 64 else 1;
     gate.hold_first_release = mode == .priority;
     const sources = try a.alloc(coordinator.Source, count);
     for (sources, 0..) |*source, i| source.* = .{ .id = @intCast(i), .revision = 1, .epoch = 1, .is_unreachable = false, .blocks = if (i == 0) &first_blocks else &blocks, .roads = &.{}, .constructed = &.{}, .events = &.{} };
@@ -168,12 +168,25 @@ fn scenario(mode: Mode) !void {
     if (stalls) {
         gate.mutex.lockUncancelable(io);
         while (!gate.entered) gate.changed.waitUncancelable(io, &gate.mutex);
-        if (mode == .write_stall) {
+        if (mode == .write_stall or mode == .queued_write_failure) {
             // 36 raw records fit; reservation blocks source 37 before encoding.
             while (gate.released < 36) gate.changed.waitUncancelable(io, &gate.mutex);
         } else if (mode != .before_cancel) while (!gate.encoded) gate.changed.waitUncancelable(io, &gate.mutex);
         const premature_ack = gate.committed;
         gate.mutex.unlock(io);
+        if (mode == .queued_write_failure) {
+            job.mutex.lockUncancelable(io);
+            const consumed = job.output_head;
+            const queued = job.output.items.len - consumed;
+            var queued_bytes: usize = 0;
+            for (job.output.items[consumed..]) |bytes| queued_bytes += bytes.len;
+            const charged = job.output_bytes;
+            job.mutex.unlock(io);
+            try std.testing.expectEqual(@as(usize, 1), consumed);
+            try std.testing.expect(queued > 0);
+            // The stalled writer's popped record is still charged to the cap.
+            try std.testing.expect(charged > queued_bytes);
+        }
         if (mode == .footer_cancel) {
             try std.testing.expect(job.commit_started);
             const started = coordinator.now(io);
@@ -195,7 +208,7 @@ fn scenario(mode: Mode) !void {
         job.encoder.await(io);
         try std.testing.expect(!premature_ack);
         try std.testing.expect(job.peak_bytes <= format.max_chunk_record_bytes);
-        if (mode == .write_stall or mode == .before_cancel) {
+        if (mode == .write_stall or mode == .before_cancel or mode == .queued_write_failure) {
             try std.testing.expect(!job.commit_started);
             try std.testing.expect(gate.failure != null);
             try std.testing.expectEqual(@as(u64, 0), store.sequence);
@@ -212,6 +225,11 @@ fn scenario(mode: Mode) !void {
         try std.testing.expect(!gate.committed);
         try std.testing.expectEqual(@as(u64, 0), store.sequence);
         try std.testing.expectEqual(storage.Phase.ready, store.phase);
+    }
+    if (mode == .queued_write_failure) {
+        // deinit must free these queued records, but never the writer-owned
+        // record that the failed write already released.
+        try std.testing.expect(job.output_head < job.output.items.len);
     }
     for (gate.release_counts[0..count]) |released_count| try std.testing.expectEqual(@as(u8, 1), released_count);
     if (mode == .before_cancel) try std.testing.expect(gate.writes < 5);
@@ -241,4 +259,8 @@ test "tiny output working and manifest admission fail before workers borrow sour
     try scenario(.tiny_output);
     try scenario(.tiny_working);
     try scenario(.manifest_limit);
+}
+
+test "failed queued write frees only unconsumed output and retains writer byte charge" {
+    try scenario(.queued_write_failure);
 }

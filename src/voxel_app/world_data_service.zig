@@ -429,6 +429,7 @@ pub const WorldDataService = struct {
     retry_reads: std.ArrayList(Request) = .empty,
     read_discovered: bool = false,
     terminal_read_failure: bool = false,
+    blocked_dependency_error: ?anyerror = null,
     operation_deferred: bool = false,
     run_write_ids: std.ArrayList(u32) = .empty,
     run_gate_failure: ?anyerror = null,
@@ -871,19 +872,63 @@ pub const WorldDataService = struct {
         for (self.retry_reads.items) |read| self.processRequest(read);
     }
 
+    fn isRetryableReadFailure(err: anyerror) bool {
+        return err == error.Io or err == error.OutOfMemory;
+    }
+
+    /// Select the command prefix before restarting reads: progress may resolve an
+    /// operation immediately, so the fence must already belong to this attempt.
+    fn requestSaveTransition(self: *WorldDataService, id: u64, final: bool) void {
+        if (self.queued_save != null and !final) return;
+        self.queued_save = .{ .id = id, .final = final };
+        self.save_fence_remaining = self.pending.items.len;
+        self.dependency_auto_retried = false;
+        self.dependency_retry_at = null;
+        self.selectSaveDrain();
+        self.retrySaveDrain();
+    }
+
+    /// Every explicit/automatic retry must wake both read queries and mutation
+    /// dependency discovery; neither queue can rely on another completion arriving.
+    fn retrySaveDrain(self: *WorldDataService) void {
+        self.retryReadFailures();
+        self.retryWaitingReads();
+        self.retryPending();
+    }
+
+    fn selectSaveDrain(self: *WorldDataService) void {
+        const save = self.queued_save orelse return;
+        if (self.job != null or self.status.intent_id == save.id) return;
+        self.status.intent_id = save.id;
+        self.status.target_sequence = 0;
+        self.status.phase = .capturing;
+        self.status.active = true;
+        self.status.error_name = null;
+    }
+
+    fn noteDrainFailure(self: *WorldDataService, err: anyerror) void {
+        self.selectSaveDrain();
+        self.failPersistence(err);
+        const save = self.queued_save orelse return;
+        if (!save.final) return;
+        if (isRetryableReadFailure(err) and !self.dependency_auto_retried) {
+            if (self.dependency_retry_at == null) self.dependency_retry_at = persistence.now(self.io) + std.time.ns_per_s;
+            self.status.active = true;
+        } else self.dependency_retry_at = null;
+    }
+
     fn retryReadFailures(self: *WorldDataService) void {
         while (true) {
             var failures = self.read_failed.iterator();
             var retry: ?u32 = null;
             while (failures.next()) |entry| {
-                if (entry.value_ptr.* == error.Io or entry.value_ptr.* == error.OutOfMemory) {
+                if (isRetryableReadFailure(entry.value_ptr.*)) {
                     retry = entry.key_ptr.*;
                     break;
                 }
             }
             _ = self.read_failed.remove(retry orelse break);
         }
-        self.retryWaitingReads();
     }
 
     fn processRequest(self: *WorldDataService, request: Request) void {
@@ -894,8 +939,10 @@ pub const WorldDataService = struct {
             return;
         }
         if (request == .load_chunks or request == .standing_space or request == .restore_position) {
+            self.blocked_dependency_error = null;
             if (!self.dependenciesReady(request)) {
                 self.deferRead(request);
+                if (self.blocked_dependency_error) |err| self.noteDrainFailure(err);
                 return;
             }
         }
@@ -924,18 +971,12 @@ pub const WorldDataService = struct {
                         self.installLoaded(loaded.id, loaded.revision, chunk) catch |err| {
                             chunk.deinit(self.worker_state.liveAllocator(self.allocator));
                             self.read_failed.put(self.allocator, loaded.id, err) catch {};
-                            self.failPersistence(err);
+                            self.noteDrainFailure(err);
                         };
                     }
                 } else |err| {
                     self.read_failed.put(self.allocator, loaded.id, err) catch {};
-                    self.failPersistence(err);
-                    if ((err == error.Io or err == error.OutOfMemory) and !self.dependency_auto_retried) {
-                        if (self.queued_save) |save| if (save.final and self.dependency_retry_at == null) {
-                            self.dependency_retry_at = persistence.now(self.io) + std.time.ns_per_s;
-                            self.status.active = true;
-                        };
-                    }
+                    self.noteDrainFailure(err);
                 }
                 const loaded_coords = self.layout.decodeChunkId(loaded.id);
                 self.dirty_meshes.put(self.allocator, loaded.id, {}) catch self.failPersistence(error.OutOfMemory);
@@ -953,26 +994,7 @@ pub const WorldDataService = struct {
                 client.checkpoint_mutex.unlock(self.io);
                 self.applyEligibleCheckpoint(client);
             },
-            .save => |save| {
-                self.dependency_auto_retried = false;
-                self.dependency_retry_at = null;
-                self.retryReadFailures();
-                if (self.job != null or self.pending.items.len != 0 or (save.final and (self.read_pending.count() != 0 or self.waiting_reads.items.len != 0 or self.compactor != null))) {
-                    if (self.queued_save == null or save.final) {
-                        self.queued_save = .{ .id = save.id, .final = save.final };
-                        self.save_fence_remaining = self.pending.items.len;
-                        if (self.job == null) {
-                            self.status.intent_id = save.id;
-                            self.status.target_sequence = 0;
-                            self.status.phase = .capturing;
-                            self.status.active = true;
-                            self.status.error_name = null;
-                        }
-                    }
-                    return;
-                }
-                self.beginCapture(save.id, save.final) catch |err| self.failPersistence(err);
-            },
+            .save => |save| self.requestSaveTransition(save.id, save.final),
             .cancel_save => |id| {
                 if (self.queued_save) |save| if (save.id == id) {
                     self.queued_save = null;
@@ -1260,7 +1282,11 @@ pub const WorldDataService = struct {
 
     fn retryPending(self: *WorldDataService) void {
         while (true) {
+            self.selectSaveDrain();
             if (self.queued_save) |save| {
+                // A preceding writer may have been the last source of wakes.
+                // Revisit retained query failures when this drain takes over.
+                if (save.final and self.job == null and self.read_pending.count() == 0 and self.waiting_reads.items.len != 0) self.retryWaitingReads();
                 const ready = self.job == null and self.save_fence_remaining == 0 and (!save.final or (self.read_pending.count() == 0 and self.waiting_reads.items.len == 0 and self.compactor == null));
                 if (ready) {
                     self.queued_save = null;
@@ -1268,7 +1294,12 @@ pub const WorldDataService = struct {
                 }
             }
             if (self.pending.items.len == 0) break;
-            if (!self.dependenciesReady(self.pending.items[0].request) or !self.admissible(self.pending.items[0].request)) break;
+            self.blocked_dependency_error = null;
+            if (!self.dependenciesReady(self.pending.items[0].request)) {
+                if (self.blocked_dependency_error) |err| self.noteDrainFailure(err);
+                break;
+            }
+            if (!self.admissible(self.pending.items[0].request)) break;
             const pending = self.pending.orderedRemove(0);
             self.processing_since = pending.since;
             self.processAdmitted(pending.request);
@@ -1541,8 +1572,7 @@ pub const WorldDataService = struct {
         if (self.dependency_retry_at) |retry| if (at >= retry) {
             self.dependency_retry_at = null;
             self.dependency_auto_retried = true;
-            self.retryReadFailures();
-            self.retryPending();
+            self.retrySaveDrain();
         };
         if (self.unsaved_work and at - self.last_success_ns >= self.limits.overdue_ns) self.status.overdue = true;
         if (self.job) |job| {
@@ -1606,7 +1636,15 @@ pub const WorldDataService = struct {
             } else null });
         }
         for (decoded_metadata.construction) |cell| try chunk.metadata.constructed.append(live, @intCast(cell));
-        for (decoded_metadata.timers) |timer| try chunk.metadata.timed.trySchedule(live, .{ .block = @intCast(timer.cell), .kind = @enumFromInt(timer.kind), .due_tick = timer.deadline });
+        // The decoder validated one event per cell; bulk import avoids the
+        // replacement scans and shifts needed by interactive timer scheduling.
+        try chunk.metadata.timed.reserve(live, decoded_metadata.timers.len);
+        for (decoded_metadata.timers) |timer| chunk.metadata.timed.events.appendAssumeCapacity(.{ .block = @intCast(timer.cell), .kind = @enumFromInt(timer.kind), .due_tick = timer.deadline });
+        std.mem.sort(transformations.Event, chunk.metadata.timed.events.items, {}, struct {
+            fn less(_: void, a: transformations.Event, b: transformations.Event) bool {
+                return a.due_tick < b.due_tick or (a.due_tick == b.due_tick and a.block < b.block);
+            }
+        }.less);
         return chunk;
     }
     fn installLoaded(self: *WorldDataService, id: u32, revision: u64, chunk: WorldChunk) !void {
@@ -1621,41 +1659,47 @@ pub const WorldDataService = struct {
         if (chunk.metadata.timed.events.items.len != 0) self.worker_state.timed_chunks.putAssumeCapacity(id, {});
     }
 
+    fn failDependencyRead(self: *WorldDataService, err: anyerror) void {
+        self.blocked_dependency_error = err;
+        self.noteDrainFailure(err);
+    }
+
     fn requireBase(self: *WorldDataService, id: u32) bool {
         if (self.worker_state.modified_chunks.contains(id)) return true;
         const catalog = if (self.catalog) |*value| value else return true;
         if (catalog.revision(id) == null) return true;
         self.read_discovered = true;
-        if (self.read_failed.contains(id)) {
+        if (self.read_failed.get(id)) |err| {
             self.terminal_read_failure = true;
+            self.blocked_dependency_error = err;
             return false;
         }
         if (!self.read_pending.contains(id) and self.read_pending.count() < self.limits.pending_commands) {
             self.requests.mutex.lockUncancelable(self.io);
             if (self.loaded_ring.items.len == 0) self.loaded_ring.resize(self.allocator, self.limits.pending_commands) catch {
                 self.requests.mutex.unlock(self.io);
-                self.failPersistence(error.OutOfMemory);
+                self.failDependencyRead(error.OutOfMemory);
                 return false;
             };
             self.requests.mutex.unlock(self.io);
             self.read_failed.ensureUnusedCapacity(self.allocator, @intCast(self.read_pending.count() + 1)) catch {
-                self.failPersistence(error.OutOfMemory);
+                self.failDependencyRead(error.OutOfMemory);
                 return false;
             };
             var read = catalog.prepareRead(id) catch |err| {
-                self.failPersistence(err);
+                self.failDependencyRead(err);
                 return false;
             };
             if (read) |*handle| {
                 self.read_pending.put(self.allocator, id, handle.revision) catch {
                     handle.deinit();
-                    self.failPersistence(error.OutOfMemory);
+                    self.failDependencyRead(error.OutOfMemory);
                     return false;
                 };
                 self.read_requests.tryPush(self.io, self.allocator, handle.*) catch |err| {
                     _ = self.read_pending.remove(id);
                     handle.deinit();
-                    self.failPersistence(err);
+                    self.failDependencyRead(err);
                     return false;
                 };
             }
@@ -3965,4 +4009,252 @@ test "public service final save retries transient persisted dependency once thro
     try std.testing.expectEqual(persistence.Phase.complete, saved.phase);
     try std.testing.expect(persistence.now(std.testing.io) - released_at >= std.time.ns_per_s);
     f.store.setFaults(null);
+}
+
+fn savedDependencyFixture() !*PersistenceFixture {
+    const f = try PersistenceFixture.init(.{});
+    errdefer f.deinit();
+    const client = try f.service.createClient();
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = .{ 10, 10, 48 }, .action = .{ .put = .snow } }));
+    try std.testing.expectEqual(persistence.Phase.complete, (try f.waitSave(f.service.requestSave(true))).phase);
+    return f;
+}
+
+fn waitDependencyFailure(service: *WorldDataService) !void {
+    const until = persistence.now(std.testing.io) + 5 * std.time.ns_per_s;
+    while (persistence.now(std.testing.io) < until) {
+        const status = service.persistenceStatus();
+        if (status.phase == .failed and status.pending_commands == 1) return;
+        try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestDependencyFailureTimeout;
+}
+
+test "final save restarts an edit dependency that failed before the save request" {
+    const f = try savedDependencyFixture();
+    defer f.deinit();
+    f.service.destroy();
+    var faults: @import("persistence/io.zig").Faults = .{ .operation = .read };
+    f.store.setFaults(&faults);
+    f.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .flat, &f.store, .{});
+    const client = try f.service.createClient();
+    _ = try client.trySubmitOperation(.{ .block = .{ 10, 10, 48 }, .action = .remove });
+    try waitDependencyFailure(f.service);
+    const saved = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.complete, saved.phase);
+    try std.testing.expectEqual(@as(usize, 0), saved.pending_commands);
+    var replies: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&replies);
+    try std.testing.expect(try client.waitResponses(&replies));
+    try std.testing.expectEqual(OperationStatus.success, replies.items[0].operation.?.status);
+    try std.testing.expectEqual(@as(u64, 2), replies.items[0].chunk_revision);
+    const bytes = (try f.store.readChunk(std.testing.allocator, f.layout.encodeChunkCoords(.{ 0, 0, 1 }))).?;
+    defer std.testing.allocator.free(bytes);
+    var durable = try format.decodeChunk(std.testing.allocator, f.store.world_uuid, bytes, f.store.dimensions);
+    defer durable.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 2), durable.revision);
+    try std.testing.expectEqual(@as(u8, 0), durable.blocks[transformations.index(.{ 10, 10, 16 })]);
+    f.store.setFaults(null);
+}
+
+const RepeatedReadFailure = struct {
+    enabled: std.atomic.Value(bool) = .init(true),
+    faults: @import("persistence/io.zig").Faults = .{ .operation = .read },
+    fn hook(context: ?*anyopaque, operation: @import("persistence/io.zig").Operation) void {
+        const self: *RepeatedReadFailure = @ptrCast(@alignCast(context.?));
+        if (operation != .read) return;
+        self.faults.enabled = self.enabled.load(.acquire);
+        self.faults.observed = 0;
+    }
+};
+
+test "final dependency drain has one automatic retry and explicit retry resumes the same edit" {
+    const f = try savedDependencyFixture();
+    defer f.deinit();
+    f.service.destroy();
+    var failure: RepeatedReadFailure = .{};
+    failure.faults.context = &failure;
+    failure.faults.hook = RepeatedReadFailure.hook;
+    f.store.setFaults(&failure.faults);
+    f.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .flat, &f.store, .{});
+    const client = try f.service.createClient();
+    _ = try client.trySubmitOperation(.{ .block = .{ 10, 10, 48 }, .action = .remove });
+    try waitDependencyFailure(f.service);
+    const started = persistence.now(std.testing.io);
+    const failed = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.failed, failed.phase);
+    try std.testing.expect(persistence.now(std.testing.io) - started >= std.time.ns_per_s);
+    try std.testing.expectEqualStrings("Io", failed.error_name.?);
+    try std.testing.expectEqual(@as(usize, 1), failed.pending_commands);
+    try Io.sleep(std.testing.io, .fromMilliseconds(1100), .awake);
+    try std.testing.expectEqual(failed.progress_generation, f.service.persistenceStatus().progress_generation);
+    failure.enabled.store(false, .release);
+    const saved = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.complete, saved.phase);
+    try std.testing.expectEqual(@as(usize, 0), saved.pending_commands);
+    f.store.setFaults(null);
+}
+
+test "final dependency drain reports permanent corruption without automatic retry" {
+    const f = try savedDependencyFixture();
+    defer f.deinit();
+    f.service.destroy();
+    var catalog = try f.store.snapshotCatalog();
+    defer catalog.deinit();
+    var read = (try catalog.prepareRead(f.layout.encodeChunkCoords(.{ 0, 0, 1 }))).?;
+    defer read.deinit();
+    const record = try read.read(std.testing.allocator);
+    defer std.testing.allocator.free(record);
+    record[record.len - 1] ^= 1;
+    try read.file.write(record[record.len - 1 ..], read.offset + record.len - 1);
+    f.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .flat, &f.store, .{});
+    const client = try f.service.createClient();
+    _ = try client.trySubmitOperation(.{ .block = .{ 10, 10, 48 }, .action = .remove });
+    try waitDependencyFailure(f.service);
+    const failed = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.failed, failed.phase);
+    try std.testing.expectEqualStrings("ChecksumMismatch", failed.error_name.?);
+    try std.testing.expectEqual(@as(u64, 0), failed.target_sequence);
+    try std.testing.expectEqual(@as(usize, 1), failed.pending_commands);
+    try Io.sleep(std.testing.io, .fromMilliseconds(1100), .awake);
+    try std.testing.expectEqual(failed.progress_generation, f.service.persistenceStatus().progress_generation);
+    const explicit = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.failed, explicit.phase);
+    try std.testing.expectEqualStrings("ChecksumMismatch", explicit.error_name.?);
+}
+
+test "public service restores a dense timer chunk in deadline and cell order" {
+    const f = try PersistenceFixture.init(.{});
+    defer f.deinit();
+    f.service.destroy();
+    const a = std.testing.allocator;
+    const timers = try a.alloc(format.Timer, format.cell_count);
+    defer a.free(timers);
+    for (timers, 0..) |*timer, cell| timer.* = .{ .cell = @intCast(cell), .kind = @intCast(cell % 2), .deadline = 1000 + (format.cell_count - cell) % 17 };
+    const metadata = try format.encodeMetadata(a, .{ .timers = timers });
+    defer a.free(metadata);
+    const blocks = [_]u8{@intFromEnum(rules.BlockType.dirt)} ** format.cell_count;
+    const record = try format.encodeChunk(a, f.store.world_uuid, .{ .id = f.layout.encodeChunkCoords(.{ 0, 0, 1 }), .revision = 7, .is_unreachable = false, .blocks = &blocks, .metadata = metadata });
+    defer a.free(record);
+    const global = format.encodeGlobal(0);
+    try f.store.beginSnapshot(1, &global, &.{}, 0, 1);
+    try f.store.appendChunk(record);
+    _ = try f.store.commitSnapshot();
+    try f.store.compact();
+    f.service = try WorldDataService.createPersistent(std.testing.io, a, &f.layout, .flat, &f.store, .{});
+    const client = try f.service.createClient();
+    _ = client.requestChunks(.{ 0, 0 }, 1, 2);
+    var replies: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&replies);
+    try std.testing.expect(try client.waitResponses(&replies));
+    const events = replies.items[0].data.blocks.chunk.metadata.timed.events.items;
+    try std.testing.expectEqual(format.cell_count, events.len);
+    var seen = [_]bool{false} ** format.cell_count;
+    for (events, 0..) |event, i| {
+        try std.testing.expect(!seen[event.block]);
+        seen[event.block] = true;
+        try std.testing.expectEqual(timers[event.block].deadline, event.due_tick);
+        try std.testing.expectEqual(timers[event.block].kind, @intFromEnum(event.kind));
+        if (i != 0) try std.testing.expect(events[i - 1].due_tick < event.due_tick or (events[i - 1].due_tick == event.due_tick and events[i - 1].block < event.block));
+    }
+}
+
+fn corruptDependencyRecord(f: *PersistenceFixture) !void {
+    var catalog = try f.store.snapshotCatalog();
+    defer catalog.deinit();
+    var read = (try catalog.prepareRead(f.layout.encodeChunkCoords(.{ 0, 0, 1 }))).?;
+    defer read.deinit();
+    const record = try read.read(std.testing.allocator);
+    defer std.testing.allocator.free(record);
+    record[record.len - 1] ^= 1;
+    try read.file.write(record[record.len - 1 ..], read.offset + record.len - 1);
+}
+
+fn waitAnyDependencyFailure(service: *WorldDataService) !void {
+    const until = persistence.now(std.testing.io) + 5 * std.time.ns_per_s;
+    while (persistence.now(std.testing.io) < until) {
+        if (service.persistenceStatus().phase == .failed) return;
+        try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestDependencyFailureTimeout;
+}
+
+test "final save reports permanent dependency failure with only waiting read queries" {
+    const f = try savedDependencyFixture();
+    defer f.deinit();
+    f.service.destroy();
+    try corruptDependencyRecord(f);
+    f.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .flat, &f.store, .{});
+    const client = try f.service.createClient();
+    _ = client.requestChunks(.{ 0, 0 }, 1, 2);
+    try waitAnyDependencyFailure(f.service);
+    const failed = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.failed, failed.phase);
+    try std.testing.expectEqualStrings("ChecksumMismatch", failed.error_name.?);
+    try std.testing.expectEqual(@as(usize, 0), failed.pending_commands);
+}
+
+fn queuedFinalDependencyFailure(read_only: bool) !void {
+    const f = try savedDependencyFixture();
+    defer f.deinit();
+    f.service.destroy();
+    try corruptDependencyRecord(f);
+    f.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .flat, &f.store, .{});
+    var gate: ServiceWriteGate = .{};
+    var faults: @import("persistence/io.zig").Faults = .{ .enabled = false, .context = &gate, .hook = ServiceWriteGate.hook };
+    f.store.setFaults(&faults);
+    defer gate.released.set(std.testing.io);
+    const older = f.service.requestSave(false);
+    try gate.entered.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    const client = try f.service.createClient();
+    if (read_only) {
+        _ = client.requestChunks(.{ 0, 0 }, 1, 2);
+        try waitAnyDependencyFailure(f.service);
+    } else {
+        _ = try client.trySubmitOperation(.{ .block = .{ 10, 10, 48 }, .action = .remove });
+        try waitDependencyFailure(f.service);
+    }
+    const final = f.service.requestSave(true);
+    gate.released.set(std.testing.io);
+    const failed = try f.waitSave(final);
+    try std.testing.expect(final != older);
+    try std.testing.expectEqual(final, failed.intent_id);
+    try std.testing.expectEqual(persistence.Phase.failed, failed.phase);
+    try std.testing.expectEqualStrings("ChecksumMismatch", failed.error_name.?);
+    try std.testing.expectEqual(@as(u64, 0), failed.target_sequence);
+    f.store.setFaults(null);
+}
+
+test "queued final drain publishes its own mutation failure after an older job completes" {
+    try queuedFinalDependencyFailure(false);
+}
+
+test "queued final drain publishes its own read query failure after an older job completes" {
+    try queuedFinalDependencyFailure(true);
+}
+
+test "synchronous dependency preparation OOM schedules bounded final retry" {
+    const f = try savedDependencyFixture();
+    defer f.deinit();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var service: WorldDataService = .{
+        .layout = &f.layout,
+        .io = std.testing.io,
+        .allocator = failing.allocator(),
+        .worker = undefined,
+        .worker_state = .{ .layout = &f.layout, .generator = undefined },
+        .catalog = try f.store.snapshotCatalog(),
+        .queued_save = .{ .id = 11, .final = true },
+    };
+    defer service.catalog.?.deinit();
+    try std.testing.expect(!service.requireBase(f.layout.encodeChunkCoords(.{ 0, 0, 1 })));
+    try std.testing.expectEqual(@as(u64, 11), service.status.intent_id);
+    try std.testing.expect(service.status.active);
+    try std.testing.expect(service.dependency_retry_at != null);
+    try std.testing.expectEqualStrings("OutOfMemory", service.status.error_name.?);
+    service.dependency_auto_retried = true;
+    service.dependency_retry_at = null;
+    try std.testing.expect(!service.requireBase(f.layout.encodeChunkCoords(.{ 0, 0, 1 })));
+    try std.testing.expect(!service.status.active);
+    try std.testing.expect(service.dependency_retry_at == null);
 }

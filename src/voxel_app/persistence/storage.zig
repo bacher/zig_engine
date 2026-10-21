@@ -47,8 +47,13 @@ pub const Store = struct {
     phase: Phase = .ready,
     transaction: ?Transaction = null,
     pub fn create(a: std.mem.Allocator, path: [:0]const u8, initial: Initial, limits: Limits) !Store {
-        try io.makeDirectory(path);
-        const dir = try io.Directory.open(path);
+        return createWithFaults(a, path, initial, limits, null);
+    }
+    fn createWithFaults(a: std.mem.Allocator, path: [:0]const u8, initial: Initial, limits: Limits, faults: ?*io.Faults) !Store {
+        var creation_path = try io.CreationPath.init(a, path, faults);
+        defer creation_path.deinit();
+        var dir = try creation_path.openDirectory();
+        dir.faults = faults;
         errdefer dir.close();
         // Never invent a fresh anchor beside orphaned persistence evidence.
         // An empty precreated directory (including its stable lock) is allowed.
@@ -117,7 +122,7 @@ pub const Store = struct {
         try candidate.sync();
         try dir.rename("initial.tmp", "world.base", true);
         try dir.sync(candidate);
-        try io.syncParent(path, candidate, a);
+        try creation_path.sync(candidate);
         self.base = candidate;
         var initial_index: u64 = 120 + descriptor.len + global.len;
         for (initial.chunks) |bytes| {
@@ -1645,6 +1650,105 @@ test "creation preserves orphaned persistence artifacts and accepts an empty pre
             var store = try Store.create(a, path, initial, .{});
             defer store.deinit();
             try std.testing.expectEqual(@as(u64, 0), store.sequence);
+        }
+    }
+}
+
+test "fresh nested save path through a parent alias creates parents and preserves world identity" {
+    const a = std.testing.allocator;
+    var uuid: Uuid = undefined;
+    std.c.arc4random_buf(&uuid, uuid.len);
+    const root = try std.fmt.allocPrintSentinel(a, "/private/tmp/zig-persistence-nested-{x}", .{uuid}, 0);
+    defer a.free(root);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, root) catch {};
+    // macOS /tmp is a symlink to /private/tmp. Existing ancestor aliases
+    // retain ordinary path semantics; only the world leaf rejects symlinks.
+    const path = try std.fmt.allocPrintSentinel(a, "/tmp/zig-persistence-nested-{x}/saves/default", .{uuid}, 0);
+    defer a.free(path);
+    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+    defer a.free(descriptor);
+    const global = format.encodeGlobal(17);
+    const initial: Initial = .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 };
+    var trace: io.Faults = .{ .enabled = false };
+    var store = try Store.createWithFaults(a, path, initial, .{}, &trace);
+    store.setFaults(null);
+    store.deinit();
+    var created: usize = 0;
+    var between_flushes: usize = 0;
+    var max_directory_chain: usize = 0;
+    for (trace.trace[0..trace.trace_len]) |operation| switch (operation) {
+        .make_directory => created += 1,
+        .directory_sync => between_flushes += 1,
+        .full_sync => {
+            max_directory_chain = @max(max_directory_chain, between_flushes);
+            between_flushes = 0;
+        },
+        else => {},
+    };
+    try std.testing.expectEqual(@as(usize, 3), created);
+    // New root/saves/default plus the existing parent must precede full flush.
+    try std.testing.expect(max_directory_chain >= 4);
+    try std.testing.expectError(error.AlreadyExists, Store.create(a, path, initial, .{}));
+    var reopened = try Store.open(a, path, .{});
+    defer reopened.deinit();
+    try std.testing.expectEqualSlices(u8, &uuid, &reopened.world_uuid);
+    try std.testing.expectEqual(@as(u64, 17), try format.decodeGlobal(reopened.global));
+}
+
+test "nested creation propagates mkdir namespace and fullflush failures without overwriting evidence" {
+    const a = std.testing.allocator;
+    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+    defer a.free(descriptor);
+    const global = format.encodeGlobal(0);
+    const Failure = struct { operation: io.Operation, after: usize };
+    // directory_sync0 is base installation, subsequent ones are bottom-up
+    // ancestor barriers; full_sync2 is the flush after that complete chain.
+    for ([_]Failure{ .{ .operation = .make_directory, .after = 1 }, .{ .operation = .directory_sync, .after = 2 }, .{ .operation = .full_sync, .after = 2 } }) |failure| {
+        var uuid: Uuid = undefined;
+        std.c.arc4random_buf(&uuid, uuid.len);
+        const root = try std.fmt.allocPrintSentinel(a, "/private/tmp/zig-persistence-nested-fault-{x}", .{uuid}, 0);
+        defer a.free(root);
+        defer std.Io.Dir.cwd().deleteTree(std.testing.io, root) catch {};
+        const path = try std.fmt.allocPrintSentinel(a, "{s}/saves/default", .{root}, 0);
+        defer a.free(path);
+        const initial: Initial = .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 };
+        var fault: io.Faults = .{ .operation = failure.operation, .after = failure.after };
+        try std.testing.expectError(error.Io, Store.createWithFaults(a, path, initial, .{}, &fault));
+        if (failure.operation == .make_directory) {
+            // The first parent remains. A retry must persist it too, even though
+            // it now exists, and may create only the remaining two directories.
+            var trace: io.Faults = .{ .enabled = false };
+            var retry = try Store.createWithFaults(a, path, initial, .{}, &trace);
+            retry.setFaults(null);
+            retry.deinit();
+            var created: usize = 0;
+            for (trace.trace[0..trace.trace_len]) |op| if (op == .make_directory) {
+                created += 1;
+            };
+            try std.testing.expectEqual(@as(usize, 2), created);
+        } else {
+            // A failed durability barrier cannot report successful creation or
+            // establish a WAL; its installed base remains recovery evidence.
+            const before = read_before: {
+                const dir = try io.Directory.open(path);
+                defer dir.close();
+                const names = try dir.names(a, 128);
+                defer a.free(names);
+                for (names) |name| a.free(name);
+                try std.testing.expectEqual(@as(usize, 0), names.len);
+                const base = try dir.file("world.base", false);
+                defer base.close();
+                break :read_before try readAlloc(a, base, 0, try base.size());
+            };
+            defer a.free(before);
+            try std.testing.expectError(error.AlreadyExists, Store.create(a, path, initial, .{}));
+            const dir = try io.Directory.open(path);
+            defer dir.close();
+            const base = try dir.file("world.base", false);
+            defer base.close();
+            const after = try readAlloc(a, base, 0, try base.size());
+            defer a.free(after);
+            try std.testing.expectEqualSlices(u8, before, after);
         }
     }
 }
