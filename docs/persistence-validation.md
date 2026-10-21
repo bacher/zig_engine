@@ -15,7 +15,7 @@ zig build test
 zig build
 ```
 
-Final full CPU run: **599 passed, 1 skipped** across 600 tests. The skip is the existing wrap-only coordinate test in the unwrapped configuration. The focused capture target also passed 47/47 tests.
+Final full CPU run: **600 passed, 1 skipped** across 601 tests. The skip is the existing wrap-only coordinate test in the unwrapped configuration. The focused capture target also passed 47/47 tests.
 
 The focused targets isolate codec/storage, capture concurrency, and world/timer/client logic. The full suite also exercises the authoritative service and application lifecycle. Tests use temporary worlds and deterministic failure injection; they do not write the default player save.
 
@@ -48,9 +48,9 @@ The initial fixes centralized save request, drain selection, retry and failure h
 
 `save_lifecycle.zig` now owns active attempt stages, queued command fences, the bounded dependency-retry allowance, cancellation policy, and watchdog deadlines. The service executes its decisions using the existing worker, dependency queues and source ownership. Public status remains compatible; application exit choices and encoder/storage code are unchanged.
 
-Eleven deterministic, standard-library-only tests cover command-prefix fences, queued takeover after an older writer, read-query/compactor readiness, retry exhaustion and replacement, earliest deadline selection, final/overdue exemptions, cancellation versus durable completion, exact failure values, and stale epochs. A completed or cancelled drain retires its retry deadline; the ready-drain test verifies that an obsolete retry cannot fire after capture becomes eligible. These tests run with `zig test src/voxel_app/persistence/save_lifecycle.zig` and through the full suite.
+Twelve deterministic, standard-library-only tests cover command-prefix fences, queued takeover after an older writer, read-query/compactor readiness, retry exhaustion and replacement, earliest deadline selection, final/overdue exemptions, cancellation versus durable completion, exact failure values, failed finalization after a durable commit, and stale epochs. A completed or cancelled drain retires its retry deadline; the ready-drain test verifies that an obsolete retry cannot fire after capture becomes eligible. These tests run with `zig test src/voxel_app/persistence/save_lifecycle.zig` and through the full suite.
 
-The extraction adds no worker, allocation, disk operation, file-format change, or future simulation interface. Existing service regressions still exercise actual capture deadlines, dependency-read failures, durable edit recovery, and shutdown admission. No new benchmark or interactive UI campaign was performed for this refactor.
+Stage predecessor assertions run in Debug/ReleaseSafe after stale-epoch rejection; failed completion remains legal at any stage. ReleaseFast retains the epoch checks without runtime assertion checks. The twelve standalone lifecycle tests passed in Debug, ReleaseSafe, and ReleaseFast. The extraction adds no worker, allocation, disk operation, file-format change, or future simulation interface. Existing service regressions still exercise actual capture deadlines, dependency-read failures, durable edit recovery, and shutdown admission. No new benchmark or interactive UI campaign was performed for this refactor.
 
 ## Native application smoke check
 

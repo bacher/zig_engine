@@ -122,6 +122,7 @@ pub const Lifecycle = struct {
     pub fn encoded(self: *Lifecycle, epoch: u64) bool {
         const attempt = if (self.active) |*attempt| attempt else return false;
         if (attempt.epoch != epoch) return false;
+        std.debug.assert(attempt.stage == .capturing);
         attempt.stage = .writing;
         return true;
     }
@@ -131,6 +132,7 @@ pub const Lifecycle = struct {
     pub fn committed(self: *Lifecycle, epoch: u64, at: i96) bool {
         const attempt = if (self.active) |*attempt| attempt else return false;
         if (attempt.epoch != epoch) return false;
+        std.debug.assert(attempt.stage == .writing);
         attempt.stage = .finalizing;
         self.last_success_ns = at;
         self.overdue = false;
@@ -140,6 +142,7 @@ pub const Lifecycle = struct {
     pub fn finished(self: *Lifecycle, epoch: u64, failure: ?anyerror) ?Completion {
         const attempt = self.active orelse return null;
         if (attempt.epoch != epoch) return null;
+        if (failure == null) std.debug.assert(attempt.stage == .finalizing);
         self.active = null;
         return .{ .intent = attempt.intent, .outcome = if (failure) |err| switch (err) {
             error.CaptureCanceled, error.Cancelled, error.Canceled => .{ .canceled = err },
@@ -339,6 +342,20 @@ test "terminal transitions preserve actual cancellation and failure errors" {
     try testing.expectEqual(@as(i96, 10), lifecycle.last_success_ns);
 }
 
+test "failed finalization preserves the acknowledged durable progress" {
+    var lifecycle: Lifecycle = .{ .unsaved_work = true, .last_success_ns = 10, .overdue = true };
+    lifecycle.started(.{ .id = 1, .final = true }, 1, 100);
+    try testing.expect(lifecycle.encoded(1));
+    try testing.expect(lifecycle.committed(1, 200));
+    const completion = lifecycle.finished(1, error.Io).?;
+    try testing.expectEqual(error.Io, completion.outcome.failed);
+    try testing.expectEqual(@as(u64, 1), completion.intent.id);
+    try testing.expect(completion.intent.final);
+    try testing.expect(lifecycle.active == null);
+    try testing.expectEqual(@as(i96, 200), lifecycle.last_success_ns);
+    try testing.expect(!lifecycle.overdue);
+}
+
 test "overdue priority survives source release cancel exit and failed attempts until durable ack" {
     var lifecycle: Lifecycle = .{ .unsaved_work = true, .last_success_ns = 10 };
     lifecycle.started(.{ .id = 1, .final = true }, 1, 100);
@@ -384,6 +401,7 @@ test "stale epoch events cannot transition a replacement attempt or reset overdu
     try testing.expect(!lifecycle.encoded(1));
     try testing.expect(!lifecycle.committed(1, 300));
     try testing.expect(lifecycle.finished(1, error.Io) == null);
+    try testing.expect(lifecycle.finished(1, null) == null);
     try testing.expectEqual(Stage.capturing, lifecycle.active.?.stage);
     try testing.expectEqual(@as(u64, 2), lifecycle.active.?.intent.id);
     try testing.expectEqual(@as(i96, 100), lifecycle.last_success_ns);
