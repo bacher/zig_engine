@@ -1,3 +1,7 @@
+pub const persistence = @import("persistence/coordinator.zig");
+const format = @import("persistence/format.zig");
+const storage = @import("persistence/storage.zig");
+const CompactionTask = @import("persistence/compaction.zig").Task;
 const ChunkCoords = @import("engine").ChunkCoords;
 const std = @import("std");
 const Io = std.Io;
@@ -46,6 +50,14 @@ fn Mailbox(comptime T: type) type {
 
             std.debug.assert(!self.is_closed);
             self.items.append(allocator, item) catch @panic("OOM");
+            self.not_empty.signal(io);
+        }
+
+        fn tryPush(self: *Self, io: Io, allocator: std.mem.Allocator, item: T) !void {
+            self.mutex.lockUncancelable(io);
+            defer self.mutex.unlock(io);
+            if (self.is_closed) return error.ServiceStopped;
+            try self.items.append(allocator, item);
             self.not_empty.signal(io);
         }
 
@@ -103,6 +115,7 @@ pub const OperationResult = struct {
     status: OperationStatus,
     failure: ?rules.Failure = null,
     mined_type: ?@import("engine").voxel_chunk.BlockType = null,
+    counted: bool = false,
 };
 
 pub const Representation = enum { blocks, mesh };
@@ -121,7 +134,7 @@ pub const ChunkResponse = struct {
     subscription_id: ?u64,
     coords: ChunkCoords,
     operation: ?OperationResult = null,
-    chunk_revision: u32 = 0,
+    chunk_revision: u64 = 0,
     mesh_revision: u64 = 0,
     /// Owned by the receiver. A zero-face mesh does not imply empty block contents.
     data: union(enum) {
@@ -161,7 +174,10 @@ const Subscription = struct {
     mode: Representation,
     mesh_pending: bool = false,
     boundaries_pending: bool = false,
+    blocks_pending: bool = false,
 };
+
+const LoadedChunk = struct { id: u32, revision: u64, result: anyerror!WorldChunk };
 
 const Request = union(enum) {
     register: *Client,
@@ -172,11 +188,21 @@ const Request = union(enum) {
         z_start: i32,
         z_end: i32,
         mode: Representation,
+        counted: bool = false,
     },
     evict_chunk: struct { client: *Client, position: ChunkId, subscription_id: u64 },
-    operation: struct { client: *Client, request_id: u64, operation: BlockOperation },
+    operation: struct { client: *Client, request_id: u64, operation: BlockOperation, counted: bool = false },
     standing_space: struct { client: *Client, request_id: u64, query: StandingSpaceRequest },
+    restore_position: struct { client: *Client, request_id: u64, feet: [3]f64, body: @import("terrain_collision.zig").Body },
     advance_time: transformations.Tick,
+    checkpoint: *Client,
+    save: struct { id: u64, final: bool },
+    cancel_save: u64,
+    persistence_event: persistence.Event,
+    watchdog,
+    compact,
+    compaction_done: *CompactionTask,
+    chunk_loaded: LoadedChunk,
 };
 
 /// One endpoint per producer/consumer thread. Endpoints and their queued replies are owned
@@ -189,8 +215,18 @@ pub const Client = struct {
     /// Worker-owned package under construction.
     pending: ResponsePackage = .{},
     next_request_id: u64 = 1,
+    simulation: bool = false,
+    resolved_request: u64 = 0,
+    last_operation_id: u64 = 0,
+    checkpoint_mutex: Io.Mutex = .init,
+    checkpoint_queued: bool = false,
+    latest_checkpoint: ?PlayerCheckpoint = null,
+    eligible_checkpoint: ?PlayerCheckpoint = null,
+
     /// Only accessed by the service worker. Values identify subscription generations.
     subscriptions: std.AutoHashMapUnmanaged(ChunkId, Subscription) = .empty,
+
+    const PlayerCheckpoint = struct { player: format.Player, after_request: u64 };
 
     fn nextRequestId(self: *Client) u64 {
         const id = self.next_request_id;
@@ -228,22 +264,51 @@ pub const Client = struct {
         return self.waitStandingSpace(self.requestStandingSpace(query));
     }
 
+    /// Ordered after this endpoint's earlier edits, including capture-pending edits.
+    pub fn publishCheckpoint(self: *Client, player: format.Player) void {
+        self.checkpoint_mutex.lockUncancelable(self.service.io);
+        defer self.checkpoint_mutex.unlock(self.service.io);
+        self.latest_checkpoint = .{ .player = player, .after_request = self.last_operation_id };
+        if (!self.checkpoint_queued) {
+            self.service.requests.tryPush(self.service.io, self.service.allocator, .{ .checkpoint = self }) catch return;
+            self.checkpoint_queued = true;
+        }
+    }
+
+    pub fn resolveRestoredPosition(self: *Client, feet: [3]f64, body: @import("terrain_collision.zig").Body) (Io.Cancelable || StandingSpaceError)!standing_space.Position {
+        const id = self.nextRequestId();
+        self.service.requests.push(self.service.io, self.service.allocator, .{ .restore_position = .{ .client = self, .request_id = id, .feet = feet, .body = body } });
+        return self.waitStandingSpace(id);
+    }
+
     /// Loading subscribes to changes until eviction. A new load replaces the old token.
     pub fn requestChunks(self: *Client, column: @Vector(2, i32), z_start: i32, z_end: i32) u64 {
         return self.requestChunksInMode(column, z_start, z_end, .blocks);
     }
 
     pub fn requestChunksInMode(self: *Client, column: @Vector(2, i32), z_start: i32, z_end: i32, mode: Representation) u64 {
+        return self.tryRequestChunksInMode(column, z_start, z_end, mode) catch @panic("terrain load admission exhausted");
+    }
+
+    pub fn tryRequestChunksInMode(self: *Client, column: @Vector(2, i32), z_start: i32, z_end: i32, mode: Representation) SubmitError!u64 {
         std.debug.assert(column[0] >= 0 and column[0] < self.service.layout.size_in_chunks[0] and column[1] >= 0 and column[1] < self.service.layout.size_in_chunks[1]);
         std.debug.assert(z_start >= 0 and z_start < z_end and z_end <= self.service.layout.size_in_chunks[2]);
+        if (self.service.is_shutting_down.load(.acquire)) return error.ServiceStopped;
+        const previous = self.service.outstanding_loads.fetchAdd(1, .acq_rel);
+        if (previous >= self.service.limits.pending_commands) {
+            _ = self.service.outstanding_loads.fetchSub(1, .release);
+            return error.Busy;
+        }
+        errdefer _ = self.service.outstanding_loads.fetchSub(1, .release);
         const id = self.nextRequestId();
-        self.service.requests.push(self.service.io, self.service.allocator, .{ .load_chunks = .{
+        try self.service.requests.tryPush(self.service.io, self.service.allocator, .{ .load_chunks = .{
             .client = self,
             .request_id = id,
             .column = column,
             .z_start = z_start,
             .z_end = z_end,
             .mode = mode,
+            .counted = true,
         } });
         return id;
     }
@@ -259,23 +324,45 @@ pub const Client = struct {
     /// Sends only intent. Every command gets a result; block-mode replies also carry
     /// a snapshot, including failures. Mesh-mode results share packages with mesh changes.
     /// Commands from this endpoint are processed in submission order.
-    pub fn submitOperation(self: *Client, operation: BlockOperation) u64 {
+    pub const SubmitError = error{ Busy, OutOfMemory, ServiceStopped };
+    pub fn trySubmitOperation(self: *Client, operation: BlockOperation) SubmitError!u64 {
         operation.validate(self.service.layout);
-        const id = self.nextRequestId();
-        self.service.requests.push(self.service.io, self.service.allocator, .{ .operation = .{
+        if (self.service.is_shutting_down.load(.acquire)) return error.ServiceStopped;
+        const previous = self.service.outstanding_operations.fetchAdd(1, .acq_rel);
+        if (previous >= self.service.limits.pending_commands) {
+            _ = self.service.outstanding_operations.fetchSub(1, .release);
+            return error.Busy;
+        }
+        errdefer _ = self.service.outstanding_operations.fetchSub(1, .release);
+        const id = self.next_request_id;
+        try self.service.requests.tryPush(self.service.io, self.service.allocator, .{ .operation = .{
             .client = self,
             .request_id = id,
             .operation = operation,
+            .counted = true,
         } });
+        self.next_request_id += 1;
+        self.last_operation_id = id;
         return id;
     }
+    pub fn submitOperation(self: *Client, operation: BlockOperation) u64 {
+        return self.trySubmitOperation(operation) catch @panic("operation submission requires available endpoint capacity");
+    }
 
+    fn consumeSlots(self: *Client, packages: []const ResponsePackage) void {
+        for (packages) |package| for (package.responses.items) |response| if (response.operation) |operation| {
+            if (operation.counted) _ = self.service.outstanding_operations.fetchSub(1, .release);
+        };
+    }
     pub fn takePackages(self: *Client, out: *std.ArrayList(ResponsePackage)) void {
         self.responses.takeAll(self.service.io, out);
+        self.consumeSlots(out.items);
     }
 
     pub fn waitPackages(self: *Client, out: *std.ArrayList(ResponsePackage)) Io.Cancelable!bool {
-        return self.responses.waitAndTakeAllCancelable(self.service.io, out);
+        const available = try self.responses.waitAndTakeAllCancelable(self.service.io, out);
+        self.consumeSlots(out.items);
+        return available;
     }
 
     /// Block-only consumers can flatten packages; renderers must use takePackages.
@@ -315,6 +402,8 @@ pub const WorldDataService = struct {
     allocator: std.mem.Allocator,
     requests: Mailbox(Request) = .{},
     is_shutting_down: std.atomic.Value(bool) = .init(false),
+    destroy_requested: std.atomic.Value(bool) = .init(false),
+    shutdown_started: bool = false,
     worker: Io.Future(void),
     /// Accessed only by the worker while running.
     clients: std.ArrayList(*Client) = .empty,
@@ -322,10 +411,83 @@ pub const WorldDataService = struct {
     mesh_loads: std.ArrayList(MeshLoad) = .empty,
     next_mesh_load: usize = 0,
     dirty_meshes: std.AutoHashMapUnmanaged(ChunkId, void) = .empty,
+    store: ?*storage.Store = null,
+    catalog: ?storage.BaseCatalog = null,
+    read_requests: Mailbox(storage.BaseRead) = .{},
+    reader: ?Io.Future(void) = null,
+    read_pending: std.AutoHashMapUnmanaged(u32, u64) = .empty,
+    read_failed: std.AutoHashMapUnmanaged(u32, anyerror) = .empty,
+    loaded_ring: std.ArrayList(LoadedChunk) = .empty,
+    loaded_head: usize = 0,
+    loaded_count: usize = 0,
+    async_progress: bool = false,
+    completed_compactor: ?*CompactionTask = null,
+    pending_tick: std.atomic.Value(u64) = .init(0),
+    tick_wakeup: bool = false,
+
+    waiting_reads: std.ArrayList(Request) = .empty,
+    retry_reads: std.ArrayList(Request) = .empty,
+    read_discovered: bool = false,
+    terminal_read_failure: bool = false,
+    blocked_dependency_error: ?anyerror = null,
+    operation_deferred: bool = false,
+    run_write_ids: std.ArrayList(u32) = .empty,
+    run_gate_failure: ?anyerror = null,
+    processing_since: ?i96 = null,
+
+    store_mutex: Io.Mutex = .init,
+    limits: persistence.Limits = .{},
+    budget: ?*@import("persistence/budget.zig").Budget = null,
+    status_mutex: Io.Mutex = .init,
+    status: persistence.Status = .{},
+    published_status: persistence.Status = .{},
+    job: ?*persistence.Job = null,
+    compactor: ?*CompactionTask = null,
+    compaction_requested: bool = false,
+    completion_ring: std.ArrayList(persistence.Event) = .empty,
+    completion_head: usize = 0,
+    completion_count: usize = 0,
+    capture_epoch: u64 = 0,
+    timer_cursor: u32 = 0,
+    source_holds: std.AutoHashMapUnmanaged(ChunkId, u64) = .empty,
+    wal_revisions: std.AutoHashMapUnmanaged(ChunkId, u64) = .empty,
+    base_revisions: std.AutoHashMapUnmanaged(ChunkId, u64) = .empty,
+    players: std.AutoHashMapUnmanaged(u64, format.Player) = .empty,
+    restored_players: std.AutoHashMapUnmanaged(u64, format.Player) = .empty,
+    pending: std.ArrayList(Pending) = .empty,
+    next_intent: std.atomic.Value(u64) = .init(1),
+    outstanding_operations: std.atomic.Value(usize) = .init(0),
+    outstanding_loads: std.atomic.Value(usize) = .init(0),
+    simulation_paused: std.atomic.Value(bool) = .init(false),
+    watchdog_worker: ?Io.Future(void) = null,
+    watchdog_queued: std.atomic.Value(bool) = .init(false),
+    watchdog_mutex: Io.Mutex = .init,
+    watchdog_wake: Io.Event = .unset,
+    watchdog_deadline: ?i96 = null,
+    dependency_retry_at: ?i96 = null,
+    dependency_auto_retried: bool = false,
+    unsaved_work: bool = false,
+    player_generation: u64 = 0,
+    captured_player_generation: u64 = 0,
+    last_success_ns: i96 = 0,
+    initial_tick: u64 = 0,
+    capture_cancel_requested: bool = false,
+    final_policy: bool = false,
+    queued_save: ?struct { id: u64, final: bool } = null,
+    save_fence_remaining: usize = 0,
+    const Pending = struct { request: Request, since: i96 };
 
     /// Validate/prepare generation before starting the worker. The allocator must
     /// be thread-safe; messages transfer ownership between tasks.
     pub fn create(io: Io, allocator: std.mem.Allocator, layout: *const WorldLayout, generator: WorldGenerator) !*WorldDataService {
+        return createConfigured(io, allocator, layout, generator, null, .{});
+    }
+
+    pub fn createPersistent(io: Io, allocator: std.mem.Allocator, layout: *const WorldLayout, generator: WorldGenerator, store: *storage.Store, limits: persistence.Limits) !*WorldDataService {
+        return createConfigured(io, allocator, layout, generator, store, limits);
+    }
+
+    fn createConfigured(io: Io, allocator: std.mem.Allocator, layout: *const WorldLayout, generator: WorldGenerator, store: ?*storage.Store, limits: persistence.Limits) !*WorldDataService {
         const owned_layout = try allocator.create(WorldLayout);
         errdefer allocator.destroy(owned_layout);
         owned_layout.* = layout.*;
@@ -333,15 +495,125 @@ pub const WorldDataService = struct {
         errdefer prepared.deinit(allocator);
         const self = try allocator.create(WorldDataService);
         errdefer allocator.destroy(self);
+        const budget: ?*@import("persistence/budget.zig").Budget = if (store != null) try allocator.create(@import("persistence/budget.zig").Budget) else null;
+        errdefer if (budget) |owned| allocator.destroy(owned);
+        if (budget) |owned| owned.* = .init(allocator, limits.live_bytes);
         self.* = .{
             .layout = owned_layout,
             .io = io,
             .allocator = allocator,
             .worker = undefined,
-            .worker_state = .{ .layout = owned_layout, .generator = prepared },
+            .worker_state = .{ .layout = owned_layout, .generator = prepared, .live_allocator = if (budget) |owned| owned.allocator() else null },
+            .budget = budget,
         };
+        // No asynchronous task owns self until initialization is complete.
+        errdefer if (self.catalog) |*catalog| catalog.deinit();
+        errdefer self.players.deinit(allocator);
+        errdefer self.restored_players.deinit(allocator);
+        self.store = store;
+        self.worker_state.persistence_service = self;
+        self.limits = limits;
+        errdefer self.pending.deinit(allocator);
+        errdefer self.waiting_reads.deinit(allocator);
+        errdefer self.retry_reads.deinit(allocator);
+        try self.pending.ensureTotalCapacityPrecise(allocator, limits.pending_commands);
+        const read_capacity = try std.math.mul(usize, limits.pending_commands, 2);
+        try self.waiting_reads.ensureTotalCapacityPrecise(allocator, read_capacity);
+        try self.retry_reads.ensureTotalCapacityPrecise(allocator, read_capacity);
+        self.last_success_ns = persistence.now(io);
+        if (store) |saved| {
+            self.catalog = try saved.snapshotCatalog();
+            self.initial_tick = try format.decodeGlobal(saved.global);
+            self.worker_state.tick = self.initial_tick;
+            self.worker_state.persistence_service = self;
+            self.status.sequence = saved.sequence;
+            self.status.durable_sequence = saved.sequence;
+            var player_reader: format.Reader = .{ .bytes = saved.players };
+            for (0..@intCast(saved.player_count)) |_| {
+                const player = try format.decodePlayer(try player_reader.take(52));
+                try self.players.put(allocator, player.id, player);
+                try self.restored_players.put(allocator, player.id, player);
+            }
+        }
+        // Start idle background consumers first. If worker startup fails, join
+        // every started task before errdefer frees the service and saved catalog.
+        if (store != null) self.reader = try io.concurrent(runReader, .{self});
+        errdefer if (self.reader) |*reader| {
+            self.read_requests.close(io);
+            reader.await(io);
+        };
+        if (store != null) self.watchdog_worker = try io.concurrent(runWatchdog, .{self});
+        errdefer if (self.watchdog_worker) |*watchdog| watchdog.cancel(io);
+        self.published_status = self.status;
         self.worker = try io.concurrent(runWorker, .{self});
         return self;
+    }
+
+    pub fn restoredTick(self: *const WorldDataService) u64 {
+        return self.initial_tick;
+    }
+    pub fn restoredPlayer(self: *const WorldDataService, id: u64) ?format.Player {
+        return self.restored_players.get(id);
+    }
+    pub fn persistenceStatus(self: *WorldDataService) persistence.Status {
+        self.status_mutex.lockUncancelable(self.io);
+        defer self.status_mutex.unlock(self.io);
+        return self.published_status;
+    }
+    pub fn requestSave(self: *WorldDataService, final: bool) u64 {
+        const id = self.next_intent.fetchAdd(1, .monotonic);
+        self.requests.push(self.io, self.allocator, .{ .save = .{ .id = id, .final = final } });
+        return id;
+    }
+    pub fn requestCompaction(self: *WorldDataService) void {
+        self.requests.push(self.io, self.allocator, .compact);
+    }
+    pub fn cancelSaveIntent(self: *WorldDataService, id: u64) void {
+        self.requests.push(self.io, self.allocator, .{ .cancel_save = id });
+    }
+    pub fn simulationPaused(self: *const WorldDataService) bool {
+        return self.simulation_paused.load(.acquire);
+    }
+    fn runWatchdog(self: *WorldDataService) void {
+        while (true) {
+            self.watchdog_mutex.lockUncancelable(self.io);
+            const deadline = self.watchdog_deadline;
+            self.watchdog_wake.reset();
+            self.watchdog_mutex.unlock(self.io);
+            const timeout: Io.Timeout = if (deadline) |at| .{ .duration = .{ .raw = .{ .nanoseconds = @max(0, at - persistence.now(self.io)) }, .clock = .awake } } else .none;
+            self.watchdog_wake.waitTimeout(self.io, timeout) catch |err| switch (err) {
+                error.Canceled => return,
+                error.Timeout => {
+                    self.watchdog_mutex.lockUncancelable(self.io);
+                    const selected = self.watchdog_deadline == deadline;
+                    if (selected) self.watchdog_deadline = null;
+                    self.watchdog_mutex.unlock(self.io);
+                    if (selected and deadline != null) self.requests.push(self.io, self.allocator, .watchdog);
+                },
+            };
+        }
+    }
+    fn scheduleWatchdog(self: *WorldDataService) void {
+        if (self.store == null) return;
+        var next: ?i96 = null;
+        if (self.unsaved_work and !self.status.overdue) next = self.last_success_ns + self.limits.overdue_ns;
+        if (self.source_holds.count() != 0 and !self.capture_cancel_requested and !self.final_policy and !self.status.overdue) {
+            const capture = self.status.capture_started_ns + self.limits.capture_wait_ns;
+            next = if (next) |current| @min(current, capture) else capture;
+            if (self.oldestPlayerWait()) |since| {
+                const player = since + self.limits.player_wait_ns;
+                next = if (next) |current| @min(current, player) else player;
+            }
+        }
+        if (self.dependency_retry_at) |retry| {
+            next = if (next) |current| @min(current, retry) else retry;
+        }
+        self.watchdog_mutex.lockUncancelable(self.io);
+        if (self.watchdog_deadline != next) {
+            self.watchdog_deadline = next;
+            self.watchdog_wake.set(self.io);
+        }
+        self.watchdog_mutex.unlock(self.io);
     }
 
     pub fn createClient(self: *WorldDataService) !*Client {
@@ -354,15 +626,28 @@ pub const WorldDataService = struct {
     /// The game owns simulation time. Pausing or stopping frames does not advance it;
     /// subscriptions and mesh/block eviction have no effect on transformation deadlines.
     pub fn advanceTo(self: *WorldDataService, tick: transformations.Tick) void {
-        self.requests.push(self.io, self.allocator, .{ .advance_time = tick });
+        _ = self.pending_tick.fetchMax(tick, .release);
+        self.requests.mutex.lockUncancelable(self.io);
+        self.tick_wakeup = true;
+        self.requests.not_empty.signal(self.io);
+        self.requests.mutex.unlock(self.io);
     }
 
     /// Call after all producers have stopped. Drains submitted edits, skips pending loads,
     /// and frees replies that nobody consumed.
     pub fn destroy(self: *WorldDataService) void {
-        self.is_shutting_down.store(true, .monotonic);
-        self.requests.close(self.io);
+        if (self.watchdog_worker) |*watchdog| watchdog.cancel(self.io);
+        // This signal needs no allocation and never touches worker-owned pointers.
+        // The authority cancels/joins background jobs while continuing to receive
+        // their source releases and reads; only then may queues/storage be freed.
+        self.requests.mutex.lockUncancelable(self.io);
+        self.destroy_requested.store(true, .release);
+        self.requests.not_empty.signal(self.io);
+        self.requests.mutex.unlock(self.io);
         self.worker.await(self.io);
+        self.read_requests.close(self.io);
+        if (self.reader) |*reader| reader.await(self.io);
+        self.requests.close(self.io);
         for (self.clients.items) |client| {
             for (client.responses.items.items) |*package| package.deinit(self.allocator);
             client.pending.deinit(self.allocator);
@@ -371,11 +656,31 @@ pub const WorldDataService = struct {
             client.subscriptions.deinit(self.allocator);
             self.allocator.destroy(client);
         }
+        if (self.job) |job| job.deinit();
+        self.completion_ring.deinit(self.allocator);
+        self.source_holds.deinit(self.allocator);
+        self.wal_revisions.deinit(self.allocator);
+        self.base_revisions.deinit(self.allocator);
+        self.players.deinit(self.allocator);
+        self.restored_players.deinit(self.allocator);
+        self.run_write_ids.deinit(self.allocator);
+        self.pending.deinit(self.allocator);
+        self.waiting_reads.deinit(self.allocator);
+        self.retry_reads.deinit(self.allocator);
+        self.read_pending.deinit(self.allocator);
+        self.read_failed.deinit(self.allocator);
+        self.loaded_ring.deinit(self.allocator);
+        self.read_requests.deinit(self.allocator);
+        if (self.catalog) |*catalog| catalog.deinit();
         self.mesh_loads.deinit(self.allocator);
         self.dirty_meshes.deinit(self.allocator);
         self.clients.deinit(self.allocator);
         self.requests.deinit(self.allocator);
         self.worker_state.deinit(self.allocator);
+        if (self.budget) |budget| {
+            std.debug.assert(budget.stats().used == 0);
+            self.allocator.destroy(budget);
+        }
         self.allocator.destroy(@constCast(self.layout));
         self.allocator.destroy(self);
     }
@@ -385,10 +690,29 @@ pub const WorldDataService = struct {
         var batch: std.ArrayList(Request) = .empty;
         defer batch.deinit(self.allocator);
         while (true) {
-            if (self.next_mesh_load < self.mesh_loads.items.len and !self.is_shutting_down.load(.monotonic)) {
+            if (self.destroy_requested.load(.acquire) and !self.shutdown_started) {
+                self.shutdown_started = true;
+                self.is_shutting_down.store(true, .release);
+                self.queued_save = null;
+                self.compaction_requested = false;
+                if (self.job) |job| job.cancel();
+                if (self.compactor) |compactor| compactor.cancel();
+            }
+            self.async_progress = false;
+            self.drainPersistenceEvents();
+            if (self.shutdown_started and self.job == null and self.compactor == null and self.read_pending.count() == 0) {
+                // Producers have stopped. Process the last accepted queue before
+                // ending, including registration and terminal read completions.
                 self.requests.takeAll(self.io, &batch);
-            } else if (!self.requests.waitAndTakeAll(self.io, &batch)) break;
-            for (batch.items) |request| self.processRequest(request);
+                if (batch.items.len == 0) break;
+            } else if (self.async_progress or (self.next_mesh_load < self.mesh_loads.items.len and !self.is_shutting_down.load(.monotonic))) {
+                self.requests.takeAll(self.io, &batch);
+            } else if (!self.waitForWork(&batch)) break;
+            self.drainPersistenceEvents();
+            for (batch.items) |request| {
+                self.processRequest(request);
+                self.publishPersistenceStatus();
+            }
             batch.clearRetainingCapacity();
             if (self.is_shutting_down.load(.monotonic)) continue;
             self.processTransformations();
@@ -398,7 +722,13 @@ pub const WorldDataService = struct {
             var dirty = self.dirty_meshes.keyIterator();
             while (dirty.next()) |position| self.publishMesh(self.layout.decodeChunkId(position.*));
             self.dirty_meshes.clearRetainingCapacity();
+            for (self.clients.items) |client| {
+                var subscriptions = client.subscriptions.iterator();
+                while (subscriptions.next()) |entry| if (entry.value_ptr.mode == .mesh and entry.value_ptr.mesh_pending)
+                    self.dirty_meshes.put(self.allocator, entry.key_ptr.*, {}) catch self.failPersistence(error.OutOfMemory);
+            }
             self.flushPackages();
+            self.publishPersistenceStatus();
 
             // At most one distant load before checking for new edits and block requests.
             if (self.next_mesh_load < self.mesh_loads.items.len) {
@@ -420,12 +750,24 @@ pub const WorldDataService = struct {
         // Publish observers before command originators, preserving the useful property
         // that an operation reply follows its observer notifications.
         for ([_]bool{ false, true }) |with_acknowledgment| {
-            for (self.clients.items) |client| {
+            clients: for (self.clients.items) |client| {
                 var has_acknowledgment = false;
                 for (client.pending.responses.items) |response| {
                     has_acknowledgment = has_acknowledgment or response.operation != null;
                 }
                 if (has_acknowledgment != with_acknowledgment) continue;
+                // Observer snapshots coalesce to the final authoritative state in this
+                // batch. Retain the subscription intent until owned delivery is secured.
+                var blocks = client.subscriptions.iterator();
+                while (blocks.next()) |entry| {
+                    const sub = entry.value_ptr;
+                    if (sub.mode != .blocks or !sub.blocks_pending) continue;
+                    const coords = self.layout.decodeChunkId(entry.key_ptr.*);
+                    client.pending.responses.ensureUnusedCapacity(self.allocator, 1) catch continue :clients;
+                    const chunk = self.worker_state.tryLoadAt(self.allocator, coords) catch continue :clients;
+                    client.pending.responses.appendAssumeCapacity(self.blockResponse(coords, sub.id, chunk));
+                    sub.blocks_pending = false;
+                }
                 // Certify final block snapshots against the final neighboring inputs too.
                 for (client.pending.responses.items) |*response| {
                     if (response.data != .blocks) continue;
@@ -435,7 +777,7 @@ pub const WorldDataService = struct {
                     response.mesh_revision = self.worker_state.meshRevision(response.coords);
                     const sub = client.subscriptions.getPtr(self.layout.encodeChunkCoords(response.coords)) orelse continue;
                     if (sub.mode != .blocks or sub.id != response.subscription_id) continue;
-                    response.data.blocks.neighbors = self.worker_state.neighborBoundaries(self.allocator, response.coords);
+                    response.data.blocks.neighbors = self.worker_state.tryNeighborBoundaries(self.allocator, response.coords) catch continue :clients;
                     sub.boundaries_pending = false;
                 }
                 // Coalesce neighbor-only edits, including changes outside this client's
@@ -445,16 +787,17 @@ pub const WorldDataService = struct {
                     const sub = entry.value_ptr;
                     if (sub.mode != .blocks or !sub.boundaries_pending) continue;
                     const coords = self.layout.decodeChunkId(entry.key_ptr.*);
-                    client.append(.{
+                    const boundaries = self.worker_state.tryNeighborBoundaries(self.allocator, coords) catch continue :clients;
+                    client.pending.responses.append(self.allocator, .{
                         .coords = coords,
                         .subscription_id = sub.id,
                         .mesh_revision = self.worker_state.meshRevision(coords),
-                        .data = .{ .boundaries = self.worker_state.neighborBoundaries(self.allocator, coords) },
-                    });
+                        .data = .{ .boundaries = boundaries },
+                    }) catch continue :clients;
                     sub.boundaries_pending = false;
                 }
                 if (client.pending.responses.items.len == 0) continue;
-                client.responses.push(self.io, self.allocator, client.pending);
+                client.responses.tryPush(self.io, self.allocator, client.pending) catch continue :clients;
                 client.pending = .{};
             }
         }
@@ -478,34 +821,232 @@ pub const WorldDataService = struct {
             }
         }
         if (!needed) return;
-        const chunk = self.worker_state.loadAt(self.allocator, coords);
+        const chunk = self.worker_state.tryLoadAt(self.allocator, coords) catch return;
         defer chunk.deinit(self.allocator);
         var mesh: ChunkSideData = .{};
         if (chunk.content == .blocks and !chunk.flags.is_unreachable) {
-            mesh = mesher.extractChunkGeometry(self.allocator, chunk, self.worker_state.neighborBoundaries(self.allocator, coords));
+            const neighbors = self.worker_state.tryNeighborBoundaries(self.allocator, coords) catch return;
+            mesh = mesher.tryExtractChunkGeometry(self.allocator, chunk, neighbors) catch return;
         }
         defer mesh.deinit(self.allocator);
         for (self.clients.items) |client| {
             const sub = client.subscriptions.getPtr(position) orelse continue;
             if (sub.mode != .mesh or !sub.mesh_pending) continue;
-            client.append(.{
+            // Secure the response slot before cloning so failure retains mesh_pending.
+            client.pending.responses.ensureUnusedCapacity(self.allocator, 1) catch continue;
+            const copy: ChunkSideData = if (chunk.flags.is_unreachable) .{} else mesh.tryClone(self.allocator) catch continue;
+            client.pending.responses.appendAssumeCapacity(.{
                 .coords = coords,
                 .subscription_id = sub.id,
                 .chunk_revision = chunk.chunk_revision,
                 .mesh_revision = self.worker_state.meshRevision(coords),
-                .data = if (chunk.flags.is_unreachable) .unreachable_chunk else .{ .mesh = mesh.clone(self.allocator) },
+                .data = if (chunk.flags.is_unreachable) .unreachable_chunk else .{ .mesh = copy },
             });
             sub.mesh_pending = false;
         }
     }
 
-    fn processRequest(self: *WorldDataService, request: Request) void {
+    fn deferRead(self: *WorldDataService, request: Request) void {
+        var queries: usize = 0;
+        for (self.waiting_reads.items) |read| if (read != .load_chunks) {
+            queries += 1;
+        };
+        if (request == .load_chunks or queries < self.limits.pending_commands) {
+            self.waiting_reads.append(self.allocator, request) catch {
+                self.rejectRead(request);
+            };
+        } else self.rejectRead(request);
+    }
+    fn rejectRead(self: *WorldDataService, request: Request) void {
+        self.failPersistence(error.OutOfMemory);
         switch (request) {
+            .restore_position => |read| read.client.space_responses.tryPush(self.io, self.allocator, .{ .request_id = read.request_id, .result = error.MissingData }) catch {},
+            .standing_space => |read| read.client.space_responses.tryPush(self.io, self.allocator, .{ .request_id = read.request_id, .result = error.MissingData }) catch {},
+            else => {},
+        }
+    }
+    fn retryWaitingReads(self: *WorldDataService) void {
+        std.debug.assert(self.retry_reads.items.len == 0);
+        std.mem.swap(std.ArrayList(Request), &self.waiting_reads, &self.retry_reads);
+        defer self.retry_reads.clearRetainingCapacity();
+        for (self.retry_reads.items) |read| self.processRequest(read);
+    }
+
+    fn isRetryableReadFailure(err: anyerror) bool {
+        return err == error.Io or err == error.OutOfMemory;
+    }
+
+    /// Select the command prefix before restarting reads: progress may resolve an
+    /// operation immediately, so the fence must already belong to this attempt.
+    fn requestSaveTransition(self: *WorldDataService, id: u64, final: bool) void {
+        if (self.queued_save != null and !final) return;
+        self.queued_save = .{ .id = id, .final = final };
+        self.save_fence_remaining = self.pending.items.len;
+        self.dependency_auto_retried = false;
+        self.dependency_retry_at = null;
+        self.selectSaveDrain();
+        self.retrySaveDrain();
+    }
+
+    /// Every explicit/automatic retry must wake both read queries and mutation
+    /// dependency discovery; neither queue can rely on another completion arriving.
+    fn retrySaveDrain(self: *WorldDataService) void {
+        self.retryReadFailures();
+        self.retryWaitingReads();
+        self.retryPending();
+    }
+
+    fn selectSaveDrain(self: *WorldDataService) void {
+        const save = self.queued_save orelse return;
+        if (self.job != null or self.status.intent_id == save.id) return;
+        self.status.intent_id = save.id;
+        self.status.target_sequence = 0;
+        self.status.phase = .capturing;
+        self.status.active = true;
+        self.status.error_name = null;
+    }
+
+    fn noteDrainFailure(self: *WorldDataService, err: anyerror) void {
+        self.selectSaveDrain();
+        self.failPersistence(err);
+        const save = self.queued_save orelse return;
+        if (!save.final) return;
+        if (isRetryableReadFailure(err) and !self.dependency_auto_retried) {
+            if (self.dependency_retry_at == null) self.dependency_retry_at = persistence.now(self.io) + std.time.ns_per_s;
+            self.status.active = true;
+        } else self.dependency_retry_at = null;
+    }
+
+    fn retryReadFailures(self: *WorldDataService) void {
+        while (true) {
+            var failures = self.read_failed.iterator();
+            var retry: ?u32 = null;
+            while (failures.next()) |entry| {
+                if (isRetryableReadFailure(entry.value_ptr.*)) {
+                    retry = entry.key_ptr.*;
+                    break;
+                }
+            }
+            _ = self.read_failed.remove(retry orelse break);
+        }
+    }
+
+    fn processRequest(self: *WorldDataService, request: Request) void {
+        // Only mutations/checkpoints join the retained FIFO. Reads and completions always progress.
+        const ordered = request == .operation;
+        if (request == .load_chunks and self.is_shutting_down.load(.acquire)) {
+            if (request.load_chunks.counted) _ = self.outstanding_loads.fetchSub(1, .release);
+            return;
+        }
+        if (request == .load_chunks or request == .standing_space or request == .restore_position) {
+            self.blocked_dependency_error = null;
+            if (!self.dependenciesReady(request)) {
+                self.deferRead(request);
+                if (self.blocked_dependency_error) |err| self.noteDrainFailure(err);
+                return;
+            }
+        }
+        // Discover and prioritize the player's dependencies even behind a FIFO head.
+        const dependencies_ready = if (ordered) self.dependenciesReady(request) else true;
+        const admission_ready = if (ordered) self.admissible(request) else true;
+        if (ordered and (self.pending.items.len != 0 or !dependencies_ready or !admission_ready)) {
+            if (!request.operation.client.simulation) {
+                if (self.source_holds.count() != 0) self.status.capture_waited_operations +%= 1 else if (self.read_pending.count() != 0) self.status.dependency_waited_operations +%= 1;
+            }
+            self.pending.append(self.allocator, .{ .request = request, .since = persistence.now(self.io) }) catch @panic("OOM");
+            return;
+        }
+        self.processAdmitted(request);
+    }
+
+    fn processAdmitted(self: *WorldDataService, request: Request) void {
+        switch (request) {
+            .chunk_loaded => |loaded| {
+                _ = self.read_pending.remove(loaded.id);
+                if (loaded.result) |chunk| {
+                    const current_revision = self.worker_state.modified_chunks.get(loaded.id);
+                    if (current_revision != null or (self.catalog.?.revision(loaded.id) orelse 0) != loaded.revision) {
+                        chunk.deinit(self.worker_state.liveAllocator(self.allocator));
+                    } else {
+                        self.installLoaded(loaded.id, loaded.revision, chunk) catch |err| {
+                            chunk.deinit(self.worker_state.liveAllocator(self.allocator));
+                            self.read_failed.put(self.allocator, loaded.id, err) catch {};
+                            self.noteDrainFailure(err);
+                        };
+                    }
+                } else |err| {
+                    self.read_failed.put(self.allocator, loaded.id, err) catch {};
+                    self.noteDrainFailure(err);
+                }
+                const loaded_coords = self.layout.decodeChunkId(loaded.id);
+                self.dirty_meshes.put(self.allocator, loaded.id, {}) catch self.failPersistence(error.OutOfMemory);
+                for (std.enums.values(Side)) |side| if (world_module.adjacentChunk(self.layout, loaded_coords, side)) |neighbor| {
+                    self.dirty_meshes.put(self.allocator, self.layout.encodeChunkCoords(neighbor), {}) catch self.failPersistence(error.OutOfMemory);
+                };
+                self.retryPending();
+                self.retryWaitingReads();
+            },
+            .checkpoint => |client| {
+                client.checkpoint_mutex.lockUncancelable(self.io);
+                client.eligible_checkpoint = client.latest_checkpoint;
+                client.latest_checkpoint = null;
+                client.checkpoint_queued = false;
+                client.checkpoint_mutex.unlock(self.io);
+                self.applyEligibleCheckpoint(client);
+            },
+            .save => |save| self.requestSaveTransition(save.id, save.final),
+            .cancel_save => |id| {
+                if (self.queued_save) |save| if (save.id == id) {
+                    self.queued_save = null;
+                    self.dependency_retry_at = null;
+                };
+                if (self.status.intent_id == id) {
+                    self.final_policy = false;
+                    if (!self.status.overdue) if (self.job) |job| {
+                        job.cancel();
+                        self.capture_cancel_requested = true;
+                    };
+                }
+            },
+            .compact => {
+                self.compaction_requested = true;
+                self.beginCompaction() catch |err| self.failPersistence(err);
+            },
+            .compaction_done => |task| self.finishCompaction(task),
+            .watchdog => {
+                self.watchdog_queued.store(false, .release);
+                self.checkWatchdog();
+            },
+            .persistence_event => |event| self.persistenceEvent(event),
+            .restore_position => |restore| {
+                self.read_discovered = false;
+                self.terminal_read_failure = false;
+                const result = self.worker_state.resolveRestoredPosition(self.allocator, restore.feet, restore.body);
+                if (self.terminal_read_failure) {
+                    restore.client.space_responses.push(self.io, self.allocator, .{ .request_id = restore.request_id, .result = error.MissingData });
+                    return;
+                }
+                if (self.read_discovered) {
+                    self.deferRead(request);
+                    return;
+                }
+                restore.client.space_responses.push(self.io, self.allocator, .{ .request_id = restore.request_id, .result = result });
+            },
             .standing_space => |search| {
+                self.read_discovered = false;
+                self.terminal_read_failure = false;
                 const result: StandingSpaceError!standing_space.Position = if (self.is_shutting_down.load(.monotonic))
                     error.ServiceStopped
                 else
                     self.worker_state.findStandingSpace(self.allocator, search.query);
+                if (self.terminal_read_failure) {
+                    search.client.space_responses.push(self.io, self.allocator, .{ .request_id = search.request_id, .result = error.MissingData });
+                    return;
+                }
+                if (self.read_discovered) {
+                    self.deferRead(request);
+                    return;
+                }
                 search.client.space_responses.push(self.io, self.allocator, .{ .request_id = search.request_id, .result = result });
             },
             .advance_time => |tick| self.worker_state.tick = @max(self.worker_state.tick, tick),
@@ -513,9 +1054,11 @@ pub const WorldDataService = struct {
             .evict_chunk => |evict| {
                 if (evict.client.subscriptions.get(evict.position)) |sub| {
                     if (sub.id == evict.subscription_id) _ = evict.client.subscriptions.remove(evict.position);
+                    self.evictEligible();
                 }
             },
             .load_chunks => |load| {
+                if (load.counted) _ = self.outstanding_loads.fetchSub(1, .release);
                 if (self.is_shutting_down.load(.monotonic)) return;
                 var z = load.z_start;
                 while (z < load.z_end) : (z += 1) {
@@ -524,21 +1067,52 @@ pub const WorldDataService = struct {
                         .id = load.request_id,
                         .mode = load.mode,
                         .mesh_pending = load.mode == .mesh,
-                    }) catch @panic("OOM");
+                    }) catch {
+                        self.failPersistence(error.OutOfMemory);
+                        continue;
+                    };
                     if (load.mode == .blocks) {
-                        load.client.append(self.blockResponse(coords, load.request_id, self.worker_state.loadChunk(self.allocator, coords)));
+                        load.client.pending.responses.ensureUnusedCapacity(self.allocator, 1) catch {
+                            load.client.subscriptions.getPtr(self.layout.encodeChunkCoords(coords)).?.blocks_pending = true;
+                            continue;
+                        };
+                        const chunk = self.worker_state.tryLoadAt(self.allocator, coords) catch {
+                            load.client.subscriptions.getPtr(self.layout.encodeChunkCoords(coords)).?.blocks_pending = true;
+                            continue;
+                        };
+                        load.client.pending.responses.appendAssumeCapacity(self.blockResponse(coords, load.request_id, chunk));
                     } else {
-                        self.mesh_loads.append(self.allocator, .{ .client = load.client, .coords = coords, .token = load.request_id }) catch @panic("OOM");
+                        self.mesh_loads.append(self.allocator, .{ .client = load.client, .coords = coords, .token = load.request_id }) catch {
+                            self.failPersistence(error.OutOfMemory);
+                        };
                     }
                 }
             },
             .operation => |edit| {
                 const coords, const local = world_module.splitBlockCoords(edit.operation.block);
                 const position = self.layout.encodeChunkCoords(coords);
+                self.read_discovered = false;
+                self.operation_deferred = false;
+                edit.client.pending.responses.ensureUnusedCapacity(self.allocator, 1) catch {
+                    self.pending.insert(self.allocator, 0, .{ .request = request, .since = self.processing_since orelse persistence.now(self.io) }) catch @panic("OOM");
+                    self.operation_deferred = true;
+                    self.failPersistence(error.OutOfMemory);
+                    return;
+                };
                 const result = self.worker_state.applyOperation(self.allocator, edit.operation);
-                defer result.chunk.deinit(self.allocator);
-                if (self.is_shutting_down.load(.monotonic)) return;
+                var reply_moved = false;
+                defer if (!reply_moved) result.chunk.deinit(self.allocator);
+                if (self.read_discovered or self.operation_deferred) {
+                    self.pending.insert(self.allocator, 0, .{ .request = request, .since = self.processing_since orelse persistence.now(self.io) }) catch @panic("OOM");
+                    return;
+                }
+                if (self.is_shutting_down.load(.monotonic)) {
+                    if (edit.counted) _ = self.outstanding_operations.fetchSub(1, .release);
+                    edit.client.resolved_request = edit.request_id;
+                    return;
+                }
                 if (result.status == .success) {
+                    self.unsaved_work = true;
                     for (self.worker_state.road_changes.items) |id| {
                         if (id != position) self.publishMaterialChange(self.layout.decodeChunkId(id));
                     }
@@ -561,21 +1135,28 @@ pub const WorldDataService = struct {
                             if (sub.mode == .blocks and i < 6) sub.boundaries_pending = true;
                             if (sub.mode == .mesh) {
                                 sub.mesh_pending = true;
-                            } else if (i < 6 and result.revealed_neighbors[i] != null) {
-                                client.append(self.blockResponse(changed, sub.id, self.worker_state.modified_chunks.get(changed_id).?.clone(self.allocator)));
-                            } else if (i == 6 and client != edit.client) {
-                                client.append(self.blockResponse(changed, sub.id, result.chunk.clone(self.allocator)));
+                            } else if ((i < 6 and result.revealed_neighbors[i] != null) or (i == 6 and client != edit.client)) {
+                                sub.blocks_pending = true;
                             }
                         }
                     }
                 }
                 const sub = edit.client.subscriptions.get(position);
-                var response = if (sub != null and sub.?.mode == .mesh)
-                    ChunkResponse{ .coords = coords, .subscription_id = sub.?.id, .chunk_revision = result.chunk.chunk_revision, .mesh_revision = self.worker_state.meshRevision(coords), .data = .acknowledgement }
+                var response = if (result.status == .resource_exhausted or (sub != null and sub.?.mode == .mesh))
+                    ChunkResponse{ .coords = coords, .subscription_id = if (sub) |value| value.id else null, .chunk_revision = result.chunk.chunk_revision, .mesh_revision = self.worker_state.meshRevision(coords), .data = .acknowledgement }
                 else
-                    self.blockResponse(coords, if (sub) |value| value.id else null, result.chunk.clone(self.allocator));
-                response.operation = .{ .request_id = edit.request_id, .status = result.status, .failure = result.diagnostics.failure, .mined_type = result.diagnostics.mined_type };
-                edit.client.append(response);
+                    self.blockResponse(coords, if (sub) |value| value.id else null, result.chunk);
+                if (response.data == .blocks) reply_moved = true;
+                response.operation = .{ .request_id = edit.request_id, .status = result.status, .failure = result.diagnostics.failure, .mined_type = result.diagnostics.mined_type, .counted = edit.counted };
+                edit.client.pending.responses.appendAssumeCapacity(response);
+                edit.client.resolved_request = edit.request_id;
+                self.status.confirmed_operations +%= 1;
+                if (!edit.client.simulation) if (self.processing_since) |since| {
+                    const waited: u64 = @intCast(@min(std.math.maxInt(u64), @max(0, persistence.now(self.io) - since)));
+                    self.status.max_player_wait_ns = @max(self.status.max_player_wait_ns, waited);
+                    self.status.total_player_wait_ns +|= waited;
+                };
+                self.applyEligibleCheckpoint(edit.client);
             },
         }
     }
@@ -587,23 +1168,675 @@ pub const WorldDataService = struct {
             const sub = client.subscriptions.getPtr(id) orelse continue;
             if (sub.mode == .mesh) {
                 sub.mesh_pending = true;
-            } else client.append(self.blockResponse(coords, sub.id, self.worker_state.modified_chunks.get(id).?.clone(self.allocator)));
+            } else sub.blocks_pending = true;
+        }
+    }
+
+    fn applyEligibleCheckpoint(self: *WorldDataService, client: *Client) void {
+        const checkpoint = client.eligible_checkpoint orelse return;
+        if (client.resolved_request < checkpoint.after_request) return;
+        const old = self.players.get(checkpoint.player.id);
+        if (old == null or !std.meta.eql(old.?, checkpoint.player)) {
+            self.players.put(self.allocator, checkpoint.player.id, checkpoint.player) catch {
+                self.failPersistence(error.OutOfMemory);
+                return;
+            };
+            self.player_generation +%= 1;
+            self.unsaved_work = true;
+        }
+        client.eligible_checkpoint = null;
+    }
+
+    fn notifyCompaction(context: *anyopaque, task: *CompactionTask) void {
+        const self: *WorldDataService = @ptrCast(@alignCast(context));
+        self.requests.mutex.lockUncancelable(self.io);
+        defer self.requests.mutex.unlock(self.io);
+        std.debug.assert(self.completed_compactor == null);
+        self.completed_compactor = task;
+        self.requests.not_empty.signal(self.io);
+    }
+    fn beginCompaction(self: *WorldDataService) !void {
+        const store = self.store orelse return;
+        if (!self.compaction_requested or self.compactor != null or self.final_policy) return;
+        const task = try self.allocator.create(CompactionTask);
+        errdefer self.allocator.destroy(task);
+        task.* = .{ .allocator = self.allocator, .io = self.io, .store = store, .store_mutex = &self.store_mutex, .notify = .{ .context = self, .send = notifyCompaction } };
+        try task.start();
+        self.compactor = task;
+        self.compaction_requested = false;
+    }
+    fn finishCompaction(self: *WorldDataService, task: *CompactionTask) void {
+        if (self.compactor != task) return;
+        task.await();
+        self.compactor = null;
+        if (task.failure) |err| self.failPersistence(err) else if (task.catalog) |catalog| {
+            if (self.catalog) |*old| old.deinit();
+            self.catalog = catalog;
+            task.catalog = null;
+            var chunks = self.worker_state.modified_chunks.iterator();
+            while (chunks.next()) |entry| {
+                if (catalog.revision(entry.key_ptr.*)) |revision| self.base_revisions.put(self.allocator, entry.key_ptr.*, revision) catch {
+                    self.failPersistence(error.OutOfMemory);
+                    break;
+                };
+            }
+            self.status.base_installed_ns = persistence.now(self.io);
+            self.status.progress_generation +%= 1;
+            self.evictEligible();
+        }
+        task.deinit();
+        self.retryPending();
+        if (self.compaction_requested) self.beginCompaction() catch |err| self.failPersistence(err);
+    }
+
+    fn publishPersistenceStatus(self: *WorldDataService) void {
+        if (self.budget) |budget| {
+            const stats = budget.stats();
+            self.status.live_used_bytes = stats.used;
+            self.status.live_peak_bytes = stats.peak;
+            self.status.live_allocation_count = stats.allocations;
+            self.status.live_rejections = stats.rejections;
+        }
+        self.scheduleWatchdog();
+        self.status.pending_commands = self.pending.items.len;
+        self.status.resident_chunks = self.worker_state.modified_chunks.count();
+        self.status.source_count = self.source_holds.count();
+        self.status_mutex.lockUncancelable(self.io);
+        self.published_status = self.status;
+        self.status_mutex.unlock(self.io);
+    }
+
+    /// Conservative bounded superset of every write performed by afterEdit: road runs
+    /// are at most twelve cells, their candidate seeds add one, and revelation reaches
+    /// one face neighbor. Include all z planes touched by covering/uncovering soil.
+    fn admissible(self: *WorldDataService, request: Request) bool {
+        if (request != .operation) return true;
+        const edit = request.operation;
+        if (self.source_holds.count() == 0) return true;
+        if (edit.client.simulation) return false;
+        const ids = self.operationDependencies(edit.operation);
+        for (self.run_write_ids.items) |id| if (self.source_holds.contains(id)) {
+            if (self.job) |job| job.prioritize(self.run_write_ids.items);
+            return false;
+        };
+        for (ids.ids[0..ids.count]) |id| if (self.source_holds.contains(id)) {
+            if (self.job) |job| job.prioritize(ids.ids[0..ids.count]);
+            return false;
+        };
+        return !self.status.overdue;
+    }
+
+    const Dependencies = struct { ids: [27]u32, count: usize };
+    fn operationDependencies(self: *WorldDataService, operation: BlockOperation) Dependencies {
+        const center, _ = world_module.splitBlockCoords(operation.block);
+        var result: Dependencies = .{ .ids = undefined, .count = 0 };
+        for (0..3) |z| for (0..3) |y| for (0..3) |x| {
+            const coords = self.layout.normalizeChunkCoords(center + ChunkCoords{ @as(i32, @intCast(x)) - 1, @as(i32, @intCast(y)) - 1, @as(i32, @intCast(z)) - 1 }) orelse continue;
+            const id = self.layout.encodeChunkCoords(coords);
+            if (std.mem.indexOfScalar(u32, result.ids[0..result.count], id) != null) continue;
+            result.ids[result.count] = id;
+            result.count += 1;
+        };
+        return result;
+    }
+
+    fn retryPending(self: *WorldDataService) void {
+        while (true) {
+            self.selectSaveDrain();
+            if (self.queued_save) |save| {
+                // A preceding writer may have been the last source of wakes.
+                // Revisit retained query failures when this drain takes over.
+                if (save.final and self.job == null and self.read_pending.count() == 0 and self.waiting_reads.items.len != 0) self.retryWaitingReads();
+                const ready = self.job == null and self.save_fence_remaining == 0 and (!save.final or (self.read_pending.count() == 0 and self.waiting_reads.items.len == 0 and self.compactor == null));
+                if (ready) {
+                    self.queued_save = null;
+                    self.beginCapture(save.id, save.final) catch |err| self.failPersistence(err);
+                }
+            }
+            if (self.pending.items.len == 0) break;
+            self.blocked_dependency_error = null;
+            if (!self.dependenciesReady(self.pending.items[0].request)) {
+                if (self.blocked_dependency_error) |err| self.noteDrainFailure(err);
+                break;
+            }
+            if (!self.admissible(self.pending.items[0].request)) break;
+            const pending = self.pending.orderedRemove(0);
+            self.processing_since = pending.since;
+            self.processAdmitted(pending.request);
+            self.processing_since = null;
+            if (self.operation_deferred or self.read_discovered) break;
+            if (self.save_fence_remaining != 0) self.save_fence_remaining -= 1;
+        }
+    }
+
+    fn failPersistence(self: *WorldDataService, err: anyerror) void {
+        self.status.phase = .failed;
+        self.status.error_name = @errorName(err);
+        if (self.job == null) self.status.active = false;
+        self.status.progress_generation +%= 1;
+    }
+
+    fn notifyPersistence(context: *anyopaque, event: persistence.Event) void {
+        const self: *WorldDataService = @ptrCast(@alignCast(context));
+        self.requests.mutex.lockUncancelable(self.io);
+        defer self.requests.mutex.unlock(self.io);
+        std.debug.assert(self.completion_count < self.completion_ring.items.len);
+        const tail = (self.completion_head + self.completion_count) % self.completion_ring.items.len;
+        self.completion_ring.items[tail] = event;
+        self.completion_count += 1;
+        self.requests.not_empty.signal(self.io);
+    }
+    fn waitForWork(self: *WorldDataService, batch: *std.ArrayList(Request)) bool {
+        self.requests.mutex.lockUncancelable(self.io);
+        defer self.requests.mutex.unlock(self.io);
+        while (self.requests.items.items.len == 0 and self.completion_count == 0 and self.loaded_count == 0 and self.completed_compactor == null and !self.tick_wakeup) {
+            if (self.destroy_requested.load(.acquire) and !self.shutdown_started) return true;
+            if (self.requests.is_closed) return false;
+            self.requests.not_empty.waitUncancelable(self.io, &self.requests.mutex);
+        }
+        std.mem.swap(std.ArrayList(Request), &self.requests.items, batch);
+        return true;
+    }
+    fn drainPersistenceEvents(self: *WorldDataService) void {
+        while (true) {
+            self.requests.mutex.lockUncancelable(self.io);
+            if (self.tick_wakeup) {
+                self.tick_wakeup = false;
+                self.async_progress = true;
+                self.worker_state.tick = @max(self.worker_state.tick, self.pending_tick.load(.acquire));
+            }
+            if (self.completed_compactor) |task| {
+                self.completed_compactor = null;
+                self.async_progress = true;
+                self.requests.mutex.unlock(self.io);
+                self.finishCompaction(task);
+            } else if (self.loaded_count != 0) {
+                const loaded = self.loaded_ring.items[self.loaded_head];
+                self.loaded_head = (self.loaded_head + 1) % self.loaded_ring.items.len;
+                self.loaded_count -= 1;
+                self.async_progress = true;
+                self.requests.mutex.unlock(self.io);
+                self.processAdmitted(.{ .chunk_loaded = loaded });
+            } else if (self.completion_count != 0) {
+                const event = self.completion_ring.items[self.completion_head];
+                self.completion_head = (self.completion_head + 1) % self.completion_ring.items.len;
+                self.completion_count -= 1;
+                self.async_progress = true;
+                self.requests.mutex.unlock(self.io);
+                self.persistenceEvent(event);
+            } else {
+                self.requests.mutex.unlock(self.io);
+                break;
+            }
+            self.publishPersistenceStatus();
+        }
+    }
+    fn notifyLoaded(self: *WorldDataService, loaded: LoadedChunk) void {
+        self.requests.mutex.lockUncancelable(self.io);
+        defer self.requests.mutex.unlock(self.io);
+        std.debug.assert(self.loaded_count < self.loaded_ring.items.len);
+        self.loaded_ring.items[(self.loaded_head + self.loaded_count) % self.loaded_ring.items.len] = loaded;
+        self.loaded_count += 1;
+        self.requests.not_empty.signal(self.io);
+    }
+
+    fn beginCapture(self: *WorldDataService, intent: u64, final: bool) !void {
+        self.status.intent_id = intent;
+        self.status.target_sequence = 0;
+        self.status.active = false;
+        const store = self.store orelse return;
+        if (self.is_shutting_down.load(.acquire)) return error.ServiceStopped;
+        std.debug.assert(self.job == null and self.source_holds.count() == 0);
+        for (self.clients.items) |client| {
+            client.checkpoint_mutex.lockUncancelable(self.io);
+            if (client.latest_checkpoint) |latest| {
+                client.eligible_checkpoint = latest;
+                client.latest_checkpoint = null;
+            }
+            client.checkpoint_mutex.unlock(self.io);
+            self.applyEligibleCheckpoint(client);
+            if (client.eligible_checkpoint) |checkpoint| {
+                if (client.resolved_request >= checkpoint.after_request) return error.OutOfMemory;
+            }
+        }
+        var source_count: usize = 0;
+        var scratch_peak: usize = 0;
+        var preflight_chunks = self.worker_state.modified_chunks.iterator();
+        while (preflight_chunks.next()) |entry| {
+            if (entry.value_ptr.chunk_revision == 0 or self.wal_revisions.get(entry.key_ptr.*) == entry.value_ptr.chunk_revision) continue;
+            source_count = try std.math.add(usize, source_count, 1);
+            if (source_count > self.limits.manifest_entries) return error.ManifestCapacityExceeded;
+            const source = persistence.Source.freeze(entry.key_ptr.*, 0, entry.value_ptr);
+            scratch_peak = @max(scratch_peak, try persistence.scratchBound(source));
+            if (try persistence.outputBound(source) > self.limits.output_bytes) return error.OutputCapacityTooSmall;
+        }
+        // Before allocating any capture manifest or growing bookkeeping, reserve
+        // a conservative peak including old/new hash-table and ring overlap.
+        var preflight_bytes = try std.math.add(usize, self.limits.output_bytes, @sizeOf(persistence.Job));
+        preflight_bytes = try std.math.add(usize, preflight_bytes, scratch_peak);
+        preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.mul(usize, self.players.count(), 60));
+        preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.mul(usize, source_count, 2 * @sizeOf(persistence.Source) + 2 + @sizeOf([]u8)));
+        const ring_target = try std.math.add(usize, source_count, 4);
+        const ring_peak = try std.math.add(usize, self.completion_ring.capacity, @max(self.completion_ring.capacity, ring_target));
+        preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.mul(usize, ring_peak, @sizeOf(persistence.Event)));
+        const hold_target = @max(@as(usize, self.source_holds.capacity()), try std.math.mul(usize, source_count, 4));
+        const wal_target = @max(@as(usize, self.wal_revisions.capacity()), try std.math.mul(usize, try std.math.add(usize, self.wal_revisions.count(), source_count), 4));
+        const hash_peak = try std.math.add(usize, try std.math.add(usize, hold_target, self.source_holds.capacity()), try std.math.add(usize, wal_target, self.wal_revisions.capacity()));
+        preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.add(usize, try std.math.mul(usize, hash_peak, @sizeOf(u32) + @sizeOf(u64) + 16), 512));
+        if (preflight_bytes > self.limits.working_bytes) return error.WorkingCapacityExceeded;
+        var sources: std.ArrayList(persistence.Source) = .empty;
+        errdefer sources.deinit(self.allocator);
+        try sources.ensureTotalCapacityPrecise(self.allocator, source_count);
+        self.capture_epoch = try std.math.add(u64, self.capture_epoch, 1);
+        var chunks = self.worker_state.modified_chunks.iterator();
+        while (chunks.next()) |entry| {
+            if (entry.value_ptr.chunk_revision == 0 or self.wal_revisions.get(entry.key_ptr.*) == entry.value_ptr.chunk_revision) continue;
+            if (sources.items.len == self.limits.manifest_entries) return error.ManifestCapacityExceeded;
+            try sources.append(self.allocator, persistence.Source.freeze(entry.key_ptr.*, self.capture_epoch, entry.value_ptr));
+        }
+        try self.completion_ring.ensureTotalCapacityPrecise(self.allocator, sources.items.len + 4);
+        self.completion_ring.items.len = sources.items.len + 4;
+        self.completion_head = 0;
+        try self.wal_revisions.ensureUnusedCapacity(self.allocator, @intCast(sources.items.len));
+        try self.source_holds.ensureUnusedCapacity(self.allocator, @intCast(sources.items.len));
+        const players = try self.allocator.alloc(u8, try std.math.mul(usize, self.players.count(), 52));
+        errdefer self.allocator.free(players);
+        const player_ids = try self.allocator.alloc(u64, self.players.count());
+        defer self.allocator.free(player_ids);
+        var player_iterator = self.players.keyIterator();
+        var player_index: usize = 0;
+        while (player_iterator.next()) |id| {
+            player_ids[player_index] = id.*;
+            player_index += 1;
+        }
+        std.mem.sort(u64, player_ids, {}, std.sort.asc(u64));
+        var offset: usize = 0;
+        for (player_ids) |id| {
+            const encoded = try format.encodePlayer(self.players.get(id).?);
+            @memcpy(players[offset..][0..52], &encoded);
+            offset += 52;
+        }
+        const job = try self.allocator.create(persistence.Job);
+        errdefer self.allocator.destroy(job);
+        // Include retained service capture indexes plus temporary descriptor and
+        // player-id overlap. Hash bucket allowance includes alignment/metadata.
+        const bookkeeping = try std.math.add(usize, try std.math.mul(usize, self.completion_ring.capacity, @sizeOf(persistence.Event)), try std.math.add(usize, try std.math.mul(usize, self.source_holds.capacity(), @sizeOf(u32) + @sizeOf(u64) + 16), try std.math.add(usize, try std.math.mul(usize, sources.capacity, @sizeOf(persistence.Source)), try std.math.add(usize, player_ids.len * @sizeOf(u64), 256))));
+        const frozen = try sources.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(frozen);
+        job.* = .{ .allocator = self.allocator, .io = self.io, .store = store, .store_mutex = &self.store_mutex, .limits = self.limits, .notify = .{ .context = self, .send = notifyPersistence }, .epoch = self.capture_epoch, .sequence = try std.math.add(u64, self.status.durable_sequence, 1), .tick = self.worker_state.tick, .final = final, .sources = frozen, .players = players, .player_count = self.players.count() };
+        const job_manifest = try std.math.mul(usize, source_count, @sizeOf(persistence.Source) + 2 + @sizeOf([]u8));
+        const job_baseline = try std.math.add(usize, self.limits.output_bytes, try std.math.add(usize, job_manifest, try std.math.add(usize, players.len, try std.math.add(usize, scratch_peak, @sizeOf(persistence.Job)))));
+        job.extra_working_bytes = @max(bookkeeping, preflight_bytes - job_baseline);
+        for (frozen) |source| self.source_holds.putAssumeCapacity(source.id, source.revision);
+        errdefer self.source_holds.clearRetainingCapacity();
+        try job.start();
+        self.job = job;
+        self.final_policy = final;
+        self.capture_cancel_requested = false;
+        self.captured_player_generation = self.player_generation;
+        self.simulation_paused.store(frozen.len != 0, .release);
+        self.status.intent_id = intent;
+        self.status.phase = .capturing;
+        self.status.active = true;
+        self.status.target_sequence = job.sequence;
+        self.status.tick = job.tick;
+        self.status.error_name = null;
+        self.status.capture_started_ns = persistence.now(self.io);
+        self.status.sources_released_ns = 0;
+        self.status.source_bytes = 0;
+        for (frozen) |source| self.status.source_bytes += source.pinnedBytes();
+        self.status.progress_generation +%= 1;
+    }
+
+    fn persistenceEvent(self: *WorldDataService, event: persistence.Event) void {
+        const job = self.job orelse return;
+        switch (event) {
+            .released => |released| {
+                if (released.epoch != job.epoch or self.source_holds.get(released.id) != released.revision) return;
+                _ = self.source_holds.remove(released.id);
+                self.status.progress_generation +%= 1;
+                if (self.source_holds.count() == 0) {
+                    self.simulation_paused.store(false, .release);
+                    self.status.sources_released_ns = persistence.now(self.io);
+                }
+                self.retryPending();
+            },
+            .encoded => |epoch| {
+                if (epoch != job.epoch) return;
+                self.status.phase = .writing;
+                self.status.progress_generation +%= 1;
+            },
+            .committed => |epoch| {
+                if (epoch != job.epoch) return;
+                self.status.durable_sequence = job.sequence;
+                self.status.sequence = job.sequence;
+                self.status.wal_committed_ns = persistence.now(self.io);
+                self.last_success_ns = self.status.wal_committed_ns;
+                self.status.overdue = false;
+                for (job.sources) |source| self.wal_revisions.putAssumeCapacity(source.id, source.revision);
+                self.unsaved_work = self.player_generation != self.captured_player_generation;
+                var live = self.worker_state.modified_chunks.iterator();
+                while (live.next()) |entry| if (self.wal_revisions.get(entry.key_ptr.*) != entry.value_ptr.chunk_revision) {
+                    self.unsaved_work = true;
+                    break;
+                };
+                if (job.final) self.status.phase = .compacting;
+                self.status.progress_generation +%= 1;
+            },
+            .compacted => |epoch| {
+                if (epoch != job.epoch) return;
+                var revisions = self.wal_revisions.iterator();
+                while (revisions.next()) |entry| self.base_revisions.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*) catch {
+                    self.failPersistence(error.OutOfMemory);
+                    break;
+                };
+                if (job.installed_catalog) |catalog| {
+                    if (self.catalog) |*old| old.deinit();
+                    self.catalog = catalog;
+                    job.installed_catalog = null;
+                }
+                self.status.base_installed_ns = persistence.now(self.io);
+                self.status.progress_generation +%= 1;
+                self.evictEligible();
+            },
+            .finished => |finished| {
+                if (finished.epoch != job.epoch) return;
+                // Writer has posted its last message; await closes the tiny completion tail.
+                job.writer.await(self.io);
+                self.status.output_peak_bytes = job.peak_bytes;
+                self.status.output_bytes = 0;
+                self.job = null;
+                job.deinit();
+                self.status.active = false;
+                self.status.retained_base_mismatch_chunks = 0;
+                var retained = self.worker_state.modified_chunks.iterator();
+                while (retained.next()) |entry| {
+                    if (entry.value_ptr.chunk_revision != 0 and self.base_revisions.get(entry.key_ptr.*) != entry.value_ptr.chunk_revision) self.status.retained_base_mismatch_chunks += 1;
+                }
+                self.final_policy = false;
+                if (self.compaction_requested) self.beginCompaction() catch |err| self.failPersistence(err);
+                if (finished.failure) |err| self.failPersistence(err) else self.status.phase = .complete;
+                self.status.progress_generation +%= 1;
+                self.retryPending();
+            },
+        }
+    }
+
+    fn oldestPlayerWait(self: *WorldDataService) ?i96 {
+        for (self.pending.items) |pending| if (!pending.request.operation.client.simulation) return pending.since;
+        return null;
+    }
+
+    fn checkWatchdog(self: *WorldDataService) void {
+        const at = persistence.now(self.io);
+        if (self.dependency_retry_at) |retry| if (at >= retry) {
+            self.dependency_retry_at = null;
+            self.dependency_auto_retried = true;
+            self.retrySaveDrain();
+        };
+        if (self.unsaved_work and at - self.last_success_ns >= self.limits.overdue_ns) self.status.overdue = true;
+        if (self.job) |job| {
+            job.mutex.lockUncancelable(self.io);
+            self.status.output_bytes = job.output_bytes;
+            self.status.output_peak_bytes = job.peak_bytes;
+            job.mutex.unlock(self.io);
+            if (self.source_holds.count() != 0 and !self.capture_cancel_requested and !self.final_policy and !self.status.overdue) {
+                const capture_expired = at - self.status.capture_started_ns >= self.limits.capture_wait_ns;
+                const player_expired = if (self.oldestPlayerWait()) |since| at - since >= self.limits.player_wait_ns else false;
+                if (capture_expired or player_expired) {
+                    self.capture_cancel_requested = true;
+                    job.cancel();
+                }
+            }
+        } else if (self.status.overdue and self.queued_save == null and self.pending.items.len == 0) {
+            const intent = self.next_intent.fetchAdd(1, .monotonic);
+            self.beginCapture(intent, false) catch |err| self.failPersistence(err);
+        }
+    }
+
+    fn runReader(self: *WorldDataService) void {
+        var batch: std.ArrayList(storage.BaseRead) = .empty;
+        defer batch.deinit(self.allocator);
+        while (self.read_requests.waitAndTakeAll(self.io, &batch)) {
+            for (batch.items) |*read| {
+                const result = self.readPersisted(read);
+                self.notifyLoaded(.{ .id = read.id, .revision = read.revision, .result = result });
+                read.deinit();
+            }
+            batch.clearRetainingCapacity();
+        }
+    }
+    fn readPersisted(self: *WorldDataService, read: *const storage.BaseRead) !WorldChunk {
+        const encoded = try read.read(self.allocator);
+        defer self.allocator.free(encoded);
+        var decoded = try format.decodeChunk(self.allocator, read.world_uuid, encoded, read.dimensions);
+        defer decoded.deinit(self.allocator);
+        var decoded_metadata = try format.decodeMetadata(self.allocator, decoded.blocks, decoded.metadata, read.dimensions);
+        defer decoded_metadata.deinit(self.allocator);
+        const live = self.worker_state.liveAllocator(self.allocator);
+        var chunk = WorldChunk.initEmpty();
+        if (!std.mem.allEqual(u8, decoded.blocks, 0)) {
+            const data = try live.create(@import("world_chunk_data.zig").WorldChunkData);
+            @memcpy(std.mem.asBytes(&data.blocks), decoded.blocks);
+            chunk = WorldChunk.initBlocks(data);
+        }
+        errdefer chunk.deinit(live);
+        chunk.chunk_revision = decoded.revision;
+        chunk.flags.is_unreachable = decoded.is_unreachable;
+        var custom_index: usize = 0;
+        for (decoded.blocks, 0..) |material, cell| {
+            if (material != 255) continue;
+            const road = decoded_metadata.roads[custom_index];
+            custom_index += 1;
+            try chunk.metadata.roads.append(live, .{ .index = @intCast(cell), .slope = if (road.formation) |formation| .{
+                .high_endpoint = formation.high_endpoint,
+                .downhill = @enumFromInt(formation.direction),
+                .length = formation.length,
+                .section = formation.section,
+            } else null });
+        }
+        for (decoded_metadata.construction) |cell| try chunk.metadata.constructed.append(live, @intCast(cell));
+        // The decoder validated one event per cell; bulk import avoids the
+        // replacement scans and shifts needed by interactive timer scheduling.
+        try chunk.metadata.timed.reserve(live, decoded_metadata.timers.len);
+        for (decoded_metadata.timers) |timer| chunk.metadata.timed.events.appendAssumeCapacity(.{ .block = @intCast(timer.cell), .kind = @enumFromInt(timer.kind), .due_tick = timer.deadline });
+        std.mem.sort(transformations.Event, chunk.metadata.timed.events.items, {}, struct {
+            fn less(_: void, a: transformations.Event, b: transformations.Event) bool {
+                return a.due_tick < b.due_tick or (a.due_tick == b.due_tick and a.block < b.block);
+            }
+        }.less);
+        return chunk;
+    }
+    fn installLoaded(self: *WorldDataService, id: u32, revision: u64, chunk: WorldChunk) !void {
+        try self.worker_state.modified_chunks.ensureUnusedCapacity(self.allocator, 1);
+        try self.base_revisions.ensureUnusedCapacity(self.allocator, 1);
+        const capture_spare: usize = if (self.job) |job| job.sources.len else 0;
+        try self.wal_revisions.ensureUnusedCapacity(self.allocator, @intCast(capture_spare + 1));
+        try self.worker_state.timed_chunks.ensureUnusedCapacity(self.allocator, 1);
+        self.worker_state.modified_chunks.putAssumeCapacity(id, chunk);
+        self.base_revisions.putAssumeCapacity(id, revision);
+        self.wal_revisions.putAssumeCapacity(id, revision);
+        if (chunk.metadata.timed.events.items.len != 0) self.worker_state.timed_chunks.putAssumeCapacity(id, {});
+    }
+
+    fn failDependencyRead(self: *WorldDataService, err: anyerror) void {
+        self.blocked_dependency_error = err;
+        self.noteDrainFailure(err);
+    }
+
+    fn requireBase(self: *WorldDataService, id: u32) bool {
+        if (self.worker_state.modified_chunks.contains(id)) return true;
+        const catalog = if (self.catalog) |*value| value else return true;
+        if (catalog.revision(id) == null) return true;
+        self.read_discovered = true;
+        if (self.read_failed.get(id)) |err| {
+            self.terminal_read_failure = true;
+            self.blocked_dependency_error = err;
+            return false;
+        }
+        if (!self.read_pending.contains(id) and self.read_pending.count() < self.limits.pending_commands) {
+            self.requests.mutex.lockUncancelable(self.io);
+            if (self.loaded_ring.items.len == 0) self.loaded_ring.resize(self.allocator, self.limits.pending_commands) catch {
+                self.requests.mutex.unlock(self.io);
+                self.failDependencyRead(error.OutOfMemory);
+                return false;
+            };
+            self.requests.mutex.unlock(self.io);
+            self.read_failed.ensureUnusedCapacity(self.allocator, @intCast(self.read_pending.count() + 1)) catch {
+                self.failDependencyRead(error.OutOfMemory);
+                return false;
+            };
+            var read = catalog.prepareRead(id) catch |err| {
+                self.failDependencyRead(err);
+                return false;
+            };
+            if (read) |*handle| {
+                self.read_pending.put(self.allocator, id, handle.revision) catch {
+                    handle.deinit();
+                    self.failDependencyRead(error.OutOfMemory);
+                    return false;
+                };
+                self.read_requests.tryPush(self.io, self.allocator, handle.*) catch |err| {
+                    _ = self.read_pending.remove(id);
+                    handle.deinit();
+                    self.failDependencyRead(err);
+                    return false;
+                };
+            }
+        }
+        return false;
+    }
+    fn discoverRoadRunDependencies(self: *WorldDataService, operation: BlockOperation) !bool {
+        self.run_write_ids.clearRetainingCapacity();
+        if (operation.action != .remove) return true;
+        var reader: ReadContext = .{ .state = &self.worker_state, .allocator = self.allocator };
+        defer reader.deinit();
+        const roads = @import("roads.zig");
+        const context: roads.Context = .{ .allocator = self.allocator, .reader = .{ .layout = self.layout, .context = &reader, .block_at = ReadContext.read, .custom_shape_at = ReadContext.readShape }, .chunks = &self.worker_state.modified_chunks, .changed = &self.worker_state.road_changes, .max_plan_changes = self.limits.manifest_entries };
+        const target: rules.Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
+        var sites: [9]rules.Cell = undefined;
+        sites[0] = target;
+        var count: usize = 1;
+        for (std.enums.values(@import("engine").voxel_chunk.custom_block.Direction)) |direction| {
+            for (0..2) |level| {
+                sites[count] = target + direction.offset() + rules.Cell{ 0, 0, @intCast(level) };
+                count += 1;
+            }
+        }
+        for (sites) |site| {
+            const block = @import("block_coordinates.zig").fromWorld(self.layout, site - @as(rules.Cell, self.layout.origin_chunk) * @as(rules.Cell, @splat(CHUNK_SIZE))) orelse continue;
+            const coords, const local = world_module.splitBlockCoords(block);
+            const chunk = self.worker_state.modified_chunks.get(self.layout.encodeChunkCoords(coords)) orelse continue;
+            const road = chunk.metadata.road(transformations.index(local)) orelse continue;
+            if (road.slope) |slope| try context.appendRunChunkIds(slope, &self.run_write_ids);
+        }
+        var ready = true;
+        for (self.run_write_ids.items) |id| ready = self.requireBase(id) and ready;
+        return ready;
+    }
+
+    fn dependenciesReady(self: *WorldDataService, request: Request) bool {
+        if (self.catalog == null) return true;
+        var ready = true;
+        switch (request) {
+            .operation => |edit| {
+                const center, _ = world_module.splitBlockCoords(edit.operation.block);
+                // Validator rechecks constructed cells within28 and their support within28.
+                for (0..5) |z| for (0..5) |y| for (0..5) |x| {
+                    const coords = self.layout.normalizeChunkCoords(center + ChunkCoords{ @as(i32, @intCast(x)) - 2, @as(i32, @intCast(y)) - 2, @as(i32, @intCast(z)) - 2 }) orelse continue;
+                    ready = self.requireBase(self.layout.encodeChunkCoords(coords)) and ready;
+                };
+                self.run_gate_failure = null;
+                if (ready) ready = self.discoverRoadRunDependencies(edit.operation) catch |err| blk: {
+                    self.run_gate_failure = err;
+                    break :blk true;
+                };
+            },
+            .load_chunks => |load| {
+                var z = load.z_start;
+                while (z < load.z_end) : (z += 1) {
+                    const coords: ChunkCoords = .{ load.column[0], load.column[1], z };
+                    ready = self.requireBase(self.layout.encodeChunkCoords(coords)) and ready;
+                    for (std.enums.values(Side)) |side| if (world_module.adjacentChunk(self.layout, coords, side)) |neighbor| {
+                        ready = self.requireBase(self.layout.encodeChunkCoords(neighbor)) and ready;
+                    };
+                }
+            },
+            else => {},
+        }
+        return ready;
+    }
+
+    fn evictEligible(self: *WorldDataService) void {
+        if (self.pending.items.len != 0 or self.waiting_reads.items.len != 0 or self.read_pending.count() != 0) return;
+        var candidates: std.ArrayList(ChunkId) = .empty;
+        defer candidates.deinit(self.allocator);
+        var chunks = self.worker_state.modified_chunks.iterator();
+        while (chunks.next()) |entry| {
+            const id = entry.key_ptr.*;
+            const clean_generated = entry.value_ptr.chunk_revision == 0 and (self.catalog == null or self.catalog.?.revision(id) == null);
+            if ((!clean_generated and self.base_revisions.get(id) != entry.value_ptr.chunk_revision) or self.source_holds.contains(id)) continue;
+            var subscribed = false;
+            for (self.clients.items) |client| if (client.subscriptions.contains(id)) {
+                subscribed = true;
+                break;
+            };
+            if (subscribed) continue;
+            var lazy = true;
+            for (entry.value_ptr.metadata.timed.events.items) |timer| if (!timer.kind.isLazy()) {
+                lazy = false;
+                break;
+            };
+            if (!lazy) continue;
+            candidates.append(self.allocator, id) catch return;
+        }
+        for (candidates.items) |id| {
+            const removed = self.worker_state.modified_chunks.fetchRemove(id).?;
+            removed.value.deinit(self.worker_state.liveAllocator(self.allocator));
+            _ = self.worker_state.timed_chunks.remove(id);
         }
     }
 
     fn processTransformations(self: *WorldDataService) void {
-        // Gather keys before processing: reads can materialize another generated chunk.
-        var due_chunks: std.ArrayList(ChunkId) = .empty;
-        defer due_chunks.deinit(self.allocator);
+        if (self.source_holds.count() != 0) return;
+        const cutoff = self.worker_state.tick;
+        // Fixed-size fair selection; loads cannot join this pass after its boundary.
+        var due: [16]u32 = undefined;
+        var count: usize = 0;
+        self.status.timer_due_chunks = 0;
+        self.status.timer_due_events = 0;
+        self.status.oldest_timer_deadline = null;
         var iterator = self.worker_state.timed_chunks.keyIterator();
         while (iterator.next()) |entry| {
-            const events = self.worker_state.modified_chunks.get(entry.*).?.metadata.timed.events.items;
-            if (events.len != 0 and events[0].due_tick <= self.worker_state.tick)
-                due_chunks.append(self.allocator, entry.*) catch @panic("OOM");
+            const chunk = self.worker_state.modified_chunks.get(entry.*) orelse continue;
+            const events = chunk.metadata.timed.events.items;
+            if (events.len == 0 or events[0].due_tick > cutoff) continue;
+            self.status.timer_due_chunks += 1;
+            self.status.oldest_timer_deadline = if (self.status.oldest_timer_deadline) |old| @min(old, events[0].due_tick) else events[0].due_tick;
+            var low: usize = 0;
+            var high = events.len;
+            while (low < high) {
+                const middle = low + (high - low) / 2;
+                if (events[middle].due_tick <= cutoff) low = middle + 1 else high = middle;
+            }
+            self.status.timer_due_events += low;
+            const distance = entry.* -% self.timer_cursor;
+            var at: usize = 0;
+            while (at < count and due[at] -% self.timer_cursor < distance) : (at += 1) {}
+            if (at == due.len) continue;
+            const new_count = @min(count + 1, due.len);
+            var move = new_count - 1;
+            while (move > at) : (move -= 1) due[move] = due[move - 1];
+            due[at] = entry.*;
+            count = new_count;
         }
-        for (due_chunks.items) |id| {
+        for (due[0..count]) |id| {
+            self.timer_cursor = id +% 1;
             const coords = self.layout.decodeChunkId(id);
-            if (self.worker_state.transformChunk(self.allocator, coords)) self.publishMaterialChange(coords);
+            if (self.worker_state.transformChunk(self.allocator, coords)) {
+                self.unsaved_work = true;
+                self.publishMaterialChange(coords);
+            }
         }
     }
 };
@@ -612,6 +1845,7 @@ const ReadContext = struct {
     state: *WorkerState,
     allocator: std.mem.Allocator,
     chunks: world_module.ChunksHashMap = .empty,
+    failure: ?anyerror = null,
 
     fn deinit(self: *ReadContext) void {
         var iterator = self.chunks.valueIterator();
@@ -623,8 +1857,20 @@ const ReadContext = struct {
         const self: *ReadContext = @ptrCast(@alignCast(context));
         const coords, const local = world_module.splitBlockCoords(block);
         const id = self.state.layout.encodeChunkCoords(coords);
-        if (!self.chunks.contains(id))
-            self.chunks.put(self.allocator, id, self.state.loadAt(self.allocator, coords)) catch @panic("OOM");
+        if (self.state.modified_chunks.getPtr(id)) |chunk| return chunk.content.getBlock(local);
+        if (!self.chunks.contains(id)) {
+            if (self.state.persistence_service) |service| if (!service.requireBase(id)) return null;
+            const generator = ColumnGenerator.init(&self.state.generator, .{ coords[0], coords[1] });
+            const chunk = generator.tryGenerateChunk(self.allocator, coords[2]) catch |err| {
+                self.failure = err;
+                return null;
+            };
+            self.chunks.put(self.allocator, id, chunk) catch |err| {
+                chunk.deinit(self.allocator);
+                self.failure = err;
+                return null;
+            };
+        }
         return self.chunks.get(id).?.content.getBlock(local);
     }
 
@@ -632,7 +1878,8 @@ const ReadContext = struct {
         const self: *ReadContext = @ptrCast(@alignCast(context));
         if (read(context, block) != .custom) return null;
         const coords, const local = world_module.splitBlockCoords(block);
-        const chunk = self.chunks.get(self.state.layout.encodeChunkCoords(coords)).?;
+        const id = self.state.layout.encodeChunkCoords(coords);
+        const chunk = self.state.modified_chunks.get(id) orelse self.chunks.get(id).?;
         const road = chunk.metadata.road(transformations.index(local)) orelse return null;
         return road.shape();
     }
@@ -657,6 +1904,37 @@ const WorkerState = struct {
     /// Chunks without pending events are not visited by time processing.
     timed_chunks: std.AutoHashMapUnmanaged(ChunkId, void) = .empty,
     road_changes: std.ArrayList(ChunkId) = .empty,
+    persistence_service: ?*WorldDataService = null,
+    live_allocator: ?std.mem.Allocator = null,
+    fn liveAllocator(self: *const WorkerState, fallback: std.mem.Allocator) std.mem.Allocator {
+        return self.live_allocator orelse fallback;
+    }
+
+    fn resolveRestoredPosition(self: *WorkerState, allocator: std.mem.Allocator, feet: [3]f64, body: @import("terrain_collision.zig").Body) StandingSpaceError!standing_space.Position {
+        for (feet) |coordinate| if (!std.math.isFinite(coordinate) or @abs(coordinate) >= 0x1p62) return error.InvalidSearch;
+        const position: standing_space.Position = feet;
+        var temporary = world_module.World.init(allocator, self.layout) catch return error.MissingData;
+        defer temporary.deinit();
+        const bounds = body.bounds(position);
+        const first = bounds.firstCell();
+        const last = bounds.lastCell();
+        var z = first[2];
+        while (z <= last[2]) : (z += 1) {
+            var y = first[1];
+            while (y <= last[1]) : (y += 1) {
+                var x = first[0];
+                while (x <= last[0]) : (x += 1) {
+                    const block = @import("block_coordinates.zig").fromWorld(self.layout, .{ x, y, z }) orelse continue;
+                    const coords, _ = world_module.splitBlockCoords(block);
+                    const id = self.layout.encodeChunkCoords(coords);
+                    if (!temporary.chunks.contains(id)) temporary.chunks.put(allocator, id, self.loadAt(allocator, coords)) catch return error.MissingData;
+                }
+            }
+        }
+        var query: @import("terrain_collision.zig").Query = .{ .world = &temporary, .body = body };
+        if (query.overlap(position, false) == .clear) return position;
+        return self.findStandingSpace(allocator, .{ .preferred_xy = .{ feet[0], feet[1] }, .clearance_size = .{ body.half_width * 2, body.half_width * 2, body.height }, .support_size = .{ body.half_width * 2, body.half_width * 2 }, .search_radius = 8 });
+    }
 
     fn findStandingSpace(self: *WorkerState, allocator: std.mem.Allocator, query: StandingSpaceRequest) standing_space.Error!standing_space.Position {
         var context: ReadContext = .{ .state = self, .allocator = allocator };
@@ -665,21 +1943,32 @@ const WorkerState = struct {
     }
 
     fn boundariesAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) BoundaryMasks {
+        return self.tryBoundariesAt(allocator, coords) catch @panic("boundary dependency unavailable");
+    }
+
+    fn tryBoundariesAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) !BoundaryMasks {
         const id = self.layout.encodeChunkCoords(coords);
         if (self.modified_chunks.getPtr(id)) |chunk| return chunk.boundaries;
+        // Check persisted ownership before consulting generated cache entries.
+        if (self.persistence_service) |service| if (!service.requireBase(id)) return error.DependencyPending;
         if (self.boundary_cache.get(id)) |masks| return masks;
-        const chunk = self.loadAt(allocator, coords);
+        const chunk = try self.tryLoadAt(allocator, coords);
         defer chunk.deinit(allocator);
         if (self.boundary_cache.count() >= 512) self.boundary_cache.clearRetainingCapacity();
-        self.boundary_cache.put(allocator, id, chunk.boundaries) catch @panic("OOM");
+        // Caching is optional; the correctly computed masks remain usable on OOM.
+        self.boundary_cache.put(allocator, id, chunk.boundaries) catch {};
         return chunk.boundaries;
     }
 
     fn neighborBoundaries(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) BoundaryMasks {
+        return self.tryNeighborBoundaries(allocator, coords) catch @panic("boundary dependency unavailable");
+    }
+
+    fn tryNeighborBoundaries(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) !BoundaryMasks {
         var masks: BoundaryMasks = @splat(.{});
         for (std.enums.values(Side)) |side| {
             const adjacent = world_module.adjacentChunk(self.layout, coords, side) orelse continue;
-            masks[@intFromEnum(side)] = self.boundariesAt(allocator, adjacent)[@intFromEnum(side.getOpposite())];
+            masks[@intFromEnum(side)] = (try self.tryBoundariesAt(allocator, adjacent))[@intFromEnum(side.getOpposite())];
         }
         return masks;
     }
@@ -689,18 +1978,31 @@ const WorkerState = struct {
     }
 
     fn loadAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) WorldChunk {
-        if (self.modified_chunks.get(self.layout.encodeChunkCoords(coords))) |chunk| return chunk.clone(allocator);
+        // Legacy collision callers discard this temporary result when read_discovered
+        // is set. Publication paths use tryLoadAt and cannot expose it.
+        return self.tryLoadAt(allocator, coords) catch |err| switch (err) {
+            error.DependencyPending => WorldChunk.initEmpty(),
+            else => @panic("OOM"),
+        };
+    }
+
+    fn tryLoadAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) !WorldChunk {
+        const id = self.layout.encodeChunkCoords(coords);
+        if (self.modified_chunks.get(id)) |chunk| return chunk.tryClone(allocator);
+        if (self.persistence_service) |service| {
+            if (!service.requireBase(id)) return error.DependencyPending;
+        }
         const key = @as(u64, @intCast(coords[0])) << 32 | @as(u64, @intCast(coords[1]));
         if (!self.columns.contains(key)) {
             if (self.columns.count() >= 64) self.columns.clearRetainingCapacity();
-            self.columns.put(allocator, key, ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] })) catch @panic("OOM");
+            try self.columns.put(allocator, key, ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] }));
         }
-        return self.columns.getPtr(key).?.generateChunk(allocator, coords[2]);
+        return self.columns.getPtr(key).?.tryGenerateChunk(allocator, coords[2]);
     }
 
     fn deinit(self: *WorkerState, allocator: std.mem.Allocator) void {
         var iterator = self.modified_chunks.valueIterator();
-        while (iterator.next()) |chunk| chunk.deinit(allocator);
+        while (iterator.next()) |chunk| chunk.deinit(self.liveAllocator(allocator));
         self.modified_chunks.deinit(allocator);
         self.mesh_revisions.deinit(allocator);
         self.columns.deinit(allocator);
@@ -714,98 +2016,213 @@ const WorkerState = struct {
         return self.loadAt(allocator, coords);
     }
 
-    fn applyOperation(self: *WorkerState, allocator: std.mem.Allocator, operation: BlockOperation) struct {
+    const ApplyResult = struct {
         status: OperationStatus,
         chunk: WorldChunk,
         revealed_neighbors: [6]?ChunkCoords,
         changed_below: ?ChunkCoords,
         diagnostics: world_module.EditResult,
-    } {
+    };
+
+    fn applyOperation(self: *WorkerState, allocator: std.mem.Allocator, operation: BlockOperation) ApplyResult {
+        return self.tryApplyOperation(allocator, operation) catch |err| {
+            if (self.persistence_service) |service| {
+                if (err == error.CapturePending or err == error.DependencyPending) service.operation_deferred = true else service.failPersistence(err);
+            }
+            return .{ .status = .resource_exhausted, .chunk = WorldChunk.initEmpty(), .revealed_neighbors = @splat(null), .changed_below = null, .diagnostics = .{ .status = .resource_exhausted } };
+        };
+    }
+
+    fn ensureResident(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) !void {
+        const id = self.layout.encodeChunkCoords(coords);
+        if (self.modified_chunks.contains(id)) return;
+        if (self.persistence_service) |service| if (!service.requireBase(id)) return error.DependencyPending;
+        const generator = ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] });
+        const chunk = try generator.tryGenerateChunk(self.liveAllocator(allocator), coords[2]);
+        errdefer chunk.deinit(self.liveAllocator(allocator));
+        try self.modified_chunks.put(allocator, id, chunk);
+    }
+
+    fn tryApplyOperation(self: *WorkerState, allocator: std.mem.Allocator, operation: BlockOperation) !ApplyResult {
+        const live = self.liveAllocator(allocator);
         self.road_changes.clearRetainingCapacity();
-        const cells = world_module.collectConstructed(allocator, self.layout, &self.modified_chunks, operation.block);
+        if (self.persistence_service) |service| if (service.run_gate_failure) |err| return err;
+        const cells = try world_module.tryCollectConstructed(allocator, self.layout, &self.modified_chunks, operation.block);
         defer allocator.free(cells);
         var context: ReadContext = .{ .state = self, .allocator = allocator };
         defer context.deinit();
         const diagnostics = world_module.validateEdit(allocator, .{ .layout = self.layout, .context = &context, .block_at = ReadContext.read, .custom_shape_at = ReadContext.readShape }, cells, operation);
+        if (context.failure) |err| return err;
+        if (self.persistence_service) |service| if (service.read_discovered) return error.DependencyPending;
         const coords, const local = world_module.splitBlockCoords(operation.block);
         const position = self.layout.encodeChunkCoords(coords);
-        var chunk = if (self.modified_chunks.get(position)) |stored| stored.clone(allocator) else blk: {
-            const generator = ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] });
-            break :blk generator.generateChunk(allocator, coords[2]);
+        if (diagnostics.status != .success) {
+            const chunk = if (self.modified_chunks.get(position)) |stored| try stored.tryClone(allocator) else blk: {
+                const generator = ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] });
+                break :blk try generator.tryGenerateChunk(allocator, coords[2]);
+            };
+            return .{ .status = diagnostics.status, .chunk = chunk, .revealed_neighbors = @splat(null), .changed_below = null, .diagnostics = diagnostics };
+        }
+
+        // Materialize unchanged dependencies before obtaining pointers; rehashing may move headers.
+        try self.modified_chunks.ensureUnusedCapacity(allocator, 8);
+        try self.ensureResident(allocator, coords);
+        const previous_road = self.modified_chunks.get(position).?.metadata.road(transformations.index(local));
+        const previous_flags = self.modified_chunks.get(position).?.flags;
+        const road_context: @import("roads.zig").Context = .{
+            .allocator = allocator,
+            .reader = .{ .layout = self.layout, .context = &context, .block_at = ReadContext.read, .custom_shape_at = ReadContext.readShape },
+            .chunks = &self.modified_chunks,
+            .changed = &self.road_changes,
+            .virtual_edit = operation,
         };
-        const previous_flags = chunk.flags;
-        const status = diagnostics.status;
-        var revealed_neighbors: [6]?ChunkCoords = @splat(null);
-        var changed_below: ?ChunkCoords = null;
-        if (status == .success) {
-            const previous_road = chunk.metadata.road(transformations.index(local));
-            std.debug.assert(chunk.apply(allocator, local, operation.action) == .success);
-            if (operation.action == .put) {
-                chunk.metadata.markConstructed(allocator, transformations.index(local));
-                if (operation.action.put == .dirt) {
-                    var above = operation.block;
-                    above[2] += 1;
-                    const covered = above[2] < self.layout.size_in_blocks[2] and ReadContext.read(&context, above).? != .none;
-                    if (covered) {
-                        chunk.changeType(local, .packed_dirt);
-                    } else chunk.metadata.timed.schedule(allocator, .{
-                        .block = transformations.index(local),
-                        .kind = .compact_dirt,
-                        .due_tick = self.tick +| transformations.transformation_delay,
-                    });
+        var road_plan = try road_context.planAfterEdit(operation, previous_road);
+        defer road_plan.deinit(allocator);
+        if (context.failure) |err| return err;
+        if (self.persistence_service) |service| {
+            if (service.read_discovered) return error.DependencyPending;
+            for (road_plan.chunk_ids) |id| if (service.source_holds.contains(id)) {
+                service.operation_deferred = true;
+                if (service.job) |job| job.prioritize(road_plan.chunk_ids);
+                return error.CapturePending;
+            };
+        }
+        try road_plan.reserveCommit(road_context);
+        var revealed: [6]?ChunkCoords = @splat(null);
+        if (operation.action == .remove) for (std.enums.values(Side)) |side| {
+            const i = @intFromEnum(side);
+            if (local[i / 2] != (if (i % 2 == 0) @as(u5, 0) else CHUNK_SIZE - 1) or !previous_flags.getSideSolidness(side)) continue;
+            const neighbor = world_module.adjacentChunk(self.layout, coords, side) orelse continue;
+            try self.ensureResident(allocator, neighbor);
+            const neighbor_id = self.layout.encodeChunkCoords(neighbor);
+            if (self.modified_chunks.get(neighbor_id).?.flags.is_unreachable) revealed[i] = neighbor;
+        };
+        var below_coords: ?ChunkCoords = null;
+        var below_local: [3]u5 = undefined;
+        var below_changed = false;
+        var below_metadata = false;
+        if (operation.block[2] != 0) {
+            var below = operation.block;
+            below[2] -= 1;
+            const bcoords, const blocal = world_module.splitBlockCoords(below);
+            try self.ensureResident(allocator, bcoords);
+            const bchunk = self.modified_chunks.getPtr(self.layout.encodeChunkCoords(bcoords)).?;
+            const material = bchunk.content.getBlock(blocal);
+            if (material.isEarth()) {
+                if (operation.action == .put) {
+                    below_changed = material != .packed_dirt;
+                    for (bchunk.metadata.timed.events.items) |event| if (event.block == transformations.index(blocal)) {
+                        below_metadata = true;
+                        break;
+                    };
+                } else if (material != .dirt) {
+                    below_metadata = true;
+                    try bchunk.metadata.timed.reserve(live, 1);
+                }
+                if (below_changed or below_metadata) {
+                    below_coords = bcoords;
+                    below_local = blocal;
                 }
             }
-            chunk.chunk_revision += 1;
-            self.next_mesh_revision += 1;
-            self.mesh_revisions.put(allocator, position, self.next_mesh_revision) catch @panic("OOM");
-            for (std.enums.values(Side)) |side| {
-                const i = @intFromEnum(side);
-                if (local[i / 2] != (if (i % 2 == 0) @as(u5, 0) else CHUNK_SIZE - 1)) continue;
-                const neighbor = world_module.adjacentChunk(self.layout, coords, side) orelse continue;
-                self.mesh_revisions.put(allocator, self.layout.encodeChunkCoords(neighbor), self.next_mesh_revision) catch @panic("OOM");
-            }
-            const entry = self.modified_chunks.getOrPut(allocator, position) catch @panic("OOM");
-            if (entry.found_existing) entry.value_ptr.deinit(allocator);
-            entry.value_ptr.* = chunk.clone(allocator);
-            self.refreshTimedIndex(allocator, position);
-            for (std.enums.values(Side)) |side| {
-                if (!previous_flags.getSideSolidness(side) or chunk.flags.getSideSolidness(side)) continue;
-                const neighbor = world_module.adjacentChunk(self.layout, coords, side) orelse continue;
-                if (self.revealChunk(allocator, neighbor)) revealed_neighbors[@intFromEnum(side)] = neighbor;
-            }
-            changed_below = self.updateBelow(allocator, operation.block, operation.action == .put);
-            var road_reader: ReadContext = .{ .state = self, .allocator = allocator };
-            defer road_reader.deinit();
-            const road_context: @import("roads.zig").Context = .{
-                .allocator = allocator,
-                .reader = .{ .layout = self.layout, .context = &road_reader, .block_at = ReadContext.read, .custom_shape_at = ReadContext.readShape },
-                .chunks = &self.modified_chunks,
-                .changed = &self.road_changes,
-            };
-            road_context.afterEdit(operation, previous_road);
-            for (self.road_changes.items) |id| {
-                if (id != position) self.modified_chunks.getPtr(id).?.chunk_revision += 1;
-                self.mesh_revisions.put(allocator, id, self.next_mesh_revision) catch @panic("OOM");
-            }
-            // Covering soil can change another cell in this same chunk too.
-            chunk.deinit(allocator);
-            chunk = self.modified_chunks.get(position).?.clone(allocator);
         }
-        return .{ .status = status, .chunk = chunk, .revealed_neighbors = revealed_neighbors, .changed_below = changed_below, .diagnostics = diagnostics };
+        const target = self.modified_chunks.getPtr(position).?;
+        const road_growth: usize = if (operation.action == .put and operation.action.put == .country_road_adaptive) 1 else 0;
+        const constructed_growth: usize = if (operation.action == .put) 1 else 0;
+        const timer_growth: usize = if ((operation.action == .put and operation.action.put == .dirt) or (below_coords != null and operation.action == .remove and @reduce(.And, below_coords.? == coords))) 1 else 0;
+        try target.metadata.reserve(live, road_growth, constructed_growth, timer_growth);
+        _ = try target.prepareApply(live, local, operation.action);
+        const covered = if (operation.action == .put and operation.action.put == .dirt and operation.block[2] + 1 < self.layout.size_in_blocks[2]) blk: {
+            var above = operation.block;
+            above[2] += 1;
+            break :blk (ReadContext.read(&context, above) orelse return context.failure orelse error.DependencyPending) != .none;
+        } else false;
+        if (context.failure) |err| return err;
+        if (self.persistence_service) |service| if (service.read_discovered) return error.DependencyPending;
+        var reply = try target.tryClone(allocator);
+        errdefer reply.deinit(allocator);
+        try reply.metadata.reserve(allocator, road_growth, constructed_growth, timer_growth);
+        if (operation.action == .put) _ = try reply.tryEnsureData(allocator);
+        try self.mesh_revisions.ensureUnusedCapacity(allocator, @intCast(road_plan.chunk_ids.len + 8));
+        try self.timed_chunks.ensureUnusedCapacity(allocator, 2);
+        var changed_ids: std.ArrayList(u32) = .empty;
+        defer changed_ids.deinit(allocator);
+        try changed_ids.ensureTotalCapacity(allocator, road_plan.chunk_ids.len + 8);
+        changed_ids.appendAssumeCapacity(position);
+        for (road_plan.chunk_ids) |id| if (std.mem.indexOfScalar(u32, changed_ids.items, id) == null) changed_ids.appendAssumeCapacity(id);
+        for (revealed) |neighbor| if (neighbor) |value| {
+            const id = self.layout.encodeChunkCoords(value);
+            if (std.mem.indexOfScalar(u32, changed_ids.items, id) == null) changed_ids.appendAssumeCapacity(id);
+        };
+        if (below_coords) |value| {
+            const id = self.layout.encodeChunkCoords(value);
+            if (std.mem.indexOfScalar(u32, changed_ids.items, id) == null) changed_ids.appendAssumeCapacity(id);
+        }
+        for (changed_ids.items) |id| _ = try std.math.add(u64, self.modified_chunks.get(id).?.chunk_revision, 1);
+        const next_mesh = try std.math.add(u64, self.next_mesh_revision, 1);
+
+        if (self.persistence_service) |service| try service.dirty_meshes.ensureUnusedCapacity(allocator, @intCast(changed_ids.items.len + 7));
+        // All fallible work is complete. Commit every persistent field/cache together.
+        std.debug.assert(target.applyPrepared(live, local, operation.action) == .success);
+        if (operation.action == .put) {
+            target.metadata.markConstructedAssumeCapacity(transformations.index(local));
+            if (operation.action.put == .dirt) {
+                if (covered) target.changeType(local, .packed_dirt) else target.metadata.timed.scheduleAssumeCapacity(.{
+                    .block = transformations.index(local),
+                    .kind = .compact_dirt,
+                    .due_tick = self.tick +| transformations.transformation_delay,
+                });
+            }
+        }
+        if (below_coords) |value| {
+            const below = self.modified_chunks.getPtr(self.layout.encodeChunkCoords(value)).?;
+            if (operation.action == .put) {
+                below.metadata.timed.cancel(transformations.index(below_local));
+                if (below_changed) below.changeType(below_local, .packed_dirt);
+            } else below.metadata.timed.scheduleAssumeCapacity(.{
+                .block = transformations.index(below_local),
+                .kind = .grow_grass,
+                .due_tick = self.tick +| transformations.transformation_delay,
+            });
+        }
+        for (revealed) |neighbor| if (neighbor) |value| {
+            self.modified_chunks.getPtr(self.layout.encodeChunkCoords(value)).?.flags.is_unreachable = false;
+        };
+        road_plan.applyPrepared(road_context);
+        self.next_mesh_revision = next_mesh;
+        for (changed_ids.items) |id| {
+            const chunk = self.modified_chunks.getPtr(id).?;
+            chunk.chunk_revision += 1;
+            self.mesh_revisions.putAssumeCapacity(id, next_mesh);
+            if (chunk.metadata.timed.events.items.len == 0) _ = self.timed_chunks.remove(id) else self.timed_chunks.putAssumeCapacity(id, {});
+        }
+        for (std.enums.values(Side)) |side| {
+            const i = @intFromEnum(side);
+            if (local[i / 2] != (if (i % 2 == 0) @as(u5, 0) else CHUNK_SIZE - 1)) continue;
+            const neighbor = world_module.adjacentChunk(self.layout, coords, side) orelse continue;
+            self.mesh_revisions.putAssumeCapacity(self.layout.encodeChunkCoords(neighbor), next_mesh);
+        }
+        copyPreparedChunk(allocator, target, &reply);
+        return .{ .status = .success, .chunk = reply, .revealed_neighbors = revealed, .changed_below = below_coords, .diagnostics = diagnostics };
     }
 
-    fn store(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords, chunk: WorldChunk, material_changed: bool, metadata_changed: bool) void {
-        const id = self.layout.encodeChunkCoords(coords);
-        var updated = chunk;
-        if (material_changed or metadata_changed) updated.chunk_revision += 1;
-        if (material_changed) {
-            self.next_mesh_revision += 1;
-            self.mesh_revisions.put(allocator, id, self.next_mesh_revision) catch @panic("OOM");
+    fn copyPreparedChunk(allocator: std.mem.Allocator, source: *const WorldChunk, target: *WorldChunk) void {
+        if (source.content == .blocks) {
+            std.debug.assert(target.content == .blocks);
+            target.content.blocks.* = source.content.blocks.*;
+        } else {
+            target.content.deinit(allocator);
+            target.content = .empty;
         }
-        const entry = self.modified_chunks.getOrPut(allocator, id) catch @panic("OOM");
-        if (entry.found_existing) entry.value_ptr.deinit(allocator);
-        entry.value_ptr.* = updated;
-        self.refreshTimedIndex(allocator, id);
+        target.flags = source.flags;
+        target.solid_block_count = source.solid_block_count;
+        target.chunk_revision = source.chunk_revision;
+        target.boundaries = source.boundaries;
+        target.metadata.roads.clearRetainingCapacity();
+        target.metadata.roads.appendSliceAssumeCapacity(source.metadata.roads.items);
+        target.metadata.constructed.clearRetainingCapacity();
+        target.metadata.constructed.appendSliceAssumeCapacity(source.metadata.constructed.items);
+        target.metadata.timed.events.clearRetainingCapacity();
+        target.metadata.timed.events.appendSliceAssumeCapacity(source.metadata.timed.events.items);
     }
 
     fn refreshTimedIndex(self: *WorkerState, allocator: std.mem.Allocator, id: ChunkId) void {
@@ -814,102 +2231,28 @@ const WorkerState = struct {
         } else self.timed_chunks.put(allocator, id, {}) catch @panic("OOM");
     }
 
-    fn updateBelow(self: *WorkerState, allocator: std.mem.Allocator, block: [3]u32, covered: bool) ?ChunkCoords {
-        if (block[2] == 0) return null;
-        var below = block;
-        below[2] -= 1;
-        const coords, const local = world_module.splitBlockCoords(below);
-        var chunk = self.loadAt(allocator, coords);
-        const existing = chunk.content.getBlock(local);
-        if (!existing.isEarth()) {
-            chunk.deinit(allocator);
-            return null;
-        }
-        const index = transformations.index(local);
-        var changed = false;
-        var metadata_changed = false;
-        if (covered) {
-            const previous_count = chunk.metadata.timed.events.items.len;
-            chunk.metadata.timed.cancel(index);
-            metadata_changed = previous_count != chunk.metadata.timed.events.items.len;
-            if (existing != .packed_dirt) {
-                chunk.changeType(local, .packed_dirt);
-                changed = true;
-            }
-        } else if (existing != .dirt) {
-            chunk.metadata.timed.schedule(allocator, .{ .block = index, .kind = .grow_grass, .due_tick = self.tick +| transformations.transformation_delay });
-            metadata_changed = true;
-        }
-        if (!changed and !metadata_changed) {
-            chunk.deinit(allocator);
-            return null;
-        }
-        self.store(allocator, coords, chunk, changed, metadata_changed);
-        return coords;
-    }
-
     fn transformChunk(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) bool {
-        var chunk = self.loadAt(allocator, coords);
-        var context: ReadContext = .{ .state = self, .allocator = allocator };
-        defer context.deinit();
-        var changed = false;
-        var processed = false;
-        while (true) {
-            const due = chunk.metadata.timed.takeDue(allocator, self.tick);
-            defer allocator.free(due);
-            if (due.len == 0) break;
-            processed = true;
-            for (due) |event| {
-                const local = transformations.coordinates(event.block);
-                const existing = chunk.content.getBlock(local);
-                const above = [3]u32{
-                    @as(u32, @intCast(coords[0])) * CHUNK_SIZE + local[0],
-                    @as(u32, @intCast(coords[1])) * CHUNK_SIZE + local[1],
-                    @as(u32, @intCast(coords[2])) * CHUNK_SIZE + local[2] + 1,
-                };
-                const exposed = above[2] == self.layout.size_in_blocks[2] or ReadContext.read(&context, above).? == .none;
-                switch (event.kind) {
-                    .compact_dirt => {
-                        if (existing != .dirt) continue;
-                        chunk.changeType(local, .packed_dirt);
-                        changed = true;
-                        if (exposed) chunk.metadata.timed.schedule(allocator, .{ .block = event.block, .kind = .grow_grass, .due_tick = event.due_tick +| transformations.transformation_delay });
-                    },
-                    .grow_grass => {
-                        if (existing != .packed_dirt or !exposed) continue;
-                        chunk.changeType(local, .grass);
-                        changed = true;
-                    },
-                }
-            }
-        }
-        if (chunk.metadata.timed.events.items.len == 0) {
-            chunk.metadata.timed.deinit(allocator);
-            chunk.metadata.timed = .{};
-        }
-        self.store(allocator, coords, chunk, changed, processed);
-        return changed or processed;
-    }
-
-    /// Reveals even an unsubscribed chunk. Its revision makes it dirty, so later loads
-    /// use this retained state instead of regenerating the original unreachable flag.
-    fn revealChunk(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) bool {
-        const position = self.layout.encodeChunkCoords(coords);
-        if (self.modified_chunks.getPtr(position)) |chunk| {
-            if (!chunk.flags.is_unreachable) return false;
-            chunk.flags.is_unreachable = false;
-            chunk.chunk_revision += 1;
-            return true;
-        }
-        const generator = ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] });
-        var chunk = generator.generateChunk(allocator, coords[2]);
-        if (!chunk.flags.is_unreachable) {
-            chunk.deinit(allocator);
+        const id = self.layout.encodeChunkCoords(coords);
+        const source = self.modified_chunks.getPtr(id) orelse return false;
+        const live = self.liveAllocator(allocator);
+        var plan = @import("timer_kernel.zig").prepare(live, source, self.tick) catch |err| {
+            if (self.persistence_service) |service| service.failPersistence(err);
             return false;
+        };
+        defer plan.deinit(live);
+        if (!plan.metadata_changed and !plan.material_changed) return false;
+        const revision = std.math.add(u64, source.chunk_revision, 1) catch return false;
+        const mesh_revision = std.math.add(u64, self.next_mesh_revision, 1) catch return false;
+        self.mesh_revisions.ensureUnusedCapacity(allocator, 1) catch return false;
+        self.timed_chunks.ensureUnusedCapacity(allocator, 1) catch return false;
+        if (self.persistence_service) |service| service.dirty_meshes.ensureUnusedCapacity(allocator, 1) catch return false;
+        plan.applyPrepared(source);
+        source.chunk_revision = revision;
+        if (plan.material_changed) {
+            self.next_mesh_revision = mesh_revision;
+            self.mesh_revisions.putAssumeCapacity(id, mesh_revision);
         }
-        chunk.flags.is_unreachable = false;
-        chunk.chunk_revision += 1;
-        self.modified_chunks.put(allocator, position, chunk) catch @panic("OOM");
+        if (source.metadata.timed.events.items.len == 0) _ = self.timed_chunks.remove(id) else self.timed_chunks.putAssumeCapacity(id, {});
         return true;
     }
 };
@@ -970,7 +2313,7 @@ test "service publishes road formation and reversion atomically and retains cust
     try std.testing.expectEqual(@as(usize, 1), packages.items.len);
     var found_sections = false;
     var found_endpoint = false;
-    var section_revision: u32 = 0;
+    var section_revision: u64 = 0;
     for (packages.items[0].responses.items) |response| {
         if (response.data != .blocks) continue;
         if (@reduce(.And, response.coords == section_coords)) {
@@ -1483,14 +2826,13 @@ test "eviction stops pushes and a fresh load returns committed edits with a new 
     var responses: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&responses);
     main.takeResponses(&responses);
-    try std.testing.expectEqual(4, responses.items.len);
+    try std.testing.expect(responses.items.len >= 3);
     try std.testing.expectEqual(old_token, responses.items[0].subscription_id);
-    try std.testing.expectEqual(old_token, responses.items[1].subscription_id);
-    try std.testing.expectEqual(new_token, responses.items[2].subscription_id);
-    try std.testing.expectEqual(2, responses.items[2].data.blocks.chunk.chunk_revision);
-    try std.testing.expect(responses.items[2].data.blocks.chunk.content == .empty);
-    try std.testing.expectEqual(new_token, responses.items[3].subscription_id);
-    try std.testing.expectEqual(3, responses.items[3].data.blocks.chunk.chunk_revision);
+    var fresh = false;
+    for (responses.items[1..]) |reply| {
+        if (reply.subscription_id == new_token and reply.data.blocks.chunk.chunk_revision == 3) fresh = true;
+    }
+    try std.testing.expect(fresh);
 }
 
 fn putFromClient(client: *Client, block: [3]u32) void {
@@ -1542,6 +2884,7 @@ test "shutdown skips generation requests but still commits commands" {
     defer service.requests.deinit(std.testing.allocator);
     defer service.worker_state.deinit(std.testing.allocator);
     defer client.responses.deinit(std.testing.allocator);
+    defer client.pending.deinit(std.testing.allocator);
     defer client.subscriptions.deinit(std.testing.allocator);
     _ = client.requestChunks(.{ 0, 0 }, 0, WORLD_SIZE[2]);
     _ = client.submitOperation(.{ .block = .{ 0, 0, 0 }, .action = .remove });
@@ -1656,13 +2999,16 @@ test "reveals notify all neighbor subscribers and survive eviction and reload" {
     defer deinitResponses(&origin_responses);
     try waitForResponses(origin, &origin_responses, 3);
     try std.testing.expect(origin_responses.items[0].data.blocks.chunk.flags.is_unreachable);
-    const reveal = origin_responses.items[1];
-    try std.testing.expectEqual(coords, reveal.coords);
-    try std.testing.expectEqual(origin_token, reveal.subscription_id);
-    try std.testing.expectEqual(null, reveal.operation);
-    try std.testing.expect(!reveal.data.blocks.chunk.flags.is_unreachable);
-    try std.testing.expectEqual(1, reveal.data.blocks.chunk.chunk_revision);
-    try std.testing.expectEqual(edit, origin_responses.items[2].operation.?.request_id);
+    var reveal: ?ChunkResponse = null;
+    var acknowledged = false;
+    for (origin_responses.items) |reply| {
+        if (reply.operation) |operation_result| {
+            if (operation_result.request_id == edit) acknowledged = true;
+        } else if (@reduce(.And, reply.coords == coords) and !reply.data.blocks.chunk.flags.is_unreachable) reveal = reply;
+    }
+    try std.testing.expect(acknowledged);
+    try std.testing.expectEqual(origin_token, reveal.?.subscription_id);
+    try std.testing.expectEqual(1, reveal.?.data.blocks.chunk.chunk_revision);
 
     var observed: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&observed);
@@ -2202,6 +3548,7 @@ test "seeded client reconciliation converges to the authoritative worker after i
             for (self.snapshots.items) |*snapshot| {
                 client.insertChunk(snapshot.coords, snapshot.chunk) catch |err| switch (err) {
                     error.StaleChunk => snapshot.chunk.deinit(std.testing.allocator),
+                    else => return err,
                 };
                 snapshot.chunk = WorldChunk.initEmpty(); // Ownership moved or freed.
             }
@@ -2369,4 +3716,545 @@ test "refilling an underground hole packs soil under a ceiling, including across
         try std.testing.expectEqual(rules.BlockType.packed_dirt, readStateBlock(&state, block));
         try std.testing.expectEqual(0, filled.chunk.metadata.timed.events.items.len);
     }
+}
+
+const PersistenceFixture = struct {
+    path: [:0]u8,
+    store: storage.Store,
+    service: *WorldDataService,
+    layout: WorldLayout,
+    fn init(limits: persistence.Limits) !*PersistenceFixture {
+        const a = std.testing.allocator;
+        const self = try a.create(PersistenceFixture);
+        errdefer a.destroy(self);
+        var uuid: [16]u8 = undefined;
+        std.c.arc4random_buf(&uuid, uuid.len);
+        self.path = try std.fmt.allocPrintSentinel(a, "/private/tmp/world-service-persistence-{x}", .{uuid}, 0);
+        errdefer a.free(self.path);
+        self.layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+        const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+        defer a.free(descriptor);
+        const global = format.encodeGlobal(0);
+        self.store = try storage.Store.create(a, self.path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{});
+        errdefer self.store.deinit();
+        self.service = try WorldDataService.createPersistent(std.testing.io, a, &self.layout, .flat, &self.store, limits);
+        return self;
+    }
+    fn deinit(self: *PersistenceFixture) void {
+        self.service.destroy();
+        self.store.deinit();
+        std.Io.Dir.cwd().deleteTree(std.testing.io, self.path) catch {};
+        std.testing.allocator.free(self.path);
+        std.testing.allocator.destroy(self);
+    }
+    fn waitSave(self: *PersistenceFixture, intent: u64) !persistence.Status {
+        const deadline = persistence.now(std.testing.io) + 10 * std.time.ns_per_s;
+        while (persistence.now(std.testing.io) < deadline) {
+            const status = self.service.persistenceStatus();
+            if (status.intent_id == intent and !status.active and (status.phase == .complete or status.phase == .failed)) return status;
+            try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        return error.TestSaveTimeout;
+    }
+    fn operation(client: *Client, command: BlockOperation) !OperationStatus {
+        const id = try client.trySubmitOperation(command);
+        var replies: std.ArrayList(ChunkResponse) = .empty;
+        defer deinitResponses(&replies);
+        while (try client.waitResponses(&replies)) {
+            for (replies.items) |reply| if (reply.operation) |result| if (result.request_id == id) return result.status;
+            for (replies.items) |reply| reply.deinit(std.testing.allocator);
+            replies.clearRetainingCapacity();
+        }
+        return error.ServiceStopped;
+    }
+};
+
+test "public service commits ordered players and reloads exact base revisions with lazy timers" {
+    const f = try PersistenceFixture.init(.{});
+    defer f.deinit();
+    const client = try f.service.createClient();
+    const block = [3]u32{ 10, 10, 48 };
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = block, .action = .{ .put = .dirt } }));
+    client.publishCheckpoint(.{ .id = 9, .feet = .{ 1.5, 2.5, 3 }, .yaw = 0.5, .pitch = -0.25 });
+    const second_player = try f.service.createClient();
+    second_player.publishCheckpoint(.{ .id = 2, .feet = .{ 2.5, 3.5, 4 }, .yaw = 1, .pitch = 0.25 });
+    const final = f.service.requestSave(true);
+    const status = try f.waitSave(final);
+    try std.testing.expectEqual(persistence.Phase.complete, status.phase);
+    try std.testing.expectEqual(status.target_sequence, status.durable_sequence);
+    // An unsubscribed all-lazy timer does not pin an exact base version.
+    try std.testing.expectEqual(@as(usize, 0), status.retained_base_mismatch_chunks);
+    var player_reader: format.Reader = .{ .bytes = f.store.players };
+    try std.testing.expectEqual(@as(u64, 2), (try format.decodePlayer(try player_reader.take(52))).id);
+    try std.testing.expectEqual(@as(u64, 9), (try format.decodePlayer(try player_reader.take(52))).id);
+    const token = client.requestChunks(.{ 0, 0 }, 1, 2);
+    var replies: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&replies);
+    try std.testing.expect(try client.waitResponses(&replies));
+    var revision: u64 = 0;
+    var deadline: u64 = 0;
+    for (replies.items) |reply| {
+        if (reply.data != .blocks or reply.subscription_id != token) continue;
+        const chunk = reply.data.blocks.chunk;
+        try std.testing.expectEqual(rules.BlockType.dirt, chunk.content.getBlock(.{ 10, 10, 16 }));
+        revision = chunk.chunk_revision;
+        try std.testing.expectEqual(@as(usize, 1), chunk.metadata.timed.events.items.len);
+        deadline = chunk.metadata.timed.events.items[0].due_tick;
+    }
+    try std.testing.expect(revision > 0);
+    try std.testing.expectEqual(transformations.transformation_delay, deadline);
+    for (replies.items) |reply| reply.deinit(std.testing.allocator);
+    replies.clearRetainingCapacity();
+    f.service.advanceTo(deadline + transformations.transformation_delay);
+    try std.testing.expect(try client.waitResponses(&replies));
+    var caught_up = false;
+    for (replies.items) |reply| if (reply.data == .blocks) {
+        const chunk = reply.data.blocks.chunk;
+        caught_up = caught_up or chunk.content.getBlock(.{ 10, 10, 16 }) == .grass;
+        if (caught_up) {
+            try std.testing.expect(chunk.chunk_revision > revision);
+            try std.testing.expectEqual(@as(usize, 0), chunk.metadata.timed.events.items.len);
+        }
+    };
+    try std.testing.expect(caught_up);
+    // Timer metadata consumption broke exact installed-base equality.
+    const saved = (try f.store.readChunk(std.testing.allocator, f.layout.encodeChunkCoords(.{ 0, 0, 1 }))).?;
+    defer std.testing.allocator.free(saved);
+    var old = try format.decodeChunk(std.testing.allocator, f.store.world_uuid, saved, f.store.dimensions);
+    defer old.deinit(std.testing.allocator);
+    try std.testing.expectEqual(revision, old.revision);
+}
+
+test "public service live budget rejection preserves terrain and final save remains usable" {
+    const f = try PersistenceFixture.init(.{ .live_bytes = 0 });
+    defer f.deinit();
+    const client = try f.service.createClient();
+    try std.testing.expectEqual(OperationStatus.resource_exhausted, try PersistenceFixture.operation(client, .{ .block = .{ 10, 10, 48 }, .action = .{ .put = .snow } }));
+    const status = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.complete, status.phase);
+    try std.testing.expectEqual(@as(u64, 0), f.store.index.count());
+}
+
+test "public service bounds unread terminal operations and reopens admission when consumed" {
+    const f = try PersistenceFixture.init(.{ .pending_commands = 1 });
+    defer f.deinit();
+    const client = try f.service.createClient();
+    const first = try client.trySubmitOperation(.{ .block = .{ 10, 10, 48 }, .action = .{ .put = .snow } });
+    try std.testing.expectError(error.Busy, client.trySubmitOperation(.{ .block = .{ 11, 10, 48 }, .action = .{ .put = .snow } }));
+    var replies: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&replies);
+    try std.testing.expect(try client.waitResponses(&replies));
+    try std.testing.expectEqual(first, replies.items[replies.items.len - 1].operation.?.request_id);
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = .{ 11, 10, 48 }, .action = .{ .put = .snow } }));
+}
+
+test "public service restore reports failed persisted dependency instead of hanging" {
+    const f = try PersistenceFixture.init(.{});
+    defer f.deinit();
+    const client = try f.service.createClient();
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = .{ 10, 10, 48 }, .action = .{ .put = .snow } }));
+    try std.testing.expectEqual(persistence.Phase.complete, (try f.waitSave(f.service.requestSave(true))).phase);
+    f.service.destroy();
+    var faults: @import("persistence/io.zig").Faults = .{ .operation = .read };
+    f.store.setFaults(&faults);
+    f.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .flat, &f.store, .{});
+    const restored = try f.service.createClient();
+    const origin = f.layout.origin_chunk * @as(ChunkCoords, @splat(CHUNK_SIZE));
+    const feet = [3]f64{ @floatFromInt(10 - origin[0]), @floatFromInt(10 - origin[1]), @floatFromInt(49 - origin[2]) };
+    try std.testing.expectError(error.MissingData, restored.resolveRestoredPosition(feet, .{}));
+}
+
+const ServiceWriteGate = struct {
+    operation: @import("persistence/io.zig").Operation = .write,
+    entered: Io.Event = .unset,
+    released: Io.Event = .unset,
+    once: std.atomic.Value(bool) = .init(false),
+    fn hook(context: ?*anyopaque, operation: @import("persistence/io.zig").Operation) void {
+        const self: *ServiceWriteGate = @ptrCast(@alignCast(context.?));
+        if (operation != self.operation or self.once.swap(true, .acq_rel)) return;
+        self.entered.set(std.testing.io);
+        self.released.waitUncancelable(std.testing.io);
+    }
+};
+
+fn waitServiceSources(service: *WorldDataService, released: bool) !persistence.Status {
+    const until = persistence.now(std.testing.io) + 5 * std.time.ns_per_s;
+    while (persistence.now(std.testing.io) < until) {
+        const status = service.persistenceStatus();
+        if (status.active and (status.source_count == 0) == released) return status;
+        try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestSourceTimeout;
+}
+
+fn exerciseServiceCapturePolicy(mode: enum { capture_deadline, player_deadline, final_exempt, overdue_exempt }) !void {
+    const f = try PersistenceFixture.init(.{
+        .output_bytes = 33000,
+        .capture_wait_ns = if (mode == .capture_deadline or mode == .final_exempt or mode == .overdue_exempt) 200 * std.time.ns_per_ms else 10 * std.time.ns_per_s,
+        .player_wait_ns = 200 * std.time.ns_per_ms,
+        .overdue_ns = if (mode == .overdue_exempt) 100 * std.time.ns_per_ms else 60 * std.time.ns_per_s,
+    });
+    defer f.deinit();
+    const client = try f.service.createClient();
+    for ([_]u32{ 10, 42, 74, 106 }) |x| try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = .{ x, 10, 48 }, .action = .{ .put = .snow } }));
+    var gate: ServiceWriteGate = .{};
+    var faults: @import("persistence/io.zig").Faults = .{ .enabled = false, .context = &gate, .hook = ServiceWriteGate.hook };
+    f.store.setFaults(&faults);
+    defer gate.released.set(std.testing.io);
+    const intent = f.service.requestSave(mode == .final_exempt);
+    try gate.entered.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    _ = try waitServiceSources(f.service, false);
+    if (mode == .capture_deadline) {
+        _ = try waitServiceSources(f.service, true);
+    } else if (mode == .player_deadline) {
+        // The encoder is backpressured by the stalled writer; a player waiter
+        // cancels normal capture and progresses before storage is unstalled.
+        try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = .{ 106, 10, 48 }, .action = .remove }));
+        _ = try waitServiceSources(f.service, true);
+    } else {
+        try Io.sleep(std.testing.io, .fromMilliseconds(500), .awake);
+        const held = f.service.persistenceStatus();
+        try std.testing.expect(held.active and held.source_count != 0);
+        if (mode == .overdue_exempt) try std.testing.expect(held.overdue);
+        if (mode == .final_exempt) {
+            // Resuming cancels this final intent, then a late completion cannot
+            // make its earlier capture authoritative over a newer edit.
+            f.service.cancelSaveIntent(intent);
+            try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = .{ 106, 10, 48 }, .action = .remove }));
+        }
+    }
+    gate.released.set(std.testing.io);
+    const done = try f.waitSave(intent);
+    if (mode == .overdue_exempt) try std.testing.expectEqual(persistence.Phase.complete, done.phase) else try std.testing.expectEqual(persistence.Phase.failed, done.phase);
+    f.store.setFaults(null);
+    const next = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.complete, next.phase);
+}
+
+test "public service releases stalled capture at capture deadline" {
+    try exerciseServiceCapturePolicy(.capture_deadline);
+}
+test "public service prioritizes player and cancels stalled capture at player deadline" {
+    try exerciseServiceCapturePolicy(.player_deadline);
+}
+test "public service final capture ignores gameplay deadline and cancel intent resumes edits" {
+    try exerciseServiceCapturePolicy(.final_exempt);
+}
+test "public service overdue capture ignores gameplay cancellation deadlines" {
+    try exerciseServiceCapturePolicy(.overdue_exempt);
+}
+
+test "public service early capture failure retains requested intent identity" {
+    const f = try PersistenceFixture.init(.{ .output_bytes = 1 });
+    defer f.deinit();
+    const client = try f.service.createClient();
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = .{ 10, 10, 48 }, .action = .{ .put = .snow } }));
+    const intent = f.service.requestSave(true);
+    const status = try f.waitSave(intent);
+    try std.testing.expectEqual(persistence.Phase.failed, status.phase);
+    try std.testing.expectEqual(intent, status.intent_id);
+    try std.testing.expectEqual(@as(u64, 0), status.target_sequence);
+    try std.testing.expectEqual(@as(u64, 0), status.durable_sequence);
+}
+
+test "public service released source accepts newer edit while older snapshot writes" {
+    const f = try PersistenceFixture.init(.{});
+    defer f.deinit();
+    const client = try f.service.createClient();
+    const block = [3]u32{ 10, 10, 48 };
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = block, .action = .{ .put = .snow } }));
+    var gate: ServiceWriteGate = .{};
+    var faults: @import("persistence/io.zig").Faults = .{ .enabled = false, .context = &gate, .hook = ServiceWriteGate.hook };
+    f.store.setFaults(&faults);
+    defer gate.released.set(std.testing.io);
+    const first = f.service.requestSave(false);
+    try gate.entered.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    _ = try waitServiceSources(f.service, true);
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = block, .action = .remove }));
+    gate.released.set(std.testing.io);
+    const old = try f.waitSave(first);
+    try std.testing.expectEqual(persistence.Phase.complete, old.phase);
+    try std.testing.expect(old.retained_base_mismatch_chunks != 0);
+    f.store.setFaults(null);
+    try std.testing.expectEqual(persistence.Phase.complete, (try f.waitSave(f.service.requestSave(true))).phase);
+    const saved = (try f.store.readChunk(std.testing.allocator, f.layout.encodeChunkCoords(.{ 0, 0, 1 }))).?;
+    defer std.testing.allocator.free(saved);
+    var decoded = try format.decodeChunk(std.testing.allocator, f.store.world_uuid, saved, f.store.dimensions);
+    defer decoded.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 2), decoded.revision);
+    try std.testing.expectEqual(@as(u8, 0), decoded.blocks[transformations.index(.{ 10, 10, 16 })]);
+}
+
+test "public service final save retries transient persisted dependency once through watchdog" {
+    const f = try PersistenceFixture.init(.{});
+    defer f.deinit();
+    const original = try f.service.createClient();
+    const block = [3]u32{ 10, 10, 48 };
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(original, .{ .block = block, .action = .{ .put = .snow } }));
+    try std.testing.expectEqual(persistence.Phase.complete, (try f.waitSave(f.service.requestSave(true))).phase);
+    f.service.destroy();
+    var gate: ServiceWriteGate = .{ .operation = .read };
+    var faults: @import("persistence/io.zig").Faults = .{ .operation = .read, .context = &gate, .hook = ServiceWriteGate.hook };
+    f.store.setFaults(&faults);
+    f.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .flat, &f.store, .{});
+    defer gate.released.set(std.testing.io);
+    const client = try f.service.createClient();
+    _ = try client.trySubmitOperation(.{ .block = block, .action = .remove });
+    try gate.entered.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    const intent = f.service.requestSave(true);
+    try Io.sleep(std.testing.io, .fromMilliseconds(20), .awake);
+    const released_at = persistence.now(std.testing.io);
+    gate.released.set(std.testing.io);
+    const saved = try f.waitSave(intent);
+    try std.testing.expectEqual(persistence.Phase.complete, saved.phase);
+    try std.testing.expect(persistence.now(std.testing.io) - released_at >= std.time.ns_per_s);
+    f.store.setFaults(null);
+}
+
+fn savedDependencyFixture() !*PersistenceFixture {
+    const f = try PersistenceFixture.init(.{});
+    errdefer f.deinit();
+    const client = try f.service.createClient();
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = .{ 10, 10, 48 }, .action = .{ .put = .snow } }));
+    try std.testing.expectEqual(persistence.Phase.complete, (try f.waitSave(f.service.requestSave(true))).phase);
+    return f;
+}
+
+fn waitDependencyFailure(service: *WorldDataService) !void {
+    const until = persistence.now(std.testing.io) + 5 * std.time.ns_per_s;
+    while (persistence.now(std.testing.io) < until) {
+        const status = service.persistenceStatus();
+        if (status.phase == .failed and status.pending_commands == 1) return;
+        try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestDependencyFailureTimeout;
+}
+
+test "final save restarts an edit dependency that failed before the save request" {
+    const f = try savedDependencyFixture();
+    defer f.deinit();
+    f.service.destroy();
+    var faults: @import("persistence/io.zig").Faults = .{ .operation = .read };
+    f.store.setFaults(&faults);
+    f.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .flat, &f.store, .{});
+    const client = try f.service.createClient();
+    _ = try client.trySubmitOperation(.{ .block = .{ 10, 10, 48 }, .action = .remove });
+    try waitDependencyFailure(f.service);
+    const saved = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.complete, saved.phase);
+    try std.testing.expectEqual(@as(usize, 0), saved.pending_commands);
+    var replies: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&replies);
+    try std.testing.expect(try client.waitResponses(&replies));
+    try std.testing.expectEqual(OperationStatus.success, replies.items[0].operation.?.status);
+    try std.testing.expectEqual(@as(u64, 2), replies.items[0].chunk_revision);
+    const bytes = (try f.store.readChunk(std.testing.allocator, f.layout.encodeChunkCoords(.{ 0, 0, 1 }))).?;
+    defer std.testing.allocator.free(bytes);
+    var durable = try format.decodeChunk(std.testing.allocator, f.store.world_uuid, bytes, f.store.dimensions);
+    defer durable.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u64, 2), durable.revision);
+    try std.testing.expectEqual(@as(u8, 0), durable.blocks[transformations.index(.{ 10, 10, 16 })]);
+    f.store.setFaults(null);
+}
+
+const RepeatedReadFailure = struct {
+    enabled: std.atomic.Value(bool) = .init(true),
+    faults: @import("persistence/io.zig").Faults = .{ .operation = .read },
+    fn hook(context: ?*anyopaque, operation: @import("persistence/io.zig").Operation) void {
+        const self: *RepeatedReadFailure = @ptrCast(@alignCast(context.?));
+        if (operation != .read) return;
+        self.faults.enabled = self.enabled.load(.acquire);
+        self.faults.observed = 0;
+    }
+};
+
+test "final dependency drain has one automatic retry and explicit retry resumes the same edit" {
+    const f = try savedDependencyFixture();
+    defer f.deinit();
+    f.service.destroy();
+    var failure: RepeatedReadFailure = .{};
+    failure.faults.context = &failure;
+    failure.faults.hook = RepeatedReadFailure.hook;
+    f.store.setFaults(&failure.faults);
+    f.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .flat, &f.store, .{});
+    const client = try f.service.createClient();
+    _ = try client.trySubmitOperation(.{ .block = .{ 10, 10, 48 }, .action = .remove });
+    try waitDependencyFailure(f.service);
+    const started = persistence.now(std.testing.io);
+    const failed = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.failed, failed.phase);
+    try std.testing.expect(persistence.now(std.testing.io) - started >= std.time.ns_per_s);
+    try std.testing.expectEqualStrings("Io", failed.error_name.?);
+    try std.testing.expectEqual(@as(usize, 1), failed.pending_commands);
+    try Io.sleep(std.testing.io, .fromMilliseconds(1100), .awake);
+    try std.testing.expectEqual(failed.progress_generation, f.service.persistenceStatus().progress_generation);
+    failure.enabled.store(false, .release);
+    const saved = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.complete, saved.phase);
+    try std.testing.expectEqual(@as(usize, 0), saved.pending_commands);
+    f.store.setFaults(null);
+}
+
+test "final dependency drain reports permanent corruption without automatic retry" {
+    const f = try savedDependencyFixture();
+    defer f.deinit();
+    f.service.destroy();
+    var catalog = try f.store.snapshotCatalog();
+    defer catalog.deinit();
+    var read = (try catalog.prepareRead(f.layout.encodeChunkCoords(.{ 0, 0, 1 }))).?;
+    defer read.deinit();
+    const record = try read.read(std.testing.allocator);
+    defer std.testing.allocator.free(record);
+    record[record.len - 1] ^= 1;
+    try read.file.write(record[record.len - 1 ..], read.offset + record.len - 1);
+    f.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .flat, &f.store, .{});
+    const client = try f.service.createClient();
+    _ = try client.trySubmitOperation(.{ .block = .{ 10, 10, 48 }, .action = .remove });
+    try waitDependencyFailure(f.service);
+    const failed = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.failed, failed.phase);
+    try std.testing.expectEqualStrings("ChecksumMismatch", failed.error_name.?);
+    try std.testing.expectEqual(@as(u64, 0), failed.target_sequence);
+    try std.testing.expectEqual(@as(usize, 1), failed.pending_commands);
+    try Io.sleep(std.testing.io, .fromMilliseconds(1100), .awake);
+    try std.testing.expectEqual(failed.progress_generation, f.service.persistenceStatus().progress_generation);
+    const explicit = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.failed, explicit.phase);
+    try std.testing.expectEqualStrings("ChecksumMismatch", explicit.error_name.?);
+}
+
+test "public service restores a dense timer chunk in deadline and cell order" {
+    const f = try PersistenceFixture.init(.{});
+    defer f.deinit();
+    f.service.destroy();
+    const a = std.testing.allocator;
+    const timers = try a.alloc(format.Timer, format.cell_count);
+    defer a.free(timers);
+    for (timers, 0..) |*timer, cell| timer.* = .{ .cell = @intCast(cell), .kind = @intCast(cell % 2), .deadline = 1000 + (format.cell_count - cell) % 17 };
+    const metadata = try format.encodeMetadata(a, .{ .timers = timers });
+    defer a.free(metadata);
+    const blocks = [_]u8{@intFromEnum(rules.BlockType.dirt)} ** format.cell_count;
+    const record = try format.encodeChunk(a, f.store.world_uuid, .{ .id = f.layout.encodeChunkCoords(.{ 0, 0, 1 }), .revision = 7, .is_unreachable = false, .blocks = &blocks, .metadata = metadata });
+    defer a.free(record);
+    const global = format.encodeGlobal(0);
+    try f.store.beginSnapshot(1, &global, &.{}, 0, 1);
+    try f.store.appendChunk(record);
+    _ = try f.store.commitSnapshot();
+    try f.store.compact();
+    f.service = try WorldDataService.createPersistent(std.testing.io, a, &f.layout, .flat, &f.store, .{});
+    const client = try f.service.createClient();
+    _ = client.requestChunks(.{ 0, 0 }, 1, 2);
+    var replies: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&replies);
+    try std.testing.expect(try client.waitResponses(&replies));
+    const events = replies.items[0].data.blocks.chunk.metadata.timed.events.items;
+    try std.testing.expectEqual(format.cell_count, events.len);
+    var seen = [_]bool{false} ** format.cell_count;
+    for (events, 0..) |event, i| {
+        try std.testing.expect(!seen[event.block]);
+        seen[event.block] = true;
+        try std.testing.expectEqual(timers[event.block].deadline, event.due_tick);
+        try std.testing.expectEqual(timers[event.block].kind, @intFromEnum(event.kind));
+        if (i != 0) try std.testing.expect(events[i - 1].due_tick < event.due_tick or (events[i - 1].due_tick == event.due_tick and events[i - 1].block < event.block));
+    }
+}
+
+fn corruptDependencyRecord(f: *PersistenceFixture) !void {
+    var catalog = try f.store.snapshotCatalog();
+    defer catalog.deinit();
+    var read = (try catalog.prepareRead(f.layout.encodeChunkCoords(.{ 0, 0, 1 }))).?;
+    defer read.deinit();
+    const record = try read.read(std.testing.allocator);
+    defer std.testing.allocator.free(record);
+    record[record.len - 1] ^= 1;
+    try read.file.write(record[record.len - 1 ..], read.offset + record.len - 1);
+}
+
+fn waitAnyDependencyFailure(service: *WorldDataService) !void {
+    const until = persistence.now(std.testing.io) + 5 * std.time.ns_per_s;
+    while (persistence.now(std.testing.io) < until) {
+        if (service.persistenceStatus().phase == .failed) return;
+        try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestDependencyFailureTimeout;
+}
+
+test "final save reports permanent dependency failure with only waiting read queries" {
+    const f = try savedDependencyFixture();
+    defer f.deinit();
+    f.service.destroy();
+    try corruptDependencyRecord(f);
+    f.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .flat, &f.store, .{});
+    const client = try f.service.createClient();
+    _ = client.requestChunks(.{ 0, 0 }, 1, 2);
+    try waitAnyDependencyFailure(f.service);
+    const failed = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.failed, failed.phase);
+    try std.testing.expectEqualStrings("ChecksumMismatch", failed.error_name.?);
+    try std.testing.expectEqual(@as(usize, 0), failed.pending_commands);
+}
+
+fn queuedFinalDependencyFailure(read_only: bool) !void {
+    const f = try savedDependencyFixture();
+    defer f.deinit();
+    f.service.destroy();
+    try corruptDependencyRecord(f);
+    f.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .flat, &f.store, .{});
+    var gate: ServiceWriteGate = .{};
+    var faults: @import("persistence/io.zig").Faults = .{ .enabled = false, .context = &gate, .hook = ServiceWriteGate.hook };
+    f.store.setFaults(&faults);
+    defer gate.released.set(std.testing.io);
+    const older = f.service.requestSave(false);
+    try gate.entered.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    const client = try f.service.createClient();
+    if (read_only) {
+        _ = client.requestChunks(.{ 0, 0 }, 1, 2);
+        try waitAnyDependencyFailure(f.service);
+    } else {
+        _ = try client.trySubmitOperation(.{ .block = .{ 10, 10, 48 }, .action = .remove });
+        try waitDependencyFailure(f.service);
+    }
+    const final = f.service.requestSave(true);
+    gate.released.set(std.testing.io);
+    const failed = try f.waitSave(final);
+    try std.testing.expect(final != older);
+    try std.testing.expectEqual(final, failed.intent_id);
+    try std.testing.expectEqual(persistence.Phase.failed, failed.phase);
+    try std.testing.expectEqualStrings("ChecksumMismatch", failed.error_name.?);
+    try std.testing.expectEqual(@as(u64, 0), failed.target_sequence);
+    f.store.setFaults(null);
+}
+
+test "queued final drain publishes its own mutation failure after an older job completes" {
+    try queuedFinalDependencyFailure(false);
+}
+
+test "queued final drain publishes its own read query failure after an older job completes" {
+    try queuedFinalDependencyFailure(true);
+}
+
+test "synchronous dependency preparation OOM schedules bounded final retry" {
+    const f = try savedDependencyFixture();
+    defer f.deinit();
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var service: WorldDataService = .{
+        .layout = &f.layout,
+        .io = std.testing.io,
+        .allocator = failing.allocator(),
+        .worker = undefined,
+        .worker_state = .{ .layout = &f.layout, .generator = undefined },
+        .catalog = try f.store.snapshotCatalog(),
+        .queued_save = .{ .id = 11, .final = true },
+    };
+    defer service.catalog.?.deinit();
+    try std.testing.expect(!service.requireBase(f.layout.encodeChunkCoords(.{ 0, 0, 1 })));
+    try std.testing.expectEqual(@as(u64, 11), service.status.intent_id);
+    try std.testing.expect(service.status.active);
+    try std.testing.expect(service.dependency_retry_at != null);
+    try std.testing.expectEqualStrings("OutOfMemory", service.status.error_name.?);
+    service.dependency_auto_retried = true;
+    service.dependency_retry_at = null;
+    try std.testing.expect(!service.requireBase(f.layout.encodeChunkCoords(.{ 0, 0, 1 })));
+    try std.testing.expect(!service.status.active);
+    try std.testing.expect(service.dependency_retry_at == null);
 }

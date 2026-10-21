@@ -11,7 +11,7 @@ pub const MouseButtonParams = struct {
     mods: zglfw.Mods,
 };
 
-pub const CursorCapture = enum { while_left_button, always };
+pub const CursorCapture = enum { while_left_button, always, never };
 
 pub fn InputController(comptime Context: type) type {
     return struct {
@@ -162,7 +162,7 @@ pub fn InputController(comptime Context: type) type {
             input_controller.last_update_time = time_sec;
             input_controller.cursor_left_button_pressed = focused and window.getMouseButton(.left) != .release;
             input_controller.cursor_right_button_pressed = focused and window.getMouseButton(.right) != .release;
-            const capture = focused and (input_controller.cursor_capture == .always or input_controller.cursor_left_button_pressed);
+            const capture = focused and (input_controller.cursor_capture == .always or (input_controller.cursor_capture == .while_left_button and input_controller.cursor_left_button_pressed));
             const capture_changed = capture != input_controller.cursor_captured;
             if (capture_changed) {
                 try window.setInputMode(.cursor, if (capture) zglfw.Cursor.Mode.disabled else zglfw.Cursor.Mode.normal);

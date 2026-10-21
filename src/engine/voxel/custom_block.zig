@@ -1,10 +1,10 @@
 //! Cell-owned custom geometry. Rendering and collision share the same slope plane.
 const std = @import("std");
 pub const Direction = enum(u32) {
-    positive_x,
-    negative_x,
-    positive_y,
-    negative_y,
+    positive_x = 0,
+    negative_x = 1,
+    positive_y = 2,
+    negative_y = 3,
 
     pub fn offset(self: Direction) @Vector(3, i64) {
         return switch (self) {

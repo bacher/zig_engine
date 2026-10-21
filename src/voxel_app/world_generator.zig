@@ -193,11 +193,17 @@ pub const ColumnGenerator = struct {
 
     /// The caller owns the block data of the returned chunk.
     pub fn generateChunk(self: *const ColumnGenerator, allocator: std.mem.Allocator, chunk_z: i32) WorldChunk {
+        return self.tryGenerateChunk(allocator, chunk_z) catch @panic("OOM");
+    }
+
+    /// Authoritative loading prepares an owned chunk before publishing it. Failure
+    /// leaves the column reusable and no partially materialized chunk escapes.
+    pub fn tryGenerateChunk(self: *const ColumnGenerator, allocator: std.mem.Allocator, chunk_z: i32) std.mem.Allocator.Error!WorldChunk {
         std.debug.assert(chunk_z >= 0 and chunk_z < self.layout.size_in_chunks[2]);
 
         var chunk = switch (self.column) {
-            .flat => generateFlatChunk(self.layout, allocator, chunk_z),
-            .terrain => |*terrain| terrain.generateChunk(allocator, chunk_z),
+            .flat => try generateFlatChunk(self.layout, allocator, chunk_z),
+            .terrain => |*terrain| try terrain.generateChunk(allocator, chunk_z),
         };
         // Outer y/z faces have no neighboring wall. X is periodic.
         if (self.coords[1] > 0 and self.coords[1] + 1 < self.layout.size_in_chunks[1] and
@@ -216,7 +222,7 @@ pub const ColumnGenerator = struct {
     }
 };
 
-fn generateFlatChunk(layout: *const WorldLayout, allocator: std.mem.Allocator, chunk_z: i32) WorldChunk {
+fn generateFlatChunk(layout: *const WorldLayout, allocator: std.mem.Allocator, chunk_z: i32) std.mem.Allocator.Error!WorldChunk {
     const center_z = @divExact(layout.size_in_chunks[2], 2);
 
     if (chunk_z + 1 == center_z) {
@@ -256,7 +262,7 @@ const TerrainColumn = struct {
         };
     }
 
-    fn generateChunk(self: *const TerrainColumn, allocator: std.mem.Allocator, chunk_z: i32) WorldChunk {
+    fn generateChunk(self: *const TerrainColumn, allocator: std.mem.Allocator, chunk_z: i32) std.mem.Allocator.Error!WorldChunk {
         const chunk_bottom = @as(u32, @intCast(chunk_z)) * CHUNK_SIZE;
         const chunk_top = chunk_bottom + CHUNK_SIZE;
 
@@ -293,8 +299,8 @@ fn terrainAdjacentMinimumHeight(layout: *const WorldLayout, coords: @Vector(2, i
     return minimum;
 }
 
-fn allocateChunk(allocator: std.mem.Allocator, data: WorldChunkData) WorldChunk {
-    const world_chunk_data = allocator.create(WorldChunkData) catch @panic("OOM");
+fn allocateChunk(allocator: std.mem.Allocator, data: WorldChunkData) std.mem.Allocator.Error!WorldChunk {
+    const world_chunk_data = try allocator.create(WorldChunkData);
     world_chunk_data.* = data;
     return WorldChunk.initBlocks(world_chunk_data);
 }
@@ -686,4 +692,20 @@ test "preparation validates only used octaves and supports zero persistence" {
     defer near_period_limit.deinit(std.testing.allocator);
     try std.testing.expectEqual(std.math.maxInt(i64) - 2047, near_period_limit.kind.terrain.octaves[0].x_period);
     _ = ColumnGenerator.init(&near_period_limit, .{ 1, 1 });
+}
+
+test "fallible generation preserves allocation-free air and retries materialization" {
+    for ([_]WorldGenerator{ .flat, .{ .terrain = .{ .seed = 12345 } } }) |generator| {
+        var prepared = try generator.prepare(std.testing.allocator, &test_layout);
+        defer prepared.deinit(std.testing.allocator);
+        const column = ColumnGenerator.init(&prepared, .{ 1, 1 });
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        try std.testing.expectError(error.OutOfMemory, column.tryGenerateChunk(failing.allocator(), 0));
+        const air = try column.tryGenerateChunk(failing.allocator(), test_layout.size_in_chunks[2] - 1);
+        defer air.deinit(failing.allocator());
+        try std.testing.expect(air.content == .empty);
+        const solid = try column.tryGenerateChunk(std.testing.allocator, 0);
+        defer solid.deinit(std.testing.allocator);
+        try std.testing.expect(solid.content == .blocks);
+    }
 }

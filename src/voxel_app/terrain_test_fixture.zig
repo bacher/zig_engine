@@ -12,6 +12,10 @@ pub const Fixture = struct {
         const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
         var world = try World.init(std.testing.allocator, &layout);
         errdefer world.deinit();
+        // Terrain fixtures build complete rooms/volumes as synthetic pending
+        // edits. Keep those finite setup budgets separate from gameplay defaults.
+        world.pending_operation_limit = 65536;
+        world.pending_byte_limit = 64 * 1024 * 1024;
         for (0..4) |z| for (0..4) |y| for (0..4) |x| {
             try world.insertChunk(.{ @intCast(x), @intCast(y), @intCast(z) }, @import("world.zig").WorldChunk.initEmpty());
         };

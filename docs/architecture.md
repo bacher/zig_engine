@@ -20,6 +20,10 @@ flowchart TD
     Main[Voxel application main thread] --> Engine
     Main -->|load, evict, edit| Service[World-data service worker]
     Simulation[Simulation worker] -->|its own client endpoint| Service
+    Service -->|frozen borrowed sources| Capture[Persistence encoder]
+    Capture -->|bounded encoded output| Writer[WAL writer]
+    Service -->|async generation-safe reads| Base[Installed base]
+    Writer --> Disk[Durable WAL and base compaction]
     Service --> Generator[Deterministic terrain generator]
     Service -->|packages of blocks, masks, or faces| Main
     Main --> Cache[Optimistic block cache]
@@ -52,6 +56,8 @@ The arrows show responsibilities and data flow, not separate processes. The serv
 | [`world.zig`](../src/voxel_app/world.zig) | Block contents, operations, local cache, and optimistic replay. |
 | [`world_data_service.zig`](../src/voxel_app/world_data_service.zig) | Command ordering, authoritative revisions, subscriptions, batching, and retained modifications. |
 | [`world_generator.zig`](../src/voxel_app/world_generator.zig), [`perlin_noise.zig`](../src/voxel_app/perlin_noise.zig) | Deterministic heightmap terrain and flat test terrain. |
+| [`persistence/`](../src/voxel_app/persistence) | Versioned codecs, bounded encoding, WAL, recovery, compaction, macOS durability adapter, and crash model. |
+| [`timer_kernel.zig`](../src/voxel_app/timer_kernel.zig) | Fallible local block-timer planning and allocation-free commit through a fixed cutoff. |
 | [`simulation_worker.zig`](../src/voxel_app/simulation_worker.zig) | A second world client that repeatedly edits one block. |
 | [`player_controller.zig`](../src/voxel_app/player_controller.zig), [`terrain_collision.zig`](../src/voxel_app/terrain_collision.zig) | Application-owned player body, gravity, jumping/climbing, terrain sweeps, and recovery against the local block cache. |
 | [`gltf_loader/`](../gltf_loader) | Local glTF JSON, geometry, texture, skin, and animation input support. |
@@ -70,7 +76,7 @@ Each application owns an `engine_config.zig` module injected into its engine bui
 | `zig build test` | Run registered CPU tests, including coordinates/hierarchy under both wrapping configurations. |
 | `zig build test-gpu` | Validate world pipelines, cache sharing/lifetimes, allocation cleanup, and GPU coordinate arithmetic through readback under both configurations with headless Dawn. |
 
-Both applications change their working directory to the executable directory before loading assets. The build installs `content/` alongside the binaries. Asset lookup still mixes paths relative to the configured content directory with explicit `content/...` paths.
+The voxel app resolves its save path against the launch directory and opens/recovers the selected world before creating a window. Saved dimensions and generator settings define the reopened world. Both applications change their working directory to the executable directory before loading assets. The build installs `content/` alongside the binaries. Asset lookup still mixes paths relative to the configured content directory with explicit `content/...` paths.
 
 ## Initialization and frame order
 
@@ -83,7 +89,7 @@ Before entering its render loop, the voxel application starts the world-data ser
 `Engine.runLoop` prepares the initial active scene's instance buffer, then repeats:
 
 1. Poll GLFW events. Key-press callbacks can execute application logic here.
-2. Exit if the window closes or Escape is pressed.
+2. Handle window close or Escape through the optional application close callback. The voxel app can defer exit while it drains and saves, continuing the render loop.
 3. Sample monotonic elapsed time and frame delta independently of GPU statistics, reset frame statistics, and poll mouse state/cursor capture.
 4. Update the active scene's camera aspect ratio and its optional spectator controller.
 5. Call the application's `onUpdate` callback. The voxel app receives block updates, advances the player against the resulting local cache, refreshes streaming, rebuilds meshes, and uploads geometry here.
@@ -110,7 +116,7 @@ Future world gameplay simulation will use a configurable fixed step around 20 or
 
 GPU operations run on the application thread. The service generates data and face records without accessing GPU resources. Each producer/consumer thread uses its own client endpoint; a client's request-ID counter is not a shared multi-thread API. Service mailboxes use short mutex-protected sections, and an allocator used by the service must support concurrent allocation.
 
-The voxel app stops the simulation worker, submits any remaining local commands, and destroys the service before destroying its game state and engine. Service shutdown commits already submitted edits, skips pending generation work, and frees unconsumed replies. Modified world state exists only for the service lifetime.
+The voxel app stops the simulation worker, submits any remaining local commands, and destroys the service before destroying its game state and engine. Service shutdown commits already submitted edits, skips pending generation work, and frees unconsumed replies. Persistent worlds drain admitted actions and player checkpoints before final capture. A delayed or failed save keeps the loop responsive and offers wait/retry, cancel exit, and explicit quit without saving. See [persistence](persistence.md) for the storage lifecycle.
 
 ## Read next
 

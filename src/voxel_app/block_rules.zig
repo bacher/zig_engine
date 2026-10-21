@@ -150,6 +150,7 @@ pub const Validator = struct {
     /// Hypothetical edited contents; validation never mutates the world.
     edit: ?struct { cell: Cell, material: BlockType } = null,
     cache: Cache = .empty,
+    allocation_failed: bool = false,
     depth: u16 = 0,
     /// Recursive support searches never recenter on intermediate blocks.
     root: ?Cell = null,
@@ -488,7 +489,9 @@ pub const Validator = struct {
             self.depth -= 1;
         }
         const result = try self.evaluateUncached(cell, material);
-        self.cache.put(self.allocator, cell, .{ .evaluation = result, .evidence = self.evidence.?, .scope = self.scope }) catch @panic("OOM");
+        self.cache.put(self.allocator, cell, .{ .evaluation = result, .evidence = self.evidence.?, .scope = self.scope }) catch {
+            self.allocation_failed = true;
+        };
         return result;
     }
 

@@ -7,3 +7,6 @@ tmp/
 .vscode/
 *.DS_Store
 .idea/
+
+# Local persistent worlds selected by the voxel application.
+saves/

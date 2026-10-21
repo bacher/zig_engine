@@ -10,7 +10,12 @@ pub fn extractChunkSideData(
     content: ChunkContent,
     neighbors: BoundaryMasks,
 ) voxel.ChunkSideData {
+    return tryExtractChunkSideData(allocator, content, neighbors) catch @panic("OOM");
+}
+
+pub fn tryExtractChunkSideData(allocator: std.mem.Allocator, content: ChunkContent, neighbors: BoundaryMasks) !voxel.ChunkSideData {
     var result: voxel.ChunkSideData = .{};
+    errdefer result.deinit(allocator);
     if (content == .empty) return result;
     for (content.blocks.blocks, 0..) |slice, z| {
         for (slice, 0..) |row, y| {
@@ -29,10 +34,10 @@ pub fn extractChunkSideData(
                         if (positive) adjacent[axis] += 1 else adjacent[axis] -= 1;
                         break :blk content.getBlock(adjacent).occludesFaces();
                     };
-                    if (!occluded) result.blocks_grouped_by_side[index].append(allocator, .{
+                    if (!occluded) try result.blocks_grouped_by_side[index].append(allocator, .{
                         .coords = .{ local[0], local[1], local[2] },
                         .block_type = block,
-                    }) catch @panic("OOM");
+                    });
                 }
             }
         }
@@ -41,10 +46,15 @@ pub fn extractChunkSideData(
 }
 
 pub fn extractChunkGeometry(allocator: std.mem.Allocator, chunk: @import("world.zig").WorldChunk, neighbors: BoundaryMasks) voxel.ChunkSideData {
-    var result = extractChunkSideData(allocator, chunk.content, neighbors);
+    return tryExtractChunkGeometry(allocator, chunk, neighbors) catch @panic("OOM");
+}
+
+pub fn tryExtractChunkGeometry(allocator: std.mem.Allocator, chunk: @import("world.zig").WorldChunk, neighbors: BoundaryMasks) !voxel.ChunkSideData {
+    var result = try tryExtractChunkSideData(allocator, chunk.content, neighbors);
+    errdefer result.deinit(allocator);
     for (chunk.metadata.roads.items) |road| {
         const local = @import("block_transformations.zig").coordinates(road.index);
-        result.custom_blocks.append(allocator, .{ .coords = .{ local[0], local[1], local[2] }, .shape = road.shape() }) catch @panic("OOM");
+        try result.custom_blocks.append(allocator, .{ .coords = .{ local[0], local[1], local[2] }, .shape = road.shape() });
     }
     return result;
 }
@@ -69,4 +79,17 @@ test "neighbor masks cull matching faces and retain real exterior surfaces" {
     defer opened.deinit(allocator);
     try std.testing.expectEqual(1, opened.blocks_grouped_by_side[0].items.len);
     try std.testing.expectEqual([3]u8{ 0, 8, 7 }, opened.blocks_grouped_by_side[0].items[0].coords);
+}
+
+fn exerciseFallibleMesh(allocator: std.mem.Allocator) !void {
+    var solid = @import("world_chunk_data.zig").WorldChunkData.initSolid();
+    var mesh = try tryExtractChunkSideData(allocator, .{ .blocks = &solid }, @splat(.{}));
+    defer mesh.deinit(allocator);
+    var copy = try mesh.tryClone(allocator);
+    defer copy.deinit(allocator);
+    for (copy.blocks_grouped_by_side) |faces| try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE, faces.items.len);
+}
+
+test "mesh preparation and transfer cloning clean up every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseFallibleMesh, .{});
 }
