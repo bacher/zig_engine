@@ -108,6 +108,8 @@ pub const Engine = struct {
         argument: *anyopaque,
         onUpdate: ?*const fn (engine: *Engine, argument: *anyopaque) void,
         onRender: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder, argument: *anyopaque) void,
+        /// Camera-space geometry after compositing, with fresh depth for self-occlusion.
+        onRenderOverlay3D: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder, argument: *anyopaque) void = null,
         onKeyPress: ?*const fn (engine: *Engine, key_params: KeyParams, argument: *anyopaque) void = null,
         onKeyRelease: ?*const fn (engine: *Engine, key_params: KeyParams, argument: *anyopaque) void = null,
         onMouseButtonPress: ?*const fn (engine: *Engine, params: MouseButtonParams, argument: *anyopaque) void = null,
@@ -798,7 +800,7 @@ pub const Engine = struct {
                             camera_chunk_uniform.offset,
                         });
                         shadow_map_pass.setBindGroup(1, scene.voxel_bind_group.wgpu_bind_group, &.{});
-                        if (scene.voxel_grid.custom_block_count > 0) shadow_map_pass.draw(36, scene.voxel_grid.custom_block_count, 0, 0);
+                        scene.voxel_grid.drawCustomBlocks(shadow_map_pass);
 
                         engine.temp_buffers.resetDrawingLists();
                     }
@@ -960,7 +962,7 @@ pub const Engine = struct {
                     pass.setBindGroup(1, engine.bind_group_minecraft_texture.wgpu_bind_group, &.{});
                     pass.setBindGroup(2, engine.bind_group_shadow_map.wgpu_bind_group, &.{global_light_clip_matrix_array.offset});
                     pass.setBindGroup(3, scene.voxel_bind_group.wgpu_bind_group, &.{});
-                    if (scene.voxel_grid.custom_block_count > 0) pass.draw(36, scene.voxel_grid.custom_block_count, 0, 0);
+                    scene.voxel_grid.drawCustomBlocks(pass);
 
                     if (DEBUG_SHOW_WIREFRAME_OBJECTS) {
                         pass.setPipeline(engine.pipelines.lines.pipeline_gpu);
@@ -1108,6 +1110,31 @@ pub const Engine = struct {
                         outline.drawBatch(pass, engine.pipelines.block_outline_occluded.pipeline_gpu, engine.pipelines.block_outline.pipeline_gpu, engine.bind_group_block_outline.wgpu_bind_group, 0, @intCast(scene.block_overlays.count), visible_count);
                     }
                 }
+            }
+
+            if (engine.callbacks.onRenderOverlay3D) |onRenderOverlay3D| {
+                const color_attachments = [_]wgpu.RenderPassColorAttachment{.{
+                    .view = back_buffer_view,
+                    .load_op = .load,
+                    .store_op = .store,
+                }};
+                // All scene-depth consumers have finished; reuse its attachment for
+                // held geometry without letting terrain occlude the held item.
+                const pass = encoder.beginRenderPass(.{
+                    .color_attachments = &color_attachments,
+                    .color_attachment_count = color_attachments.len,
+                    .depth_stencil_attachment = &.{
+                        .view = engine.depth_texture.view,
+                        .depth_load_op = .clear,
+                        .depth_clear_value = 1,
+                        .depth_store_op = .discard,
+                    },
+                });
+                defer {
+                    pass.end();
+                    pass.release();
+                }
+                onRenderOverlay3D(engine, pass, engine.callbacks.argument);
             }
 
             if (engine.callbacks.onRender) |onRender| {

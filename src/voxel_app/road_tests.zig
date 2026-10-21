@@ -522,6 +522,8 @@ test "unformed adaptive roads collide as cubes and missing support is unknown" {
     fixture.set(.{ 0, 0, 0 }, .country_road_adaptive);
     var query: collision.Query = .{ .world = &fixture.world, .body = .{} };
     try std.testing.expectEqual(collision.Overlap.solid, query.overlap(.{ 0.5, 0.5, 0.9 }, true));
+    // The lowered visual surface does not change full-cube player collision.
+    try std.testing.expectEqual(collision.Overlap.clear, query.overlap(.{ 0.5, 0.5, 1.01 }, true));
     try std.testing.expectApproxEqAbs(@as(f64, 1), query.moveAxis(.{ 0.5, 0.5, 4 }, 2, -5).position[2], 1e-10);
     const support_coords, _ = world.splitBlockCoords(storage(&fixture, .{ 2, 0, -1 }));
     fixture.world.removeChunk(support_coords);

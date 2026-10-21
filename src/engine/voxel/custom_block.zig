@@ -78,6 +78,10 @@ pub const Shape = union(enum) {
 
 pub const Draw = struct { coords: [3]u8, shape: Shape };
 
+pub const slope_vertex_count = 36;
+/// Keep in sync with ADAPTIVE_VERTEX_COUNT in adaptive_geometry.wgsl.
+pub const adaptive_vertex_count = 198;
+
 /// 48-byte storage record; each instance describes one independent custom block.
 pub const GPU_CustomBlock = extern struct {
     chunk_origin: [3]i32,

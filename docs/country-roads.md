@@ -1,9 +1,17 @@
 # Country roads
 
 In putting mode, **7** selects a solid country road and **8** selects an adaptive country
-road. Solid roads are ordinary textured cubes. Adaptive roads initially display an inset
-marker using an existing atlas texture; their movement collision still fills the whole cell.
+road. Solid roads are ordinary textured cubes. Unformed adaptive roads fill the cell's
+horizontal footprint with a faceted uneven top around three quarters of the cell height,
+using the existing atlas texture. Opposite top edges match so adjacent blocks join in
+either horizontal direction, including across chunks.
+The top ranges from 11/16 to 13/16 of a block high, and all geometry stays inside the
+1×1×1 cell. This relief is visual only; movement collision remains a regular full cube.
+Formed slopes retain their original appearance.
 Neither type changes movement speed.
+
+The adaptive road item held by the player or previewed in spectator putting mode uses the
+same unformed model, atlas UVs, and faceted normals as a placed adaptive block.
 
 Every road cell needs a solid block immediately underneath it. Existing cube-colliding
 materials, including an unformed adaptive road, supply that support. Formed slopes cannot
@@ -56,8 +64,9 @@ Custom descriptors use a separate 4 MiB GPU buffer with 48-byte records. They do
 ordinary voxel face slots. Upload preflight checks both buffers; removals refresh custom
 draws even if ordinary uploads are waiting for capacity. Custom records are rebuilt only
 when resident custom descriptors change; ordinary-only chunk changes leave the buffer clean.
-Instances share one draw per pass, for four draws across the forward pass and three shadow
-cascades, regardless of the number of road cells. Their geometry stays outside chunk meshes.
+Instances share up to two draws per pass, grouping formed slopes (36 vertices) separately
+from unformed blocks (198 vertices). Both groups use the custom renderer in the forward
+pass and three shadow cascades. Their geometry stays outside chunk meshes.
 
 Formation and reversion update every affected chunk's revision and travel in the service's
 atomic response packages. Saved orientations survive subscription eviction in service
@@ -96,6 +105,8 @@ calculation. A ceiling can clip an uphill lift; the valid partial lift continues
 horizontal sweeping and settling, so a player can leave the ceiling when the path is clear.
 
 GPU geometry readback covers every section of 4-, 7-, and 12-section runs in all directions,
-including zero-height ends, and verifies actual atlas UVs and normals. A full raster/image
+including zero-height ends, and verifies actual atlas UVs and normals. Unformed geometry
+checks cover cell bounds, lowered tops, triangle winding, faceted normals, and matching
+top edges in a 2x2 patch across chunk boundaries and the wrapped x seam. A full raster/image
 regression harness, per-chunk upload ranges, and a road-index map are deferred: they add
 resource or bookkeeping complexity, and the latter two need profiling evidence first.
