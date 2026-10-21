@@ -405,7 +405,7 @@ const Game = struct {
                     break;
                 };
                 if (pending.operation.player != null) {
-                    game.block_interaction.pending.?.request_id = pending.request_id;
+                    game.block_interaction.markSubmitted(pending.request_id.?);
                 }
             }
         }
@@ -438,14 +438,10 @@ const Game = struct {
                     };
                 }
                 world.acknowledgeOperationResult(result.request_id, result.status);
-                if (game.block_interaction.pending) |*pending| if (pending.request_id == result.request_id) {
-                    if (result.player_inventory) |inventory| if (inventory.player_id == game.player_id) {
-                        game.block_interaction.inventory = inventory.material;
-                    };
-                    pending.resolved = true;
-                    game.finishInventoryReconciliation();
+                if (game.block_interaction.acknowledge(game.player_id, result)) {
+                    game.block_interaction.finishReconciliation(world.pending_operations.items);
                     game.clearBlockFocus();
-                };
+                }
                 world.last_edit_result = .{ .status = result.status, .failure = result.failure, .mined_type = result.mined_type };
                 game.showBlockEditError(world.last_edit_result.?);
             }
@@ -703,19 +699,10 @@ const Game = struct {
         for (game.tool_commands.items) |command| game.editBlockInView(command);
     }
 
-    fn finishInventoryReconciliation(game: *Game) void {
-        const pending = game.block_interaction.pending orelse return;
-        if (!pending.resolved) return;
-        for (game.world.?.pending_operations.items) |operation| {
-            if (operation.request_id == pending.request_id) return;
-        }
-        game.block_interaction.pending = null;
-    }
-
     fn updatePlayerBlockTool(game: *Game) void {
         const interaction = &game.block_interaction;
-        game.finishInventoryReconciliation();
         const world = if (game.world) |*world| world else return;
+        interaction.finishReconciliation(world.pending_operations.items);
         const camera = game.engine.active_scene.?.camera;
         const mode = game.blockMode();
         const target = (block_targeting.findTarget(world, camera.position, camera.forwardDirection(), mode) catch null);
@@ -763,14 +750,12 @@ const Game = struct {
         if (hold.elapsed < hold.duration()) return;
 
         const operation = hold.operation;
-        interaction.holding = null;
         const result = world.tryOperation(operation);
+        interaction.completePrediction(result);
         if (result.status != .success) {
             game.showBlockEditError(result);
             return;
         }
-        interaction.inventory = if (operation.action == .remove) result.mined_type.? else null;
-        interaction.pending = .{};
         if (game.player) |*player| player.terrainChanged();
         game.clearBlockFocus();
         game.markChunksAroundBlockDirty(operation.block);
@@ -2835,7 +2820,7 @@ const StreamingTest = struct {
     fn acknowledgePlayer(self: *StreamingTest, request_id: u64, status: world_module.OperationStatus, inventory: ?voxel_chunk_module.BlockType) !void {
         const pending = &self.game.world.?.pending_operations.items[0];
         pending.request_id = request_id;
-        self.game.block_interaction.pending.?.request_id = request_id;
+        self.game.block_interaction.markSubmitted(request_id);
         const coords, _ = world_module.splitBlockCoords(pending.operation.block);
         try self.apply(&.{.{
             .coords = coords,
