@@ -42,7 +42,7 @@ pub fn InputController(comptime Context: type) type {
         cursor_position_delta: [2]f32 = .{ 0, 0 },
         cursor_left_button_pressed: bool = false,
         cursor_right_button_pressed: bool = false,
-        cursor_capture: CursorCapture = .while_left_button,
+        cursor_capture: CursorCapture = .always,
         cursor_captured: bool = false,
         focused: bool = true,
         focus_changed: bool = false,

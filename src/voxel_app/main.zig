@@ -322,7 +322,7 @@ const Game = struct {
         game.exit_intent = null;
         game.exit_requested = false;
         game.close_ready = false;
-        game.engine.input_controller.cursor_capture = if (game.control_mode == .player) .always else .while_left_button;
+        game.engine.input_controller.cursor_capture = .always;
         game.engine.active_scene.?.spectator_enabled = game.control_mode == .spectator;
         if (game.simulation) |simulation| simulation.resumeDispatch();
     }
@@ -388,7 +388,7 @@ const Game = struct {
             scene.spectator_camera.pitch = player.pitch;
             game.control_mode = .spectator;
             scene.spectator_enabled = true;
-            game.engine.input_controller.cursor_capture = .while_left_button;
+            game.engine.input_controller.cursor_capture = .always;
         } else {
             game.control_mode = .player;
             scene.spectator_enabled = false;
@@ -1703,6 +1703,7 @@ test "Q excursions start at player eyes and return to the frozen player position
     const eyes = camera.position;
     try std.testing.expectEqualDeep(Position{ 1.5, 2.5, 4.6 }, eyes);
     try std.testing.expect(scene.spectator_enabled);
+    try std.testing.expectEqual(@as(@TypeOf(input.cursor_capture), .always), input.cursor_capture);
     try std.testing.expectEqual(@as(f32, 0.5), spectator.yaw);
     try std.testing.expectEqual(@as(f32, 0.2), spectator.pitch);
     try std.testing.expect(!game.player.?.auto_climb);
@@ -1928,7 +1929,7 @@ test "queued edits use the camera view updated after the press" {
     try std.testing.expect(try fixture.game.world.?.isBlockSolid(target));
 }
 
-test "mouse look and removal in the same frame use the new player and spectator aim" {
+test "mouse look without holding a button and removal in the same frame use the new player and spectator aim" {
     for ([_]bool{ false, true }) |spectating| {
         var fixture: StreamingTest = .{};
         fixture.init();
@@ -1957,7 +1958,7 @@ test "mouse look and removal in the same frame use the new player and spectator 
         handleKeyPress(&fixture.game, .{ .key = if (spectating) .x else .e, .mods = .{} });
         try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
         fixture.input.cursor_position_delta = .{ math.pi / 0.01, 0 };
-        fixture.input.cursor_left_button_pressed = true;
+        fixture.input.cursor_left_button_pressed = false;
         if (spectating) spectator.update(0.016);
         fixture.game.updatePlayer(false);
         fixture.game.updateBlockTool();

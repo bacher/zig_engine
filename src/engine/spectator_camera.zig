@@ -86,10 +86,6 @@ pub const SpectatorCamera = struct {
     }
 
     fn handleView(spectator_camera: *SpectatorCamera, _: f32) void {
-        if (!spectator_camera.input_controller.cursor_left_button_pressed) {
-            return;
-        }
-
         const delta = spectator_camera.input_controller.cursor_position_delta;
 
         spectator_camera.yaw -= delta[0] * 0.005;
@@ -132,7 +128,6 @@ test "spectator pitch stops at vertical and reverses without accumulated oversho
     const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
     var camera = Camera.init(&layout, 1);
     var input: InputControllerGeneric = undefined;
-    input.cursor_left_button_pressed = true;
     var spectator = SpectatorCamera.init(&camera, &input);
     const limit: f32 = std.math.pi / 2.0;
     for ([_]f32{ -1, 1 }) |direction| {

@@ -104,7 +104,7 @@ The default scene has a spectator controller:
 | W / S | Move forward/backward in the camera's orientation. |
 | A / D | Strafe left/right. Horizontal diagonal input is normalized. |
 | Space / C | Move along world +Z / -Z. |
-| Hold left mouse button and move mouse | Capture the cursor and change yaw/pitch; pitch stops at +/-90 degrees. Release restores the cursor. |
+| Move mouse | Change yaw/pitch without holding a button; pitch stops at +/-90 degrees. The cursor stays captured while the window is focused. |
 | Escape | Leave the engine loop. |
 | Ctrl+E | Toggle SSAO; exits SSAO debug mode if it was active. |
 | Ctrl+R | Toggle SSAO debug display, enabling SSAO when entering it. |
@@ -114,7 +114,7 @@ The default scene has a spectator controller:
 | Left click in the voxel app | Perform the active block mode's action within four metres. |
 | E / X in the voxel app | Place against the hit face in putting mode / mine the focused block in removing mode. Each shortcut is ignored in the other mode. |
 
-Movement uses a base speed of 5 world units per second and elapsed frame time. There is no collision, gravity, or terrain constraint in `SpectatorCamera`; it can move through solid terrain. Pitch is not explicitly clamped.
+Movement uses a base speed of 5 world units per second and elapsed frame time. There is no collision, gravity, or terrain constraint in `SpectatorCamera`; it can move through solid terrain.
 
 `InputController` retains held keys. Press/repeat events update that state, but the application key-press callback fires only for a press. Released keys are excluded from held-key queries immediately and removed from storage at frame end. Press edges survive a same-frame release, so short Escape taps still exit. Held mouse state is polled each frame; mouse press callbacks run in arrival order, including complete clicks between frames. The voxel app queues keyboard and mouse tool commands together, captures the selected material for each placement, and drains every command after the current camera update. Cursor capture can follow the left button or remain enabled continuously; supported platforms use raw mouse motion while captured. Capture/focus transitions reset cursor deltas, and focus loss clears held keys.
 
