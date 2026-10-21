@@ -1,6 +1,6 @@
 # Game vision
 
-This is the long-term creative and technical direction for the game, based on the author's ideas as of 2026-10-19. It describes the experience we want to work toward and gives context for decisions made along the way. It is a living document, not a final requirements specification, a release commitment, or a description of everything currently implemented.
+This is the long-term creative and technical direction for the game, based on the author's ideas as of 2026-10-21. It describes the experience we want to work toward and gives context for decisions made along the way. It is a living document, not a final requirements specification, a release commitment, or a description of everything currently implemented.
 
 Reaching this vision will take many iterations and milestones. Early versions can explore a small part of it. Use the vision to keep that groundwork focused, while allowing experiments to change the details. Numerical values below are starting points for design and balancing unless a feature specification explicitly adopts them.
 
@@ -57,6 +57,14 @@ The following values express the initial balance idea, not fixed tuning:
 
 A separate fertile-soil region is a possibility, but may add more complexity than useful decisions. Whether terrain categories such as mountains can overlap climate biomes remains to be defined.
 
+### Resource deposits and extraction
+
+Unlike Minecraft, mineral resources should occur in huge, finite deposits. Establishing extraction at a new deposit should supply resources for a meaningful period of play, making the effort of building access, equipment, and transport worthwhile. Eventually the deposit is exhausted, and the player must find and develop another one. This applies to ordinary bulk materials such as limestone, clay, sand, and gravel as well as valuable metal ores.
+
+Resource placement should broadly reflect where materials occur on Earth. Metal ores should be found predominantly in mountainous terrain; other resources should favor their own plausible geological settings. These concentrations should give regions distinct industrial opportunities and create sustained demand for freight transport.
+
+Extraction methods can include open-pit mining, quarrying, and underground workings reached through tunnels or shafts. Other methods may be added where appropriate to the resource and its setting; the full set remains open.
+
 ### Generation direction
 
 A candidate generation process is:
@@ -86,9 +94,9 @@ Construction should feel broadly like Minecraft or Valheim: players shape buildi
 
 Location matters to production. Fishing piers belong on rivers or lakes, mills serve fields, and mines belong near mineral-rich mountains. More advanced construction materials enable more effective facilities.
 
-Materials must be delivered to the construction site. There is no conventional inventory large enough to carry an entire building's supplies. The initial idea is that the player carries one block at a time, increasing to at most three later in progression.
+Materials must be delivered to the construction site. There is no conventional inventory large enough to carry an entire building's supplies. The initial idea is that the player carries one block at a time, increasing to at most three later in progression through backpack upgrades that each add one block of personal carrying capacity.
 
-A cart increases transport capacity, but slows the player and needs a sufficiently even surface with limited gradients. This creates a reason to build a usable road from extraction to construction before attempting a large project. Cart capacity, allowed slopes, and movement costs are open balance choices.
+A cart increases transport capacity, but slows the player and needs a sufficiently even surface with limited gradients. This creates a reason to build a usable road from extraction to construction before attempting a large project. The proposed capacity progression is described under freight transport below; allowed slopes and movement costs remain open balance choices.
 
 ### Structural limits
 
@@ -106,7 +114,7 @@ Initial material examples:
 
 The plank examples should allow a 6 × 6 room with a 4 × 4 interior and a flat wooden ceiling. Exact diagonal propagation, load accounting, and support rules belong in feature specifications. The [current placement document](block-placement.md) describes today's implemented rules and values, which may be more specific than this vision.
 
-Large-scale production and placement of cement and reinforced concrete need further design. They should fit the physical production and delivery economy, but the construction workflow is still an open question.
+Concrete production follows the material chain described below. Large-scale delivery and placement of concrete and reinforced concrete still need further design, including how reinforcement and concrete are combined at a construction site.
 
 ### Major structures
 
@@ -146,6 +154,29 @@ Crafting grows into factory production, with goods transported from where they a
 | Vehicle dispenser | Makes previously manufactured vehicles available for couriers to rent or use for transport. |
 
 Housing improves local efficiency, but delivery itself does not require houses. A supply network should be able to establish and serve an outpost before a residential settlement exists there.
+
+### Cement and concrete production
+
+Concrete is a particularly appealing production chain because it connects bulk resource extraction, high-temperature processing, and construction. Making concrete requires **cement, gravel, sand, and water**.
+
+Cement production starts with **limestone and clay**, potentially with other mineral additives. The raw materials are fired in a kiln at approximately **1,450 °C** to produce clinker, which is then ground to make cement. Cement is subsequently mixed with gravel, sand, and water to produce concrete.
+
+This chain should make quarries, processing facilities, and transport links useful parts of the construction economy. Exact recipes, process equipment, energy requirements, and the handling of water and concrete remain to be designed; water-dependent details must account for the deferred river and lake features.
+
+### Freight transport progression
+
+Transport technology increases the number of blocks moved in one trip. The proposed stages and starting capacities are:
+
+| Stage | Carrying capacity |
+| --- | --- |
+| Backpack | +1 block of personal carrying capacity. |
+| Handcart | 4 blocks. |
+| Pedal-powered vehicle | 8 blocks. |
+| Horse-drawn wagon or carriage | 16 blocks; this stage may be deferred. |
+| Self-propelled cart or car | 32 blocks. |
+| Truck | Up to 81 blocks, arranged as a 3 × 3 × 9 load. |
+
+Each stage should improve transport throughput and efficiency per block by carrying more cargo at once. Movement speed also varies between vehicles, so capacity alone does not determine delivery time. Terrain, road quality, gradients, and operating supplies should make the choice of transport meaningful. Exact speeds and costs remain balance choices.
 
 ### Warehouses and material orders
 
