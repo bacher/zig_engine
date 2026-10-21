@@ -16,6 +16,7 @@ pub const VoxelGrid = @import("./voxel/voxel_grid.zig").VoxelGrid;
 pub const voxel_chunk = @import("./voxel/voxel_chunk.zig");
 pub const block_outline = @import("./block_outline.zig");
 pub const held_block = @import("./held_block.zig");
+pub const empty_hands = @import("./empty_hands.zig");
 pub const held_item_motion = @import("./held_item_motion.zig");
 pub const held_item_pose = @import("./held_item_pose.zig");
 pub const tube = @import("./shape_generation/tube.zig");
@@ -32,6 +33,7 @@ pub const zgui_utils = @import("./zgui_utils.zig");
 test {
     _ = @import("block_outline.zig");
     _ = @import("held_block.zig");
+    _ = @import("empty_hands.zig");
     _ = @import("held_item_motion_tests.zig");
     _ = @import("spectator_camera.zig");
     _ = @import("input_controller.zig");
