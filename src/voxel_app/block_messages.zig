@@ -30,7 +30,7 @@ pub const TimedError = struct {
 pub fn draw(preview: ?placement_preview.Preview, action_error: *const TimedError, now: f64) void {
     const screen = zgui.io.getDisplaySize();
     if (screen[0] <= 0 or screen[1] <= 0) return;
-    // Layout uses framebuffer pixels; font sizes are scaled by zgui itself.
+    // Layout uses GUI display units; font sizes are scaled by zgui itself.
     const scale = zgui.getStyle().font_scale_dpi;
     var buffer: [block_diagnostics.message_capacity]u8 = undefined;
     if (preview) |current| if (current.errorMessage(&buffer)) |message| {

@@ -89,15 +89,15 @@ Before entering its render loop, the voxel application starts the world-data ser
 `Engine.runLoop` prepares the initial active scene's instance buffer, then repeats:
 
 1. Poll GLFW events. Key-press callbacks can execute application logic here.
-2. Handle window close or Escape through the optional application close callback. The voxel app can defer exit while it drains and saves, continuing the render loop.
-3. Sample monotonic elapsed time and frame delta independently of GPU statistics, reset frame statistics, and poll mouse state/cursor capture.
-4. Update the active scene's camera aspect ratio and its optional spectator controller.
+2. Handle window close through the optional application close callback. Escape toggles the in-game menu during event handling; its Exit button invokes the same close callback. The voxel app can defer exit while it drains and saves, continuing the render loop.
+3. Sample monotonic elapsed time independently of GPU statistics, advance gameplay time and frame delta unless paused, reset frame statistics, and poll mouse state/cursor capture. Storage and shutdown deadlines use a separate monotonic real-time clock.
+4. Update the active scene's camera aspect ratio and its optional spectator controller. The spectator controller is inactive while the menu is open.
 5. Call the application's `onUpdate` callback. The voxel app receives block updates, advances the player against the resulting local cache, refreshes streaming, rebuilds meshes, and uploads geometry here.
 6. Draw the active scene, post-process, and invoke `onRender` for overlays.
 7. Submit GPU commands and present. Handle a reported swapchain resize.
 8. Remove released keys from the held-key state.
 
-Rendering, camera orientation, and local movement consume monotonic frame elapsed time. The player splits the complete elapsed interval into steps no larger than 1/120 second, consuming the final fractional step immediately; this is a numerical stability bound, not a 120 Hz input/update limit. There is no time clamp or dependency on world-worker progress. Loss of window focus freezes controls, and the first focused frame consumes no paused movement interval. Skeletal animation evaluation remains draw-driven and derives visual time from the same monotonic engine clock.
+Rendering, camera orientation, and local movement consume monotonic frame elapsed time. The player splits the complete elapsed interval into steps no larger than 1/120 second, consuming the final fractional step immediately; this is a numerical stability bound, not a 120 Hz input/update limit. There is no time clamp or dependency on world-worker progress. Loss of window focus freezes controls, and the first focused frame consumes no paused movement interval. Skeletal animation evaluation remains draw-driven and derives visual time from the gameplay clock. The single-player menu freezes that clock, player movement, world ticks, and background simulation dispatch, while rendering, accepted edit reconciliation, streaming, and persistence continue. Closing the menu discards the transition frame interval so the paused interval never becomes movement. The menu has a pause policy that can be disabled for future multiplayer sessions; gameplay input stays blocked while the menu is open.
 
 Future world gameplay simulation will use a configurable fixed step around 20 or 40 ticks/s on its own worker, independently of local controls. That rate is not yet selected or implemented: the current simulation worker remains the two-second block-edit example, and the world-data service remains command-driven. Main-thread render/meshing stalls can still delay visible feedback. Player collisions use the latest delivered cache state, including optimistic edits, rather than waiting for authoritative worker state.
 

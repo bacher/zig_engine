@@ -31,6 +31,26 @@ pub const DpiScaling = struct {
 // zgui owns a single context shared by the engine and application overlays.
 var dpi_scaling: DpiScaling = undefined;
 
+// Retain GLFW's matching display size, framebuffer density, and mouse units on Retina.
+extern fn ImGui_ImplWGPU_NewFrame() void;
+extern fn ImGui_ImplGlfw_NewFrame() void;
+
+fn layoutScale(content_scale: [2]f32, window_size: [2]c_int, framebuffer_size: [2]c_int) [2]f32 {
+    if (window_size[0] <= 0 or window_size[1] <= 0 or framebuffer_size[0] <= 0 or framebuffer_size[1] <= 0) return .{ 1, 1 };
+    return .{
+        content_scale[0] * @as(f32, @floatFromInt(window_size[0])) / @as(f32, @floatFromInt(framebuffer_size[0])),
+        content_scale[1] * @as(f32, @floatFromInt(window_size[1])) / @as(f32, @floatFromInt(framebuffer_size[1])),
+    };
+}
+
+fn updateDpi(window: *zglfw.Window) void {
+    const content_scale = window.getContentScale();
+    dpi_scaling.update(if (@import("builtin").os.tag == .macos)
+        layoutScale(content_scale, window.getSize(), window.getFramebufferSize())
+    else
+        content_scale);
+}
+
 pub fn zguiInit(
     allocator: std.mem.Allocator,
     window: *zglfw.Window,
@@ -54,7 +74,7 @@ pub fn zguiInit(
     errdefer zgui.backend.deinit();
 
     dpi_scaling = DpiScaling.init();
-    dpi_scaling.update(window.getContentScale());
+    updateDpi(window);
 }
 
 pub fn zguiDeinit() void {
@@ -62,10 +82,35 @@ pub fn zguiDeinit() void {
     zgui.deinit();
 }
 
-pub fn beginFrame(window: *zglfw.Window, width: u32, height: u32) void {
-    dpi_scaling.update(window.getContentScale());
-    zgui.backend.newFrame(width, height);
+pub fn beginFrame(window: *zglfw.Window) void {
+    updateDpi(window);
+    if (@import("builtin").os.tag == .macos) {
+        ImGui_ImplWGPU_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        zgui.newFrame();
+    } else {
+        const size = window.getFramebufferSize();
+        zgui.backend.newFrame(@intCast(@max(0, size[0])), @intCast(@max(0, size[1])));
+    }
     // zgui.showDemoWindow(null);
+}
+
+pub fn drawInGameMenu(engine: *Engine) void {
+    if (!engine.menu.open) return;
+    const screen = zgui.io.getDisplaySize();
+    const scale = zgui.getStyle().font_scale_dpi;
+    zgui.setNextWindowPos(.{ .x = screen[0] / 2, .y = screen[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
+    _ = zgui.begin("Game menu", .{ .flags = .{
+        .always_auto_resize = true,
+        .no_title_bar = true,
+        .no_move = true,
+        .no_resize = true,
+        .no_collapse = true,
+        .no_saved_settings = true,
+    } });
+    defer zgui.end();
+    if (zgui.button("Resume", .{ .w = 200 * scale, .h = 40 * scale })) engine.setMenuOpen(false);
+    if (zgui.button("Exit", .{ .w = 200 * scale, .h = 40 * scale })) engine.exitFromMenu();
 }
 
 pub fn drawDebugWindow(engine: *const Engine) void {
@@ -115,4 +160,63 @@ pub fn drawDebugWindow(engine: *const Engine) void {
 
 pub fn endFrame(pass: wgpu.RenderPassEncoder) void {
     zgui.backend.draw(pass);
+}
+
+test "GUI layout scale accounts for framebuffer density on Retina and scaled desktops" {
+    try std.testing.expectEqualDeep([2]f32{ 1, 1 }, layoutScale(.{ 2, 2 }, .{ 1280, 800 }, .{ 2560, 1600 }));
+    try std.testing.expectEqualDeep([2]f32{ 2, 2 }, layoutScale(.{ 2, 2 }, .{ 1280, 800 }, .{ 1280, 800 }));
+    try std.testing.expectEqualDeep([2]f32{ 1, 1 }, layoutScale(.{ 1, 1 }, .{ 1280, 800 }, .{ 1280, 800 }));
+    try std.testing.expectEqualDeep([2]f32{ 1, 1 }, layoutScale(.{ 2, 2 }, .{ 0, 0 }, .{ 0, 0 }));
+}
+
+test "menu buttons resume and request asynchronous exit at normal and Retina density" {
+    const Probe = struct {
+        close_requests: usize = 0,
+        fn close(_: *Engine, argument: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(argument));
+            self.close_requests += 1;
+            return false;
+        }
+        fn frame(engine: *Engine) void {
+            zgui.newFrame();
+            drawInGameMenu(engine);
+            zgui.render();
+        }
+    };
+    zgui.init(std.testing.allocator);
+    defer zgui.deinit();
+    zgui.io.setIniFilename(null);
+    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
+    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
+    var probe: Probe = .{};
+    var input: @import("input_controller.zig").InputController(Engine) = undefined;
+    input.cursor_capture = .always;
+    var engine: Engine = undefined;
+    engine.input_controller = &input;
+    engine.callbacks = .{ .argument = &probe, .onUpdate = null, .onRender = null, .onCloseRequest = Probe.close };
+    for ([_]f32{ 1, 2 }) |density| {
+        input.cursor_capture = .always;
+        engine.menu = .{};
+        engine.setMenuOpen(true);
+        zgui.io.setDisplaySize(1280, 820);
+        zgui.io.setDisplayFramebufferScale(density, density);
+        for (0..3) |_| Probe.frame(&engine);
+        zgui.io.addMousePositionEvent(640, 388);
+        Probe.frame(&engine);
+        zgui.io.addMouseButtonEvent(.left, true);
+        Probe.frame(&engine);
+        zgui.io.addMouseButtonEvent(.left, false);
+        Probe.frame(&engine);
+        try std.testing.expect(!engine.menu.open);
+        try std.testing.expectEqual(.always, input.cursor_capture);
+        engine.setMenuOpen(true);
+        for (0..3) |_| Probe.frame(&engine);
+        zgui.io.addMousePositionEvent(640, 432);
+        Probe.frame(&engine);
+        zgui.io.addMouseButtonEvent(.left, true);
+        Probe.frame(&engine);
+        zgui.io.addMouseButtonEvent(.left, false);
+        Probe.frame(&engine);
+        try std.testing.expectEqual(@as(usize, @intFromFloat(density)), probe.close_requests);
+    }
 }

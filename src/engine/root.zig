@@ -31,6 +31,7 @@ pub const ChunkCoords = world_math.ChunkCoords;
 pub const zgui_utils = @import("./zgui_utils.zig");
 
 test {
+    _ = @import("zgui_utils.zig");
     _ = @import("block_outline.zig");
     _ = @import("held_block.zig");
     _ = @import("empty_hands.zig");

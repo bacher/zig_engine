@@ -144,7 +144,7 @@ const Game = struct {
             .look_angles = if (spectator) .{ scene.spectator_camera.yaw, scene.spectator_camera.pitch } else if (player) |p| .{ p.yaw, p.pitch } else .{ 0, 0 },
             .grounded = !spectator and if (player) |p| p.grounded else false,
             .gait_enabled = spectator or if (player) |p| p.grounded and p.climb == null else false,
-            .active = input.focused and !input.focus_changed,
+            .active = input.focused and !input.focus_changed and !game.engine.menu.open and !game.exit_requested,
         }, game.engine.frame_delta);
     }
 
@@ -205,27 +205,21 @@ const Game = struct {
             return;
         }
 
-        if (!game.exit_requested and std.math.isFinite(game.engine.frame_delta) and game.engine.frame_delta > 0) {
-            game.fractional_ticks += game.engine.frame_delta * @as(f64, @floatFromInt(transformations.ticks_per_second));
-            const ticks: transformations.Tick = @intFromFloat(@floor(game.fractional_ticks));
-            game.fractional_ticks -= @as(f64, @floatFromInt(ticks));
-            game.world.?.simulation_tick +|= ticks;
-            if (ticks != 0) if (game.world_data) |service| service.advanceTo(game.world.?.simulation_tick);
-        }
+        game.advanceWorldClock();
 
         game.flushBlockOperations();
         game.updateChunksAroundCamera(false);
         const has_new_chunks = game.receiveChunks();
         // Synchronize blocks first, then resolve local movement against that cache.
         // Player input remains independent of mesh work and GPU upload capacity.
-        if (!game.exit_requested) {
+        if (!game.exit_requested and !game.engine.menu.open) {
             if (game.player != null) game.updatePlayer(has_new_chunks);
             game.updateBlockTool();
         }
         game.flushBlockOperations();
         game.updatePersistence();
         game.updateChunksAroundCamera(has_new_chunks);
-        game.updateBlockFocus();
+        if (!game.engine.menu.open) game.updateBlockFocus();
         game.rebuildDirtyChunks();
         const grid = game.engine.active_scene.?.voxel_grid;
         if (!grid.hasUploadCapacity() and game.render_radius > 2) {
@@ -240,6 +234,16 @@ const Game = struct {
         }
         game.gpu_capacity_warning = false;
         grid.uploadToGPU(game.engine.gctx);
+    }
+
+    fn advanceWorldClock(game: *Game) void {
+        if (!game.exit_requested and !game.engine.gameplayPaused() and std.math.isFinite(game.engine.frame_delta) and game.engine.frame_delta > 0) {
+            game.fractional_ticks += game.engine.frame_delta * @as(f64, @floatFromInt(transformations.ticks_per_second));
+            const ticks: transformations.Tick = @intFromFloat(@floor(game.fractional_ticks));
+            game.fractional_ticks -= @as(f64, @floatFromInt(ticks));
+            game.world.?.simulation_tick +|= ticks;
+            if (ticks != 0) if (game.world_data) |service| service.advanceTo(game.world.?.simulation_tick);
+        }
     }
 
     fn checkpoint(game: *Game) void {
@@ -277,7 +281,7 @@ const Game = struct {
             if (status.intent_id != intent) return;
             if (status.progress_generation != game.exit_progress) {
                 game.exit_progress = status.progress_generation;
-                game.exit_progress_at = game.engine.time;
+                game.exit_progress_at = game.engine.real_time;
             }
             const saved_but_finalization_failed = status.phase == .failed and !status.active and
                 status.target_sequence != 0 and status.durable_sequence >= status.target_sequence;
@@ -288,19 +292,21 @@ const Game = struct {
             }
             return;
         }
-        if (game.engine.time >= game.next_autosave_at) {
+        if (game.engine.real_time >= game.next_autosave_at) {
             _ = service.requestSave(false);
-            game.next_autosave_at = game.engine.time + 60;
+            game.next_autosave_at = game.engine.real_time + 60;
         }
-        if (game.engine.time >= game.next_compaction_at) {
+        if (game.engine.real_time >= game.next_compaction_at) {
             service.requestCompaction();
-            game.next_compaction_at = game.engine.time + 600;
+            game.next_compaction_at = game.engine.real_time + 600;
         }
     }
 
     fn beginExit(game: *Game) void {
         if (game.exit_requested) return;
         game.exit_requested = true;
+        game.engine.menu.enabled = false;
+        game.engine.setMenuOpen(false);
         game.block_interaction.cancelHold();
         // Quiesce NPC admission before the final save can enter the service queue.
         // Already admitted NPC commands precede that save; later ones await resume.
@@ -310,7 +316,7 @@ const Game = struct {
         // have entered the authority's ordered queue.
         game.updatePersistence();
         game.exit_progress = 0;
-        game.exit_progress_at = game.engine.time;
+        game.exit_progress_at = game.engine.real_time;
         game.engine.input_controller.cursor_capture = .never;
         game.engine.active_scene.?.spectator_enabled = false;
         game.jump_requested = false;
@@ -322,6 +328,7 @@ const Game = struct {
         game.exit_intent = null;
         game.exit_requested = false;
         game.close_ready = false;
+        game.engine.menu.enabled = true;
         game.engine.input_controller.cursor_capture = .always;
         game.engine.active_scene.?.spectator_enabled = game.control_mode == .spectator;
         if (game.simulation) |simulation| simulation.resumeDispatch();
@@ -1144,6 +1151,7 @@ pub fn main(init: std.process.Init) !void {
             .onMouseButtonPress = onMouseButtonPress,
             .onMouseButtonRelease = onMouseButtonRelease,
             .onCloseRequest = onCloseRequest,
+            .onMenuChanged = onMenuChanged,
         },
     );
     game.engine = engine;
@@ -1315,6 +1323,21 @@ fn onCloseRequest(_: *Engine, game_opaque: *anyopaque) bool {
     return false;
 }
 
+fn onMenuChanged(engine: *Engine, game_opaque: *anyopaque) void {
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
+    game.block_interaction.loseFocus();
+    game.tool_commands.clearRetainingCapacity();
+    game.jump_requested = false;
+    if (game.player) |*player| {
+        player.resetJumpInput();
+        if (!engine.menu.open) player.terrainChanged();
+    }
+    game.clearBlockFocus();
+    if (game.simulation) |simulation| {
+        if (engine.gameplayPaused() or game.exit_requested) simulation.pauseDispatch() else simulation.resumeDispatch();
+    }
+}
+
 fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
 
@@ -1340,7 +1363,7 @@ fn onKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque) v
 }
 
 fn handleKeyPress(game: *Game, key_params: KeyParams) void {
-    if (game.exit_requested) return;
+    if (game.exit_requested or game.engine.menu.open) return;
     switch (key_params.key) {
         .x => if (game.control_mode == .spectator) game.queueBlockAction(.remove),
         .e => if (!key_params.mods.control) {
@@ -1396,7 +1419,7 @@ fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams, game_opaque: *
 }
 
 fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
-    if (game.exit_requested) return;
+    if (game.exit_requested or game.engine.menu.open) return;
     if (game.control_mode == .player) {
         if (params.button == .left) game.block_interaction.press(.mouse);
         return;
@@ -1429,8 +1452,10 @@ fn onRenderOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque:
 
 fn onRender(engine: *Engine, _: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
-    block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
-    drawCrosshair();
+    if (!engine.menu.open) {
+        block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
+        drawCrosshair();
+    }
     drawPersistence(game);
 }
 
@@ -1438,20 +1463,21 @@ fn drawPersistence(game: *Game) void {
     if (game.persistence_store == null) return;
     const status = game.world_data.?.persistenceStatus();
     if (!game.exit_requested and !status.overdue and status.phase != .failed) return;
-    zgui.setNextWindowPos(.{ .x = game.engine.screen_size[0] / 2, .y = game.engine.screen_size[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
+    const screen = zgui.io.getDisplaySize();
+    zgui.setNextWindowPos(.{ .x = screen[0] / 2, .y = screen[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
     _ = zgui.begin("World saving", .{ .flags = .{ .always_auto_resize = true, .no_collapse = true, .no_saved_settings = true } });
     defer zgui.end();
     if (game.exit_requested) {
         zgui.textUnformatted(if (game.exit_intent == null or status.pending_commands != 0) "Finishing pending actions..." else if (status.phase == .compacting) "Finalizing save..." else "Saving...");
-        const delayed = game.engine.time - game.exit_progress_at >= 5;
+        const delayed = game.engine.real_time - game.exit_progress_at >= 5;
         if (status.phase == .failed or delayed) {
             if (status.error_name) |name| zgui.text("Save failed: {s}", .{name}) else zgui.textUnformatted("Still waiting for storage or pending actions...");
             if (game.exit_intent != null and status.phase == .failed and !status.active) {
                 if (zgui.button("Retry", .{})) {
                     game.exit_intent = game.world_data.?.requestSave(true);
-                    game.exit_progress_at = game.engine.time;
+                    game.exit_progress_at = game.engine.real_time;
                 }
-            } else if (zgui.button("Keep waiting", .{})) game.exit_progress_at = game.engine.time;
+            } else if (zgui.button("Keep waiting", .{})) game.exit_progress_at = game.engine.real_time;
             zgui.sameLine(.{});
             if (zgui.button("Cancel exit", .{})) game.cancelExit();
             zgui.textUnformatted("Quitting now may lose changes since the last durable save.");
@@ -1467,6 +1493,57 @@ fn drawPersistence(game: *Game) void {
     } else {
         zgui.textUnformatted("Saving is behind. World-changing actions may wait while saving catches up.");
     }
+}
+
+test "menu cancels pending controls and pauses world time and background simulation" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    try fixture.preparePlayerToolTest();
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
+    defer service.destroy();
+    // Use the real admission gate without starting the NPC's startup/cadence loop.
+    var simulation: SimulationWorker = .{ .client = try service.createClient(), .worker = undefined };
+    game.simulation = &simulation;
+    game.player = PlayerController.init(std.testing.allocator, .{ 0, 0, 0 });
+    handleKeyPress(game, .{ .key = .e, .mods = .{} });
+    game.updateBlockTool();
+    try std.testing.expect(game.block_interaction.holding != null);
+    game.jump_requested = true;
+    fixture.engine.frame_delta = 0.125;
+    game.advanceWorldClock();
+    const tick = game.world.?.simulation_tick;
+    const fraction = game.fractional_ticks;
+    fixture.engine.setMenuOpen(true);
+    try std.testing.expect(simulation.paused.load(.acquire));
+    try std.testing.expectEqual(null, game.block_interaction.holding);
+    try std.testing.expect(!game.jump_requested);
+    handleKeyPress(game, .{ .key = .space, .mods = .{} });
+    handleKeyPress(game, .{ .key = .q, .mods = .{} });
+    handleMouseButtonPress(game, .{ .button = .left, .mods = .{} });
+    try std.testing.expect(!game.jump_requested);
+    try std.testing.expectEqual(.player, game.control_mode);
+    try std.testing.expectEqual(null, game.block_interaction.requested);
+    // Even an elapsed sample provided by a caller cannot advance paused timers.
+    fixture.engine.frame_delta = 120;
+    game.advanceWorldClock();
+    try std.testing.expectEqual(tick, game.world.?.simulation_tick);
+    try std.testing.expectEqual(fraction, game.fractional_ticks);
+    fixture.engine.setMenuOpen(false);
+    try std.testing.expect(!simulation.paused.load(.acquire));
+    game.advanceWorldClock();
+    try std.testing.expectEqual(tick, game.world.?.simulation_tick);
+    fixture.engine.frame_delta = 0.125;
+    game.advanceWorldClock();
+    try std.testing.expect(game.world.?.simulation_tick > tick);
+    // Future multiplayer sessions continue world timers and NPC admission.
+    fixture.engine.menu.pauses_game = false;
+    fixture.engine.setMenuOpen(true);
+    try std.testing.expect(!simulation.paused.load(.acquire));
+    fixture.engine.frame_delta = 1;
+    game.advanceWorldClock();
+    try std.testing.expect(game.world.?.simulation_tick > tick + transformations.ticks_per_second / 2);
 }
 
 test "held motion sampling uses actual active-camera movement and material selection preserves motion" {
@@ -2878,6 +2955,9 @@ const StreamingTest = struct {
         self.scene.camera = &self.camera;
         self.engine.active_scene = &self.scene;
         self.engine.time = 0;
+        self.engine.real_time = 0;
+        self.engine.menu = .{};
+        self.engine.callbacks = .{ .argument = &self.game, .onUpdate = null, .onRender = null, .onMenuChanged = onMenuChanged };
         self.engine.frame_delta = 0;
         self.input = .{
             .allocator = std.testing.allocator,
@@ -3706,13 +3786,19 @@ test "shutdown cannot save ahead of optimistic edits that have not been admitted
     try std.testing.expectEqual(@as(usize, 1), game.world.?.pending_operations.items.len);
     try std.testing.expectEqual(null, game.world.?.pending_operations.items[0].request_id);
     try std.testing.expectEqual(@as(u64, 0), game.world_client.?.last_operation_id);
-    game.beginExit();
+    fixture.engine.callbacks.onCloseRequest = onCloseRequest;
+    fixture.engine.setMenuOpen(true);
+    fixture.engine.exitFromMenu();
     try std.testing.expect(game.exit_requested);
+    try std.testing.expect(!fixture.engine.menu.open);
+    fixture.engine.setMenuOpen(true);
+    try std.testing.expect(!fixture.engine.menu.open);
     try std.testing.expectEqual(null, game.exit_intent);
     try std.testing.expectEqual(@as(u64, 0), service.persistenceStatus().intent_id);
     // Canceling this drain restores controls without discarding the intent.
     game.cancelExit();
     try std.testing.expect(!game.exit_requested);
+    try std.testing.expect(fixture.engine.menu.enabled);
     try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, game.heldMaterial().?);
     try std.testing.expect(game.block_interaction.pending != null);
     try std.testing.expectEqual(@as(usize, 1), game.world.?.pending_operations.items.len);
