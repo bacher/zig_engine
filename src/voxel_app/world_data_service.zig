@@ -2,6 +2,7 @@ pub const persistence = @import("persistence/coordinator.zig");
 const format = @import("persistence/format.zig");
 const storage = @import("persistence/storage.zig");
 const CompactionTask = @import("persistence/compaction.zig").Task;
+const save_lifecycle = @import("persistence/save_lifecycle.zig");
 const ChunkCoords = @import("engine").ChunkCoords;
 const std = @import("std");
 const Io = std.Io;
@@ -464,17 +465,10 @@ pub const WorldDataService = struct {
     watchdog_mutex: Io.Mutex = .init,
     watchdog_wake: Io.Event = .unset,
     watchdog_deadline: ?i96 = null,
-    dependency_retry_at: ?i96 = null,
-    dependency_auto_retried: bool = false,
-    unsaved_work: bool = false,
+    lifecycle: save_lifecycle.Lifecycle = .{},
     player_generation: u64 = 0,
     captured_player_generation: u64 = 0,
-    last_success_ns: i96 = 0,
     initial_tick: u64 = 0,
-    capture_cancel_requested: bool = false,
-    final_policy: bool = false,
-    queued_save: ?struct { id: u64, final: bool } = null,
-    save_fence_remaining: usize = 0,
     const Pending = struct { request: Request, since: i96 };
 
     /// Validate/prepare generation before starting the worker. The allocator must
@@ -520,7 +514,7 @@ pub const WorldDataService = struct {
         const read_capacity = try std.math.mul(usize, limits.pending_commands, 2);
         try self.waiting_reads.ensureTotalCapacityPrecise(allocator, read_capacity);
         try self.retry_reads.ensureTotalCapacityPrecise(allocator, read_capacity);
-        self.last_success_ns = persistence.now(io);
+        self.lifecycle.last_success_ns = persistence.now(io);
         if (store) |saved| {
             self.catalog = try saved.snapshotCatalog();
             self.initial_tick = try format.decodeGlobal(saved.global);
@@ -595,25 +589,33 @@ pub const WorldDataService = struct {
     }
     fn scheduleWatchdog(self: *WorldDataService) void {
         if (self.store == null) return;
-        var next: ?i96 = null;
-        if (self.unsaved_work and !self.status.overdue) next = self.last_success_ns + self.limits.overdue_ns;
-        if (self.source_holds.count() != 0 and !self.capture_cancel_requested and !self.final_policy and !self.status.overdue) {
-            const capture = self.status.capture_started_ns + self.limits.capture_wait_ns;
-            next = if (next) |current| @min(current, capture) else capture;
-            if (self.oldestPlayerWait()) |since| {
-                const player = since + self.limits.player_wait_ns;
-                next = if (next) |current| @min(current, player) else player;
-            }
-        }
-        if (self.dependency_retry_at) |retry| {
-            next = if (next) |current| @min(current, retry) else retry;
-        }
+        const next = self.lifecycle.nextDeadline(self.lifecycleDeadlines(), self.lifecycleDeadlineObservations());
         self.watchdog_mutex.lockUncancelable(self.io);
         if (self.watchdog_deadline != next) {
             self.watchdog_deadline = next;
             self.watchdog_wake.set(self.io);
         }
         self.watchdog_mutex.unlock(self.io);
+    }
+
+    fn lifecycleDeadlines(self: *const WorldDataService) save_lifecycle.Deadlines {
+        return .{ .capture_wait_ns = self.limits.capture_wait_ns, .player_wait_ns = self.limits.player_wait_ns, .overdue_ns = self.limits.overdue_ns };
+    }
+
+    fn lifecycleObservations(self: *WorldDataService) save_lifecycle.Observations {
+        return .{
+            .source_holds = self.source_holds.count(),
+            .pending_commands = self.pending.items.len,
+            .pending_reads = self.read_pending.count(),
+            .waiting_queries = self.waiting_reads.items.len,
+            .compactor_active = self.compactor != null,
+        };
+    }
+
+    fn lifecycleDeadlineObservations(self: *WorldDataService) save_lifecycle.Observations {
+        var observed = self.lifecycleObservations();
+        if (observed.source_holds != 0) observed.oldest_player_wait = self.oldestPlayerWait();
+        return observed;
     }
 
     pub fn createClient(self: *WorldDataService) !*Client {
@@ -693,7 +695,7 @@ pub const WorldDataService = struct {
             if (self.destroy_requested.load(.acquire) and !self.shutdown_started) {
                 self.shutdown_started = true;
                 self.is_shutting_down.store(true, .release);
-                self.queued_save = null;
+                self.lifecycle.queued = null;
                 self.compaction_requested = false;
                 if (self.job) |job| job.cancel();
                 if (self.compactor) |compactor| compactor.cancel();
@@ -873,17 +875,13 @@ pub const WorldDataService = struct {
     }
 
     fn isRetryableReadFailure(err: anyerror) bool {
-        return err == error.Io or err == error.OutOfMemory;
+        return save_lifecycle.Lifecycle.isRetryableReadFailure(err);
     }
 
     /// Select the command prefix before restarting reads: progress may resolve an
     /// operation immediately, so the fence must already belong to this attempt.
     fn requestSaveTransition(self: *WorldDataService, id: u64, final: bool) void {
-        if (self.queued_save != null and !final) return;
-        self.queued_save = .{ .id = id, .final = final };
-        self.save_fence_remaining = self.pending.items.len;
-        self.dependency_auto_retried = false;
-        self.dependency_retry_at = null;
+        if (self.lifecycle.request(.{ .id = id, .final = final }, self.pending.items.len) == .none) return;
         self.selectSaveDrain();
         self.retrySaveDrain();
     }
@@ -897,8 +895,7 @@ pub const WorldDataService = struct {
     }
 
     fn selectSaveDrain(self: *WorldDataService) void {
-        const save = self.queued_save orelse return;
-        if (self.job != null or self.status.intent_id == save.id) return;
+        const save = self.lifecycle.selectDrain() orelse return;
         self.status.intent_id = save.id;
         self.status.target_sequence = 0;
         self.status.phase = .capturing;
@@ -906,15 +903,19 @@ pub const WorldDataService = struct {
         self.status.error_name = null;
     }
 
+    fn reportAttemptPhase(self: *WorldDataService) void {
+        const attempt = self.lifecycle.active.?;
+        self.status.phase = switch (attempt.stage) {
+            .capturing => .capturing,
+            .writing => .writing,
+            .finalizing => if (attempt.intent.final) .compacting else .writing,
+        };
+    }
+
     fn noteDrainFailure(self: *WorldDataService, err: anyerror) void {
         self.selectSaveDrain();
         self.failPersistence(err);
-        const save = self.queued_save orelse return;
-        if (!save.final) return;
-        if (isRetryableReadFailure(err) and !self.dependency_auto_retried) {
-            if (self.dependency_retry_at == null) self.dependency_retry_at = persistence.now(self.io) + std.time.ns_per_s;
-            self.status.active = true;
-        } else self.dependency_retry_at = null;
+        if (self.lifecycle.dependencyFailed(err, persistence.now(self.io))) self.status.active = true;
     }
 
     fn retryReadFailures(self: *WorldDataService) void {
@@ -996,17 +997,7 @@ pub const WorldDataService = struct {
             },
             .save => |save| self.requestSaveTransition(save.id, save.final),
             .cancel_save => |id| {
-                if (self.queued_save) |save| if (save.id == id) {
-                    self.queued_save = null;
-                    self.dependency_retry_at = null;
-                };
-                if (self.status.intent_id == id) {
-                    self.final_policy = false;
-                    if (!self.status.overdue) if (self.job) |job| {
-                        job.cancel();
-                        self.capture_cancel_requested = true;
-                    };
-                }
+                if (self.lifecycle.cancel(id)) if (self.job) |job| job.cancel();
             },
             .compact => {
                 self.compaction_requested = true;
@@ -1112,7 +1103,7 @@ pub const WorldDataService = struct {
                     return;
                 }
                 if (result.status == .success) {
-                    self.unsaved_work = true;
+                    self.lifecycle.unsaved_work = true;
                     for (self.worker_state.road_changes.items) |id| {
                         if (id != position) self.publishMaterialChange(self.layout.decodeChunkId(id));
                     }
@@ -1182,7 +1173,7 @@ pub const WorldDataService = struct {
                 return;
             };
             self.player_generation +%= 1;
-            self.unsaved_work = true;
+            self.lifecycle.unsaved_work = true;
         }
         client.eligible_checkpoint = null;
     }
@@ -1197,7 +1188,7 @@ pub const WorldDataService = struct {
     }
     fn beginCompaction(self: *WorldDataService) !void {
         const store = self.store orelse return;
-        if (!self.compaction_requested or self.compactor != null or self.final_policy) return;
+        if (!self.compaction_requested or self.compactor != null or self.lifecycle.finalPolicy()) return;
         const task = try self.allocator.create(CompactionTask);
         errdefer self.allocator.destroy(task);
         task.* = .{ .allocator = self.allocator, .io = self.io, .store = store, .store_mutex = &self.store_mutex, .notify = .{ .context = self, .send = notifyCompaction } };
@@ -1238,6 +1229,7 @@ pub const WorldDataService = struct {
             self.status.live_rejections = stats.rejections;
         }
         self.scheduleWatchdog();
+        self.status.overdue = self.lifecycle.overdue;
         self.status.pending_commands = self.pending.items.len;
         self.status.resident_chunks = self.worker_state.modified_chunks.count();
         self.status.source_count = self.source_holds.count();
@@ -1263,7 +1255,7 @@ pub const WorldDataService = struct {
             if (self.job) |job| job.prioritize(ids.ids[0..ids.count]);
             return false;
         };
-        return !self.status.overdue;
+        return !self.lifecycle.overdue;
     }
 
     const Dependencies = struct { ids: [27]u32, count: usize };
@@ -1283,16 +1275,10 @@ pub const WorldDataService = struct {
     fn retryPending(self: *WorldDataService) void {
         while (true) {
             self.selectSaveDrain();
-            if (self.queued_save) |save| {
-                // A preceding writer may have been the last source of wakes.
-                // Revisit retained query failures when this drain takes over.
-                if (save.final and self.job == null and self.read_pending.count() == 0 and self.waiting_reads.items.len != 0) self.retryWaitingReads();
-                const ready = self.job == null and self.save_fence_remaining == 0 and (!save.final or (self.read_pending.count() == 0 and self.waiting_reads.items.len == 0 and self.compactor == null));
-                if (ready) {
-                    self.queued_save = null;
-                    self.beginCapture(save.id, save.final) catch |err| self.failPersistence(err);
-                }
-            }
+            // A preceding writer may have been the last source of wakes.
+            // Revisit retained query failures when this drain takes over.
+            if (self.lifecycle.needsQueryRecheck(self.lifecycleObservations())) self.retryWaitingReads();
+            if (self.lifecycle.takeReady(self.lifecycleObservations())) |save| self.beginCapture(save.id, save.final) catch |err| self.failPersistence(err);
             if (self.pending.items.len == 0) break;
             self.blocked_dependency_error = null;
             if (!self.dependenciesReady(self.pending.items[0].request)) {
@@ -1305,7 +1291,7 @@ pub const WorldDataService = struct {
             self.processAdmitted(pending.request);
             self.processing_since = null;
             if (self.operation_deferred or self.read_discovered) break;
-            if (self.save_fence_remaining != 0) self.save_fence_remaining -= 1;
+            self.lifecycle.commandResolved();
         }
     }
 
@@ -1471,17 +1457,17 @@ pub const WorldDataService = struct {
         errdefer self.source_holds.clearRetainingCapacity();
         try job.start();
         self.job = job;
-        self.final_policy = final;
-        self.capture_cancel_requested = false;
+        const started = persistence.now(self.io);
+        self.lifecycle.started(.{ .id = intent, .final = final }, job.epoch, started);
         self.captured_player_generation = self.player_generation;
         self.simulation_paused.store(frozen.len != 0, .release);
         self.status.intent_id = intent;
-        self.status.phase = .capturing;
+        self.reportAttemptPhase();
         self.status.active = true;
         self.status.target_sequence = job.sequence;
         self.status.tick = job.tick;
         self.status.error_name = null;
-        self.status.capture_started_ns = persistence.now(self.io);
+        self.status.capture_started_ns = started;
         self.status.sources_released_ns = 0;
         self.status.source_bytes = 0;
         for (frozen) |source| self.status.source_bytes += source.pinnedBytes();
@@ -1502,25 +1488,24 @@ pub const WorldDataService = struct {
                 self.retryPending();
             },
             .encoded => |epoch| {
-                if (epoch != job.epoch) return;
-                self.status.phase = .writing;
+                if (!self.lifecycle.encoded(epoch)) return;
+                self.reportAttemptPhase();
                 self.status.progress_generation +%= 1;
             },
             .committed => |epoch| {
-                if (epoch != job.epoch) return;
+                const committed_at = persistence.now(self.io);
+                if (!self.lifecycle.committed(epoch, committed_at)) return;
                 self.status.durable_sequence = job.sequence;
                 self.status.sequence = job.sequence;
-                self.status.wal_committed_ns = persistence.now(self.io);
-                self.last_success_ns = self.status.wal_committed_ns;
-                self.status.overdue = false;
+                self.status.wal_committed_ns = committed_at;
                 for (job.sources) |source| self.wal_revisions.putAssumeCapacity(source.id, source.revision);
-                self.unsaved_work = self.player_generation != self.captured_player_generation;
+                self.lifecycle.unsaved_work = self.player_generation != self.captured_player_generation;
                 var live = self.worker_state.modified_chunks.iterator();
                 while (live.next()) |entry| if (self.wal_revisions.get(entry.key_ptr.*) != entry.value_ptr.chunk_revision) {
-                    self.unsaved_work = true;
+                    self.lifecycle.unsaved_work = true;
                     break;
                 };
-                if (job.final) self.status.phase = .compacting;
+                if (job.final) self.reportAttemptPhase();
                 self.status.progress_generation +%= 1;
             },
             .compacted => |epoch| {
@@ -1546,6 +1531,7 @@ pub const WorldDataService = struct {
                 self.status.output_peak_bytes = job.peak_bytes;
                 self.status.output_bytes = 0;
                 self.job = null;
+                const completion = self.lifecycle.finished(finished.epoch, finished.failure).?;
                 job.deinit();
                 self.status.active = false;
                 self.status.retained_base_mismatch_chunks = 0;
@@ -1553,9 +1539,12 @@ pub const WorldDataService = struct {
                 while (retained.next()) |entry| {
                     if (entry.value_ptr.chunk_revision != 0 and self.base_revisions.get(entry.key_ptr.*) != entry.value_ptr.chunk_revision) self.status.retained_base_mismatch_chunks += 1;
                 }
-                self.final_policy = false;
                 if (self.compaction_requested) self.beginCompaction() catch |err| self.failPersistence(err);
-                if (finished.failure) |err| self.failPersistence(err) else self.status.phase = .complete;
+                switch (completion.outcome) {
+                    .complete => self.status.phase = .complete,
+                    .canceled => |err| self.failPersistence(err),
+                    .failed => |err| self.failPersistence(err),
+                }
                 self.status.progress_generation +%= 1;
                 self.retryPending();
             },
@@ -1569,28 +1558,20 @@ pub const WorldDataService = struct {
 
     fn checkWatchdog(self: *WorldDataService) void {
         const at = persistence.now(self.io);
-        if (self.dependency_retry_at) |retry| if (at >= retry) {
-            self.dependency_retry_at = null;
-            self.dependency_auto_retried = true;
-            self.retrySaveDrain();
-        };
-        if (self.unsaved_work and at - self.last_success_ns >= self.limits.overdue_ns) self.status.overdue = true;
+        if (self.lifecycle.takeDueRetry(at) == .retry_dependencies) self.retrySaveDrain();
         if (self.job) |job| {
             job.mutex.lockUncancelable(self.io);
             self.status.output_bytes = job.output_bytes;
             self.status.output_peak_bytes = job.peak_bytes;
             job.mutex.unlock(self.io);
-            if (self.source_holds.count() != 0 and !self.capture_cancel_requested and !self.final_policy and !self.status.overdue) {
-                const capture_expired = at - self.status.capture_started_ns >= self.limits.capture_wait_ns;
-                const player_expired = if (self.oldestPlayerWait()) |since| at - since >= self.limits.player_wait_ns else false;
-                if (capture_expired or player_expired) {
-                    self.capture_cancel_requested = true;
-                    job.cancel();
-                }
-            }
-        } else if (self.status.overdue and self.queued_save == null and self.pending.items.len == 0) {
-            const intent = self.next_intent.fetchAdd(1, .monotonic);
-            self.beginCapture(intent, false) catch |err| self.failPersistence(err);
+        }
+        switch (self.lifecycle.watchdog(at, self.lifecycleDeadlines(), self.lifecycleDeadlineObservations())) {
+            .none => {},
+            .cancel_capture => self.job.?.cancel(),
+            .start_overdue => {
+                const intent = self.next_intent.fetchAdd(1, .monotonic);
+                self.beginCapture(intent, false) catch |err| self.failPersistence(err);
+            },
         }
     }
 
@@ -1834,7 +1815,7 @@ pub const WorldDataService = struct {
             self.timer_cursor = id +% 1;
             const coords = self.layout.decodeChunkId(id);
             if (self.worker_state.transformChunk(self.allocator, coords)) {
-                self.unsaved_work = true;
+                self.lifecycle.unsaved_work = true;
                 self.publishMaterialChange(coords);
             }
         }
@@ -4244,17 +4225,16 @@ test "synchronous dependency preparation OOM schedules bounded final retry" {
         .worker = undefined,
         .worker_state = .{ .layout = &f.layout, .generator = undefined },
         .catalog = try f.store.snapshotCatalog(),
-        .queued_save = .{ .id = 11, .final = true },
+        .lifecycle = .{ .queued = .{ .intent = .{ .id = 11, .final = true }, .fence_remaining = 0 } },
     };
     defer service.catalog.?.deinit();
     try std.testing.expect(!service.requireBase(f.layout.encodeChunkCoords(.{ 0, 0, 1 })));
     try std.testing.expectEqual(@as(u64, 11), service.status.intent_id);
     try std.testing.expect(service.status.active);
-    try std.testing.expect(service.dependency_retry_at != null);
+    try std.testing.expect(service.lifecycle.queued.?.retry == .scheduled);
     try std.testing.expectEqualStrings("OutOfMemory", service.status.error_name.?);
-    service.dependency_auto_retried = true;
-    service.dependency_retry_at = null;
+    service.lifecycle.queued.?.retry = .exhausted;
     try std.testing.expect(!service.requireBase(f.layout.encodeChunkCoords(.{ 0, 0, 1 })));
     try std.testing.expect(!service.status.active);
-    try std.testing.expect(service.dependency_retry_at == null);
+    try std.testing.expect(service.lifecycle.queued.?.retry == .exhausted);
 }
