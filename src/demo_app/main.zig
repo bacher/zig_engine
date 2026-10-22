@@ -23,8 +23,15 @@ const zgui_utils = @import("engine").zgui_utils;
 
 const Game = struct {
     allocator: std.mem.Allocator,
+    menu_open: bool = false,
     saved_game_objects: std.StringHashMapUnmanaged(*GameObject) = .empty,
     saved_game_object_groups: std.StringHashMapUnmanaged(*GameObjectGroup) = .empty,
+
+    fn setMenuOpen(game: *Game, engine: *Engine, open: bool) void {
+        game.menu_open = open;
+        engine.setPaused(open);
+        engine.setGameplayInputBlocked(open);
+    }
 
     pub fn init(allocator: std.mem.Allocator) !*Game {
         const game = try allocator.create(Game);
@@ -82,6 +89,7 @@ pub fn main(init: std.process.Init) !void {
             .argument = game,
             .onUpdate = onUpdate,
             .onRender = onRender,
+            .onUIKeyPress = onUIKeyPress,
         },
     );
     defer engine.deinit();
@@ -314,10 +322,37 @@ fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
     // }
 }
 
+fn onUIKeyPress(engine: *Engine, params: @import("engine").KeyParams, game_opaque: *anyopaque) bool {
+    if (params.key != .escape or !engine.input_controller.focused) return false;
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
+    game.setMenuOpen(engine, !game.menu_open);
+    return true;
+}
+
 fn onRender(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
-    _ = engine;
     _ = pass;
-    _ = game_opaque;
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
+    if (!game.menu_open) return;
+    const screen = zgui.io.getDisplaySize();
+    zgui.getBackgroundDrawList().addRectFilled(.{
+        .pmin = .{ 0, 0 },
+        .pmax = screen,
+        .col = zgui.colorConvertFloat4ToU32(.{ 0, 0, 0, 0.5 }),
+    });
+    const scale = zgui.getStyle().font_scale_dpi;
+    zgui.setNextWindowPos(.{ .x = screen[0] / 2, .y = screen[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
+    zgui.setNextWindowFocus();
+    _ = zgui.begin("Demo menu", .{ .flags = .{
+        .always_auto_resize = true,
+        .no_title_bar = true,
+        .no_move = true,
+        .no_resize = true,
+        .no_collapse = true,
+        .no_saved_settings = true,
+    } });
+    defer zgui.end();
+    if (zgui.button("Resume", .{ .w = 200 * scale, .h = 40 * scale })) game.setMenuOpen(engine, false);
+    if (zgui.button("Exit", .{ .w = 200 * scale, .h = 40 * scale })) engine.requestExit();
 }
 
 const GAPS: [8][]const u8 = .{

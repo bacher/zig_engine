@@ -61,6 +61,8 @@ const DEBUG = true;
 const CHUNK_LOAD_RADIUS = 3;
 const BLOCK_LOAD_RADIUS = 1;
 
+const menu = @import("menu.zig");
+
 const Game = struct {
     const MeshVersion = struct { chunk_revision: u64, mesh_revision: u64 };
     const BoundarySnapshot = struct { masks: world_engine.BoundaryMasks, mesh_revision: u64 };
@@ -74,6 +76,9 @@ const Game = struct {
     player_id: u64 = 1,
     next_autosave_at: f64 = 60,
     next_compaction_at: f64 = 600,
+    menu_open: bool = false,
+    /// Future multiplayer sessions leave simulation running behind the menu.
+    menu_pauses_game: bool = true,
     exit_requested: bool = false,
     exit_intent: ?u64 = null,
     close_ready: bool = false,
@@ -123,6 +128,21 @@ const Game = struct {
     saved_game_objects: std.StringHashMapUnmanaged(*GameObject) = .empty,
     saved_game_object_groups: std.StringHashMapUnmanaged(*GameObjectGroup) = .empty,
 
+    fn setMenuOpen(game: *Game, open: bool) void {
+        if (game.exit_requested or open == game.menu_open) return;
+        game.menu_open = open;
+        game.engine.setPaused(open and game.menu_pauses_game);
+        game.engine.setGameplayInputBlocked(open);
+    }
+
+    fn handleMenuAction(game: *Game, action: menu.Action) void {
+        if (!game.menu_open) return;
+        switch (action) {
+            .resume_game => game.setMenuOpen(false),
+            .exit_game => game.engine.requestExit(),
+        }
+    }
+
     fn heldMaterial(game: *const Game) ?voxel_chunk_module.BlockType {
         if (game.control_mode == .player) return game.block_interaction.inventory;
         return if (game.block_mode == .putting) game.selected_material else null;
@@ -144,7 +164,7 @@ const Game = struct {
             .look_angles = if (spectator) .{ scene.spectator_camera.yaw, scene.spectator_camera.pitch } else if (player) |p| .{ p.yaw, p.pitch } else .{ 0, 0 },
             .grounded = !spectator and if (player) |p| p.grounded else false,
             .gait_enabled = spectator or if (player) |p| p.grounded and p.climb == null else false,
-            .active = input.focused and !input.focus_changed and !game.engine.menu.open and !game.exit_requested,
+            .active = input.focused and !input.focus_changed and !game.engine.gameplay_input_blocked and !game.exit_requested,
         }, game.engine.frame_delta);
     }
 
@@ -212,14 +232,14 @@ const Game = struct {
         const has_new_chunks = game.receiveChunks();
         // Synchronize blocks first, then resolve local movement against that cache.
         // Player input remains independent of mesh work and GPU upload capacity.
-        if (!game.exit_requested and !game.engine.menu.open) {
+        if (!game.exit_requested and !game.engine.paused and !game.engine.gameplay_input_blocked) {
             if (game.player != null) game.updatePlayer(has_new_chunks);
             game.updateBlockTool();
         }
         game.flushBlockOperations();
         game.updatePersistence();
         game.updateChunksAroundCamera(has_new_chunks);
-        if (!game.engine.menu.open) game.updateBlockFocus();
+        if (!game.engine.gameplay_input_blocked) game.updateBlockFocus();
         game.rebuildDirtyChunks();
         const grid = game.engine.active_scene.?.voxel_grid;
         if (!grid.hasUploadCapacity() and game.render_radius > 2) {
@@ -237,7 +257,7 @@ const Game = struct {
     }
 
     fn advanceWorldClock(game: *Game) void {
-        if (!game.exit_requested and !game.engine.gameplayPaused() and std.math.isFinite(game.engine.frame_delta) and game.engine.frame_delta > 0) {
+        if (!game.exit_requested and !game.engine.paused and std.math.isFinite(game.engine.frame_delta) and game.engine.frame_delta > 0) {
             game.fractional_ticks += game.engine.frame_delta * @as(f64, @floatFromInt(transformations.ticks_per_second));
             const ticks: transformations.Tick = @intFromFloat(@floor(game.fractional_ticks));
             game.fractional_ticks -= @as(f64, @floatFromInt(ticks));
@@ -305,8 +325,9 @@ const Game = struct {
     fn beginExit(game: *Game) void {
         if (game.exit_requested) return;
         game.exit_requested = true;
-        game.engine.menu.enabled = false;
-        game.engine.setMenuOpen(false);
+        game.menu_open = false;
+        game.engine.setPaused(true);
+        game.engine.setGameplayInputBlocked(true);
         game.block_interaction.cancelHold();
         // Quiesce NPC admission before the final save can enter the service queue.
         // Already admitted NPC commands precede that save; later ones await resume.
@@ -317,7 +338,6 @@ const Game = struct {
         game.updatePersistence();
         game.exit_progress = 0;
         game.exit_progress_at = game.engine.real_time;
-        game.engine.input_controller.cursor_capture = .never;
         game.engine.active_scene.?.spectator_enabled = false;
         game.jump_requested = false;
         if (game.player) |*player| player.resetJumpInput();
@@ -328,8 +348,8 @@ const Game = struct {
         game.exit_intent = null;
         game.exit_requested = false;
         game.close_ready = false;
-        game.engine.menu.enabled = true;
-        game.engine.input_controller.cursor_capture = .always;
+        game.engine.setPaused(false);
+        game.engine.setGameplayInputBlocked(false);
         game.engine.active_scene.?.spectator_enabled = game.control_mode == .spectator;
         if (game.simulation) |simulation| simulation.resumeDispatch();
     }
@@ -1146,12 +1166,14 @@ pub fn main(init: std.process.Init) !void {
             .onUpdate = onUpdate,
             .onRender = onRender,
             .onRenderOverlay3D = onRenderOverlay3D,
+            .onUIKeyPress = onUIKeyPress,
             .onKeyPress = onKeyPress,
             .onKeyRelease = onKeyRelease,
             .onMouseButtonPress = onMouseButtonPress,
             .onMouseButtonRelease = onMouseButtonRelease,
             .onCloseRequest = onCloseRequest,
-            .onMenuChanged = onMenuChanged,
+            .onPauseChanged = onPauseChanged,
+            .onGameplayInputChanged = onGameplayInputChanged,
         },
     );
     game.engine = engine;
@@ -1323,18 +1345,22 @@ fn onCloseRequest(_: *Engine, game_opaque: *anyopaque) bool {
     return false;
 }
 
-fn onMenuChanged(engine: *Engine, game_opaque: *anyopaque) void {
+fn onGameplayInputChanged(engine: *Engine, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
     game.block_interaction.loseFocus();
     game.tool_commands.clearRetainingCapacity();
     game.jump_requested = false;
     if (game.player) |*player| {
         player.resetJumpInput();
-        if (!engine.menu.open) player.terrainChanged();
+        if (!engine.gameplay_input_blocked) player.terrainChanged();
     }
     game.clearBlockFocus();
+}
+
+fn onPauseChanged(engine: *Engine, game_opaque: *anyopaque) void {
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
     if (game.simulation) |simulation| {
-        if (engine.gameplayPaused() or game.exit_requested) simulation.pauseDispatch() else simulation.resumeDispatch();
+        if (engine.paused or game.exit_requested) simulation.pauseDispatch() else simulation.resumeDispatch();
     }
 }
 
@@ -1362,8 +1388,20 @@ fn onKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque) v
     handleKeyPress(game, key_params);
 }
 
+fn onUIKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque) bool {
+    if (!engine.input_controller.focused) return false;
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
+    return handleUIKeyPress(game, key_params);
+}
+
+fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
+    if (key_params.key != .escape) return false;
+    game.setMenuOpen(!game.menu_open);
+    return true;
+}
+
 fn handleKeyPress(game: *Game, key_params: KeyParams) void {
-    if (game.exit_requested or game.engine.menu.open) return;
+    if (game.exit_requested or game.engine.gameplay_input_blocked) return;
     switch (key_params.key) {
         .x => if (game.control_mode == .spectator) game.queueBlockAction(.remove),
         .e => if (!key_params.mods.control) {
@@ -1419,7 +1457,7 @@ fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams, game_opaque: *
 }
 
 fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
-    if (game.exit_requested or game.engine.menu.open) return;
+    if (game.exit_requested or game.engine.gameplay_input_blocked) return;
     if (game.control_mode == .player) {
         if (params.button == .left) game.block_interaction.press(.mouse);
         return;
@@ -1452,11 +1490,12 @@ fn onRenderOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque:
 
 fn onRender(engine: *Engine, _: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
-    if (!engine.menu.open) {
+    if (!game.menu_open) {
         block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
         drawCrosshair();
     }
     drawPersistence(game);
+    if (game.menu_open) if (menu.draw(engine.paused)) |action| game.handleMenuAction(action);
 }
 
 fn drawPersistence(game: *Game) void {
@@ -1510,12 +1549,23 @@ test "menu cancels pending controls and pauses world time and background simulat
     handleKeyPress(game, .{ .key = .e, .mods = .{} });
     game.updateBlockTool();
     try std.testing.expect(game.block_interaction.holding != null);
+    // Pausing alone gates simulation without opening UI or canceling controls.
+    fixture.engine.setPaused(true);
+    try std.testing.expect(simulation.paused.load(.acquire));
+    try std.testing.expect(!game.menu_open);
+    try std.testing.expect(!fixture.engine.gameplay_input_blocked);
+    try std.testing.expect(game.block_interaction.holding != null);
+    fixture.engine.setPaused(false);
+    try std.testing.expect(!simulation.paused.load(.acquire));
     game.jump_requested = true;
     fixture.engine.frame_delta = 0.125;
     game.advanceWorldClock();
     const tick = game.world.?.simulation_tick;
     const fraction = game.fractional_ticks;
-    fixture.engine.setMenuOpen(true);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expect(game.menu_open);
+    try std.testing.expect(fixture.engine.paused);
+    try std.testing.expect(fixture.engine.gameplay_input_blocked);
     try std.testing.expect(simulation.paused.load(.acquire));
     try std.testing.expectEqual(null, game.block_interaction.holding);
     try std.testing.expect(!game.jump_requested);
@@ -1530,7 +1580,7 @@ test "menu cancels pending controls and pauses world time and background simulat
     game.advanceWorldClock();
     try std.testing.expectEqual(tick, game.world.?.simulation_tick);
     try std.testing.expectEqual(fraction, game.fractional_ticks);
-    fixture.engine.setMenuOpen(false);
+    game.handleMenuAction(.resume_game);
     try std.testing.expect(!simulation.paused.load(.acquire));
     game.advanceWorldClock();
     try std.testing.expectEqual(tick, game.world.?.simulation_tick);
@@ -1538,12 +1588,26 @@ test "menu cancels pending controls and pauses world time and background simulat
     game.advanceWorldClock();
     try std.testing.expect(game.world.?.simulation_tick > tick);
     // Future multiplayer sessions continue world timers and NPC admission.
-    fixture.engine.menu.pauses_game = false;
-    fixture.engine.setMenuOpen(true);
+    game.menu_pauses_game = false;
+    handleKeyPress(game, .{ .key = .e, .mods = .{} });
+    game.jump_requested = true;
+    try game.tool_commands.append(game.allocator, .remove);
+    const frame_delta = fixture.engine.frame_delta;
+    game.setMenuOpen(true);
+    try std.testing.expect(!fixture.engine.paused);
+    try std.testing.expect(fixture.engine.gameplay_input_blocked);
+    try std.testing.expectEqual(null, game.block_interaction.requested);
+    try std.testing.expect(!game.jump_requested);
+    try std.testing.expectEqual(0, game.tool_commands.items.len);
+    try std.testing.expectEqual(frame_delta, fixture.engine.frame_delta);
     try std.testing.expect(!simulation.paused.load(.acquire));
     fixture.engine.frame_delta = 1;
     game.advanceWorldClock();
     try std.testing.expect(game.world.?.simulation_tick > tick + transformations.ticks_per_second / 2);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expect(!game.menu_open);
+    try std.testing.expect(!fixture.engine.gameplay_input_blocked);
+    try std.testing.expectEqual(1, fixture.engine.frame_delta);
 }
 
 test "held motion sampling uses actual active-camera movement and material selection preserves motion" {
@@ -1728,6 +1792,7 @@ test "crosshair and fonts follow DPI changes without accumulating style rounding
 }
 
 test {
+    _ = menu;
     _ = world_module;
     _ = world_generator;
     _ = world_data_service;
@@ -2956,8 +3021,9 @@ const StreamingTest = struct {
         self.engine.active_scene = &self.scene;
         self.engine.time = 0;
         self.engine.real_time = 0;
-        self.engine.menu = .{};
-        self.engine.callbacks = .{ .argument = &self.game, .onUpdate = null, .onRender = null, .onMenuChanged = onMenuChanged };
+        self.engine.paused = false;
+        self.engine.gameplay_input_blocked = false;
+        self.engine.callbacks = .{ .argument = &self.game, .onUpdate = null, .onRender = null, .onPauseChanged = onPauseChanged, .onGameplayInputChanged = onGameplayInputChanged };
         self.engine.frame_delta = 0;
         self.input = .{
             .allocator = std.testing.allocator,
@@ -3787,18 +3853,19 @@ test "shutdown cannot save ahead of optimistic edits that have not been admitted
     try std.testing.expectEqual(null, game.world.?.pending_operations.items[0].request_id);
     try std.testing.expectEqual(@as(u64, 0), game.world_client.?.last_operation_id);
     fixture.engine.callbacks.onCloseRequest = onCloseRequest;
-    fixture.engine.setMenuOpen(true);
-    fixture.engine.exitFromMenu();
+    game.setMenuOpen(true);
+    game.handleMenuAction(.exit_game);
     try std.testing.expect(game.exit_requested);
-    try std.testing.expect(!fixture.engine.menu.open);
-    fixture.engine.setMenuOpen(true);
-    try std.testing.expect(!fixture.engine.menu.open);
+    try std.testing.expect(!game.menu_open);
+    game.setMenuOpen(true);
+    try std.testing.expect(!game.menu_open);
     try std.testing.expectEqual(null, game.exit_intent);
     try std.testing.expectEqual(@as(u64, 0), service.persistenceStatus().intent_id);
     // Canceling this drain restores controls without discarding the intent.
     game.cancelExit();
     try std.testing.expect(!game.exit_requested);
-    try std.testing.expect(fixture.engine.menu.enabled);
+    try std.testing.expect(!fixture.engine.paused);
+    try std.testing.expect(!fixture.engine.gameplay_input_blocked);
     try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, game.heldMaterial().?);
     try std.testing.expect(game.block_interaction.pending != null);
     try std.testing.expectEqual(@as(usize, 1), game.world.?.pending_operations.items.len);

@@ -95,31 +95,6 @@ pub fn beginFrame(window: *zglfw.Window) void {
     // zgui.showDemoWindow(null);
 }
 
-pub fn drawInGameMenu(engine: *Engine) void {
-    if (!engine.menu.open) return;
-    const screen = zgui.io.getDisplaySize();
-    if (engine.gameplayPaused()) {
-        zgui.getBackgroundDrawList().addRectFilled(.{
-            .pmin = .{ 0, 0 },
-            .pmax = screen,
-            .col = zgui.colorConvertFloat4ToU32(.{ 0, 0, 0, 0.5 }),
-        });
-    }
-    const scale = zgui.getStyle().font_scale_dpi;
-    zgui.setNextWindowPos(.{ .x = screen[0] / 2, .y = screen[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
-    _ = zgui.begin("Game menu", .{ .flags = .{
-        .always_auto_resize = true,
-        .no_title_bar = true,
-        .no_move = true,
-        .no_resize = true,
-        .no_collapse = true,
-        .no_saved_settings = true,
-    } });
-    defer zgui.end();
-    if (zgui.button("Resume", .{ .w = 200 * scale, .h = 40 * scale })) engine.setMenuOpen(false);
-    if (zgui.button("Exit", .{ .w = 200 * scale, .h = 40 * scale })) engine.exitFromMenu();
-}
-
 pub fn drawDebugWindow(engine: *const Engine) void {
     _ = zgui.begin("Debug", .{
         .flags = .{
@@ -174,56 +149,4 @@ test "GUI layout scale accounts for framebuffer density on Retina and scaled des
     try std.testing.expectEqualDeep([2]f32{ 2, 2 }, layoutScale(.{ 2, 2 }, .{ 1280, 800 }, .{ 1280, 800 }));
     try std.testing.expectEqualDeep([2]f32{ 1, 1 }, layoutScale(.{ 1, 1 }, .{ 1280, 800 }, .{ 1280, 800 }));
     try std.testing.expectEqualDeep([2]f32{ 1, 1 }, layoutScale(.{ 2, 2 }, .{ 0, 0 }, .{ 0, 0 }));
-}
-
-test "menu buttons resume and request asynchronous exit at normal and Retina density" {
-    const Probe = struct {
-        close_requests: usize = 0,
-        fn close(_: *Engine, argument: *anyopaque) bool {
-            const self: *@This() = @ptrCast(@alignCast(argument));
-            self.close_requests += 1;
-            return false;
-        }
-        fn frame(engine: *Engine) void {
-            zgui.newFrame();
-            drawInGameMenu(engine);
-            zgui.render();
-        }
-    };
-    zgui.init(std.testing.allocator);
-    defer zgui.deinit();
-    zgui.io.setIniFilename(null);
-    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
-    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
-    var probe: Probe = .{};
-    var input: @import("input_controller.zig").InputController(Engine) = undefined;
-    input.cursor_capture = .always;
-    var engine: Engine = undefined;
-    engine.input_controller = &input;
-    engine.callbacks = .{ .argument = &probe, .onUpdate = null, .onRender = null, .onCloseRequest = Probe.close };
-    for ([_]f32{ 1, 2 }) |density| {
-        input.cursor_capture = .always;
-        engine.menu = .{};
-        engine.setMenuOpen(true);
-        zgui.io.setDisplaySize(1280, 820);
-        zgui.io.setDisplayFramebufferScale(density, density);
-        for (0..3) |_| Probe.frame(&engine);
-        zgui.io.addMousePositionEvent(640, 388);
-        Probe.frame(&engine);
-        zgui.io.addMouseButtonEvent(.left, true);
-        Probe.frame(&engine);
-        zgui.io.addMouseButtonEvent(.left, false);
-        Probe.frame(&engine);
-        try std.testing.expect(!engine.menu.open);
-        try std.testing.expectEqual(.always, input.cursor_capture);
-        engine.setMenuOpen(true);
-        for (0..3) |_| Probe.frame(&engine);
-        zgui.io.addMousePositionEvent(640, 432);
-        Probe.frame(&engine);
-        zgui.io.addMouseButtonEvent(.left, true);
-        Probe.frame(&engine);
-        zgui.io.addMouseButtonEvent(.left, false);
-        Probe.frame(&engine);
-        try std.testing.expectEqual(@as(usize, @intFromFloat(density)), probe.close_requests);
-    }
 }
