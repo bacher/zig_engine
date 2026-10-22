@@ -85,10 +85,21 @@ pub fn zguiDeinit() void {
 pub fn beginFrame(window: *zglfw.Window) void {
     updateDpi(window);
     if (@import("builtin").os.tag == .macos) {
+        // zgui.backend.newFrame(fb_width, fb_height) prepares WGPU and GLFW, then
+        // overwrites GLFW's DisplaySize with framebuffer pixels and forces
+        // DisplayFramebufferScale to 1 before starting the core ImGui frame.
+        // On Retina, GLFW mouse positions are in logical window units: e.g.
+        // a 1280x820 window has a 2560x1640 framebuffer but its mouse center is
+        // (640, 410). The overwrite makes rendered widgets and hit tests disagree.
+        // Prepare both backends directly to retain GLFW's logical display size
+        // and 2x framebuffer scale. zgui.newFrame() starts only the core ImGui
+        // frame, so it must follow the two backend calls rather than replace them.
         ImGui_ImplWGPU_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         zgui.newFrame();
     } else {
+        // This existing path does not fix zgui's separate content-scale mouse
+        // multiplication on Windows; Retina framebuffer density is a different issue.
         const size = window.getFramebufferSize();
         zgui.backend.newFrame(@intCast(@max(0, size[0])), @intCast(@max(0, size[1])));
     }
