@@ -482,7 +482,7 @@ pub const Scene = struct {
 
             // Time dependant update logic
 
-            if (scene.spectator_enabled and scene.engine.input_controller.focused and
+            if (scene.spectator_enabled and !scene.engine.paused and !scene.engine.gameplay_input_blocked and scene.engine.input_controller.focused and
                 !scene.engine.input_controller.focus_changed)
             {
                 scene.spectator_camera.update(time_passed);

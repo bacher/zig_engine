@@ -105,7 +105,7 @@ The default scene has a spectator controller:
 | A / D | Strafe left/right. Horizontal diagonal input is normalized. |
 | Space / C | Move along world +Z / -Z. |
 | Move mouse | Change yaw/pitch without holding a button; pitch stops at +/-90 degrees. The cursor stays captured while the window is focused. |
-| Escape | Leave the engine loop. |
+| Escape | Open or close the in-game menu (Resume / Exit); pause single-player gameplay. |
 | Ctrl+E | Toggle SSAO; exits SSAO debug mode if it was active. |
 | Ctrl+R | Toggle SSAO debug display, enabling SSAO when entering it. |
 | B | Toggle SSAO blur. |
@@ -116,7 +116,7 @@ The default scene has a spectator controller:
 
 Movement uses a base speed of 5 world units per second and elapsed frame time. There is no collision, gravity, or terrain constraint in `SpectatorCamera`; it can move through solid terrain.
 
-`InputController` retains held keys. Press/repeat events update that state, but the application key-press callback fires only for a press. Released keys are excluded from held-key queries immediately and removed from storage at frame end. Press edges survive a same-frame release, so short Escape taps still exit. Held mouse state is polled each frame; mouse press callbacks run in arrival order, including complete clicks between frames. The voxel app queues keyboard and mouse tool commands together, captures the selected material for each placement, and drains every command after the current camera update. Cursor capture can follow the left button or remain enabled continuously; supported platforms use raw mouse motion while captured. Capture/focus transitions reset cursor deltas, and focus loss clears held keys.
+`InputController` retains held keys. Press/repeat events update that state, but the application key-press callback fires only for a press. Released keys are excluded from held-key queries immediately and removed from storage at frame end. Press edges survive a same-frame release, so short taps remain visible to frame-based consumers. The application handles Escape through `onUIKeyPress`, which runs before gameplay filtering and can consume the event even while gameplay input is blocked; repeats do not toggle the menu. The menu releases cursor capture and blocks gameplay presses, player movement, and spectator movement. Resume or another Escape restores capture and clears pending tool/jump input. Pausing is separate from blocking input: single-player pause transitions discard the transition frame interval, while future multiplayer menu transitions preserve simulation time. Single-player gameplay time, block timers, and simulation dispatch pause while rendering and asynchronous persistence continue. Exit uses the same close callback as the window close button. Held mouse state is polled each frame; mouse press callbacks run in arrival order, including complete clicks between frames. The voxel app queues keyboard and mouse tool commands together, captures the selected material for each placement, and drains every command after the current camera update. Cursor capture can follow the left button or remain enabled continuously; supported platforms use raw mouse motion while captured. Capture/focus transitions reset cursor deltas, and focus loss clears held keys.
 
 ## Player controls and timing
 

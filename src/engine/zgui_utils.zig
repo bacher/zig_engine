@@ -31,6 +31,26 @@ pub const DpiScaling = struct {
 // zgui owns a single context shared by the engine and application overlays.
 var dpi_scaling: DpiScaling = undefined;
 
+// Retain GLFW's matching display size, framebuffer density, and mouse units on Retina.
+extern fn ImGui_ImplWGPU_NewFrame() void;
+extern fn ImGui_ImplGlfw_NewFrame() void;
+
+fn layoutScale(content_scale: [2]f32, window_size: [2]c_int, framebuffer_size: [2]c_int) [2]f32 {
+    if (window_size[0] <= 0 or window_size[1] <= 0 or framebuffer_size[0] <= 0 or framebuffer_size[1] <= 0) return .{ 1, 1 };
+    return .{
+        content_scale[0] * @as(f32, @floatFromInt(window_size[0])) / @as(f32, @floatFromInt(framebuffer_size[0])),
+        content_scale[1] * @as(f32, @floatFromInt(window_size[1])) / @as(f32, @floatFromInt(framebuffer_size[1])),
+    };
+}
+
+fn updateDpi(window: *zglfw.Window) void {
+    const content_scale = window.getContentScale();
+    dpi_scaling.update(if (@import("builtin").os.tag == .macos)
+        layoutScale(content_scale, window.getSize(), window.getFramebufferSize())
+    else
+        content_scale);
+}
+
 pub fn zguiInit(
     allocator: std.mem.Allocator,
     window: *zglfw.Window,
@@ -54,7 +74,7 @@ pub fn zguiInit(
     errdefer zgui.backend.deinit();
 
     dpi_scaling = DpiScaling.init();
-    dpi_scaling.update(window.getContentScale());
+    updateDpi(window);
 }
 
 pub fn zguiDeinit() void {
@@ -62,9 +82,27 @@ pub fn zguiDeinit() void {
     zgui.deinit();
 }
 
-pub fn beginFrame(window: *zglfw.Window, width: u32, height: u32) void {
-    dpi_scaling.update(window.getContentScale());
-    zgui.backend.newFrame(width, height);
+pub fn beginFrame(window: *zglfw.Window) void {
+    updateDpi(window);
+    if (@import("builtin").os.tag == .macos) {
+        // zgui.backend.newFrame(fb_width, fb_height) prepares WGPU and GLFW, then
+        // overwrites GLFW's DisplaySize with framebuffer pixels and forces
+        // DisplayFramebufferScale to 1 before starting the core ImGui frame.
+        // On Retina, GLFW mouse positions are in logical window units: e.g.
+        // a 1280x820 window has a 2560x1640 framebuffer but its mouse center is
+        // (640, 410). The overwrite makes rendered widgets and hit tests disagree.
+        // Prepare both backends directly to retain GLFW's logical display size
+        // and 2x framebuffer scale. zgui.newFrame() starts only the core ImGui
+        // frame, so it must follow the two backend calls rather than replace them.
+        ImGui_ImplWGPU_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        zgui.newFrame();
+    } else {
+        // This existing path does not fix zgui's separate content-scale mouse
+        // multiplication on Windows; Retina framebuffer density is a different issue.
+        const size = window.getFramebufferSize();
+        zgui.backend.newFrame(@intCast(@max(0, size[0])), @intCast(@max(0, size[1])));
+    }
     // zgui.showDemoWindow(null);
 }
 
@@ -115,4 +153,11 @@ pub fn drawDebugWindow(engine: *const Engine) void {
 
 pub fn endFrame(pass: wgpu.RenderPassEncoder) void {
     zgui.backend.draw(pass);
+}
+
+test "GUI layout scale accounts for framebuffer density on Retina and scaled desktops" {
+    try std.testing.expectEqualDeep([2]f32{ 1, 1 }, layoutScale(.{ 2, 2 }, .{ 1280, 800 }, .{ 2560, 1600 }));
+    try std.testing.expectEqualDeep([2]f32{ 2, 2 }, layoutScale(.{ 2, 2 }, .{ 1280, 800 }, .{ 1280, 800 }));
+    try std.testing.expectEqualDeep([2]f32{ 1, 1 }, layoutScale(.{ 1, 1 }, .{ 1280, 800 }, .{ 1280, 800 }));
+    try std.testing.expectEqualDeep([2]f32{ 1, 1 }, layoutScale(.{ 2, 2 }, .{ 0, 0 }, .{ 0, 0 }));
 }

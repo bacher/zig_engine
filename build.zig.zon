@@ -68,8 +68,8 @@
         },
 
         .zgui = .{
-            .url = "git+https://github.com/zig-gamedev/zgui#bfbebed372723d1f585f86fc0a550232b3427f4d",
-            .hash = "zgui-0.6.0-dev--L6sZJhIbgAjWdK5h6xuVUrsOcD-RdqEOEPf03Zgi4mF",
+            .url = "git+https://github.com/zig-gamedev/zgui#a25eb0434a3e032e44e2e40238cd9a390aeec028",
+            .hash = "zgui-0.6.0-dev--L6sZMdHbgDGyf0mWBzn0LjGig6LuanLqohxml6sZiPG",
         },
 
         .zmath = .{

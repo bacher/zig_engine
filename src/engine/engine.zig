@@ -110,12 +110,17 @@ pub const Engine = struct {
         onRender: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder, argument: *anyopaque) void,
         /// Camera-space geometry after compositing, with fresh depth for self-occlusion.
         onRenderOverlay3D: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder, argument: *anyopaque) void = null,
+        /// Runs before gameplay input filtering. Return true to consume a UI key.
+        onUIKeyPress: ?*const fn (engine: *Engine, key_params: KeyParams, argument: *anyopaque) bool = null,
         onKeyPress: ?*const fn (engine: *Engine, key_params: KeyParams, argument: *anyopaque) void = null,
         onKeyRelease: ?*const fn (engine: *Engine, key_params: KeyParams, argument: *anyopaque) void = null,
         onMouseButtonPress: ?*const fn (engine: *Engine, params: MouseButtonParams, argument: *anyopaque) void = null,
         onMouseButtonRelease: ?*const fn (engine: *Engine, params: MouseButtonParams, argument: *anyopaque) void = null,
         /// Return false to keep rendering while the application completes asynchronous shutdown.
         onCloseRequest: ?*const fn (engine: *Engine, argument: *anyopaque) bool = null,
+        onPauseChanged: ?*const fn (engine: *Engine, argument: *anyopaque) void = null,
+        /// Cancel application-owned holds and queued controls on input transitions.
+        onGameplayInputChanged: ?*const fn (engine: *Engine, argument: *anyopaque) void = null,
     };
 
     gctx: *zgpu.GraphicsContext,
@@ -129,8 +134,12 @@ pub const Engine = struct {
     content_dir: []const u8,
     clock_start: std.Io.Timestamp,
     previous_update: ?std.Io.Timestamp = null,
-    time: f64, // seconds
-    frame_delta: f64 = 0, // monotonic elapsed seconds, independent of GPU statistics
+    time: f64, // gameplay seconds; frozen while paused
+    real_time: f64 = 0, // monotonic seconds for storage and shutdown deadlines
+    frame_delta: f64 = 0, // gameplay frame seconds, independent of GPU statistics
+    paused: bool = false,
+    gameplay_input_blocked: bool = false,
+    previous_cursor_capture: @import("input_controller.zig").CursorCapture = .always,
 
     state: EngineState = .{},
 
@@ -500,6 +509,10 @@ pub const Engine = struct {
     }
 
     fn onKeyPress(engine: *Engine, key_params: KeyParams) void {
+        if (engine.callbacks.onUIKeyPress) |callback| {
+            if (callback(engine, key_params, engine.callbacks.argument)) return;
+        }
+        if (engine.gameplay_input_blocked) return;
         switch (key_params.key) {
             .e => if (key_params.mods.control) {
                 if (engine.state.debug_ssao_enabled) {
@@ -542,6 +555,7 @@ pub const Engine = struct {
     }
 
     fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams) void {
+        if (engine.gameplay_input_blocked) return;
         if (engine.callbacks.onMouseButtonPress) |callback|
             callback(engine, params, engine.callbacks.argument);
     }
@@ -562,12 +576,13 @@ pub const Engine = struct {
 
     pub fn update(engine: *Engine) !void {
         const now = std.Io.Clock.awake.now(engine.io);
-        engine.time = @as(f64, @floatFromInt(engine.clock_start.durationTo(now).nanoseconds)) / std.time.ns_per_s;
-        engine.frame_delta = if (engine.previous_update) |previous|
+        engine.real_time = @as(f64, @floatFromInt(engine.clock_start.durationTo(now).nanoseconds)) / std.time.ns_per_s;
+        const elapsed = if (engine.previous_update) |previous|
             @as(f64, @floatFromInt(previous.durationTo(now).nanoseconds)) / std.time.ns_per_s
         else
             0;
         engine.previous_update = now;
+        engine.advanceGameplayClock(elapsed);
 
         // resetting frame stats before each frame
         engine.frame_stats = .{};
@@ -1154,11 +1169,7 @@ pub const Engine = struct {
                 }
 
                 if (engine.zgui) {
-                    zgui_utils.beginFrame(
-                        engine.window_context.window,
-                        engine.gctx.swapchain_descriptor.width,
-                        engine.gctx.swapchain_descriptor.height,
-                    );
+                    zgui_utils.beginFrame(engine.window_context.window);
                     zgui_utils.drawDebugWindow(engine);
                 }
 
@@ -1740,6 +1751,36 @@ pub const Engine = struct {
         return true;
     }
 
+    fn advanceGameplayClock(engine: *Engine, elapsed: f64) void {
+        engine.frame_delta = if (engine.paused) 0 else elapsed;
+        engine.time += engine.frame_delta;
+    }
+
+    /// Freeze gameplay time while rendering and asynchronous application work continue.
+    pub fn setPaused(engine: *Engine, paused: bool) void {
+        if (paused == engine.paused) return;
+        engine.paused = paused;
+        // Never apply the paused interval to the first resumed frame.
+        engine.previous_update = null;
+        engine.frame_delta = 0;
+        if (engine.callbacks.onPauseChanged) |callback| callback(engine, engine.callbacks.argument);
+    }
+
+    /// Release the cursor and suppress gameplay controls without changing simulation time.
+    pub fn setGameplayInputBlocked(engine: *Engine, blocked: bool) void {
+        if (blocked == engine.gameplay_input_blocked) return;
+        engine.gameplay_input_blocked = blocked;
+        const input = engine.input_controller;
+        if (blocked) engine.previous_cursor_capture = input.cursor_capture;
+        input.cursor_capture = if (blocked) .never else engine.previous_cursor_capture;
+        input.cursor_position_delta = .{ 0, 0 };
+        if (engine.callbacks.onGameplayInputChanged) |callback| callback(engine, engine.callbacks.argument);
+    }
+
+    pub fn requestExit(engine: *Engine) void {
+        if (engine.requestClose()) engine.window_context.window.setShouldClose(true);
+    }
+
     pub fn runLoop(engine: *Engine) !void {
         if (engine.active_scene) |scene| {
             try scene.prepareForRendering();
@@ -1750,7 +1791,7 @@ pub const Engine = struct {
         while (true) {
             zglfw.pollEvents();
 
-            if (window.shouldClose() or engine.input_controller.wasKeyPressed(.escape)) {
+            if (window.shouldClose()) {
                 if (engine.requestClose()) break;
                 window.setShouldClose(false);
             }
@@ -1778,6 +1819,110 @@ pub const Engine = struct {
     }
 };
 
+test "input blocking releases the cursor, filters gameplay, and still delivers UI keys" {
+    const Probe = struct {
+        input_changes: usize = 0,
+        presses: usize = 0,
+        ui_presses: usize = 0,
+        fn inputChanged(_: *Engine, argument: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(argument));
+            self.input_changes += 1;
+        }
+        fn ui(_: *Engine, params: KeyParams, argument: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(argument));
+            self.ui_presses += 1;
+            return params.key == .escape;
+        }
+        fn key(_: *Engine, _: KeyParams, argument: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(argument));
+            self.presses += 1;
+        }
+        fn mouse(_: *Engine, _: MouseButtonParams, argument: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(argument));
+            self.presses += 1;
+        }
+    };
+    var probe: Probe = .{};
+    var input: @import("input_controller.zig").InputController(Engine) = undefined;
+    input.cursor_capture = .while_left_button;
+    input.cursor_position_delta = .{ 10, 20 };
+    var engine: Engine = undefined;
+    engine.paused = false;
+    engine.gameplay_input_blocked = false;
+    engine.state = .{};
+    engine.input_controller = &input;
+    engine.callbacks = .{
+        .argument = &probe,
+        .onUpdate = null,
+        .onRender = null,
+        .onGameplayInputChanged = Probe.inputChanged,
+        .onUIKeyPress = Probe.ui,
+        .onKeyPress = Probe.key,
+        .onMouseButtonPress = Probe.mouse,
+    };
+    engine.previous_update = std.Io.Timestamp.zero;
+    engine.frame_delta = 0.25;
+    engine.setGameplayInputBlocked(true);
+    try std.testing.expect(!engine.paused);
+    try std.testing.expectEqual(.never, input.cursor_capture);
+    try std.testing.expectEqualDeep([2]f32{ 0, 0 }, input.cursor_position_delta);
+    // Opening and closing UI must not discard multiplayer simulation time.
+    try std.testing.expectEqual(std.Io.Timestamp.zero, engine.previous_update.?);
+    try std.testing.expectEqual(0.25, engine.frame_delta);
+    Engine.onKeyPress(&engine, .{ .key = .escape, .mods = .{} });
+    Engine.onKeyPress(&engine, .{ .key = .e, .mods = .{ .control = true } });
+    Engine.onMouseButtonPress(&engine, .{ .button = .left, .mods = .{} });
+    try std.testing.expectEqual(2, probe.ui_presses);
+    try std.testing.expectEqual(0, probe.presses);
+    try std.testing.expectEqualDeep(EngineState{}, engine.state);
+    engine.setGameplayInputBlocked(false);
+    try std.testing.expectEqual(.while_left_button, input.cursor_capture);
+    try std.testing.expectEqual(0.25, engine.frame_delta);
+    try std.testing.expectEqual(2, probe.input_changes);
+    // Consumed UI keys never leak to gameplay, including when input is enabled.
+    Engine.onKeyPress(&engine, .{ .key = .escape, .mods = .{} });
+    try std.testing.expectEqual(0, probe.presses);
+    Engine.onKeyPress(&engine, .{ .key = .e, .mods = .{} });
+    Engine.onMouseButtonPress(&engine, .{ .button = .left, .mods = .{} });
+    try std.testing.expectEqual(2, probe.presses);
+    engine.setGameplayInputBlocked(false);
+    try std.testing.expectEqual(2, probe.input_changes);
+}
+
+test "pausing freezes gameplay time independently of input and drops the resumed interval" {
+    const Probe = struct {
+        changes: usize = 0,
+        fn changed(_: *Engine, argument: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(argument));
+            self.changes += 1;
+        }
+    };
+    var probe: Probe = .{};
+    var engine: Engine = undefined;
+    engine.paused = false;
+    engine.gameplay_input_blocked = false;
+    engine.time = 3;
+    engine.callbacks = .{ .argument = &probe, .onUpdate = null, .onRender = null, .onPauseChanged = Probe.changed };
+    engine.setPaused(true);
+    try std.testing.expect(!engine.gameplay_input_blocked);
+    engine.advanceGameplayClock(120);
+    try std.testing.expectEqual(3, engine.time);
+    try std.testing.expectEqual(0, engine.frame_delta);
+    engine.setPaused(true);
+    try std.testing.expectEqual(1, probe.changes);
+    engine.previous_update = std.Io.Timestamp.zero;
+    engine.setPaused(false);
+    try std.testing.expectEqual(null, engine.previous_update);
+    try std.testing.expectEqual(0, engine.frame_delta);
+    try std.testing.expectEqual(2, probe.changes);
+    engine.advanceGameplayClock(0.25);
+    try std.testing.expectEqual(3.25, engine.time);
+    try std.testing.expectEqual(0.25, engine.frame_delta);
+    engine.gameplay_input_blocked = true;
+    engine.advanceGameplayClock(0.25);
+    try std.testing.expectEqual(3.5, engine.time);
+}
+
 test "engine forwards mouse presses and input releases to the application" {
     const Probe = struct {
         received: ?MouseButtonParams = null,
@@ -1798,10 +1943,14 @@ test "engine forwards mouse presses and input releases to the application" {
     };
     var probe: Probe = .{};
     var engine: Engine = undefined;
+    engine.paused = false;
+    engine.gameplay_input_blocked = false;
     engine.callbacks = .{ .argument = &probe, .onUpdate = null, .onRender = null, .onMouseButtonPress = Probe.press, .onMouseButtonRelease = Probe.mouseRelease, .onKeyRelease = Probe.keyRelease };
     const params: MouseButtonParams = .{ .button = .left, .mods = .{ .control = true } };
     Engine.onMouseButtonPress(&engine, params);
     try std.testing.expectEqualDeep(params, probe.received.?);
+    // Releases still clear application-owned state while gameplay input is blocked.
+    engine.gameplay_input_blocked = true;
     Engine.onMouseButtonRelease(&engine, params);
     try std.testing.expectEqualDeep(params, probe.released.?);
     const key: KeyParams = .{ .key = .e, .mods = .{} };
@@ -1813,6 +1962,8 @@ test "SSAO debug shortcuts require Ctrl and Ctrl E exits the debug view" {
     var context: u8 = 0;
     var engine: Engine = undefined;
     engine.state = .{};
+    engine.paused = false;
+    engine.gameplay_input_blocked = false;
     engine.callbacks = .{ .argument = &context, .onUpdate = null, .onRender = null };
     Engine.onKeyPress(&engine, .{ .key = .e, .mods = .{} });
     Engine.onKeyPress(&engine, .{ .key = .r, .mods = .{} });
@@ -1972,6 +2123,8 @@ test "application may defer close for async saving and later permit it" {
     };
     var probe: Probe = .{};
     var engine: Engine = undefined;
+    engine.paused = false;
+    engine.gameplay_input_blocked = false;
     engine.callbacks = .{ .argument = &probe, .onUpdate = null, .onRender = null, .onCloseRequest = Probe.close };
     try std.testing.expect(!engine.requestClose());
     probe.ready = true;
