@@ -559,6 +559,9 @@ processing recipes, prospecting UI, and transport simulation; research gates; fa
 work execution and supply accounting; complete foundation/pile mechanics; tree growth,
 automatic felling, leaf decay, and physical collapse. Optional beaches may be deferred.
 
+Full consolidation of material behavior definitions and predicates is a follow-up after
+G1–G5 (F3); the material rules and shared safety checks required below remain in scope.
+
 ## Plan
 
 Provisional technical design for review. No task below is marked implemented by this draft.
@@ -915,6 +918,25 @@ Keep climate resolution shared by service meshing and optimistic client remeshin
 soil in hand keeps its ordinary loose-soil appearance. The desert branch uses baseline
 appearance for imported soil as specified in R15, rather than an undefined palette case.
 
+#### Follow-up improvement — material behavior matrix
+
+After the first G1–G5 implementation, consolidate the material rules into one behavior
+matrix here, alongside the runtime data model. Cover soil states, sand, water, foliage,
+deeprock, and each resource separately. List collision, face occlusion, mining policy/result
+(forbidden, no item, or a usable item), placeability, required placement footprint and ability
+to support soil/sand footprints, direct construction/road support, stable-platform eligibility,
+and timers. Include permanent immutability for deeprock. Preserve the intentional differences
+across R13–R19, R27, and R36–R41 rather than deriving every property from one structural flag.
+
+Use a shared material definition to drive simple `BlockType` predicates and the material
+categories consumed by road and soil/sand validators. Keep neighborhood-dependent geometry
+and support checks in shared algorithms. Add table-driven invariant checks across these
+consumers so collision, placement, support, mining, and timers cannot silently drift apart.
+Treat this as a behavior-preserving refactor, using the first implementation's focused tests
+as a baseline; it does not enable resource mining or introduce processing recipes. Deferring
+the consolidation does not defer shared mining policies, immutable-floor protection, or
+client/service validation already required for G1–G5.
+
 ### Persistence, caches, and shortcuts
 
 Introduce a new generator ID (provisionally 2), schema version, compact explicit settings,
@@ -997,9 +1019,10 @@ pristine chunks, enlarging cache limits, or redoing global preparation on each r
 | G5: Integration | Immutable mutation guard, validated bottom restoration, new-world save/reopen, edited-chunk authority, bounded caches, shortcut oracle, regeneration benchmarks, debug maps | `src/voxel_app/world.zig`, `src/voxel_app/persistence/format.zig`, `main.zig`, `world_data_service.zig`, generator/service/GPU tests |
 | F1: Later construction | Revisit the temporarily allowed soil platform over sand; foundation-to-rock rules and piles | Separate construction specification, then shared validator and support dependencies |
 | F2: Later simulation | Farming prohibition, clothing/water services, action food cost | Future simulation specification, consuming the shared environmental API |
+| F3: Material behavior consolidation | After G1–G5, add one behavior matrix near the runtime data model, shared material definitions, and table-driven invariant checks | `src/engine/voxel/voxel_chunk.zig`, `src/voxel_app/block_rules.zig`, road/collision/render/mining/timer consumers and tests |
 
 Module paths not already present are proposals. G1–G5 together are the planned generation
-delivery; F1/F2 do not block exploring the generator, and must not be reported as implemented
+delivery; F1–F3 do not block exploring the generator, and must not be reported as implemented
 merely because their environmental inputs exist.
 
 ### Risks and validation strategy
@@ -1114,13 +1137,21 @@ merely from a compact macro map; complete residency remains separately measured.
 - [ ] T18: Specify NPC/farm/action consumers of environment profiles and their supply/cost
   accounting; keep exact economic multipliers outside generator geometry. [R11–R12]
 
+### Follow-up improvements after the first implementation
+
+- [ ] T23: After G1–G5, consolidate material rules into the behavior matrix beside the
+  runtime data model, covering soil states, sand, water, foliage, deeprock, and every resource.
+  Introduce shared material definitions and migrate predicates/validator categories with
+  table-driven invariant checks, preserving the first version's behavior. This F3 refactor
+  does not block G1–G5 or postpone their required shared validation. [R13–R19, R27, R36–R41]
+
 ### Validation
 
 - [ ] T19: Implement the deterministic regeneration hash oracle and benchmark cached versus
   evicted columns, including the beach toggle and actual bounded-cache churn. Publish
   measured preparation/query/generation/meshing costs and owned scratch limits. [R30–R35]
 - [ ] T-val: Verify all AC1–AC35 for G1–G5, including current AC22 environmental flags,
-  AC23 permitted platforms, and AC28–AC35 mining/floor/foundation contracts; keep future F1/F2 tasks
+  AC23 permitted platforms, and AC28–AC35 mining/floor/foundation contracts; keep future F1–F3 tasks
   separate. Publish seed-suite maps/metrics
   and run relevant CPU/build/GPU/persistence checks, repeated-regeneration benchmarks, and
   player-scale visual inspection. [AC1–AC35]
