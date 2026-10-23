@@ -214,7 +214,7 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   settings. Reordering chunk requests, parallel work, cache eviction, restart, or crossing
   the X seam must not change generated blocks, climate, trees, or deposits. Saved edits
   remain authoritative within mutable cells and never regenerate mined material or removed
-  vegetation. They cannot override the canonical immutable bedrock layer (R38–R39). Untouched
+  vegetation. They cannot override the canonical immutable deeprock layer (R38–R39). Untouched
   chunks may be generated arbitrarily many times and are not persisted merely to stabilize
   random outcomes. Beaches and islands obey the same determinism contract.
 - R31: Use a new generator identity/settings schema; unsupported versions fail explicitly.
@@ -225,7 +225,7 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   or arrays for all possible chunks. Bound preparation memory, candidate lists, retries,
   feature-index occupancy, column caches, and per-chunk generation work. Preserve existing
   residency/backpressure behavior rather than assuming the enlarged world fits in memory.
-- R33: Rework generation shortcuts so they cannot omit water, crowns, deposits, or bedrock.
+- R33: Rework generation shortcuts so they cannot omit water, crowns, deposits, or deeprock.
   Empty shortcuts require bounds on all generated occupancy; stone shortcuts require proof that
   no material overlay intersects. Enclosure/occlusion certification must remain conservative
   for every new material and use the same generation source as actual chunks.
@@ -263,32 +263,40 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   Explicit removal without an item succeeds with `mined_type = null`, keeps the initially
   empty slot empty, and follows ordinary acknowledgement/reconciliation and save/reopen.
   Prediction and authority must not unconditionally unwrap successful removal results.
-- R38: Add a distinct `bedrock` material at the world's absolute storage bottom. For each
+- R38: Add a distinct `deeprock` material at the world's absolute storage bottom. For each
   canonical horizontal column, choose deterministic irregular thickness `B(x,y)` in [1,3]
-  blocks and fill **every** storage cell `0 <= z < B(x,y)` with bedrock. Thus z=0 is a
-  complete sealed layer and no bedrock cell has a hole or different material underneath.
+  blocks and fill **every** storage cell `0 <= z < B(x,y)` with deeprock. Thus z=0 is a
+  complete sealed layer and no deeprock cell has a hole or different material underneath.
   The formation lies wholly in the lowest Z chunk and covers the entire X/Y footprint,
   including oceans, islands, and inaccessible polar strips. X wrapping and regeneration
-  preserve exactly the same thickness. Bedrock is opaque, full-cube-colliding, non-placeable,
-  yields no item, and can provide natural-rock support. Ordinary rock above it stays subject
+  preserve exactly the same thickness. Deeprock is opaque, full-cube-colliding, non-placeable,
+  yields no item, and is a stable direct foundation under R41. Ordinary rock above it stays subject
   to its configured mining policy.
-- R39: Bedrock is permanently immutable by every supported world-changing operation, not
-  merely unavailable to the player's mining tool. Canonical bedrock cells cannot be removed,
+- R39: Deeprock is permanently immutable by every supported world-changing operation, not
+  merely unavailable to the player's mining tool. Canonical deeprock cells cannot be removed,
   replaced, moved, or transformed by player/spectator edits, NPC/simulation actions, timers,
   road/bulk/indirect writes, or runtime debug tools. Generation and resource/surface overlays
   must preserve them. Validate complete authoritative write sets before committing effects,
   and keep optimistic replay subject to the same invariant. Planners may deliberately
   exclude immutable cells; a rejected transaction cannot commit partial effects. Saved/WAL
-  data cannot override the layer: conflicting restored bedrock is rejected as invalid world
+  data cannot override the layer: conflicting restored deeprock is rejected as invalid world
   data before publishing or using that restored chunk, with no silent regeneration of
   modified chunks or loss of valid edits above the layer. Validate lazily loaded records
   without requiring an all-world scan on reopen.
 - R40: Keep the finite lower-Z boundary as an independent impassable guard, in addition to
-  bedrock collision. No player body may cross below storage Z=0 through falling, climbing,
+  deeprock collision. No player body may cross below storage Z=0 through falling, climbing,
   high-speed motion, teleport, mode changes, recovery,
   or unavailable terrain. Validate destinations/restored poses before activation or resolve
   them to valid standing space. Apply layout-origin conversion correctly: negative centred
   world Z can be valid, while below the layout's storage bottom is always forbidden.
+- R41: A single exposed deeprock cell provides a stable direct foundation for wood/mineral
+  construction and roads resting on its top. No surrounding `3 × 3` area or centred
+  `3 × 3 × 3` platform is required; irregular neighboring deeprock heights do not invalidate
+  that contact. Construction height counters restart above the foundation, with the first
+  placed block at level one; ordinary height/span limits still apply. Soil and sand retain
+  their separate filled `3 × 3` support footprints, in which deeprock qualifies as structural
+  support and one cell fills one position. Blocks placed above deeprock keep their own
+  material, support rules, and mutability.
 
 ## Clarifications
 
@@ -321,7 +329,7 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   A valid `3 × 3 × 3` soil platform may support construction even with sand below it.
   Direct building on sand is still prohibited. Foundation-to-rock checks and piles are
   deferred; original natural-rock surface heights do not substitute for future live support.
-  This ordinary foundation rock is distinct from the immutable bottom `bedrock` material.
+  This ordinary foundation rock is distinct from the immutable bottom `deeprock` material.
 - Q9: What remains to be balanced?
   A9: CONFIRMED approach: use visual maps of several seeds to tune mountain heights,
   forests, and resource distributions before fixing numbers. UNRESOLVED numeric tuning:
@@ -359,11 +367,13 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   materials. Foliage clearing is an explicit no-item removal, not an implicit exception for
   arbitrary unconfigured resource types, and must handle a null result safely.
 - Q15: What seals the absolute world bottom?
-  A15: CONFIRMED on 2026-10-23: a permanently indestructible `bedrock` formation, 1–3 blocks
+  A15: CONFIRMED on 2026-10-23: a permanently indestructible `deeprock` formation, 1–3 blocks
   thick per column with deterministic irregular top height. All cells below its top are
-  bedrock down to storage z=0; no voids. Mining, replacement, indirect mutation, or traversal
+  deeprock down to storage z=0; no voids. Mining, replacement, indirect mutation, or traversal
   cannot create a route below the world. The thickness rule is shared by generation and
   restoration validation and does not need a stored full-world map.
+  The confirmed material name is `deeprock`; a single exposed cell is a stable direct
+  foundation without a `3 × 3` area/platform requirement, as detailed in R41.
 
 ## Acceptance Criteria
 
@@ -442,7 +452,7 @@ the temporarily allowed soil platform. Future foundation/NPC execution tasks rem
   stored wall blocks or blocked-chunk loads required to establish the barrier. [R28–R29]
 - AC19: GIVEN modified/mined chunks and an unchanged world descriptor WHEN saving,
   evicting, and reopening THEN current blocks/metadata override regeneration and climate
-  stays identical within mutable cells; canonical bedrock remains unchanged and an
+  stays identical within mutable cells; canonical deeprock remains unchanged and an
   unsupported generator version is reported explicitly. Mining fixtures use sand or an
   explicitly configured usable test resource. [R30–R31, R36–R39]
 - AC20: GIVEN forest, coastline, mineral, and high-altitude fixtures WHEN comparing optimized
@@ -488,28 +498,34 @@ the temporarily allowed soil platform. Future foundation/NPC execution tasks rem
   removal is rejected and both the leaf block and carried item remain intact. [R27, R37]
 - AC30: GIVEN fixed seeds and columns including ocean, islands, poles, and the wrapped seam
   WHEN generating/revisiting the lowest Z chunk THEN each thickness is in [1,3], all cells
-  below its top through z=0 are bedrock, the top varies over the fixture, and reordered
+  below its top through z=0 are deeprock, the top varies over the fixture, and reordered
   requests, cache eviction, and restart reproduce the same filled layer. [R30, R38]
 - AC31: GIVEN bottom chunks and overlapping deposits/surface overlays WHEN comparing all
-  optimized generation paths with a slow material reference THEN bedrock has priority,
+  optimized generation paths with a slow material reference THEN deeprock has priority,
   no air/water/resource replaces it, and stone shortcuts preserve its exact irregular
   shape while ordinary mineable stone above remains available. [R24, R33, R38–R39]
-- AC32: GIVEN a protected bedrock cell and a multi-cell operation with valid mutable targets
+- AC32: GIVEN a protected deeprock cell and a multi-cell operation with valid mutable targets
   WHEN removal/replacement/transformation is attempted through direct, indirect, optimistic,
   timer, road, simulation, or runtime debug paths THEN the protected layer is unchanged,
   a rejected transaction commits no partial effects or item grants, and a clear
   immutable-material failure is reported. An explicitly filtered bulk plan may change its
-  remaining mutable targets while leaving bedrock intact. [R36, R39]
-- AC33: GIVEN a valid edited bottom chunk and an invalid record removing/replacing bedrock
+  remaining mutable targets while leaving deeprock intact. [R36, R39]
+- AC33: GIVEN a valid edited bottom chunk and an invalid record removing/replacing deeprock
   WHEN saving/reopening or restoring base/WAL contents THEN valid upper edits and the
   canonical layer survive, while the invalid record is rejected before that restored chunk
-  is published/used rather than overriding bedrock or regenerating the modified chunk.
+  is published/used rather than overriding deeprock or regenerating the modified chunk.
   Lazy restoration does not scan all world records on reopen. [R31, R38–R39]
-- AC34: GIVEN exposed bedrock, missing terrain, or a pose/destination below the storage floor
+- AC34: GIVEN exposed deeprock, missing terrain, or a pose/destination below the storage floor
   WHEN falling quickly, climbing, teleporting, restoring/recovering, or switching to/from
   spectator mode THEN the active player body stays at or above the valid world lower bound;
   no missing chunk, tunnelling, origin-conversion error, or return from a debug camera
   permits the player to enter below it. [R40]
+- AC35: GIVEN an exposed deeprock top with lower neighboring cells and no centred
+  `3 × 3 × 3` platform WHEN placing wood/mineral construction or a road directly on it
+  THEN the shared client/service rules accept that direct foundation without a `3 × 3`
+  area check, start applicable height counters at level one, and retain ordinary height/span
+  limits above it. Soil/sand still require their complete `3 × 3` footprint, and placed
+  blocks do not inherit deeprock's immutability or foundation privileges. [R41]
 
 ## Constraints
 
@@ -519,7 +535,7 @@ the temporarily allowed soil platform. Future foundation/NPC execution tasks rem
 - Climate queries describe location; material/support queries use **current authoritative
   blocks**. A generated deposit descriptor is not remaining stock, a generated height is
   not current clearance, and an original natural-rock horizon does not prove a current
-  foundation. Canonical bottom bedrock is a separate immutable coordinate/material invariant.
+  foundation. Canonical bottom deeprock is a separate immutable coordinate/material invariant.
 - Preserve byte-sized block storage and the four-byte ordinary voxel face record where
   practical. Palette/render IDs need a separate type and must not enter persistence or block
   operations. Custom road sentinel 255 remains reserved.
@@ -629,8 +645,8 @@ and inland relief without making a vertical cliff around every coast.
 For each canonical storage column, compute the thickness directly:
 
 ```text
-B(x,y) = 1 + stableHash(seed ^ BEDROCK_TAG, canonicalX, storageY) % 3
-material(x,y,z) = bedrock for every 0 <= storageZ < B(x,y)
+B(x,y) = 1 + stableHash(seed ^ DEEPROCK_TAG, canonicalX, storageY) % 3
+material(x,y,z) = deeprock for every 0 <= storageZ < B(x,y)
 ```
 
 Pin the hash, named layer tag, coordinate encoding, and unsigned wrapping arithmetic to
@@ -640,7 +656,7 @@ Require original terrain height to be at least three blocks. Apply the same seal
 rule to playable natural and flat profiles; isolated test fixtures must state their own
 material setup explicitly rather than accidentally relying on a floor-free playable profile.
 
-Resolve bedrock before ordinary rock, deposits, soil, sand/beaches, water, and vegetation.
+Resolve deeprock before ordinary rock, deposits, soil, sand/beaches, water, and vegetation.
 Host replacement cannot target it. The existing `initSolid(stone)` shortcut must fill the
 canonical bottom mask when used in the lowest chunk; higher uniform rock chunks retain
 their shortcut. A slow reference uses the identical mask and makes this priority testable.
@@ -768,7 +784,7 @@ deposits for every voxel.
 
 Resolve overlap by an explicit total order `(priority, stable_deposit_id)` and validate
 effective remaining volume/connectivity after host clipping and competing overlays. Resource
-blocks never replace bedrock, water, air, or tree voxels. Preserve the desert sand surface
+blocks never replace deeprock, water, air, or tree voxels. Preserve the desert sand surface
 except intentional rocky outcrops; underground clay does not create a grass/soil desert surface.
 Startup uses bounded shape/core proofs, conservative effective-volume bounds, and sampling;
 exact voxel counting is an optional diagnostic over selected deposits/reduced worlds. Do
@@ -848,17 +864,24 @@ Environmental profiles expose future work/farming flags and tunable multipliers.
 and water needs are distinct flags; a later actor entering both conditions must not lose
 one requirement merely because a rendering enum changes.
 
-Add block types for leaves, bedrock, and resource materials with explicit collision, occlusion,
+Add block types for leaves, deeprock, and resource materials with explicit collision, occlusion,
 mining, placement, and foundation categories. Do not let an enum addition accidentally gain
 all soil timers or construction privileges. Proposed consolidated ore/limestone/coal host
 blocks act as natural rock for support; clay is cohesive natural ground with an explicitly
 chosen soil-like support category, without grass/compaction timers.
 New raw resources need not be placeable building materials before their material design.
 Sand is the already placeable exception. Ore, limestone, clay, and coal remain unmineable
-until explicitly configured with supported usable results. Bedrock is opaque, colliding,
-non-placeable natural-rock support, with forbidden removal and permanent mutation protection.
+until explicitly configured with supported usable results. Deeprock is opaque, colliding,
+non-placeable stable direct support, with forbidden removal and permanent mutation protection.
 These categories require review in the material phase; generic non-air occupancy is not a
 foundation contract.
+
+Recognize deeprock directly in the shared foundation validator before testing for a centred
+`3 × 3 × 3` stable platform. A single supporting deeprock top is sufficient for ordinary
+wood/mineral construction and road contact even along the formation's irregular surface;
+the foundation check must not request a complete box below the world's floor. Preserve
+height/span accounting above that contact and separate soil/sand footprint validation:
+deeprock fills an individual structural footprint cell but does not waive the other eight.
 
 Make the mining outcome explicit, separately from placement and immutability:
 
@@ -925,7 +948,7 @@ measurement justifies a separately budgeted change. Do not duplicate the macro m
 column/client. Consumers can share immutable prepared data with explicit lifetime ownership.
 
 Track maximum terrain, water, and tree occupancy separately for empty shortcuts. Resource
-intersection tests and the bedrock mask precede uniform-rock shortcuts. Enclosure needs only
+intersection tests and the deeprock mask precede uniform-rock shortcuts. Enclosure needs only
 solid/occluding occupancy, but any new shortcut proof must agree with generated boundary
 strips and material rules. Retain the cave-free invariant; leaf canopies cannot certify an
 underground enclosure.
@@ -968,8 +991,8 @@ pristine chunks, enlarging cache limits, or redoing global preparation on each r
 | Milestone | Scope | Likely components |
 | --- | --- | --- |
 | G1: Environment foundation | New version/settings, larger default, pure climate queries, polar inset and finite floor, diagnostics | `src/voxel_app/consts.zig`, `world_generator.zig`, proposed environment module, `terrain_collision.zig`, `standing_space.zig`, `player_controller.zig`, `main.zig` |
-| G2: Land and relief | Connected continents and smaller islands, ocean, ranges, surface layering, deterministic bedrock, safe first-start region | `world_generator.zig`, `perlin_noise.zig`, proposed geography/relief modules, `world_data_service.zig` |
-| G3: Materials and geology | Opaque water, climate soil palette, sand local rules, indexed deposits, starter resources, explicit mining policy | `src/engine/voxel/voxel_chunk.zig`, `src/engine/shaders/voxel/`, `src/voxel_app/block_rules.zig`, `world_engine_glue.zig`, `player_interaction.zig`, `world_data_service.zig` |
+| G2: Land and relief | Connected continents and smaller islands, ocean, ranges, surface layering, deterministic deeprock, safe first-start region | `world_generator.zig`, `perlin_noise.zig`, proposed geography/relief modules, `world_data_service.zig` |
+| G3: Materials and geology | Opaque water, climate soil palette, sand local rules, deeprock direct foundations, indexed deposits, starter resources, explicit mining policy | `src/engine/voxel/voxel_chunk.zig`, `src/engine/shaders/voxel/`, `src/voxel_app/block_rules.zig`, `world_engine_glue.zig`, `player_interaction.zig`, `world_data_service.zig` |
 | G4: Vegetation | Forest/meadow fields, leaves with null-safe no-item clearing, complete cross-chunk trees, mesh pressure checks | Proposed vegetation module, `world_generator.zig`, voxel/collision/render material code, `player_interaction.zig` |
 | G5: Integration | Immutable mutation guard, validated bottom restoration, new-world save/reopen, edited-chunk authority, bounded caches, shortcut oracle, regeneration benchmarks, debug maps | `src/voxel_app/world.zig`, `src/voxel_app/persistence/format.zig`, `main.zig`, `world_data_service.zig`, generator/service/GPU tests |
 | F1: Later construction | Revisit the temporarily allowed soil platform over sand; foundation-to-rock rules and piles | Separate construction specification, then shared validator and support dependencies |
@@ -1041,7 +1064,7 @@ merely from a compact macro map; complete residency remains separately measured.
   refinement, coarse land target, optional offline coverage estimator, and bounded
   deterministic retry/failure policy. [R3–R4, R30, R32]
 - [ ] T7: Add shared sea level, ocean filling, sand/soil layering, indexed ranges, and
-  conservative terrain/water occupancy bounds; generate the canonical 1–3-block bedrock
+  conservative terrain/water occupancy bounds; generate the canonical 1–3-block deeprock
   floor in playable profiles and bottom-chunk solid shortcuts. [R5–R6, R15, R33, R38]
 - [ ] T8: Select/validate a safe first-start region; add spawn/access exclusions for later
   trees without relying on world origin. [R23, R29]
@@ -1055,8 +1078,11 @@ merely from a compact macro map; complete residency remains separately measured.
   soil and timers; verify CPU/GPU material layout and optimistic remeshing. [R13–R14, R19]
 - [ ] T10: Implement distinct granular footprints, constructed-sand dependencies, and sand
   support rejection for buildings/roads, including seam and missing-data cases. [R16–R17]
+- [ ] T22: Recognize one exposed deeprock cell as a stable direct foundation in shared
+  client/service construction and road rules, without a `3 × 3` area/platform check;
+  preserve ordinary height/span limits and separate soil/sand footprints. [R41, AC35]
 - [ ] T11: Define resource material behavior, indexed deposit shapes/precedence, geology
-  weights, effective-volume validation, and finite resource persistence. Exclude bedrock
+  weights, effective-volume validation, and finite resource persistence. Exclude deeprock
   hosts and leave unconfigured resources unmineable. [R21–R24, R30–R33, R36–R39]
 - [ ] T12: Reuse/insert the three starter pockets and verify local access on the final
   generated terrain. [R23, R29]
@@ -1070,14 +1096,14 @@ merely from a compact macro map; complete residency remains separately measured.
   candidates and complete-form clipping into chunks; explicitly enable no-item foliage
   clearing and verify empty/occupied-slot behavior. [R25–R27, R36–R37]
 - [ ] T15: Update column caches, boundary/enclosure/empty/rock shortcuts, and client/service
-  generation paths; compare them with a slow reference including bedrock priority in
+  generation paths; compare them with a slow reference including deeprock priority in
   bottom chunks. [R10–R11, R30, R32–R33, R38–R39]
-- [ ] T21: Protect bedrock through shared write-set validation, including indirect edits,
+- [ ] T21: Protect deeprock through shared write-set validation, including indirect edits,
   optimistic replay, timers, roads/bulk plans, and debug/service setters. Verify rejected
   transactions have no partial effects and filtered plans preserve the floor. [R39]
 - [ ] T16: Integrate new descriptor/material serialization and new-world save/reopen tests
   with sand or explicitly configured usable resource mining and no-item foliage removal.
-  Validate canonical bedrock before publishing each restored bottom chunk/base/WAL result;
+  Validate canonical deeprock before publishing each restored bottom chunk/base/WAL result;
   preserve valid upper edits and report invalid records without regeneration. [R30–R31, R36–R39]
 
 ### Follow-up specifications
@@ -1093,8 +1119,8 @@ merely from a compact macro map; complete residency remains separately measured.
 - [ ] T19: Implement the deterministic regeneration hash oracle and benchmark cached versus
   evicted columns, including the beach toggle and actual bounded-cache churn. Publish
   measured preparation/query/generation/meshing costs and owned scratch limits. [R30–R35]
-- [ ] T-val: Verify all AC1–AC34 for G1–G5, including current AC22 environmental flags,
-  AC23 permitted platforms, and AC28–AC34 mining/floor contracts; keep future F1/F2 tasks
+- [ ] T-val: Verify all AC1–AC35 for G1–G5, including current AC22 environmental flags,
+  AC23 permitted platforms, and AC28–AC35 mining/floor/foundation contracts; keep future F1/F2 tasks
   separate. Publish seed-suite maps/metrics
   and run relevant CPU/build/GPU/persistence checks, repeated-regeneration benchmarks, and
-  player-scale visual inspection. [AC1–AC34]
+  player-scale visual inspection. [AC1–AC35]
