@@ -40,6 +40,8 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   settings, changed blocks, construction metadata, and timers. Saved changes override
   generation. Existing storage bounds descriptor bytes to 4 KiB; a macro map must not be
   inserted into that descriptor without a separately designed format change.
+  Current flat worlds use generator ID 0 with seed 0 and empty settings; terrain uses ID 1.
+  Both identities predate deeprock and must not be silently assigned the new output.
 - [Resource budgeting](resource-budgeting.md) remains a follow-up. Enlarging the coordinate
   space does not authorize materializing the entire world or enlarging residency budgets.
 
@@ -59,7 +61,9 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   others by continuous water. A landmass crossing that seam counts once. Smaller detached
   islands are required in the first iteration and do not count toward the 3–5 continents.
   Distinguish continent cores from bounded smaller island footprints structurally, without
-  requiring a full-world land-area census. Islands must not bridge two continents.
+  requiring a full-world land-area census. Protected water gaps separate distinct islands
+  from one another and from all continents; islands cannot merge into an extra large
+  landmass or bridge two continents.
 - R4: Target approximately 60% dry land in horizontal projection, counting every `(X,Y)`
   once, regardless of elevation, including both continents and islands. Use this as a
   construction/tuning target, not a reason to count every final land column or run an
@@ -217,10 +221,15 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   vegetation. They cannot override the canonical immutable deeprock layer (R38–R39). Untouched
   chunks may be generated arbitrarily many times and are not persisted merely to stabilize
   random outcomes. Beaches and islands obey the same determinism contract.
-- R31: Use a new generator identity/settings schema; unsupported versions fail explicitly.
+- R31: Use generator ID 2, generator version 1, with a mandatory settings profile tag
+  (`natural` or `flat`); this identity versions the settings schema and layer algorithms.
+  Both playable profiles persist a seed and use the canonical deeprock floor. Reject legacy
+  ID 0 (seedless flat), ID 1 (old terrain), and unknown versions/profiles explicitly before
+  preparation or worker startup; never reinterpret their descriptors as the new profiles.
   Backward compatibility and migration of old worlds are not required. Within a supported
   version, reopening must reproduce the same unmodified world and environmental queries.
-  Persist compact inputs and deterministically rebuild prepared macro data.
+  Persist compact inputs and deterministically rebuild prepared macro data. The selected
+  runtime generator, settings, seed, and layout must match the persisted descriptor.
 - R32: World creation and routine queries must not allocate block-resolution global maps
   or arrays for all possible chunks. Bound preparation memory, candidate lists, retries,
   feature-index occupancy, column caches, and per-chunk generation work. Preserve existing
@@ -234,7 +243,8 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   deposit locations/effective sizes, starting access, preparation cost, and forest mesh
   pressure. Full/fine land-coverage measurements are optional offline diagnostics, not a
   runtime dependency of climate queries or chunk regeneration. Statistical tuning claims
-  must be distinguished from deterministic invariants.
+  must be distinguished from deterministic invariants. Preparation reports distinguish
+  invalid configuration, rejected candidates, terminal failures, and exhausted seeds (R42).
 - R35: Treat repeated regeneration of untouched chunks as a normal measured workload.
   Expensive bounded macro preparation happens once per prepared-world lifetime, never per
   chunk or cache refill. Benchmark cached and evicted column generation separately, retaining
@@ -297,6 +307,19 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   their separate filled `3 × 3` support footprints, in which deeprock qualifies as structural
   support and one cell fills one position. Blocks placed above deeprock keep their own
   material, support rules, and mutability.
+
+### Preparation failure contract
+
+- R42: Validate profile/settings/layout independently of candidate generation. Unsupported
+  identities and invalid configuration fail with zero candidate attempts; no retry can fix
+  impossible climate widths, unsafe arithmetic, invalid parameters, or provably inadequate
+  configured capacities. Candidate-specific topology, placement, deposit, index-occupancy,
+  or starter-access failure consumes one of at most eight natural-layout attempts. Allocation,
+  cancellation, work/memory-budget exhaustion, and internal invariant failures abort rather
+  than trigger another candidate. After eight candidate rejections, return `SeedRejected`
+  with the reasons; never silently change settings, seed, or capacities. Record stable failure
+  category/reason, stage, profile/identity, original seed, attempt index/count, and relevant
+  limits/observed values. Rebuilding selects the same first accepted candidate in index order.
 
 ## Clarifications
 
@@ -374,13 +397,19 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   restoration validation and does not need a stored full-world map.
   The confirmed material name is `deeprock`; a single exposed cell is a stable direct
   foundation without a `3 × 3` area/platform requirement, as detailed in R41.
+- Q16: Does the new generator identity cover playable flat worlds?
+  A16: DESIGN DECISION: yes, ID 2 / version 1 has explicit `natural` and `flat` profiles.
+  Flat is no longer the seedless legacy ID 0; it persists its seed and profile settings,
+  reproduces deeprock, and skips natural geography/climate-width preparation. Reject old
+  identities rather than migrating or silently changing their generated output.
 
 ## Acceptance Criteria
 
 The milestones below separate generator delivery from future gameplay consumers. They are
 verification requirements for implementation, not tests claimed to have run during drafting.
 All listed criteria cover generation delivery, including current environmental flags and
-the temporarily allowed soil platform. Future foundation/NPC execution tasks remain separate.
+the temporarily allowed soil platform. Future foundation/NPC execution and material
+consolidation tasks remain separate.
 
 - AC1: GIVEN a new default voxel world WHEN its layout is created THEN dimensions are
   `2048 × 1024 × 32` chunks, ID round trips fit `u32`, X wraps, and Y/Z remain finite. [R1–R2]
@@ -470,8 +499,9 @@ the temporarily allowed soil platform. Future foundation/NPC execution tasks rem
   a foundation down to rock, while direct placement of that block on sand is rejected.
   This is the confirmed temporary construction behavior. [R17–R18]
 - AC24: GIVEN an incompatible natural profile WHEN preparing the world THEN it fails before
-  worker startup with a clear configuration error; small flat fixtures can explicitly use
-  zero inset without weakening production bounds. [R8, R28, R32]
+  worker startup with a clear configuration error and zero candidate attempts; small flat
+  fixtures use the explicit new flat identity and zero inset without weakening natural-profile
+  bounds. [R8, R28, R31–R32, R42]
 - AC25: GIVEN optional beaches are enabled WHEN sampling a low coastal band and seam-crossing
   mainland/island neighbors THEN sand follows the refined generated shore, preserves
   climate/heights/water occupancy, and has ordinary sand behavior. Classification performs
@@ -526,6 +556,24 @@ the temporarily allowed soil platform. Future foundation/NPC execution tasks rem
   area check, start applicable height counters at level one, and retain ordinary height/span
   limits above it. Soil/sand still require their complete `3 × 3` footprint, and placed
   blocks do not inherit deeprock's immutability or foundation privileges. [R41]
+- AC36: GIVEN ID 2 / version 1 descriptors for natural and flat profiles WHEN creating,
+  saving, and reopening their worlds THEN the profile/settings/seed/layout and canonical
+  deeprock match. Legacy ID 0 with empty settings, legacy ID 1, unknown versions/profiles,
+  malformed or cross-profile settings, and mismatched runtime generator/seed/layout are
+  rejected before preparation or service-worker startup, without fallback dispatch. [R31, R38]
+- AC37: GIVEN adversarial final-column topology fixtures WHEN comparing their cylindrical
+  four-neighbor land graph with the protected cores THEN diagonal-only mainland connections
+  fail, minimum-width necks retain a protected path under maximal allowed coast displacement,
+  seam-crossing islands count once, and islands near two continents preserve both water gaps.
+  Deliberately severed necks, orphan mainland fragments, and forced island bridges, merged
+  island chains, or gap breaches are detected even when macro owner labels still look valid.
+  [R3, R30, R34]
+- AC38: GIVEN invalid settings, retryable candidate failures, and terminal failure injection
+  WHEN preparing a world THEN invalid settings use zero attempts, each candidate rejection
+  consumes exactly one of at most eight attempts, and terminal errors stop without retry.
+  Identical inputs produce the same first accepted candidate or `SeedRejected` trace; no
+  partial prepared world is published and diagnostics identify category, reason, stage,
+  identity/seed, attempt, and relevant bounds. [R32, R34, R42]
 
 ## Constraints
 
@@ -542,9 +590,10 @@ the temporarily allowed soil platform. Future foundation/NPC execution tasks rem
 - Preserve missing-data handling, authoritative edit checks, atomic response packages,
   persistence revisions, and the fixed support-window discipline. Any expansion of support
   dependencies requires a separate reviewed construction design.
-- Preparation validates finite parameters, safe arithmetic, periodic noise bounds, minimum
-  climate widths, feature capacities, and allocation failure in all build modes. Bound retries
-  and expose failure; do not silently publish a world that fails its geography contract.
+- Preparation validates identity/profile, finite parameters, safe arithmetic, periodic noise
+  bounds, climate widths, and capacity feasibility before attempts in all build modes. Keep
+  retryable candidate capacity/topology checks separate from terminal allocation/budget errors
+  under R42; do not silently publish a world that fails its geography contract.
 - Performance numbers below are proposed engineering gates to measure, not observations.
   Cross-platform regeneration must have a documented numerical/determinism contract before
   its generator version is frozen; pin algorithm/hash/rounding and test supported targets.
@@ -568,10 +617,10 @@ Provisional technical design for review. No task below is marked implemented by 
 
 ### Approach
 
-Use this dependency order, without conflating layers:
+For the natural profile, use this dependency order, without conflating layers:
 
 ```text
-version + dimensions + seed + settings
+generator ID/version + profile + dimensions + seed + settings
   -> immutable bottom mask (independent per column)
   -> connected continental layout + islands / coast / ocean
   -> periodic climate + geological provinces
@@ -618,13 +667,36 @@ guides large-scale geography, never assigns a whole chunk its climate or vegetat
    the minimum continental-core extent; classify by construction, not an expensive census
    of all final connected components. Fine island shapes can be smaller than a macro cell;
    index their complete possible extents for local terrain queries. Keep islands out of
-   protected straits where they could join continents. Their coasts, resources, vegetation,
+   protected straits where they could join continents and preserve water gaps between
+   distinct island descriptors. Their coasts, resources, vegetation,
    and climate follow the same field/material rules as mainland terrain.
 6. Use at most eight deterministic candidate layouts, with stable growth/tie-break IDs.
-   Reject preparation explicitly if no candidate meets structural validity/capacity gates.
+   Validate configuration first, then consume an attempt only for candidate-specific
+   rejection under R42. Reject preparation explicitly if none meets validity/capacity gates.
    Do not run full-resolution land counting or coverage-driven fine sampling on this path;
    approximate coverage comes from coarse construction targets. No unbounded seed loop or
    fallback to a single continent.
+
+#### Adversarial topology fixtures
+
+Use exhaustive bounded/reduced fixtures of final generated columns, not just macro owner
+labels. A land vertex is a column satisfying `H >= S`; edges are cardinal X/Y neighbors,
+with X modulo width and no Y wrapping. Each intended mainland column must reach its assigned
+protected core; every mainland component contains exactly one core, and an intended island
+component contains none. Each island ID maps to one separate connected component; distinct
+island IDs cannot merge. Check protected water gaps separately from graph connectivity.
+
+| Fixture | Required result on final columns |
+| --- | --- |
+| Two mainland lobes joined only at a corner | No cardinal path: reject a candidate claiming both belong to one core. Distinct diagonal-touching components remain distinct; separately reject any required water-gap violation. |
+| Neck at the configured minimum width, with maximal permitted coast displacement | The protected cardinal spine survives. Include a deliberately severed/below-minimum result that must fail despite unchanged macro labels; incompatible width/displacement settings fail preflight instead. |
+| An island straddling X=0 | One connected island, counted once, with identical samples at X and X±width. Opposite Y edges never connect. |
+| An island approaching two different continents | Preserve both protected gaps and both mainland components; reject forced face-connected bridges or clearance breaches, including diagonal approaches. |
+| Mainland fragment detached by refinement, plus multiple islands in a strait | Detect the orphan mainland fragment instead of relabeling it as an island. An island chain cannot bridge protected mainland cores; distinct islands must retain water gaps, including when merging would create an extra large landmass without a core. |
+
+Compare the final component/core membership against the intended protected-core and island
+assignments, including valid controls and deliberately invalid variants. Run these in tests
+and offline diagnostics; they do not add a full-resolution world scan to normal preparation.
 
 Offline diagnostic exports can measure final coverage, including islands, with a deterministic
 jittered sample in each `32 × 32` block tile and an independently offset pass (2,097,152
@@ -642,6 +714,44 @@ Proposed tuning at default height: sea level 384 blocks, ocean depth 32–160 bl
 ordinary land 1–64 blocks above sea level, mountain uplift 64–384 blocks. Clamp all results
 with room above for full tree crowns; retain solid bottom terrain. Shape continental shelf
 and inland relief without making a vertical cliff around every coast.
+
+### Preparation validation and failure reporting
+
+Validate identity, profile payload, layout, and settings before any candidate work. Check
+finite/range-safe arithmetic, periodic-field bounds, climate width/displacement feasibility,
+coast protection widths, positive feature limits, and any statically provable capacity or
+preparation-budget impossibility. In particular, frozen/intermediate belts that cannot fit
+are invalid settings even if some seed happens to produce narrower boundary excursions.
+Flat validates its own fields and finite floor/headroom; natural-only climate/geography
+constraints do not apply to it.
+
+Use named categories with stable reason codes; names below are the intended API semantics:
+
+| Category | Examples/reasons | Action |
+| --- | --- | --- |
+| `UnsupportedGenerator` | Legacy/unknown generator ID, version, or profile | Fail before preparation; zero attempts. |
+| `InvalidConfiguration` | `MalformedSettings`, `InvalidLayout`, `UnsafeNumericRange`, `InvalidClimateWidths`, `InvalidCoastBounds`, `InfeasibleCapacity`, descriptor/runtime mismatch | Fail preflight; zero attempts. |
+| `CandidateRejected` | `TopologyConflict`, `RequiredFeaturePlacement`, `FeatureIndexCapacity`, `DepositValidity`, `StartAccessUnavailable` | Discard that candidate and consume one attempt; try the next index. |
+| `PreparationAborted` | `AllocationFailed`, `Cancelled`, `WorkBudgetExceeded`, `MemoryBudgetExceeded`, `InternalInvariantFailure` | Clean up and stop immediately; do not resample or report the seed as exhausted. |
+| `SeedRejected` | Eight `CandidateRejected` results with no accepted layout | Stop and report the complete bounded rejection trace. |
+
+A positive index capacity that overflows only because of a particular feature distribution
+is `CandidateRejected.FeatureIndexCapacity`. A capacity below a proven mandatory minimum is
+`InvalidConfiguration.InfeasibleCapacity`; allocation failure is `PreparationAborted`.
+Do not hide implementation bugs, failed immutable-cell guards, or budget overruns inside
+the topology/candidate retry path.
+
+For natural candidate i in [0,7], derive layout and dependent feature streams from the
+original world seed, named tags, and i. Keep independent climate/deeprock streams unchanged.
+Accept the lowest valid candidate index, regardless of parallel task completion order.
+All local placement/access searches are separately bounded; they do not create additional
+outer sets of eight attempts. Flat performs no layout search. Never publish partially
+prepared data, enlarge limits, or switch to a different user seed as a fallback.
+
+Diagnostics and seed-batch reports retain identity/profile, original seed, stage, category,
+reason, optional candidate index, attempts started, candidates rejected, and applicable
+observed values/limits. Exhaustion records all eight rejection reasons; preflight records
+zero attempts. Reopen uses the same deterministic selection and reports failure explicitly.
 
 ### Immutable bottom formation
 
@@ -780,10 +890,10 @@ Proposed metal preference gate: at least 4× deposit-block density per eligible 
 in mountains compared with non-mountains, with most metal volume in mountain regions.
 
 Use a bounded spatial index; bucket references cover the complete possible noisy extent.
-Cap candidate descriptors per bin and total references, rejecting/regenerating overfull
-preparation. Large descriptors may use a second index level rather than referencing every
-small bin. Query candidate overlays once per chunk/column where possible, not all world
-deposits for every voxel.
+Cap candidate descriptors per bin and total references; placement-dependent overflow rejects
+the candidate as `FeatureIndexCapacity` under R42. Large descriptors may use a second index
+level rather than referencing every small bin. Query candidate overlays once per chunk/column
+where possible, not all world deposits for every voxel.
 
 Resolve overlap by an explicit total order `(priority, stable_deposit_id)` and validate
 effective remaining volume/connectivity after host clipping and competing overlays. Resource
@@ -886,6 +996,11 @@ the foundation check must not request a complete box below the world's floor. Pr
 height/span accounting above that contact and separate soil/sand footprint validation:
 deeprock fills an individual structural footprint cell but does not waive the other eight.
 
+Establish one production mining policy and one mutation guard, shared by prediction and
+authority, before integrating new material edit paths (T20/T21). Callers use those shared
+implementations from the start; local copies pending F3 are not an acceptable intermediate
+implementation. F3 consolidates the wider material definitions after G1–G5.
+
 Make the mining outcome explicit, separately from placement and immutability:
 
 ```zig
@@ -939,10 +1054,33 @@ client/service validation already required for G1–G5.
 
 ### Persistence, caches, and shortcuts
 
-Introduce a new generator ID (provisionally 2), schema version, compact explicit settings,
-and independent layer seed tags. Keep the persisted descriptor within the existing 4-KiB
-limit; rebuild macro grids, indices, and starting candidates deterministically during
-preparation. No full-resolution climate map or generated deposit contents are saved up front.
+Use the explicit generator identity and profile dispatch below, with compact settings and
+independent layer seed tags:
+
+| Descriptor field | New-world contract |
+| --- | --- |
+| `generator_id` / `generator_version` | `2` / `1`; the pair versions algorithms and settings encoding. Retain/validate the wire version when decoding. |
+| `seed` | Persisted `u64` for both profiles, including flat; it determines deeprock. |
+| `settings.profile` | Required `natural` or `flat` discriminator, followed by only that profile's payload. Empty settings and unknown/cross-profile fields are invalid. |
+| `settings` payload | Natural carries the generation inputs above; flat has no profile-specific tuning in this version. Its tag is still mandatory. |
+
+The new flat profile keeps a dimension-derived flat surface, a uniform temperate/meadow
+environment, zero polar inset, and seeded deeprock. It does not prepare continents, islands,
+ranges, deposits, or trees and is not subject to natural minimum climate widths. Playable
+flat generation and save/reopen use this profile; isolated material fixtures need not be
+serialized worlds. Never relabel a saved legacy ID 0 world as flat with deeprock. Legacy
+ID 1 terrain is also unsupported; migration is out of scope. The runtime flat representation
+must retain its seed/identity rather than remain a seedless enum tag.
+
+Update descriptor encode/decode/validation and both new-world and saved-world construction
+with exhaustive ID/version/profile dispatch. Replace the current 39-byte legacy-terrain
+settings cap with bounded profile-aware validation; do not interpret every nonzero ID as
+terrain or discard its version. Before preparation, ensure any separately supplied runtime
+generator, profile/settings, seed, and layout agree with the store's descriptor.
+
+Keep the complete persisted descriptor within the existing 4-KiB limit; rebuild macro grids,
+indices, and starting candidates deterministically during preparation. No full-resolution
+climate map or generated deposit contents are saved up front.
 Changes to material IDs, rounding, candidate order, or field semantics require version review.
 Compare prepared-data fingerprints on reopen in tests to detect accidental drift.
 Prepared macro maps, island/ridge/deposit indices, and climate-boundary inputs belong to
@@ -1012,11 +1150,11 @@ pristine chunks, enlarging cache limits, or redoing global preparation on each r
 
 | Milestone | Scope | Likely components |
 | --- | --- | --- |
-| G1: Environment foundation | New version/settings, larger default, pure climate queries, polar inset and finite floor, diagnostics | `src/voxel_app/consts.zig`, `world_generator.zig`, proposed environment module, `terrain_collision.zig`, `standing_space.zig`, `player_controller.zig`, `main.zig` |
+| G1: Environment foundation | Versioned natural/flat profiles, classified preparation failures, larger default, pure climate queries, polar inset and finite floor, diagnostics | `src/voxel_app/consts.zig`, `world_generator.zig`, proposed environment module, `terrain_collision.zig`, `standing_space.zig`, `player_controller.zig`, `main.zig` |
 | G2: Land and relief | Connected continents and smaller islands, ocean, ranges, surface layering, deterministic deeprock, safe first-start region | `world_generator.zig`, `perlin_noise.zig`, proposed geography/relief modules, `world_data_service.zig` |
-| G3: Materials and geology | Opaque water, climate soil palette, sand local rules, deeprock direct foundations, indexed deposits, starter resources, explicit mining policy | `src/engine/voxel/voxel_chunk.zig`, `src/engine/shaders/voxel/`, `src/voxel_app/block_rules.zig`, `world_engine_glue.zig`, `player_interaction.zig`, `world_data_service.zig` |
+| G3: Materials and geology | Shared mining policy and mutation guard before material edit integration; opaque water, climate soil palette, sand local rules, deeprock direct foundations, indexed deposits, starter resources | `src/engine/voxel/voxel_chunk.zig`, `src/engine/shaders/voxel/`, `src/voxel_app/block_rules.zig`, `world_engine_glue.zig`, `player_interaction.zig`, `world_data_service.zig`, `world.zig` |
 | G4: Vegetation | Forest/meadow fields, leaves with null-safe no-item clearing, complete cross-chunk trees, mesh pressure checks | Proposed vegetation module, `world_generator.zig`, voxel/collision/render material code, `player_interaction.zig` |
-| G5: Integration | Immutable mutation guard, validated bottom restoration, new-world save/reopen, edited-chunk authority, bounded caches, shortcut oracle, regeneration benchmarks, debug maps | `src/voxel_app/world.zig`, `src/voxel_app/persistence/format.zig`, `main.zig`, `world_data_service.zig`, generator/service/GPU tests |
+| G5: Integration | Mutation guard verification, validated bottom restoration, both-profile save/reopen and legacy rejection, edited-chunk authority, bounded caches, shortcut oracle, regeneration benchmarks, debug maps | `src/voxel_app/world.zig`, `src/voxel_app/persistence/format.zig`, `main.zig`, `world_data_service.zig`, generator/service/GPU tests |
 | F1: Later construction | Revisit the temporarily allowed soil platform over sand; foundation-to-rock rules and piles | Separate construction specification, then shared validator and support dependencies |
 | F2: Later simulation | Farming prohibition, clothing/water services, action food cost | Future simulation specification, consuming the shared environmental API |
 | F3: Material behavior consolidation | After G1–G5, add one behavior matrix near the runtime data model, shared material definitions, and table-driven invariant checks | `src/engine/voxel/voxel_chunk.zig`, `src/voxel_app/block_rules.zig`, road/collision/render/mining/timer consumers and tests |
@@ -1028,7 +1166,8 @@ merely because their environmental inputs exist.
 ### Risks and validation strategy
 
 - **Topology versus visual coast detail:** protect land/water cores, prove refinement bounds,
-  and compare exact reduced worlds with the macro/island result. Simplify unconstrained
+  and compare adversarial final-column fixtures and exact reduced worlds with the protected
+  cores/island assignments. Simplify unconstrained
   shoreline noise if necessary, while retaining the required first-iteration islands.
 - **Geographic scale:** a four-chunk minimum frozen belt is small relative to this default
   world, while a 10% belt is approximately 3.3 km deep. Use overview maps and player-scale
@@ -1051,8 +1190,9 @@ merely because their environmental inputs exist.
   Golden outputs are versioned; supported builds must agree at material/boundary decisions.
 - **False confidence from samples:** statistical appearance targets are measured on a
   published deterministic suite (proposed 64 seeds including the default 12345), with all
-  failures reported. Exact connectivity/spacing/polar minima are checked structurally or
-  exhaustively at the appropriate representation, not inferred from screenshots.
+  failures and categorized rejection traces reported. Exact connectivity/spacing/polar
+  minima are checked structurally or exhaustively at the appropriate representation,
+  not inferred from screenshots.
 
 For implementation, combine focused generator/reference tests, client/service edit and
 persistence regressions, the existing CPU/build suite, and relevant headless GPU tests.
@@ -1075,17 +1215,25 @@ merely from a compact macro map; complete residency remains separately measured.
 ### Phase 1 — Shared environment and world bounds
 
 - [ ] T3: Add versioned settings validation, pure climate/environment queries, and point/map
-  equivalence plus seam/ordering tests. [R7–R12, R30–R32]
+  equivalence plus seam/ordering tests. Define ID 2 / version 1 natural/flat dispatch and
+  preflight validation with legacy rejection and named failure categories. [R7–R12, R30–R32, R42]
 - [ ] T4: Change the voxel default dimensions; add shared playable-Y bounds to movement,
   climb, standing-space/recovery, and mode return, plus the independent lower-Z player guard.
   Retain explicit flat fixtures. [R1–R2, R28, R40]
-- [ ] T5: Add environment diagnostic export and bounded preparation accounting. [R32, R34]
+- [ ] T5: Add environment diagnostic export, bounded preparation accounting, and categorized
+  failure/retry traces for preparation and seed-batch reports. [R32, R34, R42]
 
 ### Phase 2 — Continents, water, and ranges
 
 - [ ] T6: Implement connected macro continents, indexed smaller islands, bounded coast
   refinement, coarse land target, optional offline coverage estimator, and bounded
-  deterministic retry/failure policy. [R3–R4, R30, R32]
+  deterministic retry/failure policy with at most eight candidate attempts after preflight.
+  Keep candidate index/selection stable and distinguish capacity rejection from allocation
+  or budget failure. [R3–R4, R30, R32, R42]
+- [ ] T24: Add the adversarial final-column topology fixtures: diagonal-only contacts,
+  minimum-width/severed necks, seam-crossing islands, and islands/chains near two continents.
+  Compare cardinal component/core membership and water gaps against protected assignments,
+  including valid and invalid variants without a full-world startup scan. [R3, R34, AC37]
 - [ ] T7: Add shared sea level, ocean filling, sand/soil layering, indexed ranges, and
   conservative terrain/water occupancy bounds; generate the canonical 1–3-block deeprock
   floor in playable profiles and bottom-chunk solid shortcuts. [R5–R6, R15, R33, R38]
@@ -1096,7 +1244,12 @@ merely from a compact macro map; complete residency remains separately measured.
 
 - [ ] T20: Introduce shared default-deny mining policies independently of placement/support;
   preserve configured conversions and the occupied-slot gate, validate yielded inventory
-  items, and handle explicit no-item success safely in prediction/authority. [R36–R37]
+  items, and handle explicit no-item success safely in prediction/authority. Integrate one
+  production policy rather than parallel client/service copies. [R36–R37]
+- [ ] T21: Protect deeprock through shared write-set validation, including indirect edits,
+  optimistic replay, timers, roads/bulk plans, and debug/service setters. Establish this
+  shared guard alongside T20 before integrating new material edits; verify rejected
+  transactions have no partial effects and filtered plans preserve the floor. [R39]
 - [ ] T9: Add render-only climate soil appearances and opaque blue water, preserving saved
   soil and timers; verify CPU/GPU material layout and optimistic remeshing. [R13–R14, R19]
 - [ ] T10: Implement distinct granular footprints, constructed-sand dependencies, and sand
@@ -1121,11 +1274,10 @@ merely from a compact macro map; complete residency remains separately measured.
 - [ ] T15: Update column caches, boundary/enclosure/empty/rock shortcuts, and client/service
   generation paths; compare them with a slow reference including deeprock priority in
   bottom chunks. [R10–R11, R30, R32–R33, R38–R39]
-- [ ] T21: Protect deeprock through shared write-set validation, including indirect edits,
-  optimistic replay, timers, roads/bulk plans, and debug/service setters. Verify rejected
-  transactions have no partial effects and filtered plans preserve the floor. [R39]
 - [ ] T16: Integrate new descriptor/material serialization and new-world save/reopen tests
   with sand or explicitly configured usable resource mining and no-item foliage removal.
+  Cover natural and seeded flat profiles, malformed/legacy identity rejection, profile-aware
+  settings bounds, and runtime descriptor/seed/layout mismatch before service startup.
   Validate canonical deeprock before publishing each restored bottom chunk/base/WAL result;
   preserve valid upper edits and report invalid records without regeneration. [R30–R31, R36–R39]
 
@@ -1147,11 +1299,16 @@ merely from a compact macro map; complete residency remains separately measured.
 
 ### Validation
 
+- [ ] T25: Inject preflight, retryable candidate, and terminal preparation failures. Verify
+  zero attempts for invalid inputs, deterministic first-valid selection, the shared eight-
+  attempt cap, cleanup/no partial publication, and complete `SeedRejected` diagnostics.
+  [R32, R34, R42, AC36, AC38]
 - [ ] T19: Implement the deterministic regeneration hash oracle and benchmark cached versus
   evicted columns, including the beach toggle and actual bounded-cache churn. Publish
   measured preparation/query/generation/meshing costs and owned scratch limits. [R30–R35]
-- [ ] T-val: Verify all AC1–AC35 for G1–G5, including current AC22 environmental flags,
-  AC23 permitted platforms, and AC28–AC35 mining/floor/foundation contracts; keep future F1–F3 tasks
+- [ ] T-val: Verify all AC1–AC38 for G1–G5, including current AC22 environmental flags,
+  AC23 permitted platforms, AC28–AC35 mining/floor/foundation contracts, and AC36–AC38
+  profile identity/topology/failure handling; keep future F1–F3 tasks
   separate. Publish seed-suite maps/metrics
   and run relevant CPU/build/GPU/persistence checks, repeated-regeneration benchmarks, and
-  player-scale visual inspection. [AC1–AC35]
+  player-scale visual inspection. [AC1–AC38]
