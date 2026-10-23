@@ -1,6 +1,7 @@
 ---
 service: zig_engine
 created: 2026-10-22
+updated: 2026-10-23
 status: draft
 ---
 
@@ -32,7 +33,7 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
 - [Block placement](../../docs/block-placement.md) already distinguishes loose soil,
   packed soil, and grass-covered packed soil. Compaction and surface timers are authoritative
   state. Sand currently bypasses structural placement checks; a stable soil platform can
-  reset construction support counters without proving support down to bedrock.
+  reset construction support counters without proving support down to underlying natural rock.
 - [Country roads](country-roads.md) currently allow cube-colliding materials as direct
   support. The proposed sand restriction is a deliberate exception to that rule.
 - [World persistence](world-persistence.md) records dimensions, generator identity, seed,
@@ -169,7 +170,9 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
 - R23: Small deposits of clay, sand, and coal also occur for early production. Metal and
   limestone have only the large-deposit population in this version. The user confirmed a
   guarantee of accessible small clay/sand/coal deposits near the **first starting position
-  only**; other continents and later spawns receive no equivalent guarantee.
+  only**; other continents and later spawns receive no equivalent guarantee. This guarantees
+  physical placement/access, not permission to mine an unconfigured resource before its
+  usable mining result and interaction flow are implemented (R36–R37).
 - R24: Resource blocks replace compatible solid host material below the actual surface,
   with shallow exposures allowed. Define stable overlap precedence, resource IDs, depth
   ranges, and size classes. Published quantities mean effective resource-block counts after
@@ -190,8 +193,10 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   or stable platforms; road validation must explicitly respect this despite cube collision.
   Generated trunks and leaves are natural blocks, not constructed placements. Trees can be
   mined block by block; automatic felling, falling trunks, leaf decay, regrowth, and sapling
-  planting are deferred. Mining a trunk yields the existing trunk item; leaves have no
-  useful harvest item in this version.
+  planting are deferred. Mining a trunk yields the existing trunk item. Leaves have an
+  explicitly configured removal-without-item policy, distinct from forbidden resource
+  mining; removing them leaves the inventory empty and requires null-safe prediction and
+  authoritative handling (R36–R37).
 
 ### Playable bounds, persistence, and scale
 
@@ -208,7 +213,8 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
 - R30: Generation is deterministic for dimensions, generator version, seed, and serialized
   settings. Reordering chunk requests, parallel work, cache eviction, restart, or crossing
   the X seam must not change generated blocks, climate, trees, or deposits. Saved edits
-  remain authoritative and never regenerate mined material or removed vegetation. Untouched
+  remain authoritative within mutable cells and never regenerate mined material or removed
+  vegetation. They cannot override the canonical immutable bedrock layer (R38–R39). Untouched
   chunks may be generated arbitrarily many times and are not persisted merely to stabilize
   random outcomes. Beaches and islands obey the same determinism contract.
 - R31: Use a new generator identity/settings schema; unsupported versions fail explicitly.
@@ -219,8 +225,8 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   or arrays for all possible chunks. Bound preparation memory, candidate lists, retries,
   feature-index occupancy, column caches, and per-chunk generation work. Preserve existing
   residency/backpressure behavior rather than assuming the enlarged world fits in memory.
-- R33: Rework generation shortcuts so they cannot omit water, crowns, or deposits. Empty
-  shortcuts require bounds on all generated occupancy; stone shortcuts require proof that
+- R33: Rework generation shortcuts so they cannot omit water, crowns, deposits, or bedrock.
+  Empty shortcuts require bounds on all generated occupancy; stone shortcuts require proof that
   no material overlay intersects. Enclosure/occlusion certification must remain conservative
   for every new material and use the same generation source as actual chunks.
 - R34: Provide reproducible diagnostic maps and seed-batch measurements for continent
@@ -234,6 +240,55 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   chunk or cache refill. Benchmark cached and evicted column generation separately, retaining
   existing bounded caches; performance must not depend on eventual disk persistence or an
   indefinitely warm column cache. Measure the beach overlay separately before enabling it.
+
+### Mining capability and immutable world floor
+
+- R36: Mining/removal eligibility is an explicit material capability, independent of
+  placement, collision, face occlusion, and structural support. Default newly added or
+  unconfigured materials to forbidden mining rather than yielding their own block ID.
+  Ore, limestone, clay, and coal remain visible, solid geological resources but cannot be
+  mined until their usable result and interaction flow are explicitly configured. Existing
+  configured materials, including sand, retain their mining conversions. A separately
+  configured non-resource removal without an item, such as clearing foliage, is permitted;
+  an absent result alone never grants permission to delete a block. Share this policy
+  between client prediction and authoritative player, spectator-edit, and simulation
+  removal paths. Rejection changes no blocks, inventory, timers, metadata, or revisions.
+- R37: A successful item-yielding extraction must produce an item supported by the current
+  inventory/persistence schema with an implemented way to use it and empty the slot.
+  For the current single-block inventory, only its configured placeable mining results
+  satisfy that contract; do not insert new unplaceable raw resources and strand the slot.
+  Future resource features must configure the complete use/transfer flow before enabling
+  their mining. Preserve the current empty-slot prerequisite for player mining, including
+  foliage clearing: an occupied slot rejects removal without changing the carried item.
+  Explicit removal without an item succeeds with `mined_type = null`, keeps the initially
+  empty slot empty, and follows ordinary acknowledgement/reconciliation and save/reopen.
+  Prediction and authority must not unconditionally unwrap successful removal results.
+- R38: Add a distinct `bedrock` material at the world's absolute storage bottom. For each
+  canonical horizontal column, choose deterministic irregular thickness `B(x,y)` in [1,3]
+  blocks and fill **every** storage cell `0 <= z < B(x,y)` with bedrock. Thus z=0 is a
+  complete sealed layer and no bedrock cell has a hole or different material underneath.
+  The formation lies wholly in the lowest Z chunk and covers the entire X/Y footprint,
+  including oceans, islands, and inaccessible polar strips. X wrapping and regeneration
+  preserve exactly the same thickness. Bedrock is opaque, full-cube-colliding, non-placeable,
+  yields no item, and can provide natural-rock support. Ordinary rock above it stays subject
+  to its configured mining policy.
+- R39: Bedrock is permanently immutable by every supported world-changing operation, not
+  merely unavailable to the player's mining tool. Canonical bedrock cells cannot be removed,
+  replaced, moved, or transformed by player/spectator edits, NPC/simulation actions, timers,
+  road/bulk/indirect writes, or runtime debug tools. Generation and resource/surface overlays
+  must preserve them. Validate complete authoritative write sets before committing effects,
+  and keep optimistic replay subject to the same invariant. Planners may deliberately
+  exclude immutable cells; a rejected transaction cannot commit partial effects. Saved/WAL
+  data cannot override the layer: conflicting restored bedrock is rejected as invalid world
+  data before publishing or using that restored chunk, with no silent regeneration of
+  modified chunks or loss of valid edits above the layer. Validate lazily loaded records
+  without requiring an all-world scan on reopen.
+- R40: Keep the finite lower-Z boundary as an independent impassable guard, in addition to
+  bedrock collision. No player body may cross below storage Z=0 through falling, climbing,
+  high-speed motion, teleport, mode changes, recovery,
+  or unavailable terrain. Validate destinations/restored poses before activation or resolve
+  them to valid standing space. Apply layout-origin conversion correctly: negative centred
+  world Z can be valid, while below the layout's storage bottom is always forbidden.
 
 ## Clarifications
 
@@ -265,7 +320,8 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   A8: REVISED/CONFIRMED on 2026-10-22: allow the soil-platform workaround for this iteration.
   A valid `3 × 3 × 3` soil platform may support construction even with sand below it.
   Direct building on sand is still prohibited. Foundation-to-rock checks and piles are
-  deferred; generated bedrock heights are not used as a substitute for future live support.
+  deferred; original natural-rock surface heights do not substitute for future live support.
+  This ordinary foundation rock is distinct from the immutable bottom `bedrock` material.
 - Q9: What remains to be balanced?
   A9: CONFIRMED approach: use visual maps of several seeds to tune mountain heights,
   forests, and resource distributions before fixing numbers. UNRESOLVED numeric tuning:
@@ -295,6 +351,19 @@ decisions, proposed defaults, and deferred mechanics are distinguished below.
   is unmeasured; compare beaches enabled/disabled in the regeneration benchmark below.
   Beach inclusion remains conditional on that measurement. Deterministic regeneration is
   a confirmed requirement, including with empty caches and after restart.
+- Q14: What happens to new resources without an implemented use?
+  A14: CONFIRMED on 2026-10-23, addressing [PR #37's inventory review comment](https://github.com/bacher/zig_engine/pull/37#discussion_r4349879370):
+  they cannot be mined until explicitly configured with a supported usable result/flow.
+  This is a temporary resource-development state, not an intended finished-game dead end.
+  Use an explicit default-deny mining capability that also supports permanently unmineable
+  materials. Foliage clearing is an explicit no-item removal, not an implicit exception for
+  arbitrary unconfigured resource types, and must handle a null result safely.
+- Q15: What seals the absolute world bottom?
+  A15: CONFIRMED on 2026-10-23: a permanently indestructible `bedrock` formation, 1–3 blocks
+  thick per column with deterministic irregular top height. All cells below its top are
+  bedrock down to storage z=0; no voids. Mining, replacement, indirect mutation, or traversal
+  cannot create a route below the world. The thickness rule is shared by generation and
+  restoration validation and does not need a stored full-world map.
 
 ## Acceptance Criteria
 
@@ -355,7 +424,8 @@ the temporarily allowed soil platform. Future foundation/NPC execution tasks rem
   non-mountain settings; no small metal/limestone population is introduced. [R21–R24]
 - AC14: GIVEN a new world's first starting candidate WHEN preparation accepts it THEN
   shallow small clay/sand/coal deposits are reachable in the configured local land region
-  without ocean crossing, and the final standing-space check accepts current blocks. [R23, R29]
+  without ocean crossing, and the final standing-space check accepts current blocks.
+  Physical reachability does not enable mining of unconfigured clay/coal. [R23, R29, R36]
 - AC15: GIVEN trees spanning all three chunk axes and the X seam WHEN generating chunks
   separately, in reverse order, and after eviction THEN complete 4–5-trunk-block trees
   reassemble identically, with no overlaps, terrain intersections, or forbidden climate
@@ -364,14 +434,17 @@ the temporarily allowed soil platform. Future foundation/NPC execution tasks rem
   boundaries THEN forests contain substantially more trees, boundaries cut across chunks,
   frozen columns contain no trees/bushes, and steppe/desert match configured scarcity. [R26]
 - AC17: GIVEN foliage WHEN colliding, building, mining, and meshing THEN it has the agreed
-  opaque cube behavior, provides no structural support or useful item, and natural trees
-  can be mined without triggering a constructed-tree dependency rejection. [R27]
+  opaque cube behavior, provides no structural support or useful item, and configured
+  no-item clearing succeeds without a constructed-tree rejection or a null-result panic;
+  trunk mining continues to yield the trunk item. [R27, R36–R37]
 - AC18: GIVEN an actor approaching either polar inset at any height WHEN moving, climbing,
   spawning, teleporting, or recovering THEN the whole body remains in playable Y, with no
   stored wall blocks or blocked-chunk loads required to establish the barrier. [R28–R29]
 - AC19: GIVEN modified/mined chunks and an unchanged world descriptor WHEN saving,
   evicting, and reopening THEN current blocks/metadata override regeneration and climate
-  stays identical; an unsupported generator version is reported explicitly. [R30–R31]
+  stays identical within mutable cells; canonical bedrock remains unchanged and an
+  unsupported generator version is reported explicitly. Mining fixtures use sand or an
+  explicitly configured usable test resource. [R30–R31, R36–R39]
 - AC20: GIVEN forest, coastline, mineral, and high-altitude fixtures WHEN comparing optimized
   generation/enclosure with an unoptimized reference THEN blocks, exposed faces, boundary
   masks, and enclosure decisions agree or conservatively retain extra geometry. [R33]
@@ -402,6 +475,41 @@ the temporarily allowed soil platform. Future foundation/NPC execution tasks rem
   and cache-evicted regeneration workloads THEN sample counts, allocations/scratch, column
   build and chunk/mesh times are reported separately, and any enabled beach default meets
   the measured regeneration budget without increasing residency to hide its cost. [R20, R32, R35]
+- AC28: GIVEN an unconfigured material or an unconfigured ore/limestone/clay/coal block
+  WHEN player prediction, authority, spectator edits, or simulation requests its removal
+  THEN the operation is explicitly rejected and its block, inventory, timers, metadata,
+  and revisions remain unchanged. A newly added material receives this default without
+  inheriting a self-yielding mining fallback. [R36]
+- AC29: GIVEN an empty player inventory, configured ordinary mining, and explicit foliage
+  removal without an item WHEN completing, acknowledging, saving, and reopening those
+  operations THEN item-yielding extraction produces only a usable supported inventory item
+  that can be placed to free the slot; foliage clearing succeeds with an empty slot and no null unwrap,
+  reconciliation deadlock, phantom item, or save failure. With an occupied slot, foliage
+  removal is rejected and both the leaf block and carried item remain intact. [R27, R37]
+- AC30: GIVEN fixed seeds and columns including ocean, islands, poles, and the wrapped seam
+  WHEN generating/revisiting the lowest Z chunk THEN each thickness is in [1,3], all cells
+  below its top through z=0 are bedrock, the top varies over the fixture, and reordered
+  requests, cache eviction, and restart reproduce the same filled layer. [R30, R38]
+- AC31: GIVEN bottom chunks and overlapping deposits/surface overlays WHEN comparing all
+  optimized generation paths with a slow material reference THEN bedrock has priority,
+  no air/water/resource replaces it, and stone shortcuts preserve its exact irregular
+  shape while ordinary mineable stone above remains available. [R24, R33, R38–R39]
+- AC32: GIVEN a protected bedrock cell and a multi-cell operation with valid mutable targets
+  WHEN removal/replacement/transformation is attempted through direct, indirect, optimistic,
+  timer, road, simulation, or runtime debug paths THEN the protected layer is unchanged,
+  a rejected transaction commits no partial effects or item grants, and a clear
+  immutable-material failure is reported. An explicitly filtered bulk plan may change its
+  remaining mutable targets while leaving bedrock intact. [R36, R39]
+- AC33: GIVEN a valid edited bottom chunk and an invalid record removing/replacing bedrock
+  WHEN saving/reopening or restoring base/WAL contents THEN valid upper edits and the
+  canonical layer survive, while the invalid record is rejected before that restored chunk
+  is published/used rather than overriding bedrock or regenerating the modified chunk.
+  Lazy restoration does not scan all world records on reopen. [R31, R38–R39]
+- AC34: GIVEN exposed bedrock, missing terrain, or a pose/destination below the storage floor
+  WHEN falling quickly, climbing, teleporting, restoring/recovering, or switching to/from
+  spectator mode THEN the active player body stays at or above the valid world lower bound;
+  no missing chunk, tunnelling, origin-conversion error, or return from a debug camera
+  permits the player to enter below it. [R40]
 
 ## Constraints
 
@@ -410,7 +518,8 @@ the temporarily allowed soil platform. Future foundation/NPC execution tasks rem
   GPU-owned biome truth. New stochastic layers use named seed streams and canonical X.
 - Climate queries describe location; material/support queries use **current authoritative
   blocks**. A generated deposit descriptor is not remaining stock, a generated height is
-  not current clearance, and a generated bedrock height is not proof of a current foundation.
+  not current clearance, and an original natural-rock horizon does not prove a current
+  foundation. Canonical bottom bedrock is a separate immutable coordinate/material invariant.
 - Preserve byte-sized block storage and the four-byte ordinary voxel face record where
   practical. Palette/render IDs need a separate type and must not enter persistence or block
   operations. Custom road sentinel 255 remains reserved.
@@ -444,18 +553,21 @@ Use this dependency order, without conflating layers:
 
 ```text
 version + dimensions + seed + settings
+  -> immutable bottom mask (independent per column)
   -> connected continental layout + islands / coast / ocean
   -> periodic climate + geological provinces
   -> relief ranges + detailed terrain + surface cover
   -> first-start region + indexed deposits + starter pockets
   -> vegetation fields + deterministic tree candidates
   -> generated blocks / climate-aware render material
-  -> saved edits override generated blocks
+  -> saved edits override mutable generated cells; validate immutable bottom on restoration
 ```
 
 Climate is also directly queryable from prepared inputs; it does not require the intervening
 block-generation stages. First-start selection and starter deposits happen before trees,
 so tree exclusion around the spawn/access patches does not create a circular dependency.
+The bottom mask is independently queryable and has priority over every material overlay;
+geography, climate, and feature preparation do not depend on enumerating that mask.
 
 ### Continental layout and height
 
@@ -511,6 +623,28 @@ Proposed tuning at default height: sea level 384 blocks, ocean depth 32–160 bl
 ordinary land 1–64 blocks above sea level, mountain uplift 64–384 blocks. Clamp all results
 with room above for full tree crowns; retain solid bottom terrain. Shape continental shelf
 and inland relief without making a vertical cliff around every coast.
+
+### Immutable bottom formation
+
+For each canonical storage column, compute the thickness directly:
+
+```text
+B(x,y) = 1 + stableHash(seed ^ BEDROCK_TAG, canonicalX, storageY) % 3
+material(x,y,z) = bedrock for every 0 <= storageZ < B(x,y)
+```
+
+Pin the hash, named layer tag, coordinate encoding, and unsigned wrapping arithmetic to
+the generator version. This is one hash per horizontal column in the lowest Z chunk;
+no noise halo, neighboring chunk, global map, or additional random stream state is needed.
+Require original terrain height to be at least three blocks. Apply the same sealed-floor
+rule to playable natural and flat profiles; isolated test fixtures must state their own
+material setup explicitly rather than accidentally relying on a floor-free playable profile.
+
+Resolve bedrock before ordinary rock, deposits, soil, sand/beaches, water, and vegetation.
+Host replacement cannot target it. The existing `initSolid(stone)` shortcut must fill the
+canonical bottom mask when used in the lowest chunk; higher uniform rock chunks retain
+their shortcut. A slow reference uses the identical mask and makes this priority testable.
+This material is distinct from ordinary natural rock used in desert foundation discussions.
 
 ### Climate boundaries and transitions
 
@@ -604,7 +738,7 @@ by default only after its measured cache-evicted regeneration overhead is accept
 Use explicit immutable descriptors: stable ID, resource, size class, centre, orientation,
 shape parameters, depth/host restrictions, priority, and local seed. Prefer connected lenses,
 seams, and irregular ellipsoids with bounded noise over scattered per-block ore chance.
-The majority of a large deposit should be a connected mineable body. Do not fill a huge
+The majority of a large deposit should be a connected resource body. Do not fill a huge
 bounding box with a negligible density of disconnected resource specks and call it large.
 
 Proposed initial ranges and settings, to validate against effective volumes:
@@ -634,8 +768,8 @@ deposits for every voxel.
 
 Resolve overlap by an explicit total order `(priority, stable_deposit_id)` and validate
 effective remaining volume/connectivity after host clipping and competing overlays. Resource
-blocks never replace water, air, or tree voxels. Preserve the desert sand surface except
-intentional rocky outcrops; underground clay does not create a grass/soil desert surface.
+blocks never replace bedrock, water, air, or tree voxels. Preserve the desert sand surface
+except intentional rocky outcrops; underground clay does not create a grass/soil desert surface.
 Startup uses bounded shape/core proofs, conservative effective-volume bounds, and sampling;
 exact voxel counting is an optional diagnostic over selected deposits/reduced worlds. Do
 not silently enumerate millions of blocks per deposit on every prepare/reopen. Any exact
@@ -655,6 +789,8 @@ and starter pockets ensure early sand access does not require reaching the equat
 optional beach. Resource descriptors describe the original world; remaining stock always
 comes from current authoritative blocks. Mining methods are later consumers of the same
 deposit geometry and do not change its generation.
+Descriptors and physical starter access do not grant mining permission: resource materials
+remain forbidden until their complete usable-result flow is configured under R36–R37.
 
 ### Vegetation and trees
 
@@ -712,14 +848,40 @@ Environmental profiles expose future work/farming flags and tunable multipliers.
 and water needs are distinct flags; a later actor entering both conditions must not lose
 one requirement merely because a rendering enum changes.
 
-Add block types for leaves and resource materials with explicit collision, occlusion,
+Add block types for leaves, bedrock, and resource materials with explicit collision, occlusion,
 mining, placement, and foundation categories. Do not let an enum addition accidentally gain
 all soil timers or construction privileges. Proposed consolidated ore/limestone/coal host
-blocks act as natural rock for support and mine to their resource; clay is cohesive natural
-ground with an explicitly chosen soil-like support category, without grass/compaction timers.
+blocks act as natural rock for support; clay is cohesive natural ground with an explicitly
+chosen soil-like support category, without grass/compaction timers.
 New raw resources need not be placeable building materials before their material design.
-Sand is the already placeable exception. These categories require review in the material
-phase; generic non-air occupancy is not a foundation contract.
+Sand is the already placeable exception. Ore, limestone, clay, and coal remain unmineable
+until explicitly configured with supported usable results. Bedrock is opaque, colliding,
+non-placeable natural-rock support, with forbidden removal and permanent mutation protection.
+These categories require review in the material phase; generic non-air occupancy is not a
+foundation contract.
+
+Make the mining outcome explicit, separately from placement and immutability:
+
+```zig
+const MiningPolicy = union(enum) {
+    forbidden,
+    remove_without_item,
+    yield_item: BlockType, // Current inventory representation; not a future item-system design.
+};
+```
+
+Material lookup defaults to `.forbidden`; enumerate configured conversions explicitly rather
+than using `else => self`. Keep existing dirt/grass/packed-soil conversions, sand, stone,
+and other configured current results. Leaves explicitly use `.remove_without_item`.
+Neither `isPlaceable()` nor a null yield grants permission to remove a block. Item-yielding
+policies must agree with current inventory validation and offer an implemented way to place
+the result. Registering a future raw resource alone cannot activate its mining.
+
+Check the same policy before optimistic removal and authoritative commit. Preserve the
+occupied-slot gate even for no-item clearing. Successful no-item removal still has the
+ordinary success/acknowledgement path but no inventory assignment; replace unconditional
+`mined_type.?` handling in prediction and authority with explicit outcome handling. Test
+acknowledgement, rollback, the next interaction, and saving an empty slot after leaf removal.
 
 For rendering, prefer a distinct `RenderMaterialId` in the existing face type byte: resolve
 soil appearance from the column when meshing, preserve authoritative `BlockType`, and reserve
@@ -743,15 +905,30 @@ the prepared-world lifetime; evicting a column must not rebuild them. Cache cont
 derived accelerators, never inputs to generation decisions. Repeated generation of pristine
 chunks must produce identical block bytes without writing those chunks to disk.
 
+Validate the canonical bottom mask before publishing each restored lowest-Z chunk, including
+its base record and replayed WAL edits. A conflicting record is an explicit data error;
+never repair it by discarding valid upper edits or silently regenerating a modified chunk.
+This is a bounded check on the loaded chunk, not a global saved-world scan.
+
+Use a shared immutability check on complete planned write sets before effects/revisions are
+committed. Cover authoritative edits, optimistic application/replay, timers/`changeType`,
+road/bulk operations, and runtime debug/service setters, including paths that currently skip
+ordinary construction checks. Bulk planners may exclude protected cells deliberately; a
+failed transaction cannot grant items or partially change mutable targets. Original-world
+generation and validated restoration are distinct from gameplay mutation, but both must
+produce the canonical mask. Keep finite lower-Z collision independent of loaded terrain,
+and validate player destinations/recovery and mode return against the layout's storage floor.
+
 Extend `ColumnGenerator` to cache the 32×32 environment data needed for its vertical chunks.
 Keep current bounded caches (presently 64 column generators and 512 boundary entries) unless
 measurement justifies a separately budgeted change. Do not duplicate the macro map per
 column/client. Consumers can share immutable prepared data with explicit lifetime ownership.
 
 Track maximum terrain, water, and tree occupancy separately for empty shortcuts. Resource
-intersection tests precede uniform-rock shortcuts. Enclosure needs only solid/occluding
-occupancy, but any new shortcut proof must agree with generated boundary strips and material
-rules. Retain the cave-free invariant; leaf canopies cannot certify an underground enclosure.
+intersection tests and the bedrock mask precede uniform-rock shortcuts. Enclosure needs only
+solid/occluding occupancy, but any new shortcut proof must agree with generated boundary
+strips and material rules. Retain the cave-free invariant; leaf canopies cannot certify an
+underground enclosure.
 
 Proposed preparation memory gate: at most 32 MiB peak owned generator data/scratch for the
 default profile, excluding live chunks and existing persistence/render allocations. Measure
@@ -790,11 +967,11 @@ pristine chunks, enlarging cache limits, or redoing global preparation on each r
 
 | Milestone | Scope | Likely components |
 | --- | --- | --- |
-| G1: Environment foundation | New version/settings, larger default, pure climate queries, polar inset, diagnostics | `src/voxel_app/consts.zig`, `world_generator.zig`, proposed environment module, `terrain_collision.zig`, `standing_space.zig`, `player_controller.zig`, `main.zig` |
-| G2: Land and relief | Connected continents and smaller islands, ocean, ranges, surface layering, safe first-start region | `world_generator.zig`, `perlin_noise.zig`, proposed geography/relief modules, `world_data_service.zig` |
-| G3: Materials and geology | Opaque water, climate soil palette, sand local rules, indexed deposits, starter resources | `src/engine/voxel/voxel_chunk.zig`, `src/engine/shaders/voxel/`, `src/voxel_app/block_rules.zig`, `world_engine_glue.zig`, material/collision/mining code |
-| G4: Vegetation | Forest/meadow fields, leaves, complete cross-chunk trees, mesh pressure checks | Proposed vegetation module, `world_generator.zig`, voxel/collision/render material code |
-| G5: Integration | New-world save/reopen, edited-chunk authority, bounded caches, shortcut oracle, regeneration benchmarks, debug maps | `src/voxel_app/persistence/format.zig`, `main.zig`, `world_data_service.zig`, generator/service/GPU tests |
+| G1: Environment foundation | New version/settings, larger default, pure climate queries, polar inset and finite floor, diagnostics | `src/voxel_app/consts.zig`, `world_generator.zig`, proposed environment module, `terrain_collision.zig`, `standing_space.zig`, `player_controller.zig`, `main.zig` |
+| G2: Land and relief | Connected continents and smaller islands, ocean, ranges, surface layering, deterministic bedrock, safe first-start region | `world_generator.zig`, `perlin_noise.zig`, proposed geography/relief modules, `world_data_service.zig` |
+| G3: Materials and geology | Opaque water, climate soil palette, sand local rules, indexed deposits, starter resources, explicit mining policy | `src/engine/voxel/voxel_chunk.zig`, `src/engine/shaders/voxel/`, `src/voxel_app/block_rules.zig`, `world_engine_glue.zig`, `player_interaction.zig`, `world_data_service.zig` |
+| G4: Vegetation | Forest/meadow fields, leaves with null-safe no-item clearing, complete cross-chunk trees, mesh pressure checks | Proposed vegetation module, `world_generator.zig`, voxel/collision/render material code, `player_interaction.zig` |
+| G5: Integration | Immutable mutation guard, validated bottom restoration, new-world save/reopen, edited-chunk authority, bounded caches, shortcut oracle, regeneration benchmarks, debug maps | `src/voxel_app/world.zig`, `src/voxel_app/persistence/format.zig`, `main.zig`, `world_data_service.zig`, generator/service/GPU tests |
 | F1: Later construction | Revisit the temporarily allowed soil platform over sand; foundation-to-rock rules and piles | Separate construction specification, then shared validator and support dependencies |
 | F2: Later simulation | Farming prohibition, clothing/water services, action food cost | Future simulation specification, consuming the shared environmental API |
 
@@ -813,6 +990,12 @@ merely because their environmental inputs exist.
 - **Temporary sand foundation policy:** soil platforms above sand are explicitly allowed by
   R18, while sand stays outside broad structural predicates. Do not accidentally reject the
   permitted platform route or claim a foundation-to-rock proof that does not exist.
+- **Inventory dead ends:** material presence and placement/support categories must not enable
+  mining implicitly. Keep unknown resources forbidden, and exercise both item-yielding and
+  explicit no-item acknowledgement/save paths with the current single-slot inventory.
+- **Bottom-layer bypasses:** a mining-only guard misses indirect writes, optimized generation,
+  optimistic replay, and restored chunks. Use the shared canonical mask, validate mutation
+  write sets and lazy restoration, and retain finite lower-Z collision without loaded data.
 - **Forest face budget:** trees add substantial ordinary voxel faces. Exercise dense mixed
   forest/coast chunks against existing 4-MiB face capacity and 64-KiB per-chunk allocation,
   boundary invalidation, shadows, and capacity fallback. Do not silently truncate trees to
@@ -848,7 +1031,8 @@ merely from a compact macro map; complete residency remains separately measured.
 - [ ] T3: Add versioned settings validation, pure climate/environment queries, and point/map
   equivalence plus seam/ordering tests. [R7–R12, R30–R32]
 - [ ] T4: Change the voxel default dimensions; add shared playable-Y bounds to movement,
-  climb, standing-space/recovery, and mode return. Retain explicit flat fixtures. [R1–R2, R28]
+  climb, standing-space/recovery, and mode return, plus the independent lower-Z player guard.
+  Retain explicit flat fixtures. [R1–R2, R28, R40]
 - [ ] T5: Add environment diagnostic export and bounded preparation accounting. [R32, R34]
 
 ### Phase 2 — Continents, water, and ranges
@@ -857,18 +1041,23 @@ merely from a compact macro map; complete residency remains separately measured.
   refinement, coarse land target, optional offline coverage estimator, and bounded
   deterministic retry/failure policy. [R3–R4, R30, R32]
 - [ ] T7: Add shared sea level, ocean filling, sand/soil layering, indexed ranges, and
-  conservative terrain/water occupancy bounds. [R5–R6, R15, R33]
+  conservative terrain/water occupancy bounds; generate the canonical 1–3-block bedrock
+  floor in playable profiles and bottom-chunk solid shortcuts. [R5–R6, R15, R33, R38]
 - [ ] T8: Select/validate a safe first-start region; add spawn/access exclusions for later
   trees without relying on world origin. [R23, R29]
 
 ### Phase 3 — Materials, rendering, and resources
 
+- [ ] T20: Introduce shared default-deny mining policies independently of placement/support;
+  preserve configured conversions and the occupied-slot gate, validate yielded inventory
+  items, and handle explicit no-item success safely in prediction/authority. [R36–R37]
 - [ ] T9: Add render-only climate soil appearances and opaque blue water, preserving saved
   soil and timers; verify CPU/GPU material layout and optimistic remeshing. [R13–R14, R19]
 - [ ] T10: Implement distinct granular footprints, constructed-sand dependencies, and sand
   support rejection for buildings/roads, including seam and missing-data cases. [R16–R17]
 - [ ] T11: Define resource material behavior, indexed deposit shapes/precedence, geology
-  weights, effective-volume validation, and finite mining persistence. [R21–R24, R30–R33]
+  weights, effective-volume validation, and finite resource persistence. Exclude bedrock
+  hosts and leave unconfigured resources unmineable. [R21–R24, R30–R33, R36–R39]
 - [ ] T12: Reuse/insert the three starter pockets and verify local access on the final
   generated terrain. [R23, R29]
 - [ ] T13: Prototype the bounded shallow beach overlay using retained terrain samples;
@@ -878,11 +1067,18 @@ merely from a compact macro map; complete residency remains separately measured.
 ### Phase 4 — Vegetation and integration
 
 - [ ] T14: Add leaves and forest/meadow fields; implement bounded globally prioritized tree
-  candidates and complete-form clipping into chunks. [R25–R27]
+  candidates and complete-form clipping into chunks; explicitly enable no-item foliage
+  clearing and verify empty/occupied-slot behavior. [R25–R27, R36–R37]
 - [ ] T15: Update column caches, boundary/enclosure/empty/rock shortcuts, and client/service
-  generation paths; compare them with a slow reference. [R10–R11, R30, R32–R33]
+  generation paths; compare them with a slow reference including bedrock priority in
+  bottom chunks. [R10–R11, R30, R32–R33, R38–R39]
+- [ ] T21: Protect bedrock through shared write-set validation, including indirect edits,
+  optimistic replay, timers, roads/bulk plans, and debug/service setters. Verify rejected
+  transactions have no partial effects and filtered plans preserve the floor. [R39]
 - [ ] T16: Integrate new descriptor/material serialization and new-world save/reopen tests
-  with edited/mined resources and removed tree blocks. [R30–R31]
+  with sand or explicitly configured usable resource mining and no-item foliage removal.
+  Validate canonical bedrock before publishing each restored bottom chunk/base/WAL result;
+  preserve valid upper edits and report invalid records without regeneration. [R30–R31, R36–R39]
 
 ### Follow-up specifications
 
@@ -897,7 +1093,8 @@ merely from a compact macro map; complete residency remains separately measured.
 - [ ] T19: Implement the deterministic regeneration hash oracle and benchmark cached versus
   evicted columns, including the beach toggle and actual bounded-cache churn. Publish
   measured preparation/query/generation/meshing costs and owned scratch limits. [R30–R35]
-- [ ] T-val: Verify all AC1–AC27 for G1–G5, including current AC22 environmental flags and
-  AC23 permitted platforms; keep future F1/F2 tasks separate. Publish seed-suite maps/metrics
+- [ ] T-val: Verify all AC1–AC34 for G1–G5, including current AC22 environmental flags,
+  AC23 permitted platforms, and AC28–AC34 mining/floor contracts; keep future F1/F2 tasks
+  separate. Publish seed-suite maps/metrics
   and run relevant CPU/build/GPU/persistence checks, repeated-regeneration benchmarks, and
-  player-scale visual inspection. [AC1–AC27]
+  player-scale visual inspection. [AC1–AC34]
