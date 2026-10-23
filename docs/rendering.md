@@ -157,7 +157,30 @@ regressions compare instanced and individual draws at 20, 34, and 65 cells, incl
 correction masks and a visible-only focused cell. Profile GPU stroke coverage before raising
 the application preview bound; instancing does not reduce screen-space overdraw.
 
-The voxel grid stores exposed-face records, not a conventional indexed mesh or a dense GPU block array. Each record contains local block coordinates and block type in four bytes. Six lists group those records by outward face direction. The vertex shader generates six vertices per face and selects atlas UVs using block type and direction.
+The voxel grid stores exposed-face records, not a conventional indexed mesh or a dense GPU block array. Each record contains local block coordinates and a render-material ID in four bytes. Six lists group those records by outward face direction. The vertex shader generates six vertices per face and selects atlas UVs using the render material and direction.
+
+World storage uses [`BlockType`](../src/engine/voxel/voxel_chunk.zig), with IDs 0–20 and
+`custom = 255`; carried items have a narrower persistence schema. `GPU_BlockInfo.block_type`
+uses the separate `RenderMaterial` enum. Shared IDs retain the same meanings, and meshing
+adds two climate appearances for saved `grass = 3` cells:
+
+| Column climate | Render material | Appearance |
+| --- | --- | --- |
+| Temperate or desert | `grass = 3` | Existing grass top and soil faces. |
+| Steppe | `grass_steppe = 21` | Yellow grass top with ordinary soil sides and bottom. |
+| Frozen | `grass_frozen = 22` | Snow-textured top with ordinary soil sides and bottom. |
+
+[`world_engine_glue.zig`](../src/voxel_app/world_engine_glue.zig) applies the generator's
+column climate during both local and service mesh extraction. Saved cells remain grass;
+loose dirt, packed dirt, and sand keep their material appearances. IDs 21 and 22 belong only
+to render payloads and are rejected by block and inventory persistence validation.
+
+[`material_color.wgsl`](../src/engine/shaders/voxel/material_color.wgsl) supplies the shared
+world/held-block colors. Water (ID 4) is opaque blue and leaves (ID 15) are opaque green:
+both return alpha 1 before the visible shader's alpha-discard check, even when the sampled
+atlas texel is transparent. Their cube faces write depth and cast solid shadows. Geological
+materials (IDs 16–20) use tinted existing atlas tiles. Climate cover changes the top
+appearance without changing stored soil or its interaction rules.
 
 Chunk metadata describes eight combinations of three directions, one direction from each axis. The draw's instance index encodes the chunk metadata index and the selected direction combination. The visible pass chooses a combination from the signed camera/chunk delta. When any delta component is zero, it draws opposite combinations 0 and 7 to cover all six sides. This selection affects submitted faces, not the authoritative mesh contents.
 
@@ -296,6 +319,8 @@ Frame statistics include candidate object count, uploaded instance-range size, v
 - [`shaders/basic/`](../src/engine/shaders/basic), [`shaders/voxel/`](../src/engine/shaders/voxel), [`shaders/shadow_map/`](../src/engine/shaders/shadow_map), and [`shaders/quad/`](../src/engine/shaders/quad): vertex generation, shadow comparisons, and post-processing.
 - [`render_coordinates_tests.zig`](../src/engine/render_coordinates_tests.zig): agreement of camera/shadow projections and translation invariance across all cascades.
 - [`world_shader_tests.zig`](../src/engine/world_shader_tests.zig), [`world_coordinate_readback.zig`](../src/engine/world_coordinate_readback.zig): headless production-pipeline validation, cache lifetimes, and numerical GPU/CPU coordinate comparison through compute/readback.
+- [`material_readback.zig`](../src/engine/material_readback.zig): production WGSL color/UV readback with a transparent atlas sample, checking opaque water/leaves, the steppe top tint, and frozen top/soil UVs.
+- [`world_engine_glue.zig`](../src/voxel_app/world_engine_glue.zig), [`persistence/format.zig`](../src/voxel_app/persistence/format.zig): climate appearance selection without changing saved materials, and rejection of render-only IDs from saved blocks and inventories.
 - [`voxel_tests.zig`](../src/engine/voxel_tests.zig): face/upload data and allocator behavior without creating a GPU device.
 
-`zig build test` exercises the registered CPU tests under both application wrapping configurations. `zig build test-gpu` separately validates the eight specialized pipelines and their cache sharing, reference lifetimes, and allocation cleanup with headless Dawn in each compiled wrapping mode. It also validates the height-map pipeline, covering every pipeline that embeds the shared shadow sampler, and executes the production coordinate helper to compare GPU readback with CPU results at seams, half-period ties, f32 precision boundaries, and signed i32 limits, using three world widths. These checks do not replace a runtime visual check of rendering, alpha/shadow agreement, SSAO, or resize.
+`zig build test` exercises the registered CPU tests under both application wrapping configurations. `zig build test-gpu` separately validates the eight specialized pipelines and their cache sharing, reference lifetimes, and allocation cleanup with headless Dawn in each compiled wrapping mode. It also validates the height-map pipeline, covering every pipeline that embeds the shared shadow sampler, and executes the production coordinate helper to compare GPU readback with CPU results at seams, half-period ties, f32 precision boundaries, and signed i32 limits, using three world widths. Its material readback executes the shared production color and UV helpers for all ordinary material IDs and all six face directions. These checks do not replace a runtime visual check of rendering, alpha/shadow agreement, SSAO, or resize.

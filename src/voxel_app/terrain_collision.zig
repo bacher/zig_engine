@@ -45,6 +45,7 @@ pub const Query = struct {
     fn cellState(self: *Query, cell: Cell, report_missing: bool) CellState {
         // The finite y/z edges are walls. X follows the voxel application's topology.
         const block = coordinates.fromWorld(self.world.layout, cell) orelse return .{ .occupancy = .solid };
+        if (!coordinates.isPlayableY(self.world.layout, block[1], self.world.playable_y_inset)) return .{ .occupancy = .solid };
         const chunk_coords, const local = @import("world.zig").splitBlockCoords(block);
         const chunk = self.world.getChunk(chunk_coords) orelse {
             if (report_missing) self.missing_chunk = self.missing_chunk orelse chunk_coords;
@@ -238,6 +239,27 @@ pub const Query = struct {
 /// Centred horizontally in the foot cell, with feet on its bottom face.
 pub fn cellPosition(cell: Cell) Position {
     return @as(Position, @floatFromInt(cell)) + Position{ 0.5, 0.5, 0 };
+}
+
+test "polar walls and finite floor do not depend on loaded terrain" {
+    const std = @import("std");
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 4 } });
+    var world = try World.init(std.testing.allocator, &layout);
+    defer world.deinit();
+    world.playable_y_inset = 64;
+    try world.insertChunk(.{ 4, 2, 2 }, @import("world.zig").WorldChunk.initEmpty());
+    var query: Query = .{ .world = &world, .body = .{} };
+    const feet: Position = .{ 0.5, -63.5, 0 };
+    try std.testing.expectEqual(Overlap.clear, query.overlap(feet, false));
+    const stopped = query.moveAxis(feet, 1, -10);
+    try std.testing.expect(stopped.collided);
+    try std.testing.expectApproxEqAbs(@as(f64, -63.7), stopped.position[1], epsilon);
+    try std.testing.expectEqual(Overlap.solid, query.overlap(.{ 0.5, -65, 0 }, false));
+    try std.testing.expectEqual(Overlap.solid, query.overlap(.{ 0.5, 65, 0 }, false));
+    try std.testing.expectEqual(Overlap.solid, query.overlap(.{ 0.5, 0.5, -64.1 }, false));
+    // A flat profile reserves no polar rows, so an unloaded row is missing data.
+    world.playable_y_inset = 0;
+    try std.testing.expectEqual(Overlap.missing, query.overlap(.{ 0.5, -65, 0 }, false));
 }
 
 /// Tests the nearest periodic image of a storage block against the body.

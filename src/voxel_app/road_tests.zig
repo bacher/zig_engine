@@ -405,6 +405,22 @@ test "road placement needs direct support and cannot remove that support" {
     }
 }
 
+test "adaptive road formation rejects cube-colliding sand and foliage foundations" {
+    for ([_]engine.voxel_chunk.BlockType{ .sand, .leaves }) |support| {
+        var fixture = try Fixture.init();
+        defer fixture.deinit();
+        const high: Cell = .{ 0, 0, 0 };
+        const low: Cell = .{ 5, 0, -1 };
+        row(&fixture, high, .positive_x, 4);
+        fixture.set(low, .none);
+        fixture.set(.{ 2, 0, -1 }, .none);
+        fixture.set(.{ 2, 0, -1 }, support);
+        fixture.set(low, .country_road_solid);
+        for (1..5) |section|
+            try std.testing.expect(shape(&fixture, .{ @intCast(section), 0, 0 }).? == .adaptive);
+    }
+}
+
 test "custom cells keep neighboring ordinary faces and produce separate draw records" {
     var fixture = try Fixture.init();
     defer fixture.deinit();

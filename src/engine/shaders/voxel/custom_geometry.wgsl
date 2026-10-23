@@ -30,5 +30,5 @@ fn customVertex(instance_index: u32, vertex_index: u32) -> VoxelVertex {
     local.z *= mix(block.high, block.low, along);
     if (side == 5u) { normal = normalize(vec3f(-gradient, 1.0)); }
     let position = chunkOffset(block.chunk_origin, origin_chunk) + block.local_origin + local;
-    return VoxelVertex(vec4f(position, 1.0), normal, getUv(side, corner, 13u));
+    return VoxelVertex(vec4f(position, 1.0), normal, getUv(side, corner, 13u), vec2u(13u, side));
 }

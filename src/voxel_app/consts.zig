@@ -3,7 +3,7 @@ pub const CHUNK_SIZE = chunks.CHUNK_SIZE;
 pub const ChunkId = chunks.ChunkId;
 /// voxel_app always uses periodic x terrain.
 pub const WORLD_SETTINGS: @import("engine").WorldSettings = .{
-    .size_in_chunks = .{ 512, 256, 8 },
+    .size_in_chunks = .{ 2048, 1024, 32 },
 };
 
 comptime {

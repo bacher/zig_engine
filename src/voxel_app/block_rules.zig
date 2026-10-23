@@ -2,6 +2,7 @@
 const std = @import("std");
 const engine = @import("engine");
 pub const BlockType = engine.voxel_chunk.BlockType;
+pub const MiningPolicy = engine.voxel_chunk.MiningPolicy;
 pub const Cell = @Vector(3, i64);
 pub const Limits = struct {
     pub const wood_height: u32 = 12;
@@ -30,6 +31,9 @@ pub const Reason = enum {
     would_invalidate_structure,
     support_search_limit,
     road_support,
+    sand_footprint,
+    mining_forbidden,
+    immutable_cell,
 };
 
 /// Target-relative coordinates remain continuous across the wrapped x seam.
@@ -76,6 +80,10 @@ pub const Reader = struct {
     context: *anyopaque,
     block_at: *const fn (*anyopaque, [3]u32) ?BlockType,
     custom_shape_at: ?*const fn (*anyopaque, [3]u32) ?engine.voxel_chunk.custom_block.Shape = null,
+    /// Playable worlds supply the canonical generator floor, independently of residency.
+    immutable_at: ?*const fn (*anyopaque, [3]u32) bool = null,
+    /// Reserved polar rows, measured in storage blocks at each finite Y edge.
+    playable_y_inset: u32 = 0,
 
     pub fn normalize(self: Reader, cell: Cell) ?Cell {
         var result = cell;
@@ -90,7 +98,18 @@ pub const Reader = struct {
         const normalized = self.normalize(cell) orelse return .none;
         return self.block_at(self.context, .{ @intCast(normalized[0]), @intCast(normalized[1]), @intCast(normalized[2]) });
     }
+
+    pub fn isImmutable(self: Reader, cell: Cell) bool {
+        const normalized = self.normalize(cell) orelse return false;
+        if (self.immutable_at) |check| if (check(self.context, .{ @intCast(normalized[0]), @intCast(normalized[1]), @intCast(normalized[2]) })) return true;
+        return self.get(normalized) == .deeprock;
+    }
 };
+
+/// Road support is independent of full-cube collision.
+pub fn supportsRoad(material: BlockType) bool {
+    return material != .none and material != .sand and material != .leaves;
+}
 
 const State = struct { wood: u32 = 0, mineral: u32 = 0 };
 const Evaluation = union(enum) { supported: State, rejected: Failure };
@@ -267,12 +286,13 @@ pub const Validator = struct {
         return .{ .rejected = result };
     }
 
-    fn footprint(self: *Validator, cell: Cell) ReadError!Evaluation {
-        var result: Failure = .{ .reason = .earth_footprint, .subject = cell, .limit = 9 };
+    fn footprint(self: *Validator, cell: Cell, material: BlockType) ReadError!Evaluation {
+        var result: Failure = .{ .reason = if (material == .sand) .sand_footprint else .earth_footprint, .subject = cell, .limit = 9 };
         for (0..3) |y| {
             for (0..3) |x| {
                 const below = cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -1 };
-                if ((try self.get(below)).isStructural()) result.actual += 1 else result.add(below);
+                const support = try self.get(below);
+                if (support.isStructural() or support == .sand) result.actual += 1 else result.add(below);
             }
         }
         if (result.actual != 9) return .{ .rejected = result };
@@ -297,7 +317,7 @@ pub const Validator = struct {
             return result;
         }
         // These foundations already give the minimum height without inspecting an unused cube.
-        if (below == .stone or (material.isWood() and below.isMineralConstruction()))
+        if (below.isNaturalRock() or (material.isWood() and below.isMineralConstruction()))
             return height(cell, material, .{});
         var unresolved: ?ReadError = null;
         const platform = below.isStablePlatformMaterial() and (self.stablePlatform(cell) catch |err| blk: {
@@ -316,15 +336,15 @@ pub const Validator = struct {
 
     fn vertical(self: *Validator, cell: Cell, material: BlockType, below: BlockType) ReadError!Evaluation {
         const below_cell = cell - Cell{ 0, 0, 1 };
-        if (below.isEarth()) return self.platformFailure(.earth_requires_stable_platform, cell);
+        if (below.isEarth() or below == .clay) return self.platformFailure(.earth_requires_stable_platform, cell);
         if (material.isWood()) {
             if (!below.isStructural()) return failure(.incompatible_support, below_cell, 0, 0);
             if (!below.isWood()) return height(cell, material, .{});
         } else if (material == .crushed_stone) {
-            if (below == .stone) return height(cell, material, .{});
+            if (below.isNaturalRock()) return height(cell, material, .{});
             if (below != .crushed_stone) return failure(.incompatible_support, below_cell, 0, 0);
         } else {
-            if (below == .stone) return height(cell, material, .{});
+            if (below.isNaturalRock()) return height(cell, material, .{});
             if (!below.isReinforced()) return self.platformFailure(.missing_foundation, cell);
         }
         return switch (try self.evaluate(below_cell, below)) {
@@ -414,7 +434,7 @@ pub const Validator = struct {
 
     fn crushedBridgeSide(self: *Validator, side: Cell) ReadError!Evaluation {
         const neighbor = try self.get(side);
-        if (neighbor != .stone and neighbor != .crushed_stone)
+        if (!neighbor.isNaturalRock() and neighbor != .crushed_stone)
             return failure(.missing_foundation, side, 0, 1);
         // Another unsupported bridge cannot extend the one-cell exception.
         if (neighbor == .crushed_stone) return self.direct(side, neighbor);
@@ -496,10 +516,12 @@ pub const Validator = struct {
     }
 
     fn evaluateUncached(self: *Validator, cell: Cell, material: BlockType) ReadError!Evaluation {
+        if ((material == .water or material == .snow) and (try self.get(cell - Cell{ 0, 0, 1 })) == .sand)
+            return failure(.incompatible_support, cell - Cell{ 0, 0, 1 }, 0, 0);
         if (material.isRoad()) {
             const below_cell = cell - Cell{ 0, 0, 1 };
             const below = try self.get(below_cell);
-            var supported = below != .none;
+            var supported = supportsRoad(below);
             if (below == .custom) if (self.reader.custom_shape_at) |read_shape| {
                 const normalized = self.reader.normalize(below_cell).?;
                 if (read_shape(self.reader.context, .{ @intCast(normalized[0]), @intCast(normalized[1]), @intCast(normalized[2]) })) |shape|
@@ -510,7 +532,7 @@ pub const Validator = struct {
             result.rejected.add(below_cell);
             return result;
         }
-        if (material.isEarth()) return self.footprint(cell);
+        if (material.isEarth() or material == .sand) return self.footprint(cell, material);
         if (!material.isWood() and !material.isMineralConstruction()) return .{ .supported = .{} };
         if (material == .crushed_stone) {
             var run: u32 = 0;
@@ -524,6 +546,9 @@ pub const Validator = struct {
                     for (1..run) |depth| result.rejected.add(cell - Cell{ 0, 0, @intCast(depth) });
                     return result;
                 }
+                // An exposed rock contact is a complete direct foundation;
+                // especially at deeprock's irregular floor, no box is needed.
+                if ((try self.get(below - Cell{ 0, 0, 1 })).isNaturalRock()) break;
                 const platform = self.stablePlatform(below) catch |err| blk: {
                     rememberError(&unresolved, err);
                     break :blk false;
@@ -536,7 +561,7 @@ pub const Validator = struct {
         // An incompatible occupied block cannot be treated as air to bypass the hierarchy.
         if (below != .none) {
             if (direct_result == .rejected) {
-                const compatible = if (material.isWood()) below.isStructural() and !below.isEarth() else if (material == .crushed_stone) below == .crushed_stone or below == .stone else below.isReinforced() or below == .stone;
+                const compatible = if (material.isWood()) below.isStructural() and !below.isEarth() else if (material == .crushed_stone) below == .crushed_stone or below.isNaturalRock() else below.isReinforced() or below.isNaturalRock();
                 if (!compatible) return direct_result;
                 const reason = direct_result.rejected.reason;
                 if (reason != .wood_height and reason != .mineral_height and reason != .missing_data and reason != .support_search_limit)
@@ -585,7 +610,7 @@ pub const Validator = struct {
             const delta = displacement(self.reader.layout, cell, edit.cell);
             return depth == 1 and delta[0] == 0 and delta[1] == 0;
         }
-        const radius: u64 = if (material.isEarth()) blk: {
+        const radius: u64 = if (material.isEarth() or material == .sand) blk: {
             if (depth != 1) return false;
             break :blk 1;
         } else if (material.isWood() or material.isMineralConstruction())
@@ -1184,4 +1209,107 @@ test "cached read bounds fit whole periodic intervals rather than just their wra
     try std.testing.expect(right.fits(&layout, .{ -28, 0, 0 }));
     try std.testing.expect(!left.fits(&layout, .{ 28, 30, 0 }));
     try std.testing.expect(!right.fits(&layout, .{ -28, 0, 30 }));
+}
+
+test "sand retains a wrapped nine-cell footprint and rejects nonstructural supports" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    const cell: Cell = .{ 0, 12, 4 };
+    const corner: Cell = .{ fixture.layout.size_in_blocks[0] - 1, 11, 3 };
+    for ([_]BlockType{ .none, .water, .snow, .leaves }) |unsupported| {
+        try fixture.raw(corner, unsupported);
+        const rejected = fixture.check(cell, .sand).?;
+        try std.testing.expectEqual(Reason.sand_footprint, rejected.reason);
+        try std.testing.expectEqual(@as(u32, 8), rejected.actual);
+    }
+    try fixture.raw(corner, .sand);
+    try fixture.put(cell, .sand);
+    const dependent = fixture.check(corner, .none).?;
+    try std.testing.expectEqual(Reason.would_remove_support, dependent.reason);
+    try std.testing.expectEqual(Reason.sand_footprint, dependent.cause.?);
+    fixture.missing = corner;
+    try std.testing.expectEqual(Reason.missing_data, fixture.check(cell, .sand).?.reason);
+}
+
+test "sand and leaves cannot directly support construction or either road" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    const cell: Cell = .{ 12, 12, 5 };
+    for ([_]BlockType{ .sand, .leaves }) |support| {
+        try fixture.raw(cell - Cell{ 0, 0, 1 }, support);
+        for ([_]BlockType{ .tree_trunk, .planks, .crushed_stone, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive }) |material| {
+            try std.testing.expect(fixture.check(cell, material) != null);
+        }
+        if (support == .sand) for ([_]BlockType{ .water, .snow }) |material|
+            try std.testing.expect(fixture.check(cell, material) != null);
+    }
+}
+
+test "a complete soil platform over remaining sand restarts construction support" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    const cell: Cell = .{ 12, 12, 8 };
+    for (1..4) |depth| for (0..3) |y| for (0..3) |x| {
+        try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, .packed_dirt);
+    };
+    for (0..3) |y| for (0..3) |x| {
+        try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -4 }, .sand);
+    };
+    try std.testing.expect(fixture.check(cell, .planks) == null);
+    try std.testing.expect(fixture.check(cell, .reinforced_concrete) == null);
+}
+
+test "one deeprock top supports construction without platform or below-floor reads" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    const cell: Cell = .{ 12, 12, 1 };
+    try fixture.raw(cell - Cell{ 0, 0, 1 }, .deeprock);
+    // Any box probe would encounter this unknown neighboring floor cell.
+    fixture.missing = .{ 11, 11, 0 };
+    for ([_]BlockType{ .tree_trunk, .planks, .crushed_stone, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive }) |material| {
+        try std.testing.expect(fixture.check(cell, material) == null);
+    }
+    try std.testing.expectEqual(Reason.missing_data, fixture.check(cell, .dirt).?.reason);
+    try std.testing.expectEqual(Reason.missing_data, fixture.check(cell, .sand).?.reason);
+}
+
+test "mining policies explicitly preserve usable results and distinguish no-item removal" {
+    for (std.enums.values(BlockType)) |material| {
+        switch (material.miningPolicy()) {
+            .yields => |item| try std.testing.expect(item.isPlaceable()),
+            .remove_without_item => try std.testing.expectEqual(BlockType.leaves, material),
+            .forbidden => {},
+        }
+    }
+    for ([_]BlockType{ .metal_ore, .limestone, .clay, .coal, .deeprock, .none }) |material|
+        try std.testing.expect(material.miningPolicy() == .forbidden);
+    try std.testing.expectEqual(BlockType.dirt, BlockType.grass.minedType().?);
+    try std.testing.expectEqual(BlockType.dirt, BlockType.packed_dirt.minedType().?);
+    try std.testing.expectEqual(BlockType.crushed_stone, BlockType.stone.minedType().?);
+    try std.testing.expectEqual(BlockType.sand, BlockType.sand.minedType().?);
+    try std.testing.expectEqual(BlockType.tree_trunk, BlockType.tree_trunk.minedType().?);
+    try std.testing.expectEqual(BlockType.country_road_adaptive, BlockType.custom.minedType().?);
+    try std.testing.expect(BlockType.leaves.miningPolicy() == .remove_without_item);
+    try std.testing.expectEqual(@as(?BlockType, null), BlockType.leaves.minedType());
+}
+
+test "clay uses packed-soil platforms while other geological hosts support directly" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    const cell: Cell = .{ 12, 12, 5 };
+    try fixture.raw(cell - Cell{ 0, 0, 1 }, .clay);
+    try std.testing.expectEqual(Reason.earth_requires_stable_platform, fixture.check(cell, .planks).?.reason);
+    for (1..4) |depth| for (0..3) |y| for (0..3) |x| {
+        try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, .clay);
+    };
+    try std.testing.expect(fixture.check(cell, .planks) == null);
+    try std.testing.expect(fixture.check(cell, .reinforced_concrete) == null);
+    try std.testing.expect(fixture.check(cell, .dirt) == null);
+    try std.testing.expect(!BlockType.clay.isEarth());
+    fixture.missing = .{ 11, 11, 4 };
+    for ([_]BlockType{ .metal_ore, .limestone, .coal }) |resource| {
+        try fixture.raw(cell - Cell{ 0, 0, 1 }, resource);
+        try std.testing.expect(fixture.check(cell, .planks) == null);
+        try std.testing.expect(fixture.check(cell, .reinforced_concrete) == null);
+    }
 }

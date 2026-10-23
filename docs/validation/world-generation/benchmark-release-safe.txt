@@ -1,0 +1,126 @@
+preparation_allocations=7 preparation_peak_requested=2122224 prepared_live_requested=418288 column_bytes=27200 natural_column_bytes=27168 cache_column_limit=64 retained_column_upper_bound=1740800 chunk_scratch_stack_bytes=32768
+identity=2/1 profile=natural seed=12345 beaches=false mode=ReleaseSafe target=aarch64-macos preparation_ms=45.126 peak_owned_bytes=2122224 attempts=1 selected=0 references=86 max_bin=6
+cold_column_plus_surface_chunk: median_ms=0.357 p95_ms=0.367 units_per_sample=1 throughput_units_s=2798.50
+cached_column_vertical_chunks: median_ms=7.156 p95_ms=7.218 units_per_sample=32 throughput_units_s=4471.72
+representative_sites dense_forest_trees=23 maximum_shore_delta_8=101
+site=plains x=64 y=6592 z=13 coast=272 relief=lowland climate=temperate column_initialization: median_ms=0.117 p95_ms=0.117 units_per_sample=1 throughput_units_s=8568.39
+site=plains rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.217 p95_ms=0.225 units_per_sample=1 throughput_units_s=4604.75
+meshing_prepared_chunk_and_neighbors: median_ms=0.189 p95_ms=0.203 units_per_sample=1 throughput_units_s=5305.04
+site=plains chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=3 mesh_resizes=18 mesh_peak_requested=4272 max_single_allocation=4272 faces=1024 face_bytes=4096 exceeds_64KiB=false digest=ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a
+site=mainland_coast x=3951 y=3264 z=12 coast=3 relief=lowland climate=steppe column_initialization: median_ms=0.152 p95_ms=0.158 units_per_sample=1 throughput_units_s=6580.77
+site=mainland_coast rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.051 p95_ms=0.055 units_per_sample=1 throughput_units_s=19640.19
+meshing_prepared_chunk_and_neighbors: median_ms=0.028 p95_ms=0.031 units_per_sample=1 throughput_units_s=36144.14
+site=mainland_coast chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=6 mesh_resizes=21 mesh_peak_requested=3392 max_single_allocation=2760 faces=704 face_bytes=2816 exceeds_64KiB=false digest=c76ee0a3a06e700e8599df028686a7c3798eb07649e0fb263429dbb398e1e07b
+site=island_coast x=18122 y=1643 z=12 coast=2 relief=lowland climate=frozen column_initialization: median_ms=0.105 p95_ms=0.108 units_per_sample=1 throughput_units_s=9486.14
+site=island_coast rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.045 p95_ms=0.047 units_per_sample=1 throughput_units_s=22099.45
+meshing_prepared_chunk_and_neighbors: median_ms=0.020 p95_ms=0.023 units_per_sample=1 throughput_units_s=50102.71
+site=island_coast chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=12 mesh_resizes=18 mesh_peak_requested=2648 max_single_allocation=1752 faces=473 face_bytes=1892 exceeds_64KiB=false digest=b868ec8dd64a59e2261bedb310ccdf5cd4f3289031dac2ff977792600b614130
+site=steep_shore x=62191 y=19520 z=12 coast=6 relief=lowland climate=temperate column_initialization: median_ms=0.264 p95_ms=0.277 units_per_sample=1 throughput_units_s=3787.28
+site=steep_shore rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=10 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.069 p95_ms=0.069 units_per_sample=1 throughput_units_s=14563.25
+meshing_prepared_chunk_and_neighbors: median_ms=0.050 p95_ms=0.057 units_per_sample=1 throughput_units_s=19834.97
+site=steep_shore chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=18 mesh_resizes=51 mesh_peak_requested=8252 max_single_allocation=4272 faces=1488 face_bytes=5952 exceeds_64KiB=false digest=37cef2f065fb8097c7303ab56a4b39ab3f04c5f05931d12e33bf7c8afb130ec3
+site=desert x=64 y=14784 z=13 coast=5776 relief=lowland climate=desert column_initialization: median_ms=0.123 p95_ms=0.126 units_per_sample=1 throughput_units_s=8113.59
+site=desert rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.055 p95_ms=0.056 units_per_sample=1 throughput_units_s=18058.69
+meshing_prepared_chunk_and_neighbors: median_ms=0.107 p95_ms=0.111 units_per_sample=1 throughput_units_s=9353.05
+site=desert chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=3 mesh_resizes=18 mesh_peak_requested=4272 max_single_allocation=4272 faces=1024 face_bytes=4096 exceeds_64KiB=false digest=b5a975696448d7b5629fedeabc62bc87d7ec13575e192a8c13f570bfcb2fac99
+site=dense_forest x=3648 y=11328 z=13 coast=7056 relief=lowland climate=temperate column_initialization: median_ms=0.223 p95_ms=0.224 units_per_sample=1 throughput_units_s=4480.11
+site=dense_forest rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=23 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.084 p95_ms=0.085 units_per_sample=1 throughput_units_s=11863.66
+meshing_prepared_chunk_and_neighbors: median_ms=0.152 p95_ms=0.155 units_per_sample=1 throughput_units_s=6591.57
+site=dense_forest chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=18 mesh_resizes=66 mesh_peak_requested=11940 max_single_allocation=6540 faces=2278 face_bytes=9112 exceeds_64KiB=false digest=990832c133122f1e4b4f7770592a059d6b860420510a79dd08c69fd20a623461
+site=deposit x=35758 y=18624 z=11 coast=4368 relief=mountain climate=temperate column_initialization: median_ms=0.126 p95_ms=0.129 units_per_sample=1 throughput_units_s=7926.00
+site=deposit rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.253 p95_ms=0.268 units_per_sample=1 throughput_units_s=3958.44
+meshing_prepared_chunk_and_neighbors: median_ms=0.469 p95_ms=0.502 units_per_sample=1 throughput_units_s=2132.20
+site=deposit chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=0 mesh_resizes=0 mesh_peak_requested=0 max_single_allocation=0 faces=0 face_bytes=0 exceeds_64KiB=false digest=f5bf739d7efec5d8c7aa58af3fe39b8b497b9fdb5a7b13517efa00d89cf017d0
+site=x_seam x=65535 y=16384 z=13 coast=3984 relief=lowland climate=desert column_initialization: median_ms=0.123 p95_ms=0.128 units_per_sample=1 throughput_units_s=8119.12
+site=x_seam rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.045 p95_ms=0.047 units_per_sample=1 throughput_units_s=22429.57
+meshing_prepared_chunk_and_neighbors: median_ms=0.066 p95_ms=0.068 units_per_sample=1 throughput_units_s=15065.91
+site=x_seam chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=3 mesh_resizes=18 mesh_peak_requested=4272 max_single_allocation=4272 faces=1024 face_bytes=4096 exceeds_64KiB=false digest=5f3520f6ce7c9ff4d6834cf25afcf58c3db4792e0d1371f34efec6b7cdfdd893
+site=ocean x=64 y=64 z=11 coast=0 relief=lowland climate=frozen column_initialization: median_ms=0.115 p95_ms=0.119 units_per_sample=1 throughput_units_s=8686.21
+site=ocean rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.052 p95_ms=0.052 units_per_sample=1 throughput_units_s=19215.25
+meshing_prepared_chunk_and_neighbors: median_ms=0.436 p95_ms=0.438 units_per_sample=1 throughput_units_s=2295.12
+site=ocean chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=3 mesh_resizes=18 mesh_peak_requested=4272 max_single_allocation=4272 faces=1024 face_bytes=4096 exceeds_64KiB=false digest=589ebcfd0f034fa3c56fa2b57f75c22a23755bb0e2dfc72dc25ad8577b3f1fc7
+site=polar x=32768 y=0 z=11 coast=0 relief=lowland climate=frozen column_initialization: median_ms=0.090 p95_ms=0.090 units_per_sample=1 throughput_units_s=11111.11
+site=polar rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=0 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.059 p95_ms=0.059 units_per_sample=1 throughput_units_s=16889.61
+meshing_prepared_chunk_and_neighbors: median_ms=0.428 p95_ms=0.453 units_per_sample=1 throughput_units_s=2335.54
+site=polar chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=6 mesh_resizes=36 mesh_peak_requested=8544 max_single_allocation=4272 faces=2048 face_bytes=8192 exceeds_64KiB=false digest=b7f77a3eb47c37078398febf2f1148d7650f9524453b590de9acb69e521e5634
+site=mountain x=35758 y=18624 z=22 coast=4368 relief=mountain climate=temperate column_initialization: median_ms=0.128 p95_ms=0.129 units_per_sample=1 throughput_units_s=7817.57
+site=mountain rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.093 p95_ms=0.095 units_per_sample=1 throughput_units_s=10699.99
+meshing_prepared_chunk_and_neighbors: median_ms=0.133 p95_ms=0.141 units_per_sample=1 throughput_units_s=7514.11
+site=mountain chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=15 mesh_resizes=39 mesh_peak_requested=6896 max_single_allocation=4272 faces=1490 face_bytes=5960 exceeds_64KiB=false digest=76245aadc83208aef57a129bc417063516d85aa72bfda58fad2402a56e048db7
+cache_churn columns=96 forward_ms=22.734 reverse_ms=18.101 misses=160 clears=2 maximum_resident=64
+representative_replay sites=11 derived_mesh_boundary_climate_hashes_match_after_eviction_and_restart=true
+mesh_start faces=1024 face_bytes=4096 exceeds_64KiB=false digest=ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a sampled_land_percent=60.795 environment_samples_s=9399828.63 metadata_fingerprint=d17867cf8466f4cb
+preparation_allocations=7 preparation_peak_requested=2122224 prepared_live_requested=418288 column_bytes=27200 natural_column_bytes=27168 cache_column_limit=64 retained_column_upper_bound=1740800 chunk_scratch_stack_bytes=32768
+identity=2/1 profile=natural seed=12345 beaches=true mode=ReleaseSafe target=aarch64-macos preparation_ms=45.869 peak_owned_bytes=2122224 attempts=1 selected=0 references=86 max_bin=6
+cold_column_plus_surface_chunk: median_ms=0.405 p95_ms=0.415 units_per_sample=1 throughput_units_s=2470.41
+cached_column_vertical_chunks: median_ms=7.292 p95_ms=7.333 units_per_sample=32 throughput_units_s=4388.37
+representative_sites dense_forest_trees=23 maximum_shore_delta_8=101
+site=plains x=64 y=6592 z=13 coast=272 relief=lowland climate=temperate column_initialization: median_ms=0.116 p95_ms=0.118 units_per_sample=1 throughput_units_s=8658.01
+site=plains rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.199 p95_ms=0.214 units_per_sample=1 throughput_units_s=5023.03
+meshing_prepared_chunk_and_neighbors: median_ms=0.185 p95_ms=0.193 units_per_sample=1 throughput_units_s=5393.25
+site=plains chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=3 mesh_resizes=18 mesh_peak_requested=4272 max_single_allocation=4272 faces=1024 face_bytes=4096 exceeds_64KiB=false digest=ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a
+site=mainland_coast x=3951 y=3264 z=12 coast=3 relief=lowland climate=steppe column_initialization: median_ms=0.203 p95_ms=0.210 units_per_sample=1 throughput_units_s=4915.02
+site=mainland_coast rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.052 p95_ms=0.057 units_per_sample=1 throughput_units_s=19386.23
+meshing_prepared_chunk_and_neighbors: median_ms=0.027 p95_ms=0.029 units_per_sample=1 throughput_units_s=37735.85
+site=mainland_coast chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=6 mesh_resizes=21 mesh_peak_requested=3392 max_single_allocation=2760 faces=704 face_bytes=2816 exceeds_64KiB=false digest=76bf20987793d01e9fa0cf342ff298cc6129d3d4b107d846e222c8430d484bb0
+site=island_coast x=18122 y=1643 z=12 coast=2 relief=lowland climate=frozen column_initialization: median_ms=0.163 p95_ms=0.166 units_per_sample=1 throughput_units_s=6130.27
+site=island_coast rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.046 p95_ms=0.046 units_per_sample=1 throughput_units_s=21978.02
+meshing_prepared_chunk_and_neighbors: median_ms=0.021 p95_ms=0.022 units_per_sample=1 throughput_units_s=48780.49
+site=island_coast chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=12 mesh_resizes=18 mesh_peak_requested=2648 max_single_allocation=1752 faces=473 face_bytes=1892 exceeds_64KiB=false digest=040f8f03d8a0ff8355da07cbd9c24363a969f2b8de67eadf75716f3b65f7eb0b
+site=steep_shore x=62191 y=19520 z=12 coast=6 relief=lowland climate=temperate column_initialization: median_ms=0.320 p95_ms=0.352 units_per_sample=1 throughput_units_s=3129.08
+site=steep_shore rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=9 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.056 p95_ms=0.060 units_per_sample=1 throughput_units_s=17883.65
+meshing_prepared_chunk_and_neighbors: median_ms=0.058 p95_ms=0.064 units_per_sample=1 throughput_units_s=17155.01
+site=steep_shore chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=18 mesh_resizes=45 mesh_peak_requested=7280 max_single_allocation=4272 faces=1412 face_bytes=5648 exceeds_64KiB=false digest=4ce93c778d015c687223aabe4b6afcf0b112520a1d6d91788bc14008fbf563e5
+site=desert x=64 y=14784 z=13 coast=5776 relief=lowland climate=desert column_initialization: median_ms=0.123 p95_ms=0.126 units_per_sample=1 throughput_units_s=8116.36
+site=desert rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.055 p95_ms=0.056 units_per_sample=1 throughput_units_s=18140.59
+meshing_prepared_chunk_and_neighbors: median_ms=0.105 p95_ms=0.106 units_per_sample=1 throughput_units_s=9531.43
+site=desert chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=3 mesh_resizes=18 mesh_peak_requested=4272 max_single_allocation=4272 faces=1024 face_bytes=4096 exceeds_64KiB=false digest=b5a975696448d7b5629fedeabc62bc87d7ec13575e192a8c13f570bfcb2fac99
+site=dense_forest x=3648 y=11328 z=13 coast=7056 relief=lowland climate=temperate column_initialization: median_ms=0.224 p95_ms=0.225 units_per_sample=1 throughput_units_s=4461.80
+site=dense_forest rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=23 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.085 p95_ms=0.100 units_per_sample=1 throughput_units_s=11834.32
+meshing_prepared_chunk_and_neighbors: median_ms=0.148 p95_ms=0.156 units_per_sample=1 throughput_units_s=6764.34
+site=dense_forest chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=18 mesh_resizes=66 mesh_peak_requested=11940 max_single_allocation=6540 faces=2278 face_bytes=9112 exceeds_64KiB=false digest=990832c133122f1e4b4f7770592a059d6b860420510a79dd08c69fd20a623461
+site=deposit x=35758 y=18624 z=11 coast=4368 relief=mountain climate=temperate column_initialization: median_ms=0.138 p95_ms=0.146 units_per_sample=1 throughput_units_s=7250.74
+site=deposit rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.244 p95_ms=0.244 units_per_sample=1 throughput_units_s=4106.08
+meshing_prepared_chunk_and_neighbors: median_ms=0.435 p95_ms=0.441 units_per_sample=1 throughput_units_s=2301.28
+site=deposit chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=0 mesh_resizes=0 mesh_peak_requested=0 max_single_allocation=0 faces=0 face_bytes=0 exceeds_64KiB=false digest=f5bf739d7efec5d8c7aa58af3fe39b8b497b9fdb5a7b13517efa00d89cf017d0
+site=x_seam x=65535 y=16384 z=13 coast=3984 relief=lowland climate=desert column_initialization: median_ms=0.134 p95_ms=0.140 units_per_sample=1 throughput_units_s=7478.98
+site=x_seam rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.045 p95_ms=0.045 units_per_sample=1 throughput_units_s=22325.42
+meshing_prepared_chunk_and_neighbors: median_ms=0.063 p95_ms=0.070 units_per_sample=1 throughput_units_s=15936.25
+site=x_seam chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=3 mesh_resizes=18 mesh_peak_requested=4272 max_single_allocation=4272 faces=1024 face_bytes=4096 exceeds_64KiB=false digest=5f3520f6ce7c9ff4d6834cf25afcf58c3db4792e0d1371f34efec6b7cdfdd893
+site=ocean x=64 y=64 z=11 coast=0 relief=lowland climate=frozen column_initialization: median_ms=0.101 p95_ms=0.102 units_per_sample=1 throughput_units_s=9856.20
+site=ocean rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.052 p95_ms=0.052 units_per_sample=1 throughput_units_s=19323.67
+meshing_prepared_chunk_and_neighbors: median_ms=0.452 p95_ms=0.461 units_per_sample=1 throughput_units_s=2210.96
+site=ocean chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=3 mesh_resizes=18 mesh_peak_requested=4272 max_single_allocation=4272 faces=1024 face_bytes=4096 exceeds_64KiB=false digest=589ebcfd0f034fa3c56fa2b57f75c22a23755bb0e2dfc72dc25ad8577b3f1fc7
+site=polar x=32768 y=0 z=11 coast=0 relief=lowland climate=frozen column_initialization: median_ms=0.092 p95_ms=0.097 units_per_sample=1 throughput_units_s=10825.44
+site=polar rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=0 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.069 p95_ms=0.075 units_per_sample=1 throughput_units_s=14501.58
+meshing_prepared_chunk_and_neighbors: median_ms=0.431 p95_ms=0.434 units_per_sample=1 throughput_units_s=2321.76
+site=polar chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=6 mesh_resizes=36 mesh_peak_requested=8544 max_single_allocation=4272 faces=2048 face_bytes=8192 exceeds_64KiB=false digest=b7f77a3eb47c37078398febf2f1148d7650f9524453b590de9acb69e521e5634
+site=mountain x=35758 y=18624 z=22 coast=4368 relief=mountain climate=temperate column_initialization: median_ms=0.140 p95_ms=0.146 units_per_sample=1 throughput_units_s=7134.35
+site=mountain rounds=3 retained_environment_samples=1024 adjacent_terrain_samples=128 retained_tree_descriptors=0 chunk_voxels=32768 internal_feature_queries_excluded=true
+chunk_fill: median_ms=0.099 p95_ms=0.104 units_per_sample=1 throughput_units_s=10105.30
+meshing_prepared_chunk_and_neighbors: median_ms=0.134 p95_ms=0.139 units_per_sample=1 throughput_units_s=7444.19
+site=mountain chunk_allocations=3 chunk_peak_requested=32768 mesh_allocations=15 mesh_resizes=39 mesh_peak_requested=6896 max_single_allocation=4272 faces=1490 face_bytes=5960 exceeds_64KiB=false digest=76245aadc83208aef57a129bc417063516d85aa72bfda58fad2402a56e048db7
+cache_churn columns=96 forward_ms=21.885 reverse_ms=18.138 misses=160 clears=2 maximum_resident=64
+representative_replay sites=11 derived_mesh_boundary_climate_hashes_match_after_eviction_and_restart=true
+mesh_start faces=1024 face_bytes=4096 exceeds_64KiB=false digest=ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a sampled_land_percent=60.795 environment_samples_s=9327778.26 metadata_fingerprint=d17867cf8466f4cb

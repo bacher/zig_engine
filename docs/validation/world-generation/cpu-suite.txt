@@ -1,0 +1,213 @@
+run test w
+SSAO = false
+Debug SSAO = true
+SSAO = true
+
+run test w
+SSAO = false
+Debug SSAO = true
+SSAO = true
+
+run test w
+selected material: tree_trunk
+control mode: spectator
+control mode: player
+control mode: spectator
+selected material: dirt
+selected material: crushed_stone
+selected material: tree_trunk
+selected material: planks
+selected material: rebar
+selected material: reinforced_concrete
+selected material: country_road_solid
+selected material: country_road_adaptive
+block mode: putting
+place block { 8192, 4098, 128 }
+block mode: removing
+remove block { 8192, 4098, 128 }
+block mode: putting
+place block { 8192, 4098, 128 }
+block mode: putting
+block mode: removing
+place block { 8192, 4098, 128 }
+remove block { 8192, 4098, 128 }
+block mode: putting
+place block { 8192, 4098, 128 }
+place block { 8192, 4097, 128 }
+block mode: putting
+place block { 8192, 4098, 128 }
+place block { 8192, 4097, 128 }
+block mode: putting
+place block { 8192, 4098, 128 }
+block mode: putting
+block mode: removing
+place block { 8192, 4098, 128 }
+place block { 8192, 4097, 128 }
+remove block { 8192, 4097, 128 }
+block mode: putting
+place block { 8192, 4096, 128 }
+remove block { 8195, 4096, 129 }
+remove block { 8192, 4099, 128 }
+remove block { 8192, 4100, 128 }
+place block { 8192, 4100, 128 }
+remove block { 8192, 4100, 128 }
+block mode: putting
+place block { 8192, 4100, 128 }
+block mode: putting
+block mode: removing
+block mode: putting
+remove block { 8192, 4099, 128 }
+remove block { 8192, 4100, 128 }
+block mode: putting
+block mode: putting
+place block { 8192, 4098, 128 }
+block mode: removing
+remove block { 8192, 4099, 128 }
+block mode: putting
+block mode: putting
+place block { 8192, 4099, 128 }
+remove block { 8192, 4099, 128 }
+remove block { 8192, 4100, 128 }
+voxel buffer capacity reached; reducing the visible box to 5x5x5
+voxel uploads exceed buffer capacity even at 5x5x5; retaining pending uploads
+control mode: player
+7x7x7 terrain: 269 KiB of mesh payload; fits 4 MiB slot allocator
+
+Build Summary: 45/45 steps succeeded; 880/881 tests passed (1 skipped)
+test success
++- run test 210 pass (210 total) 12s MaxRSS:98M
+|  +- compile test Debug native success 3s MaxRSS:654M
+|     +- WriteFile cached
+|     +- compile lib engine_wrapped Debug native cached 162ms MaxRSS:35M
+|     |  +- WriteFile  cached
+|     |  +- compile lib glfw Debug native cached 204ms MaxRSS:35M
+|     |  +- WriteFile cached
+|     |  +- compile lib zdawn Debug native cached 184ms MaxRSS:34M
+|     |  +- WriteFile cached
+|     |  +- compile lib imgui Debug native cached 148ms MaxRSS:34M
+|     |  +- compile lib glfw Debug native (reused)
+|     |  +- compile lib zdawn Debug native (reused)
+|     |  +- compile lib imgui Debug native (reused)
+|     |  +- options cached
+|     |  +- options cached
+|     |  +- options cached
+|     |  +- options cached
+|     +- compile lib engine_wrapped Debug native (+13 more reused dependencies)
+|     +- WriteFile  (reused)
+|     +- compile lib glfw Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile lib zdawn Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile lib imgui Debug native (reused)
+|     +- compile lib glfw Debug native (reused)
+|     +- compile lib zdawn Debug native (reused)
+|     +- compile lib imgui Debug native (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 42 pass (42 total) 1s MaxRSS:8M
+|  +- compile test Debug native cached 97ms MaxRSS:34M
++- run test 18 pass, 1 skip (19 total) 18ms MaxRSS:2M
+|  +- compile test Debug native cached 118ms MaxRSS:34M
+|     +- options (reused)
++- run test 65 pass (65 total) 387ms MaxRSS:26M
+|  +- compile test Debug native cached 186ms MaxRSS:35M
+|     +- WriteFile  (reused)
+|     +- compile lib glfw Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile lib zdawn Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile lib imgui Debug native (reused)
+|     +- compile lib glfw Debug native (reused)
+|     +- compile lib zdawn Debug native (reused)
+|     +- compile lib imgui Debug native (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 19 pass (19 total) 22ms MaxRSS:2M
+|  +- compile test Debug native cached 119ms MaxRSS:34M
+|     +- options (reused)
++- run test 65 pass (65 total) 388ms MaxRSS:26M
+|  +- compile test Debug native cached 167ms MaxRSS:35M
+|     +- WriteFile  (reused)
+|     +- compile lib glfw Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile lib zdawn Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile lib imgui Debug native (reused)
+|     +- compile lib glfw Debug native (reused)
+|     +- compile lib zdawn Debug native (reused)
+|     +- compile lib imgui Debug native (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 20 pass (20 total) 17ms MaxRSS:2M
+|  +- compile test Debug native cached 127ms MaxRSS:34M
+|     +- options (reused)
+|     +- options (reused)
++- run test success 21ms MaxRSS:9M
+|  +- compile test Debug native cached 170ms MaxRSS:35M
+|     +- WriteFile cached
+|     +- compile lib engine Debug native cached 184ms MaxRSS:35M
+|     |  +- WriteFile  (reused)
+|     |  +- compile lib glfw Debug native (reused)
+|     |  +- WriteFile (reused)
+|     |  +- compile lib zdawn Debug native (reused)
+|     |  +- WriteFile (reused)
+|     |  +- compile lib imgui Debug native (reused)
+|     |  +- compile lib glfw Debug native (reused)
+|     |  +- compile lib zdawn Debug native (reused)
+|     |  +- compile lib imgui Debug native (reused)
+|     |  +- options (reused)
+|     |  +- options (reused)
+|     |  +- options (reused)
+|     |  +- options (reused)
+|     +- compile lib engine Debug native (+13 more reused dependencies)
+|     +- WriteFile  (reused)
+|     +- compile lib glfw Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile lib zdawn Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile lib imgui Debug native (reused)
+|     +- compile lib glfw Debug native (reused)
+|     +- compile lib zdawn Debug native (reused)
+|     +- compile lib imgui Debug native (reused)
+|     +- options cached
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 422 pass (422 total) 30s MaxRSS:88M
+|  +- compile test Debug native success 5s MaxRSS:886M
+|     +- WriteFile (reused)
+|     +- compile lib engine_wrapped Debug native (+13 more reused dependencies)
+|     +- compile lib engine_wrapped Debug native (+13 more reused dependencies)
+|     +- WriteFile  (reused)
+|     +- compile lib glfw Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile lib zdawn Debug native (reused)
+|     +- WriteFile (reused)
+|     +- compile lib imgui Debug native (reused)
+|     +- compile lib glfw Debug native (reused)
+|     +- compile lib zdawn Debug native (reused)
+|     +- compile lib imgui Debug native (reused)
+|     +- options cached
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
+|     +- options (reused)
++- run test 1 pass (1 total) 16ms MaxRSS:2M
+|  +- compile test Debug native cached 100ms MaxRSS:34M
+|     +- options (reused)
++- run test 2 pass (2 total) 1s MaxRSS:34M
+|  +- compile test Debug native cached 130ms MaxRSS:34M
+|     +- options (reused)
++- run test 10 pass (10 total) 16ms MaxRSS:2M
+|  +- compile test Debug native cached 132ms MaxRSS:34M
++- run test 1 pass (1 total) 17ms MaxRSS:2M
+|  +- compile test Debug native cached 142ms MaxRSS:34M
++- run test 5 pass (5 total) 23ms MaxRSS:2M
+   +- compile test Debug native cached 121ms MaxRSS:34M

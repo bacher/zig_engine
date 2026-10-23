@@ -1,5 +1,6 @@
 //! Versioned wire codecs. All wire storage is bytes, never native struct layout.
 const std = @import("std");
+const generation_settings = @import("../generation_settings.zig");
 pub const current_write_version: u32 = 2;
 pub const minimum_readable_version: u32 = 1;
 pub const Uuid = [16]u8;
@@ -7,7 +8,7 @@ pub const Digest = [32]u8;
 pub const cell_count = 32768;
 pub const maximum_metadata_size = 1179675;
 pub const maximum_chunk_size = 1212501;
-pub const Error = error{ InvalidFormat, UnsupportedVersion, UnsupportedCodec, InvalidMetadata, InvalidDescriptor, ChecksumMismatch, Overflow };
+pub const Error = error{ InvalidFormat, UnsupportedVersion, UnsupportedGenerator, UnsupportedCodec, InvalidMetadata, InvalidDescriptor, ChecksumMismatch, Overflow };
 pub const Reader = struct {
     bytes: []const u8,
     pos: usize = 0,
@@ -66,10 +67,19 @@ pub const Chunk = struct {
     }
 };
 
+/// Wire material IDs are independent of the runtime enum's native representation.
+pub fn validBlockMaterial(material: u8) bool {
+    return switch (material) {
+        0...20, 255 => true,
+        else => false,
+    };
+}
+
 pub fn validateMetadata(blocks: []const u8, metadata: []const u8, dimensions: [3]u32) Error!void {
     if (blocks.len != cell_count or metadata.len > maximum_metadata_size) return error.InvalidMetadata;
     var custom_count: usize = 0;
     for (blocks) |b| {
+        if (!validBlockMaterial(b)) return error.InvalidFormat;
         if (b == 255) custom_count += 1;
     }
     var found_custom = false;
@@ -318,50 +328,89 @@ pub fn validatePlayers(bytes: []const u8, count: u64) Error!void {
     try r.done();
 }
 
-pub const Descriptor = struct { dimensions: [3]u32, generator_id: u16, seed: u64, settings: []const u8 };
+pub const generator_id: u16 = 2;
+pub const generator_version: u32 = 1;
+pub const maximum_descriptor_size: usize = 4096;
+pub const descriptor_fixed_size: usize = 41;
+pub const Profile = enum(u8) { natural = 0, flat = 1 };
+pub const NaturalSettings = generation_settings.NaturalSettings;
+pub const GeneratorSettings = union(Profile) { natural: NaturalSettings, flat };
+pub const flat_settings = [_]u8{@intFromEnum(Profile.flat)};
+pub const natural_settings_size: usize = 9;
+
+pub fn encodeNaturalSettings(settings: NaturalSettings) [natural_settings_size]u8 {
+    var out: [natural_settings_size]u8 = undefined;
+    var p: usize = 0;
+    put(u8, &out, &p, @intFromEnum(Profile.natural));
+    put(u8, &out, &p, @intFromBool(settings.beaches));
+    put(u16, &out, &p, settings.climate_displacement);
+    put(u8, &out, &p, settings.island_count);
+    put(u8, &out, &p, settings.large_deposits_per_resource);
+    put(u8, &out, &p, settings.small_deposits_per_resource);
+    put(u16, &out, &p, settings.feature_index_capacity);
+    return out;
+}
+
+pub fn decodeGeneratorSettings(bytes: []const u8) Error!GeneratorSettings {
+    if (bytes.len == 0) return error.InvalidDescriptor;
+    return switch (bytes[0]) {
+        @intFromEnum(Profile.flat) => if (bytes.len == flat_settings.len) .flat else error.InvalidDescriptor,
+        @intFromEnum(Profile.natural) => blk: {
+            if (bytes.len != natural_settings_size) return error.InvalidDescriptor;
+            var r: Reader = .{ .bytes = bytes[1..] };
+            const beaches = try r.int(u8);
+            if (beaches > 1) return error.InvalidDescriptor;
+            break :blk .{ .natural = .{
+                .beaches = beaches == 1,
+                .climate_displacement = try r.int(u16),
+                .island_count = try r.int(u8),
+                .large_deposits_per_resource = try r.int(u8),
+                .small_deposits_per_resource = try r.int(u8),
+                .feature_index_capacity = try r.int(u16),
+            } };
+        },
+        else => error.UnsupportedGenerator,
+    };
+}
+
+pub const Descriptor = struct {
+    dimensions: [3]u32,
+    generator_id: u16,
+    generator_version: u32 = generator_version,
+    seed: u64,
+    settings: []const u8,
+};
 pub fn validateDescriptor(d: Descriptor) Error!void {
+    if (d.settings.len > maximum_descriptor_size - descriptor_fixed_size) return error.InvalidDescriptor;
+    switch (d.generator_id) {
+        generator_id => switch (d.generator_version) {
+            generator_version => {},
+            else => return error.UnsupportedVersion,
+        },
+        else => return error.UnsupportedGenerator,
+    }
     var count: u64 = 1;
     for (d.dimensions) |dim| {
         if (dim < 2 or !std.math.isPowerOfTwo(dim) or dim > std.math.maxInt(u32) / 32) return error.InvalidDescriptor;
         count = try mul(count, dim);
     }
     if (count > 0x100000000) return error.InvalidDescriptor;
-    switch (d.generator_id) {
-        0 => if (d.seed != 0 or d.settings.len != 0) return error.InvalidDescriptor,
-        1 => {
-            if (d.settings.len != 39) return error.InvalidDescriptor;
-            var r: Reader = .{ .bytes = d.settings };
-            const scale: f64 = @bitCast(try r.int(u64));
-            const octaves = try r.int(u8);
-            const lacunarity: f64 = @bitCast(try r.int(u64));
-            const persistence: f64 = @bitCast(try r.int(u64));
-            const present = try r.int(u8);
-            const base = try r.int(u32);
-            const height: f64 = @bitCast(try r.int(u64));
-            _ = try r.int(u8);
-            if (!std.math.isFinite(scale) or scale <= 0 or octaves == 0 or !std.math.isFinite(lacunarity) or lacunarity <= 0 or !std.math.isFinite(persistence) or persistence < 0 or !std.math.isFinite(height) or height < 0 or present > 1 or (present == 0 and base != 0)) return error.InvalidDescriptor;
-            var frequency = 1.0 / scale;
-            var amplitude: f64 = 1;
-            var total: f64 = 0;
-            const width: f64 = @floatFromInt(@as(u64, d.dimensions[0]) * 32);
-            const last_y: f64 = @floatFromInt(@as(u64, d.dimensions[1]) * 32 - 1);
-            for (0..octaves) |i| {
-                const period = @max(1.0, @round(width * frequency));
-                if (!std.math.isFinite(frequency) or frequency <= 0 or !std.math.isFinite(period) or period >= 0x1p63 or (width - 1) * (period / width) >= 0x1p63 or !std.math.isFinite(last_y * frequency) or last_y * frequency >= 0x1p63 or !std.math.isFinite(amplitude)) return error.InvalidDescriptor;
-                total += amplitude;
-                if (!std.math.isFinite(total)) return error.InvalidDescriptor;
-                if (i + 1 < octaves) {
-                    frequency *= lacunarity;
-                    amplitude *= persistence;
-                }
-            }
-        },
-        else => return error.InvalidDescriptor,
+    switch (try decodeGeneratorSettings(d.settings)) {
+        .flat => {},
+        .natural => |settings| settings.validate(d.dimensions) catch return error.InvalidDescriptor,
     }
 }
+
+/// Check separately supplied runtime inputs before preparing or starting workers.
+pub fn validateRuntimeIdentity(d: Descriptor, dimensions: [3]u32, seed: u64, settings: GeneratorSettings) Error!void {
+    try validateDescriptor(d);
+    if (!std.mem.eql(u32, &d.dimensions, &dimensions) or d.seed != seed or
+        !std.meta.eql(try decodeGeneratorSettings(d.settings), settings)) return error.InvalidDescriptor;
+}
+
 pub fn encodeDescriptor(allocator: std.mem.Allocator, d: Descriptor) ![]u8 {
     try validateDescriptor(d);
-    const out = try allocator.alloc(u8, 41 + d.settings.len);
+    const out = try allocator.alloc(u8, descriptor_fixed_size + d.settings.len);
     var p: usize = 0;
     put(u16, out, &p, 1);
     put(u16, out, &p, 1);
@@ -369,7 +418,7 @@ pub fn encodeDescriptor(allocator: std.mem.Allocator, d: Descriptor) ![]u8 {
     for (d.dimensions) |dim| put(u32, out, &p, dim);
     put(u8, out, &p, 1);
     put(u16, out, &p, d.generator_id);
-    put(u32, out, &p, 1);
+    put(u32, out, &p, d.generator_version);
     put(u64, out, &p, d.seed);
     put(u32, out, &p, @intCast(d.settings.len));
     @memcpy(out[p..][0..d.settings.len], d.settings);
@@ -378,16 +427,17 @@ pub fn encodeDescriptor(allocator: std.mem.Allocator, d: Descriptor) ![]u8 {
     return out;
 }
 pub fn decodeDescriptor(bytes: []const u8) Error!Descriptor {
+    if (bytes.len > maximum_descriptor_size) return error.InvalidDescriptor;
     var r: Reader = .{ .bytes = bytes };
     if (try r.int(u16) != 1 or try r.int(u16) != 1 or try r.int(u16) != 32) return error.UnsupportedVersion;
     var d: Descriptor = undefined;
     for (&d.dimensions) |*dim| dim.* = try r.int(u32);
     if (try r.int(u8) != 1) return error.InvalidDescriptor;
     d.generator_id = try r.int(u16);
-    if (try r.int(u32) != 1) return error.UnsupportedVersion;
+    d.generator_version = try r.int(u32);
     d.seed = try r.int(u64);
     const n = try r.int(u32);
-    if (n > 39) return error.InvalidDescriptor;
+    if (n > maximum_descriptor_size - descriptor_fixed_size) return error.InvalidDescriptor;
     d.settings = try r.take(n);
     if (try r.int(u32) != 60) return error.InvalidDescriptor;
     try r.done();
@@ -491,7 +541,7 @@ test "metadata validates custom correspondence and independent section identitie
 }
 test "descriptor global and player strict wire roundtrips" {
     const a = std.testing.allocator;
-    const d: Descriptor = .{ .dimensions = .{ 512, 256, 8 }, .generator_id = 0, .seed = 0, .settings = &.{} };
+    const d: Descriptor = .{ .dimensions = .{ 512, 256, 8 }, .generator_id = generator_id, .seed = 0, .settings = &flat_settings };
     const bytes = try encodeDescriptor(a, d);
     defer a.free(bytes);
     const decoded = try decodeDescriptor(bytes);
@@ -509,6 +559,111 @@ test "descriptor global and player strict wire roundtrips" {
     try std.testing.expectError(error.Overflow, mul(std.math.maxInt(u64), 12));
     try std.testing.expectError(error.InvalidFormat, range(9, 2, 10));
 }
+
+test "generator profiles retain settings seed version and layout" {
+    const allocator = std.testing.allocator;
+    const natural = NaturalSettings{
+        .beaches = true,
+        .climate_displacement = 112,
+        .island_count = 10,
+        .large_deposits_per_resource = 6,
+        .small_deposits_per_resource = 7,
+        .feature_index_capacity = 96,
+    };
+    const natural_bytes = encodeNaturalSettings(natural);
+    const fixtures = [_]Descriptor{
+        .{ .dimensions = .{ 4, 4, 4 }, .generator_id = generator_id, .seed = 0xfedcba9876543210, .settings = &flat_settings },
+        .{ .dimensions = .{ 2048, 1024, 32 }, .generator_id = generator_id, .seed = 0x8877665544332211, .settings = &natural_bytes },
+    };
+    for (fixtures) |descriptor| {
+        const bytes = try encodeDescriptor(allocator, descriptor);
+        defer allocator.free(bytes);
+        try std.testing.expect(bytes.len <= maximum_descriptor_size);
+        const actual = try decodeDescriptor(bytes);
+        try std.testing.expectEqualDeep(descriptor, actual);
+        try validateRuntimeIdentity(actual, descriptor.dimensions, descriptor.seed, try decodeGeneratorSettings(descriptor.settings));
+        try std.testing.expectError(error.InvalidDescriptor, validateRuntimeIdentity(actual, descriptor.dimensions, descriptor.seed +% 1, try decodeGeneratorSettings(descriptor.settings)));
+        try std.testing.expectError(error.InvalidDescriptor, validateRuntimeIdentity(actual, .{ 8, 8, 8 }, descriptor.seed, try decodeGeneratorSettings(descriptor.settings)));
+        for (0..bytes.len) |length| try std.testing.expectError(error.InvalidFormat, decodeDescriptor(bytes[0..length]));
+    }
+    try std.testing.expectEqualDeep(GeneratorSettings{ .natural = natural }, try decodeGeneratorSettings(&natural_bytes));
+    try std.testing.expectError(error.InvalidDescriptor, validateRuntimeIdentity(fixtures[1], fixtures[1].dimensions, fixtures[1].seed, .{ .natural = .{} }));
+    try std.testing.expectError(error.InvalidDescriptor, validateRuntimeIdentity(fixtures[1], fixtures[1].dimensions, fixtures[1].seed, .flat));
+}
+
+test "generator descriptors reject legacy unsupported and malformed profile payloads" {
+    const allocator = std.testing.allocator;
+    var descriptor = Descriptor{ .dimensions = .{ 4, 4, 4 }, .generator_id = generator_id, .seed = 91, .settings = &flat_settings };
+    for ([_]u16{ 0, 1, 3, std.math.maxInt(u16) }) |id| {
+        descriptor.generator_id = id;
+        try std.testing.expectError(error.UnsupportedGenerator, validateDescriptor(descriptor));
+    }
+    descriptor.generator_id = generator_id;
+    for ([_]u32{ 0, 2, std.math.maxInt(u32) }) |version| {
+        descriptor.generator_version = version;
+        try std.testing.expectError(error.UnsupportedVersion, validateDescriptor(descriptor));
+    }
+    descriptor.generator_version = generator_version;
+    const bytes = try encodeDescriptor(allocator, descriptor);
+    defer allocator.free(bytes);
+    for ([_]u8{ 0, 1, 3, 255 }) |id| {
+        bytes[19] = id;
+        try std.testing.expectError(error.UnsupportedGenerator, decodeDescriptor(bytes));
+    }
+    bytes[19] = generator_id;
+    bytes[21] = 2;
+    try std.testing.expectError(error.UnsupportedVersion, decodeDescriptor(bytes));
+    bytes[21] = generator_version;
+    bytes[37] = 255;
+    try std.testing.expectError(error.UnsupportedGenerator, decodeDescriptor(bytes));
+    bytes[37] = @intFromEnum(Profile.natural);
+    try std.testing.expectError(error.InvalidDescriptor, decodeDescriptor(bytes));
+
+    try std.testing.expectError(error.InvalidDescriptor, decodeGeneratorSettings(&.{}));
+    try std.testing.expectError(error.InvalidDescriptor, decodeGeneratorSettings(&.{ @intFromEnum(Profile.flat), 0 }));
+    var natural = encodeNaturalSettings(.{});
+    natural[0] = @intFromEnum(Profile.flat);
+    try std.testing.expectError(error.InvalidDescriptor, decodeGeneratorSettings(&natural));
+    natural[0] = @intFromEnum(Profile.natural);
+    natural[1] = 2;
+    try std.testing.expectError(error.InvalidDescriptor, decodeGeneratorSettings(&natural));
+    const invalid = encodeNaturalSettings(.{ .large_deposits_per_resource = 0 });
+    try std.testing.expectError(error.InvalidDescriptor, validateDescriptor(.{ .dimensions = .{ 2048, 1024, 32 }, .generator_id = generator_id, .seed = 1, .settings = &invalid }));
+    const oversized = [_]u8{0} ** (maximum_descriptor_size + 1);
+    try std.testing.expectError(error.InvalidDescriptor, decodeDescriptor(&oversized));
+    const excessive_settings = [_]u8{0} ** (maximum_descriptor_size - descriptor_fixed_size + 1);
+    descriptor.settings = &excessive_settings;
+    try std.testing.expectError(error.InvalidDescriptor, validateDescriptor(descriptor));
+    for ([_][3]u32{ .{ 1, 2, 2 }, .{ 3, 2, 2 }, .{ 134217728, 2, 2 }, .{ 65536, 65536, 2 } }) |dimensions| {
+        descriptor.dimensions = dimensions;
+        descriptor.settings = &flat_settings;
+        try std.testing.expectError(error.InvalidDescriptor, validateDescriptor(descriptor));
+    }
+}
+
+test "new natural materials persist as blocks and stay outside the inventory schema" {
+    const allocator = std.testing.allocator;
+    const uuid = [_]u8{42} ** 16;
+    var blocks = [_]u8{0} ** cell_count;
+    for (15..21) |material| blocks[material] = @intCast(material);
+    const encoded = try encodeChunk(allocator, uuid, .{ .id = 1, .revision = 3, .is_unreachable = false, .blocks = &blocks, .metadata = &.{} });
+    defer allocator.free(encoded);
+    var restored = try decodeChunk(allocator, uuid, encoded, .{ 4, 4, 4 });
+    defer restored.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &blocks, restored.blocks);
+    for (15..21) |material| {
+        try std.testing.expectError(error.InvalidFormat, encodePlayer(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0, .inventory = @intCast(material) }));
+    }
+    for ([_]u8{ 21, 22, 254 }) |material| {
+        blocks[0] = material;
+        try std.testing.expectError(error.InvalidFormat, encodeChunk(allocator, uuid, .{ .id = 1, .revision = 3, .is_unreachable = false, .blocks = &blocks, .metadata = &.{} }));
+    }
+    encoded[22] = 22;
+    resealChunk(uuid, encoded);
+    try std.testing.expectError(error.InvalidFormat, validateChunkRecord(uuid, encoded, .{ 4, 4, 4 }));
+    try std.testing.expectError(error.InvalidFormat, decodeChunk(allocator, uuid, encoded, .{ 4, 4, 4 }));
+}
+
 fn allocationScenario(a: std.mem.Allocator) !void {
     var blocks = [_]u8{0} ** cell_count;
     blocks[0] = 255;
@@ -520,40 +675,11 @@ fn allocationScenario(a: std.mem.Allocator) !void {
     defer decoded.deinit(a);
     var restored = try decodeMetadata(a, decoded.blocks, decoded.metadata, .{ 2, 2, 2 });
     defer restored.deinit(a);
-    const descriptor = try encodeDescriptor(a, .{ .dimensions = .{ 2, 2, 2 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+    const descriptor = try encodeDescriptor(a, .{ .dimensions = .{ 2, 2, 2 }, .generator_id = generator_id, .seed = 0, .settings = &flat_settings });
     defer a.free(descriptor);
 }
 test "all codec allocation failures release owned buffers" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationScenario, .{});
-}
-
-pub const TerrainSettings = struct { noise_scale: f64 = 192, octaves: u8 = 4, lacunarity: f64 = 2, persistence: f64 = 0.5, base_height: ?u32 = null, height_amplitude: f64 = 48, dirt_depth: u8 = 4 };
-pub fn encodeTerrainSettings(settings: TerrainSettings) [39]u8 {
-    var out: [39]u8 = undefined;
-    var p: usize = 0;
-    put(u64, &out, &p, @bitCast(settings.noise_scale));
-    put(u8, &out, &p, settings.octaves);
-    put(u64, &out, &p, @bitCast(settings.lacunarity));
-    put(u64, &out, &p, @bitCast(settings.persistence));
-    put(u8, &out, &p, @intFromBool(settings.base_height != null));
-    put(u32, &out, &p, settings.base_height orelse 0);
-    put(u64, &out, &p, @bitCast(settings.height_amplitude));
-    put(u8, &out, &p, settings.dirt_depth);
-    return out;
-}
-pub fn decodeTerrainSettings(bytes: []const u8) Error!TerrainSettings {
-    if (bytes.len != 39) return error.InvalidDescriptor;
-    var r: Reader = .{ .bytes = bytes };
-    const scale: f64 = @bitCast(try r.int(u64));
-    const octaves = try r.int(u8);
-    const lacunarity: f64 = @bitCast(try r.int(u64));
-    const persistence: f64 = @bitCast(try r.int(u64));
-    const present = try r.int(u8);
-    const base = try r.int(u32);
-    if (present > 1 or (present == 0 and base != 0)) return error.InvalidDescriptor;
-    const amplitude: f64 = @bitCast(try r.int(u64));
-    const dirt = try r.int(u8);
-    return .{ .noise_scale = scale, .octaves = octaves, .lacunarity = lacunarity, .persistence = persistence, .base_height = if (present == 1) base else null, .height_amplitude = amplitude, .dirt_depth = dirt };
 }
 
 pub const Metadata = struct {
@@ -616,19 +742,6 @@ pub fn decodeMetadata(allocator: std.mem.Allocator, blocks: []const u8, bytes: [
     return .{ .roads = roads, .construction = construction, .timers = timers };
 }
 
-test "terrain settings retain automatic height and reject invalid layout parameters" {
-    const settings = encodeTerrainSettings(.{});
-    const decoded = try decodeTerrainSettings(&settings);
-    try std.testing.expectEqual(@as(?u32, null), decoded.base_height);
-    try validateDescriptor(.{ .dimensions = .{ 512, 256, 8 }, .generator_id = 1, .seed = 1, .settings = &settings });
-    for ([_][3]u32{ .{ 1, 2, 2 }, .{ 3, 2, 2 }, .{ 134217728, 2, 2 }, .{ 65536, 65536, 2 } }) |dims| try std.testing.expectError(error.InvalidDescriptor, validateDescriptor(.{ .dimensions = dims, .generator_id = 0, .seed = 0, .settings = &.{} }));
-    const bad = encodeTerrainSettings(.{ .noise_scale = std.math.nan(f64) });
-    try std.testing.expectError(error.InvalidDescriptor, validateDescriptor(.{ .dimensions = .{ 2, 2, 2 }, .generator_id = 1, .seed = 1, .settings = &bad }));
-    const d = try std.testing.allocator.dupe(u8, &settings);
-    defer std.testing.allocator.free(d);
-    d[25] = 2;
-    try std.testing.expectError(error.InvalidDescriptor, decodeTerrainSettings(d));
-}
 test "exact air record framing and hash domain binds world identity" {
     const a = std.testing.allocator;
     const uuid = [_]u8{0} ** 16;
@@ -754,7 +867,7 @@ test "inventory schema roundtrips all carried materials and migrates legacy empt
     var invalid = encoded;
     invalid[46] = 2;
     try std.testing.expectError(error.UnsupportedVersion, decodePlayer(&invalid));
-    for ([_]u8{ 1, 3, 7, 15, 255 }) |material| {
+    for ([_]u8{ 1, 3, 7, 15, 16, 17, 18, 19, 20, 255 }) |material| {
         invalid = encoded;
         invalid[52] = material;
         try std.testing.expectError(error.InvalidFormat, decodePlayer(&invalid));

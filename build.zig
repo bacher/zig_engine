@@ -303,9 +303,45 @@ pub fn build(b: *std.Build) void {
     const run_slot_buffer_manager_unit_tests = b.addRunArtifact(slot_buffer_manager_unit_tests);
 
     const test_step = b.step("test", "Run unit tests for both application wrapping modes");
+    const generation_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/generation_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    generation_tests.root_module.linkLibrary(voxel_engine_lib);
+    generation_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
+    generation_tests.root_module.addImport("zmath", zmath.module("root"));
+    const run_generation_tests = b.addRunArtifact(generation_tests);
+    b.step("test-generation", "Validate generation, topology, failure traces, and regeneration").dependOn(&run_generation_tests.step);
+    test_step.dependOn(&run_generation_tests.step);
+
+    const generation_tools = [_]struct { name: []const u8, source: []const u8, description: []const u8 }{
+        .{ .name = "generation-map", .source = "src/voxel_app/generation_map.zig", .description = "Export reproducible generation overview maps and seed diagnostics" },
+        .{ .name = "benchmark-generation", .source = "src/voxel_app/generation_benchmark.zig", .description = "Measure cached and repeated cold-column regeneration" },
+    };
+    for (generation_tools) |tool| {
+        const executable = b.addExecutable(.{
+            .name = tool.name,
+            .root_module = b.createModule(.{
+                .root_source_file = b.path(tool.source),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        executable.root_module.linkLibrary(voxel_engine_lib);
+        executable.root_module.addImport("engine", voxel_engine_lib.root_module);
+        executable.root_module.addImport("zmath", zmath.module("root"));
+        const run = b.addRunArtifact(executable);
+        if (b.args) |args| run.addArgs(args);
+        b.step(tool.name, tool.description).dependOn(&run.step);
+    }
     const persistence_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/voxel_app/persistence/tests.zig"),
+            .root_source_file = b.path("src/voxel_app/persistence_tests.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,

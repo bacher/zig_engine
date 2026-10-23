@@ -285,7 +285,7 @@ test "exit pause fences a simulation dispatch preempted before submission and re
     defer allocator.free(path);
     defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
     const layout = try @import("engine").WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
-    const descriptor = try format.encodeDescriptor(allocator, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+    const descriptor = try format.encodeDescriptor(allocator, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
     defer allocator.free(descriptor);
     const global = format.encodeGlobal(0);
     var store = try storage.Store.create(allocator, path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{});

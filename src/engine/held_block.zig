@@ -8,7 +8,7 @@ const BlockType = @import("voxel/voxel_chunk.zig").BlockType;
 const Pipeline = @import("pipeline.zig").Pipeline;
 const BindGroup = @import("bind_group.zig").BindGroup;
 
-pub const shader = @embedFile("shaders/voxel/block_geometry.wgsl") ++ @embedFile("shaders/voxel/adaptive_geometry.wgsl") ++ @embedFile("shaders/held_block.wgsl");
+pub const shader = @embedFile("shaders/voxel/block_geometry.wgsl") ++ @embedFile("shaders/voxel/adaptive_geometry.wgsl") ++ @embedFile("shaders/voxel/material_color.wgsl") ++ @embedFile("shaders/held_block.wgsl");
 
 pub fn vertexCount(block: BlockType) u32 {
     return if (block == .country_road_adaptive or block == .custom) @import("voxel/custom_block.zig").adaptive_vertex_count else 36;
