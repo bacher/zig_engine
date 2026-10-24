@@ -786,8 +786,14 @@ Water occupies `H <= z < S` only where `H < S`, with sea surface at S. Land colu
 Track terrain height, water surface, and maximum generated occupancy separately.
 
 Implemented tuning at default height: sea level 384 blocks, ocean depth 8–148 blocks,
-ordinary rolling-land component 1–49 blocks before coast/detail, mountain uplift up to 320
-blocks. Clamp all results with room above for full tree crowns; retain solid bottom terrain. Shape continental shelf
+ordinary rolling-land component 1–99 blocks before the coast ramp, mountain uplift up to 320
+blocks. Combine three nonnegative periodic integer bands: broad relief at `max(64, height/16)`
+blocks with span `min(48, depth/16)`, visible hills at 192 blocks with span
+`min(40, depth/16)`, and detail at 64 blocks with span `min(10, depth/32)`. Add their
+fixed-point weighted values before one final division; independent octave floors can create
+coincident two-block steps. Nonnegative bands avoid flattening inland valleys against the
+minimum land height. Only land evaluates the two local bands; ocean bathymetry is unchanged.
+Clamp all results with room above for full tree crowns; retain solid bottom terrain. Shape continental shelf
 and inland relief without making a vertical cliff around every coast.
 
 ### Preparation validation and failure reporting
@@ -984,7 +990,13 @@ also validate clipping and connected center planes. All work is bounded by the p
 budget; fingerprints hash descriptors/prepared data, not all resource voxels. Diagnostics
 distinguish exact counts from sampled spatial allocation and eligible-host volume.
 
-Select a temperate, low-slope mainland start, then reuse or insert the three small starter
+Select a temperate mainland start with a small, low-slope standing area.
+Keep the four cardinal samples 64 blocks away dry and on the same mainland,
+without requiring that entire neighborhood to be level. Along each cardinal ray at distances
+1–4, require dry same-owner terrain, at most one block of height difference from the start,
+and at most one block between successive samples. This protects the immediate standing
+area while allowing hills within view. Reserve the extra 16 bounded probes per possible
+macro candidate in preparation work accounting. Then reuse or insert the three small starter
 pockets. Proposed access radius: 256 blocks by shortest wrapped distance, with at most four
 blocks of cover and a dry traversable route within the local land region. Validate routes
 against the implemented movement/climb limits and final generated trees, not only Euclidean

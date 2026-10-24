@@ -286,15 +286,22 @@ pub const Geography = struct {
             }
         }
         const broad = hash.field2(hash.mix(self.seed ^ 0x5445525241494e), cx, y, self.width, @max(64, self.height / 16));
-        const detail = hash.field2(hash.mix(self.seed ^ 0x44455441494c), cx, y, self.width, 128);
-        const land_height = 1 + @divTrunc((broad + 65535) * @as(i64, @min(48, self.depth / 16)), 131070);
-        const coast_ramp: i64 = @intCast(@min(65535, @as(u64, land.coast) * 65535 / 96));
-        const uplift = @divTrunc(@as(i64, mountain) * @as(i64, @min(320, self.depth / 3)), 65535);
-        const elevation = @divTrunc(land_height * coast_ramp, 65535) + uplift + @divTrunc(detail * 2 * coast_ramp, 65535 * 65535);
-        const height: u32 = if (land.id != 0)
-            @intCast(std.math.clamp(@as(i64, self.sea_level) + @max(1, elevation), 3, self.depth - 12))
-        else
-            self.sea_level - @as(u32, @intCast(8 + @divTrunc((broad + 65535) * @as(i64, @min(140, self.sea_level / 2)), 131070)));
+        const height: u32 = if (land.id != 0) blk: {
+            // Visible rolling hills complement the kilometre-scale land field.
+            // Nonnegative bands avoid clipping inland valleys into flat shelves.
+            const hills = hash.field2(hash.mix(self.seed ^ 0x48494c4c53), cx, y, self.width, 192);
+            const detail = hash.field2(hash.mix(self.seed ^ 0x44455441494c), cx, y, self.width, 64);
+            // Round the combined bands once: separate octave floors can coincide
+            // into two-block steps even when the continuous slope stays below one.
+            const weighted = (broad + 65535) * @as(i64, @min(48, self.depth / 16)) +
+                (hills + 65535) * @as(i64, @min(40, self.depth / 16)) +
+                (detail + 65535) * @as(i64, @min(10, self.depth / 32));
+            const land_height = 1 + @divTrunc(weighted, 131070);
+            const coast_ramp: i64 = @intCast(@min(65535, @as(u64, land.coast) * 65535 / 96));
+            const uplift = @divTrunc(@as(i64, mountain) * @as(i64, @min(320, self.depth / 3)), 65535);
+            const elevation = @divTrunc(land_height * coast_ramp, 65535) + uplift;
+            break :blk @intCast(std.math.clamp(@as(i64, self.sea_level) + @max(1, elevation), 3, self.depth - 12));
+        } else self.sea_level - @as(u32, @intCast(8 + @divTrunc((broad + 65535) * @as(i64, @min(140, self.sea_level / 2)), 131070)));
         const moisture = hash.field2(hash.mix(self.seed ^ 0x4d4f495354555245), cx, y, self.width, @max(128, self.height / 20));
         const vegetation: env.VegetationId = if (land.id == 0 or climate == .frozen or climate == .desert)
             .barren
@@ -431,6 +438,39 @@ test "reported frozen-steppe ridge join has no height cliff" {
     try std.testing.expectEqual(@as(u16, 0), steppe.mountain_strength);
     try std.testing.expectEqual(frozen.landmass_id, steppe.landmass_id);
     try std.testing.expect(@abs(@as(i64, frozen.terrain_height) - steppe.terrain_height) <= 1);
+}
+
+test "inland lowlands have visible local relief and gentle sampled slopes" {
+    var geography = try Geography.init(std.testing.allocator, hash.stream(12345, .continents, 0), .{ 65536, 32768, 1024 }, .{});
+    defer geography.deinit(std.testing.allocator);
+    // The former default start and a separate temperate forest interior.
+    for ([_][2]u32{ .{ 64, 6592 }, .{ 3648, 11328 } }) |site| {
+        var minimum: u32 = std.math.maxInt(u32);
+        var maximum: u32 = 0;
+        var inland_samples: usize = 0;
+        for (0..64) |dy| for (0..64) |dx| {
+            const x = @as(i64, site[0]) + @as(i64, @intCast(dx * 4)) - 128;
+            const y = site[1] + @as(u32, @intCast(dy * 4)) - 128;
+            const here = geography.at(.temperate, x, y);
+            try std.testing.expect(!here.water_present and here.relief == .lowland);
+            // Shore ramps have their own gradient fixtures. Isolate hills where
+            // that ramp is saturated, rather than counting coastal uplift.
+            if (here.coast_distance < 96) continue;
+            inland_samples += 1;
+            minimum = @min(minimum, here.terrain_height);
+            maximum = @max(maximum, here.terrain_height);
+            try std.testing.expectEqualDeep(here, geography.at(.temperate, x - geography.width, y));
+            for ([_][2]i32{ .{ 1, 0 }, .{ 0, 1 } }) |offset| {
+                const near = geography.at(.temperate, x + offset[0], @intCast(@as(i64, y) + offset[1]));
+                if (near.coast_distance < 96) continue;
+                try std.testing.expect(@abs(@as(i64, here.terrain_height) - near.terrain_height) <= 1);
+            }
+        };
+        // A broad-only field can vary globally while looking flat at player scale.
+        try std.testing.expect(inland_samples >= 2048);
+        try std.testing.expect(maximum - minimum >= 12);
+        try std.testing.expect(maximum - minimum <= 64);
+    }
 }
 
 test "reported internal macro join has no mainland height cliff" {

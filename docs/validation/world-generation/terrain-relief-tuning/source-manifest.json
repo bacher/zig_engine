@@ -1,0 +1,121 @@
+{
+  "baseline_commit": "d528f99b38c6ca062c56ef900194aa4d70e5caaf",
+  "sources": {
+    "src/voxel_app/generation_geography.zig": {
+      "sha256": "deb7e0979cc6027f468edfd2fbe717452e05da721df68b01603ceaf0b4950762",
+      "bytes": 31530
+    },
+    "src/voxel_app/generation_hash.zig": {
+      "sha256": "3d0aecd419e0fe556c01e116ace0e9ac07357337d386d3c5ec470f924df50774",
+      "bytes": 2600
+    },
+    "src/voxel_app/world_environment.zig": {
+      "sha256": "166389dc75f94cc3dbebc7f1af119df236a0c44e5f78247d2661e00a555523d3",
+      "bytes": 5265
+    },
+    "src/voxel_app/generation_settings.zig": {
+      "sha256": "6fca7de59aa3e90d45a541e4929b224bb60a75f00b4e7730157b60e7e9fc3c27",
+      "bytes": 1954
+    },
+    "src/voxel_app/generation_coast_approx.zig": {
+      "sha256": "04d91f3b553340182b98ae344b55b888dffc189162b3b74001513d7329b2e7fc",
+      "bytes": 5673
+    },
+    "src/voxel_app/perlin_noise.zig": {
+      "sha256": "22347e6399d76a2444155cc41a8745c7aa89622d847accd6d155e4c2393da055",
+      "bytes": 5378
+    },
+    "src/voxel_app/world_generator.zig": {
+      "sha256": "430e6244410e625de8d3390b9af8ba8eac5818f87a39b759efe2b12d854e8487",
+      "bytes": 44760,
+      "role": "Legacy default parameter and sampling reference; probe mirrors this path."
+    }
+  },
+  "platform": {
+    "zig": "0.16.0",
+    "mode": "ReleaseFast",
+    "target": "aarch64-macos"
+  },
+  "native_command": "zig build-exe probe.zig -O ReleaseFast -femit-bin=probe --global-cache-dir /private/tmp/zig-worldgen-cache; ./probe results",
+  "native_process_wall_seconds_observed": 0.873,
+  "timing_scope": "One bounded standalone diagnostic, not a regeneration benchmark; wall time includes process and file output.",
+  "preparation": "One Geography and ClimateField, no deposits, chunks, caches or trees.",
+  "raw_512_patches_not_copied": {
+    "inland_temperate.bin": {
+      "sha256": "42a98d153f9cc4697777b1feaf49a5bbf8e5c04372d916c1d86fb87cf75800ec",
+      "bytes": 4718592
+    },
+    "inland_desert.bin": {
+      "sha256": "015f4318ce5bee9b1549ea4ded872f53c89d4696b6de058dfd09e7cdc08d74a4",
+      "bytes": 4718592
+    },
+    "fixed_spawn.bin": {
+      "sha256": "6ebfb5ac1e25deca9dd1e3c27c82bc45fab534410fd79d084cc00fc861234ec5",
+      "bytes": 4718592
+    },
+    "B48_12_old_filter.bin": {
+      "sha256": "cc5ade2da8320e1d17effff15da6ebcf938ea90d266da54707c648e0fb657671",
+      "bytes": 4718592
+    },
+    "A32_8_old_filter.bin": {
+      "sha256": "549eb39c76a2a0ff9bb4458b5e72736f346086c7df55947521fcace557c26902",
+      "bytes": 4718592
+    },
+    "inland_steppe.bin": {
+      "sha256": "b3d47e26e2bc318762754a18b93b251237fcd357d4cd50a872dfe547f9af4270",
+      "bytes": 4718592
+    }
+  },
+  "temporary_evidence_root": "/private/tmp/terrain-tuning-probe",
+  "preservation": "Complete statistics and 1-block cross-sections retained. Spatial grids retain exact mean heights of each2x2 block group at four plotted sites, gzip-compressed; raw512 grids remain temporary and are reproducible from committed baseline plus probe.",
+  "production_pairs": {
+    "source_sha256": {
+      "generation_settings.zig": "6fca7de59aa3e90d45a541e4929b224bb60a75f00b4e7730157b60e7e9fc3c27",
+      "generation_geography.zig": "cd3a0e34591846276fb0ee8b7a86733cf494c31549c36b4a73a67343d21a15db",
+      "generation_hash.zig": "3d0aecd419e0fe556c01e116ace0e9ac07357337d386d3c5ec470f924df50774",
+      "world_environment.zig": "166389dc75f94cc3dbebc7f1af119df236a0c44e5f78247d2661e00a555523d3",
+      "generation_coast_approx.zig": "04d91f3b553340182b98ae344b55b888dffc189162b3b74001513d7329b2e7fc"
+    },
+    "method": "Standalone copied production Geography and ClimateField point query after benchmark quiet window; source formula is chosen C.",
+    "points": [
+      {
+        "x": 36735,
+        "y": 13632,
+        "height": 411,
+        "coast": 43
+      },
+      {
+        "x": 36736,
+        "y": 13632,
+        "height": 411,
+        "coast": 43
+      },
+      {
+        "x": 11647,
+        "y": 3212,
+        "height": 439,
+        "mountain_strength": 0
+      },
+      {
+        "x": 11647,
+        "y": 3213,
+        "height": 439,
+        "mountain_strength": 0
+      },
+      {
+        "x": 64,
+        "y": 6592,
+        "height": 451
+      }
+    ]
+  },
+  "production_accepted_start": {
+    "block": [
+      64,
+      6592,
+      451
+    ],
+    "attempt": 0,
+    "source": "Final full-production64-seed JSONL and parent validation report; root confirmed after completion."
+  }
+}

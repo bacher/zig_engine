@@ -74,7 +74,9 @@ pub const NaturalWorld = struct {
             // Logical work units bound heap comparisons, fixed-cost field probes,
             // placement probes and exact deposit XY-column visits. Integer span
             // inversion inside each deposit visit has eight fixed iterations.
-            report.work_units += Geography.preparationWorkBound(cells) + featureWorkBound(settings);
+            // The local start pad adds twelve environment and four land-only
+            // probes beyond the original four broad neighborhood probes.
+            report.work_units += Geography.preparationWorkBound(cells) + @as(u64, cells) * 16 + featureWorkBound(settings);
             if (report.work_units > options.work_budget) {
                 report.category = .preparation_aborted;
                 report.reason = .work_budget_exceeded;
@@ -226,12 +228,7 @@ pub const NaturalWorld = struct {
             const y: u32 = @intCast(index / self.geography.macro_width * 128 + 64);
             const e = self.baseEnvironmentAt(x, y);
             if (e.climate != .temperate or e.relief != .lowland or e.vegetation != .meadow or e.coast_distance < 128 or e.surface_cover != .soil) continue;
-            var safe = true;
-            for ([_][2]i32{ .{ -64, 0 }, .{ 64, 0 }, .{ 0, -64 }, .{ 0, 64 } }) |offset| {
-                const near = self.baseEnvironmentAt(@as(i64, x) + offset[0], @intCast(@as(i64, y) + offset[1]));
-                if (near.water_present or near.landmass_id != owner or @abs(@as(i64, near.terrain_height) - e.terrain_height) > 4) safe = false;
-            }
-            if (safe) return .{ x, y, e.terrain_height };
+            if (startSurroundingsSafe(self, x, y, owner, e.terrain_height)) return .{ x, y, e.terrain_height };
         }
         return null;
     }
@@ -279,6 +276,27 @@ pub const NaturalWorld = struct {
     }
 };
 
+/// Keep a dry mainland neighborhood without requiring a 128-metre plateau.
+/// The short rays protect standing space; deposit preparation separately proves
+/// every column along the three exact starter-resource access routes.
+fn startSurroundingsSafe(world: anytype, x: u32, y: u32, owner: u8, height: u32) bool {
+    for ([_][2]i32{ .{ -64, 0 }, .{ 64, 0 }, .{ 0, -64 }, .{ 0, 64 } }) |offset| {
+        if (world.geography.landAt(@as(i64, x) + offset[0], @intCast(@as(i64, y) + offset[1])).id != owner) return false;
+    }
+    for ([_][2]i32{ .{ -1, 0 }, .{ 1, 0 }, .{ 0, -1 }, .{ 0, 1 } }) |direction| {
+        var previous = height;
+        for (1..5) |distance| {
+            const step: i64 = @intCast(distance);
+            const near = world.baseEnvironmentAt(@as(i64, x) + @as(i64, direction[0]) * step, @intCast(@as(i64, y) + @as(i64, direction[1]) * step));
+            if (near.water_present or near.landmass_id != owner or
+                @abs(@as(i64, near.terrain_height) - height) > 1 or
+                @abs(@as(i64, near.terrain_height) - previous) > 1) return false;
+            previous = near.terrain_height;
+        }
+    }
+    return true;
+}
+
 fn featureWorkBound(settings: NaturalSettings) u64 {
     var bound: u64 = 1_000_000;
     for (@import("generation_deposits.zig").definitions) |definition| {
@@ -297,12 +315,69 @@ fn fingerprintScalar(digest: *std.crypto.hash.sha2.Sha256, value: anytype) void 
     digest.update(&bytes);
 }
 
+test "start surroundings allow nearby hills and reject intervening local hazards" {
+    const Fixture = struct {
+        const GeographyFixture = struct {
+            neighbor_owner: u8 = 1,
+            pub fn landAt(self: @This(), _: i64, _: u32) struct { id: u8 } {
+                return .{ .id = self.neighbor_owner };
+            }
+        };
+        geography: GeographyFixture = .{},
+        hazard: enum { none, bump, two_block_step, water, other_owner } = .none,
+
+        pub fn baseEnvironmentAt(self: @This(), x: i64, y: u32) struct { terrain_height: u32, water_present: bool, landmass_id: u8 } {
+            const distance = @abs(x - 128) + @abs(@as(i64, y) - 128);
+            var height: u32 = @intCast(100 + distance / 8);
+            if (y == 128) {
+                if (self.hazard == .bump and x == 130) height = 102;
+                if (self.hazard == .two_block_step and x == 129) height = 99;
+                if (self.hazard == .two_block_step and x == 130) height = 101;
+            }
+            const hazard_site = x == 130 and y == 128;
+            return .{ .terrain_height = height, .water_present = hazard_site and self.hazard == .water, .landmass_id = if (hazard_site and self.hazard == .other_owner) 2 else 1 };
+        }
+    };
+    var fixture: Fixture = .{};
+    try std.testing.expectEqual(@as(u32, 108), fixture.baseEnvironmentAt(192, 128).terrain_height);
+    try std.testing.expect(startSurroundingsSafe(&fixture, 128, 128, 1, 100));
+    for ([_]@TypeOf(fixture.hazard){ .bump, .two_block_step, .water, .other_owner }) |hazard| {
+        fixture.hazard = hazard;
+        try std.testing.expect(!startSurroundingsSafe(&fixture, 128, 128, 1, 100));
+    }
+    fixture.hazard = .none;
+    for ([_]u8{ 0, 2 }) |owner| {
+        fixture.geography.neighbor_owner = owner;
+        try std.testing.expect(!startSurroundingsSafe(&fixture, 128, 128, 1, 100));
+    }
+}
+
 test "finite resource populations have exact retained quantities and large source dominance" {
     const allocator = std.testing.allocator;
     const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2048, 1024, 32 } });
     var report: PreparationReport = .{};
     var world = try NaturalWorld.init(allocator, &layout, 12345, .{}, &report);
     defer world.deinit(allocator);
+    const start = world.first_start;
+    const start_owner = world.baseEnvironmentAt(start[0], start[1]).landmass_id;
+    var nearby_hill = false;
+    for ([_][2]i32{ .{ -64, 0 }, .{ 64, 0 }, .{ 0, -64 }, .{ 0, 64 } }) |offset| {
+        const far = world.baseEnvironmentAt(@as(i64, start[0]) + offset[0], @intCast(@as(i64, start[1]) + offset[1]));
+        try std.testing.expect(!far.water_present and far.landmass_id == start_owner);
+        nearby_hill = nearby_hill or @abs(@as(i64, far.terrain_height) - start[2]) > 4;
+    }
+    try std.testing.expect(nearby_hill);
+    for ([_][2]i32{ .{ -1, 0 }, .{ 1, 0 }, .{ 0, -1 }, .{ 0, 1 } }) |direction| {
+        var previous = start[2];
+        for (1..5) |distance| {
+            const step: i64 = @intCast(distance);
+            const near = world.baseEnvironmentAt(@as(i64, start[0]) + @as(i64, direction[0]) * step, @intCast(@as(i64, start[1]) + @as(i64, direction[1]) * step));
+            try std.testing.expect(!near.water_present and near.landmass_id == start_owner);
+            try std.testing.expect(@abs(@as(i64, near.terrain_height) - start[2]) <= 1);
+            try std.testing.expect(@abs(@as(i64, near.terrain_height) - previous) <= 1);
+            previous = near.terrain_height;
+        }
+    }
     var large: [5]u64 = @splat(0);
     var small: [5]u64 = @splat(0);
     var population: [5]u32 = @splat(0);
@@ -349,6 +424,15 @@ test "finite resource populations have exact retained quantities and large sourc
         try std.testing.expect(@abs(@as(i64, d.center[1]) - world.first_start[1]) <= 24);
         const e = world.baseEnvironmentAt(d.center[0], d.center[1]);
         try std.testing.expect(e.terrain_height - (d.center[2] + d.radii[2]) <= 4);
+        var previous = start[2];
+        for (0..25) |step| {
+            const x = hash.wrappedX(@as(i64, start[0]) + @divTrunc(hash.distanceX(d.center[0], start[0], layout.size_in_blocks[0]) * @as(i64, @intCast(step)), 24), layout.size_in_blocks[0]);
+            const y: u32 = @intCast(@as(i64, start[1]) + @divTrunc((@as(i64, d.center[1]) - start[1]) * @as(i64, @intCast(step)), 24));
+            const route = world.baseEnvironmentAt(x, y);
+            try std.testing.expect(!route.water_present and route.landmass_id == start_owner);
+            try std.testing.expect(@abs(@as(i64, route.terrain_height) - previous) <= 1);
+            previous = route.terrain_height;
+        }
     }
 }
 

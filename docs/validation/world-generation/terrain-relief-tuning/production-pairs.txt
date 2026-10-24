@@ -1,0 +1,5 @@
+x=36735 y=13632 height=411 coast=43 climate=temperate mountain=1900
+x=36736 y=13632 height=411 coast=43 climate=temperate mountain=1902
+x=11647 y=3212 height=439 coast=3082 climate=frozen mountain=0
+x=11647 y=3213 height=439 coast=3083 climate=steppe mountain=0
+x=64 y=6592 height=451 coast=190 climate=temperate mountain=0

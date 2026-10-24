@@ -1,0 +1,119 @@
+{
+  "seed": 12345,
+  "attempt": 0,
+  "size_blocks": [
+    65536,
+    32768,
+    1024
+  ],
+  "side": 512,
+  "variants": [
+    "legacy",
+    "current",
+    "A32_8",
+    "B48_12",
+    "C40_10"
+  ],
+  "sites": [
+    {
+      "label": "fixed_spawn",
+      "x": 64,
+      "y": 6592
+    },
+    {
+      "label": "inland_steppe",
+      "x": 3008,
+      "y": 3520
+    },
+    {
+      "label": "inland_temperate",
+      "x": 448,
+      "y": 6848
+    },
+    {
+      "label": "inland_desert",
+      "x": 64,
+      "y": 15040
+    },
+    {
+      "label": "A32_8_old_filter",
+      "x": 1344,
+      "y": 6592
+    },
+    {
+      "label": "B48_12_old_filter",
+      "x": 1728,
+      "y": 6592
+    }
+  ],
+  "provisional_starts": [
+    {
+      "variant": "current_old_filter",
+      "block": [
+        64,
+        6592,
+        429
+      ]
+    },
+    {
+      "variant": "current_local_filter",
+      "block": [
+        64,
+        6592,
+        429
+      ]
+    },
+    {
+      "variant": "A32_8_old_filter",
+      "block": [
+        1344,
+        6592,
+        428
+      ]
+    },
+    {
+      "variant": "A32_8_local_filter",
+      "block": [
+        64,
+        6592,
+        447
+      ]
+    },
+    {
+      "variant": "B48_12_old_filter",
+      "block": [
+        1728,
+        6592,
+        427
+      ]
+    },
+    {
+      "variant": "B48_12_local_filter",
+      "block": [
+        64,
+        6592,
+        455
+      ]
+    },
+    {
+      "variant": "C40_10_old_filter",
+      "block": [
+        1728,
+        6592,
+        424
+      ]
+    },
+    {
+      "variant": "C40_10_local_filter",
+      "block": [
+        64,
+        6592,
+        451
+      ]
+    }
+  ],
+  "layout": "row-major Y ascending; 18-byte records: legacy,current,A32_8,B48_12,C40_10 heights u16LE; land,climate,relief,owner u8; coast,mountain_strength u16LE",
+  "legacy": "Exact default legacy 192-block/4-octave Perlin sampling; seed12345; amplitude48;base512; periods rounded per octave.",
+  "candidates": "Same broad,land mask,coast,mountain as current. Hills unsigned field192 seed mix(geography.seed^0x48494c4c53); detail unsigned field64 with current detail seed. Spans32/8,48/12,40/10; one /131070 floor after weighted broad+hills+detail, then coast-ramp floor.",
+  "selection": "Fixed current accepted spawn plus first macro center per steppe/temperate/desert with coarse distance>=6, protected512 patch, zero mountain at9 probes; provisional per-candidate findStart has old ±64 height<=4 filter or local filter retaining ±64 dry/owner plus cardinal distances1..4 center/step deltas<=1; deposit acceptance not run."
+}

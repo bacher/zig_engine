@@ -49,6 +49,12 @@ full-cube collision.
 Mountain uplift tapers before both displaced frozen boundaries, reaching zero on the
 adjoining nonfrozen rows. Classification and uplift use the same climate-boundary sample.
 
+Rolling terrain combines the broad continental field with 192-block hills and 64-block
+details. At default depth their respective height spans are 48, 40, and 10 blocks, combined
+before rounding and tapered toward shore. Spawn selection keeps only its immediate four-block
+cardinal rays within one height step; the wider neighborhood may contain hills. Dry mainland
+checks and exact starter-resource access routes still apply.
+
 Mainland shore proximity combines a capped distance to conservative coastal rectangles
 with a shared bilinear inland field. It crosses internal macro-cell boundaries without
 resetting and uses a fixed `3 × 3` record query. The approximation can flatten up to 16

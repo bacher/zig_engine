@@ -1,0 +1,36 @@
+run test w
+approx adversarial mainland columns=514882 flat-collar columns=52178 maximum adjacent-land height delta=3
+
+Build Summary: 15/15 steps succeeded; 223/223 tests passed
+test-generation success
++- run test 223 pass (223 total) 16s MaxRSS:98M
+   +- compile test Debug native success 2s MaxRSS:682M
+      +- WriteFile cached
+      +- compile lib engine_wrapped Debug native cached 143ms MaxRSS:35M
+      |  +- WriteFile  cached
+      |  +- compile lib glfw Debug native cached 155ms MaxRSS:34M
+      |  +- WriteFile cached
+      |  +- compile lib zdawn Debug native cached 154ms MaxRSS:34M
+      |  +- WriteFile cached
+      |  +- compile lib imgui Debug native cached 145ms MaxRSS:34M
+      |  +- compile lib glfw Debug native (reused)
+      |  +- compile lib zdawn Debug native (reused)
+      |  +- compile lib imgui Debug native (reused)
+      |  +- options cached
+      |  +- options cached
+      |  +- options cached
+      |  +- options cached
+      +- compile lib engine_wrapped Debug native (+13 more reused dependencies)
+      +- WriteFile  (reused)
+      +- compile lib glfw Debug native (reused)
+      +- WriteFile (reused)
+      +- compile lib zdawn Debug native (reused)
+      +- WriteFile (reused)
+      +- compile lib imgui Debug native (reused)
+      +- compile lib glfw Debug native (reused)
+      +- compile lib zdawn Debug native (reused)
+      +- compile lib imgui Debug native (reused)
+      +- options (reused)
+      +- options (reused)
+      +- options (reused)
+      +- options (reused)
