@@ -67,7 +67,7 @@ const Harness = struct {
         self.path = try std.fmt.allocPrintSentinel(a, "/private/tmp/persistence-seeded-service-{x}", .{uuid}, 0);
         errdefer a.free(self.path);
         self.layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
-        const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+        const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
         defer a.free(descriptor);
         const global = format.encodeGlobal(0);
         self.store = try storage.Store.create(a, self.path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{});

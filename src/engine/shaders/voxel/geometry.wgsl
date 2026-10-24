@@ -11,6 +11,7 @@ struct VoxelVertex {
     position: vec4f,
     normal: vec3f,
     uv: vec2f,
+    material_and_side: vec2u,
 }
 
 fn voxelVertex(
@@ -66,5 +67,5 @@ fn voxelVertex(
 
     let position4 = vec4f(chunk_origin + vec3f(block_origin + block_vertex), 1.0);
 
-    return VoxelVertex(position4, normal, uv);
+    return VoxelVertex(position4, normal, uv, vec2u(block_type, chunk_side));
 }

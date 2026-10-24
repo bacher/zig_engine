@@ -14,6 +14,9 @@ zig build run_voxel -- --world saves/my-world        # Reopen it
 zig build run_voxel -- --ephemeral                   # Run without saving
 zig build test        # Run registered unit/regression tests
 zig build test-persistence # Run CPU persistence format/storage tests
+zig build test-generation # Run geography/topology/regeneration regressions
+zig build generation-map -Doptimize=ReleaseFast -- /tmp/world.ppm 12345 3
+zig build benchmark-generation -Doptimize=ReleaseFast -- 12345 3
 zig build test-gpu    # Optional headless Dawn GPU checks (requires graphics adapter)
 ```
 
@@ -38,9 +41,12 @@ The subsystem documents describe the current implementation, extracted from exis
 | [World configuration](docs/world-configuration.md) | Runtime dimensions, compile-time optional x wrapping, immutable layouts, shader specialization, and validation. |
 | [World configuration research](docs/world-configuration-options.md) | Original tradeoff analysis and isolated compiler measurements. |
 
-The draft [world generation specification](specs/features/world-generation.md) plans continents,
-climate belts, mountain ranges, finite deposits, and forests, with shared environmental queries
-for rendering and future simulation.
+The [world generation specification](specs/features/world-generation.md) defines the natural
+world: 2048×1024×32 chunks, connected continents and islands, climate belts, mountain ranges,
+finite deposits, forests, and an immutable deeprock floor. Climate queries are shared by
+generation, rendering, and future simulation. Old saves using generator IDs 0/1 are rejected.
+The [validation report](docs/validation/world-generation/README.md) records seed maps,
+regeneration benchmarks, memory bounds, and CPU/GPU results.
 
 The subsystem docs link to implementing modules and existing tests. The [Zig/WGSL type naming agreement](docs/rendering.md#zigwgsl-type-naming-agreement) requires `GPU_` for Zig shader payload types. [TODO.md](TODO.md) is a task list. [Agent session logs](agent-sessions/README.md) are historical records.
 
@@ -50,7 +56,7 @@ The voxel app starts in player mode: W/A/S/D walk, mouse movement looks around, 
 
 Q switches between player and debug spectator modes. Each spectator excursion starts at the player's eyes; the player freezes and returning restores its position and view. Spectator controls are W/A/S/D, Space/C for up/down, and looking by moving the mouse without holding a button, as in player mode. The demo app uses these spectator controls by default. Escape opens or closes the in-game menu. Resume closes the menu; Exit quits through the normal save-on-exit flow. The menu pauses single-player gameplay, including world timers and the simulation example, and releases the cursor. Ctrl+E toggles SSAO, Ctrl+R toggles its debug view, and B toggles blur.
 
-In player mode, inventory holds one block. Hold E or the left mouse button for three seconds to extract a block with empty hands, or one second to place the carried block. Releasing early cancels. Each action requires a fresh press, and the next action waits for the world service's acknowledgment. Mining preserves material conversions: stone yields crushed stone, earth yields dirt, and adaptive roads yield their placeable item. Inventory and terrain update optimistically together and reconcile together on rejection. Tab, X, and material-selection shortcuts have no player action.
+In player mode, inventory holds one block. Hold E or the left mouse button for three seconds to extract a block with empty hands, or one second to place the carried block. Releasing early cancels. Each action requires a fresh press, and the next action waits for the world service's acknowledgment. Leaves can be cleared without receiving an item; newly generated ore, limestone, clay, and coal remain unmineable until their resource use is configured. Deeprock cannot be changed. Mining preserves material conversions: stone yields crushed stone, earth yields dirt, and adaptive roads yield their placeable item. Inventory and terrain update optimistically together and reconcile together on rejection. Tab, X, and material-selection shortcuts have no player action.
 
 In debug spectator mode, Tab switches between removing (the initial mode) and putting. Left click performs the active mode's action instantly; X also removes in removing mode, and E also places in putting mode. Keys 1-8 select loose soil, crushed stone, trunk, planks, rebar, reinforced concrete, solid country road, and adaptive country road. Supported straight runs of 4–12 adaptive road cells form walkable slopes between solid endpoints one level apart; see [country roads](docs/country-roads.md). Reach is four metres from the camera to the edited cube's nearest vertex. Removal measures the first block under the crosshair; placement measures the empty cube adjacent to its hit face, even if that face is beyond four metres. Highlighting and actual actions share the reach check. Removing mode shows green focus edges and skips placement previews. Putting mode shows an opaque cyan outline for allowed placement or red for rejection, matching the green focus outline's width and opacity, with translucent orange outlines around problematic blocks or missing support cells; it hides green focus edges. Hidden hints remain faintly visible through terrain. Rejected placement shows small orange error text at the bottom centre on a translucent rounded background. Actual edit failures show medium red text at the top centre without a background for four seconds; both messages can appear together. Observer presses edit once, and the observer block mode persists across Q excursions. Switching control mode cancels an unfinished player hold; the player inventory is preserved. Placement overlapping the player is rejected, including during spectating. There is no material selection UI yet. See [block placement rules](docs/block-placement.md), [scenes and input](docs/scenes.md), and [voxel tools](docs/voxel-world.md#tools-and-simulation-example).
 

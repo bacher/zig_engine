@@ -4,11 +4,11 @@ The voxel application combines deterministic terrain generation with an in-memor
 
 ## Space and contents
 
-Chunks remain fixed at 32 by 32 by 32 blocks. The application chooses world dimensions at scene creation; its current preset is 512 by 256 by 8 chunks: 16384 by 8192 by 256 blocks. Each block occupies one world-coordinate unit, defined as one metre. X wrapping is always enabled by the application's compile-time engine configuration. Positions beyond y/z storage boundaries cannot index terrain; outer faces at those boundaries remain exposed, and the player treats those edges as collision walls.
+Chunks remain fixed at 32 by 32 by 32 blocks. The application chooses world dimensions at scene creation; its current preset is 2048 by 1024 by 32 chunks: 65536 by 32768 by 1024 blocks. Each block occupies one world-coordinate unit, defined as one metre. X wrapping is always enabled by the application's compile-time engine configuration. Positions beyond y/z storage boundaries cannot index terrain; outer faces at those boundaries remain exposed, and the player treats those edges as collision walls.
 
-World coordinates are centered using the immutable layout's half-dimension `origin_chunk`. With the current preset, world position zero corresponds to stored block coordinates (8192, 4096, 128). Spatial chunk coordinates are signed vectors; normalize x and validate y/z before encoding a storage ID through that world's layout. Its dimension exponents determine the packed ID widths: the current preset uses 9/8/3 bits, or 20 of the available 32 bits. The cache and service retain immutable copies of the scene's validated layout. A compile-time guard rejects an engine configuration with wrapping disabled. See [world configuration](world-configuration.md) and [coordinates](coordinates.md).
+World coordinates are centered using the immutable layout's half-dimension `origin_chunk`. With the current preset, world position zero corresponds to stored block coordinates (32768, 16384, 512). Spatial chunk coordinates are signed vectors; normalize x and validate y/z before encoding a storage ID through that world's layout. Its dimension exponents determine the packed ID widths: the current preset uses 11/10/5 bits, or 26 of the available 32 bits. The cache and service retain immutable copies of the scene's validated layout. A compile-time guard rejects an engine configuration with wrapping disabled. See [world configuration](world-configuration.md) and [coordinates](coordinates.md).
 
-`WorldChunkData.blocks` is indexed `[z][y][x]` and contains one `BlockType` per block. Types include air, natural/crushed stone, loose/packed soil, grass-covered packed soil, trunks, planks, rebar, reinforced concrete, water, sand, and snow. Current occupancy tests treat every non-air type as solid; water does not have a separate transparent/fluid occupancy rule. Custom cells use value 255 and sparse metadata; country roads save their formed slope ownership there. Occupancy, face occlusion, and collision are separate: custom cells stay occupied, expose neighboring ordinary faces, and use their recorded collision shape. Sparse construction indices and ordered time events also live in chunk metadata. See [block placement and transformations](block-placement.md).
+`WorldChunkData.blocks` is indexed `[z][y][x]` and contains one `BlockType` per block. Types include air, natural/crushed stone, loose/packed soil, grass-covered packed soil, trunks, foliage, planks, rebar, reinforced concrete, water, sand, snow, metal ore, limestone, clay, coal, and deeprock. Current occupancy tests treat every non-air type as solid; water does not have a separate transparent/fluid occupancy rule. Custom cells use value 255 and sparse metadata; country roads save their formed slope ownership there. Occupancy, face occlusion, and collision are separate: custom cells stay occupied, expose neighboring ordinary faces, and use their recorded collision shape. Sparse construction indices and ordered time events also live in chunk metadata. See [block placement and transformations](block-placement.md).
 
 `WorldChunk` contains block content, solid count, flags, own boundary masks, and authoritative chunk revision. Content is either allocation-free `empty` or a dense block array. A solid chunk still stores individual blocks; there is no separate uniform-solid representation. Removing the final solid block releases the dense allocation.
 
@@ -16,23 +16,22 @@ The six solid-face flags describe whether every block of one of the chunk's own 
 
 ## Terrain generation
 
-`WorldGenerator` supports a flat world and seeded heightmap terrain. The running voxel app selects terrain with seed 12345. A column generator computes heights for one horizontal chunk column and reuses them across its vertical chunks.
+Playable generator ID 2/version 1 has seeded `natural` and `flat` profiles. The voxel app
+uses natural seed 12345 by default. Old generator IDs 0 and 1 are rejected on reopen;
+`.terrain` remains an isolated fixture for the existing noise regressions.
 
-`WorldDataService.create` calls `generator.prepare(allocator, layout)` before starting its worker. The resulting `PreparedWorldGenerator` belongs to that service and holds an immutable table of octave frequencies, positive `i64` x periods, x sampling frequencies, and amplitudes, plus the amplitude sum. All columns and neighbor-strip samples reuse this table, including after cache eviction. Flat worlds need no octave allocation. Service destruction and failed startup release the table.
+`WorldDataService.create` prepares immutable world data before starting workers. Preparation
+validates configuration, builds a bounded coarse continental map and feature data, selects a
+safe temperate start, and prepares finite deposits. Allocation-free climate point and 32×32
+map queries share the same periodic field used for generation and rendering. The prepared
+generator borrows its layout and is owned by the service; columns and render clients must
+not outlive it.
 
-Preparation checks the layout and generator settings together. Scalar settings must be finite with positive noise scale/lacunarity, at least one octave, and nonnegative persistence/height amplitude. Used octave frequencies must remain positive and finite; amplitudes and their sum must remain finite. Rounded periods and sampled lattice coordinates must be below 2⁶³, preserving room for Perlin's `+1` neighbors. X block coordinates are normalized with the world's power-of-two mask before sampling. These checks return errors in every build mode:
-
-| Error | Meaning |
-| --- | --- |
-| `InvalidGenerationParameters` | A requested scalar setting is invalid. |
-| `NoiseFrequencyOutOfRange` | A used frequency overflows, underflows to zero, or is nonfinite. |
-| `NoisePeriodOutOfRange` | A derived period cannot be represented safely. |
-| `NoiseCoordinateOutOfRange` | The layout/frequency combination exceeds the sampler's lattice range, including y. |
-| `NoiseAmplitudeOutOfRange` | A used amplitude or amplitude sum overflows. |
-
-For example, `{ 1 << 26, 2, 2 }` chunks with `noise_scale = 4` and four octaves produces a final x period of 2³² lattice cells. This is supported by the widened representation. Enlarging a period does not remove the coordinate or floating-point limits.
-
-For direct generation outside the service, prepare once and reuse the result:
+Direct and allocating natural-world preparation use the same settings/memory preflight and
+failure reporting before candidate attempts. Chunk filling evaluates deeprock thickness and
+the deposit-index candidate slice once per horizontal column, then reuses those inputs for
+its vertical cells. These inputs live only during filling; persistent column-cache sizes
+are unchanged. The slow point oracle computes its own inputs afresh.
 
 ```zig
 var prepared = try generator.prepare(allocator, layout);
@@ -40,13 +39,34 @@ defer prepared.deinit(allocator);
 const column = ColumnGenerator.init(&prepared, .{ chunk_x, chunk_y });
 ```
 
-The prepared generator borrows its layout. Columns retain that layout and materialized heights, so the layout must outlive them. Changing dimensions or generator settings requires preparing a new generator.
+Natural worlds have 3–5 connected continents, detached islands, a shared sea level,
+cave-free terrain, climate belts, mountain ranges, finite geological deposits, and forests
+separated by meadows. The north-to-south belts occupy approximately 10/10/25/10/25/10/10%
+of the whole map. Each column has one climate, independent of chunk boundaries. Desert
+cover is sand; other covered soil renders green, yellow, or snowy according to climate.
+Soil types and timers are saved unchanged. Water and foliage render opaque cubes and retain
+full-cube collision.
+Mountain uplift tapers before both displaced frozen boundaries, reaching zero on the
+adjoining nonfrozen rows. Classification and uplift use the same climate-boundary sample.
 
-Terrain height combines periodic-x Perlin noise octaves, rounds the result, and clamps it between 1 and the world's block height. X periods use whole numbers of noise cells so both height values and slopes meet at the wrap seam. Default settings use noise scale 192, four octaves, frequency multiplier 2, amplitude multiplier 0.5, base height at half the selected world height (128 with the preset), height amplitude 48, and four dirt blocks below the surface.
+Mainland shore proximity combines a capped distance to conservative coastal rectangles
+with a shared bilinear inland field. It crosses internal macro-cell boundaries without
+resetting and uses a fixed `3 × 3` record query. The approximation can flatten up to 16
+extra blocks beside a shore; islands retain their analytic taper. This coordinate describes
+original geography and does not track player edits to water.
 
-The generated column has grass-covered packed soil at the surface, packed soil immediately below, natural stone deeper down, and air above. Generated soil is already compacted and its surface already grassy, without pending transformations. There are no generated caves. Fully above-surface chunks are empty; sufficiently deep chunks use a shortcut to fill stone. The flat generator supplies solid lower chunks and a half-filled surface chunk near the world midpoint.
+Every playable profile has contiguous seeded deeprock from storage z=0 through an irregular
+1–3-block thickness. The same pure mask protects prediction, authority, indirect edits,
+and lazy saved-chunk restoration. Invalid floor data is rejected rather than regenerated.
+Flat profiles skip natural features, use temperate climate and zero polar inset, and retain
+a simple dimension-derived surface. Natural worlds reserve the outer two Y chunk rows at
+each pole as an invisible player wall. The finite lower-Z collision boundary is independent
+of terrain residency.
 
-Generation is deterministic for the same layout, coordinates, seed, and parameters. Regression snapshots from before octave preparation retain the same default/custom heights and enclosure bounds at seams and world edges. Untouched chunks can therefore be discarded and regenerated. Committed modifications override generated data.
+Untouched chunks are discarded and deterministically regenerated from the compact identity;
+only modified chunks need persistence. Generation order, column eviction, and restart do
+not advance a shared random stream. See the [generation spec](../specs/features/world-generation.md)
+for feature bounds, failure categories, and validation requirements.
 
 ## Authoritative service and client protocol
 
@@ -204,9 +224,12 @@ The simulation worker initially loads the central chunk column, finds the surfac
 | [`standing_space.zig`](../src/voxel_app/standing_space.zig), [`block_collision.zig`](../src/voxel_app/block_collision.zig) | Supported-space search, clearance versus real support, finite bounds, nearest offsets, and shared collision geometry. |
 | [`main.zig`](../src/voxel_app/main.zig) | Streaming/pinning, handoffs, package application, mesh reuse, mask precedence, camera tools, and capacity fallback. |
 | [`block_targeting.zig`](../src/voxel_app/block_targeting.zig) | Camera rays, candidate cube reach by nearest vertex, hit faces, bounds, missing chunks, and wrapped seams. |
-| [`world_generator.zig`](../src/voxel_app/world_generator.zig), [`perlin_noise.zig`](../src/voxel_app/perlin_noise.zig) | Determinism, surface/shortcut consistency, periodic x, and enclosure certification. |
+| [`world_generator.zig`](../src/voxel_app/world_generator.zig), [`natural_generator.zig`](../src/voxel_app/natural_generator.zig), [`generation_tests.zig`](../src/voxel_app/generation_tests.zig) | Natural/flat profiles, deterministic geography, material oracle, periodic X, and enclosure certification. |
 | [`boundary_mask.zig`](../src/voxel_app/boundary_mask.zig), [`world_engine_glue.zig`](../src/voxel_app/world_engine_glue.zig) | Mask coordinates/sizes and cross-chunk face extraction. |
 | [`simulation_worker.zig`](../src/voxel_app/simulation_worker.zig) | Surface selection, result-dependent action changes, cancellation, and subscription updates. |
 | [`voxel_tests.zig`](../src/engine/voxel_tests.zig), [`voxel_grid.zig`](../src/engine/voxel/voxel_grid.zig), [`voxel/`](../src/engine/voxel) | GPU data preparation, slot allocation/reuse, exact preflight, and fixed limits. |
 
-Run `zig build test` for the root build's registered tests. The descriptions here are based on current implementations and existing regression cases; no new test run was part of this documentation extraction. Runtime-layout regressions additionally cover two differently sized services, periodic terrain, and streaming/edits across each x seam. Rendering appearance requires separate visual validation.
+Run `zig build test` for the root build's registered tests. Runtime-layout regressions cover
+two differently sized services, periodic terrain, and streaming/edits across each X seam.
+The [generation validation report](validation/world-generation/README.md) records executed
+CPU/GPU tests, natural save/reopen checks, maps, regeneration measurements, and visual inspection.

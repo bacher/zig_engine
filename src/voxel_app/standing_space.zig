@@ -39,6 +39,7 @@ fn validate(reader: Reader, request: Request) Error!void {
 
 fn solid(reader: Reader, cell: Cell) Error!bool {
     const block = coordinates.fromWorld(reader.layout, cell) orelse return error.NoSpace;
+    if (!coordinates.isPlayableY(reader.layout, block[1], reader.playable_y_inset)) return error.NoSpace;
     const material = reader.block_at(reader.context, block) orelse return error.MissingData;
     return geometry.movementCollision(material) == .full_cube;
 }
@@ -59,7 +60,7 @@ fn surface(reader: Reader, cell: Cell, footprint: geometry.Bounds) f64 {
 fn at(reader: Reader, request: Request, xy: [2]f64) Error!Position {
     const area = bounds(xy, .{ request.support_size[0], request.support_size[1], 1 }, 0).horizontalCells();
     const origin: Cell = @as(Cell, reader.layout.origin_chunk) * @as(Cell, @splat(engine.chunk_utils.CHUNK_SIZE));
-    if (area.first[1] < -origin[1] or area.last[1] >= @as(i64, reader.layout.size_in_blocks[1]) - origin[1]) return error.NoSpace;
+    if (area.first[1] < @as(i64, reader.playable_y_inset) - origin[1] or area.last[1] >= @as(i64, reader.layout.size_in_blocks[1]) - reader.playable_y_inset - origin[1]) return error.NoSpace;
     var z: i64 = @as(i64, reader.layout.size_in_blocks[2]) - origin[2];
     while (z > -origin[2]) {
         z -= 1;

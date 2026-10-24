@@ -1,0 +1,236 @@
+{
+  "seed_first": 12345,
+  "seed_count": 64,
+  "accepted": 64,
+  "rejected": 0,
+  "layout_blocks": [
+    65536,
+    32768,
+    1024
+  ],
+  "sample_grid": [
+    512,
+    256
+  ],
+  "passes": 2,
+  "test_generation": "passed",
+  "platform": "Apple M4 Max; aarch64 macOS; Metal driver reports macOS 26.7.1 (25G241); Zig 0.16.0",
+  "build_modes": {
+    "ReleaseFast": 9,
+    "ReleaseSafe": 3
+  },
+  "land_percent": {
+    "mean": 60.74382662773132,
+    "minimum_pass_estimate": 60.67962646484375,
+    "maximum_pass_estimate": 60.811614990234375,
+    "maximum_offset_disagreement_pp": 0.0396728515625
+  },
+  "preparation_ms": {
+    "minimum": 31.331292,
+    "maximum": 76.060083,
+    "mean": 38.39495253125
+  },
+  "preparation_peak_owned_bytes": 2122272,
+  "feature_references_maximum": 94,
+  "index_bin_occupancy_maximum": 9,
+  "retry_traces": [
+    {
+      "seed": 12365,
+      "preparation": {
+        "generator_id": 2,
+        "generator_version": 1,
+        "profile": "natural",
+        "seed": 12365,
+        "category": "none",
+        "reason": "none",
+        "stage": "complete",
+        "attempts_started": 2,
+        "candidates_rejected": 1,
+        "selected_attempt": 1,
+        "rejections": [
+          "start_access_unavailable",
+          "none",
+          "none",
+          "none",
+          "none",
+          "none",
+          "none",
+          "none"
+        ],
+        "rejection_details": [
+          {
+            "reason": "start_access_unavailable",
+            "stage": "deposits",
+            "observed": 0,
+            "limit": 0
+          },
+          {
+            "reason": "none",
+            "stage": "preflight",
+            "observed": 0,
+            "limit": 0
+          },
+          {
+            "reason": "none",
+            "stage": "preflight",
+            "observed": 0,
+            "limit": 0
+          },
+          {
+            "reason": "none",
+            "stage": "preflight",
+            "observed": 0,
+            "limit": 0
+          },
+          {
+            "reason": "none",
+            "stage": "preflight",
+            "observed": 0,
+            "limit": 0
+          },
+          {
+            "reason": "none",
+            "stage": "preflight",
+            "observed": 0,
+            "limit": 0
+          },
+          {
+            "reason": "none",
+            "stage": "preflight",
+            "observed": 0,
+            "limit": 0
+          },
+          {
+            "reason": "none",
+            "stage": "preflight",
+            "observed": 0,
+            "limit": 0
+          }
+        ],
+        "peak_owned_bytes": 2122272,
+        "feature_references": 88,
+        "max_bin_occupancy": 6,
+        "observed": 0,
+        "limit": 0,
+        "work_units": 57665744
+      }
+    }
+  ],
+  "belt_percent_by_pass": [
+    [
+      9.98777151107788,
+      9.991741180419922,
+      25.000643730163574,
+      10.034322738647461,
+      24.99176263809204,
+      9.999632835388184,
+      9.994125366210938
+    ],
+    [
+      9.98837947845459,
+      9.990763664245605,
+      25.008535385131836,
+      10.024893283843994,
+      24.98772144317627,
+      10.003173351287842,
+      9.996533393859863
+    ]
+  ],
+  "resource_distribution_by_pass": [
+    {
+      "metal_ore": {
+        "effective_blocks_exact_total": 937084914,
+        "estimated_mountain_fraction": 1.0,
+        "estimated_sedimentary_fraction": 0.0,
+        "estimated_density_per_lowland_host_voxel": 0.0,
+        "estimated_density_per_mountain_host_voxel": 0.00027870250810422355,
+        "minimum_large_source_volume_fraction_per_seed": 1.0
+      },
+      "limestone": {
+        "effective_blocks_exact_total": 3023140136,
+        "estimated_mountain_fraction": 0.0022708860355306485,
+        "estimated_sedimentary_fraction": 0.99187731449561,
+        "estimated_density_per_lowland_host_voxel": 9.518916869989704e-05,
+        "estimated_density_per_mountain_host_voxel": 2.0418110487719133e-06,
+        "minimum_large_source_volume_fraction_per_seed": 1.0
+      },
+      "clay": {
+        "effective_blocks_exact_total": 198997365,
+        "estimated_mountain_fraction": 0.0,
+        "estimated_sedimentary_fraction": 0.9994231520052922,
+        "estimated_density_per_lowland_host_voxel": 6.280062060632822e-06,
+        "estimated_density_per_mountain_host_voxel": 0.0,
+        "minimum_large_source_volume_fraction_per_seed": 0.9994615865226066
+      },
+      "coal": {
+        "effective_blocks_exact_total": 284605962,
+        "estimated_mountain_fraction": 0.0,
+        "estimated_sedimentary_fraction": 0.9984630792588144,
+        "estimated_density_per_lowland_host_voxel": 8.98174256823002e-06,
+        "estimated_density_per_mountain_host_voxel": 0.0,
+        "minimum_large_source_volume_fraction_per_seed": 0.9995350771079562
+      },
+      "sand": {
+        "effective_blocks_exact_total": 1127650558,
+        "estimated_mountain_fraction": 0.001399202037083077,
+        "estimated_sedimentary_fraction": 0.9918802626610795,
+        "estimated_density_per_lowland_host_voxel": 3.553718782262194e-05,
+        "estimated_density_per_mountain_host_voxel": 4.6926363310668523e-07,
+        "minimum_large_source_volume_fraction_per_seed": 0.9998863541079636
+      }
+    },
+    {
+      "metal_ore": {
+        "effective_blocks_exact_total": 937084914,
+        "estimated_mountain_fraction": 1.0,
+        "estimated_sedimentary_fraction": 0.0,
+        "estimated_density_per_lowland_host_voxel": 0.0,
+        "estimated_density_per_mountain_host_voxel": 0.00027897332880051385,
+        "minimum_large_source_volume_fraction_per_seed": 1.0
+      },
+      "limestone": {
+        "effective_blocks_exact_total": 3023140136,
+        "estimated_mountain_fraction": 0.0020091960732264436,
+        "estimated_sedimentary_fraction": 0.9921522217455446,
+        "estimated_density_per_lowland_host_voxel": 9.520428885261683e-05,
+        "estimated_density_per_mountain_host_voxel": 1.8082744173749454e-06,
+        "minimum_large_source_volume_fraction_per_seed": 1.0
+      },
+      "clay": {
+        "effective_blocks_exact_total": 198997365,
+        "estimated_mountain_fraction": 0.0,
+        "estimated_sedimentary_fraction": 0.9995605846245716,
+        "estimated_density_per_lowland_host_voxel": 6.2794126064273575e-06,
+        "estimated_density_per_mountain_host_voxel": 0.0,
+        "minimum_large_source_volume_fraction_per_seed": 0.9994615865226066
+      },
+      "coal": {
+        "effective_blocks_exact_total": 284605962,
+        "estimated_mountain_fraction": 0.0,
+        "estimated_sedimentary_fraction": 0.9982442974130077,
+        "estimated_density_per_lowland_host_voxel": 8.980813719051935e-06,
+        "estimated_density_per_mountain_host_voxel": 0.0,
+        "minimum_large_source_volume_fraction_per_seed": 0.9995350771079562
+      },
+      "sand": {
+        "effective_blocks_exact_total": 1127650558,
+        "estimated_mountain_fraction": 0.0016402527785175757,
+        "estimated_sedimentary_fraction": 0.991727217968152,
+        "estimated_density_per_lowland_host_voxel": 3.5524935354280514e-05,
+        "estimated_density_per_mountain_host_voxel": 5.506416521009401e-07,
+        "minimum_large_source_volume_fraction_per_seed": 0.9998863541079636
+      }
+    }
+  ],
+  "cross_mode_hash_count": 24,
+  "cross_mode_hashes_equal": true,
+  "cross_mode_prepared_fingerprints_equal": true,
+  "limitations": [
+    "Offset-grid disagreement is a reproducibility/error check, not a statistical confidence interval.",
+    "Global topology uses construction invariants and exhaustive reduced/adversarial final-column graphs; no default-world block-column census was performed.",
+    "Resource totals are exact prepared effective counts; spatial relief/geology allocation and eligible host volumes are estimates from bounded samples.",
+    "Requested allocator bytes exclude allocator page overhead, GPU residency, disk caches, and complete gameplay residency.",
+    "Dense forest test reports an actual representative chunk; it does not exhaust all forest chunks or independently prove capacity fallback.",
+    "No default beach setting change is inferred from these machine-specific measurements."
+  ]
+}

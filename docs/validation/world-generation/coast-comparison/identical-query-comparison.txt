@@ -1,0 +1,15 @@
+1/1 generation_geography.test.coast comparison rotated timing and cross section...fixture x=36735,y=13632 coast=144/45/43 height=454/405/405 localC=43 broadB=65
+fixture x=36736,y=13632 coast=0/45/43 height=385/405/405 localC=43 broadB=64
+default macrojoins checked=474777 max coast delta=2 max height delta=2
+round=0 mode=old env250k_ms=20.578 mainland_queries=152002
+round=0 mode=exact env250k_ms=144.328 mainland_queries=152002
+round=0 mode=approx env250k_ms=21.875 mainland_queries=152002
+round=1 mode=approx env250k_ms=21.658 mainland_queries=152002
+round=1 mode=old env250k_ms=20.597 mainland_queries=152002
+round=1 mode=exact env250k_ms=143.415 mainland_queries=152002
+round=2 mode=exact env250k_ms=142.521 mainland_queries=152002
+round=2 mode=approx env250k_ms=21.992 mainland_queries=152002
+round=2 mode=old env250k_ms=20.543 mainland_queries=152002
+comparison digest=842931159
+OK
+All 1 tests passed.

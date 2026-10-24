@@ -1,0 +1,78 @@
+{
+  "hash_algorithm": "SHA256",
+  "protocol": {
+    "zig_version": "0.16.0",
+    "mode": "ReleaseFast",
+    "target": "aarch64-macos",
+    "seed": 12345,
+    "layout_chunks": [
+      2048,
+      1024,
+      32
+    ],
+    "samples_per_site_per_run": 31,
+    "beaches_each_run": [
+      false,
+      true
+    ],
+    "paired_order": [
+      "baseline-paired-1.txt",
+      "optimized-paired-1.txt",
+      "optimized-paired-2.txt",
+      "baseline-paired-2.txt"
+    ],
+    "invocation_arguments": [
+      "12345",
+      "31"
+    ],
+    "comparison_logs": "The four paired direct-binary runs; initial build/run logs are excluded from the comparison."
+  },
+  "logs": [
+    {
+      "file": "baseline-paired-1.txt",
+      "role": "paired comparison",
+      "sha256": "f191d1a195ffb24f3a9b1037d51909157ccc6b7db5e0069fce38aa0246ea7f7b",
+      "bytes": 20229
+    },
+    {
+      "file": "optimized-paired-1.txt",
+      "role": "paired comparison",
+      "sha256": "8278fa8cce6728ad7f1a046e9daa7d5e42d658324fa8030d047d52aaadcc689f",
+      "bytes": 20230
+    },
+    {
+      "file": "optimized-paired-2.txt",
+      "role": "paired comparison",
+      "sha256": "0e3df21b7ad85e614b2c5155fc664d994d8be81ba57c4cbbc654b3cc27650efb",
+      "bytes": 20228
+    },
+    {
+      "file": "baseline-paired-2.txt",
+      "role": "paired comparison",
+      "sha256": "2e6be7be11f3e95803bf24d03356f81b3bd86e54ecaaa262314236085ebe822b",
+      "bytes": 20229
+    },
+    {
+      "file": "baseline-31.txt",
+      "role": "initial build/run; excluded from comparison",
+      "sha256": "1d04d0c45caa012f6e7527210363ef9079078502ac9af8f09fd759bb9a7b96a7",
+      "bytes": 21721
+    },
+    {
+      "file": "optimized-31.txt",
+      "role": "initial build/run; excluded from comparison",
+      "sha256": "897cff6cbf9e66bbf8db5b906488bfcafe2939791e30219c842675e0774ed498",
+      "bytes": 21720
+    }
+  ],
+  "binaries": {
+    "baseline": {
+      "path": "baseline/.zig-cache/o/14a5960b1b8e753d2c91368c1490443c/benchmark-generation",
+      "sha256": "9e859ac9aadc5ae74c9f9b2b552d8f5a66258a75ae34495ad638cc8019a691b1"
+    },
+    "optimized": {
+      "path": "optimized/.zig-cache/o/bf825e615f36edfc537cc359b471e1f2/benchmark-generation",
+      "sha256": "cd7c6b725779d9031ddd821a6ab7bc8a76dd4e2a2c9f62dd173fc16bc162a955"
+    }
+  }
+}

@@ -19,16 +19,22 @@ client data produces `missing_data`, never an assumption that the missing cells 
 | Rebar and reinforced concrete | Share horizontal support and the mineral height group. |
 | Solid country road | Ordinary cube; requires solid support directly below. |
 | Adaptive country road | Custom cell (255); full-cube collision until a supported 4–12-section run forms a slope. |
+| Sand | Placeable/minable; retains a filled 3×3 footprint, has no soil timers, and directly supports only soil/sand. |
+| Leaves | Opaque colliding foliage; removable without an item, with no structural support or decay. |
+| Ore, limestone, coal | Natural-rock support; mining disabled until usable resource results are configured. |
+| Clay | Packed-soil support, without compaction/grass timers; mining disabled pending resource mechanics. |
+| Deeprock | Immutable seeded bottom formation; one exposed top supplies a direct stable foundation. |
 
-Water, sand, and snow retain their existing placement/collision behavior. They are outside
-the structural material families and cannot supply earth footprints or stable platforms.
-Construction materials and unformed adaptive roads have full-cube collision; formed roads
-follow their inclined surfaces. See [country roads](country-roads.md) for formation and
-reversion rules. The existing atlas supplies temporary
-tiles for the new construction materials; placement hints use the shared block-outline shader.
+Water and standalone snow keep their existing placement/collision behavior except that
+neither can be placed directly on sand. They cannot supply earth/sand footprints or stable
+platforms. Construction materials and unformed adaptive roads have full-cube collision;
+formed roads follow their inclined surfaces. See [country roads](country-roads.md).
 
-Mining results include `mined_type`. There is no inventory, recipe, or dropped-item system
-yet; this result provides the conversion contract for a future inventory.
+`BlockType.miningPolicy()` is the shared explicit allowlist used by prediction and authority:
+forbidden, remove without an item, or yield a configured placeable item. New unconfigured
+resources default to forbidden mining. `mined_type` is optional even on success; clearing
+leaves keeps an empty player slot empty. An occupied slot still rejects all player mining.
+Deeprock has an independent mutation guard covering all direct and indirect writes.
 
 ## Stable platforms
 
@@ -36,18 +42,19 @@ A stable platform is a completely filled 3x3x3 cube immediately below a candidat
 The cube covers x/y offsets -1 through +1 and z offsets -1 through -3. The candidate must
 be directly above the center of the cube's top layer. Every cell must contain loose or
 packed soil, natural or crushed stone, rebar, or reinforced concrete. Mixtures are allowed;
-wood, water, sand, snow, and air do not qualify.
+ore, limestone, coal, clay, and deeprock also qualify; wood, water, sand, snow, foliage, and air do not qualify.
 
-A stable platform supplies a foundation and resets height counters. It can be constructed;
+A single exposed deeprock cell is also a direct foundation, without requiring a surrounding platform. Soil and sand still require all nine footprint cells. A stable platform supplies a foundation and resets height counters. It can be constructed;
 it does not require natural stone underneath it. Repeatedly building a new platform to
 restart the counters is an intentional building compromise. This also resets the counted
 crushed-stone run at the platform, rather than counting through it.
 
 ## Local support and height
 
-Loose soil needs nine structural blocks in the 3x3 layer directly beneath it. Earth,
-stone, rebar/concrete, trunks, and planks can fill this layer. A constructed soil block
-retains this footprint requirement after compaction, so removing temporary supports cannot
+Loose soil and sand need nine qualifying blocks in the 3x3 layer directly beneath them. Earth,
+stone, geological resources, rebar/concrete, trunks, planks, and sand can fill this layer. Water,
+standalone snow, foliage, and air cannot. Sand remains nonstructural despite filling a footprint. A constructed soil block
+retains this footprint requirement after compaction (and constructed sand retains its own footprint), so removing temporary supports cannot
 leave a previously placed soil block floating. Generated terrain is exempt from building
 validation; natural cliffs and hills remain mineable.
 
@@ -224,7 +231,8 @@ Stopping game-time advancement pauses deadlines. Subscription eviction has no ef
 - Newly compacted exposed soil schedules grass 30 minutes after compaction.
 - Covering soil clears grass and cancels its pending surface timer.
 - Exposing packed soil schedules grass 30 minutes after the exposure.
-- Generated soil is already packed, with grass on its exposed surface immediately.
+- Generated soil is already packed, with climate cover on its exposed surface immediately.
+- The saved `grass` state renders green in temperate/desert columns, yellow in steppe, and snowy on top in frozen columns. Loose and packed soil retain their ordinary appearance until the existing timer grows cover.
   Generation schedules no soil transformations, regardless of when a chunk is discovered.
 - Grass may grow underground. Light and sky access are not checked.
 

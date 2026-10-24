@@ -55,7 +55,7 @@ pub const Interaction = struct {
         const hold = self.holding.?;
         self.holding = null;
         if (result.status != .success) return;
-        self.inventory = if (hold.operation.action == .remove) result.mined_type.? else null;
+        self.inventory = if (hold.operation.action == .remove) result.mined_type else null;
         self.pending = .{};
     }
 
@@ -230,4 +230,20 @@ test "acknowledgements without this player's inventory preserve the predicted sl
         try std.testing.expectEqual(null, interaction.pending);
         try std.testing.expect(!interaction.acknowledge(1, result));
     }
+}
+
+test "no-item foliage removal predicts and acknowledges an empty inventory" {
+    var interaction: Interaction = .{
+        .holding = .{ .source = .key, .operation = .{ .block = .{ 1, 2, 3 }, .action = .remove }, .material = .leaves },
+    };
+    interaction.completePrediction(.{ .status = .success });
+    try std.testing.expectEqual(@as(?BlockType, null), interaction.inventory);
+    try std.testing.expect(interaction.pending != null);
+    interaction.markSubmitted(7);
+    try std.testing.expect(interaction.acknowledge(1, .{ .request_id = 7, .status = .success, .player_inventory = .{ .player_id = 1, .material = null } }));
+    interaction.finishReconciliation(&.{});
+    try std.testing.expectEqual(null, interaction.pending);
+    try std.testing.expectEqual(@as(?BlockType, null), interaction.inventory);
+    interaction.press(.key);
+    try std.testing.expectEqual(Source.key, interaction.requested.?);
 }

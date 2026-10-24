@@ -6,6 +6,7 @@ const Side = @import("engine").voxel_chunk.Side;
 const WorldChunkData = @import("./world_chunk_data.zig").WorldChunkData;
 const ChunkFlags = @import("./world_chunk_data.zig").ChunkFlags;
 const world_generator = @import("./world_generator.zig");
+const mutation_guard = @import("mutation_guard.zig");
 const ChunkId = @import("./consts.zig").ChunkId;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const test_layout = @import("test_world.zig").layout;
@@ -116,6 +117,7 @@ pub const WorldChunk = struct {
     /// Material-only changes preserve occupancy and enclosure flags.
     pub fn changeType(self: *WorldChunk, local: [3]u5, block_type: BlockType) void {
         std.debug.assert(self.content.getBlock(local) != .none and block_type != .none);
+        if (!mutation_guard.allowsMaterialChange(self.content.getBlock(local), block_type)) return;
         if (self.content.getBlock(local) == block_type) return;
         self.content.blocks.blocks[local[2]][local[1]][local[0]] = block_type;
         self.cell_changes.record(transformations.index(local));
@@ -150,6 +152,7 @@ pub const WorldChunk = struct {
     /// detached staging chunks when preparing an authoritative multi-chunk edit.
     pub fn prepareApply(self: *WorldChunk, allocator: std.mem.Allocator, local: [3]u5, action: BlockAction) !OperationStatus {
         const existing = self.content.getBlock(local);
+        if (!mutation_guard.allowsMaterialChange(existing, if (action == .put) action.put else .none)) return .constraint_violation;
         switch (action) {
             .put => |material| {
                 std.debug.assert(material != .none);
@@ -157,7 +160,10 @@ pub const WorldChunk = struct {
                 if (material == .custom or material == .country_road_adaptive)
                     try self.metadata.roads.ensureUnusedCapacity(allocator, 1);
             },
-            .remove => if (existing == .none) return .already_removed,
+            .remove => {
+                if (existing == .none) return .already_removed;
+                if (existing.miningPolicy() == .forbidden) return .constraint_violation;
+            },
         }
         _ = try self.tryEnsureData(allocator);
         return .success;
@@ -171,6 +177,7 @@ pub const WorldChunk = struct {
 
     fn applyPreparedPolicy(self: *WorldChunk, allocator: std.mem.Allocator, local: [3]u5, action: BlockAction, retain_empty: bool) OperationStatus {
         const existing = self.content.getBlock(local);
+        if (!mutation_guard.allowsMaterialChange(existing, if (action == .put) action.put else .none)) return .constraint_violation;
         const block_type: BlockType = switch (action) {
             .put => |block_type| blk: {
                 std.debug.assert(block_type != .none);
@@ -179,6 +186,7 @@ pub const WorldChunk = struct {
             },
             .remove => blk: {
                 if (existing == .none) return .already_removed;
+                if (existing.miningPolicy() == .forbidden) return .constraint_violation;
                 break :blk .none;
             },
         };
@@ -285,6 +293,7 @@ const CellState = struct {
 
     fn restore(self: CellState, allocator: std.mem.Allocator, chunk: *WorldChunk, local: [3]u5) void {
         const existing = chunk.content.getBlock(local);
+        if (!mutation_guard.allowsMaterialChange(existing, self.material)) return;
         if (existing != self.material) {
             if (existing != .none) _ = chunk.applyPreparedPolicy(allocator, local, .remove, true);
             if (self.material != .none) _ = chunk.applyPreparedPolicy(allocator, local, .{
@@ -403,6 +412,9 @@ pub fn tryCollectConstructed(allocator: std.mem.Allocator, layout: *const WorldL
 
 pub fn validateEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, constructed: []const block_rules.Cell, operation: BlockOperation) EditResult {
     const cell: block_rules.Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
+    const replacement = if (operation.action == .put) operation.action.put else BlockType.none;
+    if (mutation_guard.validateWrites(reader, &.{.{ .block = operation.block, .material = replacement }})) |failure|
+        return .{ .status = .constraint_violation, .failure = failure };
     const existing = reader.get(cell) orelse return .{ .status = .missing_data, .failure = .{ .reason = .missing_data, .subject = cell } };
     const material: BlockType = switch (operation.action) {
         .put => |value| blk: {
@@ -411,6 +423,9 @@ pub fn validateEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, co
         },
         .remove => blk: {
             if (existing == .none) return .{ .status = .already_removed };
+            if (existing.miningPolicy() == .forbidden) return .{ .status = .constraint_violation, .failure = .{ .reason = .mining_forbidden, .subject = cell } };
+            if (existing.miningPolicy() == .yields and !existing.miningPolicy().yields.isPlaceable())
+                return .{ .status = .constraint_violation, .failure = .{ .reason = .mining_forbidden, .subject = cell } };
             break :blk .none;
         },
     };
@@ -435,6 +450,8 @@ pub const World = struct {
     pending_accounted_count: usize = 0,
     pending_dynamic_bytes: usize = 0,
     simulation_tick: transformations.Tick = 0,
+    immutable_floor: ?mutation_guard.CanonicalFloor = null,
+    playable_y_inset: u32 = 0,
     last_edit_result: ?EditResult = null,
     /// Assigns distinct local stamps to chunk loads and optimistic block changes.
     validation_revision: u64 = 0,
@@ -532,6 +549,7 @@ pub const World = struct {
             i -= 1;
             const pending = &self.pending_operations.items[i];
             for (pending.road_undo.items) |entry| {
+                if (self.reader().isImmutable(.{ entry.block[0], entry.block[1], entry.block[2] })) continue;
                 const coords, const local = splitBlockCoords(entry.block);
                 const id = self.layout.encodeChunkCoords(coords);
                 const chunk = self.chunks.getPtr(id) orelse continue;
@@ -545,7 +563,8 @@ pub const World = struct {
             if (pending.cell_undo) |state| {
                 const coords, const local = splitBlockCoords(pending.operation.block);
                 if (self.chunks.getPtr(self.layout.encodeChunkCoords(coords))) |chunk| {
-                    state.restore(self.allocator, chunk, local);
+                    if (!self.reader().isImmutable(.{ pending.operation.block[0], pending.operation.block[1], pending.operation.block[2] }))
+                        state.restore(self.allocator, chunk, local);
                 }
             }
             pending.cell_undo = null;
@@ -594,6 +613,7 @@ pub const World = struct {
     /// One ordered replay step: capture ownership, mutate material, then restore
     /// saved formations and evaluate the road transition against this exact state.
     fn tryApplyPending(self: *World, pending: *PendingOperation, stamp_material: bool) !void {
+        if (!self.allowsOperation(pending.operation)) return;
         const coords, const local = splitBlockCoords(pending.operation.block);
         const chunk = self.chunks.getPtr(self.layout.encodeChunkCoords(coords)) orelse return;
         const before = CellState.capture(chunk, local);
@@ -666,7 +686,22 @@ pub const World = struct {
     }
 
     pub fn reader(self: *const World) block_rules.Reader {
-        return .{ .layout = self.layout, .context = @constCast(self), .block_at = readBlock, .custom_shape_at = readShape };
+        return .{ .layout = self.layout, .context = @constCast(self), .block_at = readBlock, .custom_shape_at = readShape, .immutable_at = immutableAt, .playable_y_inset = self.playable_y_inset };
+    }
+
+    fn immutableAt(context: *anyopaque, block: [3]u32) bool {
+        const self: *const World = @ptrCast(@alignCast(context));
+        return if (self.immutable_floor) |floor| floor.contains(block) else false;
+    }
+
+    fn allowsOperation(self: *const World, operation: BlockOperation) bool {
+        const material = if (operation.action == .put) operation.action.put else BlockType.none;
+        if (mutation_guard.validateWrites(self.reader(), &.{.{ .block = operation.block, .material = material }}) != null) return false;
+        if (operation.action == .remove) {
+            const existing = self.reader().get(.{ operation.block[0], operation.block[1], operation.block[2] }) orelse return false;
+            if (existing != .none and existing.miningPolicy() == .forbidden) return false;
+        }
+        return true;
     }
 
     /// Only a performance hint changes locally. No command or revision is needed: the
@@ -818,6 +853,7 @@ pub const World = struct {
     /// optimistic block, metadata, flag, stamp, or pending command contents.
     fn enqueueOptimistic(self: *World, operation: BlockOperation, mark_constructed: bool) !OperationStatus {
         operation.validate(self.layout);
+        if (!self.allowsOperation(operation)) return .constraint_violation;
         if (!self.canQueueOperation()) return error.Capacity;
         const coords, const local = splitBlockCoords(operation.block);
         const id = self.layout.encodeChunkCoords(coords);
@@ -974,11 +1010,11 @@ test "editing rejects occupied placements and repeated removals without queueing
     defer world.deinit();
     try insertGeneratedChunks(&world, .flat, .{ 0, 0 }, 0, 1);
 
-    const bottom = [3]u32{ 0, 0, 0 };
-    try std.testing.expectEqual(OperationStatus.already_exists, world.tryOperation(.{ .block = bottom, .action = .{ .put = .dirt } }).status);
+    const interior = [3]u32{ 0, 0, 4 };
+    try std.testing.expectEqual(OperationStatus.already_exists, world.tryOperation(.{ .block = interior, .action = .{ .put = .dirt } }).status);
     try std.testing.expectEqual(0, world.pending_operations.items.len);
-    try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = bottom, .action = .remove }).status);
-    try std.testing.expectEqual(OperationStatus.already_removed, world.tryOperation(.{ .block = bottom, .action = .remove }).status);
+    try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = interior, .action = .remove }).status);
+    try std.testing.expectEqual(OperationStatus.already_removed, world.tryOperation(.{ .block = interior, .action = .remove }).status);
     try std.testing.expectEqual(1, world.pending_operations.items.len);
 }
 
@@ -1099,6 +1135,103 @@ test "earth placement at the world bottom still needs its footprint" {
     try std.testing.expectEqual(block_rules.Reason.earth_footprint, result.failure.?.reason);
     try std.testing.expectEqual(0, world.pending_operations.items.len);
     try std.testing.expectEqual(0, world.getChunk(.{ 0, 0, 0 }).?.chunk_revision);
+}
+
+test "unconfigured resources reject mining before blocks metadata or pending edits change" {
+    const a = std.testing.allocator;
+    var world = try World.init(a, &test_layout);
+    defer world.deinit();
+    const data = try a.create(WorldChunkData);
+    data.* = WorldChunkData.initEmpty();
+    var source = WorldChunk.initBlocks(data);
+    for ([_]BlockType{ .metal_ore, .limestone, .clay, .coal }) |resource| {
+        data.blocks[3][2][1] = resource;
+        try source.metadata.timed.trySchedule(a, .{ .block = transformations.index(.{ 1, 2, 3 }), .kind = .grow_grass, .due_tick = 99 });
+        const result = validateEdit(a, .{ .layout = world.layout, .context = &source, .block_at = struct {
+            fn read(context: *anyopaque, block: [3]u32) ?BlockType {
+                const chunk: *WorldChunk = @ptrCast(@alignCast(context));
+                return chunk.content.getBlock(splitBlockCoords(block)[1]);
+            }
+        }.read }, &.{}, .{ .block = .{ 1, 2, 3 }, .action = .remove });
+        try std.testing.expectEqual(OperationStatus.constraint_violation, result.status);
+        try std.testing.expectEqual(block_rules.Reason.mining_forbidden, result.failure.?.reason);
+        try std.testing.expectEqual(resource, source.content.getBlock(.{ 1, 2, 3 }));
+        try std.testing.expectEqual(@as(usize, 1), source.metadata.timed.events.items.len);
+        try std.testing.expectEqual(@as(u64, 0), source.chunk_revision);
+        try std.testing.expectEqual(@as(u64, 0), source.cell_changes.sequence);
+        try std.testing.expectEqual(OperationStatus.constraint_violation, try source.tryApply(a, .{ 1, 2, 3 }, .remove));
+    }
+    source.deinit(a);
+    try std.testing.expectEqual(@as(usize, 0), world.pending_operations.items.len);
+}
+
+test "foliage removal succeeds with no item and ordinary optimistic retirement" {
+    const a = std.testing.allocator;
+    var world = try World.init(a, &test_layout);
+    defer world.deinit();
+    const data = try a.create(WorldChunkData);
+    data.* = WorldChunkData.initEmpty();
+    data.blocks[3][2][1] = .leaves;
+    try world.insertChunk(.{ 0, 0, 0 }, WorldChunk.initBlocks(data));
+    const result = world.tryOperation(.{ .block = .{ 1, 2, 3 }, .action = .remove });
+    try std.testing.expectEqual(OperationStatus.success, result.status);
+    try std.testing.expectEqual(@as(?BlockType, null), result.mined_type);
+    try std.testing.expectEqual(@as(usize, 1), world.pending_operations.items.len);
+    world.pending_operations.items[0].request_id = 7;
+    world.acknowledgeOperation(7);
+    try world.insertChunk(.{ 0, 0, 0 }, WorldChunk.initEmpty());
+    try std.testing.expectEqual(@as(usize, 0), world.pending_operations.items.len);
+    try std.testing.expectEqual(BlockType.none, world.getChunk(.{ 0, 0, 0 }).?.content.getBlock(.{ 1, 2, 3 }));
+}
+
+test "deeprock guards low-level material changes debug writes and optimistic replay" {
+    const a = std.testing.allocator;
+    var world = try World.init(a, &test_layout);
+    defer world.deinit();
+    const data = try a.create(WorldChunkData);
+    data.* = WorldChunkData.initEmpty();
+    data.blocks[0][2][1] = .deeprock;
+    try world.insertChunk(.{ 0, 0, 0 }, WorldChunk.initBlocks(data));
+    const chunk = world.chunks.getPtr(world.layout.encodeChunkId(0, 0, 0)).?;
+    const before = chunk.cell_changes.sequence;
+    try std.testing.expectEqual(OperationStatus.constraint_violation, try chunk.tryApply(a, .{ 1, 2, 0 }, .remove));
+    try std.testing.expectEqual(OperationStatus.constraint_violation, chunk.applyPrepared(a, .{ 1, 2, 0 }, .{ .put = .sand }));
+    chunk.changeType(.{ 1, 2, 0 }, .stone);
+    world.setBlockUnchecked(.{ 1, 2, 0 }, .none);
+    try std.testing.expectEqual(BlockType.deeprock, data.blocks[0][2][1]);
+    try std.testing.expectEqual(before, chunk.cell_changes.sequence);
+    try std.testing.expectEqual(@as(usize, 0), world.pending_operations.items.len);
+
+    // A pending edit from an older baseline must not overwrite newly authoritative floor.
+    const target = [3]u32{ 7, 8, 2 };
+    world.setBlockUnchecked(target, .snow);
+    const snapshot_data = try a.create(WorldChunkData);
+    snapshot_data.* = WorldChunkData.initEmpty();
+    snapshot_data.blocks[2][8][7] = .deeprock;
+    var snapshot = WorldChunk.initBlocks(snapshot_data);
+    snapshot.chunk_revision = 1;
+    try world.insertChunk(.{ 0, 0, 0 }, snapshot);
+    try std.testing.expectEqual(BlockType.deeprock, world.getChunk(.{ 0, 0, 0 }).?.content.getBlock(.{ 7, 8, 2 }));
+}
+
+test "canonical floor rejects a complete mixed write set independently of loaded material" {
+    var world = try World.init(std.testing.allocator, &test_layout);
+    defer world.deinit();
+    world.immutable_floor = .{ .context = &test_layout, .immutable_at = struct {
+        fn contains(_: *const anyopaque, block: [3]u32) bool {
+            return block[2] < 2;
+        }
+    }.contains };
+    const writes = [_]mutation_guard.Write{
+        .{ .block = .{ 3, 3, 8 }, .material = .none },
+        .{ .block = .{ 3, 3, 1 }, .material = .sand },
+    };
+    const failure = mutation_guard.validateWrites(world.reader(), &writes).?;
+    try std.testing.expectEqual(block_rules.Reason.immutable_cell, failure.reason);
+    try std.testing.expectEqualDeep(block_rules.Cell{ 3, 3, 1 }, failure.subject);
+    // Residency cannot turn a protected coordinate into a mutable one.
+    try std.testing.expectEqual(OperationStatus.constraint_violation, world.previewOperation(.{ .block = .{ 3, 3, 1 }, .action = .remove }).status);
+    try std.testing.expectEqual(@as(usize, 0), world.pending_operations.items.len);
 }
 
 test "the default editing API validates before queueing and preserves earth supports" {

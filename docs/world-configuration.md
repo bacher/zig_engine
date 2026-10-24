@@ -33,7 +33,7 @@ Validation requires:
 
 Invalid settings return `InvalidWorldDimension`, `WorldDimensionTooLarge`, or `TooManyChunkIdBits`. Chunk size remains fixed at 32³; block formats, voxel face formats, GPU buffer capacities, and instance strides remain fixed too.
 
-The voxel app's current dimension preset is in [`consts.zig`](../src/voxel_app/consts.zig): 512×256×8 chunks. The demo selects the same dimensions. `WorldSettings` contains only dimensions; wrapping is supplied by the application's engine configuration. Neither has an implicit engine default.
+The voxel app's current dimension preset is in [`consts.zig`](../src/voxel_app/consts.zig): 2048×1024×32 chunks (65536×32768×1024 blocks). The demo retains 512×256×8 chunks. `WorldSettings` contains only dimensions; wrapping is supplied by the application's engine configuration. Neither has an implicit engine default.
 
 ## Coordinates and IDs
 
@@ -65,13 +65,13 @@ Cameras, transforms, billboards, voxel face selection, visible projections, and 
 
 Pipeline compilation occurs only on cache misses during scene creation; switching the active scene selects its existing pipelines. Sharing avoids duplicate pipeline construction and GPU resources for compatible live scenes. Frame-time gains have not been measured.
 
-`World.init(allocator, layout)` and `WorldDataService.create(io, allocator, layout, generator)` take validated layouts and retain their own immutable copies. The service validates and prepares its generator against its layout before starting the worker. It owns one immutable octave table reused by all column and neighbor-strip generation. Each service has its own subscriptions, IDs, and caches. `ColumnGenerator.init(prepared, coords)` uses the prepared generator's const layout, which must outlive the column. Their x-periodic behavior is guaranteed by the application's compile-time guard. See [terrain generation](voxel-world.md#terrain-generation) for preparation errors and ownership.
+`World.init(allocator, layout)` and `WorldDataService.create(io, allocator, layout, generator)` take validated layouts and retain their own immutable copies. The service validates and prepares its generator against its layout before starting the worker. It owns immutable prepared geography and feature data reused by all column and neighbor-strip generation. Each service has its own subscriptions, IDs, and caches. `ColumnGenerator.init(prepared, coords)` uses the prepared generator's const layout, which must outlive the column. Their x-periodic behavior is guaranteed by the application's compile-time guard. See [terrain generation](voxel-world.md#terrain-generation) for preparation errors and ownership.
 
-Terrain remains periodic in x. Its default base height is half the selected block height (`base_height = null`); an explicit base height is still supported. Height bounds, flat surface placement, enclosure certification, and neighbor strips use the selected dimensions. Simulation startup allocates its received-chunk bookkeeping using the selected height.
+Natural terrain remains periodic in x, with finite Y/Z. Its climate and geography are prepared independently of resident chunks. The two outer Y chunk rows at each pole are impassable to the player; flat worlds use no polar inset. Every playable profile has a seeded, immutable 1–3-block deeprock floor. Simulation startup allocates its received-chunk bookkeeping using the selected height.
 
-An accepted engine layout can still be rejected by a particular terrain configuration. Periods use positive `i64`, but their derivation and the sampled x/y lattice coordinates must remain in range; octave frequencies, amplitudes, and their sum must be finite. Invalid combinations return an error before the service worker starts, including in ReleaseFast.
+An accepted engine layout can still be rejected by a natural-generation configuration. Natural climate widths, feature capacities, and safe arithmetic are validated before candidate preparation and worker startup. The isolated legacy `.terrain` fixture additionally validates its Perlin octave frequencies, amplitudes, periods, and lattice coordinates in every build mode.
 
-Changing dimensions requires creating a new scene/world and fresh caches/services. Existing IDs, geometry, pending responses, and generated terrain cannot be reinterpreted under a different layout. Changing topology also requires rebuilding the application. The same seed may produce different terrain when dimensions change; eventual save metadata needs to retain dimensions and topology alongside generator settings.
+Changing dimensions requires creating a new scene/world and fresh caches/services. Existing IDs, geometry, pending responses, and generated terrain cannot be reinterpreted under a different layout. Changing topology also requires rebuilding the application. The same seed may produce different terrain when dimensions change; save metadata retains dimensions, generator ID/version, seed, and a mandatory natural/flat settings profile. Legacy generator IDs 0 and 1 are rejected.
 
 ## Compile-time optimization
 

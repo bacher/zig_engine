@@ -64,6 +64,12 @@ pub const BlockType = enum(u8) {
     country_road_solid = 13,
     /// Selection/validation material; stored cells use custom plus sparse metadata.
     country_road_adaptive = 14,
+    leaves = 15,
+    metal_ore = 16,
+    limestone = 17,
+    clay = 18,
+    coal = 19,
+    deeprock = 20,
     custom = 255,
 
     pub fn occludesFaces(self: BlockType) bool {
@@ -90,8 +96,15 @@ pub const BlockType = enum(u8) {
         return self == .crushed_stone or self.isReinforced();
     }
 
+    pub fn isNaturalRock(self: BlockType) bool {
+        return switch (self) {
+            .stone, .metal_ore, .limestone, .coal, .deeprock => true,
+            else => false,
+        };
+    }
+
     pub fn isStablePlatformMaterial(self: BlockType) bool {
-        return self.isEarth() or self == .stone or self.isMineralConstruction();
+        return self.isEarth() or self == .clay or self.isNaturalRock() or self.isMineralConstruction();
     }
 
     pub fn isStructural(self: BlockType) bool {
@@ -99,21 +112,74 @@ pub const BlockType = enum(u8) {
     }
 
     pub fn isPlaceable(self: BlockType) bool {
-        return self != .none and self != .stone and self != .packed_dirt and self != .grass and self != .custom;
+        return switch (self) {
+            .dirt, .water, .sand, .snow, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive => true,
+            else => false,
+        };
     }
 
-    pub fn minedType(self: BlockType) BlockType {
-        if (self == .custom) return .country_road_adaptive;
-        if (self == .stone) return .crushed_stone;
-        if (self.isEarth()) return .dirt;
-        return self;
+    /// Capability is explicit: an absent item never grants removal permission.
+    pub fn miningPolicy(self: BlockType) MiningPolicy {
+        return switch (self) {
+            .stone => .{ .yields = .crushed_stone },
+            .dirt, .packed_dirt, .grass => .{ .yields = .dirt },
+            .custom => .{ .yields = .country_road_adaptive },
+            .water, .sand, .snow, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive => .{ .yields = self },
+            .leaves => .remove_without_item,
+            else => .forbidden,
+        };
+    }
+
+    pub fn minedType(self: BlockType) ?BlockType {
+        return switch (self.miningPolicy()) {
+            .yields => |item| item,
+            .forbidden, .remove_without_item => null,
+        };
+    }
+};
+
+pub const MiningPolicy = union(enum) {
+    forbidden,
+    remove_without_item,
+    yields: BlockType,
+};
+
+/// GPU appearances. Climate cover IDs never enter saved blocks or inventories.
+pub const RenderMaterial = enum(u8) {
+    none = 0,
+    stone = 1,
+    dirt = 2,
+    grass = 3,
+    water = 4,
+    sand = 5,
+    snow = 6,
+    packed_dirt = 7,
+    crushed_stone = 8,
+    tree_trunk = 9,
+    planks = 10,
+    rebar = 11,
+    reinforced_concrete = 12,
+    country_road_solid = 13,
+    country_road_adaptive = 14,
+    leaves = 15,
+    metal_ore = 16,
+    limestone = 17,
+    clay = 18,
+    coal = 19,
+    deeprock = 20,
+    grass_steppe = 21,
+    grass_frozen = 22,
+    custom = 255,
+
+    pub fn fromBlock(block: BlockType) RenderMaterial {
+        return @enumFromInt(@intFromEnum(block));
     }
 };
 
 /// Four-byte face record decoded from a u32 by WGSL. See docs/rendering.md for GPU_ naming.
 pub const GPU_BlockInfo = extern struct {
     coords: [3]u8,
-    block_type: BlockType,
+    block_type: RenderMaterial,
 };
 
 pub fn makeInteriorBlockCoords(x: anytype, y: anytype, z: anytype) [3]u8 {
@@ -126,6 +192,10 @@ pub fn makeInteriorBlockCoords(x: anytype, y: anytype, z: anytype) [3]u8 {
 
 comptime {
     std.debug.assert(@sizeOf(GPU_BlockInfo) == 4);
+    std.debug.assert(@offsetOf(GPU_BlockInfo, "block_type") == 3);
+    for (std.meta.fields(BlockType)) |field| {
+        std.debug.assert(@intFromEnum(@field(RenderMaterial, field.name)) == field.value);
+    }
 }
 
 pub const BlockCoordList = std.ArrayList(GPU_BlockInfo);

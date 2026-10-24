@@ -22,6 +22,7 @@ const WORLD_SIZE = test_layout.size_in_chunks;
 const Side = @import("engine").voxel_chunk.Side;
 const transformations = @import("block_transformations.zig");
 const rules = @import("block_rules.zig");
+const mutation_guard = @import("mutation_guard.zig");
 const standing_space = @import("standing_space.zig");
 pub const StandingSpaceRequest = standing_space.Request;
 pub const StandingSpaceError = standing_space.Error || error{ServiceStopped};
@@ -491,6 +492,22 @@ pub const WorldDataService = struct {
     }
 
     fn createConfigured(io: Io, allocator: std.mem.Allocator, layout: *const WorldLayout, generator: WorldGenerator, store: ?*storage.Store, limits: persistence.Limits) !*WorldDataService {
+        // Reject mismatched descriptors before preparing terrain or launching work.
+        if (store) |saved| {
+            const descriptor = try format.decodeDescriptor(saved.descriptor);
+            const seed: u64 = switch (generator) {
+                .flat => 0,
+                .flat_seeded => |value| value,
+                .natural => |value| value.seed,
+                .terrain => return error.UnsupportedGenerator,
+            };
+            const settings: format.GeneratorSettings = switch (generator) {
+                .flat, .flat_seeded => .flat,
+                .natural => |value| .{ .natural = value.settings },
+                .terrain => unreachable,
+            };
+            try format.validateRuntimeIdentity(descriptor, .{ @intCast(layout.size_in_chunks[0]), @intCast(layout.size_in_chunks[1]), @intCast(layout.size_in_chunks[2]) }, seed, settings);
+        }
         const owned_layout = try allocator.create(WorldLayout);
         errdefer allocator.destroy(owned_layout);
         owned_layout.* = layout.*;
@@ -550,6 +567,11 @@ pub const WorldDataService = struct {
         self.published_status = self.status;
         self.worker = try io.concurrent(runWorker, .{self});
         return self;
+    }
+
+    /// Immutable after creation; the service must outlive every borrowing client.
+    pub fn preparedGenerator(self: *const WorldDataService) *const PreparedWorldGenerator {
+        return &self.worker_state.generator;
     }
 
     pub fn restoredTick(self: *const WorldDataService) u64 {
@@ -837,7 +859,9 @@ pub const WorldDataService = struct {
         var mesh: ChunkSideData = .{};
         if (chunk.content == .blocks and !chunk.flags.is_unreachable) {
             const neighbors = self.worker_state.tryNeighborBoundaries(self.allocator, coords) catch return;
-            mesh = mesher.tryExtractChunkGeometry(self.allocator, chunk, neighbors) catch return;
+            var climate: mesher.ClimateMap = undefined;
+            self.preparedGenerator().fillClimateMap(.{ coords[0], coords[1] }, &climate);
+            mesh = mesher.tryExtractChunkGeometryWithClimate(self.allocator, chunk, neighbors, &climate) catch return;
         }
         defer mesh.deinit(self.allocator);
         for (self.clients.items) |client| {
@@ -1123,7 +1147,7 @@ pub const WorldDataService = struct {
                         // The player record exists and was checked before the terrain
                         // commit. This part of the same service turn cannot allocate.
                         const player = self.players.getPtr(transfer.id).?;
-                        player.inventory = if (edit.operation.action == .remove) @intFromEnum(result.diagnostics.mined_type.?) else null;
+                        player.inventory = if (edit.operation.action == .remove) if (result.diagnostics.mined_type) |item| @intFromEnum(item) else null else null;
                         self.player_generation +%= 1;
                     }
                     self.lifecycle.unsaved_work = true;
@@ -1633,6 +1657,7 @@ pub const WorldDataService = struct {
         defer decoded.deinit(self.allocator);
         var decoded_metadata = try format.decodeMetadata(self.allocator, decoded.blocks, decoded.metadata, read.dimensions);
         defer decoded_metadata.deinit(self.allocator);
+        try validateRestoredFloor(&self.worker_state.generator, self.layout.decodeChunkId(decoded.id), decoded.blocks, decoded_metadata);
         const live = self.worker_state.liveAllocator(self.allocator);
         var chunk = WorldChunk.initEmpty();
         if (!std.mem.allEqual(u8, decoded.blocks, 0)) {
@@ -1732,7 +1757,7 @@ pub const WorldDataService = struct {
         var reader: ReadContext = .{ .state = &self.worker_state, .allocator = self.allocator };
         defer reader.deinit();
         const roads = @import("roads.zig");
-        const context: roads.Context = .{ .allocator = self.allocator, .reader = .{ .layout = self.layout, .context = &reader, .block_at = ReadContext.read, .custom_shape_at = ReadContext.readShape }, .chunks = &self.worker_state.modified_chunks, .changed = &self.worker_state.road_changes, .max_plan_changes = self.limits.manifest_entries };
+        const context: roads.Context = .{ .allocator = self.allocator, .reader = reader.reader(), .chunks = &self.worker_state.modified_chunks, .changed = &self.worker_state.road_changes, .max_plan_changes = self.limits.manifest_entries };
         const target: rules.Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
         var sites: [9]rules.Cell = undefined;
         sites[0] = target;
@@ -1861,11 +1886,42 @@ pub const WorldDataService = struct {
     }
 };
 
+/// A decoded record must preserve the complete canonical mask before it can
+/// enter resident state. This applies equally to base and WAL-backed reads.
+fn validateRestoredFloor(generator: *const PreparedWorldGenerator, coords: ChunkCoords, blocks: []const u8, metadata: format.Metadata) !void {
+    const floor_id = @intFromEnum(@import("engine").voxel_chunk.BlockType.deeprock);
+    if (coords[2] != 0) {
+        if (std.mem.indexOfScalar(u8, blocks, floor_id) != null) return error.InvalidWorldData;
+        return;
+    }
+    for (0..CHUNK_SIZE) |y| for (0..CHUNK_SIZE) |x| {
+        const gx = @as(u32, @intCast(coords[0])) * CHUNK_SIZE + @as(u32, @intCast(x));
+        const gy = @as(u32, @intCast(coords[1])) * CHUNK_SIZE + @as(u32, @intCast(y));
+        const thickness = generator.deeprockThickness(gx, gy);
+        for (0..CHUNK_SIZE) |z| {
+            if ((blocks[(z * CHUNK_SIZE + y) * CHUNK_SIZE + x] == floor_id) != (z < thickness)) return error.InvalidWorldData;
+        }
+    };
+    // Construction and timers on an otherwise valid protected material are
+    // corruption too; restoration never repairs or silently regenerates records.
+    for (metadata.construction) |index| if (blocks[index] == @intFromEnum(@import("engine").voxel_chunk.BlockType.deeprock)) return error.InvalidWorldData;
+    for (metadata.timers) |timer| if (blocks[timer.cell] == @intFromEnum(@import("engine").voxel_chunk.BlockType.deeprock)) return error.InvalidWorldData;
+}
+
 const ReadContext = struct {
     state: *WorkerState,
     allocator: std.mem.Allocator,
     chunks: world_module.ChunksHashMap = .empty,
     failure: ?anyerror = null,
+
+    fn immutableAt(context: *anyopaque, block: [3]u32) bool {
+        const self: *ReadContext = @ptrCast(@alignCast(context));
+        return block[2] < self.state.generator.deeprockThickness(block[0], block[1]);
+    }
+
+    fn reader(self: *ReadContext) rules.Reader {
+        return .{ .layout = self.state.layout, .context = self, .block_at = read, .custom_shape_at = readShape, .immutable_at = immutableAt, .playable_y_inset = self.state.generator.playableYInset() };
+    }
 
     fn deinit(self: *ReadContext) void {
         var iterator = self.chunks.valueIterator();
@@ -1935,6 +1991,7 @@ const WorkerState = struct {
         const position: standing_space.Position = feet;
         var temporary = world_module.World.init(allocator, self.layout) catch return error.MissingData;
         defer temporary.deinit();
+        temporary.playable_y_inset = self.generator.playableYInset();
         const bounds = body.bounds(position);
         const first = bounds.firstCell();
         const last = bounds.lastCell();
@@ -1959,7 +2016,7 @@ const WorkerState = struct {
     fn findStandingSpace(self: *WorkerState, allocator: std.mem.Allocator, query: StandingSpaceRequest) standing_space.Error!standing_space.Position {
         var context: ReadContext = .{ .state = self, .allocator = allocator };
         defer context.deinit();
-        return standing_space.find(.{ .layout = self.layout, .context = &context, .block_at = ReadContext.read, .custom_shape_at = ReadContext.readShape }, query);
+        return standing_space.find(context.reader(), query);
     }
 
     fn boundariesAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) BoundaryMasks {
@@ -2071,7 +2128,7 @@ const WorkerState = struct {
         defer allocator.free(cells);
         var context: ReadContext = .{ .state = self, .allocator = allocator };
         defer context.deinit();
-        var diagnostics = world_module.validateEdit(allocator, .{ .layout = self.layout, .context = &context, .block_at = ReadContext.read, .custom_shape_at = ReadContext.readShape }, cells, operation);
+        var diagnostics = world_module.validateEdit(allocator, context.reader(), cells, operation);
         if (context.failure) |err| return err;
         if (self.persistence_service) |service| if (service.read_discovered) return error.DependencyPending;
         const coords, const local = world_module.splitBlockCoords(operation.block);
@@ -2105,7 +2162,7 @@ const WorkerState = struct {
         const previous_flags = self.modified_chunks.get(position).?.flags;
         const road_context: @import("roads.zig").Context = .{
             .allocator = allocator,
-            .reader = .{ .layout = self.layout, .context = &context, .block_at = ReadContext.read, .custom_shape_at = ReadContext.readShape },
+            .reader = context.reader(),
             .chunks = &self.modified_chunks,
             .changed = &self.road_changes,
             .virtual_edit = operation,
@@ -2172,6 +2229,21 @@ const WorkerState = struct {
         } else false;
         if (context.failure) |err| return err;
         if (self.persistence_service) |service| if (service.read_discovered) return error.DependencyPending;
+        // Validate both the target and indirect soil/timer writes as one plan.
+        // Road section writes were validated by the shared road planner above.
+        var writes: [2]mutation_guard.Write = undefined;
+        writes[0] = .{ .block = operation.block, .material = if (operation.action == .put) operation.action.put else .none };
+        var write_count: usize = 1;
+        if (below_coords != null) {
+            var below_block = operation.block;
+            below_block[2] -= 1;
+            writes[1] = .{ .block = below_block, .material = if (below_changed) .packed_dirt else ReadContext.read(&context, below_block) orelse return error.DependencyPending };
+            write_count += 1;
+        }
+        if (mutation_guard.validateWrites(context.reader(), writes[0..write_count])) |failure| {
+            const rejected: world_module.EditResult = .{ .status = .constraint_violation, .failure = failure };
+            return .{ .status = rejected.status, .chunk = try target.tryClone(allocator), .revealed_neighbors = @splat(null), .changed_below = null, .diagnostics = rejected };
+        }
         var reply = try target.tryClone(allocator);
         errdefer reply.deinit(allocator);
         try reply.metadata.reserve(allocator, road_growth, constructed_growth, timer_growth);
@@ -2276,6 +2348,20 @@ const WorkerState = struct {
         };
         defer plan.deinit(live);
         if (!plan.metadata_changed and !plan.material_changed) return false;
+        var context: ReadContext = .{ .state = self, .allocator = allocator };
+        defer context.deinit();
+        // Consumption/rescheduling is itself a persistent write. Reject the
+        // complete timer plan if any due event targets the immutable mask.
+        for (source.metadata.timed.events.items) |event| {
+            if (event.due_tick > self.tick) continue;
+            const local = transformations.coordinates(event.block);
+            const block: [3]u32 = .{
+                @as(u32, @intCast(coords[0])) * CHUNK_SIZE + local[0],
+                @as(u32, @intCast(coords[1])) * CHUNK_SIZE + local[1],
+                @as(u32, @intCast(coords[2])) * CHUNK_SIZE + local[2],
+            };
+            if (mutation_guard.validateWrites(context.reader(), &.{.{ .block = block, .material = source.content.getBlock(local) }}) != null) return false;
+        }
         const revision = std.math.add(u64, source.chunk_revision, 1) catch return false;
         const mesh_revision = std.math.add(u64, self.next_mesh_revision, 1) catch return false;
         self.mesh_revisions.ensureUnusedCapacity(allocator, 1) catch return false;
@@ -2523,8 +2609,7 @@ test "soil compacts at thirty minutes, grows grass later, and resets exposure af
     try std.testing.expectEqual(.grass, readStateBlock(&state, block));
     var above = block;
     above[2] += 1;
-    // Sand is outside this feature's structural groups and can cover the surface.
-    const cover = state.applyOperation(allocator, .{ .block = above, .action = .{ .put = .sand } });
+    const cover = state.applyOperation(allocator, .{ .block = above, .action = .{ .put = .snow } });
     defer cover.chunk.deinit(allocator);
     try std.testing.expectEqual(OperationStatus.success, cover.status);
     try std.testing.expectEqual(.packed_dirt, readStateBlock(&state, block));
@@ -2578,6 +2663,74 @@ test "mining natural stone yields crushed stone and does not allow placing natur
     defer replaced.chunk.deinit(allocator);
     try std.testing.expectEqual(OperationStatus.constraint_violation, replaced.status);
     try std.testing.expectEqual(rules.Reason.material_not_placeable, replaced.diagnostics.failure.?.reason);
+}
+
+test "canonical deeprock rejects direct indirect and timer writes without partial effects" {
+    const a = std.testing.allocator;
+    var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) };
+    defer state.deinit(a);
+    const x: u32 = 10;
+    const y: u32 = 10;
+    const thickness = state.generator.deeprockThickness(x, y);
+    const protected = [3]u32{ x, y, thickness - 1 };
+    const direct = state.applyOperation(a, .{ .block = protected, .action = .remove });
+    defer direct.chunk.deinit(a);
+    try std.testing.expectEqual(OperationStatus.constraint_violation, direct.status);
+    try std.testing.expectEqual(rules.Reason.immutable_cell, direct.diagnostics.failure.?.reason);
+    try std.testing.expectEqual(@as(u64, 0), direct.chunk.chunk_revision);
+
+    // Even corrupted resident contents cannot grant permission at a canonical
+    // floor coordinate. Include a legal upper timer to prove atomic rejection.
+    const data = try a.create(@import("world_chunk_data.zig").WorldChunkData);
+    data.* = @import("world_chunk_data.zig").WorldChunkData.initEmpty();
+    const protected_local = world_module.splitBlockCoords(protected)[1];
+    data.blocks[protected_local[2]][y][x] = .grass;
+    data.blocks[8][5][5] = .dirt;
+    var source = WorldChunk.initBlocks(data);
+    try source.metadata.timed.trySchedule(a, .{ .block = transformations.index(protected_local), .kind = .grow_grass, .due_tick = 1 });
+    try source.metadata.timed.trySchedule(a, .{ .block = transformations.index(.{ 5, 5, 8 }), .kind = .compact_dirt, .due_tick = 1 });
+    const id = test_layout.encodeChunkId(0, 0, 0);
+    try state.modified_chunks.put(a, id, source);
+    const indirect = state.applyOperation(a, .{ .block = .{ x, y, thickness }, .action = .{ .put = .snow } });
+    defer indirect.chunk.deinit(a);
+    try std.testing.expectEqual(OperationStatus.constraint_violation, indirect.status);
+    try std.testing.expectEqual(rules.Reason.immutable_cell, indirect.diagnostics.failure.?.reason);
+    try std.testing.expectEqual(rules.BlockType.none, data.blocks[thickness][y][x]);
+    try std.testing.expectEqual(rules.BlockType.grass, data.blocks[protected_local[2]][y][x]);
+    state.tick = transformations.transformation_delay * 2;
+    try std.testing.expect(!state.transformChunk(a, .{ 0, 0, 0 }));
+    const unchanged = state.modified_chunks.get(id).?;
+    try std.testing.expectEqual(rules.BlockType.dirt, unchanged.content.getBlock(.{ 5, 5, 8 }));
+    try std.testing.expectEqual(@as(usize, 2), unchanged.metadata.timed.events.items.len);
+    try std.testing.expectEqual(@as(u64, 0), unchanged.chunk_revision);
+    try std.testing.expectEqual(@as(u64, 0), unchanged.cell_changes.sequence);
+}
+
+test "sand and clay never acquire soil timers from exposure or covering" {
+    const a = std.testing.allocator;
+    var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) };
+    defer state.deinit(a);
+    const coords: ChunkCoords = .{ 0, 0, 2 };
+    const data = try a.create(@import("world_chunk_data.zig").WorldChunkData);
+    data.* = @import("world_chunk_data.zig").WorldChunkData.initEmpty();
+    data.blocks[3][8][8] = .sand;
+    data.blocks[4][8][8] = .snow;
+    data.blocks[3][8][12] = .clay;
+    try state.modified_chunks.put(a, test_layout.encodeChunkCoords(coords), WorldChunk.initBlocks(data));
+    for ([_]u32{ 8, 12 }) |x| {
+        const block = [3]u32{ x, 8, 2 * CHUNK_SIZE + 4 };
+        if (x == 12) {
+            const placed = state.applyOperation(a, .{ .block = block, .action = .{ .put = .snow } });
+            defer placed.chunk.deinit(a);
+            try std.testing.expectEqual(OperationStatus.success, placed.status);
+        }
+        const removed = state.applyOperation(a, .{ .block = block, .action = .remove });
+        defer removed.chunk.deinit(a);
+        try std.testing.expectEqual(OperationStatus.success, removed.status);
+    }
+    try std.testing.expectEqual(@as(usize, 0), state.modified_chunks.get(test_layout.encodeChunkCoords(coords)).?.metadata.timed.events.items.len);
+    try std.testing.expectEqual(rules.BlockType.sand, data.blocks[3][8][8]);
+    try std.testing.expectEqual(rules.BlockType.clay, data.blocks[3][8][12]);
 }
 
 test "evicting a subscription preserves timers and a large time step catches up both stages" {
@@ -2784,7 +2937,7 @@ test "commands validate against authority and return status plus independent sna
     defer service.destroy();
     const client = try service.createClient();
     const block = [3]u32{ 1, 2, WORLD_SIZE[2] * CHUNK_SIZE - 1 };
-    const put = client.submitOperation(.{ .block = block, .action = .{ .put = .sand } });
+    const put = client.submitOperation(.{ .block = block, .action = .{ .put = .snow } });
     const duplicate = client.submitOperation(.{ .block = block, .action = .{ .put = .snow } });
     const remove = client.submitOperation(.{ .block = block, .action = .remove });
     const missing = client.submitOperation(.{ .block = block, .action = .remove });
@@ -2800,8 +2953,8 @@ test "commands validate against authority and return status plus independent sna
         try std.testing.expectEqual(status, response.operation.?.status);
         try std.testing.expectEqual(revision, response.data.blocks.chunk.chunk_revision);
     }
-    try std.testing.expectEqual(.sand, responses.items[0].data.blocks.chunk.content.getBlock(.{ 1, 2, 31 }));
-    try std.testing.expectEqual(.sand, responses.items[1].data.blocks.chunk.content.getBlock(.{ 1, 2, 31 }));
+    try std.testing.expectEqual(.snow, responses.items[0].data.blocks.chunk.content.getBlock(.{ 1, 2, 31 }));
+    try std.testing.expectEqual(.snow, responses.items[1].data.blocks.chunk.content.getBlock(.{ 1, 2, 31 }));
     try std.testing.expectEqual(1, responses.items[1].data.blocks.chunk.solid_block_count);
     try std.testing.expect(responses.items[2].data.blocks.chunk.content == .empty);
     try std.testing.expectEqual(WorldChunk.initEmpty().flags, responses.items[2].data.blocks.chunk.flags);
@@ -2818,7 +2971,7 @@ test "successful edits push data only to subscribers and combine the origin repl
     const observer_token = observer.requestChunks(.{ 0, 0 }, z, z + 1);
     _ = other.requestChunks(.{ 1, 0 }, z, z + 1);
     const block = [3]u32{ 0, 0, z * CHUNK_SIZE };
-    const id = origin.submitOperation(.{ .block = block, .action = .{ .put = .sand } });
+    const id = origin.submitOperation(.{ .block = block, .action = .{ .put = .snow } });
     _ = origin.submitOperation(.{ .block = block, .action = .{ .put = .snow } });
     var origin_responses: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&origin_responses);
@@ -2830,7 +2983,7 @@ test "successful edits push data only to subscribers and combine the origin repl
     try std.testing.expectEqual(2, observed.items.len);
     try std.testing.expectEqual(observer_token, observed.items[1].subscription_id);
     try std.testing.expectEqual(null, observed.items[1].operation);
-    try std.testing.expectEqual(.sand, observed.items[1].data.blocks.chunk.content.getBlock(.{ 0, 0, 0 }));
+    try std.testing.expectEqual(.snow, observed.items[1].data.blocks.chunk.content.getBlock(.{ 0, 0, 0 }));
     try std.testing.expectEqual(origin_token, origin_responses.items[1].subscription_id);
     try std.testing.expectEqual(id, origin_responses.items[1].operation.?.request_id);
     var unrelated: std.ArrayList(ChunkResponse) = .empty;
@@ -2848,7 +3001,7 @@ test "eviction stops pushes and a fresh load returns committed edits with a new 
     const position = test_layout.encodeChunkId(0, 0, z);
     const old_token = main.requestChunks(.{ 0, 0 }, z, z + 1);
     const block = [3]u32{ 16, 16, z * CHUNK_SIZE };
-    _ = npc.submitOperation(.{ .block = block, .action = .{ .put = .sand } });
+    _ = npc.submitOperation(.{ .block = block, .action = .{ .put = .snow } });
     main.evictChunk(position, old_token);
     _ = npc.submitOperation(.{ .block = block, .action = .remove });
     const new_token = main.requestChunks(.{ 0, 0 }, z, z + 1);
@@ -2871,7 +3024,7 @@ test "eviction stops pushes and a fresh load returns committed edits with a new 
 }
 
 fn putFromClient(client: *Client, block: [3]u32) void {
-    _ = client.submitOperation(.{ .block = block, .action = .{ .put = .sand } });
+    _ = client.submitOperation(.{ .block = block, .action = .{ .put = .snow } });
 }
 
 test "concurrent clients cannot both put into the same empty block" {
@@ -2903,7 +3056,7 @@ test "service shutdown drains edits and frees unconsumed replies" {
     const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
     const client = try service.createClient();
     for (0..4) |x| _ = client.requestChunks(.{ @intCast(x), 0 }, 0, WORLD_SIZE[2]);
-    _ = client.submitOperation(.{ .block = .{ 0, 0, 0 }, .action = .remove });
+    _ = client.submitOperation(.{ .block = .{ 0, 0, 4 }, .action = .remove });
     service.destroy();
 }
 
@@ -2922,7 +3075,7 @@ test "shutdown skips generation requests but still commits commands" {
     defer client.pending.deinit(std.testing.allocator);
     defer client.subscriptions.deinit(std.testing.allocator);
     _ = client.requestChunks(.{ 0, 0 }, 0, WORLD_SIZE[2]);
-    _ = client.submitOperation(.{ .block = .{ 0, 0, 0 }, .action = .remove });
+    _ = client.submitOperation(.{ .block = .{ 0, 0, 4 }, .action = .remove });
     service.is_shutting_down.store(true, .monotonic);
     service.requests.close(service.io);
     service.runWorker();
@@ -3365,9 +3518,11 @@ test "soil placed beneath existing sand packs immediately and waits for exposure
     defer state.deinit(allocator);
     const surface = test_layout.size_in_blocks[2] / 2 - CHUNK_SIZE / 2;
     const block = [3]u32{ 10, 10, surface };
-    const covered = state.applyOperation(allocator, .{ .block = .{ 10, 10, surface + 1 }, .action = .{ .put = .sand } });
-    defer covered.chunk.deinit(allocator);
-    try std.testing.expectEqual(OperationStatus.success, covered.status);
+    const covering = [3]u32{ 10, 10, surface + 1 };
+    const covering_coords, const covering_local = world_module.splitBlockCoords(covering);
+    var natural = state.loadAt(allocator, covering_coords);
+    try std.testing.expectEqual(OperationStatus.success, try natural.tryApply(allocator, covering_local, .{ .put = .sand }));
+    try state.modified_chunks.put(allocator, test_layout.encodeChunkCoords(covering_coords), natural);
     const placed = state.applyOperation(allocator, .{ .block = block, .action = .{ .put = .dirt } });
     defer placed.chunk.deinit(allocator);
     try std.testing.expectEqual(OperationStatus.success, placed.status);
@@ -3767,7 +3922,7 @@ const PersistenceFixture = struct {
         self.path = try std.fmt.allocPrintSentinel(a, "/private/tmp/world-service-persistence-{x}", .{uuid}, 0);
         errdefer a.free(self.path);
         self.layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
-        const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+        const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = format.generator_id, .seed = 0, .settings = &format.flat_settings });
         defer a.free(descriptor);
         const global = format.encodeGlobal(0);
         self.store = try storage.Store.create(a, self.path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{});
@@ -4337,6 +4492,69 @@ test "player transfers own inventory across checkpoints saves and game restarts"
     try std.testing.expectEqual(@as(u8, @intFromEnum(rules.BlockType.crushed_stone)), chunk.blocks[15 * 1024 + 10 * 32 + 10]);
 }
 
+test "forbidden resource mining and no-item foliage clearing preserve inventory and saved edits" {
+    const f = try PersistenceFixture.init(.{});
+    defer f.deinit();
+    f.service.destroy();
+    const a = std.testing.allocator;
+    var blocks = [_]u8{0} ** format.cell_count;
+    const leaf = [3]u32{ 1, 2, 40 };
+    const snow = [3]u32{ 9, 2, 40 };
+    const destination = [3]u32{ 10, 2, 40 };
+    blocks[transformations.index(.{ 1, 2, 8 })] = @intFromEnum(rules.BlockType.leaves);
+    blocks[transformations.index(.{ 9, 2, 8 })] = @intFromEnum(rules.BlockType.snow);
+    const resources = [_]rules.BlockType{ .metal_ore, .limestone, .clay, .coal };
+    for (resources, 0..) |resource, i| blocks[transformations.index(.{ @intCast(4 + i), 5, 8 })] = @intFromEnum(resource);
+    const metadata = try format.encodeMetadata(a, .{});
+    defer a.free(metadata);
+    const id = f.layout.encodeChunkId(0, 0, 1);
+    const record = try format.encodeChunk(a, f.store.world_uuid, .{ .id = id, .revision = 1, .is_unreachable = false, .blocks = &blocks, .metadata = metadata });
+    defer a.free(record);
+    const global = format.encodeGlobal(0);
+    try f.store.beginSnapshot(1, &global, &.{}, 0, 1);
+    try f.store.appendChunk(record);
+    _ = try f.store.commitSnapshot();
+    try f.store.compact();
+    f.service = try WorldDataService.createPersistent(std.testing.io, a, &f.layout, .flat, &f.store, .{});
+    var client = try f.service.createClient();
+    client.publishCheckpoint(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+    for (resources, 0..) |_, i| {
+        const block = [3]u32{ @intCast(4 + i), 5, 40 };
+        for ([_]bool{ false, true }) |player| {
+            const result = try PersistenceFixture.operationResult(client, .{ .block = block, .action = .remove, .player = if (player) .{ .id = 1, .expected_sequence = 0 } else null });
+            try std.testing.expectEqual(OperationStatus.constraint_violation, result.status);
+            try std.testing.expectEqual(rules.Reason.mining_forbidden, result.failure.?.reason);
+            try std.testing.expectEqual(@as(?rules.BlockType, null), result.mined_type);
+        }
+    }
+    const acquired = try PersistenceFixture.operationResult(client, .{ .block = snow, .action = .remove, .player = .{ .id = 1, .expected_sequence = 0 } });
+    try std.testing.expectEqual(OperationStatus.success, acquired.status);
+    try std.testing.expectEqual(rules.BlockType.snow, acquired.player_inventory.?.material.?);
+    const occupied = try PersistenceFixture.operationResult(client, .{ .block = leaf, .action = .remove, .player = .{ .id = 1, .expected_sequence = 0 } });
+    try std.testing.expectEqual(OperationStatus.inventory_mismatch, occupied.status);
+    try std.testing.expectEqual(rules.BlockType.snow, occupied.player_inventory.?.material.?);
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = destination, .action = .{ .put = .snow }, .player = .{ .id = 1, .expected_sequence = 0 } }));
+    const cleared = try PersistenceFixture.operationResult(client, .{ .block = leaf, .action = .remove, .player = .{ .id = 1, .expected_sequence = 0 } });
+    try std.testing.expectEqual(OperationStatus.success, cleared.status);
+    try std.testing.expectEqual(@as(?rules.BlockType, null), cleared.mined_type);
+    try std.testing.expectEqual(@as(?rules.BlockType, null), cleared.player_inventory.?.material);
+    try std.testing.expectEqual(persistence.Phase.complete, (try f.waitSave(f.service.requestSave(true))).phase);
+    f.service.destroy();
+    f.store.deinit();
+    f.store = try storage.Store.open(a, f.path, .{});
+    f.service = try WorldDataService.createPersistent(std.testing.io, a, &f.layout, .flat, &f.store, .{});
+    try std.testing.expectEqual(@as(?u8, null), f.service.restoredPlayer(1).?.inventory);
+    client = try f.service.createClient();
+    const gone = try PersistenceFixture.operationResult(client, .{ .block = leaf, .action = .remove });
+    try std.testing.expectEqual(OperationStatus.already_removed, gone.status);
+    for (resources, 0..) |resource, i| {
+        const result = try PersistenceFixture.operationResult(client, .{ .block = .{ @intCast(4 + i), 5, 40 }, .action = .remove });
+        try std.testing.expectEqual(OperationStatus.constraint_violation, result.status);
+        try std.testing.expectEqual(rules.Reason.mining_forbidden, result.failure.?.reason);
+        try std.testing.expectEqual(@as(?rules.BlockType, null), resource.minedType());
+    }
+}
+
 test "player extraction rejects a replacement even when the replacement has the same material" {
     const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
     defer service.destroy();
@@ -4344,15 +4562,15 @@ test "player extraction rejects a replacement even when the replacement has the 
     const npc = try service.createClient();
     player.publishCheckpoint(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
     const block = [3]u32{ 10, 10, test_layout.size_in_blocks[2] - 1 };
-    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = block, .action = .{ .put = .sand } }));
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = block, .action = .{ .put = .snow } }));
     try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = block, .action = .remove }));
-    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = block, .action = .{ .put = .sand } }));
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = block, .action = .{ .put = .snow } }));
     const result = try PersistenceFixture.operationResult(player, .{ .block = block, .action = .remove, .player = .{ .id = 1, .expected_sequence = 1 } });
     try std.testing.expectEqual(OperationStatus.target_changed, result.status);
     try std.testing.expectEqual(null, result.player_inventory.?.material);
     const retry = try PersistenceFixture.operationResult(player, .{ .block = block, .action = .remove, .player = .{ .id = 1, .expected_sequence = 3 } });
     try std.testing.expectEqual(OperationStatus.success, retry.status);
-    try std.testing.expectEqual(rules.BlockType.sand, retry.player_inventory.?.material.?);
+    try std.testing.expectEqual(rules.BlockType.snow, retry.player_inventory.?.material.?);
 }
 
 test "saving before a player consumes its acknowledgement captures inventory and terrain together" {
@@ -4382,10 +4600,273 @@ test "player extraction accepts unrelated NPC edits within the same chunk" {
     player.publishCheckpoint(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
     const source = [3]u32{ 10, 10, test_layout.size_in_blocks[2] - 1 };
     const other = [3]u32{ 11, 10, source[2] };
-    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = source, .action = .{ .put = .sand } }));
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = source, .action = .{ .put = .snow } }));
     try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = other, .action = .{ .put = .snow } }));
     try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(npc, .{ .block = other, .action = .remove }));
     const result = try PersistenceFixture.operationResult(player, .{ .block = source, .action = .remove, .player = .{ .id = 1, .expected_sequence = 1 } });
     try std.testing.expectEqual(OperationStatus.success, result.status);
-    try std.testing.expectEqual(rules.BlockType.sand, result.player_inventory.?.material.?);
+    try std.testing.expectEqual(rules.BlockType.snow, result.player_inventory.?.material.?);
+}
+
+test "restored chunks preserve exact canonical floor and reject protected metadata" {
+    const a = std.testing.allocator;
+    var prepared = try WorldGenerator.prepare(.flat, a, &test_layout);
+    defer prepared.deinit(a);
+    const column = ColumnGenerator.init(&prepared, .{ 0, 0 });
+    const original = try column.tryGenerateChunk(a, 0);
+    defer original.deinit(a);
+    var blocks: [format.cell_count]u8 = undefined;
+    @memcpy(&blocks, std.mem.asBytes(&original.content.blocks.blocks));
+    const metadata: format.Metadata = .{ .roads = &.{}, .construction = &.{}, .timers = &.{} };
+    try validateRestoredFloor(&prepared, .{ 0, 0, 0 }, &blocks, metadata);
+    // Valid edits above the mask survive; corrupt records are never repaired.
+    blocks[4 * 32 * 32] = @intFromEnum(@import("engine").voxel_chunk.BlockType.none);
+    try validateRestoredFloor(&prepared, .{ 0, 0, 0 }, &blocks, metadata);
+    const original_floor = blocks[0];
+    blocks[0] = @intFromEnum(@import("engine").voxel_chunk.BlockType.stone);
+    try std.testing.expectError(error.InvalidWorldData, validateRestoredFloor(&prepared, .{ 0, 0, 0 }, &blocks, metadata));
+    blocks[0] = original_floor;
+    blocks[3 * 32 * 32] = original_floor;
+    try std.testing.expectError(error.InvalidWorldData, validateRestoredFloor(&prepared, .{ 0, 0, 0 }, &blocks, metadata));
+    @memcpy(&blocks, std.mem.asBytes(&original.content.blocks.blocks));
+    var construction = [_]u16{0};
+    var invalid_metadata = metadata;
+    invalid_metadata.construction = &construction;
+    try std.testing.expectError(error.InvalidWorldData, validateRestoredFloor(&prepared, .{ 0, 0, 0 }, &blocks, invalid_metadata));
+    try std.testing.expectError(error.InvalidWorldData, validateRestoredFloor(&prepared, .{ 0, 0, 1 }, &blocks, metadata));
+}
+
+test "persistent runtime identity mismatches fail before generator preparation" {
+    const f = try PersistenceFixture.init(.{});
+    defer f.deinit();
+    try std.testing.expectError(error.InvalidDescriptor, WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .{ .flat_seeded = 1 }, &f.store, .{}));
+    try std.testing.expectError(error.UnsupportedGenerator, WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &f.layout, .{ .terrain = .{ .seed = 0 } }, &f.store, .{}));
+    const wrong_layout = try WorldLayout.init(.{ .size_in_chunks = .{ 8, 4, 4 } });
+    try std.testing.expectError(error.InvalidDescriptor, WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &wrong_layout, .flat, &f.store, .{}));
+}
+
+const FloorRestoreSource = enum { base, wal };
+
+fn exerciseLazyFloorRestore(source: FloorRestoreSource, corrupt_floor: bool) !void {
+    const a = std.testing.allocator;
+    var uuid: [16]u8 = undefined;
+    std.c.arc4random_buf(&uuid, uuid.len);
+    const path = try std.fmt.allocPrintSentinel(a, "/private/tmp/world-floor-restore-{x}", .{uuid}, 0);
+    defer a.free(path);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    const dimensions: [3]u32 = .{ @intCast(layout.size_in_chunks[0]), @intCast(layout.size_in_chunks[1]), @intCast(layout.size_in_chunks[2]) };
+    const seed: u64 = 0x9182736455aabbcc;
+    const generator = WorldGenerator{ .flat_seeded = seed };
+    var prepared = try generator.prepare(a, &layout);
+    defer prepared.deinit(a);
+    const column = ColumnGenerator.init(&prepared, .{ 0, 0 });
+    const original = try column.tryGenerateChunk(a, 0);
+    defer original.deinit(a);
+    var blocks: [format.cell_count]u8 = undefined;
+    @memcpy(&blocks, std.mem.asBytes(&original.content.blocks.blocks));
+    // This edit is deliberately outside every possible 1--3-block floor mask.
+    const edited_cell = (8 * CHUNK_SIZE + 12) * CHUNK_SIZE + 10;
+    blocks[edited_cell] = @intFromEnum(rules.BlockType.none);
+    if (corrupt_floor) blocks[0] = @intFromEnum(rules.BlockType.stone);
+    const id = layout.encodeChunkCoords(.{ 0, 0, 0 });
+    const encoded = try format.encodeChunk(a, uuid, .{ .id = id, .revision = 7, .is_unreachable = false, .blocks = &blocks, .metadata = &.{} });
+    defer a.free(encoded);
+    // Both variants are valid checksummed storage records. Only the prepared
+    // generator has enough identity information to recognize the floor conflict.
+    try format.validateChunkRecord(uuid, encoded, dimensions);
+    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = dimensions, .generator_id = format.generator_id, .seed = seed, .settings = &format.flat_settings });
+    defer a.free(descriptor);
+    const global = format.encodeGlobal(44);
+    var store = try storage.Store.create(a, path, .{
+        .world_uuid = uuid,
+        .descriptor = descriptor,
+        .global = &global,
+        .players = &.{},
+        .player_count = 0,
+        .chunks = if (source == .base) &.{encoded} else &.{},
+    }, .{});
+    var store_open = true;
+    defer if (store_open) store.deinit();
+    if (source == .wal) {
+        try store.beginSnapshot(1, &global, &.{}, 0, 1);
+        try store.appendChunk(encoded);
+        _ = try store.commitSnapshot();
+    }
+    store.deinit();
+    store_open = false;
+    // Existing recovery installs a committed WAL generation into the base. The
+    // exact chunk bytes must survive that path before lazy service validation.
+    store = try storage.Store.open(a, path, .{});
+    store_open = true;
+    const restored_record = (try store.readChunk(a, id)).?;
+    defer a.free(restored_record);
+    try std.testing.expectEqualSlices(u8, encoded, restored_record);
+    const file_size = try store.base.size();
+    const before = try a.alloc(u8, @intCast(file_size));
+    defer a.free(before);
+    try store.base.read(before, 0);
+    const service = try WorldDataService.createPersistent(std.testing.io, a, &layout, generator, &store, .{});
+    defer service.destroy();
+    try std.testing.expect(service.persistenceStatus().phase != .failed);
+    const client = try service.createClient();
+    const token = client.requestChunks(.{ 0, 0 }, 0, 1);
+    var replies: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&replies);
+    if (corrupt_floor) {
+        try waitAnyDependencyFailure(service);
+        const status = service.persistenceStatus();
+        try std.testing.expectEqualStrings("InvalidWorldData", status.error_name.?);
+        client.takeResponses(&replies);
+        // Failure must not publish a regenerated substitute or any partial chunk.
+        for (replies.items) |reply| try std.testing.expect(reply.data != .blocks or !std.meta.eql(reply.coords, ChunkCoords{ 0, 0, 0 }));
+    } else {
+        try waitForResponses(client, &replies, 1);
+        var found = false;
+        for (replies.items) |reply| {
+            if (reply.subscription_id != token or reply.data != .blocks) continue;
+            const chunk = reply.data.blocks.chunk;
+            try std.testing.expectEqual(@as(u64, 7), chunk.chunk_revision);
+            const data = chunk.content.toData();
+            try std.testing.expectEqualSlices(u8, &blocks, std.mem.asBytes(&data.blocks));
+            try std.testing.expectEqual(rules.BlockType.none, data.blocks[8][12][10]);
+            found = true;
+        }
+        try std.testing.expect(found);
+    }
+    try std.testing.expectEqual(file_size, try store.base.size());
+    const after = try a.alloc(u8, @intCast(file_size));
+    defer a.free(after);
+    try store.base.read(after, 0);
+    try std.testing.expectEqualSlices(u8, before, after);
+    const after_record = (try store.readChunk(a, id)).?;
+    defer a.free(after_record);
+    try std.testing.expectEqualSlices(u8, encoded, after_record);
+}
+
+test "lazy restored base and WAL chunks retain upper edits above the seeded floor" {
+    for ([_]FloorRestoreSource{ .base, .wal }) |source| try exerciseLazyFloorRestore(source, false);
+}
+
+test "lazy restored base and WAL floor conflicts fail without rewriting or regeneration" {
+    for ([_]FloorRestoreSource{ .base, .wal }) |source| try exerciseLazyFloorRestore(source, true);
+}
+
+test "natural profile service saves mined starter sand and bottom edits across a fresh reopen" {
+    const a = std.testing.allocator;
+    const Test = struct {
+        fn load(client: *Client, coords: ChunkCoords) !WorldChunk {
+            const token = try client.tryRequestChunksInMode(.{ coords[0], coords[1] }, coords[2], coords[2] + 1, .blocks);
+            var replies: std.ArrayList(ChunkResponse) = .empty;
+            defer deinitResponses(&replies);
+            const deadline = persistence.now(std.testing.io) + 10 * std.time.ns_per_s;
+            while (persistence.now(std.testing.io) < deadline) {
+                client.takeResponses(&replies);
+                for (replies.items) |reply| if (reply.subscription_id == token and reply.data == .blocks)
+                    return reply.data.blocks.chunk.tryClone(std.testing.allocator);
+                for (replies.items) |reply| reply.deinit(std.testing.allocator);
+                replies.clearRetainingCapacity();
+                try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            return error.TestLoadTimeout;
+        }
+
+        fn save(service: *WorldDataService) !void {
+            const intent = service.requestSave(true);
+            const deadline = persistence.now(std.testing.io) + 10 * std.time.ns_per_s;
+            while (persistence.now(std.testing.io) < deadline) {
+                const status = service.persistenceStatus();
+                if (status.intent_id == intent and !status.active and (status.phase == .complete or status.phase == .failed)) {
+                    try std.testing.expectEqual(persistence.Phase.complete, status.phase);
+                    try std.testing.expectEqual(status.target_sequence, status.durable_sequence);
+                    return;
+                }
+                try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+            }
+            return error.TestSaveTimeout;
+        }
+    };
+    var uuid: [16]u8 = undefined;
+    std.c.arc4random_buf(&uuid, uuid.len);
+    const path = try std.fmt.allocPrintSentinel(a, "/private/tmp/natural-service-reopen-{x}", .{uuid}, 0);
+    defer a.free(path);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    const layout = try WorldLayout.init(@import("consts.zig").WORLD_SETTINGS);
+    const dimensions: [3]u32 = .{ @intCast(layout.size_in_chunks[0]), @intCast(layout.size_in_chunks[1]), @intCast(layout.size_in_chunks[2]) };
+    const generator: WorldGenerator = .{ .natural = .{ .seed = 12345 } };
+    const settings = format.encodeNaturalSettings(.{});
+    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = dimensions, .generator_id = format.generator_id, .seed = 12345, .settings = &settings });
+    defer a.free(descriptor);
+    const global = format.encodeGlobal(0);
+    var store = try storage.Store.create(a, path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{});
+    var store_open = true;
+    defer if (store_open) store.deinit();
+    var service: ?*WorldDataService = try WorldDataService.createPersistent(std.testing.io, a, &layout, generator, &store, .{});
+    defer if (service) |running| running.destroy();
+    var client = try service.?.createClient();
+    const prepared = service.?.preparedGenerator();
+    const fingerprint = prepared.kind.natural.fingerprint();
+    const first_start = prepared.firstStart().?;
+    var starter_sand: ?[3]u32 = null;
+    for (prepared.kind.natural.deposits.items[0..prepared.kind.natural.deposits.count]) |deposit| {
+        if (deposit.size_class == .starter and deposit.resource == .sand) starter_sand = deposit.center;
+    }
+    const sand = starter_sand.?;
+    const bottom = [3]u32{ sand[0], sand[1], 4 };
+    try std.testing.expectEqual(rules.BlockType.sand, prepared.referenceMaterialAt(sand[0], sand[1], sand[2]));
+    try std.testing.expectEqual(rules.BlockType.stone, prepared.referenceMaterialAt(bottom[0], bottom[1], bottom[2]));
+    const sand_coords, const sand_local = world_module.splitBlockCoords(sand);
+    const bottom_coords, const bottom_local = world_module.splitBlockCoords(bottom);
+    var climate: @import("world_environment.zig").ClimateMap = undefined;
+    prepared.fillClimateMap(.{ sand_coords[0], sand_coords[1] }, &climate);
+    const feet: [3]f64 = .{
+        @as(f64, @floatFromInt(first_start[0])) - @as(f64, @floatFromInt(layout.origin_chunk[0])) * CHUNK_SIZE + 0.5,
+        @as(f64, @floatFromInt(first_start[1])) - @as(f64, @floatFromInt(layout.origin_chunk[1])) * CHUNK_SIZE + 0.5,
+        @as(f64, @floatFromInt(first_start[2])) - @as(f64, @floatFromInt(layout.origin_chunk[2])) * CHUNK_SIZE,
+    };
+    client.publishCheckpoint(.{ .id = 7, .feet = feet, .yaw = 0, .pitch = 0 });
+    const mined = try PersistenceFixture.operationResult(client, .{ .block = sand, .action = .remove, .player = .{ .id = 7, .expected_sequence = 0 } });
+    try std.testing.expectEqual(OperationStatus.success, mined.status);
+    try std.testing.expectEqual(rules.BlockType.sand, mined.mined_type.?);
+    try std.testing.expectEqual(rules.BlockType.sand, mined.player_inventory.?.material.?);
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = bottom, .action = .remove }));
+    const expected_sand = try Test.load(client, sand_coords);
+    defer expected_sand.deinit(a);
+    const expected_bottom = try Test.load(client, bottom_coords);
+    defer expected_bottom.deinit(a);
+    try std.testing.expectEqual(rules.BlockType.none, expected_sand.content.getBlock(sand_local));
+    try std.testing.expectEqual(rules.BlockType.none, expected_bottom.content.getBlock(bottom_local));
+    try Test.save(service.?);
+    service.?.destroy();
+    service = null;
+    store.deinit();
+    store_open = false;
+    store = try storage.Store.open(a, path, .{});
+    store_open = true;
+    const reopened_descriptor = try format.decodeDescriptor(store.descriptor);
+    const reopened_settings = try format.decodeGeneratorSettings(reopened_descriptor.settings);
+    try std.testing.expect(reopened_settings == .natural);
+    service = try WorldDataService.createPersistent(std.testing.io, a, &layout, .{ .natural = .{ .seed = reopened_descriptor.seed, .settings = reopened_settings.natural } }, &store, .{});
+    client = try service.?.createClient();
+    const reopened = service.?.preparedGenerator();
+    try std.testing.expectEqualSlices(u8, &fingerprint, &reopened.kind.natural.fingerprint());
+    try std.testing.expectEqualDeep(first_start, reopened.firstStart().?);
+    var reopened_climate: @import("world_environment.zig").ClimateMap = undefined;
+    reopened.fillClimateMap(.{ sand_coords[0], sand_coords[1] }, &reopened_climate);
+    try std.testing.expectEqualDeep(climate, reopened_climate);
+    try std.testing.expectEqual(@as(?u8, @intFromEnum(rules.BlockType.sand)), service.?.restoredPlayer(7).?.inventory);
+    for ([_]ChunkCoords{ sand_coords, bottom_coords }, [_]WorldChunk{ expected_sand, expected_bottom }) |coords, expected| {
+        const actual = try Test.load(client, coords);
+        defer actual.deinit(a);
+        const expected_data = expected.content.toData();
+        const actual_data = actual.content.toData();
+        try std.testing.expectEqual(expected.chunk_revision, actual.chunk_revision);
+        try std.testing.expectEqualSlices(u8, std.mem.asBytes(&expected_data.blocks), std.mem.asBytes(&actual_data.blocks));
+        try std.testing.expectEqualDeep(expected.metadata.timed.events.items, actual.metadata.timed.events.items);
+        try std.testing.expectEqualDeep(expected.metadata.constructed.items, actual.metadata.constructed.items);
+        if (coords[2] == 0) for (0..CHUNK_SIZE) |y| for (0..CHUNK_SIZE) |x| {
+            const thickness = reopened.deeprockThickness(@as(i64, coords[0]) * CHUNK_SIZE + @as(i64, @intCast(x)), @as(u32, @intCast(coords[1])) * CHUNK_SIZE + @as(u32, @intCast(y)));
+            for (0..CHUNK_SIZE) |z| try std.testing.expectEqual(z < thickness, actual_data.blocks[z][y][x] == .deeprock);
+        };
+    }
 }
