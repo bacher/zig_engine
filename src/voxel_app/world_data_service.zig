@@ -265,6 +265,17 @@ pub const Client = struct {
         return error.ServiceStopped;
     }
 
+    /// Poll only the latest outstanding search. Discard older value-only replies
+    /// without waiting for a result or consuming terrain packages/subscriptions.
+    pub fn pollStandingSpace(self: *Client, request_id: u64) ?StandingSpaceResponse {
+        self.space_responses.mutex.lockUncancelable(self.service.io);
+        defer self.space_responses.mutex.unlock(self.service.io);
+        defer self.space_responses.items.clearRetainingCapacity();
+        for (self.space_responses.items.items) |reply|
+            if (reply.request_id == request_id) return reply;
+        return null;
+    }
+
     pub fn findStandingSpace(self: *Client, query: StandingSpaceRequest) (Io.Cancelable || StandingSpaceError)!standing_space.Position {
         return self.waitStandingSpace(self.requestStandingSpace(query));
     }
@@ -3573,6 +3584,55 @@ test "standing-space requests preserve active terrain subscriptions and queued p
     try std.testing.expectEqual(.blocks, std.meta.activeTag(responses.items[0].data));
     try std.testing.expectEqual(1, client.subscriptions.count());
     try std.testing.expectEqual(1, service.clients.items.len);
+}
+
+test "standing-space polling returns only the latest success or error and preserves terrain replies" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &layout, .flat);
+    defer service.destroy();
+    const client = try service.createClient();
+    const barrier = try service.createClient();
+    // An empty endpoint must return immediately, even with no search underway.
+    try std.testing.expectEqual(null, client.pollStandingSpace(1));
+    const token = client.requestChunks(.{ 0, 0 }, 0, 1);
+    const old_id = client.requestStandingSpace(testSpaceQuery(.{ -21.5, -21.5 }));
+    const latest_id = client.requestStandingSpace(testSpaceQuery(.{ 10.5, 10.5 }));
+    // A separate endpoint establishes that both earlier query replies are ready
+    // without consuming either of this endpoint's reply channels.
+    _ = try barrier.findStandingSpace(testSpaceQuery(.{ 0.5, 0.5 }));
+    const latest = client.pollStandingSpace(latest_id).?;
+    try std.testing.expectEqual(latest_id, latest.request_id);
+    try std.testing.expectEqual(standing_space.Position{ 10.5, 10.5, -16 }, try latest.result);
+    try std.testing.expectEqual(null, client.pollStandingSpace(old_id));
+    try std.testing.expectEqual(null, client.pollStandingSpace(latest_id));
+
+    var invalid = testSpaceQuery(.{ 0.5, 0.5 });
+    invalid.support_size = .{ 3, 3 };
+    const failed_id = client.requestStandingSpace(invalid);
+    _ = try barrier.findStandingSpace(testSpaceQuery(.{ 0.5, 0.5 }));
+    const failed = client.pollStandingSpace(failed_id).?;
+    try std.testing.expectEqual(failed_id, failed.request_id);
+    try std.testing.expectError(error.InvalidSearch, failed.result);
+    try std.testing.expectEqual(null, client.pollStandingSpace(failed_id));
+
+    var responses: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&responses);
+    try std.testing.expect(try client.waitResponses(&responses));
+    try std.testing.expectEqual(1, responses.items.len);
+    try std.testing.expectEqual(token, responses.items[0].subscription_id);
+    try std.testing.expectEqual(.blocks, std.meta.activeTag(responses.items[0].data));
+    try std.testing.expectEqual(1, client.subscriptions.count());
+    try std.testing.expectEqual(2, service.clients.items.len);
+}
+
+test "standing-space polling discards a stale reply while the latest search is pending" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &layout, .flat);
+    defer service.destroy();
+    const client = try service.createClient();
+    client.space_responses.push(service.io, service.allocator, .{ .request_id = 1, .result = .{ 0.5, 0.5, -16 } });
+    try std.testing.expectEqual(null, client.pollStandingSpace(2));
+    try std.testing.expectEqual(null, client.pollStandingSpace(1));
 }
 
 test "standing-space search sees edits ordered before it, including after terrain eviction" {
