@@ -16,8 +16,8 @@ Close it with M, Escape, or the Close button. The game menu and map are exclusiv
 Escape closes the map first. Exiting the game also closes it.
 
 Debug builds add **Mouse1** teleportation on the terrain image. A click moves the
-actor currently under control and keeps the map open. The destination is the
-centre of the selected block column, with north-up coordinates and a half-block
+actor currently under control and closes the map on success. The destination is
+the centre of the selected block column, with north-up coordinates and a half-block
 inset at the world edges. Holding or dragging the mouse does not repeat the
 request; the margins, Close button, and unavailable-map placeholder do not
 teleport. Release builds omit this debugger control and its hint.
@@ -25,9 +25,9 @@ teleport. Release builds omit this debugger control and its hint.
 For the player, teleportation looks up the current surface asynchronously at the
 exact selected column, including terrain edits, and places the player only when
 a safe standing position is available. The map shows progress or a failure;
-failure leaves the player where they were. For a spectator, the destination is
-four metres above the generated land or water surface; the original player
-stays in place. Both modes preserve the actor's heading.
+failure leaves the player where they were and keeps the map open. For a spectator,
+the destination is four metres above the generated land or water surface; the
+original player stays in place. Both modes preserve the actor's heading.
 
 The overview samples immutable generated terrain, climate, forests, and mountains;
 it does not reflect player terrain edits or show underground deposits. Sampling

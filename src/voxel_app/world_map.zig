@@ -25,7 +25,7 @@ pub const State = struct {
     }
 
     /// M/Escape are handled before gameplay input is dispatched. A Debug map
-    /// click requests teleportation without closing the panel.
+    /// click requests teleportation; the application closes the panel on success.
     pub fn draw(self: *State, allocator: std.mem.Allocator, gctx: *zgpu.GraphicsContext, prepared: *const generation.PreparedWorldGenerator, view: View) Action {
         if (self.texture == null and !self.failed) {
             self.prepare(allocator, gctx, prepared) catch |err| {

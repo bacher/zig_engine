@@ -232,6 +232,7 @@ const Game = struct {
         game.held_motion.reset();
         game.last_missing_collision = null;
         game.recovery_warning = false;
+        game.setOverlay(.none);
     }
 
     fn handleMenuAction(game: *Game, action: menu.Action) void {
@@ -1932,7 +1933,8 @@ test "debug map teleport resolves current edited surface and keeps player view a
     try std.testing.expectEqual(@as(f32, -0.2), game.player.?.pitch);
     try std.testing.expectEqual(@as(f64, 0), game.player.?.vertical_velocity);
     try std.testing.expectEqual(voxel_chunk_module.BlockType.planks, game.block_interaction.inventory.?);
-    try std.testing.expect(game.overlay == .world_map and fixture.engine.gameplay_input_blocked);
+    try std.testing.expect(game.overlay == .none and !fixture.engine.gameplay_input_blocked);
+    try std.testing.expectEqual(.always, fixture.input.cursor_capture);
     try std.testing.expectEqual(null, game.map_teleport_error);
     try std.testing.expectEqual(0, game.tool_commands.items.len);
     try std.testing.expectEqual(null, game.block_interaction.holding);
@@ -1960,6 +1962,7 @@ test "debug map teleport failure leaves the player at the original position" {
     try finishMapTeleport(game);
     try std.testing.expectEqual(original, game.player.?.position);
     try std.testing.expectEqualStrings("No safe surface at this point", game.map_teleport_error.?);
+    try std.testing.expect(game.overlay == .world_map and fixture.engine.gameplay_input_blocked);
 }
 
 test "closing then reopening the map ignores a successful pending teleport" {
@@ -2013,7 +2016,8 @@ test "debug map spectator teleport preserves the original player and spectator o
     try std.testing.expectEqual(@as(f32, 1.2), spectator.yaw);
     try std.testing.expectEqual(@as(f32, -0.3), spectator.pitch);
     try std.testing.expectEqual(null, game.map_teleport);
-    try std.testing.expectEqual(.world_map, game.overlay);
+    try std.testing.expect(game.overlay == .none and !fixture.engine.gameplay_input_blocked);
+    try std.testing.expectEqual(.always, fixture.input.cursor_capture);
 }
 
 test "map teleport dispatch rejects closed maps and release builds" {
