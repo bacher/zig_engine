@@ -1,0 +1,58 @@
+{
+  "hash_algorithm": "SHA256",
+  "scope": "All preserved files except this manifest and README.md.",
+  "files": {
+    "analyse.py": {
+      "sha256": "2278a68e2eb76a4e997f87ca423d237d41a7c8348bc5bf8ddd07a40eda0e3780",
+      "bytes": 3961
+    },
+    "cross-sections.csv": {
+      "sha256": "b7b2769f13a4198fab90a27cbdb952bea250e890c445db2ee26dc0ee6a33146a",
+      "bytes": 353141
+    },
+    "cross-sections.png": {
+      "sha256": "3a752e3a452e9c793a11631270115eaf40f9ac6259810619e52af56cbd722bff",
+      "bytes": 121941
+    },
+    "cross-sections.svg": {
+      "sha256": "929441606a87eade1b7705977c9b012f4dd7442011a4461b822f495c8aa9c241",
+      "bytes": 373878
+    },
+    "height-grids.csv.gz": {
+      "sha256": "95e995077a613d2e52e5cb4f75be1e083317523d8ab15871a901be0802395fb3",
+      "bytes": 1383909
+    },
+    "metadata.json": {
+      "sha256": "483f29db2d135b05f681c150de96987394985b18edeb83003d6aefd88abb017d",
+      "bytes": 2572
+    },
+    "plot.py": {
+      "sha256": "d4e911c4b7bb8e207856a60f921b2b011893f4201673d0dee4f38097b2cadff3",
+      "bytes": 6090
+    },
+    "probe.zig": {
+      "sha256": "afca17fd2014383c9549d002495fdc8f8e6716eea07459cb78d8a6ce9f3af3e9",
+      "bytes": 10187
+    },
+    "production-pairs.txt": {
+      "sha256": "7da00dcfa2cc6bd5979ea6c9d7ceb6207aac25397f57aa48558a1b30e1ac6147",
+      "bytes": 324
+    },
+    "source-manifest.json": {
+      "sha256": "23bf70130fb66382df7c2948527f99bcb00d8d7c578f9cfc6722aebf8488f060",
+      "bytes": 4460
+    },
+    "spawn-comparison.png": {
+      "sha256": "adaf01aec464388f66185f9d25fc7c201b3a94c2ada6253b230b00760adeb28c",
+      "bytes": 94565
+    },
+    "statistics.csv": {
+      "sha256": "e7c432c85e6ee52a82d07bd6995e86c359f88e56a1470dd09672ada22fefd8f9",
+      "bytes": 22707
+    },
+    "statistics.json": {
+      "sha256": "7d39059260c9869ced2a73b92f6afb4d8dbe27f75ea7f9af1987a89a95ad7ea4",
+      "bytes": 81361
+    }
+  }
+}

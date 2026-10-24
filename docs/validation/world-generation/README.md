@@ -34,6 +34,28 @@ resource flows. Both playable natural and flat profiles have seeded, contiguous
 1–3-block deeprock; invalid saved floors are rejected before publication.
 Legacy generator IDs 0/1 are rejected explicitly.
 
+## Local relief tuning
+
+Lowlands now combine the broad continental field with hills at a 192-block scale
+and detail at 64 blocks. Their default height spans are 48, 40, and 10 blocks;
+one final fixed-point division combines them before the coast ramp. This adds
+visible rolling terrain without clipping negative valleys into flat shelves.
+Ocean bathymetry and mountain strength/classification are unchanged.
+
+At seed 12345's start, the centered 64 × 64 patch has a **16-block** height range,
+compared with **1 block** before tuning and **20 blocks** in the legacy terrain
+profile. That is a local comparison, not a global terrain-range guarantee. The
+[terrain comparison](terrain-relief-tuning/README.md) includes three candidate
+strengths, several inland sites, cross-sections, and coast-filtering details.
+
+The old spawn filter required four samples 64 blocks away to be within four
+blocks of the start height, biasing selection toward plateaus. It now preserves
+the dry same-mainland checks there and limits height differences only along the
+immediate four-block cardinal rays. Every ray sample stays within one block of
+the start and its predecessor; the existing exact starter-resource routes remain
+required. Tests check actual spawn safety and nearby hills as well as synthetic
+intervening bumps, water, ownership changes, and two-block steps.
+
 ## PR review corrections
 
 The mainland coast coordinate now combines finite conservative coastal rectangles
@@ -41,15 +63,17 @@ with a shared bilinear inland field. It crosses internal macro edges continuousl
 with a cardinal step bound of two. Land ownership and coast erosion are unchanged.
 The approximation may flatten up to 16 extra blocks beside the real shore; its
 inland values do not promise exact water distance. Islands retain their separate
-analytic taper. At the reported seed-12345 join `(36735,13632)` → `(36736,13632)`,
-height **454 → 385** becomes **405 → 405**. An independent fine-grid distance BFS
+analytic taper. The original 69-block height jump at the reported seed-12345
+join `(36735,13632)` → `(36736,13632)` is covered by an adjacent-column regression
+requiring at most two blocks of height difference. An independent fine-grid distance BFS
 checks 514,882 mainland columns in concave, neck, corner, and seam fixtures,
 including maximally conservative trim records. Maximum adjacent-land height delta
-in those reduced fixtures is four blocks.
+in those reduced fixtures is three blocks with the tuned terrain.
 
 Mountain uplift uses the same displaced climate boundaries as classification and
 reaches zero on both nonfrozen border rows. The reported frozen/steppe join at
-`(11647,3212)` → `(11647,3213)` changes from **408 → 555** to **408 → 408**.
+`(11647,3212)` → `(11647,3213)` originally jumped from **408 → 555**; its regression
+now requires at most one block of height difference.
 Tests cover both poles, both horizontal axes, seam equivalence, and nonzero inland
 attenuation; these are not a universal height-gradient guarantee for all settings.
 
@@ -62,8 +86,8 @@ all seven geography allocation failures, cleanup, and exact memory boundaries.
 The [coast prototype comparison](coast-comparison/README.md) records the exact-index
 experiment and the chosen approximation, including a cross-section and complete
 regeneration measurements. The separate [chunk-fill comparison](column-fill-comparison/README.md)
-isolates material-input reuse with identical terrain. The final production
-measurements below include both changes.
+isolates material-input reuse with identical terrain. Both comparison snapshots
+predate local-relief tuning; the final production measurements below include all changes.
 
 ## Connectivity evidence
 
@@ -99,8 +123,8 @@ macOS 26.7.1 (25G241).
 | Check | Result |
 | --- | --- |
 | `zig build` | Passed; both applications and installed content built |
-| `zig build test` | 45/45 steps; 897 passed, 1 skipped of 898 registered tests |
-| `zig build test-generation` | 15/15 steps; 221/221 passed |
+| `zig build test` | 45/45 steps; 901 passed, 1 skipped of 902 registered tests |
+| `zig build test-generation` | 15/15 steps; 223/223 passed |
 | `zig build test-persistence` | 42/42 passed; also included in the full suite |
 | `zig build test-capture` | Passed on 2026-10-23 |
 | `zig build test-gpu` | 2026-10-23: 19/19 steps; 90/90 passed on Metal, both wrapping configurations |
@@ -109,7 +133,8 @@ macOS 26.7.1 (25G241).
 | Player-scale inspection | 2026-10-23: safe grass spawn, complete trunks/crowns, opaque foliage and shadows |
 
 The CPU skip is the existing nonwrapping counterpart of a wrap-specific
-coordinate test. See the [final CPU transcript](cpu-suite.txt).
+coordinate test. See the [final CPU transcript](cpu-suite.txt) and
+[focused generation transcript](test-generation.txt).
 The 2026-10-24 rerun covers the build, full CPU suite (including persistence),
 generation diagnostics, both benchmark modes, and overview maps. GPU and
 player-scale results above are retained from 2026-10-23; shaders and material
@@ -142,15 +167,14 @@ The second offset measures sensitivity to the sampling grid, not a statistical
 confidence interval. Reduced topology fixtures separately enumerate final
 land columns exactly to verify connectivity.
 
-- Mean estimated land: **60.7438%**; individual pass estimates
+- Mean estimated land: **60.7436%**; individual pass estimates
   **60.6796–60.8116%**. Maximum disagreement between offsets: **0.0397 percentage
   points**. Normal preparation does not run this coverage scan.
 - Mean belt areas are approximately **9.99 / 9.99 / 25.00 / 10.03 / 24.99 /
   10.00 / 10.00%**, within the specified one-percentage-point tolerance.
   Per-seed world and land-only climate counts are retained in the JSONL.
-- 63 seeds accepted attempt 0. Seed **12365** rejected its first candidate for
-  `start_access_unavailable` and accepted attempt 1; the full trace is retained.
-- Preparation took **31.33–76.06 ms**, mean **38.39 ms**. Peak requested owned
+- All 64 seeds accepted attempt 0, with no candidate retries.
+- Preparation took **30.12–55.99 ms**, mean **35.57 ms**. Peak requested owned
   allocation was **2,122,272 bytes**, below the 32-MiB preparation gate.
   Maximum indexed feature references: **94**; maximum bucket occupancy: **9**
   against the configured per-bucket limit of 64.
@@ -160,7 +184,7 @@ least **99.9461%** of descriptor resource volume for every resource in every
 seed. Spatial allocation is estimated separately: per-deposit accepted samples
 are weighted by exact effective block counts, and eligible host volume is
 estimated from the two column passes. These estimates place **100%** of metal
-in mountains in both passes (mountain host density approximately 0.000279,
+in mountains in both passes (mountain host density approximately 0.000267,
 sampled lowland density zero). Non-metal resources are at least approximately
 **99.17% sedimentary** and **99.77% lowland**. Exact totals and sampled spatial
 fractions are separate fields in the summary. Desert surface sand is not
@@ -180,14 +204,16 @@ checked separately by generator tests and conservative generation bounds.
 
 | ReleaseFast workload | Beaches off | Beaches on |
 | --- | ---: | ---: |
-| Cold column + surface chunk + hash, median | 0.372 ms | 0.309 ms |
-| 32 vertical chunks from a cached column, median | 5.346 ms | 5.419 ms |
-| Mainland shore column initialization, median | 0.112 ms | 0.176 ms |
-| 96-column forward traversal | 18.975 ms | 18.881 ms |
-| Reverse traversal after eviction | 15.324 ms | 15.053 ms |
+| Cold column + surface chunk + hash, median | 0.255 ms | 0.203 ms |
+| 32 vertical chunks from a cached column, median | 5.283 ms | 5.082 ms |
+| Mainland shore column initialization, median | 0.120 ms | 0.217 ms |
+| 96-column forward traversal | 18.220 ms | 19.932 ms |
+| Reverse traversal after eviction | 14.815 ms | 16.393 ms |
 
-These small workloads show timing noise and location-dependent beach cost;
-they do not establish a general speedup. Beaches remain **off by default**.
+These small workloads show timing noise and location-dependent beach cost.
+Terrain tuning also changes material/mesh outputs and selected vertical chunks,
+so these absolute times do not establish a speedup over the earlier terrain.
+Beaches remain **off by default**.
 The logs separately report column, chunk-fill, and meshing times, throughput,
 allocation calls/resizes, and p95. Retained environment/border sample counts
 explicitly exclude internal feature probes. Mesh timing uses already prepared
@@ -203,7 +229,7 @@ allocation accounting excludes allocator overhead and RSS, and these numbers
 do not establish the whole game's 8/16-GB residency budget.
 
 The dense-forest fixture retains 23 complete tree descriptors and emits
-**2,278 faces / 9,112 face bytes**, below the existing 64-KiB per-chunk limit.
+**1,101 faces / 4,404 face bytes**, below the existing 64-KiB per-chunk limit.
 The buried deposit fixture correctly emits no exposed faces; its mountain
 surface is measured separately. These fixtures do not prove that every forest
 chunk fits, so existing GPU capacity handling remains necessary.
@@ -227,6 +253,7 @@ are red (metal), cream (limestone), rust (clay), near-black (coal), and yellow
 ```sh
 zig build -j2
 zig build test -j2 --summary all
+zig build test-generation -j2 --summary all
 zig build test-capture -j2
 zig build test-gpu -j2 --summary all
 zig build generation-map -Doptimize=ReleaseFast -j2 -- /tmp/overview.ppm 12345 64
