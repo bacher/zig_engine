@@ -1,0 +1,675 @@
+--- old/src/voxel_app/generation_coast_approx.zig
++++ approx/src/voxel_app/generation_coast_approx.zig
+@@ -0,0 +1,115 @@
++const std = @import("std");
++const hash = @import("generation_hash.zig");
++
++/// Approximate mainland relief scalar. Ownership/refinement still decides land.
++/// The conservative near-shore collar is at most16 blocks wider than true water.
++pub const CoastApprox = struct {
++    width: u32,
++    macro_width: u32,
++    macro_height: u32,
++    coarse: []const u16,
++    /// Four exposed-edge bits followed by a five-bit maximum fringe width.
++    features: []u16,
++    pub const cap = 4096;
++    pub const Sample = struct { local: u32, broad: u32, coast: u32 };
++
++    pub fn init(allocator: std.mem.Allocator, seed: u64, width: u32, height: u32, owners: []const u8, coarse: []const u16) !CoastApprox {
++        const mw = width / 128;
++        const mh = height / 128;
++        const features = try allocator.alloc(u16, owners.len);
++        for (owners, 0..) |owner, i| {
++            features[i] = 0;
++            if (owner == 0) continue;
++            const mx: u32 = @intCast(i % mw);
++            const my: u32 = @intCast(i / mw);
++            const x = mx * 128;
++            const y = my * 128;
++            const left_x = if (mx == 0) mw - 1 else mx - 1;
++            const right_x = if (mx + 1 == mw) 0 else mx + 1;
++            const exposed = [4]bool{
++                owners[@as(usize, my) * mw + left_x] != owner,
++                owners[@as(usize, my) * mw + right_x] != owner,
++                my == 0 or owners[@as(usize, my - 1) * mw + mx] != owner,
++                my + 1 == mh or owners[@as(usize, my + 1) * mw + mx] != owner,
++            };
++            var mask: u16 = 0;
++            var maximum: u32 = 0;
++            if (exposed[0]) {
++                mask |= 1;
++                maximum = @max(maximum, @max(trim(seed, width, x, y), trim(seed, width, x, y + 127)));
++            }
++            if (exposed[1]) {
++                mask |= 2;
++                maximum = @max(maximum, @max(trim(seed, width, x + 127, y), trim(seed, width, x + 127, y + 127)));
++            }
++            if (exposed[2]) {
++                mask |= 4;
++                maximum = @max(maximum, trim(seed, width, x + 64, y));
++            }
++            if (exposed[3]) {
++                mask |= 8;
++                maximum = @max(maximum, trim(seed, width, x + 64, y + 127));
++            }
++            features[i] = mask | @as(u16, @intCast(maximum << 4));
++        }
++        return .{ .width = width, .macro_width = mw, .macro_height = mh, .coarse = coarse, .features = features };
++    }
++
++    pub fn deinit(self: *CoastApprox, allocator: std.mem.Allocator) void {
++        allocator.free(self.features);
++    }
++
++    fn trim(seed: u64, width: u32, x: u32, y: u32) u32 {
++        const n = hash.field2(hash.mix(seed ^ 0x434f415354), x % width, y, width, 256);
++        return @intCast(8 + @divTrunc((n + 65535) * 16, 131070));
++    }
++
++    fn rectangle(x: i64, y: i64, x0: i64, y0: i64, x1: i64, y1: i64) u32 {
++        return @intCast(@max(@max(@max(x0 - x, x - x1), @max(y0 - y, y - y1)), 0));
++    }
++
++    pub fn distance(self: *const CoastApprox, x: u32, y: u32) u32 {
++        return self.sample(x, y).coast;
++    }
++
++    pub fn sample(self: *const CoastApprox, x: u32, y: u32) Sample {
++        const mx = x / 128;
++        const my = y / 128;
++        const columns = [3]u32{ if (mx == 0) self.macro_width - 1 else mx - 1, mx, if (mx + 1 == self.macro_width) 0 else mx + 1 };
++        var d: [9]u32 = undefined;
++        var nearest: u32 = 129;
++        for (0..3) |oy| {
++            const row = @as(i64, my) + @as(i64, @intCast(oy)) - 1;
++            if (row < 0 or row >= self.macro_height) {
++                d[oy * 3] = 0;
++                d[oy * 3 + 1] = 0;
++                d[oy * 3 + 2] = 0;
++                continue;
++            }
++            for (columns, 0..) |column, ox| {
++                const index = @as(usize, @intCast(row)) * self.macro_width + column;
++                d[oy * 3 + ox] = self.coarse[index];
++                const feature = self.features[index];
++                if (feature == 0) continue;
++                const m: i64 = @intCast(feature >> 4);
++                const x0 = (@as(i64, mx) + @as(i64, @intCast(ox)) - 1) * 128;
++                const y0 = row * 128;
++                if (feature & 1 != 0) nearest = @min(nearest, rectangle(x, y, x0, y0, x0 + m - 1, y0 + 127));
++                if (feature & 2 != 0) nearest = @min(nearest, rectangle(x, y, x0 + 128 - m, y0, x0 + 127, y0 + 127));
++                if (feature & 4 != 0) nearest = @min(nearest, rectangle(x, y, x0, y0, x0 + 127, y0 + m - 1));
++                if (feature & 8 != 0) nearest = @min(nearest, rectangle(x, y, x0, y0 + 128 - m, x0 + 127, y0 + 127));
++            }
++        }
++        const v00 = @min(4098, @min(@min(d[0], d[1]), @min(d[3], d[4])) * 128);
++        const v10 = @min(4098, @min(@min(d[1], d[2]), @min(d[4], d[5])) * 128);
++        const v01 = @min(4098, @min(@min(d[3], d[4]), @min(d[6], d[7])) * 128);
++        const v11 = @min(4098, @min(@min(d[4], d[5]), @min(d[7], d[8])) * 128);
++        const lx = x % 128;
++        const ly = y % 128;
++        // One final floor of the shared bilinear polynomial preserves its
++        // per-axis slope bound. Intermediate interpolation floors would not.
++        const broad = (v00 * (128 - lx) * (128 - ly) + v10 * lx * (128 - ly) + v01 * (128 - lx) * ly + v11 * lx * ly) / (128 * 128);
++        const local = nearest -| 1;
++        return .{ .local = local, .broad = broad, .coast = @min(cap, local + (broad -| 130)) };
++    }
++};
+--- old/src/voxel_app/generation_coast_index.zig
++++ approx/src/voxel_app/generation_coast_index.zig
+@@ -0,0 +1,141 @@
++const std = @import("std");
++const hash = @import("generation_hash.zig");
++
++pub const CoastIndex = struct {
++    seed: u64,
++    width: u32,
++    height: u32,
++    macro_width: u32,
++    macro_height: u32,
++    owners: []const u8,
++    nodes: []u8,
++    coarse: []const u16,
++    pub const cap = 4096;
++
++    const Box = struct {
++        x: u32,
++        y: u32,
++        w: u32,
++        h: u32,
++        fn split(self: Box) [2]Box {
++            if (self.w >= self.h) {
++                const w = (self.w + 1) / 2;
++                return .{ .{ .x = self.x, .y = self.y, .w = w, .h = self.h }, .{ .x = self.x + w, .y = self.y, .w = self.w - w, .h = self.h } };
++            }
++            const h = (self.h + 1) / 2;
++            return .{ .{ .x = self.x, .y = self.y, .w = self.w, .h = h }, .{ .x = self.x, .y = self.y + h, .w = self.w, .h = self.h - h } };
++        }
++        fn count(self: Box) usize {
++            return @as(usize, self.w) * self.h;
++        }
++    };
++
++    pub fn init(allocator: std.mem.Allocator, seed: u64, width: u32, height: u32, owners: []const u8, coarse: []const u16) !CoastIndex {
++        const nodes = try allocator.alloc(u8, owners.len * 2 - 1);
++        var self = CoastIndex{ .seed = seed, .width = width, .height = height, .macro_width = width / 128, .macro_height = height / 128, .owners = owners, .nodes = nodes, .coarse = coarse };
++        self.build(0, self.root());
++        return self;
++    }
++    pub fn deinit(self: *CoastIndex, allocator: std.mem.Allocator) void {
++        allocator.free(self.nodes);
++    }
++    fn root(self: *const CoastIndex) Box {
++        return .{ .x = 0, .y = 0, .w = self.macro_width, .h = self.macro_height };
++    }
++    fn owner(self: *const CoastIndex, x: i64, y: i64) u8 {
++        if (y < 0 or y >= self.macro_height) return 0;
++        return self.owners[@as(usize, @intCast(y)) * self.macro_width + @as(usize, @intCast(@mod(x, self.macro_width)))];
++    }
++    fn build(self: *CoastIndex, index: usize, box: Box) void {
++        if (box.w == 1 and box.h == 1) {
++            const own = self.owner(box.x, box.y);
++            self.nodes[index] = @intFromBool(own != 0 and (self.owner(@as(i64, box.x) - 1, box.y) != own or self.owner(@as(i64, box.x) + 1, box.y) != own or self.owner(box.x, @as(i64, box.y) - 1) != own or self.owner(box.x, @as(i64, box.y) + 1) != own));
++            return;
++        }
++        const children = box.split();
++        const right = index + children[0].count() * 2;
++        self.build(index + 1, children[0]);
++        self.build(right, children[1]);
++        self.nodes[index] = self.nodes[index + 1] | self.nodes[right];
++    }
++
++    fn axisDistance(p: i64, lo: i64, hi: i64) u32 {
++        return @intCast(@max(@max(lo - p, p - hi), 0));
++    }
++    fn rectDistance(x: i64, y: u32, lo_x: i64, lo_y: u32, hi_x: i64, hi_y: u32) u32 {
++        return @max(axisDistance(x, lo_x, hi_x), axisDistance(y, lo_y, hi_y));
++    }
++    fn bound(self: *const CoastIndex, box: Box, x: u32, y: u32) u32 {
++        const lo_x: i64 = @as(i64, box.x) * 128;
++        const hi_x: i64 = @as(i64, box.x + box.w) * 128 - 1;
++        const dy = axisDistance(y, box.y * 128, (box.y + box.h) * 128 - 1);
++        return @max(dy, @min(axisDistance(x, lo_x, hi_x), @min(axisDistance(@as(i64, x) - self.width, lo_x, hi_x), axisDistance(@as(i64, x) + self.width, lo_x, hi_x))));
++    }
++
++    pub fn distance(self: *const CoastIndex, x: u32, y: u32) u32 {
++        const d = self.coarse[(y / 128) * self.macro_width + x / 128];
++        if (d >= 66) return cap;
++        var best: u32 = cap + 1;
++        self.query(0, self.root(), x, y, &best);
++        return best -| 1;
++    }
++    fn query(self: *const CoastIndex, index: usize, box: Box, x: u32, y: u32, best: *u32) void {
++        if (self.nodes[index] == 0 or self.bound(box, x, y) >= best.*) return;
++        if (box.w == 1 and box.h == 1) {
++            for ([_]i64{ @as(i64, x) - self.width, x, @as(i64, x) + self.width }) |px| {
++                self.leaf(box, px, y, best);
++            }
++            return;
++        }
++        const children = box.split();
++        const right = index + children[0].count() * 2;
++        const left_bound = self.bound(children[0], x, y);
++        const right_bound = self.bound(children[1], x, y);
++        if (left_bound <= right_bound) {
++            self.query(index + 1, children[0], x, y, best);
++            self.query(right, children[1], x, y, best);
++        } else {
++            self.query(right, children[1], x, y, best);
++            self.query(index + 1, children[0], x, y, best);
++        }
++    }
++    fn trim(self: *const CoastIndex, x: u32, y: u32) u32 {
++        const n = hash.field2(hash.mix(self.seed ^ 0x434f415354), x % self.width, y, self.width, 256);
++        return @intCast(8 + @divTrunc((n + 65535) * 16, 131070));
++    }
++    fn leaf(self: *const CoastIndex, box: Box, x: i64, y: u32, best: *u32) void {
++        const lo_x = box.x * 128;
++        const lo_y = box.y * 128;
++        const lower = rectDistance(x, y, lo_x, lo_y, lo_x + 127, lo_y + 127);
++        if (lower >= best.*) return;
++        const own = self.owner(box.x, box.y);
++        const exposed = [4]bool{ self.owner(@as(i64, box.x) - 1, box.y) != own, self.owner(@as(i64, box.x) + 1, box.y) != own, self.owner(box.x, @as(i64, box.y) - 1) != own, self.owner(box.x, @as(i64, box.y) + 1) != own };
++        const bottom = if (exposed[2]) self.trim(lo_x + 64, lo_y) else 0;
++        const top = if (exposed[3]) self.trim(lo_x + 64, lo_y + 127) else 0;
++        var low = lower;
++        var high = @min(best.* - 1, lower + 127);
++        if (!self.intersects(lo_x, lo_y, x, y, high, exposed, bottom, top)) return;
++        while (low < high) {
++            const mid = low + (high - low) / 2;
++            if (self.intersects(lo_x, lo_y, x, y, mid, exposed, bottom, top)) high = mid else low = mid + 1;
++        }
++        best.* = low;
++    }
++    fn intersects(self: *const CoastIndex, lo_x: u32, lo_y: u32, x: i64, y: u32, radius: u32, exposed: [4]bool, bottom: u32, top: u32) bool {
++        const y0: i64 = @max(lo_y, @as(i64, y) - radius);
++        const y1: i64 = @min(lo_y + 127, @as(i64, y) + radius);
++        const x0 = @max(lo_x, x - radius);
++        const x1 = @min(lo_x + 127, x + radius);
++        if (y0 > y1 or x0 > x1) return false;
++        if ((bottom > 0 and y0 < lo_y + bottom) or (top > 0 and y1 > lo_y + 127 - top)) return true;
++        if (exposed[0]) {
++            const left = @max(self.trim(lo_x, @intCast(y0)), self.trim(lo_x, @intCast(y1)));
++            if (x0 < lo_x + left) return true;
++        }
++        if (exposed[1]) {
++            const right = @max(self.trim(lo_x + 127, @intCast(y0)), self.trim(lo_x + 127, @intCast(y1)));
++            if (x1 > lo_x + 127 - right) return true;
++        }
++        return false;
++    }
++};
+--- old/src/voxel_app/generation_geography.zig
++++ approx/src/voxel_app/generation_geography.zig
+@@ -1,6 +1,7 @@
+ const std = @import("std");
+ const hash = @import("generation_hash.zig");
+ const env = @import("world_environment.zig");
++const CoastApprox = @import("generation_coast_approx.zig").CoastApprox;
+ const Settings = @import("generation_settings.zig").NaturalSettings;
+
+ pub const Island = struct { id: u8, x: u32, y: u32, radius_x: u32, radius_y: u32 };
+@@ -19,6 +20,7 @@
+     /// Zero water, 1..5 connected protected mainland core ownership.
+     owners: []u8,
+     coastal_distance: []u16,
++    coast_field: ?CoastApprox = null,
+     core_seeds: [5][2]u32 = undefined,
+     core_counts: [5]u32 = @splat(0),
+
+@@ -35,94 +37,96 @@
+         errdefer allocator.free(distances);
+         @memset(distances, 0);
+         var self = Geography{ .seed = seed, .width = size[0], .height = size[1], .depth = size[2], .sea_level = @intCast(@as(u64, size[2]) * 3 / 8), .continent_count = @intCast(3 + hash.mix(seed) % 3), .island_count = settings.island_count, .macro_width = mw, .macro_height = mh, .owners = owners, .coastal_distance = distances };
+-        const costs = try allocator.alloc(u32, count);
+-        defer allocator.free(costs);
+-        @memset(costs, std.math.maxInt(u32));
+-        const pending = try allocator.alloc(u8, count);
+-        defer allocator.free(pending);
+-        @memset(pending, 0);
+-        const heap_ids = try allocator.alloc(u32, count);
+-        defer allocator.free(heap_ids);
+-        const positions = try allocator.alloc(u32, count);
+-        defer allocator.free(positions);
+-        @memset(positions, std.math.maxInt(u32));
+-        var heap = Heap{ .ids = heap_ids, .positions = positions, .costs = costs };
+-        for (0..self.continent_count) |i| {
+-            const h = hash.mix(seed +% i);
+-            const sector = mw / self.continent_count;
+-            const base: i64 = @intCast((i * 2 + 1) * mw / (@as(usize, self.continent_count) * 2));
+-            const jitter = @as(i64, @intCast(h % @max(1, sector / 2))) - @as(i64, sector / 4);
+-            const sx: u32 = @intCast(@mod(base + jitter, mw));
+-            const sy: u32 = mh / 4 + @as(u32, @intCast((h >> 16) % @max(1, mh / 2)));
+-            const index = sy * mw + sx;
+-            self.core_seeds[i] = .{ sx, sy };
+-            pending[index] = @intCast(i + 1);
+-            costs[index] = @intCast((h >> 32) % 200);
+-            heap.insert(index);
+-        }
+-        var filled: usize = 0;
+-        // Coast erosion removes a bounded fringe; this coarse target is tuned
+-        // offline, never followed by a fine-resolution acceptance census.
+-        const target = count * 61 / 100;
+-        while (heap.pop()) |index| {
+-            const x = index % mw;
+-            const y = index / mw;
+-            if (y == 0 or y + 1 == mh) continue;
+-            const owner = pending[index];
+-            var permitted = true;
+-            var has_parent = false;
+-            for (0..3) |oy| for (0..3) |ox| {
+-                const nx: u32 = @intCast(@mod(@as(i64, x) + @as(i64, @intCast(ox)) - 1, mw));
+-                const ny: u32 = @intCast(@as(i64, y) + @as(i64, @intCast(oy)) - 1);
+-                const neighbor = owners[ny * mw + nx];
+-                if (neighbor != 0 and neighbor != owner) permitted = false;
+-                if ((ox == 1 or oy == 1) and neighbor == owner) has_parent = true;
+-            };
+-            const root = self.core_seeds[owner - 1];
+-            if (!permitted or (!has_parent and !(root[0] == x and root[1] == y))) continue;
+-            owners[index] = owner;
+-            self.core_counts[owner - 1] += 1;
+-            filled += 1;
+-            if (filled == target) break;
+-            const neighbors = [_]u32{ y * mw + (x + mw - 1) % mw, y * mw + (x + 1) % mw, (y - 1) * mw + x, (y + 1) * mw + x };
+-            for (neighbors) |neighbor| {
+-                if (owners[neighbor] != 0 or heap.positions[neighbor] == std.math.maxInt(u32) - 1) continue;
+-                const nx = neighbor % mw;
+-                const ny = neighbor / mw;
+-                const field = hash.field2(hash.mix(seed ^ 0x47524f575448), nx * 128, ny * 128, size[0], @max(256, size[1] / 12));
+-                const edge: u32 = @intCast(40 + @divTrunc((field + 65535) * 100, 131070) + @as(i64, @intCast(hash.at(seed, nx, ny) % 35)));
+-                const next = costs[index] + edge;
+-                if (next < costs[neighbor] or (next == costs[neighbor] and owner < pending[neighbor])) {
+-                    costs[neighbor] = next;
+-                    pending[neighbor] = owner;
+-                    heap.insert(neighbor);
++        {
++            const costs = try allocator.alloc(u32, count);
++            defer allocator.free(costs);
++            @memset(costs, std.math.maxInt(u32));
++            const pending = try allocator.alloc(u8, count);
++            defer allocator.free(pending);
++            @memset(pending, 0);
++            const heap_ids = try allocator.alloc(u32, count);
++            defer allocator.free(heap_ids);
++            const positions = try allocator.alloc(u32, count);
++            defer allocator.free(positions);
++            @memset(positions, std.math.maxInt(u32));
++            var heap = Heap{ .ids = heap_ids, .positions = positions, .costs = costs };
++            for (0..self.continent_count) |i| {
++                const h = hash.mix(seed +% i);
++                const sector = mw / self.continent_count;
++                const base: i64 = @intCast((i * 2 + 1) * mw / (@as(usize, self.continent_count) * 2));
++                const jitter = @as(i64, @intCast(h % @max(1, sector / 2))) - @as(i64, sector / 4);
++                const sx: u32 = @intCast(@mod(base + jitter, mw));
++                const sy: u32 = mh / 4 + @as(u32, @intCast((h >> 16) % @max(1, mh / 2)));
++                const index = sy * mw + sx;
++                self.core_seeds[i] = .{ sx, sy };
++                pending[index] = @intCast(i + 1);
++                costs[index] = @intCast((h >> 32) % 200);
++                heap.insert(index);
++            }
++            var filled: usize = 0;
++            // Coast erosion removes a bounded fringe; this coarse target is tuned
++            // offline, never followed by a fine-resolution acceptance census.
++            const target = count * 61 / 100;
++            while (heap.pop()) |index| {
++                const x = index % mw;
++                const y = index / mw;
++                if (y == 0 or y + 1 == mh) continue;
++                const owner = pending[index];
++                var permitted = true;
++                var has_parent = false;
++                for (0..3) |oy| for (0..3) |ox| {
++                    const nx: u32 = @intCast(@mod(@as(i64, x) + @as(i64, @intCast(ox)) - 1, mw));
++                    const ny: u32 = @intCast(@as(i64, y) + @as(i64, @intCast(oy)) - 1);
++                    const neighbor = owners[ny * mw + nx];
++                    if (neighbor != 0 and neighbor != owner) permitted = false;
++                    if ((ox == 1 or oy == 1) and neighbor == owner) has_parent = true;
++                };
++                const root = self.core_seeds[owner - 1];
++                if (!permitted or (!has_parent and !(root[0] == x and root[1] == y))) continue;
++                owners[index] = owner;
++                self.core_counts[owner - 1] += 1;
++                filled += 1;
++                if (filled == target) break;
++                const neighbors = [_]u32{ y * mw + (x + mw - 1) % mw, y * mw + (x + 1) % mw, (y - 1) * mw + x, (y + 1) * mw + x };
++                for (neighbors) |neighbor| {
++                    if (owners[neighbor] != 0 or heap.positions[neighbor] == std.math.maxInt(u32) - 1) continue;
++                    const nx = neighbor % mw;
++                    const ny = neighbor / mw;
++                    const field = hash.field2(hash.mix(seed ^ 0x47524f575448), nx * 128, ny * 128, size[0], @max(256, size[1] / 12));
++                    const edge: u32 = @intCast(40 + @divTrunc((field + 65535) * 100, 131070) + @as(i64, @intCast(hash.at(seed, nx, ny) % 35)));
++                    const next = costs[index] + edge;
++                    if (next < costs[neighbor] or (next == costs[neighbor] and owner < pending[neighbor])) {
++                        costs[neighbor] = next;
++                        pending[neighbor] = owner;
++                        heap.insert(neighbor);
++                    }
+                 }
+             }
+-        }
+-        if (filled < target) return error.TopologyConflict;
+-        for (self.core_counts[0..self.continent_count]) |n| if (n < @max(4, target / self.continent_count / 5)) return error.TopologyConflict;
+-        // Reuse bounded heap scratch for a multi-source coast distance BFS.
+-        var read: usize = 0;
+-        var write: usize = 0;
+-        for (owners, 0..) |owner, i| {
+-            if (owner == 0) {
+-                heap_ids[write] = @intCast(i);
+-                write += 1;
+-            } else distances[i] = std.math.maxInt(u16);
+-        }
+-        while (read < write) : (read += 1) {
+-            const index = heap_ids[read];
+-            const x = index % mw;
+-            const y = index / mw;
+-            const neighbors = [_]?u32{ y * mw + (x + mw - 1) % mw, y * mw + (x + 1) % mw, if (y > 0) (y - 1) * mw + x else null, if (y + 1 < mh) (y + 1) * mw + x else null };
+-            for (neighbors) |possible| if (possible) |neighbor| {
+-                if (distances[neighbor] == std.math.maxInt(u16)) {
+-                    distances[neighbor] = distances[index] + 1;
+-                    heap_ids[write] = neighbor;
++            if (filled < target) return error.TopologyConflict;
++            for (self.core_counts[0..self.continent_count]) |n| if (n < @max(4, target / self.continent_count / 5)) return error.TopologyConflict;
++            // Reuse bounded heap scratch for a multi-source coast distance BFS.
++            var read: usize = 0;
++            var write: usize = 0;
++            for (owners, 0..) |owner, i| {
++                if (owner == 0) {
++                    heap_ids[write] = @intCast(i);
+                     write += 1;
+-                }
+-            };
+-        }
++                } else distances[i] = std.math.maxInt(u16);
++            }
++            while (read < write) : (read += 1) {
++                const index = heap_ids[read];
++                const x = index % mw;
++                const y = index / mw;
++                const neighbors = [_]?u32{ y * mw + (x + mw - 1) % mw, y * mw + (x + 1) % mw, if (y > 0) (y - 1) * mw + x else null, if (y + 1 < mh) (y + 1) * mw + x else null };
++                for (neighbors) |possible| if (possible) |neighbor| {
++                    if (distances[neighbor] == std.math.maxInt(u16)) {
++                        distances[neighbor] = distances[index] + 1;
++                        heap_ids[write] = neighbor;
++                        write += 1;
++                    }
++                };
++            }
++        } // Release all growth/BFS scratch before retaining coast features.
+         var accepted: usize = 0;
+         for (0..2048) |attempt| {
+             if (accepted == settings.island_count) break;
+@@ -141,10 +145,12 @@
+             accepted += 1;
+         }
+         if (accepted != settings.island_count) return error.RequiredFeaturePlacement;
++        self.coast_field = try CoastApprox.init(allocator, seed, size[0], size[1], self.owners, self.coastal_distance);
+         return self;
+     }
+
+     pub fn deinit(self: *Geography, allocator: std.mem.Allocator) void {
++        if (self.coast_field) |*field| field.deinit(allocator);
+         allocator.free(self.owners);
+         allocator.free(self.coastal_distance);
+     }
+@@ -197,7 +203,7 @@
+             const top = if (self.ownerAt(mx, @as(i64, my) + 1) == owner) @as(u32, 0) else self.trim(mx * 128 + 64, my * 128 + 127);
+             if (ly >= bottom and ly + top < 128 and lx >= left and lx + right < 128) {
+                 const d = self.coastal_distance[my * self.macro_width + mx];
+-                return .{ .id = owner, .coast = if (d > 1) (@as(u32, d) - 1) * 128 + 16 else @min(@min(lx - left, 127 - lx - right), @min(ly - bottom, 127 - ly - top)) };
++                return .{ .id = owner, .coast = if (self.coast_field) |*field| field.distance(cx, y) else if (d > 1) (@as(u32, d) - 1) * 128 + 16 else @min(@min(lx - left, 127 - lx - right), @min(ly - bottom, 127 - ly - top)) };
+             }
+         }
+         for (self.islands[0..self.island_count]) |island| {
+@@ -393,3 +399,179 @@
+     try std.testing.expectEqual(frozen.landmass_id, steppe.landmass_id);
+     try std.testing.expect(@abs(@as(i64, frozen.terrain_height) - steppe.terrain_height) <= 1);
+ }
++
++test "approximate mainland coast retains footprint and bounded gradients at corners necks and seam" {
++    const a = std.testing.allocator;
++    const w = 512;
++    const h = 512;
++    const n = w * h;
++    const owners = try a.alloc(u8, 16);
++    defer a.free(owners);
++    const coarse = try a.alloc(u16, 16);
++    defer a.free(coarse);
++    const queue = try a.alloc(u32, n);
++    defer a.free(queue);
++    const exact = try a.alloc(u16, n);
++    defer a.free(exact);
++    const output = try a.alloc(u16, n);
++    defer a.free(output);
++    var checked: usize = 0;
++    var collar: usize = 0;
++    var maximum_height_delta: u32 = 0;
++    for (0..4) |fixture| {
++        @memset(owners, 0);
++        switch (fixture) {
++            0 => {
++                owners[5] = 1;
++                owners[6] = 1;
++                owners[9] = 1;
++                owners[10] = 1;
++            },
++            1 => {
++                owners[4] = 1;
++                owners[7] = 1;
++                owners[8] = 1;
++                owners[9] = 1;
++                owners[11] = 1;
++            },
++            2 => {
++                owners[4] = 1;
++                owners[5] = 1;
++                owners[6] = 1;
++                owners[9] = 1;
++                owners[10] = 1;
++            },
++            else => {
++                owners[4] = 1;
++                owners[5] = 1;
++                owners[6] = 1;
++                owners[7] = 1;
++                owners[8] = 1;
++                owners[11] = 1;
++            },
++        }
++        // Exact macro Manhattan distance from every water cell, finite Y/periodic X.
++        var read: usize = 0;
++        var write: usize = 0;
++        for (owners, 0..) |owner, i| {
++            coarse[i] = if (owner == 0) 0 else 65535;
++            if (owner == 0) {
++                queue[write] = @intCast(i);
++                write += 1;
++            }
++        }
++        while (read < write) : (read += 1) {
++            const i = queue[read];
++            const x = i % 4;
++            const y = i / 4;
++            for ([_]?u32{ y * 4 + (x + 3) % 4, y * 4 + (x + 1) % 4, if (y > 0) i - 4 else null, if (y < 3) i + 4 else null }) |possible| if (possible) |j| {
++                if (coarse[j] == 65535) {
++                    coarse[j] = coarse[i] + 1;
++                    queue[write] = j;
++                    write += 1;
++                }
++            };
++        }
++        var g = Geography{ .seed = hash.mix(12345 + fixture), .width = w, .height = h, .depth = 128, .sea_level = 48, .continent_count = 1, .island_count = 0, .macro_width = 4, .macro_height = 4, .owners = owners, .coastal_distance = coarse };
++        g.core_seeds[0] = .{ 1, 1 };
++        var field = try CoastApprox.init(a, g.seed, w, h, owners, coarse);
++        defer field.deinit(a);
++        for (0..2) |maximal| {
++            if (maximal == 1) for (field.features) |*feature| {
++                if (feature.* != 0) feature.* = (feature.* & 15) | (24 << 4);
++            };
++            g.coast_field = null;
++            read = 0;
++            write = 0;
++            for (0..h) |y| for (0..w) |x| {
++                const i = y * w + x;
++                if (g.landAt(@intCast(x), @intCast(y)).id == 0) {
++                    exact[i] = 0;
++                    queue[write] = @intCast(i);
++                    write += 1;
++                } else exact[i] = 65535;
++            };
++            while (read < write) : (read += 1) {
++                const i = queue[read];
++                const x = i % w;
++                const y = i / w;
++                for (0..3) |oy| for (0..3) |ox| {
++                    const ny = @as(i64, y) + @as(i64, @intCast(oy)) - 1;
++                    if (ny < 0 or ny >= h) continue;
++                    const nx: usize = @intCast(@mod(@as(i64, x) + @as(i64, @intCast(ox)) - 1, w));
++                    const j = @as(usize, @intCast(ny)) * w + nx;
++                    if (exact[j] == 65535) {
++                        exact[j] = exact[i] + 1;
++                        queue[write] = @intCast(j);
++                        write += 1;
++                    }
++                };
++            }
++            g.coast_field = field;
++            for (0..h) |y| for (0..w) |x| {
++                const land = g.landAt(@intCast(x), @intCast(y));
++                const i = y * w + x;
++                try std.testing.expectEqual(exact[i] > 0, land.id != 0);
++                output[i] = @intCast(land.coast);
++                if (land.id == 0) continue;
++                checked += 1;
++                const sample = field.sample(@intCast(x), @intCast(y));
++                const actual = exact[i] - 1;
++                const capped = @min(128, actual);
++                try std.testing.expect(sample.local <= capped and sample.local + 16 >= capped);
++                try std.testing.expectEqual(sample.local == 0, sample.coast == 0);
++                if (actual == 0) try std.testing.expectEqual(@as(u32, 0), sample.coast);
++                if (sample.coast == 0) {
++                    collar += 1;
++                    try std.testing.expect(actual <= 16);
++                }
++            };
++            for (0..h) |y| for (0..w) |x| {
++                const i = y * w + x;
++                for ([_]?usize{ y * w + (x + 1) % w, if (y + 1 < h) i + w else null }) |possible| if (possible) |j| {
++                    try std.testing.expect(@abs(@as(i64, output[i]) - output[j]) <= 2);
++                    if (exact[i] == 0 or exact[j] == 0) continue;
++                    const aa = g.at(.temperate, @intCast(x), @intCast(y));
++                    const bb = g.at(.temperate, @intCast(j % w), @intCast(j / w));
++                    const delta: u32 = @intCast(@abs(@as(i64, aa.terrain_height) - bb.terrain_height));
++                    maximum_height_delta = @max(maximum_height_delta, delta);
++                    try std.testing.expect(delta <= 8);
++                };
++            };
++        }
++    }
++    std.debug.print("approx adversarial mainland columns={d} flat-collar columns={d} maximum adjacent-land height delta={d}\n", .{ checked, collar, maximum_height_delta });
++}
++
++test "shared bilinear coast extension has bounded interior and capped gradients" {
++    const a = std.testing.allocator;
++    const w = 8192;
++    const h = 12288;
++    const mw = w / 128;
++    const mh = h / 128;
++    const n = mw * mh;
++    const owners = try a.alloc(u8, n);
++    defer a.free(owners);
++    const coarse = try a.alloc(u16, n);
++    defer a.free(coarse);
++    for (0..mh) |y| for (0..mw) |x| {
++        const d = @min(y, mh - 1 - y);
++        owners[y * mw + x] = if (d == 0) 0 else 1;
++        coarse[y * mw + x] = @intCast(d);
++    };
++    var field = try CoastApprox.init(a, 12345, w, h, owners, coarse);
++    defer field.deinit(a);
++    var capped_columns: usize = 0;
++    for (0..h) |y| for ([_]u32{ 0, 1, 127, 128, 4095, 8191 }) |x| {
++        if (owners[(y / 128) * mw + x / 128] == 0) continue;
++        const value = field.sample(x, @intCast(y));
++        capped_columns += @intFromBool(value.coast == CoastApprox.cap);
++        const right = field.sample((x + 1) % w, @intCast(y));
++        try std.testing.expect(@abs(@as(i64, value.coast) - right.coast) <= 2);
++        if (y + 1 < h and owners[((y + 1) / 128) * mw + x / 128] != 0) {
++            const top = field.sample(x, @intCast(y + 1));
++            try std.testing.expect(@abs(@as(i64, value.coast) - top.coast) <= 2);
++        }
++    };
++    try std.testing.expect(capped_columns > 0);
++}
+--- old/src/voxel_app/world_environment.zig
++++ approx/src/voxel_app/world_environment.zig
+@@ -40,8 +40,6 @@
+     surface_cover: SurfaceCover,
+     /// Zero denotes ocean, 1..5 mainland, 128..159 detached islands.
+     landmass_id: u8,
+-    /// Approximate generated-shore proximity for relief and beaches, independent
+-    /// of player edits. This is not a distance query against current water.
+     coast_distance: u32,
+
+     pub fn workRules(self: ColumnEnvironment) WorkRules {

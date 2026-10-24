@@ -26,11 +26,11 @@
     "maximum_offset_disagreement_pp": 0.0396728515625
   },
   "preparation_ms": {
-    "minimum": 33.146625,
-    "maximum": 76.279375,
-    "mean": 38.924746109375
+    "minimum": 31.331292,
+    "maximum": 76.060083,
+    "mean": 38.39495253125
   },
-  "preparation_peak_owned_bytes": 2122224,
+  "preparation_peak_owned_bytes": 2122272,
   "feature_references_maximum": 94,
   "index_bin_occupancy_maximum": 9,
   "retry_traces": [
@@ -107,12 +107,12 @@
             "limit": 0
           }
         ],
-        "peak_owned_bytes": 2122224,
+        "peak_owned_bytes": 2122272,
         "feature_references": 88,
         "max_bin_occupancy": 6,
         "observed": 0,
         "limit": 0,
-        "work_units": 56092880
+        "work_units": 57665744
       }
     }
   ],
@@ -139,91 +139,92 @@
   "resource_distribution_by_pass": [
     {
       "metal_ore": {
-        "effective_blocks_exact_total": 940268240,
+        "effective_blocks_exact_total": 937084914,
         "estimated_mountain_fraction": 1.0,
         "estimated_sedimentary_fraction": 0.0,
         "estimated_density_per_lowland_host_voxel": 0.0,
-        "estimated_density_per_mountain_host_voxel": 0.0002788652154688432,
+        "estimated_density_per_mountain_host_voxel": 0.00027870250810422355,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "limestone": {
-        "effective_blocks_exact_total": 2981870794,
-        "estimated_mountain_fraction": 0.0021665455594236786,
-        "estimated_sedimentary_fraction": 0.9919175568533056,
-        "estimated_density_per_lowland_host_voxel": 9.393174239879064e-05,
-        "estimated_density_per_mountain_host_voxel": 1.91601641711069e-06,
+        "effective_blocks_exact_total": 3023140136,
+        "estimated_mountain_fraction": 0.0022708860355306485,
+        "estimated_sedimentary_fraction": 0.99187731449561,
+        "estimated_density_per_lowland_host_voxel": 9.518916869989704e-05,
+        "estimated_density_per_mountain_host_voxel": 2.0418110487719133e-06,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "clay": {
-        "effective_blocks_exact_total": 195992903,
+        "effective_blocks_exact_total": 198997365,
         "estimated_mountain_fraction": 0.0,
-        "estimated_sedimentary_fraction": 0.9994443002314353,
-        "estimated_density_per_lowland_host_voxel": 6.1873665090304345e-06,
+        "estimated_sedimentary_fraction": 0.9994231520052922,
+        "estimated_density_per_lowland_host_voxel": 6.280062060632822e-06,
         "estimated_density_per_mountain_host_voxel": 0.0,
-        "minimum_large_source_volume_fraction_per_seed": 0.9993889170358211
+        "minimum_large_source_volume_fraction_per_seed": 0.9994615865226066
       },
       "coal": {
-        "effective_blocks_exact_total": 281751842,
+        "effective_blocks_exact_total": 284605962,
         "estimated_mountain_fraction": 0.0,
-        "estimated_sedimentary_fraction": 0.9979585210909013,
-        "estimated_density_per_lowland_host_voxel": 8.894719575884004e-06,
+        "estimated_sedimentary_fraction": 0.9984630792588144,
+        "estimated_density_per_lowland_host_voxel": 8.98174256823002e-06,
         "estimated_density_per_mountain_host_voxel": 0.0,
-        "minimum_large_source_volume_fraction_per_seed": 0.9995136250092218
+        "minimum_large_source_volume_fraction_per_seed": 0.9995350771079562
       },
       "sand": {
-        "effective_blocks_exact_total": 1111437940,
-        "estimated_mountain_fraction": 0.0014733510164066,
-        "estimated_sedimentary_fraction": 0.9915528090088469,
-        "estimated_density_per_lowland_host_voxel": 3.503566574393221e-05,
-        "estimated_density_per_mountain_host_voxel": 4.856618874636313e-07,
-        "minimum_large_source_volume_fraction_per_seed": 0.9998632901187874
+        "effective_blocks_exact_total": 1127650558,
+        "estimated_mountain_fraction": 0.001399202037083077,
+        "estimated_sedimentary_fraction": 0.9918802626610795,
+        "estimated_density_per_lowland_host_voxel": 3.553718782262194e-05,
+        "estimated_density_per_mountain_host_voxel": 4.6926363310668523e-07,
+        "minimum_large_source_volume_fraction_per_seed": 0.9998863541079636
       }
     },
     {
       "metal_ore": {
-        "effective_blocks_exact_total": 940268240,
+        "effective_blocks_exact_total": 937084914,
         "estimated_mountain_fraction": 1.0,
         "estimated_sedimentary_fraction": 0.0,
         "estimated_density_per_lowland_host_voxel": 0.0,
-        "estimated_density_per_mountain_host_voxel": 0.00027909711575140473,
+        "estimated_density_per_mountain_host_voxel": 0.00027897332880051385,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "limestone": {
-        "effective_blocks_exact_total": 2981870794,
-        "estimated_mountain_fraction": 0.002056003059166797,
-        "estimated_sedimentary_fraction": 0.992025579593928,
-        "estimated_density_per_lowland_host_voxel": 9.393353312704025e-05,
-        "estimated_density_per_mountain_host_voxel": 1.8197685677109772e-06,
+        "effective_blocks_exact_total": 3023140136,
+        "estimated_mountain_fraction": 0.0020091960732264436,
+        "estimated_sedimentary_fraction": 0.9921522217455446,
+        "estimated_density_per_lowland_host_voxel": 9.520428885261683e-05,
+        "estimated_density_per_mountain_host_voxel": 1.8082744173749454e-06,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "clay": {
-        "effective_blocks_exact_total": 195992903,
+        "effective_blocks_exact_total": 198997365,
         "estimated_mountain_fraction": 0.0,
-        "estimated_sedimentary_fraction": 0.9994829792853003,
-        "estimated_density_per_lowland_host_voxel": 6.186799076710264e-06,
+        "estimated_sedimentary_fraction": 0.9995605846245716,
+        "estimated_density_per_lowland_host_voxel": 6.2794126064273575e-06,
         "estimated_density_per_mountain_host_voxel": 0.0,
-        "minimum_large_source_volume_fraction_per_seed": 0.9993889170358211
+        "minimum_large_source_volume_fraction_per_seed": 0.9994615865226066
       },
       "coal": {
-        "effective_blocks_exact_total": 281751842,
-        "estimated_mountain_fraction": 5.5943040807238264e-06,
-        "estimated_sedimentary_fraction": 0.9977076899144908,
-        "estimated_density_per_lowland_host_voxel": 8.893854101851899e-06,
-        "estimated_density_per_mountain_host_voxel": 4.678605364216369e-10,
-        "minimum_large_source_volume_fraction_per_seed": 0.9995136250092218
+        "effective_blocks_exact_total": 284605962,
+        "estimated_mountain_fraction": 0.0,
+        "estimated_sedimentary_fraction": 0.9982442974130077,
+        "estimated_density_per_lowland_host_voxel": 8.980813719051935e-06,
+        "estimated_density_per_mountain_host_voxel": 0.0,
+        "minimum_large_source_volume_fraction_per_seed": 0.9995350771079562
       },
       "sand": {
-        "effective_blocks_exact_total": 1111437940,
-        "estimated_mountain_fraction": 0.0017184783333329186,
-        "estimated_sedimentary_fraction": 0.9913899816423998,
-        "estimated_density_per_lowland_host_voxel": 3.502385260359514e-05,
-        "estimated_density_per_mountain_host_voxel": 5.669344660261554e-07,
-        "minimum_large_source_volume_fraction_per_seed": 0.9998632901187874
+        "effective_blocks_exact_total": 1127650558,
+        "estimated_mountain_fraction": 0.0016402527785175757,
+        "estimated_sedimentary_fraction": 0.991727217968152,
+        "estimated_density_per_lowland_host_voxel": 3.5524935354280514e-05,
+        "estimated_density_per_mountain_host_voxel": 5.506416521009401e-07,
+        "minimum_large_source_volume_fraction_per_seed": 0.9998863541079636
       }
     }
   ],
   "cross_mode_hash_count": 24,
   "cross_mode_hashes_equal": true,
+  "cross_mode_prepared_fingerprints_equal": true,
   "limitations": [
     "Offset-grid disagreement is a reproducibility/error check, not a statistical confidence interval.",
     "Global topology uses construction invariants and exhaustive reduced/adversarial final-column graphs; no default-world block-column census was performed.",

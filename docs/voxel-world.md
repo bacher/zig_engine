@@ -27,6 +27,12 @@ map queries share the same periodic field used for generation and rendering. The
 generator borrows its layout and is owned by the service; columns and render clients must
 not outlive it.
 
+Direct and allocating natural-world preparation use the same settings/memory preflight and
+failure reporting before candidate attempts. Chunk filling evaluates deeprock thickness and
+the deposit-index candidate slice once per horizontal column, then reuses those inputs for
+its vertical cells. These inputs live only during filling; persistent column-cache sizes
+are unchanged. The slow point oracle computes its own inputs afresh.
+
 ```zig
 var prepared = try generator.prepare(allocator, layout);
 defer prepared.deinit(allocator);
@@ -40,6 +46,14 @@ of the whole map. Each column has one climate, independent of chunk boundaries. 
 cover is sand; other covered soil renders green, yellow, or snowy according to climate.
 Soil types and timers are saved unchanged. Water and foliage render opaque cubes and retain
 full-cube collision.
+Mountain uplift tapers before both displaced frozen boundaries, reaching zero on the
+adjoining nonfrozen rows. Classification and uplift use the same climate-boundary sample.
+
+Mainland shore proximity combines a capped distance to conservative coastal rectangles
+with a shared bilinear inland field. It crosses internal macro-cell boundaries without
+resetting and uses a fixed `3 × 3` record query. The approximation can flatten up to 16
+extra blocks beside a shore; islands retain their analytic taper. This coordinate describes
+original geography and does not track player edits to water.
 
 Every playable profile has contiguous seeded deeprock from storage z=0 through an irregular
 1–3-block thickness. The same pure mask protects prediction, authority, indirect edits,

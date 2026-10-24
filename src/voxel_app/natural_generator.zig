@@ -26,27 +26,29 @@ pub const NaturalWorld = struct {
     }
 
     pub fn initWithOptions(allocator: std.mem.Allocator, layout: *const WorldLayout, seed: u64, settings: NaturalSettings, report: *PreparationReport, options: preparation.PrepareOptions) preparation.PrepareError!NaturalWorld {
-        report.* = .{ .seed = seed };
-        settings.validate(.{ @intCast(layout.size_in_chunks[0]), @intCast(layout.size_in_chunks[1]), @intCast(layout.size_in_chunks[2]) }) catch |err| {
-            report.category = .invalid_configuration;
-            report.reason = switch (err) {
-                error.InvalidLayout => .invalid_layout,
-                error.InvalidClimateWidths => .invalid_climate_widths,
-                error.InvalidCoastBounds => .invalid_coast_bounds,
-                error.InfeasibleCapacity => .infeasible_capacity,
-            };
+        const cells = try preflight(layout, seed, settings, report, options);
+        return initPreflighted(allocator, layout, seed, settings, report, options, cells);
+    }
+
+    /// The allocating wrapper must run the same preflight before owning memory.
+    pub fn createWithOptions(allocator: std.mem.Allocator, layout: *const WorldLayout, seed: u64, settings: NaturalSettings, report: *PreparationReport, options: preparation.PrepareOptions) preparation.PrepareError!*NaturalWorld {
+        const cells = try preflight(layout, seed, settings, report, options);
+        const result = allocator.create(NaturalWorld) catch |err| {
+            report.category = .preparation_aborted;
+            report.reason = .allocation_failed;
             return err;
         };
-        const cells = @as(usize, layout.size_in_blocks[0] / 128) * (layout.size_in_blocks[1] / 128);
-        const peak_bound = @sizeOf(NaturalWorld) + cells * 16;
-        report.peak_owned_bytes = peak_bound;
-        if (peak_bound > options.memory_budget) {
-            report.category = .preparation_aborted;
-            report.reason = .memory_budget_exceeded;
-            report.observed = peak_bound;
-            report.limit = options.memory_budget;
-            return error.MemoryBudgetExceeded;
-        }
+        errdefer allocator.destroy(result);
+        result.* = try initPreflighted(allocator, layout, seed, settings, report, options, cells);
+        return result;
+    }
+
+    fn preflight(layout: *const WorldLayout, seed: u64, settings: NaturalSettings, report: *PreparationReport, options: preparation.PrepareOptions) preparation.PrepareError!usize {
+        return preparation.preflightNatural(seed, settings, .{ @intCast(layout.size_in_chunks[0]), @intCast(layout.size_in_chunks[1]), @intCast(layout.size_in_chunks[2]) }, @sizeOf(NaturalWorld), report, options);
+    }
+
+    /// Only the two checked entry points above may begin candidate preparation.
+    fn initPreflighted(allocator: std.mem.Allocator, layout: *const WorldLayout, seed: u64, settings: NaturalSettings, report: *PreparationReport, options: preparation.PrepareOptions, cells: usize) preparation.PrepareError!NaturalWorld {
         const climate = environment.ClimateField{ .seed = hash.stream(seed, .climate, 0), .width = layout.size_in_blocks[0], .height = layout.size_in_blocks[1], .displacement = settings.climate_displacement };
         for (0..8) |attempt| {
             if (options.is_cancelled) |cancel| if (cancel(options.cancellation_context)) {
@@ -72,7 +74,7 @@ pub const NaturalWorld = struct {
             // Logical work units bound heap comparisons, fixed-cost field probes,
             // placement probes and exact deposit XY-column visits. Integer span
             // inversion inside each deposit visit has eight fixed iterations.
-            report.work_units += cells * 128 + featureWorkBound(settings);
+            report.work_units += Geography.preparationWorkBound(cells) + featureWorkBound(settings);
             if (report.work_units > options.work_budget) {
                 report.category = .preparation_aborted;
                 report.reason = .work_budget_exceeded;
@@ -148,7 +150,6 @@ pub const NaturalWorld = struct {
             report.reason = .none;
             report.stage = .complete;
             report.selected_attempt = @intCast(attempt);
-            report.peak_owned_bytes = @sizeOf(NaturalWorld) + geography.owners.len * 16;
             result.report = report.*;
             return result;
         }
@@ -202,13 +203,13 @@ pub const NaturalWorld = struct {
     }
 
     pub fn baseEnvironmentAt(self: *const NaturalWorld, x: i64, y: u32) environment.ColumnEnvironment {
-        var e = self.geography.at(self.climate.at(x, y), x, y);
+        var e = self.geography.atWithClimate(self.climate, x, y);
         if (self.settings.beaches and !e.water_present and e.coast_distance <= 3 and e.terrain_height <= e.sea_level + 3 and y > 0 and y + 1 < self.layout.size_in_blocks[1]) {
             var gentle = true;
             for ([_][2]i32{ .{ -1, 0 }, .{ 1, 0 }, .{ 0, -1 }, .{ 0, 1 } }) |offset| {
                 const nx = x + offset[0];
                 const ny: u32 = @intCast(@as(i64, y) + offset[1]);
-                const other = self.geography.at(self.climate.at(nx, ny), nx, ny);
+                const other = self.geography.atWithClimate(self.climate, nx, ny);
                 if (@abs(@as(i64, other.terrain_height) - e.terrain_height) > 2) gentle = false;
             }
             if (gentle) e.surface_cover = .sand;
@@ -235,6 +236,16 @@ pub const NaturalWorld = struct {
         return null;
     }
 
+    /// Borrowed per-fill inputs for one horizontal column, never retained in the
+    /// persistent column cache. Every Z cell uses the same floor and index bin.
+    const ColumnMaterialInputs = struct {
+        x: i64,
+        y: u32,
+        environment: environment.ColumnEnvironment,
+        floor_thickness: u32,
+        deposit_candidates: []const u8,
+    };
+
     pub fn materialAt(self: *const NaturalWorld, x: i64, y: u32, z: u32) BlockType {
         const e = self.baseEnvironmentAt(x, y);
         const base = self.materialFromEnvironment(x, y, z, e);
@@ -245,11 +256,24 @@ pub const NaturalWorld = struct {
     }
 
     fn materialFromEnvironment(self: *const NaturalWorld, x: i64, y: u32, z: u32, e: environment.ColumnEnvironment) BlockType {
-        if (z < hash.deeprockThickness(self.seed, x, y, self.layout.size_in_blocks[0])) return .deeprock;
+        // The slow point oracle evaluates inputs afresh, independently of the
+        // NaturalColumn cache and the chunk fill's per-horizontal-column reuse.
+        return self.materialFromColumn(.{
+            .x = x,
+            .y = y,
+            .environment = e,
+            .floor_thickness = hash.deeprockThickness(self.seed, x, y, self.layout.size_in_blocks[0]),
+            .deposit_candidates = self.deposits.candidates(x, y),
+        }, z);
+    }
+
+    fn materialFromColumn(self: *const NaturalWorld, column: ColumnMaterialInputs, z: u32) BlockType {
+        const e = column.environment;
+        if (z < column.floor_thickness) return .deeprock;
         if (z >= e.terrain_height) return if (z < e.sea_level) .water else .none;
         const depth = e.terrain_height - z - 1;
         if (e.surface_cover == .sand and depth < 5) return .sand;
-        if (self.deposits.at(self.deposits.candidates(x, y), x, y, z)) |resource| return resource;
+        if (self.deposits.at(column.deposit_candidates, column.x, column.y, z)) |resource| return resource;
         if (e.surface_cover == .soil and depth < 5) return if (depth == 0 and !e.water_present) .grass else .packed_dirt;
         return .stone;
     }
@@ -431,11 +455,20 @@ pub const NaturalColumn = struct {
 
     pub fn generateData(self: *const NaturalColumn, chunk_z: i32) WorldChunkData {
         var data = WorldChunkData.initEmpty();
-        for (0..32) |ly| for (0..32) |lx| for (0..32) |lz| {
+        for (0..32) |ly| for (0..32) |lx| {
             const x = @as(i64, self.coords[0]) * 32 + @as(i64, @intCast(lx));
             const y: u32 = @intCast(@as(i64, self.coords[1]) * 32 + @as(i64, @intCast(ly)));
-            const z: u32 = @intCast(@as(i64, chunk_z) * 32 + @as(i64, @intCast(lz)));
-            data.blocks[lz][ly][lx] = self.world.materialFromEnvironment(x, y, z, self.environments[ly][lx]);
+            const column: NaturalWorld.ColumnMaterialInputs = .{
+                .x = x,
+                .y = y,
+                .environment = self.environments[ly][lx],
+                .floor_thickness = hash.deeprockThickness(self.world.seed, x, y, self.world.layout.size_in_blocks[0]),
+                .deposit_candidates = self.world.deposits.candidates(x, y),
+            };
+            for (0..32) |lz| {
+                const z: u32 = @intCast(@as(i64, chunk_z) * 32 + @as(i64, @intCast(lz)));
+                data.blocks[lz][ly][lx] = self.world.materialFromColumn(column, z);
+            }
         };
         const width = self.world.layout.size_in_blocks[0];
         const chunk_x = @as(i64, self.coords[0]) * 32;

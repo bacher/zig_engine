@@ -1,3 +1,6 @@
+const NaturalSettings = @import("generation_settings.zig").NaturalSettings;
+const Geography = @import("generation_geography.zig").Geography;
+
 pub const FailureCategory = enum { none, unsupported_generator, invalid_configuration, candidate_rejected, preparation_aborted, seed_rejected };
 pub const FailureReason = enum { none, invalid_layout, invalid_climate_widths, invalid_coast_bounds, infeasible_capacity, topology_conflict, required_feature_placement, feature_index_capacity, deposit_validity, start_access_unavailable, allocation_failed, cancelled, work_budget_exceeded, memory_budget_exceeded, internal_invariant_failure };
 pub const PreparationStage = enum { preflight, geography, deposits, first_start, vegetation, complete };
@@ -35,3 +38,30 @@ pub const PrepareOptions = struct {
     abort_at_attempt: ?u8 = null,
     injected_abort: FailureReason = .work_budget_exceeded,
 };
+
+/// Shared preflight for direct and heap-owned natural worlds. Validating chunk
+/// dimensions first bounds every size calculation and never consumes an attempt.
+pub fn preflightNatural(seed: u64, settings: NaturalSettings, dimensions: [3]u32, world_bytes: usize, report: *PreparationReport, options: PrepareOptions) PrepareError!usize {
+    report.* = .{ .seed = seed };
+    settings.validate(dimensions) catch |err| {
+        report.category = .invalid_configuration;
+        report.reason = switch (err) {
+            error.InvalidLayout => .invalid_layout,
+            error.InvalidClimateWidths => .invalid_climate_widths,
+            error.InvalidCoastBounds => .invalid_coast_bounds,
+            error.InfeasibleCapacity => .infeasible_capacity,
+        };
+        return err;
+    };
+    const cells = Geography.macroCellCount(dimensions);
+    const peak_bound = world_bytes + Geography.preparationPeakBytes(cells);
+    report.peak_owned_bytes = peak_bound;
+    if (peak_bound > options.memory_budget) {
+        report.category = .preparation_aborted;
+        report.reason = .memory_budget_exceeded;
+        report.observed = peak_bound;
+        report.limit = options.memory_budget;
+        return error.MemoryBudgetExceeded;
+    }
+    return cells;
+}

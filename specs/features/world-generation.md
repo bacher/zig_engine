@@ -1,7 +1,7 @@
 ---
 service: zig_engine
 created: 2026-10-22
-updated: 2026-10-23
+updated: 2026-10-24
 status: implemented
 ---
 
@@ -717,6 +717,40 @@ guides large-scale geography, never assigns a whole chunk its climate or vegetat
    approximate coverage comes from coarse construction targets. No unbounded seed loop or
    fallback to a single continent.
 
+#### Continuous mainland coast proximity
+
+Ownership and bounded erosion decide the land/water footprint. A separate approximate
+coast coordinate drives rolling relief, ridge fading, deposit sizing, and optional beaches.
+It must not reset at internal macro-cell edges.
+
+Prepare one packed `u16` per macro cell: four exposed-edge bits and the maximum erosion
+trim across its exposed edges. Vertical-edge trim is monotone within a 128-block cell
+because its noise scale is 256; endpoint samples therefore bound it. Horizontal trims are
+constant within the cell. Represent each exposed fringe by a finite edge rectangle of that
+maximum width, including its endcaps. These rectangles contain the actual eroded water
+fringes and extend inland by at most 16 blocks.
+
+For a column, query the surrounding `3 × 3` macro records and calculate
+`C = min(128, max(0, nearest_rectangle_distance_L_infinity - 1))`. Any omitted rectangle is
+already beyond this cap, so a feature cannot disappear prematurely at a neighborhood join.
+For inland depth, derive each shared macro vertex from the minimum BFS distance of its four
+incident cells, multiplied by 128 and capped at 4098. Bilinearly interpolate these shared
+vertices with one final integer floor to obtain `B`. Use
+`F = min(4096, C + max(0, B - 130))` as the mainland coast coordinate.
+
+`C` and `B` each change by at most one per cardinal column step; `F` changes by at most two,
+including across the X seam. `F` is zero at every real mainland shore. Its zero-valued land
+collar may be up to 16 blocks wider than the actual shore; inland values are an approximate
+relief coordinate, without an exact-distance guarantee. Keep the existing analytic island
+coast coordinate separate from this mainland proof. These coordinates describe generated
+geography, not the distance to current player-edited water.
+
+Queries have a fixed ceiling of nine records and 36 rectangle checks, without a tree walk,
+new noise evaluations, or allocations. Preparation adds at most six trim probes per macro
+cell. Free growth/BFS scratch before allocating the records: retained geography is `5N`
+bytes and peak geography remains `16N` bytes for `N` macro cells, plus the prepared-world
+object. Share these bounds between preparation, preflight, and tests.
+
 #### Adversarial topology fixtures
 
 Use exhaustive bounded/reduced fixtures of final generated columns, not just macro owner
@@ -852,8 +886,11 @@ point. Do not promise identical land-climate proportions or mirrored coastlines.
 ### Relief and geology
 
 Use one seeded winding ridge field per mainland, with periodic X, varying uplift, coast
-taper, and zero strength in frozen columns. Geography and climate can clip a ridge into
-segments. Branched polylines are not required by the first version. Store a mountain-strength
+taper, and zero strength in frozen columns. Reuse the displaced climate boundaries to fade
+uplift linearly over the nearest `max(128, min(1024, world_height / 32))` nonfrozen rows;
+both nonfrozen rows immediately adjoining frozen climate have zero uplift. This avoids
+a height step when the climate ID changes. Geography can split a ridge into segments.
+Branched polylines are not required by the first version. Store a mountain-strength
 field distinct from final height; low rolling terrain is not a mountain merely because its
 absolute elevation is high.
 
@@ -1148,6 +1185,11 @@ Extend `ColumnGenerator` to cache the 32×32 environment data needed for its ver
 Keep current bounded caches (presently 64 column generators and 512 boundary entries) unless
 measurement justifies a separately budgeted change. Do not duplicate the macro map per
 column/client. Consumers can share immutable prepared data with explicit lifetime ownership.
+During chunk filling, evaluate floor thickness and the deposit-index candidate slice once
+per horizontal column and reuse them for its vertical cells, without retaining additional
+cache fields. The slow point oracle evaluates those inputs independently. Direct and
+allocating natural-world preparation share settings validation, memory preflight, and
+failure mapping before either begins candidate work or allocates owned preparation data.
 
 Track maximum terrain, water, and tree occupancy separately for empty shortcuts. Resource
 intersection tests and the deeprock mask precede uniform-rock shortcuts. Enclosure needs only

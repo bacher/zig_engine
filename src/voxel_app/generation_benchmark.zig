@@ -309,6 +309,9 @@ fn run(init: std.process.Init, seed: u64, rounds: usize, beaches: bool) ![32]u8 
     std.debug.print("cache_churn columns=96 forward_ms={d:.3} reverse_ms={d:.3} misses={d} clears={d} maximum_resident={d}\n", .{ @as(f64, @floatFromInt(first_ns)) / std.time.ns_per_ms, @as(f64, @floatFromInt(revisit_ns)) / std.time.ns_per_ms, cache.misses, cache.evictions, cache.maximum_count });
     var reopened = try generation.WorldGenerator.prepare(.{ .natural = .{ .seed = seed, .settings = .{ .beaches = beaches } } }, a, &layout);
     defer reopened.deinit(a);
+    const prepared_fingerprint = prepared.kind.natural.fingerprint();
+    if (!std.mem.eql(u8, &prepared_fingerprint, &reopened.kind.natural.fingerprint())) return error.PreparedWorldChanged;
+    std.debug.print("prepared_fingerprint={s} restart_matches=true\n", .{std.fmt.bytesToHex(prepared_fingerprint, .lower)});
     for (sites, 0..) |site, index| {
         const column = Column.init(&reopened, site);
         const current = try snapshot(a, &column, z, false);

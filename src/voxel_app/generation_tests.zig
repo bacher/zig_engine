@@ -4,6 +4,8 @@ const diagnostics = @import("generation_diagnostics.zig");
 const generator = @import("world_generator.zig");
 const hash = @import("generation_hash.zig");
 const Geography = @import("generation_geography.zig").Geography;
+const NaturalWorld = @import("natural_generator.zig").NaturalWorld;
+const preparation = @import("generation_preparation.zig");
 
 const Fixture = struct {
     const width = 16;
@@ -83,12 +85,15 @@ test "actual refined geography columns retain protected core and seam-island mem
     const width = 512;
     const height = 512;
     var owners = [_]u8{0} ** 16;
-    var coast = [_]u16{1} ** 16;
+    var coast = [_]u16{0} ** 16;
     owners[1 * 4 + 1] = 1;
     owners[1 * 4 + 2] = 1;
     owners[2 * 4 + 1] = 1;
     owners[2 * 4 + 2] = 1;
+    for (owners, 0..) |owner, i| coast[i] = if (owner == 0) 0 else 1;
     var geography: Geography = .{ .seed = 12345, .width = width, .height = height, .depth = 128, .sea_level = 48, .continent_count = 1, .island_count = 1, .macro_width = 4, .macro_height = 4, .owners = &owners, .coastal_distance = &coast };
+    try geography.prepareCoast(a);
+    defer geography.coast_field.deinit(a);
     geography.core_seeds[0] = .{ 1, 1 };
     geography.islands[0] = .{ .id = 128, .x = 0, .y = 64, .radius_x = 24, .radius_y = 20 };
     const columns = try a.alloc(diagnostics.Column, width * height);
@@ -157,6 +162,150 @@ test "invalid natural settings precede allocation and never consume candidate at
     try std.testing.expectEqual(@as(usize, 0), failing.alloc_index);
 }
 
+test "geography accounting matches exact allocation peak retained bytes and request count" {
+    const dimensions = [3]u32{ 2048, 1024, 32 };
+    const cells = Geography.macroCellCount(dimensions);
+    const peak = comptime Geography.preparationPeakBytes(Geography.macroCellCount(dimensions));
+    var storage: [peak]u8 align(@alignOf(u32)) = undefined;
+    var short = std.heap.FixedBufferAllocator.init(storage[0 .. storage.len - 1]);
+    const seed = hash.stream(12345, .continents, 0);
+    const size = [3]u32{ 65536, 32768, 1024 };
+    try std.testing.expectError(error.OutOfMemory, Geography.init(short.allocator(), seed, size, .{}));
+
+    var exact = std.heap.FixedBufferAllocator.init(&storage);
+    var counted = std.testing.FailingAllocator.init(exact.allocator(), .{});
+    var geography = try Geography.init(counted.allocator(), seed, size, .{});
+    try std.testing.expectEqual(Geography.preparation_allocation_count, counted.alloc_index);
+    try std.testing.expectEqual(Geography.retainedBytes(cells), counted.allocated_bytes - counted.freed_bytes);
+    try std.testing.expectEqual(Geography.retainedBytes(cells), exact.end_index);
+    try std.testing.expectEqual(@as(u64, cells) * 134, Geography.preparationWorkBound(cells));
+    geography.deinit(counted.allocator());
+    try std.testing.expectEqual(counted.allocated_bytes, counted.freed_bytes);
+}
+
+test "direct and wrapped natural preflight have identical reports before allocation" {
+    const Case = struct {
+        dimensions: [3]u32 = .{ 2048, 1024, 32 },
+        settings: generator.NaturalSettings = .{},
+        expected: anyerror,
+        reason: preparation.FailureReason,
+    };
+    for ([_]Case{
+        .{ .dimensions = .{ 4, 4, 4 }, .expected = error.InvalidLayout, .reason = .invalid_layout },
+        .{ .settings = .{ .climate_displacement = 4096 }, .expected = error.InvalidClimateWidths, .reason = .invalid_climate_widths },
+        .{ .settings = .{ .island_count = 0 }, .expected = error.InvalidCoastBounds, .reason = .invalid_coast_bounds },
+        .{ .settings = .{ .feature_index_capacity = 0 }, .expected = error.InfeasibleCapacity, .reason = .infeasible_capacity },
+        .{ .dimensions = .{ 8192, 4096, 4 }, .expected = error.InfeasibleCapacity, .reason = .infeasible_capacity },
+        .{ .expected = error.MemoryBudgetExceeded, .reason = .memory_budget_exceeded },
+    }) |case| {
+        const layout = try engine.WorldLayout.init(.{ .size_in_chunks = case.dimensions });
+        const seed = 98765;
+        const natural = generator.WorldGenerator{ .natural = .{ .seed = seed, .settings = case.settings } };
+        var direct_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        var wrapped_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        var direct: generator.PreparationReport = .{ .profile = .flat, .seed = 1, .attempts_started = 8, .selected_attempt = 7, .category = .seed_rejected };
+        var wrapped = direct;
+        // Invalid settings retain precedence over a simultaneously exhausted budget.
+        const options: generator.PrepareOptions = .{ .memory_budget = 0 };
+        try std.testing.expectError(case.expected, NaturalWorld.initWithOptions(direct_allocator.allocator(), &layout, seed, case.settings, &direct, options));
+        try std.testing.expectError(case.expected, natural.prepareWithReportOptions(wrapped_allocator.allocator(), &layout, &wrapped, options));
+        try std.testing.expectEqualDeep(direct, wrapped);
+        try std.testing.expectEqual(case.reason, direct.reason);
+        try std.testing.expectEqual(seed, direct.seed);
+        try std.testing.expectEqual(.natural, direct.profile);
+        try std.testing.expectEqual(.preflight, direct.stage);
+        try std.testing.expectEqual(@as(u8, 0), direct.attempts_started);
+        try std.testing.expectEqual(@as(?u8, null), direct.selected_attempt);
+        try std.testing.expectEqual(@as(usize, 0), direct_allocator.alloc_index);
+        try std.testing.expectEqual(@as(usize, 0), wrapped_allocator.alloc_index);
+        if (case.expected == error.MemoryBudgetExceeded) {
+            try std.testing.expectEqual(.preparation_aborted, direct.category);
+            try std.testing.expectEqual(@sizeOf(NaturalWorld) + Geography.preparationPeakBytes(Geography.macroCellCount(case.dimensions)), direct.peak_owned_bytes);
+            try std.testing.expectEqual(direct.peak_owned_bytes, direct.observed);
+            try std.testing.expectEqual(@as(u64, 0), direct.limit);
+        } else {
+            try std.testing.expectEqual(.invalid_configuration, direct.category);
+            try std.testing.expectEqual(@as(usize, 0), direct.peak_owned_bytes);
+        }
+    }
+}
+
+test "direct and wrapped natural candidate failures retain identical attempts and cleanup" {
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2048, 1024, 32 } });
+    const seed = 12345;
+    const natural = generator.WorldGenerator{ .natural = .{ .seed = seed } };
+    const Case = struct { options: generator.PrepareOptions, expected: anyerror };
+    for ([_]Case{
+        .{ .options = .{ .is_cancelled = &cancelled }, .expected = error.Cancelled },
+        .{ .options = .{ .work_budget = 0 }, .expected = error.WorkBudgetExceeded },
+        .{ .options = .{ .reject_first_candidates = 8, .injected_rejection = .deposit_validity }, .expected = error.SeedRejected },
+        .{ .options = .{ .reject_first_candidates = 2, .abort_at_attempt = 2, .injected_abort = .internal_invariant_failure }, .expected = error.InternalInvariantFailure },
+    }) |case| {
+        var direct: generator.PreparationReport = .{};
+        var wrapped: generator.PreparationReport = .{};
+        try std.testing.expectError(case.expected, NaturalWorld.initWithOptions(std.testing.allocator, &layout, seed, .{}, &direct, case.options));
+        try std.testing.expectError(case.expected, natural.prepareWithReportOptions(std.testing.allocator, &layout, &wrapped, case.options));
+        try std.testing.expectEqualDeep(direct, wrapped);
+    }
+    // Fail every Geography allocation, offsetting the wrapper's owned object.
+    for (0..Geography.preparation_allocation_count) |allocation| {
+        var direct_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = allocation });
+        var wrapped_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = allocation + 1 });
+        var direct: generator.PreparationReport = .{};
+        var wrapped: generator.PreparationReport = .{};
+        try std.testing.expectError(error.OutOfMemory, NaturalWorld.initWithOptions(direct_allocator.allocator(), &layout, seed, .{}, &direct, .{}));
+        try std.testing.expectError(error.OutOfMemory, natural.prepareWithReportOptions(wrapped_allocator.allocator(), &layout, &wrapped, .{}));
+        try std.testing.expectEqualDeep(direct, wrapped);
+        try std.testing.expectEqual(.allocation_failed, direct.reason);
+        try std.testing.expectEqual(.geography, direct.stage);
+        try std.testing.expectEqual(@as(u8, 1), direct.attempts_started);
+        try std.testing.expectEqual(direct_allocator.allocated_bytes, direct_allocator.freed_bytes);
+        try std.testing.expectEqual(wrapped_allocator.allocated_bytes, wrapped_allocator.freed_bytes);
+    }
+}
+
+test "direct and wrapped natural worlds reject one byte below the peak before allocation" {
+    const dimensions = [3]u32{ 2048, 1024, 32 };
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = dimensions });
+    const peak = @sizeOf(NaturalWorld) + Geography.preparationPeakBytes(Geography.macroCellCount(dimensions));
+    const options: generator.PrepareOptions = .{ .memory_budget = peak - 1 };
+    const seed = 12365;
+    var direct_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var wrapped_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var direct: generator.PreparationReport = .{};
+    var wrapped: generator.PreparationReport = .{};
+    try std.testing.expectError(error.MemoryBudgetExceeded, NaturalWorld.initWithOptions(direct_allocator.allocator(), &layout, seed, .{}, &direct, options));
+    try std.testing.expectError(error.MemoryBudgetExceeded, generator.WorldGenerator.prepareWithReportOptions(.{ .natural = .{ .seed = seed } }, wrapped_allocator.allocator(), &layout, &wrapped, options));
+    try std.testing.expectEqualDeep(direct, wrapped);
+    try std.testing.expectEqual(.memory_budget_exceeded, direct.reason);
+    try std.testing.expectEqual(peak, direct.peak_owned_bytes);
+    try std.testing.expectEqual(peak, direct.observed);
+    try std.testing.expectEqual(options.memory_budget, direct.limit);
+    try std.testing.expectEqual(@as(u8, 0), direct.attempts_started);
+    try std.testing.expectEqual(@as(usize, 0), direct_allocator.alloc_index);
+    try std.testing.expectEqual(@as(usize, 0), wrapped_allocator.alloc_index);
+}
+
+test "direct and wrapped accepted natural worlds publish identical reports and fingerprints" {
+    const a = std.testing.allocator;
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2048, 1024, 32 } });
+    const seed = 12365;
+    const options: generator.PrepareOptions = .{ .memory_budget = @sizeOf(NaturalWorld) + Geography.preparationPeakBytes(Geography.macroCellCount(.{ 2048, 1024, 32 })), .reject_first_candidates = 1 };
+    var direct_report: generator.PreparationReport = .{};
+    var wrapped_report: generator.PreparationReport = .{};
+    var direct = try NaturalWorld.initWithOptions(a, &layout, seed, .{}, &direct_report, options);
+    defer direct.deinit(a);
+    var wrapped = try generator.WorldGenerator.prepareWithReportOptions(.{ .natural = .{ .seed = seed } }, a, &layout, &wrapped_report, options);
+    defer wrapped.deinit(a);
+    try std.testing.expectEqualDeep(direct_report, wrapped_report);
+    try std.testing.expectEqualDeep(direct_report, direct.report);
+    try std.testing.expectEqualDeep(wrapped_report, wrapped.kind.natural.report);
+    try std.testing.expectEqual(.complete, direct_report.stage);
+    try std.testing.expectEqual(options.memory_budget, direct_report.peak_owned_bytes);
+    try std.testing.expect(direct_report.candidates_rejected > 0);
+    try std.testing.expectEqualSlices(u8, &direct.fingerprint(), &wrapped.kind.natural.fingerprint());
+}
+
 test "playable floor hash uses canonical X and independent seeded layer streams" {
     for (0..1024) |i| {
         const x: i64 = @intCast(i);
@@ -205,6 +354,7 @@ test "preparation classifies terminal bounds cancellation and allocation without
     try std.testing.expectEqual(@as(u64, 12345), report.seed);
     try std.testing.expectEqual(@as(u32, 2), report.generator_id);
     try std.testing.expectEqual(@as(u32, 1), report.generator_version);
+    try std.testing.expectEqual(@sizeOf(NaturalWorld) + Geography.preparationPeakBytes(Geography.macroCellCount(.{ 2048, 1024, 32 })), report.peak_owned_bytes);
 }
 
 test "candidate rejection consumes at most eight deterministic attempts and terminal injection stops immediately" {
@@ -219,6 +369,7 @@ test "candidate rejection consumes at most eight deterministic attempts and term
     try std.testing.expectEqualDeep(first, second);
     try std.testing.expectEqual(@as(u8, 8), first.attempts_started);
     try std.testing.expectEqual(@as(u8, 8), first.candidates_rejected);
+    try std.testing.expect(first.work_units <= options.work_budget);
     try std.testing.expectEqual(.seed_rejected, first.category);
     try std.testing.expectEqual(.deposit_validity, first.reason);
     try std.testing.expectEqual(@as(?u8, null), first.selected_attempt);

@@ -75,28 +75,6 @@ pub const WorldGenerator = union(enum) {
             .terrain => .legacy_terrain,
         };
         if (self != .natural) report.stage = .complete;
-        if (self == .natural) self.natural.settings.validate(.{ @intCast(layout.size_in_chunks[0]), @intCast(layout.size_in_chunks[1]), @intCast(layout.size_in_chunks[2]) }) catch |err| {
-            report.category = .invalid_configuration;
-            report.reason = switch (err) {
-                error.InvalidLayout => .invalid_layout,
-                error.InvalidClimateWidths => .invalid_climate_widths,
-                error.InvalidCoastBounds => .invalid_coast_bounds,
-                error.InfeasibleCapacity => .infeasible_capacity,
-            };
-            return err;
-        };
-        if (self == .natural) {
-            const cells = @as(usize, layout.size_in_blocks[0] / 128) * (layout.size_in_blocks[1] / 128);
-            const peak_bound = @sizeOf(natural_generator.NaturalWorld) + cells * 16;
-            if (peak_bound > options.memory_budget) {
-                report.category = .preparation_aborted;
-                report.reason = .memory_budget_exceeded;
-                report.peak_owned_bytes = peak_bound;
-                report.observed = peak_bound;
-                report.limit = options.memory_budget;
-                return error.MemoryBudgetExceeded;
-            }
-        }
         return .{
             .layout = layout,
             .seed_value = switch (self) {
@@ -108,16 +86,7 @@ pub const WorldGenerator = union(enum) {
             .kind = switch (self) {
                 .flat, .flat_seeded => .flat,
                 .terrain => |terrain| .{ .terrain = try PreparedTerrain.init(allocator, layout, terrain.seed, terrain.params) },
-                .natural => |natural| blk: {
-                    const prepared = allocator.create(natural_generator.NaturalWorld) catch |err| {
-                        report.category = .preparation_aborted;
-                        report.reason = .allocation_failed;
-                        return err;
-                    };
-                    errdefer allocator.destroy(prepared);
-                    prepared.* = try natural_generator.NaturalWorld.initWithOptions(allocator, layout, natural.seed, natural.settings, report, options);
-                    break :blk .{ .natural = prepared };
-                },
+                .natural => |natural| .{ .natural = try natural_generator.NaturalWorld.createWithOptions(allocator, layout, natural.seed, natural.settings, report, options) },
             },
         };
     }
