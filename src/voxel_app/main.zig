@@ -62,6 +62,7 @@ const CHUNK_LOAD_RADIUS = 3;
 const BLOCK_LOAD_RADIUS = 1;
 
 const menu = @import("menu.zig");
+const world_map = @import("world_map.zig");
 
 const Game = struct {
     const MeshVersion = struct { chunk_revision: u64, mesh_revision: u64 };
@@ -77,6 +78,8 @@ const Game = struct {
     next_autosave_at: f64 = 60,
     next_compaction_at: f64 = 600,
     menu_open: bool = false,
+    map_open: bool = false,
+    map_state: world_map.State = .{},
     /// Future multiplayer sessions leave simulation running behind the menu.
     menu_pauses_game: bool = true,
     exit_requested: bool = false,
@@ -131,8 +134,25 @@ const Game = struct {
     fn setMenuOpen(game: *Game, open: bool) void {
         if (game.exit_requested or open == game.menu_open) return;
         game.menu_open = open;
+        if (open) game.map_open = false;
         game.engine.setPaused(open and game.menu_pauses_game);
-        game.engine.setGameplayInputBlocked(open);
+        game.engine.setGameplayInputBlocked(open or game.map_open);
+    }
+
+    fn setMapOpen(game: *Game, open: bool) void {
+        if (game.exit_requested or game.menu_open or open == game.map_open) return;
+        game.map_open = open;
+        game.engine.setGameplayInputBlocked(open or game.menu_open);
+    }
+
+    fn mapView(game: *const Game, scene: *const Scene) world_map.View {
+        return .{
+            .player = if (game.player) |player| .{ .position = player.position, .yaw = player.yaw } else null,
+            .spectator = if (game.control_mode == .spectator) .{
+                .position = scene.camera.position,
+                .yaw = scene.spectator_camera.yaw,
+            } else null,
+        };
     }
 
     fn handleMenuAction(game: *Game, action: menu.Action) void {
@@ -197,6 +217,7 @@ const Game = struct {
 
     pub fn deinit(game: *Game) void {
         game.stopWorkers();
+        game.map_state.deinit(game.engine.gctx);
         game.tool_commands.deinit(game.allocator);
         if (game.player) |*player| player.deinit();
         game.chunk_subscriptions.deinit(game.allocator);
@@ -328,6 +349,7 @@ const Game = struct {
         if (game.exit_requested) return;
         game.exit_requested = true;
         game.menu_open = false;
+        game.map_open = false;
         game.engine.setPaused(true);
         game.engine.setGameplayInputBlocked(true);
         game.block_interaction.cancelHold();
@@ -1418,9 +1440,17 @@ fn onUIKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque)
 }
 
 fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
-    if (key_params.key != .escape) return false;
-    game.setMenuOpen(!game.menu_open);
-    return true;
+    switch (key_params.key) {
+        .escape => {
+            if (game.map_open) game.setMapOpen(false) else game.setMenuOpen(!game.menu_open);
+            return true;
+        },
+        .m => {
+            game.setMapOpen(!game.map_open);
+            return true;
+        },
+        else => return false,
+    }
 }
 
 fn handleKeyPress(game: *Game, key_params: KeyParams) void {
@@ -1513,10 +1543,13 @@ fn onRenderOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque:
 
 fn onRender(engine: *Engine, _: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
-    if (!game.menu_open) {
+    if (!game.menu_open and !game.map_open) {
         block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
         drawCrosshair();
     }
+    if (game.map_open) if (game.world_data) |service| if (engine.active_scene) |scene| {
+        if (game.map_state.draw(game.allocator, engine.gctx, service.preparedGenerator(), game.mapView(scene))) game.setMapOpen(false);
+    };
     drawPersistence(game);
     if (game.menu_open) if (menu.draw(engine.paused)) |action| game.handleMenuAction(action);
 }
@@ -1631,6 +1664,165 @@ test "menu cancels pending controls and pauses world time and background simulat
     try std.testing.expect(!game.menu_open);
     try std.testing.expect(!fixture.engine.gameplay_input_blocked);
     try std.testing.expectEqual(1, fixture.engine.frame_delta);
+}
+
+test "world map captures gameplay and pending controls while simulation keeps running" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    try fixture.preparePlayerToolTest();
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
+    defer service.destroy();
+    var simulation: SimulationWorker = .{ .client = try service.createClient(), .worker = undefined };
+    game.simulation = &simulation;
+    game.player = PlayerController.init(std.testing.allocator, .{ 0, 0, 0 });
+    handleMouseButtonPress(game, .{ .button = .left, .mods = .{} });
+    game.updateBlockTool();
+    try std.testing.expect(game.block_interaction.holding != null);
+    game.jump_requested = true;
+    try game.tool_commands.append(game.allocator, .remove);
+    fixture.input.cursor_position_delta = .{ 20, -10 };
+    fixture.engine.frame_delta = 0.125;
+    const tick = game.world.?.simulation_tick;
+
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
+    try std.testing.expect(game.map_open);
+    try std.testing.expect(!game.menu_open);
+    try std.testing.expect(!fixture.engine.paused);
+    try std.testing.expect(!simulation.paused.load(.acquire));
+    try std.testing.expect(fixture.engine.gameplay_input_blocked);
+    try std.testing.expectEqual(.never, fixture.input.cursor_capture);
+    try std.testing.expectEqualDeep([2]f32{ 0, 0 }, fixture.input.cursor_position_delta);
+    try std.testing.expectEqual(null, game.block_interaction.holding);
+    try std.testing.expect(!game.jump_requested);
+    try std.testing.expectEqual(0, game.tool_commands.items.len);
+
+    handleKeyPress(game, .{ .key = .space, .mods = .{} });
+    handleKeyPress(game, .{ .key = .q, .mods = .{} });
+    handleKeyPress(game, .{ .key = .e, .mods = .{} });
+    handleMouseButtonPress(game, .{ .button = .left, .mods = .{} });
+    try std.testing.expect(!game.jump_requested);
+    try std.testing.expectEqual(.player, game.control_mode);
+    try std.testing.expectEqual(null, game.block_interaction.requested);
+    game.advanceWorldClock();
+    try std.testing.expect(game.world.?.simulation_tick > tick);
+
+    // The click that closes the map can remain physically held without starting a tool.
+    fixture.input.cursor_left_button_pressed = true;
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
+    try std.testing.expect(!game.map_open);
+    try std.testing.expect(!fixture.engine.gameplay_input_blocked);
+    try std.testing.expectEqual(.always, fixture.input.cursor_capture);
+    try std.testing.expectEqual(0.125, fixture.engine.frame_delta);
+    game.updateBlockTool();
+    try std.testing.expectEqual(null, game.block_interaction.holding);
+    try std.testing.expectEqual(null, game.block_interaction.requested);
+    handleMouseButtonRelease(game, .{ .button = .left, .mods = .{} });
+    handleMouseButtonPress(game, .{ .button = .left, .mods = .{} });
+    game.updateBlockTool();
+    try std.testing.expect(game.block_interaction.holding != null);
+}
+
+test "map Escape, menu, and exit transitions preserve modal input capture" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expect(!game.map_open);
+    try std.testing.expect(!game.menu_open);
+    try std.testing.expect(!fixture.engine.paused);
+    try std.testing.expect(!fixture.engine.gameplay_input_blocked);
+
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expect(game.menu_open);
+    try std.testing.expect(fixture.engine.paused);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
+    try std.testing.expect(!game.map_open);
+    try std.testing.expect(game.menu_open);
+    try std.testing.expect(fixture.engine.gameplay_input_blocked);
+    try std.testing.expectEqual(.never, fixture.input.cursor_capture);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+
+    game.setMapOpen(true);
+    game.setMenuOpen(true);
+    try std.testing.expect(!game.map_open);
+    try std.testing.expect(game.menu_open);
+    try std.testing.expect(fixture.engine.gameplay_input_blocked);
+    try std.testing.expectEqual(.never, fixture.input.cursor_capture);
+    game.handleMenuAction(.resume_game);
+    try std.testing.expect(!fixture.engine.gameplay_input_blocked);
+    try std.testing.expectEqual(.always, fixture.input.cursor_capture);
+
+    game.setMapOpen(true);
+    game.beginExit();
+    try std.testing.expect(!game.map_open);
+    try std.testing.expect(!game.menu_open);
+    try std.testing.expect(fixture.engine.paused);
+    try std.testing.expect(fixture.engine.gameplay_input_blocked);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expect(!game.map_open);
+    try std.testing.expect(!game.menu_open);
+    game.cancelExit();
+    try std.testing.expect(!fixture.engine.gameplay_input_blocked);
+    try std.testing.expectEqual(.always, fixture.input.cursor_capture);
+}
+
+test "world map freezes spectator movement and look without replaying mouse deltas" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    var spectator: std.meta.Child(@TypeOf(fixture.scene.spectator_camera)) = .{
+        .camera = &fixture.camera,
+        .input_controller = @ptrCast(&fixture.input),
+        .yaw = 0.7,
+        .pitch = -0.2,
+    };
+    fixture.scene.spectator_camera = &spectator;
+    fixture.scene.spectator_enabled = true;
+    fixture.scene.engine = &fixture.engine;
+    fixture.scene.previous_frame_time = 1;
+    fixture.game.control_mode = .spectator;
+    try fixture.input.pressed_keys.put(.w, {});
+    const position = fixture.camera.position;
+    fixture.game.setMapOpen(true);
+    fixture.input.cursor_position_delta = .{ 10, 20 };
+    fixture.scene.update(2);
+    try std.testing.expectEqualDeep(position, fixture.camera.position);
+    try std.testing.expectEqual(@as(f32, 0.7), spectator.yaw);
+    try std.testing.expectEqual(@as(f32, -0.2), spectator.pitch);
+    fixture.game.setMapOpen(false);
+    fixture.scene.update(2.1);
+    try std.testing.expect(!std.meta.eql(position, fixture.camera.position));
+    try std.testing.expectEqual(@as(f32, 0.7), spectator.yaw);
+    try std.testing.expectEqual(@as(f32, -0.2), spectator.pitch);
+}
+
+test "map view retains the original player pose during spectator excursions" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    fixture.game.player = PlayerController.init(std.testing.allocator, .{ 1.5, 2.5, 3 });
+    fixture.game.player.?.yaw = 0.5;
+    fixture.camera.updatePosition(.{ 100, 101, 102 });
+    var spectator: std.meta.Child(@TypeOf(fixture.scene.spectator_camera)) = .{
+        .camera = &fixture.camera,
+        .input_controller = @ptrCast(&fixture.input),
+        .yaw = 2,
+    };
+    fixture.scene.spectator_camera = &spectator;
+    const player_view = fixture.game.mapView(&fixture.scene);
+    try std.testing.expectEqualDeep(Position{ 1.5, 2.5, 3 }, player_view.player.?.position);
+    try std.testing.expectEqual(@as(f32, 0.5), player_view.player.?.yaw);
+    try std.testing.expectEqual(null, player_view.spectator);
+    fixture.game.control_mode = .spectator;
+    const spectator_view = fixture.game.mapView(&fixture.scene);
+    try std.testing.expectEqualDeep(player_view.player, spectator_view.player);
+    try std.testing.expectEqualDeep(fixture.camera.position, spectator_view.spectator.?.position);
+    try std.testing.expectEqual(@as(f32, 2), spectator_view.spectator.?.yaw);
 }
 
 test "held motion sampling uses actual active-camera movement and material selection preserves motion" {
@@ -1816,6 +2008,7 @@ test "crosshair and fonts follow DPI changes without accumulating style rounding
 
 test {
     _ = menu;
+    _ = world_map;
     _ = world_module;
     _ = world_generator;
     _ = world_data_service;
