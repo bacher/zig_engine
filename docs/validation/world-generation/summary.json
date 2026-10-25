@@ -1,7 +1,7 @@
 {
   "seed_first": 12345,
-  "seed_count": 64,
-  "accepted": 64,
+  "seed_count": 256,
+  "accepted": 256,
   "rejected": 0,
   "layout_blocks": [
     65536,
@@ -20,205 +20,123 @@
     "ReleaseSafe": 3
   },
   "land_percent": {
-    "mean": 60.74339151382446,
-    "minimum_pass_estimate": 60.67962646484375,
-    "maximum_pass_estimate": 60.811614990234375,
-    "maximum_offset_disagreement_pp": 0.0396728515625
+    "mean": 35.46496480703354,
+    "minimum_pass_estimate": 23.65264892578125,
+    "maximum_pass_estimate": 46.55914306640625,
+    "maximum_offset_disagreement_pp": 0.046539306640625
   },
   "preparation_ms": {
-    "minimum": 32.366708,
-    "maximum": 79.792125,
-    "mean": 39.046787015625
+    "minimum": 24.438208,
+    "maximum": 37.473875,
+    "mean": 30.11245703125
   },
   "preparation_peak_owned_bytes": 2122272,
-  "feature_references_maximum": 95,
-  "index_bin_occupancy_maximum": 9,
-  "retry_traces": [
-    {
-      "seed": 12376,
-      "preparation": {
-        "generator_id": 2,
-        "generator_version": 1,
-        "profile": "natural",
-        "seed": 12376,
-        "category": "none",
-        "reason": "none",
-        "stage": "complete",
-        "attempts_started": 2,
-        "candidates_rejected": 1,
-        "selected_attempt": 1,
-        "rejections": [
-          "start_access_unavailable",
-          "none",
-          "none",
-          "none",
-          "none",
-          "none",
-          "none",
-          "none"
-        ],
-        "rejection_details": [
-          {
-            "reason": "start_access_unavailable",
-            "stage": "deposits",
-            "observed": 0,
-            "limit": 0
-          },
-          {
-            "reason": "none",
-            "stage": "preflight",
-            "observed": 0,
-            "limit": 0
-          },
-          {
-            "reason": "none",
-            "stage": "preflight",
-            "observed": 0,
-            "limit": 0
-          },
-          {
-            "reason": "none",
-            "stage": "preflight",
-            "observed": 0,
-            "limit": 0
-          },
-          {
-            "reason": "none",
-            "stage": "preflight",
-            "observed": 0,
-            "limit": 0
-          },
-          {
-            "reason": "none",
-            "stage": "preflight",
-            "observed": 0,
-            "limit": 0
-          },
-          {
-            "reason": "none",
-            "stage": "preflight",
-            "observed": 0,
-            "limit": 0
-          },
-          {
-            "reason": "none",
-            "stage": "preflight",
-            "observed": 0,
-            "limit": 0
-          }
-        ],
-        "peak_owned_bytes": 2122272,
-        "feature_references": 95,
-        "max_bin_occupancy": 7,
-        "observed": 0,
-        "limit": 0,
-        "work_units": 57665744
-      }
-    }
-  ],
+  "feature_references_maximum": 101,
+  "index_bin_occupancy_maximum": 13,
+  "retry_traces": [],
   "belt_percent_by_pass": [
     [
-      9.997713565826416,
-      9.998416900634766,
-      24.999356269836426,
-      10.001325607299805,
-      25.00321865081787,
-      10.000145435333252,
-      9.999823570251465
+      9.997856616973877,
+      9.999296069145203,
+      24.99868869781494,
+      10.001260042190552,
+      25.00305473804474,
+      10.000130534172058,
+      9.99971330165863
     ],
     [
-      9.997975826263428,
-      9.999692440032959,
-      25.002169609069824,
-      9.99685525894165,
-      25.000905990600586,
-      10.0006103515625,
-      10.001790523529053
+      9.996968507766724,
+      10.000640153884888,
+      25.002622604370117,
+      9.996414184570312,
+      25.000417232513428,
+      10.002097487449646,
+      10.000839829444885
     ]
   ],
   "resource_distribution_by_pass": [
     {
       "metal_ore": {
-        "effective_blocks_exact_total": 936449082,
+        "effective_blocks_exact_total": 3727825406,
         "estimated_mountain_fraction": 1.0,
         "estimated_sedimentary_fraction": 0.0,
         "estimated_density_per_lowland_host_voxel": 0.0,
-        "estimated_density_per_mountain_host_voxel": 0.00027812760853913735,
+        "estimated_density_per_mountain_host_voxel": 0.0003916733415732201,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "limestone": {
-        "effective_blocks_exact_total": 3017786830,
-        "estimated_mountain_fraction": 0.0022465141262677144,
-        "estimated_sedimentary_fraction": 0.9919011873024465,
-        "estimated_density_per_lowland_host_voxel": 9.502736394731826e-05,
-        "estimated_density_per_mountain_host_voxel": 2.013527873716647e-06,
+        "effective_blocks_exact_total": 11547984102,
+        "estimated_mountain_fraction": 0.0017938587621556602,
+        "estimated_sedimentary_fraction": 0.9928150880774339,
+        "estimated_density_per_lowland_host_voxel": 0.00015809053860291777,
+        "estimated_density_per_mountain_host_voxel": 2.176521056146575e-06,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "clay": {
-        "effective_blocks_exact_total": 198552714,
+        "effective_blocks_exact_total": 783837394,
         "estimated_mountain_fraction": 0.0,
-        "estimated_sedimentary_fraction": 0.9994218601768778,
-        "estimated_density_per_lowland_host_voxel": 6.266321849394436e-06,
+        "estimated_sedimentary_fraction": 0.998167681565874,
+        "estimated_density_per_lowland_host_voxel": 1.0749925204491824e-05,
         "estimated_density_per_mountain_host_voxel": 0.0,
-        "minimum_large_source_volume_fraction_per_seed": 0.9994606457955998
+        "minimum_large_source_volume_fraction_per_seed": 0.9993704792383551
       },
       "coal": {
-        "effective_blocks_exact_total": 284841748,
-        "estimated_mountain_fraction": 0.0,
-        "estimated_sedimentary_fraction": 0.998055672378463,
-        "estimated_density_per_lowland_host_voxel": 8.989602978240346e-06,
-        "estimated_density_per_mountain_host_voxel": 0.0,
-        "minimum_large_source_volume_fraction_per_seed": 0.9995350771079562
+        "effective_blocks_exact_total": 1120938789,
+        "estimated_mountain_fraction": 4.280426537381991e-05,
+        "estimated_sedimentary_fraction": 0.9978239595131929,
+        "estimated_density_per_lowland_host_voxel": 1.5372438774996027e-05,
+        "estimated_density_per_mountain_host_voxel": 5.041240249641847e-09,
+        "minimum_large_source_volume_fraction_per_seed": 0.9995170450946397
       },
       "sand": {
-        "effective_blocks_exact_total": 1126100107,
-        "estimated_mountain_fraction": 0.0009785030849609787,
-        "estimated_sedimentary_fraction": 0.9929535559169096,
-        "estimated_density_per_lowland_host_voxel": 3.5504933427895766e-05,
-        "estimated_density_per_mountain_host_voxel": 3.272646766870231e-07,
-        "minimum_large_source_volume_fraction_per_seed": 0.9998863541079636
+        "effective_blocks_exact_total": 4486830716,
+        "estimated_mountain_fraction": 0.001691474578577336,
+        "estimated_sedimentary_fraction": 0.9918853692786408,
+        "estimated_density_per_lowland_host_voxel": 6.143048279838859e-05,
+        "estimated_density_per_mountain_host_voxel": 7.973951848250518e-07,
+        "minimum_large_source_volume_fraction_per_seed": 0.9998794188228909
       }
     },
     {
       "metal_ore": {
-        "effective_blocks_exact_total": 936449082,
+        "effective_blocks_exact_total": 3727825406,
         "estimated_mountain_fraction": 1.0,
         "estimated_sedimentary_fraction": 0.0,
         "estimated_density_per_lowland_host_voxel": 0.0,
-        "estimated_density_per_mountain_host_voxel": 0.00027832551925646156,
+        "estimated_density_per_mountain_host_voxel": 0.0003918159783835949,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "limestone": {
-        "effective_blocks_exact_total": 3017786830,
-        "estimated_mountain_fraction": 0.0021221708776531373,
-        "estimated_sedimentary_fraction": 0.9919650806586372,
-        "estimated_density_per_lowland_host_voxel": 9.50331806658565e-05,
-        "estimated_density_per_mountain_host_voxel": 1.9034337653909955e-06,
+        "effective_blocks_exact_total": 11547984102,
+        "estimated_mountain_fraction": 0.0017037685634983023,
+        "estimated_sedimentary_fraction": 0.9933666717627265,
+        "estimated_density_per_lowland_host_voxel": 0.00015810800726539262,
+        "estimated_density_per_mountain_host_voxel": 2.0679658228991156e-06,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "clay": {
-        "effective_blocks_exact_total": 198552714,
-        "estimated_mountain_fraction": 0.0,
-        "estimated_sedimentary_fraction": 0.9995596005711072,
-        "estimated_density_per_lowland_host_voxel": 6.265924537456674e-06,
-        "estimated_density_per_mountain_host_voxel": 0.0,
-        "minimum_large_source_volume_fraction_per_seed": 0.9994606457955998
+        "effective_blocks_exact_total": 783837394,
+        "estimated_mountain_fraction": 4.152375446117563e-06,
+        "estimated_sedimentary_fraction": 0.9981747914021919,
+        "estimated_density_per_lowland_host_voxel": 1.0750098186393907e-05,
+        "estimated_density_per_mountain_host_voxel": 3.4209692573162775e-10,
+        "minimum_large_source_volume_fraction_per_seed": 0.9993704792383551
       },
       "coal": {
-        "effective_blocks_exact_total": 284841748,
-        "estimated_mountain_fraction": 0.0,
-        "estimated_sedimentary_fraction": 0.9978480110260046,
-        "estimated_density_per_lowland_host_voxel": 8.989032998487497e-06,
-        "estimated_density_per_mountain_host_voxel": 0.0,
-        "minimum_large_source_volume_fraction_per_seed": 0.9995350771079562
+        "effective_blocks_exact_total": 1120938789,
+        "estimated_mountain_fraction": 5.95058404500901e-05,
+        "estimated_sedimentary_fraction": 0.9977998683586193,
+        "estimated_density_per_lowland_host_voxel": 1.53724932131532e-05,
+        "estimated_density_per_mountain_host_voxel": 7.010807944159143e-09,
+        "minimum_large_source_volume_fraction_per_seed": 0.9995170450946397
       },
       "sand": {
-        "effective_blocks_exact_total": 1126100107,
-        "estimated_mountain_fraction": 0.0013231805176401215,
-        "estimated_sedimentary_fraction": 0.9926822230134975,
-        "estimated_density_per_lowland_host_voxel": 3.549043330236457e-05,
-        "estimated_density_per_mountain_host_voxel": 4.4285847196016494e-07,
-        "minimum_large_source_volume_fraction_per_seed": 0.9998863541079636
+        "effective_blocks_exact_total": 4486830716,
+        "estimated_mountain_fraction": 0.001610192914334667,
+        "estimated_sedimentary_fraction": 0.9922389436904089,
+        "estimated_density_per_lowland_host_voxel": 6.143672812489009e-05,
+        "estimated_density_per_mountain_host_voxel": 7.593538065787296e-07,
+        "minimum_large_source_volume_fraction_per_seed": 0.9998794188228909
       }
     }
   ],
@@ -232,5 +150,24 @@
     "Requested allocator bytes exclude allocator page overhead, GPU residency, disk caches, and complete gameplay residency.",
     "Dense forest test reports an actual representative chunk; it does not exhaust all forest chunks or independently prove capacity fallback.",
     "No default beach setting change is inferred from these machine-specific measurements."
-  ]
+  ],
+  "land_coverage_distribution": {
+    "measured_seeds": 256,
+    "mean_percent": 35.46496480703354,
+    "p2_5_percent": 27.073001861572266,
+    "p50_percent": 35.556983947753906,
+    "p95_percent": 42.84696578979492,
+    "p97_5_percent": 43.92714500427246,
+    "seeds_within_25_45_percent": 253,
+    "fraction_within_25_45_percent": 0.98828125
+  },
+  "land_coverage_guidance": {
+    "nominal_percent": 35,
+    "soft_envelope_percent": [
+      25,
+      45
+    ],
+    "desired_seed_fraction": 0.95,
+    "runtime_ratio_gate": false
+  }
 }

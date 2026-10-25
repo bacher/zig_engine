@@ -352,7 +352,7 @@ test "finite resource populations have exact retained quantities and large sourc
     }
 }
 
-test "trees retain complete nonintersecting shapes climate clearance and seam determinism" {
+test "trees retain complete nonintersecting shapes and climate clearance" {
     const allocator = std.testing.allocator;
     const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2048, 1024, 32 } });
     var report: PreparationReport = .{};
@@ -406,12 +406,42 @@ test "trees retain complete nonintersecting shapes climate clearance and seam de
     try std.testing.expect(complete_tree_seen and boundary_tree_seen and vertical_tree_seen);
     try std.testing.expect(forest_sites >= 10 and meadow_sites >= 10);
     try std.testing.expect(forest_trees * meadow_sites > 3 * meadow_trees * forest_sites);
+}
+
+test "whole trees reconstruct across the X seam on protected mainland" {
+    const allocator = std.testing.allocator;
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 64, 64, 4 } });
+    var owners = [_]u8{0} ** 256;
+    var coarse = [_]u16{0} ** 256;
+    for (2..14) |y| for (0..8) |column| {
+        const x = (column + 12) % 16;
+        owners[y * 16 + x] = 1;
+        coarse[y * 16 + x] = @intCast(@min(column + 1, 8 - column, y - 1, 14 - y));
+    };
+    // A fixed seam-crossing mainland keeps the whole-tree test independent of
+    // whether a particular random continent happens to reach X=0 this version.
+    var world = NaturalWorld{
+        .layout = &layout,
+        .seed = 12345,
+        .settings = .{},
+        .climate = .{ .seed = hash.stream(12345, .climate, 0), .width = 2048, .height = 2048, .displacement = (NaturalSettings{}).climateDisplacement(2048) },
+        .geography = .{ .seed = hash.stream(12345, .continents, 0), .width = 2048, .height = 2048, .depth = 128, .sea_level = 48, .continent_count = 1, .island_count = 0, .macro_width = 16, .macro_height = 16, .owners = &owners, .coastal_distance = &coarse },
+        .first_start = .{ 256, 640, 48 },
+        .report = .{ .selected_attempt = 0 },
+        .deposits = .{ .width = 2048, .height = 2048 },
+    };
+    world.geography.core_seeds[0] = .{ 1, 8 };
+    try world.geography.prepareCoast(allocator);
+    defer world.geography.coast_field.deinit(allocator);
     var seam_seen = false;
     for (0..layout.size_in_blocks[1] / 8) |cell_y| {
         for ([_]i64{ 0, layout.size_in_blocks[0] / 8 - 1 }) |cell_x| {
             const tree = vegetation.eligible(&world, cell_x, @intCast(cell_y)) orelse continue;
             if (tree.root[0] >= 2 and tree.root[0] < layout.size_in_blocks[0] - 2) continue;
             if (!vegetation.accepted(&world, tree)) continue;
+            try std.testing.expectEqualDeep(tree, vegetation.eligible(&world, tree.cell[0] - layout.size_in_blocks[0] / 8, tree.cell[1]).?);
+            const across: i64 = if (tree.root[0] < 2) -1 else layout.size_in_blocks[0];
+            try std.testing.expect(tree.blockAt(across, tree.root[1], tree.root[2] + tree.trunk_height - 1, layout.size_in_blocks[0]) != null);
             try expectTreeReassembly(&world, tree);
             seam_seen = true;
             break;

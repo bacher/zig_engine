@@ -103,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
     var lines: std.ArrayList(u8) = .empty;
     var accepted: usize = 0;
     var rejected: usize = 0;
-    var total_land: f64 = 0;
+    const land_estimates = try a.alloc(f64, seed_count);
     for (0..seed_count) |index| {
         const seed = first_seed +% index;
         var report: generation.PreparationReport = .{};
@@ -120,6 +120,16 @@ pub fn main(init: std.process.Init) !void {
         const preparation_ns = beginning.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
         const sample0 = diagnostics.sampleEnvironment(&prepared, 512, 256, 0);
         const sample1 = diagnostics.sampleEnvironment(&prepared, 512, 256, 1);
+        const land_estimate = (sample0.landPercent() + sample1.landPercent()) / 2;
+        var coarse_mainland_cells: usize = 0;
+        const geography = &prepared.kind.natural.geography;
+        for (geography.owners) |owner| coarse_mainland_cells += @intFromBool(owner != 0);
+        const coarse_mainland = .{
+            .land_cells = coarse_mainland_cells,
+            .total_cells = geography.owners.len,
+            .land_percent = @as(f64, @floatFromInt(coarse_mainland_cells)) * 100 / @as(f64, @floatFromInt(geography.owners.len)),
+            .scope = "mainland macro ownership before coast refinement; excludes islands",
+        };
         var populations: [5][3]u32 = @splat(@splat(0));
         var effective_blocks: [5][3]u64 = @splat(@splat(0));
         var center_effective: [5][3]u32 = @splat(@splat(0));
@@ -135,11 +145,11 @@ pub fn main(init: std.process.Init) !void {
             mountains[r] += @intFromBool(e.relief == .mountain);
             sedimentary[r] += @intFromBool(e.geology == .sedimentary);
         }
-        const line = try std.json.Stringify.valueAlloc(a, .{ .seed = seed, .status = "accepted", .preparation = report, .preparation_ns = preparation_ns, .first_start = prepared.firstStart().?, .sample_grid = .{ 512, 256 }, .sample_pass0 = sample0, .sample_pass1 = sample1, .land_percent_pass0 = sample0.landPercent(), .land_percent_pass1 = sample1.landPercent(), .sample_disagreement_percentage_points = @abs(sample0.landPercent() - sample1.landPercent()), .resource_order = "metal_ore,limestone,clay,coal,sand", .size_order = "large,small,starter", .deposit_populations = populations, .exact_effective_blocks = effective_blocks, .estimated_resource_distribution_pass0 = resourceDistribution(&prepared, 0), .estimated_resource_distribution_pass1 = resourceDistribution(&prepared, 1), .distribution_axes = "resource,relief(lowland/mountain),geology(sedimentary/rocky)", .eligible_host_volume_estimator = "sample.host_depth_by_relief_geology * world_horizontal_area / sample.samples", .effective_centers = center_effective, .mountain_deposit_centers = mountains, .sedimentary_deposit_centers = sedimentary }, .{});
+        const line = try std.json.Stringify.valueAlloc(a, .{ .seed = seed, .status = "accepted", .preparation = report, .preparation_ns = preparation_ns, .coarse_mainland = coarse_mainland, .first_start = prepared.firstStart().?, .sample_grid = .{ 512, 256 }, .sample_pass0 = sample0, .sample_pass1 = sample1, .land_percent_pass0 = sample0.landPercent(), .land_percent_pass1 = sample1.landPercent(), .sample_disagreement_percentage_points = @abs(sample0.landPercent() - sample1.landPercent()), .resource_order = "metal_ore,limestone,clay,coal,sand", .size_order = "large,small,starter", .deposit_populations = populations, .exact_effective_blocks = effective_blocks, .estimated_resource_distribution_pass0 = resourceDistribution(&prepared, 0), .estimated_resource_distribution_pass1 = resourceDistribution(&prepared, 1), .distribution_axes = "resource,relief(lowland/mountain),geology(sedimentary/rocky)", .eligible_host_volume_estimator = "sample.host_depth_by_relief_geology * world_horizontal_area / sample.samples", .effective_centers = center_effective, .mountain_deposit_centers = mountains, .sedimentary_deposit_centers = sedimentary }, .{});
         try lines.appendSlice(a, line);
         try lines.append(a, '\n');
+        land_estimates[accepted] = land_estimate;
         accepted += 1;
-        total_land += (sample0.landPercent() + sample1.landPercent()) / 2;
         std.debug.print("seed={d} accepted attempt={d} land={d:.3}% disagreement_pp={d:.4} prep_ms={d:.3} peak_owned={d}\n", .{ seed, report.selected_attempt.?, (sample0.landPercent() + sample1.landPercent()) / 2, @abs(sample0.landPercent() - sample1.landPercent()), @as(f64, @floatFromInt(preparation_ns)) / std.time.ns_per_ms, report.peak_owned_bytes });
         if (index < 4) {
             const map_path = if (index == 0) path else try std.fmt.allocPrint(a, "{s}.seed-{d}.ppm", .{ path, seed });
@@ -148,5 +158,22 @@ pub fn main(init: std.process.Init) !void {
     }
     const report_path = try std.fmt.allocPrint(a, "{s}.jsonl", .{path});
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = report_path, .data = lines.items });
-    std.debug.print("suite first_seed={d} count={d} accepted={d} rejected={d} mean_land_percent={d:.3} report={s}\n", .{ first_seed, seed_count, accepted, rejected, if (accepted > 0) total_land / @as(f64, @floatFromInt(accepted)) else 0, report_path });
+    const coverage = diagnostics.summarizeLandCoverage(land_estimates[0..accepted]);
+    const summary = try std.json.Stringify.valueAlloc(a, .{
+        .first_seed = first_seed,
+        .requested_seeds = seed_count,
+        .accepted_seeds = accepted,
+        .rejected_seeds = rejected,
+        .coverage_informational_only = true,
+        .nominal_land_percent = 35,
+        .soft_envelope_percent = .{ 25, 45 },
+        .soft_envelope_desired_seed_fraction = 0.95,
+        .coverage_estimator = "per-seed mean of two reproducible jittered 512x256 grids over all horizontal world area, including oceans and polar strips",
+        .percentile_method = "empirical linear interpolation at (n-1)*p over successfully prepared seeds; descriptive, not confidence bounds or seed acceptance criteria",
+        .land_coverage = coverage,
+    }, .{});
+    const summary_path = try std.fmt.allocPrint(a, "{s}.summary.json", .{path});
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = summary_path, .data = summary });
+    std.debug.print("suite first_seed={d} count={d} accepted={d} rejected={d} mean_land_percent={d:.3} report={s} summary={s}\n", .{ first_seed, seed_count, accepted, rejected, coverage.mean_percent orelse 0, report_path, summary_path });
+    std.debug.print("suite informational land coverage: {s}\n", .{summary});
 }

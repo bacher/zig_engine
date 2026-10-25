@@ -22,8 +22,8 @@ Implementation evidence and measured defaults are recorded in the
 ## Context
 
 - [Game vision](../../docs/game-vision.md) defines one-metre voxels, periodic X, finite Y/Z,
-  physical logistics, and large exhaustible deposits. This feature adopts 60% land / 40%
-  ocean, superseding the vision's earlier approximate half-ocean suggestion. Its candidate
+  physical logistics, and large exhaustible deposits. This feature adopts a soft 35% land /
+  65% ocean target, superseding the earlier 60% land target. Its candidate
   Voronoi algorithm is background, not an implementation constraint.
 - Before this feature, [world configuration](../../docs/world-configuration.md) selected
   `512 × 256 × 8` **chunks**, each `32³` blocks. `WorldLayout` is immutable, coordinates are
@@ -65,13 +65,15 @@ Implementation evidence and measured defaults are recorded in the
   requiring a full-world land-area census. Protected water gaps separate distinct islands
   from one another and from all continents; islands cannot merge into an extra large
   landmass or bridge two continents.
-- R4: Target approximately 60% dry land in horizontal projection, counting every `(X,Y)`
-  once, regardless of elevation, including both continents and islands. Use this as a
-  construction/tuning target, not a reason to count every final land column or run an
-  expensive fine-resolution coverage pass during preparation/regeneration. Offline seed
-  diagnostics may estimate coverage; proposed tuning range is 58–62%. Ocean and inaccessible
-  polar strips are included in the denominator; tree canopies are not land. Climate area
-  allocation is independent of land coverage and needs no land-area normalization.
+- R4: Target approximately 35% dry land in horizontal projection, counting every `(X,Y)`
+  once, regardless of elevation, including both continents and islands. This is soft
+  statistical guidance: roughly 95% of default-profile seeds within 25–45% land is sufficient.
+  Prefer more natural shapes and cheaper preparation over a precise per-world fraction.
+  Do not impose an exact occupied-cell quota, resize finished continents, or reject/retry
+  candidates solely to satisfy a land ratio. Offline seed diagnostics estimate coverage
+  and report its distribution; normal preparation/regeneration needs no fine-resolution
+  coverage pass. Ocean and inaccessible polar strips are included in the denominator;
+  tree canopies are not land. Climate area allocation remains independent of land coverage.
 - R5: Mountains form coherent ranges, independently of climate and vegetation. They may
   overlap steppe, temperate, and desert climates, but no frozen column is classified as
   mountain. Ocean floors do not become land merely because a ridge crosses them.
@@ -371,8 +373,8 @@ Implementation evidence and measured defaults are recorded in the
 - Q11: Are islands part of the first iteration?
   A11: CONFIRMED on 2026-10-22: yes, in addition to 3–5 major continents. Islands receive
   climate from their coordinates, with no recalculation of climate shares by land area.
-  Retain the original approximate 60% total-land target as coarse tuning; exact land-column
-  counting is unnecessary. Island size/count is tuned from seed maps.
+  The land target was subsequently relaxed to a nominal 35% on 2026-10-25 (Q19); exact
+  land-column counting is unnecessary. Island size/count is tuned from seed maps.
 - Q12: What happens to foliage after felling?
   A12: CONFIRMED on 2026-10-22: opaque green colliding cubes, without automatic removal
   after trunk mining. Natural floating leaf blocks are allowed until a later tree feature.
@@ -411,6 +413,12 @@ Implementation evidence and measured defaults are recorded in the
 - Q18: Which continental construction should the implementation use?
   A18: CONFIRMED on 2026-10-23 after reviewing analytic prototype seed maps: retain
   coarse-grid growth with protected cores. The analytic prototype was too regular.
+- Q19: How closely should land coverage match its target?
+  A19: CONFIRMED on 2026-10-25: change the nominal target to 35% and treat it as soft
+  guidance. Approximately 95% of seeds within 25–45% is acceptable; favor natural shapes
+  and performance over enforcing an exact fraction. Connectivity and island separation
+  remain validity requirements. Highly elongated custom layouts need no special growth
+  handling or coverage tuning.
 
 ## Acceptance Criteria
 
@@ -429,10 +437,11 @@ consolidation tasks remain separate.
   continents; macro labels alone are insufficient. Structural invariants plus exhaustive
   reduced-world checks establish this without a full-world land census on startup. [R3]
 - AC3: GIVEN the default profile and a recorded seed suite WHEN final-column land coverage
-  is sampled offline THEN continents and islands together approach the 60% target, with
-  58–62% as the proposed tuning range, and sampling/error checks are reported. Climate
-  allocation and normal preparation/regeneration do not require that fine-resolution
-  measurement or reject a world solely for an unmeasured final fraction. [R4, R34]
+  is sampled offline THEN report the mean, empirical percentiles, and fraction of seeds
+  within the soft 25–45% envelope around a nominal 35% target, aiming for roughly 95%
+  of seeds in that range. Report sampling/error checks separately. Climate allocation
+  and normal preparation/regeneration neither require that measurement nor reject a world
+  solely for its land fraction; outliers inform tuning rather than runtime retries. [R4, R34]
 - AC4: GIVEN any X in an accepted natural world WHEN traversing Y from north to south THEN
   primary climate follows the agreed belt order, both polar extents are at least 128 blocks,
   no boundaries cross, and boundary positions vary away from chunk-aligned straight lines;
@@ -632,8 +641,10 @@ coasts with protected cell-center bridges, and separated connected island footpr
 Distinct continent owners cannot occupy neighboring macro cells, including diagonals.
 This construction replaces the draft's provisional two-macro-cell neck heuristic with
 explicit surviving cardinal paths. Final-column reduced and adversarial fixtures verify
-the core/component and water-gap contracts. The 61% coarse target produces approximately
-60.74% sampled final land across seeds 12345–12408; normal preparation performs no fine census.
+the core/component and water-gap contracts. Growth stops at a seeded cost horizon tuned
+for nominal 35% land, allowing the actual fraction to vary with geography. There is no
+occupied-cell quota or ratio-based candidate rejection; normal preparation performs no
+fine census. Offline diagnostics report the resulting coverage distribution.
 
 Fixed-point integer fields and named SplitMix64 streams drive climate, terrain, one winding
 ridge per mainland, geology, and vegetation. Bounded deposit descriptors use exact integer
@@ -688,9 +699,18 @@ guides large-scale geography, never assigns a whole chunk its climate or vegetat
 2. Grow connected land cores from the K seeds while reserving water corridors between
    continents. Prefer irregular broad shapes, bays, and nonuniform mainland sizes. Protect
    a connected interior spine and avoid narrow accidental isthmuses.
-3. Grow toward 61% macro land, leaving approximately 60% after coast erosion. Validate actual
-   component
-   connectivity, not just K different owner labels. Across X, neighbors use modulo width;
+3. Stop weighted growth at the deterministic integer cost horizon
+   `floor(sqrt(N * 35 * 98 * 98 / (200 * K)))`, where N is the macro-cell count. This uses
+   the cardinal-growth area scale only as a starting estimate; the coefficient is tuned
+   offline for approximately 35% final land. Do not continue filling to an occupied-cell
+   quota, resize finished continents, or reject a candidate for its land ratio. Use a
+   stronger coherent cost field at scale `max(256, height / 8)` blocks, with positive
+   source-cell costs in [24,202], to produce nonuniform lobes and bays. Evaluate the cost
+   once per accepted cell and reuse it for all four outgoing edges. Scale root delays
+   below `max(1, horizon / 40)` so they remain small on supported smaller layouts.
+   Validate actual component connectivity, not just K different owner labels, and retain
+   a substantial-core minimum independently of the stopping rule.
+   Across X, neighbors use modulo width;
    north/south do not connect. Reject a growth cell adjacent to another owner in its
    eight-neighbor macro neighborhood. Keep connected row intervals containing each owned
    cell's center and shared cardinal bridges during 8–24-block coast erosion. Smaller islands

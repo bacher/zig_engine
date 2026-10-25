@@ -466,6 +466,16 @@ test "accepted natural climate maps material oracle and regenerated derived data
     }
 }
 
+fn suitableBeachSite(prepared: *const generator.PreparedWorldGenerator, site: [2]u32) bool {
+    const shore = prepared.columnEnvironmentAt(site[0], site[1]);
+    if (shore.water_present or shore.surface_cover != .soil or shore.coast_distance > 3 or shore.terrain_height > shore.sea_level + 3) return false;
+    for ([_][2]i32{ .{ -1, 0 }, .{ 1, 0 }, .{ 0, -1 }, .{ 0, 1 } }) |offset| {
+        const near = prepared.columnEnvironmentAt(@as(i64, site[0]) + offset[0], @intCast(@as(i64, site[1]) + offset[1]));
+        if (@abs(@as(i64, near.terrain_height) - shore.terrain_height) > 2) return false;
+    }
+    return true;
+}
+
 test "optional beaches replace shallow shore cover without changing geography climate or starter sand" {
     const a = std.testing.allocator;
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2048, 1024, 32 } });
@@ -475,11 +485,34 @@ test "optional beaches replace shallow shore cover without changing geography cl
     defer beach.deinit(a);
     try std.testing.expectEqualDeep(plain.firstStart(), beach.firstStart());
     try std.testing.expectEqualSlices(u8, plain.kind.natural.geography.owners, beach.kind.natural.geography.owners);
-    const island = plain.kind.natural.geography.islands[0];
-    const sites = [_][2]u32{
-        .{ 3951, 3264 }, // Seeded low-slope mainland shore, also used by the benchmark.
-        .{ hash.wrappedX(@as(i64, island.x) + island.radius_x - 2, layout.size_in_blocks[0]), island.y },
-    };
+    const geography = &plain.kind.natural.geography;
+    var mainland_site: ?[2]u32 = null;
+    mainland: for (geography.owners, 0..) |owner, i| {
+        if (owner == 0 or geography.coastal_distance[i] != 1) continue;
+        const x: u32 = @intCast(i % geography.macro_width * 128);
+        const y: u32 = @intCast(i / geography.macro_width * 128);
+        // The bounded erosion fringe is 8–24 blocks wide. Search actual shore
+        // edges so land-growth tuning cannot move this overlay fixture inland.
+        for (0..32) |offset| {
+            const d: u32 = @intCast(offset);
+            for ([_][2]u32{ .{ x + d, y + 64 }, .{ x + 127 - d, y + 64 }, .{ x + 64, y + d }, .{ x + 64, y + 127 - d } }) |site| {
+                if (!suitableBeachSite(&plain, site)) continue;
+                mainland_site = site;
+                break :mainland;
+            }
+        }
+    }
+    var island_site: ?[2]u32 = null;
+    islands: for (geography.islands[0..geography.island_count]) |island| {
+        for (2..5) |inset| for ([_]i64{ -1, 1 }) |side| {
+            const site = [2]u32{ hash.wrappedX(@as(i64, island.x) + side * @as(i64, @intCast(island.radius_x - inset)), layout.size_in_blocks[0]), island.y };
+            if (!suitableBeachSite(&plain, site)) continue;
+            island_site = site;
+            break :islands;
+        };
+    }
+    try std.testing.expect(mainland_site != null and island_site != null);
+    const sites = [_][2]u32{ mainland_site.?, island_site.? };
     for (sites) |site| {
         const before = plain.columnEnvironmentAt(site[0], site[1]);
         const after = beach.columnEnvironmentAt(site[0], site[1]);

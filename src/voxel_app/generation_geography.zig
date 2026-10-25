@@ -77,6 +77,7 @@ pub const Geography = struct {
             defer allocator.free(positions);
             @memset(positions, std.math.maxInt(u32));
             var heap = Heap{ .ids = heap_ids, .positions = positions, .costs = costs };
+            const horizon = growthHorizon(count, self.continent_count);
             for (0..self.continent_count) |i| {
                 const h = hash.mix(seed +% i);
                 const sector = mw / self.continent_count;
@@ -87,14 +88,11 @@ pub const Geography = struct {
                 const index = sy * mw + sx;
                 self.core_seeds[i] = .{ sx, sy };
                 pending[index] = @intCast(i + 1);
-                costs[index] = @intCast((h >> 32) % 200);
+                costs[index] = @intCast((h >> 32) % @max(1, horizon / 40));
                 heap.insert(index);
             }
-            var filled: usize = 0;
-            // Coast erosion removes a bounded fringe; this coarse target is tuned
-            // offline, never followed by a fine-resolution acceptance census.
-            const target = count * 61 / 100;
             while (heap.pop()) |index| {
+                if (costs[index] > horizon) break;
                 const x = index % mw;
                 const y = index / mw;
                 if (y == 0 or y + 1 == mh) continue;
@@ -112,15 +110,14 @@ pub const Geography = struct {
                 if (!permitted or (!has_parent and !(root[0] == x and root[1] == y))) continue;
                 owners[index] = owner;
                 self.core_counts[owner - 1] += 1;
-                filled += 1;
-                if (filled == target) break;
+                // Coherent traversal costs deform the growing fronts into broad
+                // lobes and bays. Probe once per accepted cell, then share its
+                // positive cost across the four outgoing cardinal edges.
+                const field = hash.field2(hash.mix(seed ^ 0x47524f575448), x * macro_size, y * macro_size, size[0], @max(256, size[1] / 8));
+                const edge: u32 = @intCast(24 + @divTrunc((field + 65535) * 144, 131070) + @as(i64, @intCast(hash.at(seed, x, y) % 35)));
                 const neighbors = [_]u32{ y * mw + (x + mw - 1) % mw, y * mw + (x + 1) % mw, (y - 1) * mw + x, (y + 1) * mw + x };
                 for (neighbors) |neighbor| {
                     if (owners[neighbor] != 0 or heap.positions[neighbor] == std.math.maxInt(u32) - 1) continue;
-                    const nx = neighbor % mw;
-                    const ny = neighbor / mw;
-                    const field = hash.field2(hash.mix(seed ^ 0x47524f575448), nx * 128, ny * 128, size[0], @max(256, size[1] / 12));
-                    const edge: u32 = @intCast(40 + @divTrunc((field + 65535) * 100, 131070) + @as(i64, @intCast(hash.at(seed, nx, ny) % 35)));
                     const next = costs[index] + edge;
                     if (next < costs[neighbor] or (next == costs[neighbor] and owner < pending[neighbor])) {
                         costs[neighbor] = next;
@@ -129,8 +126,11 @@ pub const Geography = struct {
                     }
                 }
             }
-            if (filled < target) return error.TopologyConflict;
-            for (self.core_counts[0..self.continent_count]) |n| if (n < @max(4, target / self.continent_count / 5)) return error.TopologyConflict;
+            // Land fraction emerges from the growth horizon; it is never an
+            // acceptance gate. Every intended continent still needs a substantial
+            // connected core, even when competing fronts grow at different rates.
+            const minimum_core = @max(4, count * 35 / 100 / self.continent_count / 5);
+            for (self.core_counts[0..self.continent_count]) |n| if (n < minimum_core) return error.TopologyConflict;
             // Reuse bounded heap scratch for a multi-source coast distance BFS.
             var read: usize = 0;
             var write: usize = 0;
@@ -324,6 +324,13 @@ pub const Geography = struct {
     }
 };
 
+/// A cardinal front has approximately 2*r*r cells. The offline-calibrated cost
+/// scale makes 35% the nominal default-world coverage, with seed-dependent area.
+/// Integer square root pins rounding across platforms; no coverage census runs.
+fn growthHorizon(cells: usize, continents: u8) u32 {
+    return std.math.sqrt(@as(u64, cells) * 35 * 98 * 98 / (200 * @as(u64, continents)));
+}
+
 const Heap = struct {
     ids: []u32,
     positions: []u32,
@@ -417,33 +424,106 @@ test "ridge uplift fades at both polar boundaries in X and Y" {
         }
     }
     try std.testing.expect(tapered_columns > 0);
-}
 
-test "default frozen-steppe ridge join has no height cliff" {
-    var geography = try Geography.init(std.testing.allocator, hash.stream(12345, .continents, 0), .{ 65536, 32768, 1024 }, .{});
-    defer geography.deinit(std.testing.allocator);
-    const climate = env.ClimateField{ .seed = hash.stream(12345, .climate, 0), .width = geography.width, .height = geography.height, .displacement = (Settings{}).climateDisplacement(geography.height) };
+    // Keep the reported frozen/steppe cliff on protected inland terrain even
+    // when a different continent-growth version moves its historical shore.
     const boundary = climate.boundaries(11647)[0];
     const frozen = geography.atWithClimate(climate, 11647, boundary - 1);
     const steppe = geography.atWithClimate(climate, 11647, boundary);
     try std.testing.expectEqual(env.ClimateId.frozen, frozen.climate);
     try std.testing.expectEqual(env.ClimateId.steppe, steppe.climate);
+    try std.testing.expectEqual(@as(u8, 1), frozen.landmass_id);
+    try std.testing.expectEqual(frozen.landmass_id, steppe.landmass_id);
+    try std.testing.expect(frozen.coast_distance > 128 and steppe.coast_distance > 128);
     try std.testing.expectEqual(@as(u16, 0), frozen.mountain_strength);
     try std.testing.expectEqual(@as(u16, 0), steppe.mountain_strength);
-    try std.testing.expectEqual(frozen.landmass_id, steppe.landmass_id);
     try std.testing.expect(@abs(@as(i64, frozen.terrain_height) - steppe.terrain_height) <= 1);
 }
 
-test "reported internal macro join has no mainland height cliff" {
-    var geography = try Geography.init(std.testing.allocator, hash.stream(12345, .continents, 0), .{ 65536, 32768, 1024 }, .{});
-    defer geography.deinit(std.testing.allocator);
-    const climate = env.ClimateField{ .seed = hash.stream(12345, .climate, 0), .width = geography.width, .height = geography.height, .displacement = (Settings{}).climateDisplacement(geography.height) };
-    const west = geography.atWithClimate(climate, 36735, 13632);
-    const east = geography.atWithClimate(climate, 36736, 13632);
-    try std.testing.expect(west.landmass_id > 0 and west.landmass_id < 128);
-    try std.testing.expectEqual(west.landmass_id, east.landmass_id);
-    try std.testing.expect(@abs(@as(i64, west.coast_distance) - east.coast_distance) <= 2);
-    try std.testing.expect(@abs(@as(i64, west.terrain_height) - east.terrain_height) <= 2);
+test "internal macro joins and wrapped mainland joins have no height cliff" {
+    for (0..2) |fixture| {
+        var owners = [_]u8{0} ** 64;
+        var coarse = [_]u16{0} ** 64;
+        for (2..6) |y| for (0..4) |column| {
+            const x = (column + (if (fixture == 0) @as(usize, 2) else 6)) % 8;
+            owners[y * 8 + x] = 1;
+            coarse[y * 8 + x] = @intCast(@min(column + 1, 4 - column, y - 1, 6 - y));
+        };
+        // Freeze the ownership shape: this coast/relief regression must continue
+        // sampling mainland when continent-growth tuning changes seeded maps.
+        var geography = Geography{ .seed = hash.stream(12345, .continents, 0), .width = 1024, .height = 1024, .depth = 128, .sea_level = 48, .continent_count = 1, .island_count = 0, .macro_width = 8, .macro_height = 8, .owners = &owners, .coastal_distance = &coarse };
+        geography.core_seeds[0] = .{ if (fixture == 0) 3 else 7, 3 };
+        try geography.prepareCoast(std.testing.allocator);
+        defer geography.coast_field.deinit(std.testing.allocator);
+        const x: u32 = if (fixture == 0) 511 else 1023;
+        const west = geography.at(.temperate, x, 448);
+        const east = geography.at(.temperate, @as(i64, x) + 1, 448);
+        try std.testing.expectEqual(@as(u8, 1), west.landmass_id);
+        try std.testing.expectEqual(west.landmass_id, east.landmass_id);
+        try std.testing.expect(@abs(@as(i64, west.coast_distance) - east.coast_distance) <= 2);
+        try std.testing.expect(@abs(@as(i64, west.terrain_height) - east.terrain_height) <= 2);
+    }
+}
+
+test "growth horizon uses bounded integer square root at supported grid sizes" {
+    for ([_]usize{ 256, 131072, 1048576 }) |cells| for ([_]u8{ 3, 4, 5 }) |continents| {
+        const squared = @as(u64, cells) * 35 * 98 * 98 / (200 * @as(u64, continents));
+        const horizon: u64 = growthHorizon(cells, continents);
+        try std.testing.expect(horizon * horizon <= squared);
+        try std.testing.expect((horizon + 1) * (horizon + 1) > squared);
+    };
+}
+
+test "cost limited continents are deterministic connected separated and vary in area" {
+    var areas: [2]u32 = @splat(0);
+    for ([_]u64{ 12345, 0 }, 0..) |seed, sample| {
+        const stream = hash.stream(seed, .continents, 0);
+        var first = try Geography.init(std.testing.allocator, stream, .{ 2048, 2048, 128 }, .{ .island_count = 1 });
+        defer first.deinit(std.testing.allocator);
+        var again = try Geography.init(std.testing.allocator, stream, .{ 2048, 2048, 128 }, .{ .island_count = 1 });
+        defer again.deinit(std.testing.allocator);
+        try std.testing.expectEqualSlices(u8, first.owners, again.owners);
+        try std.testing.expectEqualSlices(u16, first.coastal_distance, again.coastal_distance);
+        try std.testing.expectEqualDeep(first.core_counts, again.core_counts);
+        try std.testing.expectEqualDeep(first.islands[0], again.islands[0]);
+        const mw = first.macro_width;
+        const mh = first.macro_height;
+        for (first.owners, 0..) |owner, i| {
+            if (owner == 0) continue;
+            areas[sample] += 1;
+            const x: i64 = @intCast(i % mw);
+            const y: i64 = @intCast(i / mw);
+            try std.testing.expect(y > 0 and y + 1 < mh);
+            for (0..3) |oy| for (0..3) |ox| {
+                const neighbor = first.ownerAt(x + @as(i64, @intCast(ox)) - 1, y + @as(i64, @intCast(oy)) - 1);
+                try std.testing.expect(neighbor == 0 or neighbor == owner);
+            };
+        }
+        // An independent cardinal graph walk checks each owner reaches its root.
+        for (first.core_seeds[0..first.continent_count], 0..) |root, owner_index| {
+            var visited = [_]bool{false} ** 256;
+            var queue: [256]u32 = undefined;
+            const start = root[1] * mw + root[0];
+            queue[0] = start;
+            visited[start] = true;
+            var read: usize = 0;
+            var count: usize = 1;
+            while (read < count) : (read += 1) {
+                const index = queue[read];
+                const x = index % mw;
+                const y = index / mw;
+                for ([_]?u32{ y * mw + (x + mw - 1) % mw, y * mw + (x + 1) % mw, if (y > 0) index - mw else null, if (y + 1 < mh) index + mw else null }) |possible| {
+                    const next = possible orelse continue;
+                    if (visited[next] or first.owners[next] != owner_index + 1) continue;
+                    visited[next] = true;
+                    queue[count] = next;
+                    count += 1;
+                }
+            }
+            try std.testing.expectEqual(first.core_counts[owner_index], count);
+        }
+    }
+    try std.testing.expect(areas[0] != areas[1]);
 }
 
 test "approximate mainland coast has bounded shore error and gradients at corners necks and seam" {

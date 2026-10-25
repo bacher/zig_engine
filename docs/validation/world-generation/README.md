@@ -9,9 +9,16 @@ The default profile is generator **2 / version 1**, natural, seed **12345**, wit
 
 Preparation grows 3–5 cardinally connected continents on a 512 × 256 macro grid
 (128 × 128 blocks per cell), refines their coasts by bounded erosion, and places
-12 smaller, separated islands. A 61% macro growth target leaves approximately
-60% final land after refinement. It prepares compact geography and feature data
-once; regenerating a column does not repeat this work.
+12 smaller, separated islands. Land now has a soft 35% target, with roughly 95%
+of default-profile seeds within 25–45% considered sufficient. Growth stops at
+an integer cost horizon instead of filling an exact occupied-cell quota. Stronger
+coherent regional costs make uneven lobes and bays, and the cost at each accepted
+cell is evaluated once for all four outgoing edges. Coverage never rejects a
+candidate; connectivity and feature validity remain required. Geography and feature
+data are prepared once; regenerating a column does not repeat this work.
+The [controlled geography benchmark](land-coverage-comparison/README.md) records
+a median reduction from 8.336 to 4.195 ms (49.7%) with unchanged requested memory.
+This measures geography preparation, not complete preparation or regeneration.
 
 Periodic integer fields provide winding climate boundaries, geology, rolling
 terrain, mountain ridges, and forest/meadow regions. Climate belts run north to
@@ -25,7 +32,8 @@ to 1310 blocks at the default size, replacing the barely visible 96-block
 default. Opposite control points have opposite signs, preserving exact boundary
 means over all X columns and the target belt areas up to integer rounding of
 nominal latitudes. These allocation-free queries need no retained field table.
-The [before-and-after climate map](climate-before-after.png) shows seed 12345.
+The [before-and-after climate map](climate-before-after.png) preserves the earlier
+61% footprint to isolate the climate change. Current maps below use the soft land target.
 New natural worlds use automatic mode; saved nonzero amplitudes retain their
 explicit block values.
 
@@ -51,8 +59,11 @@ with a shared bilinear inland field. It crosses internal macro edges continuousl
 with a cardinal step bound of two. Land ownership and coast erosion are unchanged.
 The approximation may flatten up to 16 extra blocks beside the real shore; its
 inland values do not promise exact water distance. Islands retain their separate
-analytic taper. At the reported seed-12345 join `(36735,13632)` → `(36736,13632)`,
-height **454 → 385** becomes **405 → 405**. An independent fine-grid distance BFS
+analytic taper. In the original seed-12345 review fixture at
+`(36735,13632)` → `(36736,13632)`, height **454 → 385** became **405 → 405**.
+Regressions use fixed mainland fixtures for internal and wrapped joins independently
+of current continent growth.
+An independent fine-grid distance BFS
 checks 514,882 mainland columns in concave, neck, corner, and seam fixtures,
 including maximally conservative trim records. Maximum adjacent-land height delta
 in those reduced fixtures is four blocks.
@@ -112,13 +123,13 @@ macOS 26.7.1 (25G241).
 | Check | Result |
 | --- | --- |
 | `zig build` | Passed; both applications and installed content built |
-| `zig build test` | 45/45 steps; 904 passed, 1 skipped of 905 registered tests |
-| `zig build test-generation` | 224/224 passed; included in the full suite |
+| `zig build test` | 45/45 steps; 910 passed, 1 skipped of 911 registered tests |
+| `zig build test-generation` | 228/228 passed; included in the full suite |
 | `zig build test-persistence` | 43/43 passed; included in the full suite |
 | `zig build test-capture` | Passed on 2026-10-23 |
 | `zig build test-gpu` | 2026-10-23: 19/19 steps; 90/90 passed on Metal, both wrapping configurations |
 | ReleaseFast / ReleaseSafe regeneration | All 24 representative hashes agree between builds |
-| 64-seed diagnostic suite | 64 accepted; no exhausted seeds |
+| 256-seed diagnostic suite | 256 accepted; no exhausted seeds |
 | Player-scale inspection | 2026-10-23: safe grass spawn, complete trunks/crowns, opaque foliage and shadows |
 
 The CPU skip is the existing nonwrapping counterpart of a wrap-specific
@@ -126,9 +137,9 @@ coordinate test. See the [final CPU transcript](cpu-suite.txt).
 The 2026-10-25 rerun covers the build, full CPU suite (including persistence),
 generation diagnostics, both benchmark modes, and overview maps. GPU and
 player-scale results above are retained from 2026-10-23; shaders and material
-rendering were unchanged by these review corrections and climate tuning. Those
-GPU checks compile production shaders and read back material colors; climate soil meshing and
-saved-material identity also have CPU tests. Prior manual inspection covered
+rendering were unchanged by these review corrections, climate tuning, and land
+growth changes. Those GPU checks compile production shaders and read back material
+colors; climate soil meshing and saved-material identity also have CPU tests. Prior manual inspection covered
 spawn terrain and nearby forest, not every climate or water configuration.
 
 | Acceptance criteria | Evidence |
@@ -148,34 +159,36 @@ revisions, metadata, carried inventory, climate, prepared fingerprint, and floor
 
 ## Seed-suite measurements
 
-[Raw JSONL](seeds-12345-12408.jsonl), [run log](seed-suite.txt), and
-[summary](summary.json) cover seeds **12345–12408**. Each seed uses two
+[Raw JSONL](seeds-12345-12600.jsonl), [run log](seed-suite.txt), and
+[summary](summary.json) cover seeds **12345–12600**. Each seed uses two
 deterministically jittered 512 × 256 sampling grids: 131,072 columns per pass.
 The second offset measures sensitivity to the sampling grid, not a statistical
 confidence interval. Reduced topology fixtures separately enumerate final
 land columns exactly to verify connectivity.
 
-- Mean estimated land: **60.7434%**; individual pass estimates
-  **60.6796–60.8116%**. Maximum disagreement between offsets: **0.0397 percentage
-  points**. Normal preparation does not run this coverage scan.
+- Mean estimated land: **35.4650%**; median **35.5570%**. **253/256 seeds
+  (98.83%)** fall within 25–45%. Empirical p2.5–p97.5 is **27.0730–43.9271%**;
+  p95 is **42.8470%**. Individual pass estimates span **23.6526–46.5591%**.
+  Maximum disagreement between offsets is **0.0465 percentage points**.
+  [Coverage diagnostics](land-coverage.json) are informational; normal preparation
+  does not run this scan or reject seeds for their land ratio.
 - Mean belt areas are approximately **10.00 / 10.00 / 25.00 / 10.00 / 25.00 /
   10.00 / 10.00%**, within the specified one-percentage-point tolerance.
   Per-seed world and land-only climate counts are retained in the JSONL.
-- 63 seeds accepted attempt 0. Seed **12376** rejected its first candidate for
-  `start_access_unavailable` and accepted attempt 1; the full trace is retained.
-- Preparation took **32.37–79.79 ms**, mean **39.05 ms**. Peak requested owned
+- All 256 seeds accepted attempt 0, including first-start and deposit preparation.
+- Preparation took **24.44–37.47 ms**, mean **30.11 ms**. Peak requested owned
   allocation was **2,122,272 bytes**, below the 32-MiB preparation gate.
-  Maximum indexed feature references: **95**; maximum bucket occupancy: **9**
+  Maximum indexed feature references: **101**; maximum bucket occupancy: **13**
   against the configured per-bucket limit of 64.
 
 Every seed has eight large deposits per resource. Large sources account for at
-least **99.9461%** of descriptor resource volume for every resource in every
+least **99.9370%** of descriptor resource volume for every resource in every
 seed. Spatial allocation is estimated separately: per-deposit accepted samples
 are weighted by exact effective block counts, and eligible host volume is
 estimated from the two column passes. These estimates place **100%** of metal
-in mountains in both passes (mountain host density approximately 0.000278,
+in mountains in both passes (mountain host density approximately 0.000392,
 sampled lowland density zero). Non-metal resources are at least approximately
-**99.19% sedimentary** and **99.77% lowland**. Exact totals and sampled spatial
+**99.18% sedimentary** and **99.82% lowland**. Exact totals and sampled spatial
 fractions are separate fields in the summary. Desert surface sand is not
 included in descriptor totals. Extraction lifetimes and transport balance remain
 untuned until production rates and recipes exist.
@@ -193,16 +206,18 @@ checked separately by generator tests and conservative generation bounds.
 
 | ReleaseFast workload | Beaches off | Beaches on |
 | --- | ---: | ---: |
-| Cold column + surface chunk + hash, median | 0.391 ms | 0.341 ms |
-| 32 vertical chunks from a cached column, median | 7.214 ms | 7.210 ms |
-| Mainland shore column initialization, median | 0.176 ms | 0.372 ms |
-| 96-column forward traversal | 35.692 ms | 35.402 ms |
-| Reverse traversal after eviction | 29.528 ms | 30.306 ms |
+| Cold column + surface chunk + hash, median | 0.483 ms | 0.376 ms |
+| 32 vertical chunks from a cached column, median | 5.709 ms | 5.728 ms |
+| Mainland shore column initialization, median | 0.191 ms | 0.342 ms |
+| 96-column forward traversal | 27.577 ms | 27.605 ms |
+| Reverse traversal after eviction | 21.945 ms | 22.525 ms |
 
 These small workloads show timing noise and location-dependent beach cost;
 they do not establish a general speedup or a controlled before/after comparison
-with the prior report. The layered climate queries perform more integer field
-evaluations; the measured retained and peak allocation sizes are unchanged.
+with prior regeneration reports. Land tuning changes both terrain and the chosen
+representative sites. The separate geography comparison above isolates preparation
+at identical seeds and settings; its improvement does not imply the same gain
+for regeneration. The measured retained and peak allocation sizes are unchanged.
 Beaches remain **off by default**.
 The logs separately report column, chunk-fill, and meshing times, throughput,
 allocation calls/resizes, and p95. Retained environment/border sample counts
@@ -235,6 +250,9 @@ brown mountains, dark-green forest, and light-green meadow. Resource markers
 are red (metal), cream (limestone), rust (clay), near-black (coal), and yellow
 (sand). Marker sizes aid visibility and are not deposit footprints.
 
+[Before/after land coverage, seed 12345](land-before-after.png). Climate boundaries
+are unchanged by the land tuning; their colors over water differ from dry land.
+
 [Seed 12345](seed-12345.png) · [12346](seed-12346.png) ·
 [12347](seed-12347.png) · [12348](seed-12348.png)
 
@@ -245,12 +263,14 @@ zig build -j2
 zig build test -j2 --summary all
 zig build test-capture -j2
 zig build test-gpu -j2 --summary all
-zig build generation-map -Doptimize=ReleaseFast -j2 -- /tmp/overview.ppm 12345 64
+zig build generation-map -Doptimize=ReleaseFast -j2 -- /tmp/overview.ppm 12345 256
 zig build benchmark-generation -Doptimize=ReleaseFast -j2 -- 12345 9
 zig build benchmark-generation -Doptimize=ReleaseSafe -j2 -- 12345 3
 ```
 
-The map command writes PPM maps and a `.jsonl` report. PNGs here are lossless
+The map command writes PPM maps, a per-seed `.jsonl` report, and an informational
+`.summary.json` with empirical coverage percentiles and the envelope fraction.
+PNGs here are lossless
 conversions. Sandboxed build/test checks used
 `--global-cache-dir /private/tmp/zig-worldgen-cache` before `--` where needed;
 the recorded diagnostic and benchmark runs used the same seeds and build modes
@@ -267,8 +287,9 @@ still uses bounded macro-cell trims. The approximate relief coordinate crosses
 internal joins continuously but can add a flat coastal collar up to 16 blocks.
 The existing abrupt seabed-height step at the actual shore is unchanged. Ridges
 taper with coast/climate and are not branched tectonic networks. No exact final
-60% quota or equal continent-size
-guarantee is claimed. F1 foundation/pile rules, F2 NPC/farm execution, and F3
-material-definition consolidation remain deferred. Clay currently supports a
+land quota or equal continent-size guarantee is claimed. The soft coverage envelope
+is tuned for the default profile; highly elongated custom layouts are not a tuning
+target and receive no special growth handling. F1 foundation/pile rules, F2 NPC/farm
+execution, and F3 material-definition consolidation remain deferred. Clay currently supports a
 packed-soil-style stable platform without soil timers, while its mining remains
 forbidden until its use flow exists.

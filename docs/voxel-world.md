@@ -46,6 +46,10 @@ of the whole map. Each column has one climate, independent of chunk boundaries. 
 cover is sand; other covered soil renders green, yellow, or snowy according to climate.
 Soil types and timers are saved unchanged. Water and foliage render opaque cubes and retain
 full-cube collision.
+Land has a soft 35% target: roughly 95% of default-profile seeds within 25–45% is sufficient.
+Weighted macro growth stops at a cost horizon, so coherent regional costs can form uneven
+lobes and bays without filling to an exact area quota. Only topology and feature validity
+cause candidate rejection; land coverage is measured offline and never gates regeneration.
 Climate boundaries combine broad periodic bends and smaller irregularities. Their default
 amplitude scales with world height (1310 blocks at the default size); centered fields retain
 the agreed belt areas. In natural settings, zero `climate_displacement` selects this

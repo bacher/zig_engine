@@ -3,6 +3,85 @@ const std = @import("std");
 const generator = @import("world_generator.zig");
 const hash = @import("generation_hash.zig");
 
+pub const LandCoverageSummary = struct {
+    measured_seeds: usize,
+    mean_percent: ?f64 = null,
+    p2_5_percent: ?f64 = null,
+    p50_percent: ?f64 = null,
+    p95_percent: ?f64 = null,
+    p97_5_percent: ?f64 = null,
+    seeds_within_25_45_percent: usize = 0,
+    fraction_within_25_45_percent: ?f64 = null,
+};
+
+/// Empirical percentiles interpolate between adjacent sorted observations at
+/// (n - 1) * p. They describe this suite, not confidence bounds for world coverage.
+fn percentileSorted(sorted: []const f64, p: f64) f64 {
+    std.debug.assert(sorted.len > 0 and p >= 0 and p <= 1);
+    const position = @as(f64, @floatFromInt(sorted.len - 1)) * p;
+    const lower: usize = @intFromFloat(@floor(position));
+    const upper = @min(lower + 1, sorted.len - 1);
+    return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - @as(f64, @floatFromInt(lower)));
+}
+
+/// Offline informational summary; sorts the supplied per-seed estimates in place.
+/// The inclusive 25–45% envelope is a tuning diagnostic, never a seed rejection rule.
+pub fn summarizeLandCoverage(estimates: []f64) LandCoverageSummary {
+    var summary: LandCoverageSummary = .{ .measured_seeds = estimates.len };
+    if (estimates.len == 0) return summary;
+    var total: f64 = 0;
+    for (estimates) |estimate| {
+        std.debug.assert(std.math.isFinite(estimate) and estimate >= 0 and estimate <= 100);
+        total += estimate;
+        summary.seeds_within_25_45_percent += @intFromBool(estimate >= 25 and estimate <= 45);
+    }
+    std.mem.sort(f64, estimates, {}, std.sort.asc(f64));
+    summary.mean_percent = total / @as(f64, @floatFromInt(estimates.len));
+    summary.p2_5_percent = percentileSorted(estimates, 0.025);
+    summary.p50_percent = percentileSorted(estimates, 0.5);
+    summary.p95_percent = percentileSorted(estimates, 0.95);
+    summary.p97_5_percent = percentileSorted(estimates, 0.975);
+    summary.fraction_within_25_45_percent = @as(f64, @floatFromInt(summary.seeds_within_25_45_percent)) / @as(f64, @floatFromInt(estimates.len));
+    return summary;
+}
+
+test "land coverage summary interpolates percentiles and includes envelope endpoints" {
+    var estimates = [_]f64{ 50, 25, 35, 20, 45 };
+    const summary = summarizeLandCoverage(&estimates);
+    try std.testing.expectEqual(@as(usize, 5), summary.measured_seeds);
+    try std.testing.expectApproxEqAbs(@as(f64, 35), summary.mean_percent.?, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 20.5), summary.p2_5_percent.?, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 35), summary.p50_percent.?, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 49), summary.p95_percent.?, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 49.5), summary.p97_5_percent.?, 1e-10);
+    try std.testing.expectEqual(@as(usize, 3), summary.seeds_within_25_45_percent);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.6), summary.fraction_within_25_45_percent.?, 1e-10);
+}
+
+test "land coverage summary handles empty singleton and even suites" {
+    var empty: [0]f64 = .{};
+    const no_measurements = summarizeLandCoverage(&empty);
+    try std.testing.expectEqual(@as(usize, 0), no_measurements.measured_seeds);
+    try std.testing.expectEqual(null, no_measurements.mean_percent);
+    try std.testing.expectEqual(null, no_measurements.p2_5_percent);
+    try std.testing.expectEqual(null, no_measurements.p50_percent);
+    try std.testing.expectEqual(null, no_measurements.p95_percent);
+    try std.testing.expectEqual(null, no_measurements.p97_5_percent);
+    try std.testing.expectEqual(null, no_measurements.fraction_within_25_45_percent);
+    var singleton = [_]f64{24};
+    const one = summarizeLandCoverage(&singleton);
+    try std.testing.expectEqual(@as(?f64, 24), one.mean_percent);
+    try std.testing.expectEqual(@as(?f64, 24), one.p2_5_percent);
+    try std.testing.expectEqual(@as(?f64, 24), one.p50_percent);
+    try std.testing.expectEqual(@as(?f64, 24), one.p95_percent);
+    try std.testing.expectEqual(@as(?f64, 24), one.p97_5_percent);
+    try std.testing.expectEqual(@as(?f64, 0), one.fraction_within_25_45_percent);
+    var even = [_]f64{ 45, 25 };
+    const two = summarizeLandCoverage(&even);
+    try std.testing.expectEqual(@as(?f64, 35), two.p50_percent);
+    try std.testing.expectEqual(@as(?f64, 1), two.fraction_within_25_45_percent);
+}
+
 pub const Column = struct {
     terrain_height: u32,
     sea_level: u32,
