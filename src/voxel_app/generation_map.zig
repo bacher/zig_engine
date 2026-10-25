@@ -7,6 +7,8 @@ const generation = @import("world_generator.zig");
 const diagnostics = @import("generation_diagnostics.zig");
 const deposits = @import("generation_deposits.zig");
 const hash = @import("generation_hash.zig");
+const env = @import("world_environment.zig");
+const desert = @import("generation_desert.zig");
 
 const width = 1024;
 const height = 512;
@@ -56,7 +58,10 @@ fn exportMap(init: std.process.Init, path: []const u8, prepared: *const generati
         if (e.water_present) {
             for (&climate_color, water) |*component, blue| component.* = @intCast((@as(u16, component.*) + blue) / 2);
         }
-        const relief_color: [3]u8 = if (e.water_present) water else if (e.relief == .mountain) .{ 128 + @as(u8, @intCast(e.mountain_strength / 1024)), 116, 104 } else if (e.vegetation == .forest) .{ 40, 103, 58 } else .{ 132, 169, 88 };
+        const relief_color: [3]u8 = if (e.water_present) water else if (e.relief == .mountain) .{ 128 + @as(u8, @intCast(e.mountain_strength / 1024)), 116, 104 } else if (e.desert_biome) |biome| switch (biome) {
+            .dunes => .{ 224, 171, 82 },
+            .flats => .{ 211, 201, 159 },
+        } else if (e.vegetation == .forest) .{ 40, 103, 58 } else .{ 132, 169, 88 };
         const resource_background: [3]u8 = if (e.water_present) .{ 40, 73, 99 } else .{ 125, 139, 111 };
         for ([_][3]u8{ land_color, climate_color, relief_color, resource_background }, 0..) |color, panel| {
             const offset = header.len + ((panel * height + py) * width + px) * 3;
@@ -90,6 +95,106 @@ fn exportMap(init: std.process.Init, path: []const u8, prepared: *const generati
         }
     }
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = path, .data = bytes });
+}
+
+const DesertDetailTile = struct {
+    biome: env.DesertBiome,
+    found: bool = false,
+    center: ?[2]u32 = null,
+    min_height: ?u32 = null,
+    max_height: ?u32 = null,
+    horizontal_profile: []const u32 = &.{},
+    vertical_profile: []const u32 = &.{},
+};
+
+fn pureDesertDetailColumn(prepared: *const generation.PreparedWorldGenerator, biome: env.DesertBiome, x: i64, y: u32) bool {
+    const e = prepared.columnEnvironmentAt(x, y);
+    if (e.water_present or e.climate != .desert or e.mountain_strength != 0 or e.desert_biome != biome) return false;
+    const terrain = desert.sample(prepared.kind.natural.geography.seed, hash.wrappedX(x, prepared.layout.size_in_blocks[0]), y, prepared.layout.size_in_blocks[0]);
+    return if (biome == .dunes) terrain.dune_weight == desert.unit else terrain.dune_weight == 0;
+}
+
+fn findDesertDetailTile(prepared: *const generation.PreparedWorldGenerator, biome: env.DesertBiome, side: u32, heights: []u32) ?[2]u32 {
+    const geography = &prepared.kind.natural.geography;
+    const half = side / 2;
+    candidates: for (geography.owners, 0..) |owner, i| {
+        if (owner == 0) continue;
+        const center = [2]u32{ @intCast(i % geography.macro_width * 128 + 64), @intCast(i / geography.macro_width * 128 + 64) };
+        if (center[1] < half or center[1] + half > prepared.layout.size_in_blocks[1]) continue;
+        const e = prepared.columnEnvironmentAt(center[0], center[1]);
+        if (e.coast_distance < 512 or e.desert_biome != biome) continue;
+        const x0 = @as(i64, center[0]) - half;
+        const y0 = center[1] - half;
+        // Reject unsuitable candidates cheaply before validating every column.
+        for ([_]u32{ 0, half, side - 1 }) |dy| for ([_]u32{ 0, half, side - 1 }) |dx| {
+            if (!pureDesertDetailColumn(prepared, biome, x0 + dx, y0 + dy)) continue :candidates;
+        };
+        for (0..side) |dy| for (0..side) |dx| {
+            const x = x0 + @as(i64, @intCast(dx));
+            const y = y0 + @as(u32, @intCast(dy));
+            if (!pureDesertDetailColumn(prepared, biome, x, y)) continue :candidates;
+            heights[dy * side + dx] = prepared.columnEnvironmentAt(x, y).terrain_height;
+        };
+        return center;
+    }
+    return null;
+}
+
+/// First-seed block-scale views of actual integrated terrain, with exact
+/// midpoint profiles and one shared grayscale height scale for both biomes.
+fn exportDesertDetail(init: std.process.Init, path: []const u8, prepared: *const generation.PreparedWorldGenerator) !void {
+    const a = init.arena.allocator();
+    const heights = try a.alloc(u32, 2 * 512 * 512);
+    var side: u32 = 512;
+    var tiles = [_]DesertDetailTile{ .{ .biome = .dunes }, .{ .biome = .flats } };
+    while (true) {
+        for (&tiles, 0..) |*tile, i| tile.center = findDesertDetailTile(prepared, tile.biome, side, heights[i * side * side ..][0 .. side * side]);
+        if ((tiles[0].center != null and tiles[1].center != null) or side == 256) break;
+        side = 256;
+    }
+    var minimum: u32 = std.math.maxInt(u32);
+    var maximum: u32 = 0;
+    for (&tiles, 0..) |*tile, i| {
+        tile.found = tile.center != null;
+        if (!tile.found) continue;
+        const tile_heights = heights[i * side * side ..][0 .. side * side];
+        tile.min_height = std.mem.min(u32, tile_heights);
+        tile.max_height = std.mem.max(u32, tile_heights);
+        minimum = @min(minimum, tile.min_height.?);
+        maximum = @max(maximum, tile.max_height.?);
+        tile.horizontal_profile = tile_heights[side / 2 * side ..][0..side];
+        const vertical = try a.alloc(u32, side);
+        for (vertical, 0..) |*value, y| value.* = tile_heights[y * side + side / 2];
+        tile.vertical_profile = vertical;
+    }
+    const missing = !tiles[0].found or !tiles[1].found;
+    if (!tiles[0].found and !tiles[1].found) minimum = 0;
+    const header = try std.fmt.allocPrint(a, "P6\n{d} {d}\n255\n", .{ side * 2, side });
+    const bytes = try a.alloc(u8, header.len + side * side * 2 * 3);
+    @memcpy(bytes[0..header.len], header);
+    for (tiles, 0..) |tile, i| for (0..side) |y| for (0..side) |x| {
+        const value: u8 = if (tile.found) @intCast((heights[i * side * side + y * side + x] - minimum) * 255 / @max(1, maximum - minimum)) else 0;
+        const color = if (tile.found) [3]u8{ value, value, value } else [3]u8{ 255, 0, 255 };
+        const offset = header.len + (y * side * 2 + i * side + x) * 3;
+        @memcpy(bytes[offset..][0..3], &color);
+    };
+    const image_path = try std.fmt.allocPrint(a, "{s}.desert.ppm", .{path});
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = image_path, .data = bytes });
+    const json = try std.json.Stringify.valueAlloc(a, .{
+        .seed = prepared.seed(),
+        .missing = missing,
+        .tile_side_blocks = side,
+        .blocks_per_pixel = 1,
+        .tile_order = "dunes,flats",
+        .row_direction = "increasing world Y; center is pixel (side/2,side/2); X wraps",
+        .height_grayscale_min = minimum,
+        .height_grayscale_max = maximum,
+        .selection = "all tile columns: dry desert, zero mountain uplift, pure biome blend; center coast distance >=512",
+        .tiles = tiles,
+    }, .{});
+    const metadata_path = try std.fmt.allocPrint(a, "{s}.desert.json", .{path});
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = metadata_path, .data = json });
+    std.debug.print("desert_detail side={d} missing={any} image={s} metadata={s}\n", .{ side, missing, image_path, metadata_path });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -155,7 +260,7 @@ pub fn main(init: std.process.Init) !void {
             mountains[r] += @intFromBool(e.relief == .mountain);
             sedimentary[r] += @intFromBool(e.geology == .sedimentary);
         }
-        const line = try std.json.Stringify.valueAlloc(a, .{ .seed = seed, .status = "accepted", .preparation = report, .preparation_ns = preparation_ns, .coarse_mainland = coarse_mainland, .first_start = start, .first_start_climate = start_climate, .sample_grid = .{ 512, 256 }, .sample_pass0 = sample0, .sample_pass1 = sample1, .land_percent_pass0 = sample0.landPercent(), .land_percent_pass1 = sample1.landPercent(), .sample_disagreement_percentage_points = @abs(sample0.landPercent() - sample1.landPercent()), .resource_order = "metal_ore,limestone,clay,coal,sand", .size_order = "large,small,starter", .deposit_populations = populations, .exact_effective_blocks = effective_blocks, .estimated_resource_distribution_pass0 = resourceDistribution(&prepared, 0), .estimated_resource_distribution_pass1 = resourceDistribution(&prepared, 1), .distribution_axes = "resource,relief(lowland/mountain),geology(sedimentary/rocky)", .eligible_host_volume_estimator = "sample.host_depth_by_relief_geology * world_horizontal_area / sample.samples", .effective_centers = center_effective, .mountain_deposit_centers = mountains, .sedimentary_deposit_centers = sedimentary }, .{});
+        const line = try std.json.Stringify.valueAlloc(a, .{ .seed = seed, .status = "accepted", .preparation = report, .preparation_ns = preparation_ns, .coarse_mainland = coarse_mainland, .first_start = start, .first_start_climate = start_climate, .sample_grid = .{ 512, 256 }, .sample_pass0 = sample0, .sample_pass1 = sample1, .desert_biome_order = "dunes,flats", .land_percent_pass0 = sample0.landPercent(), .land_percent_pass1 = sample1.landPercent(), .sample_disagreement_percentage_points = @abs(sample0.landPercent() - sample1.landPercent()), .resource_order = "metal_ore,limestone,clay,coal,sand", .size_order = "large,small,starter", .deposit_populations = populations, .exact_effective_blocks = effective_blocks, .estimated_resource_distribution_pass0 = resourceDistribution(&prepared, 0), .estimated_resource_distribution_pass1 = resourceDistribution(&prepared, 1), .distribution_axes = "resource,relief(lowland/mountain),geology(sedimentary/rocky)", .eligible_host_volume_estimator = "sample.host_depth_by_relief_geology * world_horizontal_area / sample.samples", .effective_centers = center_effective, .mountain_deposit_centers = mountains, .sedimentary_deposit_centers = sedimentary }, .{});
         try lines.appendSlice(a, line);
         try lines.append(a, '\n');
         land_estimates[accepted] = land_estimate;
@@ -164,6 +269,7 @@ pub fn main(init: std.process.Init) !void {
         if (index < 4) {
             const map_path = if (index == 0) path else try std.fmt.allocPrint(a, "{s}.seed-{d}.ppm", .{ path, seed });
             try exportMap(init, map_path, &prepared);
+            if (index == 0) try exportDesertDetail(init, path, &prepared);
         }
     }
     const report_path = try std.fmt.allocPrint(a, "{s}.jsonl", .{path});

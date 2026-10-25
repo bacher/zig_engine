@@ -55,7 +55,8 @@ Natural worlds have 3–5 connected continents, detached islands, a shared sea l
 cave-free terrain, climate belts, mountain ranges, finite geological deposits, and forests
 separated by meadows. The north-to-south belts occupy approximately 10/10/25/10/25/10/10%
 of the whole map. Each column has one climate, independent of chunk boundaries. Desert
-cover is sand; other covered soil renders green, yellow, or snowy according to climate.
+lowlands have sand cover; desert mountains expose stone. Other covered soil renders green,
+yellow, or snowy according to climate.
 Soil types and timers are saved unchanged. Water and foliage render opaque cubes and retain
 full-cube collision.
 Land has a soft 35% target: roughly 95% of default-profile seeds within 25–45% is sufficient.
@@ -68,6 +69,26 @@ the agreed belt areas. In natural settings, zero `climate_displacement` selects 
 automatic amplitude, while nonzero values specify an explicit block amplitude.
 Mountain uplift tapers before both displaced frozen boundaries, reaching zero on the
 adjoining nonfrozen rows. Classification and uplift use the same climate-boundary sample.
+
+Desert lowlands split into coherent dune and gently rolling flat regions with an approximate
+50/50 target. A seeded regional selector produces arbitrary boundaries across chunks;
+preparation does not count biome areas, impose quotas, or retry for their proportions.
+Dunes have moderate relief and usually rise one block per two or more horizontal blocks.
+Desert terrain outside mountain influence has at most a one-block rise between cardinal
+neighbors. Interior flats target roughly one block of height change per 30–40 horizontal
+blocks, allowing quantized terraces. Shore transitions may be steeper within the one-block
+cardinal limit. Continuous blending joins the lowland regions and reaches the older rolling
+terrain within a 256-block temperate collar outside the desert.
+Near shores, lowland height is capped by coast proximity rather than multiplied by a ramp.
+Mountain uplift remains separate and is excluded from the lowland slope cap; desert
+mountain surfaces are stone, while foothills may retain sand.
+
+`ColumnEnvironment.desert_biome` returns `.dunes` or `.flats` only for dry desert columns
+with zero mountain strength, and `null` elsewhere. This derived location query shares the
+generation fields and does not require resident chunks. Climate and mountain relief remain
+independent properties. The desert refinement's acceptance checks are tracked in the
+[generation spec](../specs/features/world-generation.md); executed evidence belongs in the
+[validation report](validation/world-generation/README.md).
 
 Mainland shore proximity combines a capped distance to conservative coastal rectangles
 with a shared bilinear inland field. It crosses internal macro-cell boundaries without
@@ -245,6 +266,7 @@ The simulation worker initially loads the central chunk column, finds the surfac
 | [`main.zig`](../src/voxel_app/main.zig) | Streaming/pinning, handoffs, package application, mesh reuse, mask precedence, camera tools, and capacity fallback. |
 | [`block_targeting.zig`](../src/voxel_app/block_targeting.zig) | Camera rays, candidate cube reach by nearest vertex, hit faces, bounds, missing chunks, and wrapped seams. |
 | [`world_generator.zig`](../src/voxel_app/world_generator.zig), [`natural_generator.zig`](../src/voxel_app/natural_generator.zig), [`generation_tests.zig`](../src/voxel_app/generation_tests.zig) | Natural/flat profiles, deterministic geography, material oracle, periodic X, and enclosure certification. |
+| [`generation_desert.zig`](../src/voxel_app/generation_desert.zig), [`generation_geography.zig`](../src/voxel_app/generation_geography.zig) | Dunes/flats fields, lowland slopes and shore transitions, separate mountain uplift, and exposed desert mountain stone. |
 | [`boundary_mask.zig`](../src/voxel_app/boundary_mask.zig), [`world_engine_glue.zig`](../src/voxel_app/world_engine_glue.zig) | Mask coordinates/sizes and cross-chunk face extraction. |
 | [`simulation_worker.zig`](../src/voxel_app/simulation_worker.zig) | Surface selection, result-dependent action changes, cancellation, and subscription updates. |
 | [`voxel_tests.zig`](../src/engine/voxel_tests.zig), [`voxel_grid.zig`](../src/engine/voxel/voxel_grid.zig), [`voxel/`](../src/engine/voxel) | GPU data preparation, slot allocation/reuse, exact preflight, and fixed limits. |

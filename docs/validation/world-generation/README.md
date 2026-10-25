@@ -1,6 +1,6 @@
 # World generation validation
 
-Updated on 2026-10-25 for G1–G5 and AC1–AC38 of the
+Updated on 2026-10-25 for G1–G5 and AC1–AC42 of the
 [world generation specification](../../../specs/features/world-generation.md).
 The default profile is generator **2 / version 1**, natural, seed **12345**, with
 **2048 × 1024 × 32 chunks**. Beaches are available but disabled by default.
@@ -65,6 +65,34 @@ accepted the first suitable temperate row, biasing starts toward steppe. Dry mai
 gentle meadow terrain, spawn clearance, and starter routes remain required; saved
 player restoration retains its existing behavior. This bounded search runs only
 during preparation and adds no allocations or per-chunk regeneration work.
+
+Desert lowlands now have coherent dunes and gently rolling flats. A regional field
+selects approximately equal areas without quotas or seed rejection. A 16-block-high,
+1152-block-period broad profile gives flats a characteristic 1:36 grade; a smooth
+warp bends its contours. Dunes add winding, 24-block-high ridges with a period of
+at least 160 blocks. Their 48-block phase warp varies over 1024 blocks. Only the
+dune side blends between profiles, so flat columns receive no dune contribution.
+Queries use at most three value fields, skipping dune warping where its weight
+is zero, with no extra allocations or retained map. Desert mountains remain
+independent and expose stone; lower foothills may retain sand.
+
+The pure field's ideal per-axis gradient is below 0.466320; including integer
+interpolation error keeps adjacent changes below 0.491 blocks. Shore elevation
+uses the minimum of that field and a coast cap, preserving the slope bound:
+mainland coast changes by at most two units per column, so `1 + coast / 4`
+changes by at most half a block; islands' `1 + coast / 32` changes by at most
+one quarter. One final height quantization gives at most a one-block cardinal
+step outside mountain influence. These are construction bounds, not runtime
+validation or relaxation passes. Desert terrain blends into existing rolling
+terrain in a 256-block collar outside the curved desert boundary.
+
+[Block-scale terrain and profiles](desert-terrain.png) show two actual 512×512
+tiles, with [exact profile data](desert-terrain.json). The sampled dune X profile
+has 163 height changes over 511 intervals; flat X and Y profiles each have 13,
+about one per 39 blocks. All four profiles have maximum adjacent delta one.
+Regression fixtures also exercise coast ramps, asymmetric islands, internal macro
+joins, climate boundaries, biome transitions, and the X seam. Pure-field tests
+check flat purity, grade bounds, and approximate balance at all three supported widths.
 
 ## PR review corrections
 
@@ -137,12 +165,12 @@ macOS 26.7.1 (25G241).
 | Check | Result |
 | --- | --- |
 | `zig build` | Passed; both applications and installed content built |
-| `zig build test` | 45/45 steps; 912 passed, 1 skipped of 913 registered tests |
-| `zig build test-generation` | 229/229 passed; included in the full suite; also passed in ReleaseSafe |
+| `zig build test` | 45/45 steps; 922 passed, 1 skipped of 923 registered tests |
+| `zig build test-generation` | 235/235 passed; included in the full suite; also passed in ReleaseSafe |
 | `zig build test-persistence` | 43/43 passed; included in the full suite |
 | `zig build test-capture` | Passed on 2026-10-23 |
 | `zig build test-gpu` | 2026-10-23: 19/19 steps; 90/90 passed on Metal, both wrapping configurations |
-| ReleaseFast / ReleaseSafe regeneration | All 24 representative hashes agree between builds |
+| ReleaseFast / ReleaseSafe regeneration | All 26 representative hashes agree between builds |
 | 256-seed diagnostic suite | 256 accepted; no exhausted seeds |
 | Player-scale inspection | 2026-10-23: safe grass spawn, complete trunks/crowns, opaque foliage and shadows |
 
@@ -152,7 +180,7 @@ The 2026-10-25 rerun covers the build, full CPU suite (including persistence),
 generation diagnostics, both benchmark modes, and overview maps. GPU and
 player-scale results above are retained from 2026-10-23; shaders and material
 rendering were unchanged by these review corrections, climate tuning, and land
-growth/spawn changes. Those GPU checks compile production shaders and read back material
+growth/spawn/desert changes. Those GPU checks compile production shaders and read back material
 colors; climate soil meshing and saved-material identity also have CPU tests. Prior manual inspection covered
 spawn terrain and nearby forest, not every climate or water configuration.
 
@@ -166,6 +194,7 @@ spawn terrain and nearby forest, not every climate or water configuration.
 | AC19, AC28–AC29, AC36 | Shared forbidden/no-item mining tests; natural and flat save/reopen, inventory/climate/fingerprint equality, legacy/profile/runtime mismatch rejection |
 | AC20–AC21, AC25–AC27 | Slow material oracle, conservative occupancy/enclosure checks, beach overlay fixtures, cached/evicted generation and mesh benchmark below |
 | AC38 | Zero-attempt preflight, deterministic candidate rejection, eight-attempt exhaustion, terminal allocation/budget/cancellation injection, categorized diagnostics |
+| AC39–AC42 | Pure-field slope/purity/patch tests, actual coast/island/seam/climate fixtures, stone desert mountain and biome-eligibility checks, two-pass seed counts, block-scale profiles, dune/flat replay hashes |
 
 The natural save/reopen integration test mines real starter sand and ordinary
 rock, then reopens a fresh store/service and compares edited chunk blocks,
@@ -190,6 +219,10 @@ land columns exactly to verify connectivity.
   10.00 / 10.00%**, within the specified one-percentage-point tolerance.
   Per-seed world and land-only climate counts are retained in the JSONL.
 - All 256 seeds accepted attempt 0, including first-start and deposit preparation.
+- Dunes occupy **50.14% / 50.16%** of sampled dry desert lowlands outside mountain
+  influence in the two passes; the remainder is flats. Per-seed estimates range
+  from **28.98% to 73.94%** dunes. Approximate balance is statistical guidance,
+  without a per-seed area gate; the counts and variation remain visible in the JSONL.
 - All 256 first starts lie in the middle half of a temperate belt, within **0.90%**
   of the local belt width from its midpoint. Minimum Y clearance to either neighboring
   climate is **3,246 blocks**. Seed 12345 starts at storage **(1600, 10688, 401)**,
@@ -197,7 +230,7 @@ land columns exactly to verify connectivity.
   climate, actual boundary positions, and distances to both edges.
   A separate regression checks seeds 12345, 0, and 87 at all three supported sizes,
   including the complete horizontal standing-space search/clearance area.
-- Preparation took **27.78–45.02 ms**, mean **35.18 ms**. Peak requested owned
+- Preparation took **24.77–50.24 ms**, mean **30.99 ms**. Peak requested owned
   allocation was **2,122,272 bytes**, below the 32-MiB preparation gate.
   Maximum indexed feature references: **101**; maximum bucket occupancy: **13**
   against the configured per-bucket limit of 64.
@@ -218,24 +251,26 @@ untuned until production rates and recipes exist.
 
 Seed 12345 was benchmarked for nine rounds in
 [ReleaseFast](benchmark-release-fast.txt) and three in
-[ReleaseSafe](benchmark-release-safe.txt), with beaches off/on. All 24 snapshot
+[ReleaseSafe](benchmark-release-safe.txt), with beaches off/on. All 26 snapshot
 hashes and both full prepared-world fingerprints agree across those builds.
-Eleven representative sites also agree after
+Twelve representative sites, including both desert biomes, also agree after
 actual 96-column cache churn, reverse traversal, and fresh preparation; hashes
 include blocks, climate, boundary masks, and derived mesh data. Enclosure is
 checked separately by generator tests and conservative generation bounds.
 
 | ReleaseFast workload | Beaches off | Beaches on |
 | --- | ---: | ---: |
-| Cold column + surface chunk + hash, median | 0.575 ms | 0.531 ms |
-| 32 vertical chunks from a cached column, median | 8.304 ms | 7.850 ms |
-| Mainland shore column initialization, median | 0.199 ms | 0.364 ms |
-| 96-column forward traversal | 38.406 ms | 38.934 ms |
-| Reverse traversal after eviction | 32.895 ms | 32.950 ms |
+| Cold column + surface chunk + hash, median | 0.558 ms | 0.476 ms |
+| 32 vertical chunks from a cached column, median | 7.356 ms | 7.366 ms |
+| Mainland shore column initialization, median | 0.188 ms | 0.341 ms |
+| Desert dune column initialization, median | 0.207 ms | 0.200 ms |
+| Desert flat column initialization, median | 0.186 ms | 0.186 ms |
+| 96-column forward traversal | 35.223 ms | 35.033 ms |
+| Reverse traversal after eviction | 29.371 ms | 30.200 ms |
 
 These small workloads show timing noise and location-dependent beach cost;
 they do not establish a general speedup or a controlled before/after comparison
-with prior regeneration reports. Land and spawn tuning change both terrain and the chosen
+with prior regeneration reports. Land, spawn, and desert tuning change both terrain and the chosen
 representative sites. The separate geography comparison above isolates preparation
 at identical seeds and settings; its improvement does not imply the same gain
 for regeneration. The measured retained and peak allocation sizes are unchanged.
@@ -267,7 +302,8 @@ relief/vegetation, and deposit locations. North is up; X wraps between the left
 and right edges. Water is blue, islands yellow, and the magenta cross marks
 first start. Climate colors are pale blue (frozen), yellow-brown (steppe),
 green (temperate), and tan (desert); ocean climate is tinted blue. Relief uses
-brown mountains, dark-green forest, and light-green meadow. Resource markers
+brown mountains, dark-green forest, light-green meadow, gold dunes, and pale-sand
+flats. Mountain-influenced sandy foothills retain the lowland background color. Resource markers
 are red (metal), cream (limestone), rust (clay), near-black (coal), and yellow
 (sand). Marker sizes aid visibility and are not deposit footprints.
 
@@ -289,7 +325,8 @@ zig build benchmark-generation -Doptimize=ReleaseFast -j2 -- 12345 9
 zig build benchmark-generation -Doptimize=ReleaseSafe -j2 -- 12345 3
 ```
 
-The map command writes PPM maps, a per-seed `.jsonl` report, and an informational
+The map command writes PPM maps, a first-seed `.desert.ppm` detail view and
+`.desert.json` profiles, a per-seed `.jsonl` report, and an informational
 `.summary.json` with empirical coverage percentiles and the envelope fraction.
 PNGs here are lossless
 conversions. Sandboxed build/test checks used
@@ -311,7 +348,9 @@ taper with coast/climate and are not branched tectonic networks. No exact final
 land quota or equal continent-size guarantee is claimed. The soft coverage envelope
 is tuned for the default profile. Half/double-size quality and performance still need
 separate seed suites and map inspection; other aspect ratios are outside the current
-support scope and receive no special growth handling. F1 foundation/pile rules, F2 NPC/farm
+support scope and receive no special growth handling. The fixed desert transition collar
+is tuned for 2:1 maps; on extreme tall/narrow experimental layouts, adjacent X columns
+can cross the collar and produce abrupt relief changes. F1 foundation/pile rules, F2 NPC/farm
 execution, and F3 material-definition consolidation remain deferred. Clay currently supports a
 packed-soil-style stable platform without soil timers, while its mining remains
 forbidden until its use flow exists.

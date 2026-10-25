@@ -133,8 +133,9 @@ Implementation evidence and measured defaults are recorded in the
   cover. Frozen climate does not replace soil with the existing standalone `snow` block.
   “Exposed” means no block immediately above, preserving today's underground grass eligibility
   without adding light/sky checks. Digging into soil reveals its ordinary material.
-- R15: Desert terrain has sand over rock instead of a generated soil/grass layer. Bare
-  rock outcrops and exposed geological resources are permitted. Desert sand is the same
+- R15: Desert lowlands have sand over rock instead of a generated soil/grass layer;
+  desert mountains expose stone as specified in R45. Bare rock outcrops and exposed
+  geological resources are permitted. Desert sand is the same
   material as sand elsewhere; placed soil in a desert remains soil and does not turn into
   sand. Until a dedicated desert-soil palette is designed, imported soil retains baseline
   soil/green-grass appearance there and follows normal timers. Frozen appearance likewise
@@ -337,6 +338,25 @@ Implementation evidence and measured defaults are recorded in the
   category/reason, stage, profile/identity, original seed, attempt index/count, and relevant
   limits/observed values. Rebuilding selects the same first accepted candidate in index order.
 
+### Desert lowland biomes
+
+- R43: Split desert lowlands into coherent dunes and gently rolling flats, targeting an
+  approximate 50/50 distribution through seeded regional fields. Regions have arbitrary
+  shapes and may cross chunk boundaries. This is statistical guidance, with no exact
+  per-world quota, land-area census, or candidate rejection/retry for biome proportions.
+- R44: Dunes have moderate height variation and usually rise one block per two or more
+  horizontal blocks. Outside mountain influence, desert terrain must never rise more than
+  one block between cardinally adjacent columns. Interior flats have broad, gentle rolls with
+  characteristic height changes of roughly one block per 30–40 horizontal blocks;
+  integer-height terraces are acceptable. Shore transitions may be steeper while retaining
+  the one-block cardinal limit. Preserve continuous terrain through biome transitions and
+  the periodic X seam.
+- R45: Keep mountain ranges in desert climate. The lowland slope limit does not apply
+  within mountain influence, and desert columns classified as mountain expose stone at
+  their generated surface instead of sand or soil. Foothills below mountain classification
+  may retain sand. Expose the dunes/flats classification only for dry desert columns
+  outside mountain influence; climate and mountain relief remain separate properties.
+
 ## Clarifications
 
 - Q1: Are the requested dimensions chunks or blocks?
@@ -443,6 +463,15 @@ Implementation evidence and measured defaults are recorded in the
   A21: CONFIRMED on 2026-10-25: near the center of a temperate belt, away from both steppe
   and desert. The implementation searches from actual curved belt midpoints outward,
   within their middle half, retaining the existing mainland, terrain-safety, and starter-resource rules.
+- Q22: How should desert lowlands differ?
+  A22: CONFIRMED on 2026-10-25: approximately half dunes and half gently rolling flats,
+  without quotas, full-area counting, or retries. Regions may cross chunks. Dunes should
+  usually climb one block per two or more horizontal blocks and never exceed a one-block cardinal
+  rise outside mountain influence; flats should change height roughly once per 30–40
+  horizontal blocks, with quantized terraces acceptable.
+- Q23: Does the lowland change remove desert mountains or limit their slopes?
+  A23: CONFIRMED on 2026-10-25: keep desert mountains and exclude them from the lowland
+  slope limit. Their exposed generated surface must be stone, without sand or soil cover.
 
 ## Acceptance Criteria
 
@@ -620,6 +649,24 @@ consolidation tasks remain separate.
   Identical inputs produce the same first accepted candidate or `SeedRejected` trace; no
   partial prepared world is published and diagnostics identify category, reason, stage,
   identity/seed, attempt, and relevant bounds. [R32, R34, R42]
+- AC39: GIVEN fixed seeds and dry desert columns outside mountain influence WHEN querying
+  their environments or regenerating chunks in different orders THEN dunes/flats form
+  deterministic coherent regions across chunk boundaries and the X seam, with an
+  approximate 50/50 distribution across offline samples and no runtime quota, census,
+  or ratio-based rejection/retry. [R2, R30, R43, R45]
+- AC40: GIVEN desert lowland regions, shores, and biome transitions WHEN comparing
+  cardinal neighboring surface heights THEN every rise is at most one block, interior
+  dunes have moderate relief with typical grades of 1:2 or gentler, and interior flats have broad
+  rolls with characteristic grades around 1:30–40, allowing integer terraces. Shore
+  transitions may be steeper within the one-block cardinal limit. [R44]
+- AC41: GIVEN desert mountain ranges and foothills WHEN generating their terrain and
+  surface materials THEN ranges remain present, the lowland slope cap excludes mountain
+  influence, and columns classified as mountain expose stone rather than sand or soil.
+  [R5, R15, R45]
+- AC42: GIVEN desert lowland, mountain-influenced, submerged, and non-desert columns WHEN
+  querying `ColumnEnvironment` THEN only dry desert columns with zero mountain influence
+  expose a dunes/flats biome, independently of chunk residency and regeneration order.
+  [R11, R30, R45]
 
 ## Constraints
 
@@ -690,7 +737,7 @@ raw resources remain unmineable. Beaches are implemented as a bounded optional o
 remain disabled by default after measuring location-dependent regeneration cost.
 
 The [validation report](../../docs/validation/world-generation/README.md) contains all
-AC1–AC38 evidence, seed maps/raw measurements, memory and regeneration timings, CPU/GPU
+AC1–AC42 evidence, seed maps/raw measurements, memory and regeneration timings, CPU/GPU
 results, and execution limits. F1–F3 remain deferred: stronger foundations/piles, NPC/farm
 execution, and material-definition consolidation.
 
@@ -954,6 +1001,27 @@ Branched polylines are not required by the first version. Store a mountain-stren
 field distinct from final height; low rolling terrain is not a mountain merely because its
 absolute elevation is high.
 
+Add a bounded pure desert-lowland sampler with three periodic fields to select
+coherent regions and bend analytical dune and flat profiles. Use a selector scale around
+1536 blocks and winding triangular ridges around a 160-block period with about 24 blocks
+of variation. Broad flats use a warped triangular wave about 16 blocks high with a
+1152-block period, giving characteristic integer-height steps every 33–40 blocks.
+Blend the lowland targets continuously on the dune side of selector boundaries rather than
+switching heights; flats receive no dune contribution. Bend dune crests with a 48-block
+phase warp over a 1024-block field, retaining the mathematical gradient budget.
+Skip the dune-warp query when its contribution is zero; columns use at most three local
+field evaluations. No full-area allocation or biome-ratio validation is
+part of preparation or regeneration.
+
+Use the desert target throughout desert climate and blend into existing rolling terrain
+within a 256-block collar on the temperate side of each displaced desert boundary.
+Cap lowland elevation near shores with `min(target, 1 + coast / 4)` on mainland and
+`min(target, 1 + coast / 32)` on islands instead of multiplying dune heights by a coast
+ramp. Add mountain uplift separately. Derive the optional dunes/flats query value only
+when the column is dry desert with zero mountain strength; mountain-influenced columns
+have no desert lowland classification. At mountain classification strength (currently
+18000), desert surface cover becomes exposed stone. Lower foothills can retain sand.
+
 Use broad sedimentary basin / rocky mountain province masks as geological preferences.
 No plate simulation is required. A sedimentary lens may reach a mountain foothill, but the
 overall distribution must still favor the specified hosts. Mountains alter resource weights
@@ -1104,6 +1172,7 @@ Proposed interfaces, names subject to Zig integration:
 
 ```zig
 const ClimateId = enum(u8) { frozen, steppe, temperate, desert };
+const DesertBiome = enum(u8) { dunes, flats };
 
 // Coordinates are storage block X/Y; X is normalized, Y must be in range.
 fn climateAt(prepared: *const PreparedWorldGenerator, x: i64, y: u32) ClimateId;
@@ -1114,8 +1183,10 @@ fn columnEnvironmentAt(prepared: *const PreparedWorldGenerator,
 ```
 
 `ColumnEnvironment` includes climate, original terrain height, water level/presence,
-mountain strength/class, vegetation class, and surface-cover intent. Query results are
-derived values, not per-voxel metadata. Rich queries may evaluate indexed relief descriptors;
+mountain strength/class, vegetation class, surface-cover intent, and nullable
+`desert_biome: ?DesertBiome`. The latter is set only for dry desert columns with zero
+mountain strength. Query results are derived values, not per-voxel metadata. Rich queries
+may evaluate indexed relief descriptors;
 the cheap climate-only query does not. Map indexing is `[local_y][local_x]`, independent of Z.
 Environmental profiles expose future work/farming flags and tunable multipliers. Clothing
 and water needs are distinct flags; a later actor entering both conditions must not lose
@@ -1300,7 +1371,7 @@ pristine chunks, enlarging cache limits, or redoing global preparation on each r
 | Milestone | Scope | Components |
 | --- | --- | --- |
 | G1: Environment foundation | Versioned natural/flat profiles, classified preparation failures, larger default, pure climate queries, polar inset and finite floor, diagnostics | `src/voxel_app/consts.zig`, `world_generator.zig`, `world_environment.zig`, `generation_preparation.zig`, `terrain_collision.zig`, `standing_space.zig`, `main.zig` |
-| G2: Land and relief | Connected continents and smaller islands, ocean, ranges, surface layering, deterministic deeprock, safe first-start region | `natural_generator.zig`, `generation_geography.zig`, `generation_hash.zig`, `world_data_service.zig` |
+| G2: Land and relief | Connected continents and smaller islands, ocean, ranges, desert lowlands, surface layering, deterministic deeprock, safe first-start region | `natural_generator.zig`, `generation_geography.zig`, `generation_desert.zig`, `generation_hash.zig`, `world_data_service.zig` |
 | G3: Materials and geology | Shared mining policy and mutation guard before material edit integration; opaque water, climate soil palette, sand local rules, deeprock direct foundations, indexed deposits, starter resources | `src/engine/voxel/voxel_chunk.zig`, `src/engine/shaders/voxel/`, `src/voxel_app/block_rules.zig`, `world_engine_glue.zig`, `player_interaction.zig`, `world_data_service.zig`, `world.zig` |
 | G4: Vegetation | Forest/meadow fields, leaves with null-safe no-item clearing, complete cross-chunk trees, mesh pressure checks | `generation_vegetation.zig`, `world_generator.zig`, voxel/collision/render material code, `player_interaction.zig` |
 | G5: Integration | Mutation guard verification, validated bottom restoration, both-profile save/reopen and legacy rejection, edited-chunk authority, bounded caches, shortcut oracle, regeneration benchmarks, debug maps | `src/voxel_app/world.zig`, `src/voxel_app/persistence/format.zig`, `main.zig`, `world_data_service.zig`, generator/service/GPU tests |
@@ -1388,6 +1459,9 @@ merely from a compact macro map; complete residency remains separately measured.
   floor in playable profiles and bottom-chunk solid shortcuts. [R5–R6, R15, R33, R38]
 - [x] T8: Select/validate a safe first-start region; add spawn/access exclusions for later
   trees without relying on world origin. [R23, R29]
+- [x] T26: Add coherent dunes/flats fields, continuous lowland and climate-boundary blending,
+  bounded coast caps, and nullable lowland biome queries. Preserve desert mountains and
+  expose stone on their classified surfaces. [R15, R43–R45]
 
 ### Phase 3 — Materials, rendering, and resources
 
@@ -1448,6 +1522,10 @@ merely from a compact macro map; complete residency remains separately measured.
 
 ### Validation
 
+- [x] T27: Verify desert biome coherence and approximate sampled proportions, periodicity,
+  lowland slopes/relief, coastal and climate transitions, preserved mountain ranges, stone
+  surfaces, query eligibility, and deterministic regeneration. Record executed checks and
+  measured limits in the validation report. [AC39–AC42]
 - [x] T25: Inject preflight, retryable candidate, and terminal preparation failures. Verify
   zero attempts for invalid inputs, deterministic first-valid selection, the shared eight-
   attempt cap, cleanup/no partial publication, and complete `SeedRejected` diagnostics.

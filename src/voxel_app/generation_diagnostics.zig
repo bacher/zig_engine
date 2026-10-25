@@ -190,6 +190,8 @@ pub const SampleReport = struct {
     relief: [2]u64 = @splat(0),
     land_relief: [2]u64 = @splat(0),
     land_geology: [2]u64 = @splat(0),
+    /// Dry-land desert columns, ordered dunes then flats.
+    desert_biomes: [2]u64 = @splat(0),
     /// Sum of mutable dry-land host depths over sampled columns. Multiplying by
     /// world horizontal area / samples estimates eligible host voxel volume.
     host_depth_by_relief_geology: [2][2]u64 = @splat(@splat(0)),
@@ -229,6 +231,7 @@ pub fn sampleEnvironment(prepared: *const generator.PreparedWorldGenerator, widt
             result.land_climate_belts[belt] += 1;
             result.land_relief[@intFromEnum(e.relief)] += 1;
             result.land_geology[@intFromEnum(e.geology)] += 1;
+            if (e.desert_biome) |biome| result.desert_biomes[@intFromEnum(biome)] += 1;
             const top = e.terrain_height - @min(e.terrain_height, if (e.surface_cover == .sand) @as(u32, 5) else 0);
             const floor = prepared.deeprockThickness(x, y);
             result.host_depth_by_relief_geology[@intFromEnum(e.relief)][@intFromEnum(e.geology)] += top - @min(top, floor);
@@ -236,7 +239,8 @@ pub fn sampleEnvironment(prepared: *const generator.PreparedWorldGenerator, widt
         }
         result.relief[@intFromEnum(e.relief)] += 1;
         result.vegetation[@intFromEnum(e.vegetation)] += 1;
-        result.fingerprint = hash.mix(result.fingerprint ^ @as(u64, e.terrain_height) ^ (@as(u64, @intFromEnum(e.climate)) << 32) ^ (@as(u64, e.landmass_id) << 40) ^ (@as(u64, @intFromEnum(e.vegetation)) << 48));
+        const desert_biome: u64 = if (e.desert_biome) |biome| @as(u64, @intFromEnum(biome)) + 1 else 0;
+        result.fingerprint = hash.mix(result.fingerprint ^ @as(u64, e.terrain_height) ^ (@as(u64, @intFromEnum(e.climate)) << 32) ^ (@as(u64, e.landmass_id) << 40) ^ (@as(u64, @intFromEnum(e.vegetation)) << 48) ^ (desert_biome << 56));
     };
     return result;
 }

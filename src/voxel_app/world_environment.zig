@@ -6,10 +6,14 @@ pub const ReliefId = enum(u8) { lowland, mountain };
 pub const VegetationId = enum(u8) { barren, meadow, forest, sparse };
 pub const GeologyId = enum(u8) { sedimentary, rocky };
 pub const SurfaceCover = enum(u8) { soil, sand, rock };
+pub const DesertBiome = enum(u8) { dunes, flats };
 pub const ClimateMap = [32][32]ClimateId;
 pub const ClimateSample = struct {
     id: ClimateId,
     mountain_fade: u16,
+    /// Full desert relief inside the belt, tapered into a temperate collar.
+    /// This changes terrain continuously without blending climate/material IDs.
+    desert_terrain: u16 = 0,
 };
 
 pub const WorkRules = struct {
@@ -43,6 +47,7 @@ pub const ColumnEnvironment = struct {
     /// Approximate generated-shore proximity for relief and beaches, independent
     /// of player edits. This is not a distance query against current water.
     coast_distance: u32,
+    desert_biome: ?DesertBiome = null,
 
     pub fn workRules(self: ColumnEnvironment) WorkRules {
         return rules(self.climate);
@@ -105,7 +110,15 @@ pub const ClimateField = struct {
         // Reach zero on both nonfrozen border rows, before entering frozen land.
         const distance = @min(y - b[0], b[5] - 1 - y);
         const fade_width = @max(128, @min(1024, self.height / 32));
-        return .{ .id = climate, .mountain_fade = @intCast(@min(65535, @as(u64, distance) * 65535 / fade_width)) };
+        const desert_distance = if (y < b[2]) b[2] - y else if (y >= b[3]) y - b[3] + 1 else 0;
+        return .{
+            .id = climate,
+            .mountain_fade = @intCast(@min(65535, @as(u64, distance) * 65535 / fade_width)),
+            .desert_terrain = if (climate == .desert) 65535 else if (climate == .temperate)
+                @intCast(@as(u64, 256 - @min(256, desert_distance)) * 65535 / 256)
+            else
+                0,
+        };
     }
 
     pub fn at(self: ClimateField, x: i64, y: u32) ClimateId {

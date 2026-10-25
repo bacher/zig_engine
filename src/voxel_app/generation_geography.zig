@@ -3,6 +3,7 @@ const hash = @import("generation_hash.zig");
 const env = @import("world_environment.zig");
 const CoastApprox = @import("generation_coast_approx.zig").CoastApprox;
 const Settings = @import("generation_settings.zig").NaturalSettings;
+const desert = @import("generation_desert.zig");
 
 pub const Island = struct { id: u8, x: u32, y: u32, radius_x: u32, radius_y: u32 };
 pub const macro_size = 128;
@@ -257,7 +258,7 @@ pub const Geography = struct {
     /// Explicit unfaded climate probe for terrain fixtures. Runtime queries use
     /// atWithClimate so the shared polar-boundary taper is always included.
     pub fn at(self: *const Geography, climate: env.ClimateId, x: i64, y: u32) env.ColumnEnvironment {
-        return self.atSample(.{ .id = climate, .mountain_fade = if (climate == .frozen) 0 else 65535 }, x, y);
+        return self.atSample(.{ .id = climate, .mountain_fade = if (climate == .frozen) 0 else 65535, .desert_terrain = if (climate == .desert) 65535 else 0 }, x, y);
     }
 
     pub fn atWithClimate(self: *const Geography, climate: env.ClimateField, x: i64, y: u32) env.ColumnEnvironment {
@@ -285,22 +286,37 @@ pub const Geography = struct {
                 mountain = @intCast(@as(u64, @intCast(amplitude)) * fade / 65535 * coast_fade / 65535 * sample.mountain_fade / 65535);
             }
         }
-        const broad = hash.field2(hash.mix(self.seed ^ 0x5445525241494e), cx, y, self.width, @max(64, self.height / 16));
-        const detail = hash.field2(hash.mix(self.seed ^ 0x44455441494c), cx, y, self.width, 128);
-        const land_height = 1 + @divTrunc((broad + 65535) * @as(i64, @min(48, self.depth / 16)), 131070);
-        const coast_ramp: i64 = @intCast(@min(65535, @as(u64, land.coast) * 65535 / 96));
         const uplift = @divTrunc(@as(i64, mountain) * @as(i64, @min(320, self.depth / 3)), 65535);
-        const elevation = @divTrunc(land_height * coast_ramp, 65535) + uplift + @divTrunc(detail * 2 * coast_ramp, 65535 * 65535);
-        const height: u32 = if (land.id != 0)
-            @intCast(std.math.clamp(@as(i64, self.sea_level) + @max(1, elevation), 3, self.depth - 12))
-        else
-            self.sea_level - @as(u32, @intCast(8 + @divTrunc((broad + 65535) * @as(i64, @min(140, self.sea_level / 2)), 131070)));
-        const moisture = hash.field2(hash.mix(self.seed ^ 0x4d4f495354555245), cx, y, self.width, @max(128, self.height / 20));
+        var desert_biome: ?env.DesertBiome = null;
+        const height: u32 = if (land.id != 0) land_height: {
+            var elevation: i64 = undefined;
+            if (sample.desert_terrain != 0) {
+                const terrain = desert.sample(self.seed, cx, y, self.width);
+                // Min preserves the field's slope bound, unlike multiplying
+                // its height by a short coast ramp. Island radii can narrow
+                // eight times faster along Y, so use a gentler island cap.
+                const shore_cap = desert.unit + @divTrunc(@as(i64, land.coast) * desert.unit, if (land.id < 128) @as(i64, 4) else 32);
+                const target = @min(terrain.elevation_q16, shore_cap);
+                const blended = if (sample.desert_terrain == 65535) target else blend: {
+                    const ordinary = self.rollingElevation(cx, y, land.coast) * desert.unit;
+                    break :blend ordinary + @divTrunc((target - ordinary) * sample.desert_terrain, 65535);
+                };
+                // Quantize only after blending both desert biomes and shore.
+                elevation = @divFloor(blended, desert.unit);
+                if (climate == .desert and mountain == 0) desert_biome = terrain.biome;
+            } else {
+                elevation = self.rollingElevation(cx, y, land.coast);
+            }
+            break :land_height @intCast(std.math.clamp(@as(i64, self.sea_level) + @max(1, elevation + uplift), 3, self.depth - 12));
+        } else ocean_height: {
+            const broad = hash.field2(hash.mix(self.seed ^ 0x5445525241494e), cx, y, self.width, @max(64, self.height / 16));
+            break :ocean_height self.sea_level - @as(u32, @intCast(8 + @divTrunc((broad + 65535) * @as(i64, @min(140, self.sea_level / 2)), 131070)));
+        };
         const vegetation: env.VegetationId = if (land.id == 0 or climate == .frozen or climate == .desert)
             .barren
         else if (climate == .steppe)
             .sparse
-        else if (moisture > 0)
+        else if (hash.field2(hash.mix(self.seed ^ 0x4d4f495354555245), cx, y, self.width, @max(128, self.height / 20)) > 0)
             .forest
         else
             .meadow;
@@ -311,12 +327,21 @@ pub const Geography = struct {
             .water_present = land.id == 0,
             .relief = if (mountain >= 18000) .mountain else .lowland,
             .mountain_strength = mountain,
+            .desert_biome = desert_biome,
             .vegetation = vegetation,
             .geology = if (mountain >= 12000) .rocky else .sedimentary,
-            .surface_cover = if (climate == .desert) .sand else if (mountain >= 36000) .rock else .soil,
+            .surface_cover = if (climate == .desert) (if (mountain >= 18000) .rock else .sand) else if (mountain >= 36000) .rock else .soil,
             .landmass_id = land.id,
             .coast_distance = land.coast,
         };
+    }
+
+    fn rollingElevation(self: *const Geography, x: u32, y: u32, coast: u32) i64 {
+        const broad = hash.field2(hash.mix(self.seed ^ 0x5445525241494e), x, y, self.width, @max(64, self.height / 16));
+        const detail = hash.field2(hash.mix(self.seed ^ 0x44455441494c), x, y, self.width, 128);
+        const land_height = 1 + @divTrunc((broad + 65535) * @as(i64, @min(48, self.depth / 16)), 131070);
+        const coast_ramp: i64 = @intCast(@min(65535, @as(u64, coast) * 65535 / 96));
+        return @divTrunc(land_height * coast_ramp, 65535) + @divTrunc(detail * 2 * coast_ramp, 65535 * 65535);
     }
 
     pub fn mainlandCentre(self: *const Geography, id: u8, y: u32) u32 {

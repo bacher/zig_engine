@@ -6,6 +6,112 @@ const hash = @import("generation_hash.zig");
 const Geography = @import("generation_geography.zig").Geography;
 const NaturalWorld = @import("natural_generator.zig").NaturalWorld;
 const preparation = @import("generation_preparation.zig");
+const environment = @import("world_environment.zig");
+
+test "desert lowlands retain bounded steps at shores islands macro joins and the X seam" {
+    const width = 4096;
+    const height = 2048;
+    var owners: [32 * 16]u8 = @splat(0);
+    var distances: [32 * 16]u16 = @splat(0);
+    for (2..14) |my| for (0..32) |mx| {
+        if (mx >= 8 and mx < 24) continue;
+        owners[my * 32 + mx] = 1;
+        distances[my * 32 + mx] = @intCast(@min(@min(my - 1, 14 - my), if (mx < 8) 8 - mx else mx - 23));
+    };
+    var g = Geography{ .seed = 12345, .width = width, .height = height, .depth = 1024, .sea_level = 384, .continent_count = 1, .island_count = 2, .macro_width = 32, .macro_height = 16, .owners = &owners, .coastal_distance = &distances };
+    // Keep the mountain influence away from the fixed shoreline/seam probes.
+    g.core_seeds[0] = .{ 16, 8 };
+    g.islands[0] = .{ .id = 128, .x = 2048, .y = 512, .radius_x = 128, .radius_y = 32 };
+    g.islands[1] = .{ .id = 129, .x = 0, .y = 96, .radius_x = 128, .radius_y = 32 };
+    try g.prepareCoast(std.testing.allocator);
+    defer g.coast_field.deinit(std.testing.allocator);
+    var checked: usize = 0;
+    var shores: usize = 0;
+    var islands: usize = 0;
+    var seams: usize = 0;
+    for (0..height / 7) |row| {
+        const y: u32 = @intCast(row * 7);
+        for (0..width / 11) |column| {
+            const x: i64 = @intCast(column * 11);
+            try expectDesertNeighbors(&g, x, y, &checked, &shores, &islands);
+        }
+        try expectDesertNeighbors(&g, width - 1, y, &checked, &shores, &islands);
+        const a = g.at(.desert, width - 1, y);
+        if (!a.water_present) seams += 1;
+        try std.testing.expectEqualDeep(a, g.at(.desert, -1, y));
+    }
+    // Exhaust the most elongated permitted island profile, including its narrow tips.
+    for (64..129) |y| for (0..257) |dx| {
+        const x: i64 = @as(i64, @intCast(dx)) - 128;
+        try expectDesertNeighbors(&g, x, @intCast(y), &checked, &shores, &islands);
+    };
+    try std.testing.expect(checked > 10000 and shores > 100 and islands > 100 and seams > 100);
+
+    const climate = environment.ClimateField{ .seed = hash.stream(12345, .climate, 0), .width = width, .height = height, .displacement = 76 };
+    for (0..16) |column| {
+        const x: i64 = @intCast(column * 32);
+        const boundaries = climate.boundaries(x);
+        for ([_]u32{ boundaries[2], boundaries[3] }) |boundary| {
+            const before = g.atWithClimate(climate, x, boundary - 1);
+            const after = g.atWithClimate(climate, x, boundary);
+            try std.testing.expect(!before.water_present and !after.water_present);
+            try std.testing.expectEqual(@as(u16, 0), before.mountain_strength);
+            try std.testing.expectEqual(@as(u16, 0), after.mountain_strength);
+            try std.testing.expect(@abs(@as(i64, before.terrain_height) - after.terrain_height) <= 1);
+        }
+    }
+}
+
+fn expectDesertNeighbors(g: *const Geography, x: i64, y: u32, checked: *usize, shores: *usize, islands: *usize) !void {
+    const a = g.at(.desert, x, y);
+    if (a.water_present or a.mountain_strength != 0) {
+        try std.testing.expectEqual(@as(?environment.DesertBiome, null), a.desert_biome);
+        return;
+    }
+    try std.testing.expect(a.desert_biome != null);
+    try std.testing.expectEqual(environment.SurfaceCover.sand, a.surface_cover);
+    for ([_][2]u32{ .{ 1, 0 }, .{ 0, 1 } }) |offset| {
+        if (y + offset[1] >= g.height) continue;
+        const b = g.at(.desert, x + offset[0], y + offset[1]);
+        if (b.water_present or b.mountain_strength != 0) continue;
+        try std.testing.expect(@abs(@as(i64, a.terrain_height) - b.terrain_height) <= 1);
+        checked.* += 1;
+        shores.* += @intFromBool(a.coast_distance < 96);
+        islands.* += @intFromBool(a.landmass_id >= 128);
+    }
+}
+
+test "generated desert mountains expose rock while both lowland biomes retain sand" {
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2048, 1024, 32 } });
+    var prepared = try (generator.WorldGenerator{ .natural = .{ .seed = 12345 } }).prepare(std.testing.allocator, &layout);
+    defer prepared.deinit(std.testing.allocator);
+    const g = &prepared.kind.natural.geography;
+    var biomes: [2]bool = @splat(false);
+    var rock_seen = false;
+    for (g.owners, 0..) |owner, i| {
+        if (owner == 0) continue;
+        const x: u32 = @intCast(i % g.macro_width * 128 + 64);
+        const y: u32 = @intCast(i / g.macro_width * 128 + 64);
+        const e = prepared.columnEnvironmentAt(x, y);
+        if (e.climate != .desert or e.water_present) {
+            try std.testing.expectEqual(@as(?environment.DesertBiome, null), e.desert_biome);
+            continue;
+        }
+        if (e.relief == .mountain) {
+            try std.testing.expectEqual(environment.SurfaceCover.rock, e.surface_cover);
+            try std.testing.expectEqual(@as(?environment.DesertBiome, null), e.desert_biome);
+            const top = prepared.referenceMaterialAt(x, y, e.terrain_height - 1);
+            try std.testing.expect(top != .sand and !top.isEarth());
+            rock_seen = rock_seen or top == .stone;
+        } else if (e.desert_biome) |biome| {
+            biomes[@intFromEnum(biome)] = true;
+            try std.testing.expectEqual(environment.SurfaceCover.sand, e.surface_cover);
+            try std.testing.expectEqual(engine.voxel_chunk.BlockType.sand, prepared.referenceMaterialAt(x, y, e.terrain_height - 1));
+        }
+        if (rock_seen and biomes[0] and biomes[1]) break;
+    }
+    try std.testing.expect(rock_seen and biomes[0] and biomes[1]);
+}
 
 const Fixture = struct {
     const width = 16;

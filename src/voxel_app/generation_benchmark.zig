@@ -54,7 +54,7 @@ const AllocationMeter = struct {
 };
 
 const Site = struct { label: []const u8, block: [2]u32, chunk_z: ?i32 = null };
-fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![11]Site {
+fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![12]Site {
     const natural = prepared.kind.natural;
     const size = prepared.layout.size_in_blocks;
     const start = prepared.firstStart().?;
@@ -65,16 +65,18 @@ fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![11]
         .{ .label = "mainland_coast", .block = .{ start[0], start[1] } },
         .{ .label = "island_coast", .block = .{ @intCast(@mod(@as(i64, island.x) + island.radius_x - 2, size[0])), island.y } },
         .{ .label = "steep_shore", .block = .{ start[0], start[1] } },
-        .{ .label = "desert", .block = .{ 0, size[1] / 2 } },
+        .{ .label = "desert_dunes", .block = .{ 0, size[1] / 2 } },
         .{ .label = "dense_forest", .block = .{ start[0], start[1] } },
         .{ .label = "deposit", .block = .{ deposit.center[0], deposit.center[1] }, .chunk_z = @intCast(deposit.center[2] / 32) },
         .{ .label = "x_seam", .block = .{ size[0] - 1, size[1] / 2 } },
         .{ .label = "ocean", .block = .{ 0, 0 } },
         .{ .label = "polar", .block = .{ size[0] / 2, 0 } },
         .{ .label = "mountain", .block = .{ deposit.center[0], deposit.center[1] } },
+        .{ .label = "desert_flats", .block = .{ 0, size[1] / 2 } },
     };
     var coast_found = false;
-    var desert_found = false;
+    var dunes_found = false;
+    var flats_found = false;
     var ocean_found = false;
     var maximum_trees: usize = 0;
     var maximum_slope: u32 = 0;
@@ -92,9 +94,17 @@ fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![11]
         }
         const center = [2]u32{ @intCast(mx * 128 + 64), @intCast(my * 128 + 64) };
         const e = prepared.columnEnvironmentAt(center[0], center[1]);
-        if (!desert_found and e.climate == .desert and !e.water_present) {
-            sites[4].block = center;
-            desert_found = true;
+        if (e.climate == .desert and !e.water_present and e.coast_distance >= 128 and e.mountain_strength == 0) {
+            if (e.desert_biome) |biome| switch (biome) {
+                .dunes => if (!dunes_found) {
+                    sites[4].block = center;
+                    dunes_found = true;
+                },
+                .flats => if (!flats_found) {
+                    sites[11].block = center;
+                    flats_found = true;
+                },
+            };
         }
         if (e.vegetation == .forest and i % 17 == 0) {
             const column = Column.init(prepared, .{ @intCast(center[0] / 32), @intCast(center[1] / 32) });
@@ -122,7 +132,9 @@ fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![11]
             }
         }
     }
-    if (!coast_found or !desert_found or !ocean_found) return error.MissingRepresentativeSite;
+    if (!dunes_found) return error.MissingDesertDunesSite;
+    if (!flats_found) return error.MissingDesertFlatsSite;
+    if (!coast_found or !ocean_found) return error.MissingRepresentativeSite;
     std.debug.print("representative_sites dense_forest_trees={d} maximum_shore_delta_8={d}\n", .{ maximum_trees, maximum_slope });
     return sites;
 }
@@ -137,7 +149,7 @@ fn isolatedWorkload(init: std.process.Init, a: std.mem.Allocator, prepared: *con
         sample.* = elapsed(init.io, begin);
         std.mem.doNotOptimizeAway(column);
     }
-    std.debug.print("site={s} x={d} y={d} z={d} coast={d} relief={s} climate={s} ", .{ site.label, site.block[0], site.block[1], z, e.coast_distance, @tagName(e.relief), @tagName(e.climate) });
+    std.debug.print("site={s} x={d} y={d} z={d} coast={d} relief={s} mountain_strength={d} climate={s} desert_biome={s} ", .{ site.label, site.block[0], site.block[1], z, e.coast_distance, @tagName(e.relief), e.mountain_strength, @tagName(e.climate), if (e.desert_biome) |biome| @tagName(biome) else "none" });
     printSamples("column_initialization", samples, 1);
     const cached = Column.init(prepared, coords);
     const adjacent_samples: usize = if (coords[1] == 0 or coords[1] + 1 == prepared.layout.size_in_chunks[1]) 0 else 128;
