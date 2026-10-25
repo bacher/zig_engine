@@ -130,6 +130,16 @@ pub fn main(init: std.process.Init) !void {
             .land_percent = @as(f64, @floatFromInt(coarse_mainland_cells)) * 100 / @as(f64, @floatFromInt(geography.owners.len)),
             .scope = "mainland macro ownership before coast refinement; excludes islands",
         };
+        const start = prepared.firstStart().?;
+        const start_boundaries = prepared.kind.natural.climate.boundaries(start[0]);
+        const belt_index: usize = if (start[1] < start_boundaries[2]) 1 else 3;
+        const start_climate = .{
+            .climate = prepared.climateAt(start[0], start[1]),
+            .belt_min_y = start_boundaries[belt_index],
+            .belt_max_y_exclusive = start_boundaries[belt_index + 1],
+            .distance_to_lower_edge = start[1] - start_boundaries[belt_index],
+            .distance_to_upper_edge = start_boundaries[belt_index + 1] - 1 - start[1],
+        };
         var populations: [5][3]u32 = @splat(@splat(0));
         var effective_blocks: [5][3]u64 = @splat(@splat(0));
         var center_effective: [5][3]u32 = @splat(@splat(0));
@@ -145,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
             mountains[r] += @intFromBool(e.relief == .mountain);
             sedimentary[r] += @intFromBool(e.geology == .sedimentary);
         }
-        const line = try std.json.Stringify.valueAlloc(a, .{ .seed = seed, .status = "accepted", .preparation = report, .preparation_ns = preparation_ns, .coarse_mainland = coarse_mainland, .first_start = prepared.firstStart().?, .sample_grid = .{ 512, 256 }, .sample_pass0 = sample0, .sample_pass1 = sample1, .land_percent_pass0 = sample0.landPercent(), .land_percent_pass1 = sample1.landPercent(), .sample_disagreement_percentage_points = @abs(sample0.landPercent() - sample1.landPercent()), .resource_order = "metal_ore,limestone,clay,coal,sand", .size_order = "large,small,starter", .deposit_populations = populations, .exact_effective_blocks = effective_blocks, .estimated_resource_distribution_pass0 = resourceDistribution(&prepared, 0), .estimated_resource_distribution_pass1 = resourceDistribution(&prepared, 1), .distribution_axes = "resource,relief(lowland/mountain),geology(sedimentary/rocky)", .eligible_host_volume_estimator = "sample.host_depth_by_relief_geology * world_horizontal_area / sample.samples", .effective_centers = center_effective, .mountain_deposit_centers = mountains, .sedimentary_deposit_centers = sedimentary }, .{});
+        const line = try std.json.Stringify.valueAlloc(a, .{ .seed = seed, .status = "accepted", .preparation = report, .preparation_ns = preparation_ns, .coarse_mainland = coarse_mainland, .first_start = start, .first_start_climate = start_climate, .sample_grid = .{ 512, 256 }, .sample_pass0 = sample0, .sample_pass1 = sample1, .land_percent_pass0 = sample0.landPercent(), .land_percent_pass1 = sample1.landPercent(), .sample_disagreement_percentage_points = @abs(sample0.landPercent() - sample1.landPercent()), .resource_order = "metal_ore,limestone,clay,coal,sand", .size_order = "large,small,starter", .deposit_populations = populations, .exact_effective_blocks = effective_blocks, .estimated_resource_distribution_pass0 = resourceDistribution(&prepared, 0), .estimated_resource_distribution_pass1 = resourceDistribution(&prepared, 1), .distribution_axes = "resource,relief(lowland/mountain),geology(sedimentary/rocky)", .eligible_host_volume_estimator = "sample.host_depth_by_relief_geology * world_horizontal_area / sample.samples", .effective_centers = center_effective, .mountain_deposit_centers = mountains, .sedimentary_deposit_centers = sedimentary }, .{});
         try lines.appendSlice(a, line);
         try lines.append(a, '\n');
         land_estimates[accepted] = land_estimate;

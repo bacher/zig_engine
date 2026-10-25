@@ -218,20 +218,36 @@ pub const NaturalWorld = struct {
     }
 
     fn findStart(self: *const NaturalWorld) ?[3]u32 {
-        // A global bounded macro-cell search prepares a real temperate mainland
-        // region before the live authoritative standing-space check.
-        for (self.geography.owners, 0..) |owner, index| {
-            if (owner == 0) continue;
-            const x: u32 = @intCast(index % self.geography.macro_width * 128 + 64);
-            const y: u32 = @intCast(index / self.geography.macro_width * 128 + 64);
-            const e = self.baseEnvironmentAt(x, y);
-            if (e.climate != .temperate or e.relief != .lowland or e.vegetation != .meadow or e.coast_distance < 128 or e.surface_cover != .soil) continue;
-            var safe = true;
-            for ([_][2]i32{ .{ -64, 0 }, .{ 64, 0 }, .{ 0, -64 }, .{ 0, 64 } }) |offset| {
-                const near = self.baseEnvironmentAt(@as(i64, x) + offset[0], @intCast(@as(i64, y) + offset[1]));
-                if (near.water_present or near.landmass_id != owner or @abs(@as(i64, near.terrain_height) - e.terrain_height) > 4) safe = false;
+        const cell_size = @import("generation_geography.zig").macro_size;
+        // Search the actual curved belt midpoints first, then alternate rows on
+        // either side. Never leave the middle half of either temperate belt.
+        // The widest possible belt bounds the search without retaining a map.
+        const maximum_width = self.climate.height / 4 + 1 + 2 * self.climate.displacement;
+        const radius = maximum_width / (4 * cell_size) + 1;
+        for (0..2 * radius + 1) |row| {
+            const distance: i64 = @intCast((row + 1) / 2 * cell_size);
+            const offset = if (row % 2 == 1) distance else -distance;
+            for (0..self.geography.macro_width) |macro_x| {
+                const x: u32 = @intCast(macro_x * cell_size + cell_size / 2);
+                const boundaries = self.climate.boundaries(x);
+                for ([_][2]u32{ .{ boundaries[1], boundaries[2] }, .{ boundaries[3], boundaries[4] } }) |belt| {
+                    const margin = (belt[1] - belt[0] + 3) / 4;
+                    const midpoint = (belt[0] + belt[1] - 1) / 2;
+                    const y_signed = @as(i64, midpoint / cell_size * cell_size + cell_size / 2) + offset;
+                    if (y_signed < belt[0] + margin or y_signed >= belt[1] - margin) continue;
+                    const y: u32 = @intCast(y_signed);
+                    const owner = self.geography.owners[y / cell_size * self.geography.macro_width + macro_x];
+                    if (owner == 0) continue;
+                    const e = self.baseEnvironmentAt(x, y);
+                    if (e.water_present or e.climate != .temperate or e.relief != .lowland or e.vegetation != .meadow or e.coast_distance < 128 or e.surface_cover != .soil) continue;
+                    var safe = true;
+                    for ([_][2]i32{ .{ -64, 0 }, .{ 64, 0 }, .{ 0, -64 }, .{ 0, 64 } }) |delta| {
+                        const near = self.baseEnvironmentAt(@as(i64, x) + delta[0], @intCast(@as(i64, y) + delta[1]));
+                        if (near.water_present or near.landmass_id != owner or @abs(@as(i64, near.terrain_height) - e.terrain_height) > 4) safe = false;
+                    }
+                    if (safe) return .{ x, y, e.terrain_height };
+                }
             }
-            if (safe) return .{ x, y, e.terrain_height };
         }
         return null;
     }
@@ -295,6 +311,36 @@ fn fingerprintScalar(digest: *std.crypto.hash.sha2.Sha256, value: anytype) void 
     var bytes: [@sizeOf(@TypeOf(value))]u8 = undefined;
     std.mem.writeInt(@TypeOf(value), &bytes, value, .little);
     digest.update(&bytes);
+}
+
+test "first starts stay in the interior of curved temperate belts at supported sizes" {
+    for ([_][3]u32{ .{ 1024, 512, 16 }, .{ 2048, 1024, 32 }, .{ 4096, 2048, 64 } }) |size| {
+        const layout = try WorldLayout.init(.{ .size_in_chunks = size });
+        for ([_]u64{ 12345, 0, 87 }) |seed| {
+            var report: PreparationReport = .{};
+            var world = try NaturalWorld.init(std.testing.allocator, &layout, seed, .{}, &report);
+            defer world.deinit(std.testing.allocator);
+            const start = world.first_start;
+            const b = world.climate.boundaries(start[0]);
+            const lower = if (start[1] < b[2]) b[1] else b[3];
+            const upper = if (start[1] < b[2]) b[2] else b[4];
+            const width = upper - lower;
+            try std.testing.expectEqual(environment.ClimateId.temperate, world.climate.at(start[0], start[1]));
+            try std.testing.expect(@as(u64, start[1] - lower) * 4 >= width);
+            try std.testing.expect(@as(u64, upper - 1 - start[1]) * 4 >= width);
+            // The authoritative standing-space search may shift by eight blocks.
+            // Check its entire horizontal search/clearance area, including X wrap.
+            for (0..19) |dy| for (0..19) |dx| {
+                try std.testing.expectEqual(environment.ClimateId.temperate, world.climate.at(@as(i64, start[0]) + @as(i64, @intCast(dx)) - 9, @intCast(@as(i64, start[1]) + @as(i64, @intCast(dy)) - 9)));
+            };
+            const e = world.baseEnvironmentAt(start[0], start[1]);
+            try std.testing.expect(!e.water_present and e.landmass_id > 0 and e.landmass_id < 128);
+            try std.testing.expectEqual(environment.ReliefId.lowland, e.relief);
+            try std.testing.expectEqual(environment.VegetationId.meadow, e.vegetation);
+            try std.testing.expect(e.coast_distance >= 128);
+            try std.testing.expectEqualDeep(start, world.findStart().?);
+        }
+    }
 }
 
 test "finite resource populations have exact retained quantities and large source dominance" {

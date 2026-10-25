@@ -186,6 +186,13 @@ Implementation evidence and measured defaults are recorded in the
   only**; other continents and later spawns receive no equivalent guarantee. This guarantees
   physical placement/access, not permission to mine an unconfigured resource before its
   usable mining result and interaction flow are implemented (R36–R37).
+  The first player spawn is always on temperate mainland, near the center of either
+  temperate belt. Use the actual curved boundaries at the candidate's X: prefer their
+  midpoint and restrict fallback candidates to the middle half of the belt, keeping at
+  least one quarter of its local width away from both steppe and desert along Y.
+  Retain dry, gentle meadow terrain and starter-access checks. A candidate without such
+  a start is rejected rather than relaxing the climate requirement. Restoring a saved
+  player's position is unaffected.
 - R24: Resource blocks replace compatible solid host material below the actual surface,
   with shallow exposures allowed. Define stable overlap precedence, resource IDs, depth
   ranges, and size classes. Published quantities mean effective resource-block counts after
@@ -429,9 +436,13 @@ Implementation evidence and measured defaults are recorded in the
   A20: CONFIRMED on 2026-10-25: support X:Y = 2:1, with `2048 × 1024 × 32` chunks as
   the default, plus half-size `1024 × 512 × 16` and double-size `4096 × 2048 × 64`.
   These profiles should generate reasonably well without a narrow-world adjustment.
-  Recorded seed-suite and timing evidence currently covers the default profile; quality
-  checks and performance measurements at the other two sizes remain pending. This documents
+  Recorded seed-suite and timing evidence currently covers the default profile; broader
+  quality checks and performance measurements at the other two sizes remain pending. This documents
   generation support rather than changing the engine's general layout validation.
+- Q21: Where should the first player spawn within temperate climate?
+  A21: CONFIRMED on 2026-10-25: near the center of a temperate belt, away from both steppe
+  and desert. The implementation searches from actual curved belt midpoints outward,
+  within their middle half, retaining the existing mainland, terrain-safety, and starter-resource rules.
 
 ## Acceptance Criteria
 
@@ -495,6 +506,8 @@ consolidation tasks remain separate.
   volume is substantially higher in mountains, and non-metal deposits favor their stated
   non-mountain settings; no small metal/limestone population is introduced. [R21–R24]
 - AC14: GIVEN a new world's first starting candidate WHEN preparation accepts it THEN
+  it lies in the middle half of a temperate belt at its X, with the actual displaced
+  boundaries used for that test; the live standing-space search remains temperate,
   shallow small clay/sand/coal deposits are reachable in the configured local land region
   without ocean crossing, and the final standing-space check accepts current blocks.
   Physical reachability does not enable mining of unconfigured clay/coal. [R23, R29, R36]
@@ -1031,9 +1044,14 @@ also validate clipping and connected center planes. All work is bounded by the p
 budget; fingerprints hash descriptors/prepared data, not all resource voxels. Diagnostics
 distinguish exact counts from sampled spatial allocation and eligible-host volume.
 
-Select a temperate, low-slope mainland start, then reuse or insert the three small starter
-pockets. Proposed access radius: 256 blocks by shortest wrapped distance, with at most four
-blocks of cover and a dry traversable route within the local land region. Validate routes
+Select a temperate, low-slope mainland start near a belt's local midpoint, then reuse or
+insert the three small starter pockets. Search macro-cell centers outward from both actual
+curved temperate midpoints, with a deterministic order and no allocations. Restrict
+candidates to the middle half of their local belt; do not fall back to a climate edge.
+The maximum belt width bounds the search. Reject an unsuitable candidate world through
+the existing `start_access_unavailable` retry path. This preparation-only search adds no
+work to chunk regeneration. Proposed access radius: 256 blocks by shortest wrapped distance,
+with at most four blocks of cover and a dry traversable route within the local land region. Validate routes
 against the implemented movement/climb limits and final generated trees, not only Euclidean
 distance. Prefer selecting an already suitable plain over flattening a large area. Reserve
 spawn clearance and access patches from tree placement. Bound local searches and include

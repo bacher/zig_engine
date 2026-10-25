@@ -59,6 +59,13 @@ resource flows. Both playable natural and flat profiles have seeded, contiguous
 1–3-block deeprock; invalid saved floors are rejected before publication.
 Legacy generator IDs 0/1 are rejected explicitly.
 
+First-start selection tries macro-cell centers nearest the actual curved temperate
+belt midpoints, then expands within each belt's middle half. The original scan
+accepted the first suitable temperate row, biasing starts toward steppe. Dry mainland,
+gentle meadow terrain, spawn clearance, and starter routes remain required; saved
+player restoration retains its existing behavior. This bounded search runs only
+during preparation and adds no allocations or per-chunk regeneration work.
+
 ## PR review corrections
 
 The mainland coast coordinate now combines finite conservative coastal rectangles
@@ -130,8 +137,8 @@ macOS 26.7.1 (25G241).
 | Check | Result |
 | --- | --- |
 | `zig build` | Passed; both applications and installed content built |
-| `zig build test` | 45/45 steps; 910 passed, 1 skipped of 911 registered tests |
-| `zig build test-generation` | 228/228 passed; included in the full suite |
+| `zig build test` | 45/45 steps; 912 passed, 1 skipped of 913 registered tests |
+| `zig build test-generation` | 229/229 passed; included in the full suite; also passed in ReleaseSafe |
 | `zig build test-persistence` | 43/43 passed; included in the full suite |
 | `zig build test-capture` | Passed on 2026-10-23 |
 | `zig build test-gpu` | 2026-10-23: 19/19 steps; 90/90 passed on Metal, both wrapping configurations |
@@ -145,7 +152,7 @@ The 2026-10-25 rerun covers the build, full CPU suite (including persistence),
 generation diagnostics, both benchmark modes, and overview maps. GPU and
 player-scale results above are retained from 2026-10-23; shaders and material
 rendering were unchanged by these review corrections, climate tuning, and land
-growth changes. Those GPU checks compile production shaders and read back material
+growth/spawn changes. Those GPU checks compile production shaders and read back material
 colors; climate soil meshing and saved-material identity also have CPU tests. Prior manual inspection covered
 spawn terrain and nearby forest, not every climate or water configuration.
 
@@ -183,7 +190,14 @@ land columns exactly to verify connectivity.
   10.00 / 10.00%**, within the specified one-percentage-point tolerance.
   Per-seed world and land-only climate counts are retained in the JSONL.
 - All 256 seeds accepted attempt 0, including first-start and deposit preparation.
-- Preparation took **24.44–37.47 ms**, mean **30.11 ms**. Peak requested owned
+- All 256 first starts lie in the middle half of a temperate belt, within **0.90%**
+  of the local belt width from its midpoint. Minimum Y clearance to either neighboring
+  climate is **3,246 blocks**. Seed 12345 starts at storage **(1600, 10688, 401)**,
+  with steppe/desert boundaries at Y **6945 / 14393**. Raw JSONL records each start's
+  climate, actual boundary positions, and distances to both edges.
+  A separate regression checks seeds 12345, 0, and 87 at all three supported sizes,
+  including the complete horizontal standing-space search/clearance area.
+- Preparation took **27.78–45.02 ms**, mean **35.18 ms**. Peak requested owned
   allocation was **2,122,272 bytes**, below the 32-MiB preparation gate.
   Maximum indexed feature references: **101**; maximum bucket occupancy: **13**
   against the configured per-bucket limit of 64.
@@ -213,15 +227,15 @@ checked separately by generator tests and conservative generation bounds.
 
 | ReleaseFast workload | Beaches off | Beaches on |
 | --- | ---: | ---: |
-| Cold column + surface chunk + hash, median | 0.483 ms | 0.376 ms |
-| 32 vertical chunks from a cached column, median | 5.709 ms | 5.728 ms |
-| Mainland shore column initialization, median | 0.191 ms | 0.342 ms |
-| 96-column forward traversal | 27.577 ms | 27.605 ms |
-| Reverse traversal after eviction | 21.945 ms | 22.525 ms |
+| Cold column + surface chunk + hash, median | 0.575 ms | 0.531 ms |
+| 32 vertical chunks from a cached column, median | 8.304 ms | 7.850 ms |
+| Mainland shore column initialization, median | 0.199 ms | 0.364 ms |
+| 96-column forward traversal | 38.406 ms | 38.934 ms |
+| Reverse traversal after eviction | 32.895 ms | 32.950 ms |
 
 These small workloads show timing noise and location-dependent beach cost;
 they do not establish a general speedup or a controlled before/after comparison
-with prior regeneration reports. Land tuning changes both terrain and the chosen
+with prior regeneration reports. Land and spawn tuning change both terrain and the chosen
 representative sites. The separate geography comparison above isolates preparation
 at identical seeds and settings; its improvement does not imply the same gain
 for regeneration. The measured retained and peak allocation sizes are unchanged.

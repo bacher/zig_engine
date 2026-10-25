@@ -26,9 +26,9 @@
     "maximum_offset_disagreement_pp": 0.046539306640625
   },
   "preparation_ms": {
-    "minimum": 24.438208,
-    "maximum": 37.473875,
-    "mean": 30.11245703125
+    "minimum": 27.779,
+    "maximum": 45.018458,
+    "mean": 35.17539582421875
   },
   "preparation_peak_owned_bytes": 2122272,
   "feature_references_maximum": 101,
@@ -169,5 +169,12 @@
     ],
     "desired_seed_fraction": 0.95,
     "runtime_ratio_gate": false
+  },
+  "first_start_climate": {
+    "checked_seeds": 256,
+    "all_temperate": true,
+    "all_in_middle_half": true,
+    "minimum_edge_distance_blocks": 3246,
+    "maximum_relative_midpoint_distance": 0.008986809682562713
   }
 }

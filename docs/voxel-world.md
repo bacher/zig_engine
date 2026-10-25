@@ -33,6 +33,12 @@ map queries share the same periodic field used for generation and rendering. The
 generator borrows its layout and is owned by the service; columns and render clients must
 not outlive it.
 
+New players start near the local center of a temperate belt. Selection follows the
+curved climate boundaries, tries their midpoints first, and only expands within the
+middle half of each belt, away from steppe and desert. Existing dry-mainland, gentle
+meadow, and starter-resource access checks still apply. Saved player positions retain
+their existing restoration behavior.
+
 Direct and allocating natural-world preparation use the same settings/memory preflight and
 failure reporting before candidate attempts. Chunk filling evaluates deeprock thickness and
 the deposit-index candidate slice once per horizontal column, then reuses those inputs for
