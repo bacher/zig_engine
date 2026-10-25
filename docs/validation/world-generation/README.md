@@ -1,6 +1,6 @@
 # World generation validation
 
-Updated on 2026-10-25 for G1–G5 and AC1–AC42 of the
+Updated on 2026-10-25 for G1–G6 and AC1–AC47 of the
 [world generation specification](../../../specs/features/world-generation.md).
 The default profile is generator **2 / version 1**, natural, seed **12345**, with
 **2048 × 1024 × 32 chunks**. Beaches are available but disabled by default.
@@ -8,8 +8,9 @@ The default profile is generator **2 / version 1**, natural, seed **12345**, wit
 The current natural-generation support scope is **X:Y = 2:1**, targeting
 `1024 × 512 × 16`, `2048 × 1024 × 32` (default), and `4096 × 2048 × 64` chunks.
 The seed suites, timings, and overview maps in this report use the default size.
-Comparable quality at half/double size is an expectation to validate, not a result
-established by these measurements. Other shapes and sizes remain experimental;
+Seeds 12345, 0, and 87 pass mountain/spawn/oracle/restart checks at all three sizes.
+[Recorded profile examples](supported-profiles.json) and maps cover half/0, default/12345,
+and double/87; broad seed-distribution and timing evidence remains default-only. Other shapes and sizes remain experimental;
 general engine layout acceptance does not guarantee natural-generation quality.
 
 ## Delivered behavior
@@ -28,10 +29,10 @@ a median reduction from 8.336 to 4.195 ms (49.7%) with unchanged requested memor
 This measures geography preparation, not complete preparation or regeneration.
 
 Periodic integer fields provide winding climate boundaries, geology, rolling
-terrain, mountain ridges, and forest/meadow regions. Climate belts run north to
+terrain and forest/meadow regions; prepared peak kernels provide mountain ranges. Climate belts run north to
 south in proportions 10/10/25/10/25/10/10 over the entire horizontal area,
-including water. Sea level is 384 blocks at the default height. Ridges uplift
-existing land and fade to zero before both displaced frozen boundaries.
+including water. Sea level is exactly half the world depth: 512 blocks at default.
+Mountain bodies uplift existing land and fade to zero before both displaced frozen boundaries.
 
 Climate boundaries now combine independently phased periodic fields at 6, 14,
 and 30 cells around X, weighted 2:3:1. Automatic displacement scales with height
@@ -88,11 +89,55 @@ terrain in a 256-block collar outside the curved desert boundary.
 
 [Block-scale terrain and profiles](desert-terrain.png) show two actual 512×512
 tiles, with [exact profile data](desert-terrain.json). The sampled dune X profile
-has 163 height changes over 511 intervals; flat X and Y profiles each have 13,
-about one per 39 blocks. All four profiles have maximum adjacent delta one.
+has 163 height changes over 511 intervals; flat X and Y profiles each have 14,
+about one per 36.5 blocks. All four profiles have maximum adjacent delta one.
 Regression fixtures also exercise coast ramps, asymmetric islands, internal macro
 joins, climate boundaries, biome transitions, and the X seam. Pure-field tests
 check flat purity, grade bounds, and approximate balance at all three supported widths.
+
+## Mountain refinement
+
+[Terrain views and exact sections](mountain-terrain.png), [profile data](mountain-terrain.json),
+[16-bit sampled heights](mountain-heights.png), and the [whole-map comparison](mountains-before-after.png)
+show the new peak bodies. Hills remain deferred. Each continent retains 32 peak slots in
+inline arrays, and each query evaluates at most five nearby kernels. Separate asymmetric
+rational profiles produce gentle feet and pointed, steep upper faces. Peak heights and
+base widths vary. A shared piecewise-linear centerline follows the prepared inland anchors,
+bending overlapping feet into a range without adding a uniform ridge-height baseline.
+Precomputed previous/next links avoid searching the descriptors during regeneration.
+
+The maximum of the overlapping bodies creates saddles and gorges while preserving the
+underlying land surface. Gentle feet retain climate cover; higher or steeper faces expose
+stone. The cover grade is an analytic mountain-body heuristic, excluding lowland and
+coast/climate taper derivatives; it is not a bound on the final terrain gradient.
+Metal candidates now follow actual prepared peaks, with the existing footprint/solid-host
+checks retained. Spawn candidates and their safety probes exclude all mountain influence.
+
+All 256 default-profile seeds have sea level 512 and actual maximum summit height 972
+(`floor(1024 * 95 / 100)`), with at least three such summits per seed. At seed 12345,
+51 dry descriptor centers are pointed rock summits; base widths span 807–2095 blocks.
+The selected connected saddle is at height 763, 135 blocks below its lower endpoint;
+the deeper gorge is at 606 with 255 blocks of wall relief. Exact one-block sections
+show these shapes, including a maximum six-block step in the selected gorge section.
+The default depth remains 32 chunks; no hill layer or walkable-route guarantee was added.
+
+Across the suite, 16,165 of 16,366 adjacent-anchor corridors with mountain endpoints
+retain influence at every one of 257 sampled points. Coast and climate masks can split
+exposed ranges; a continent is not promised one unbroken range. Seed 12345 has 47/48 such
+connections: the remaining corridor crosses the coastal collar at `(14738,7292)`.
+The JSONL records the first gap and its reason. These bounded probes are diagnostics,
+not an exhaustive connectivity proof, seed acceptance gate, or traversability check.
+Controlled fixtures separately test overlapping bodies, centerline knots and seam crossing.
+
+| Example | Chunks | Sea / highest summit | Sampled connections |
+| --- | --- | ---: | ---: |
+| [Half, seed 0](half-0.png) | 1024 × 512 × 16 | 256 / 486 | 55/55 |
+| [Default, seed 12345](default-12345.png) | 2048 × 1024 × 32 | 512 / 972 | 47/48; coastal split |
+| [Double, seed 87](double-87.png) | 4096 × 2048 × 64 | 1024 / 1945 | 49/49 |
+
+The nine seed/profile regression worlds additionally compare actual summit, saddle, and
+gorge chunks against the point oracle, boundary masks, material counts, X wrapping,
+fresh preparation, and derived mesh hashes.
 
 ## PR review corrections
 
@@ -103,12 +148,13 @@ The approximation may flatten up to 16 extra blocks beside the real shore; its
 inland values do not promise exact water distance. Islands retain their separate
 analytic taper. In the original seed-12345 review fixture at
 `(36735,13632)` → `(36736,13632)`, height **454 → 385** became **405 → 405**.
+Those height values are historical coast-comparison results at the previous sea level.
 Regressions use fixed mainland fixtures for internal and wrapped joins independently
 of current continent growth.
 An independent fine-grid distance BFS
 checks 514,882 mainland columns in concave, neck, corner, and seam fixtures,
 including maximally conservative trim records. Maximum adjacent-land height delta
-in those reduced fixtures is four blocks.
+in those reduced fixtures is two blocks.
 
 Mountain uplift uses the same displaced climate boundaries as classification and
 reaches zero on both nonfrozen border rows. The original review fixture at
@@ -165,12 +211,12 @@ macOS 26.7.1 (25G241).
 | Check | Result |
 | --- | --- |
 | `zig build` | Passed; both applications and installed content built |
-| `zig build test` | 45/45 steps; 922 passed, 1 skipped of 923 registered tests |
-| `zig build test-generation` | 235/235 passed; included in the full suite; also passed in ReleaseSafe |
+| `zig build test` | 45/45 steps; 935 passed, 1 skipped of 936 registered tests |
+| `zig build test-generation` | 242/242 passed; included in the full suite; also passed in ReleaseSafe |
 | `zig build test-persistence` | 43/43 passed; included in the full suite |
 | `zig build test-capture` | Passed on 2026-10-23 |
 | `zig build test-gpu` | 2026-10-23: 19/19 steps; 90/90 passed on Metal, both wrapping configurations |
-| ReleaseFast / ReleaseSafe regeneration | All 26 representative hashes agree between builds |
+| ReleaseFast / ReleaseSafe regeneration | All 30 representative hashes agree between builds |
 | 256-seed diagnostic suite | 256 accepted; no exhausted seeds |
 | Player-scale inspection | 2026-10-23: safe grass spawn, complete trunks/crowns, opaque foliage and shadows |
 
@@ -180,7 +226,7 @@ The 2026-10-25 rerun covers the build, full CPU suite (including persistence),
 generation diagnostics, both benchmark modes, and overview maps. GPU and
 player-scale results above are retained from 2026-10-23; shaders and material
 rendering were unchanged by these review corrections, climate tuning, and land
-growth/spawn/desert changes. Those GPU checks compile production shaders and read back material
+growth/spawn/desert/mountain changes. Those GPU checks compile production shaders and read back material
 colors; climate soil meshing and saved-material identity also have CPU tests. Prior manual inspection covered
 spawn terrain and nearby forest, not every climate or water configuration.
 
@@ -194,6 +240,7 @@ spawn terrain and nearby forest, not every climate or water configuration.
 | AC19, AC28–AC29, AC36 | Shared forbidden/no-item mining tests; natural and flat save/reopen, inventory/climate/fingerprint equality, legacy/profile/runtime mismatch rejection |
 | AC20–AC21, AC25–AC27 | Slow material oracle, conservative occupancy/enclosure checks, beach overlay fixtures, cached/evicted generation and mesh benchmark below |
 | AC38 | Zero-attempt preflight, deterministic candidate rejection, eight-attempt exhaustion, terminal allocation/budget/cancellation injection, categorized diagnostics |
+| AC43–AC47 | Pointed/asymmetric profile and derivative fixtures, connected centerline and X-seam fixtures, climate cover, nine seed/profile summit/pass/gorge oracle/restart checks, 256-seed actual heights, recorded sections and memory/timing checks |
 | AC39–AC42 | Pure-field slope/purity/patch tests, actual coast/island/seam/climate fixtures, stone desert mountain and biome-eligibility checks, two-pass seed counts, block-scale profiles, dune/flat replay hashes |
 
 The natural save/reopen integration test mines real starter sand and ordinary
@@ -219,30 +266,30 @@ land columns exactly to verify connectivity.
   10.00 / 10.00%**, within the specified one-percentage-point tolerance.
   Per-seed world and land-only climate counts are retained in the JSONL.
 - All 256 seeds accepted attempt 0, including first-start and deposit preparation.
-- Dunes occupy **50.14% / 50.16%** of sampled dry desert lowlands outside mountain
+- Dunes occupy **50.13% / 50.15%** of sampled dry desert lowlands outside mountain
   influence in the two passes; the remainder is flats. Per-seed estimates range
-  from **28.98% to 73.94%** dunes. Approximate balance is statistical guidance,
+  from **29.43% to 71.46%** dunes. Approximate balance is statistical guidance,
   without a per-seed area gate; the counts and variation remain visible in the JSONL.
 - All 256 first starts lie in the middle half of a temperate belt, within **0.90%**
   of the local belt width from its midpoint. Minimum Y clearance to either neighboring
-  climate is **3,246 blocks**. Seed 12345 starts at storage **(1600, 10688, 401)**,
+  climate is **3,246 blocks**. Seed 12345 starts at storage **(1600, 10688, 529)**,
   with steppe/desert boundaries at Y **6945 / 14393**. Raw JSONL records each start's
   climate, actual boundary positions, and distances to both edges.
   A separate regression checks seeds 12345, 0, and 87 at all three supported sizes,
   including the complete horizontal standing-space search/clearance area.
-- Preparation took **24.77–50.24 ms**, mean **30.99 ms**. Peak requested owned
-  allocation was **2,122,272 bytes**, below the 32-MiB preparation gate.
-  Maximum indexed feature references: **101**; maximum bucket occupancy: **13**
+- Preparation took **29.24–41.78 ms**, mean **36.77 ms**. Peak requested owned
+  allocation was **2,129,016 bytes**, below the 32-MiB preparation gate.
+  Maximum indexed feature references: **98**; maximum bucket occupancy: **14**
   against the configured per-bucket limit of 64.
 
 Every seed has eight large deposits per resource. Large sources account for at
-least **99.9370%** of descriptor resource volume for every resource in every
+least **99.9380%** of descriptor resource volume for every resource in every
 seed. Spatial allocation is estimated separately: per-deposit accepted samples
 are weighted by exact effective block counts, and eligible host volume is
 estimated from the two column passes. These estimates place **100%** of metal
-in mountains in both passes (mountain host density approximately 0.000392,
+in mountains in both passes (mountain host density approximately 0.000344,
 sampled lowland density zero). Non-metal resources are at least approximately
-**99.18% sedimentary** and **99.82% lowland**. Exact totals and sampled spatial
+**98.57% sedimentary** and **99.41% lowland**. Exact totals and sampled spatial
 fractions are separate fields in the summary. Desert surface sand is not
 included in descriptor totals. Extraction lifetimes and transport balance remain
 untuned until production rates and recipes exist.
@@ -251,36 +298,44 @@ untuned until production rates and recipes exist.
 
 Seed 12345 was benchmarked for nine rounds in
 [ReleaseFast](benchmark-release-fast.txt) and three in
-[ReleaseSafe](benchmark-release-safe.txt), with beaches off/on. All 26 snapshot
+[ReleaseSafe](benchmark-release-safe.txt), with beaches off/on. All 30 snapshot
 hashes and both full prepared-world fingerprints agree across those builds.
-Twelve representative sites, including both desert biomes, also agree after
+Fourteen representative sites, including both desert biomes and actual summit/pass/gorge columns, also agree after
 actual 96-column cache churn, reverse traversal, and fresh preparation; hashes
 include blocks, climate, boundary masks, and derived mesh data. Enclosure is
 checked separately by generator tests and conservative generation bounds.
 
 | ReleaseFast workload | Beaches off | Beaches on |
 | --- | ---: | ---: |
-| Cold column + surface chunk + hash, median | 0.558 ms | 0.476 ms |
-| 32 vertical chunks from a cached column, median | 7.356 ms | 7.366 ms |
-| Mainland shore column initialization, median | 0.188 ms | 0.341 ms |
-| Desert dune column initialization, median | 0.207 ms | 0.200 ms |
-| Desert flat column initialization, median | 0.186 ms | 0.186 ms |
-| 96-column forward traversal | 35.223 ms | 35.033 ms |
-| Reverse traversal after eviction | 29.371 ms | 30.200 ms |
+| Cold column + surface chunk + hash, median | 0.497 ms | 0.558 ms |
+| 32 vertical chunks from a cached column, median | 9.231 ms | 9.980 ms |
+| Mainland shore column initialization, median | 0.187 ms | 0.405 ms |
+| Desert dune column initialization, median | 0.236 ms | 0.233 ms |
+| Desert flat column initialization, median | 0.224 ms | 0.216 ms |
+| Mountain summit column initialization, median | 0.272 ms | 0.263 ms |
+| Mountain saddle column initialization, median | 0.292 ms | 0.273 ms |
+| Mountain gorge column initialization, median | 0.265 ms | 0.248 ms |
+| 96-column forward traversal | 40.626 ms | 39.632 ms |
+| Reverse traversal after eviction | 34.558 ms | 34.850 ms |
 
 These small workloads show timing noise and location-dependent beach cost;
 they do not establish a general speedup or a controlled before/after comparison
-with prior regeneration reports. Land, spawn, and desert tuning change both terrain and the chosen
-representative sites. The separate geography comparison above isolates preparation
+with prior regeneration reports. Land, spawn, desert, and mountain tuning change terrain and the chosen
+representative sites. Raising sea level also increases occupied vertical chunks. The separate geography comparison above isolates preparation
 at identical seeds and settings; its improvement does not imply the same gain
-for regeneration. The measured retained and peak allocation sizes are unchanged.
+for regeneration. Inline mountain descriptors add 6,744 retained/peak bytes, with no extra allocation requests
+or change to the cached-column size. The [before-mountains benchmark](benchmark-before-mountains.txt)
+used the same seed/rounds: beaches-off cached vertical generation was 7.606 ms versus
+9.231 ms now; 96-column forward/reverse traversal was 36.169/30.934 ms versus
+40.626/34.558 ms. These are complete-output comparisons, including the sea-level and
+terrain changes, not an isolated mountain-kernel benchmark.
 Beaches remain **off by default**.
 The logs separately report column, chunk-fill, and meshing times, throughput,
 allocation calls/resizes, and p95. Retained environment/border sample counts
 explicitly exclude internal feature probes. Mesh timing uses already prepared
 chunks/neighbors; neither disk nor GPU uploads are included.
 
-Preparation makes eight allocation requests and retains **680,480 bytes**,
+Preparation makes eight allocation requests and retains **687,224 bytes**,
 including the 262,144-byte coast records. Growth/BFS scratch is freed before
 those records are allocated, so peak geography stays at 16 bytes per macro cell.
 A cached column is
@@ -323,10 +378,13 @@ zig build test-gpu -j2 --summary all
 zig build generation-map -Doptimize=ReleaseFast -j2 -- /tmp/overview.ppm 12345 256
 zig build benchmark-generation -Doptimize=ReleaseFast -j2 -- 12345 9
 zig build benchmark-generation -Doptimize=ReleaseSafe -j2 -- 12345 3
+zig build generation-map -Doptimize=ReleaseFast -j2 -- /tmp/half.ppm 0 1 half
+zig build generation-map -Doptimize=ReleaseFast -j2 -- /tmp/double.ppm 87 1 double
 ```
 
 The map command writes PPM maps, a first-seed `.desert.ppm` detail view and
-`.desert.json` profiles, a per-seed `.jsonl` report, and an informational
+`.desert.json` profiles, `.mountains.ppm`, `.mountains.height.pgm`,
+`.mountains.sections.ppm`, and `.mountains.json` geometry/profiles, a per-seed `.jsonl` report, and an informational
 `.summary.json` with empirical coverage percentiles and the envelope fraction.
 PNGs here are lossless
 conversions. Sandboxed build/test checks used
@@ -343,11 +401,11 @@ validation. Algorithm/material/rounding changes require generator-version review
 Coast refinement preserves row intervals and bridges; the shoreline footprint
 still uses bounded macro-cell trims. The approximate relief coordinate crosses
 internal joins continuously but can add a flat coastal collar up to 16 blocks.
-The existing abrupt seabed-height step at the actual shore is unchanged. Ridges
+The existing abrupt seabed-height step at the actual shore is unchanged. Peak bodies
 taper with coast/climate and are not branched tectonic networks. No exact final
 land quota or equal continent-size guarantee is claimed. The soft coverage envelope
-is tuned for the default profile. Half/double-size quality and performance still need
-separate seed suites and map inspection; other aspect ratios are outside the current
+is tuned for the default profile. Half/double-size checks cover nine fixed seed/profile worlds and the recorded examples;
+broad quality/performance distributions still need separate seed suites; other aspect ratios are outside the current
 support scope and receive no special growth handling. The fixed desert transition collar
 is tuned for 2:1 maps; on extreme tall/narrow experimental layouts, adjacent X columns
 can cross the collar and produce abrupt relief changes. F1 foundation/pile rules, F2 NPC/farm

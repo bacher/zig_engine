@@ -120,13 +120,28 @@ pub const Deposits = struct {
         for (0..256) |attempt| {
             const h = hash.mix(seed ^ (@as(u64, @intFromEnum(definition.resource)) << 48) ^ (@as(u64, @intFromEnum(size_class)) << 40) ^ (@as(u64, serial) << 16) ^ attempt);
             const macro = h % world.geography.owners.len;
-            const owner = world.geography.owners[macro];
+            var owner = world.geography.owners[macro];
+            var y: u32 = @intCast(macro / world.geography.macro_width * 128 + 64);
+            var x: u32 = @intCast(macro % world.geography.macro_width * 128 + 64);
+            var metal_extent: [2]u32 = .{ std.math.maxInt(u32), std.math.maxInt(u32) };
+            if (definition.resource == .metal_ore) {
+                // Follow the retained range hosts rather than reconstructing a
+                // ridge axis. Small offsets allow several disjoint large bodies
+                // in broad peaks while every footprint still proves its host.
+                const peak_owner = h % world.geography.continent_count;
+                const peak_bin = (h >> 16) % @import("generation_mountains.zig").bin_count;
+                const peak = world.geography.mountains.peaks[peak_owner][peak_bin];
+                if (!peak.active) continue;
+                owner = @intCast(peak_owner + 1);
+                metal_extent = .{ @min(peak.radii_x[0], peak.radii_x[1]) / 4, @min(peak.radii_y[0], peak.radii_y[1]) / 4 };
+                const dx = @as(i64, @intCast((h >> 24) % @max(1, metal_extent[0]))) - @as(i64, metal_extent[0] / 2);
+                const dy = @as(i64, @intCast((h >> 40) % @max(1, metal_extent[1]))) - @as(i64, metal_extent[1] / 2);
+                x = hash.wrappedX(@as(i64, peak.center[0]) + dx, self.width);
+                const candidate_y = @as(i64, peak.center[1]) + dy;
+                if (candidate_y < 0 or candidate_y >= self.height) continue;
+                y = @intCast(candidate_y);
+            }
             if (owner == 0) continue;
-            const y: u32 = @intCast(macro / world.geography.macro_width * 128 + 64);
-            const x: u32 = if (definition.resource == .metal_ore)
-                hash.wrappedX(@as(i64, world.geography.mainlandCentre(owner - 1, y)) + @as(i64, self.width / world.geography.continent_count / 7), self.width)
-            else
-                @intCast(macro % world.geography.macro_width * 128 + 64);
             const e = world.baseEnvironmentAt(x, y);
             if (e.landmass_id != owner or e.water_present or e.coast_distance < 80) continue;
             if (definition.resource == .metal_ore and e.relief != .mountain) continue;
@@ -135,7 +150,7 @@ pub const Deposits = struct {
             const cover: u32 = if (size_class == .large) 12 else 4;
             const available = @max(8, e.coast_distance / 3);
             const radii: [3]u32 = if (size_class == .large)
-                .{ @max(16, @min(definition.large_radii[0], available)), @max(32, @min(definition.large_radii[1], available)), definition.large_radii[2] }
+                .{ @max(16, @min(definition.large_radii[0], available, metal_extent[0])), @max(32, @min(definition.large_radii[1], available, metal_extent[1])), definition.large_radii[2] }
             else
                 .{ 5 + @as(u32, @intCast(h % 3)), 5 + @as(u32, @intCast((h >> 8) % 3)), 1 };
             const center_z = if (size_class == .large) world.geography.sea_level - cover - radii[2] else e.terrain_height - cover - radii[2];

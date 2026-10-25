@@ -1,4 +1,4 @@
-//! `zig build benchmark-generation -Doptimize=ReleaseFast -- [seed] [rounds]`.
+//! `zig build benchmark-generation -Doptimize=ReleaseFast -- [seed] [rounds] [half|default|double]`.
 //! No pristine chunks are persisted; the cache has the production 64-column limit.
 const std = @import("std");
 const engine = @import("engine");
@@ -54,12 +54,14 @@ const AllocationMeter = struct {
 };
 
 const Site = struct { label: []const u8, block: [2]u32, chunk_z: ?i32 = null };
-fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![12]Site {
+fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![14]Site {
     const natural = prepared.kind.natural;
     const size = prepared.layout.size_in_blocks;
     const start = prepared.firstStart().?;
     const island = natural.geography.islands[0];
     const deposit = natural.deposits.items[0];
+    const mountain_report = diagnostics.sampleMountains(prepared);
+    if (mountain_report.summit == null or mountain_report.pass == null or mountain_report.gorge == null) return error.MissingMountainSite;
     var sites = [_]Site{
         .{ .label = "plains", .block = .{ start[0], start[1] } },
         .{ .label = "mainland_coast", .block = .{ start[0], start[1] } },
@@ -71,9 +73,12 @@ fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![12]
         .{ .label = "x_seam", .block = .{ size[0] - 1, size[1] / 2 } },
         .{ .label = "ocean", .block = .{ 0, 0 } },
         .{ .label = "polar", .block = .{ size[0] / 2, 0 } },
-        .{ .label = "mountain", .block = .{ deposit.center[0], deposit.center[1] } },
+        .{ .label = "mountain_summit", .block = mountain_report.summit.?.block },
         .{ .label = "desert_flats", .block = .{ 0, size[1] / 2 } },
+        .{ .label = "mountain_pass", .block = mountain_report.pass.?.site.block },
+        .{ .label = "mountain_gorge", .block = mountain_report.gorge.?.site.block },
     };
+    std.debug.print("mountain_sites actual_high_summits={d} consecutive_bin_pairs={d} mountain_endpoint_pairs={d} influence_connected_pairs={d} connected_passes={d} pass_wall_relief={d} gorge_wall_relief={d} diagnostic_column_probes={d}\n", .{ mountain_report.high_summits_at_95_percent, mountain_report.consecutive_bin_pairs, mountain_report.mountain_endpoint_pairs, mountain_report.influence_connected_pairs, mountain_report.connected_passes, mountain_report.pass.?.wall_relief, mountain_report.gorge.?.wall_relief, mountain_report.column_probes });
     var coast_found = false;
     var dunes_found = false;
     var flats_found = false;
@@ -260,10 +265,10 @@ fn printSamples(label: []const u8, samples: []u64, count: usize) void {
     std.debug.print("{s}: median_ms={d:.3} p95_ms={d:.3} units_per_sample={d} throughput_units_s={d:.2}\n", .{ label, median, @as(f64, @floatFromInt(samples[p95])) / std.time.ns_per_ms, count, @as(f64, @floatFromInt(count)) * 1000 / @max(0.000001, median) });
 }
 
-fn run(init: std.process.Init, seed: u64, rounds: usize, beaches: bool) ![32]u8 {
+fn run(init: std.process.Init, seed: u64, rounds: usize, beaches: bool, dimensions: [3]u32) ![32]u8 {
     var preparation_meter: AllocationMeter = .{ .backing = init.gpa };
     const a = preparation_meter.allocator();
-    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2048, 1024, 32 } });
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = dimensions });
     var report: generation.PreparationReport = .{};
     const prep_start = std.Io.Clock.awake.now(init.io);
     var prepared = try generation.WorldGenerator.prepareWithReport(.{ .natural = .{ .seed = seed, .settings = .{ .beaches = beaches } } }, a, &layout, &report);
@@ -356,6 +361,9 @@ pub fn main(init: std.process.Init) !void {
     const seed = if (args.len > 1) try std.fmt.parseInt(u64, args[1], 10) else 12345;
     const rounds = if (args.len > 2) try std.fmt.parseInt(usize, args[2], 10) else 3;
     if (rounds == 0 or rounds > 100) return error.InvalidRounds;
-    _ = try run(init, seed, rounds, false);
-    _ = try run(init, seed, rounds, true);
+    const profile = if (args.len > 3) args[3] else "default";
+    const dimensions = try diagnostics.profileDimensions(profile);
+    std.debug.print("world_size_profile={s} chunks={any}\n", .{ profile, dimensions });
+    _ = try run(init, seed, rounds, false, dimensions);
+    _ = try run(init, seed, rounds, true, dimensions);
 }

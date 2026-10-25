@@ -4,6 +4,7 @@ const env = @import("world_environment.zig");
 const CoastApprox = @import("generation_coast_approx.zig").CoastApprox;
 const Settings = @import("generation_settings.zig").NaturalSettings;
 const desert = @import("generation_desert.zig");
+const Mountains = @import("generation_mountains.zig").Mountains;
 
 pub const Island = struct { id: u8, x: u32, y: u32, radius_x: u32, radius_y: u32 };
 pub const macro_size = 128;
@@ -24,6 +25,7 @@ pub const Geography = struct {
     coast_field: CoastApprox = undefined,
     core_seeds: [5][2]u32 = undefined,
     core_counts: [5]u32 = @splat(0),
+    mountains: Mountains = .{ .width = 1, .height = 1, .sea_level = 0, .continent_count = 0 },
 
     pub const InitError = error{ OutOfMemory, TopologyConflict, RequiredFeaturePlacement };
 
@@ -45,13 +47,30 @@ pub const Geography = struct {
     }
 
     pub fn preparationWorkBound(cells: usize) u64 {
-        return @as(u64, cells) * (128 + CoastApprox.build_probe_bound_per_cell);
+        return @as(u64, cells) * (128 + CoastApprox.build_probe_bound_per_cell) + Mountains.preparationWorkBound(cells);
     }
 
     /// Explicit fixture entry point. Call once after the ownership and macro
     /// distance arrays are final; init prepares this before returning a world.
     pub fn prepareCoast(self: *Geography, allocator: std.mem.Allocator) error{OutOfMemory}!void {
         self.coast_field = try CoastApprox.init(allocator, self.seed, self.width, self.height, self.owners, self.coastal_distance);
+    }
+
+    /// Uses the actual root-seeded climate field; no independent climate seed.
+    /// Runtime preparation calls this once after ownership and coast are final.
+    pub fn prepareMountains(self: *Geography, climate: env.ClimateField) void {
+        self.mountains = Mountains.prepare(.{
+            .seed = self.seed,
+            .width = self.width,
+            .height = self.height,
+            .depth = self.depth,
+            .sea_level = self.sea_level,
+            .continent_count = self.continent_count,
+            .core_seeds = self.core_seeds,
+            .owners = self.owners,
+            .coastal_distance = self.coastal_distance,
+            .climate = climate,
+        });
     }
 
     pub fn init(allocator: std.mem.Allocator, seed: u64, size: [3]u32, settings: Settings) InitError!Geography {
@@ -64,7 +83,7 @@ pub const Geography = struct {
         const distances = try allocator.alloc(u16, count);
         errdefer allocator.free(distances);
         @memset(distances, 0);
-        var self = Geography{ .seed = seed, .width = size[0], .height = size[1], .depth = size[2], .sea_level = @intCast(@as(u64, size[2]) * 3 / 8), .continent_count = @intCast(3 + hash.mix(seed) % 3), .island_count = settings.island_count, .macro_width = mw, .macro_height = mh, .owners = owners, .coastal_distance = distances };
+        var self = Geography{ .seed = seed, .width = size[0], .height = size[1], .depth = size[2], .sea_level = size[2] / 2, .continent_count = @intCast(3 + hash.mix(seed) % 3), .island_count = settings.island_count, .macro_width = mw, .macro_height = mh, .owners = owners, .coastal_distance = distances };
         {
             const costs = try allocator.alloc(u32, count);
             defer allocator.free(costs);
@@ -249,12 +268,6 @@ pub const Geography = struct {
         return @intCast(8 + @divTrunc((n + 65535) * 16, 131070));
     }
 
-    fn centre(self: *const Geography, id: u8, y: u32) i64 {
-        const core = self.core_seeds[id];
-        const phase = hash.wrappedX(@as(i64, y) + @as(i64, @intCast(hash.mix(self.seed +% id) % self.height)), self.height);
-        const winding = hash.periodic(hash.mix(self.seed +% id), phase, self.height, 3);
-        return @as(i64, core[0]) * 128 + 64 + @divTrunc(winding * @as(i64, self.width / self.continent_count), 65536 * 10);
-    }
     /// Explicit unfaded climate probe for terrain fixtures. Runtime queries use
     /// atWithClimate so the shared polar-boundary taper is always included.
     pub fn at(self: *const Geography, climate: env.ClimateId, x: i64, y: u32) env.ColumnEnvironment {
@@ -269,26 +282,8 @@ pub const Geography = struct {
         const climate = sample.id;
         const cx = hash.wrappedX(x, self.width);
         const land = self.landAt(cx, y);
-        var mountain: u16 = 0;
-        if (land.id > 0 and land.id < 128 and climate != .frozen and land.coast > 16) {
-            const id = land.id - 1;
-            const radius: i64 = @intCast(@max(12, @min(900, self.width / self.continent_count / 12)));
-            const ridge_x = self.centre(id, y) + @as(i64, @intCast(self.width / self.continent_count / 7));
-            const dx: i64 = @intCast(@abs(hash.distanceX(cx, ridge_x, self.width)));
-            const ridge_seed = hash.mix(self.seed +% id +% 0x5249444745);
-            const ridge_y_start = self.height / 20 + @as(u32, @intCast(ridge_seed % @max(1, self.height / 6)));
-            const ridge_y_end = self.height - self.height / 20 - @as(u32, @intCast((ridge_seed >> 24) % @max(1, self.height / 6)));
-            if (dx < radius and y > ridge_y_start and y < ridge_y_end) {
-                const edge = @min(y - ridge_y_start, ridge_y_end - y);
-                const fade = @min(65535, @as(u64, edge) * 65535 / @max(1, self.height / 12));
-                const coast_fade = @min(65535, @as(u64, land.coast - 16) * 65535 / @max(1, @as(u64, @intCast(radius))));
-                const amplitude = @divTrunc((radius - dx) * 65535, radius);
-                mountain = @intCast(@as(u64, @intCast(amplitude)) * fade / 65535 * coast_fade / 65535 * sample.mountain_fade / 65535);
-            }
-        }
-        const uplift = @divTrunc(@as(i64, mountain) * @as(i64, @min(320, self.depth / 3)), 65535);
         var desert_biome: ?env.DesertBiome = null;
-        const height: u32 = if (land.id != 0) land_height: {
+        const base_height: u32 = if (land.id != 0) land_height: {
             var elevation: i64 = undefined;
             if (sample.desert_terrain != 0) {
                 const terrain = desert.sample(self.seed, cx, y, self.width);
@@ -303,15 +298,21 @@ pub const Geography = struct {
                 };
                 // Quantize only after blending both desert biomes and shore.
                 elevation = @divFloor(blended, desert.unit);
-                if (climate == .desert and mountain == 0) desert_biome = terrain.biome;
+                if (climate == .desert) desert_biome = terrain.biome;
             } else {
                 elevation = self.rollingElevation(cx, y, land.coast);
             }
-            break :land_height @intCast(std.math.clamp(@as(i64, self.sea_level) + @max(1, elevation + uplift), 3, self.depth - 12));
+            break :land_height @intCast(std.math.clamp(@as(i64, self.sea_level) + @max(1, elevation), 3, self.depth - 12));
         } else ocean_height: {
             const broad = hash.field2(hash.mix(self.seed ^ 0x5445525241494e), cx, y, self.width, @max(64, self.height / 16));
             break :ocean_height self.sea_level - @as(u32, @intCast(8 + @divTrunc((broad + 65535) * @as(i64, @min(140, self.sea_level / 2)), 131070)));
         };
+        const mountain_sample = self.mountains.sample(land.id, cx, y, base_height, land.coast, sample.mountain_fade);
+        const mountain = mountain_sample.strength;
+        if (mountain != 0) desert_biome = null;
+        // Low, gentle feet retain the local climate's cover. Higher flanks and
+        // steep faces expose rock without querying four neighbouring columns.
+        const exposed_rock = mountain_sample.shape_q16 >= 8192 or mountain_sample.grade_q16 >= 32768;
         const vegetation: env.VegetationId = if (land.id == 0 or climate == .frozen or climate == .desert)
             .barren
         else if (climate == .steppe)
@@ -322,7 +323,7 @@ pub const Geography = struct {
             .meadow;
         return .{
             .climate = climate,
-            .terrain_height = @max(3, height),
+            .terrain_height = @max(3, mountain_sample.height),
             .sea_level = self.sea_level,
             .water_present = land.id == 0,
             .relief = if (mountain >= 18000) .mountain else .lowland,
@@ -330,7 +331,7 @@ pub const Geography = struct {
             .desert_biome = desert_biome,
             .vegetation = vegetation,
             .geology = if (mountain >= 12000) .rocky else .sedimentary,
-            .surface_cover = if (climate == .desert) (if (mountain >= 18000) .rock else .sand) else if (mountain >= 36000) .rock else .soil,
+            .surface_cover = if (exposed_rock) .rock else if (climate == .desert) .sand else .soil,
             .landmass_id = land.id,
             .coast_distance = land.coast,
         };
@@ -342,10 +343,6 @@ pub const Geography = struct {
         const land_height = 1 + @divTrunc((broad + 65535) * @as(i64, @min(48, self.depth / 16)), 131070);
         const coast_ramp: i64 = @intCast(@min(65535, @as(u64, coast) * 65535 / 96));
         return @divTrunc(land_height * coast_ramp, 65535) + @divTrunc(detail * 2 * coast_ramp, 65535 * 65535);
-    }
-
-    pub fn mainlandCentre(self: *const Geography, id: u8, y: u32) u32 {
-        return hash.wrappedX(self.centre(id, y), self.width);
     }
 };
 
@@ -405,7 +402,7 @@ const Heap = struct {
     }
 };
 
-test "ridge uplift fades at both polar boundaries in X and Y" {
+test "mountain uplift fades at both polar boundaries in X and Y" {
     const allocator = std.testing.allocator;
     const owners = try allocator.alloc(u8, 512 * 256);
     defer allocator.free(owners);
@@ -422,6 +419,21 @@ test "ridge uplift fades at both polar boundaries in X and Y" {
     defer geography.coast_field.deinit(allocator);
     geography.core_seeds[0] = .{ 65, 128 };
     const climate = env.ClimateField{ .seed = hash.stream(12345, .climate, 0), .width = geography.width, .height = geography.height, .displacement = (Settings{}).climateDisplacement(geography.height) };
+    // Place known peaks across the taper instead of depending on procedural
+    // range anchors intersecting the particular boundary rows in this fixture.
+    geography.mountains = .{ .width = geography.width, .height = geography.height, .sea_level = geography.sea_level, .continent_count = 1 };
+    const test_x = 11647;
+    const test_boundaries = climate.boundaries(test_x);
+    for ([_]u32{ test_boundaries[0] + 512, test_boundaries[5] - 513 }) |y| {
+        geography.mountains.peaks[0][geography.mountains.binAt(y)] = .{
+            .active = true,
+            .center = .{ test_x, y },
+            .summit_height = 973,
+            .radii_x = .{ 2048, 1536 },
+            .radii_y = .{ 1800, 1800 },
+        };
+    }
+    geography.mountains.rebuildIndex();
     var tapered_columns: usize = 0;
     for (0..1024) |i| {
         const x: i64 = @intCast(i * 64);
@@ -726,4 +738,27 @@ test "shared bilinear coast extension has bounded interior and capped gradients"
         }
     };
     try std.testing.expect(capped_columns > 0);
+}
+
+test "gentle mountain feet retain climate cover and upper faces expose stone" {
+    var owners = [_]u8{1} ** 64;
+    var coasts = [_]u16{6} ** 64;
+    var g = Geography{ .seed = 12345, .width = 1024, .height = 1024, .depth = 1024, .sea_level = 512, .continent_count = 1, .island_count = 0, .macro_width = 8, .macro_height = 8, .owners = &owners, .coastal_distance = &coasts };
+    try g.prepareCoast(std.testing.allocator);
+    defer g.coast_field.deinit(std.testing.allocator);
+    g.mountains = .{ .width = g.width, .height = g.height, .sea_level = g.sea_level, .continent_count = 1 };
+    g.mountains.peaks[0][16] = .{ .active = true, .center = .{ 512, 512 }, .summit_height = 972, .radii_x = .{ 400, 400 }, .radii_y = .{ 48, 48 }, .shape_x = .{ 4, 12 }, .shape_y = .{ 4, 4 } };
+    g.mountains.rebuildIndex();
+    for ([_]env.ClimateId{ .temperate, .steppe, .desert }) |climate| {
+        const foot = g.at(climate, 850, 512);
+        try std.testing.expect(foot.mountain_strength > 0);
+        try std.testing.expectEqual(if (climate == .desert) env.SurfaceCover.sand else .soil, foot.surface_cover);
+        const summit = g.at(climate, 512, 512);
+        try std.testing.expectEqual(@as(u32, 972), summit.terrain_height);
+        try std.testing.expectEqual(env.SurfaceCover.rock, summit.surface_cover);
+        try std.testing.expectEqual(env.ReliefId.mountain, summit.relief);
+    }
+    const frozen = g.at(.frozen, 512, 512);
+    try std.testing.expectEqual(@as(u16, 0), frozen.mountain_strength);
+    try std.testing.expectEqual(env.SurfaceCover.soil, frozen.surface_cover);
 }

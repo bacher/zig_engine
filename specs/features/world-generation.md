@@ -2,7 +2,7 @@
 service: zig_engine
 created: 2026-10-22
 updated: 2026-10-25
-status: implemented
+status: in-progress
 ---
 
 # Generate continents, climate belts, mountain ranges, deposits, and forests
@@ -16,6 +16,8 @@ of environmental data for generation, rendering, and future simulation.
 
 Implementation of G1–G5 was authorized on 2026-10-23. Confirmed requirements remain the
 acceptance contract; numeric tuning and the explicitly deferred follow-ups remain separate.
+The mountain-shape and half-depth sea-level refinement confirmed on 2026-10-25 is in
+progress; its new acceptance criteria remain unverified until recorded below.
 Implementation evidence and measured defaults are recorded in the
 [validation report](../../docs/validation/world-generation/README.md).
 
@@ -134,8 +136,8 @@ Implementation evidence and measured defaults are recorded in the
   “Exposed” means no block immediately above, preserving today's underground grass eligibility
   without adding light/sky checks. Digging into soil reveals its ordinary material.
 - R15: Desert lowlands have sand over rock instead of a generated soil/grass layer;
-  desert mountains expose stone as specified in R45. Bare rock outcrops and exposed
-  geological resources are permitted. Desert sand is the same
+  higher or steeper desert mountain surfaces expose stone as specified in R45. Bare rock
+  outcrops and exposed geological resources are permitted. Desert sand is the same
   material as sand elsewhere; placed soil in a desert remains soil and does not turn into
   sand. Until a dedicated desert-soil palette is designed, imported soil retains baseline
   soil/green-grass appearance there and follows normal timers. Frozen appearance likewise
@@ -352,10 +354,41 @@ Implementation evidence and measured defaults are recorded in the
   the one-block cardinal limit. Preserve continuous terrain through biome transitions and
   the periodic X seam.
 - R45: Keep mountain ranges in desert climate. The lowland slope limit does not apply
-  within mountain influence, and desert columns classified as mountain expose stone at
-  their generated surface instead of sand or soil. Foothills below mountain classification
-  may retain sand. Expose the dunes/flats classification only for dry desert columns
-  outside mountain influence; climate and mountain relief remain separate properties.
+  within mountain influence. Higher or steeper desert mountain surfaces expose stone
+  instead of sand or soil; gentle foothills may retain sand, independently of the
+  mountain classification threshold. Expose the dunes/flats classification only for dry
+  desert columns outside mountain influence; climate and mountain relief remain separate
+  properties.
+
+### Mountain shape and vertical scale
+
+- R46: Distinguish mountains from the deferred hill concept. Hills would be soil-covered,
+  rounded forms with a broad, fairly flat top, no clear peak, and at most a one-block
+  rise between cardinally adjacent columns (approximately 45 degrees). Do not add a hill
+  generation layer or relief-enum value in this refinement; existing lowland rolls remain.
+- R47: Mountains are predominantly rock and have clearly pointed peaks. Their slopes start
+  gently at the foot and steepen toward higher terrain, with some faces approaching vertical.
+  Slopes vary by direction and local shape rather than forming ideal, symmetric cones.
+  Gentle foothills retain climate-appropriate cover: soil in temperate/steppe climate and
+  sand in desert; higher or steeper mountain surfaces expose rock. Cover follows the
+  height profile and slope, separately from the mountain influence classification.
+- R48: A mountain range is a series of mountains with varying peak heights and base widths.
+  Taller mountains are usually wider, with variation rather than one fixed height/width ratio.
+  Overlapping mountain bodies join through saddles and gorges and produce an irregular,
+  lobed footprint in horizontal projection. Do not represent the whole range as one
+  constant-width ridge or a repeated chain of equal cones.
+- R49: Set the common natural-world sea level to exactly half the world depth in blocks.
+  Some actual generated mountain summits must reach approximately 95% of absolute world
+  depth, after coast/climate attenuation and body overlap, rather than merely configuring an
+  unused maximum uplift. Keep the default depth at 32 chunks (1024 blocks): sea level is
+  512 and the high-summit target `floor(1024 × 95 / 100)` is storage Z=972,
+  approximately 460 metres above sea level.
+  Preserve room for valid generated occupancy below the finite upper bound.
+- R50: This refinement generates geometric saddles, gorges, and passes only. Traversable
+  route guarantees, pathfinding, and construction or transport access through ranges are
+  deferred. Preserve frozen-mountain exclusion, continent/island topology, desert slope
+  limits outside mountain influence, deterministic regeneration, and bounded preparation
+  and column-query work; these features must not require a full-world runtime census.
 
 ## Clarifications
 
@@ -456,8 +489,10 @@ Implementation evidence and measured defaults are recorded in the
   A20: CONFIRMED on 2026-10-25: support X:Y = 2:1, with `2048 × 1024 × 32` chunks as
   the default, plus half-size `1024 × 512 × 16` and double-size `4096 × 2048 × 64`.
   These profiles should generate reasonably well without a narrow-world adjustment.
-  Recorded seed-suite and timing evidence currently covers the default profile; broader
-  quality checks and performance measurements at the other two sizes remain pending. This documents
+  Recorded broad seed-suite and timing evidence covers the default profile. Mountain,
+  spawn, and oracle/restart checks cover seeds 12345, 0, and 87 at all three profiles,
+  with one recorded map example per size. Broader half/double quality and timing suites
+  remain future validation. This documents
   generation support rather than changing the engine's general layout validation.
 - Q21: Where should the first player spawn within temperate climate?
   A21: CONFIRMED on 2026-10-25: near the center of a temperate belt, away from both steppe
@@ -471,7 +506,21 @@ Implementation evidence and measured defaults are recorded in the
   horizontal blocks, with quantized terraces acceptable.
 - Q23: Does the lowland change remove desert mountains or limit their slopes?
   A23: CONFIRMED on 2026-10-25: keep desert mountains and exclude them from the lowland
-  slope limit. Their exposed generated surface must be stone, without sand or soil cover.
+  slope limit. The later mountain refinement makes their higher or steeper surfaces stone,
+  while gentle feet may retain sand independently of mountain classification (R45, R47).
+- Q24: Should rounded hills and pointed mountains be generated together?
+  A24: CONFIRMED on 2026-10-25: define hills separately as rounded soil-covered forms
+  without a clear peak, with a broad fairly flat top and a one-block cardinal slope limit.
+  Defer hill generation and any hill enum. Implement pointed, mostly rocky mountains now,
+  with gentle climate-covered feet, directionally varied slopes, and some very steep faces.
+- Q25: Does reaching 95% depth require a taller default world?
+  A25: CONFIRMED on 2026-10-25: retain the 32-chunk default depth. Sea level moves to exactly
+  50% of depth; actual high summits near 95% depth are about 460 metres above the default
+  sea level. The target is absolute storage height, not 95% of the space above the sea.
+- Q26: Must mountain passes guarantee a usable crossing route?
+  A26: CONFIRMED on 2026-10-25: geometric passes only in this refinement. Defer traversable
+  route guarantees. Range heights and widths vary together, overlapping bodies form
+  saddles/gorges, and the top-down footprint has irregular lobes rather than constant width.
 
 ## Acceptance Criteria
 
@@ -661,12 +710,37 @@ consolidation tasks remain separate.
   transitions may be steeper within the one-block cardinal limit. [R44]
 - AC41: GIVEN desert mountain ranges and foothills WHEN generating their terrain and
   surface materials THEN ranges remain present, the lowland slope cap excludes mountain
-  influence, and columns classified as mountain expose stone rather than sand or soil.
+  influence, higher/steeper mountain surfaces expose stone, and gentle feet may retain sand.
   [R5, R15, R45]
 - AC42: GIVEN desert lowland, mountain-influenced, submerged, and non-desert columns WHEN
   querying `ColumnEnvironment` THEN only dry desert columns with zero mountain influence
   expose a dunes/flats biome, independently of chunk residency and regeneration order.
   [R11, R30, R45]
+- AC43: GIVEN the mountain refinement WHEN inspecting generated relief and environmental
+  classifications THEN no new hill layer or enum is introduced, and mountains have clear
+  peaks instead of the deferred rounded, soil-covered, broad-topped hill profile. [R46–R47]
+- AC44: GIVEN fixed mountain fixtures and recorded seed views WHEN comparing radial
+  sections, neighboring columns, and surface materials THEN slopes begin gently, steepen
+  toward pointed peaks, include some nearly vertical faces, and differ across directions;
+  gentle feet retain climate cover while higher/steeper terrain is predominantly rock.
+  Desert foothills follow the same height/slope cover rule. [R45, R47]
+- AC45: GIVEN overlapping mountains in a recorded range WHEN comparing generated summit
+  heights, base widths, sections, and horizontal footprints THEN heights and widths vary,
+  taller mountains are usually wider, saddles/gorges connect the bodies, and the footprint
+  has irregular lobes rather than constant width. These are geometric checks with no
+  traversable-route guarantee. [R48, R50]
+- AC46: GIVEN the supported natural layouts WHEN reading water levels and sampling actual
+  high summits after all height modifiers THEN sea level equals `depth_in_blocks / 2`
+  exactly and some summits reach approximately 95% of absolute depth; the default remains
+  1024 blocks deep with sea level 512 and a high-summit target of 972. No generated occupancy
+  exceeds the finite Z bound. [R1, R6, R49]
+- AC47: GIVEN overlapping and seam-crossing mountain fixtures, frozen boundaries, and
+  supported runtime layouts WHEN querying and regenerating in different orders, after cache
+  eviction, and after fresh preparation THEN output is deterministic and periodic in X,
+  frozen columns have no mountains, protected land/water topology survives, and the desert
+  one-block cardinal limit holds outside influence. Prepared feature capacity and nearby
+  query work remain bounded without a runtime land/peak census or per-visit preparation.
+  [R2–R5, R30, R32, R44, R50]
 
 ## Constraints
 
@@ -701,14 +775,17 @@ erosion, and caves; extraction buildings,
 processing recipes, prospecting UI, and transport simulation; research gates; farming/NPC
 work execution and supply accounting; complete foundation/pile mechanics; tree growth,
 automatic felling, leaf decay, and physical collapse. Optional beaches may be deferred.
+Hill generation and a hill relief enum, and guaranteed traversable mountain routes remain
+deferred under R46 and R50.
 
 Full consolidation of material behavior definitions and predicates is a follow-up after
 G1–G5 (F3); the material rules and shared safety checks required below remain in scope.
 
 ## Plan
 
-G1–G5 are implemented. The result below records the delivered design; remaining proposed
-tuning values describe design experiments rather than confirmed economic balance.
+G1–G6 are implemented, including the mountain refinement in R46–R50. The completed
+tasks and recorded checks below extend the delivered baseline. Proposed tuning values describe design
+experiments rather than confirmed economic balance or frozen parameters.
 
 ### Implementation result
 
@@ -722,8 +799,9 @@ for nominal 35% land, allowing the actual fraction to vary with geography. There
 occupied-cell quota or ratio-based candidate rejection; normal preparation performs no
 fine census. Offline diagnostics report the resulting coverage distribution.
 
-Fixed-point integer fields and named SplitMix64 streams drive climate, terrain, one winding
-ridge per mainland, geology, and vegetation. Bounded deposit descriptors use exact integer
+Fixed-point integer fields and named SplitMix64 streams drive climate, terrain, geology,
+and vegetation. The mountain refinement replaces the earlier single winding ridge per
+mainland with overlapping prepared peak bodies described below. Bounded deposit descriptors use exact integer
 per-column ellipsoid span counts; complete tree candidates use global priority and conflict
 halos. Preparation retains compact immutable data, categorized failures, and an eight-attempt
 cap. Natural generation deliberately has no uniform-stone shortcut; conservative bounds
@@ -736,9 +814,10 @@ before publishing chunks. Clay uses packed-soil-style support without soil timer
 raw resources remain unmineable. Beaches are implemented as a bounded optional overlay and
 remain disabled by default after measuring location-dependent regeneration cost.
 
-The [validation report](../../docs/validation/world-generation/README.md) contains all
-AC1–AC42 evidence, seed maps/raw measurements, memory and regeneration timings, CPU/GPU
-results, and execution limits. F1–F3 remain deferred: stronger foundations/piles, NPC/farm
+The [validation report](../../docs/validation/world-generation/README.md) records the
+AC1–AC47 evidence, seed maps/raw measurements, memory and regeneration timings,
+CPU/build results, retained earlier GPU evidence, and execution limits. The mountain
+refinement rechecks affected baseline criteria and nine fixed seed/profile worlds. F1–F3 remain deferred: stronger foundations/piles, NPC/farm
 execution, and material-definition consolidation.
 
 ### Approach
@@ -816,7 +895,7 @@ guides large-scale geography, never assigns a whole chunk its climate or vegetat
 #### Continuous mainland coast proximity
 
 Ownership and bounded erosion decide the land/water footprint. A separate approximate
-coast coordinate drives rolling relief, ridge fading, deposit sizing, and optional beaches.
+coast coordinate drives rolling relief, mountain fading, deposit sizing, and optional beaches.
 It must not reset at internal macro-cell edges.
 
 Prepare one packed `u16` per macro cell: four exposed-edge bits and the maximum erosion
@@ -881,10 +960,14 @@ Water occupies `H <= z < S` only where `H < S`, with sea surface at S. Land colu
 `H >= S`; protected land uses `H >= S+1` and protected water uses `H <= S-1` to leave margin.
 Track terrain height, water surface, and maximum generated occupancy separately.
 
-Implemented tuning at default height: sea level 384 blocks, ocean depth 8–148 blocks,
-ordinary rolling-land component 1–49 blocks before coast/detail, mountain uplift up to 320
-blocks. Clamp all results with room above for full tree crowns; retain solid bottom terrain. Shape continental shelf
-and inland relief without making a vertical cliff around every coast.
+Sea level is `depth_in_blocks / 2`, or 512 at the unchanged default depth. Tune peak
+descriptors against actual final surface heights so some summits reach approximately
+`floor(depth_in_blocks * 95 / 100)` (972 at default), allowing for the underlying land surface,
+coast taper, frozen-boundary fade, and body overlap. Derive uplift from the peak target.
+Clamp occupancy with room for complete tree crowns where trees are eligible; retain solid
+bottom terrain. Shape continental shelf and inland relief without making a vertical cliff
+around every coast. Ocean-depth and ordinary lowland relief tuning remain separate from
+the absolute high-summit target.
 
 ### Preparation validation and failure reporting
 
@@ -992,14 +1075,42 @@ point. Do not promise identical land-climate proportions or mirrored coastlines.
 
 ### Relief and geology
 
-Use one seeded winding ridge field per mainland, with periodic X, varying uplift, coast
-taper, and zero strength in frozen columns. Reuse the displaced climate boundaries to fade
-uplift linearly over the nearest `max(128, min(1024, world_height / 32))` nonfrozen rows;
-both nonfrozen rows immediately adjoining frozen climate have zero uplift. This avoids
-a height step when the climate ID changes. Geography can split a ridge into segments.
-Branched polylines are not required by the first version. Store a mountain-strength
-field distinct from final height; low rolling terrain is not a mountain merely because its
-absolute elevation is high.
+`generation_mountains.zig` prepares 32 fixed peak slots per continent, at most 160 across
+the five-continent capacity. At most one inland anchor occupies each global Y slot. Each
+descriptor carries a position, summit height, independently varied positive/negative base
+widths correlated with height, skew, and directional shape parameters. Sampling visits
+only the owning continent's current Y slot and two slots on either side, at most five
+kernels. Peak descriptors and index tables are fixed inline arrays; the mountain module
+does not allocate. Use canonical wrapped X distances throughout preparation and sampling.
+
+A shared piecewise-linear centerline through prepared inland anchors bends each body
+through the range. Precomputed `previous_bins` and `next_bins` locate the neighboring
+active anchors without scanning descriptors during a query. The centerline connects
+overlapping feet without adding continuous ridge uplift or widening every peak. Individual
+body heights combine by maximum, preserving separate summits and geometric saddles/gorges.
+Coast and frozen-climate masks may separate exposed range segments; this construction does
+not force a mountain connection through ocean or frozen columns. These variable bodies
+produce irregular lobes in plan view.
+
+The current design uses seeded anisotropic, faceted rational profiles: the outer foot
+has a smooth zero-slope transition, the summit has a pointed cusp, and directional
+steepness makes faces unequal, with some near vertical. Combine nearby bodies while
+preserving peaks and connecting saddles; evaluate overlap fixtures for abrupt seams or
+unintended flattening. Avoid the earlier linear axis-ridge profile and ideal symmetric
+cones. Keep the mathematics cheap and bounded; no erosion simulation, global summit
+search, or fine-resolution world map belongs in a column query.
+
+Store mountain influence separately from the height-profile magnitude so gentle feet can
+retain climate cover while higher or steeper surfaces become rock; a nonlinear height
+profile must not silently redefine every geology, vegetation, or desert-lowland mask.
+Surface cover uses the chosen body's profile magnitude and analytic cardinal grade as a
+heuristic. The returned grade excludes derivatives of the underlying lowland height and
+coast/climate tapers; it is not a bound on the final terrain gradient or a traversal guarantee.
+Retain coast taper and zero mountain influence in frozen columns. Reuse the displaced
+climate boundaries to fade uplift before frozen climate, reaching zero on both adjoining
+nonfrozen rows, without a height step at the boundary. Low rolling terrain is not a
+mountain merely because its absolute elevation is high. Tune and verify actual high
+summits after these modifiers rather than equating a descriptor's nominal height to a summit.
 
 Add a bounded pure desert-lowland sampler with three periodic fields to select
 coherent regions and bend analytical dune and flat profiles. Use a selector scale around
@@ -1019,8 +1130,10 @@ Cap lowland elevation near shores with `min(target, 1 + coast / 4)` on mainland 
 `min(target, 1 + coast / 32)` on islands instead of multiplying dune heights by a coast
 ramp. Add mountain uplift separately. Derive the optional dunes/flats query value only
 when the column is dry desert with zero mountain strength; mountain-influenced columns
-have no desert lowland classification. At mountain classification strength (currently
-18000), desert surface cover becomes exposed stone. Lower foothills can retain sand.
+have no desert lowland classification. Gentle feet may retain sand regardless of relief
+classification. Temperate/steppe feet retain soil, while higher or steeper mountain terrain
+exposes rock. Classification and cover tuning
+must remain consistent with R45 and R47 as the new height profiles are tuned.
 
 Use broad sedimentary basin / rocky mountain province masks as geological preferences.
 No plate simulation is required. A sedimentary lens may reach a mountain foothill, but the
@@ -1296,12 +1409,18 @@ generator, profile/settings, seed, and layout agree with the store's descriptor.
 Keep the complete persisted descriptor within the existing 4-KiB limit; rebuild macro grids,
 indices, and starting candidates deterministically during preparation. No full-resolution
 climate map or generated deposit contents are saved up front.
-Changes to material IDs, rounding, candidate order, or field semantics require version review.
+Generator ID 2/version 1 is still unfrozen in this ongoing design. The mountain and sea-level
+refinement remains within that identity; compatibility with intermediate worlds is not
+required, and this refinement does not itself bump the version. Before freezing the version,
+review material IDs, rounding, candidate order, and field semantics.
 Compare prepared-data fingerprints on reopen in tests to detect accidental drift.
-Prepared macro maps, island/ridge/deposit indices, and climate-boundary inputs belong to
+Prepared macro maps, island/peak/deposit indices, and climate-boundary inputs belong to
 the prepared-world lifetime; evicting a column must not rebuild them. Cache contents are
 derived accelerators, never inputs to generation decisions. Repeated generation of pristine
 chunks must produce identical block bytes without writing those chunks to disk.
+Fixed inline peak arrays are already included in `@sizeOf(NaturalWorld)`; preparation
+accounting must not add them again as separately owned memory. Count any actual external
+allocations separately and record the nearby-kernel query bound.
 
 Validate the canonical bottom mask before publishing each restored lowest-Z chunk, including
 its base record and replayed WAL edits. A conflicting record is an explicit data error;
@@ -1375,6 +1494,7 @@ pristine chunks, enlarging cache limits, or redoing global preparation on each r
 | G3: Materials and geology | Shared mining policy and mutation guard before material edit integration; opaque water, climate soil palette, sand local rules, deeprock direct foundations, indexed deposits, starter resources | `src/engine/voxel/voxel_chunk.zig`, `src/engine/shaders/voxel/`, `src/voxel_app/block_rules.zig`, `world_engine_glue.zig`, `player_interaction.zig`, `world_data_service.zig`, `world.zig` |
 | G4: Vegetation | Forest/meadow fields, leaves with null-safe no-item clearing, complete cross-chunk trees, mesh pressure checks | `generation_vegetation.zig`, `world_generator.zig`, voxel/collision/render material code, `player_interaction.zig` |
 | G5: Integration | Mutation guard verification, validated bottom restoration, both-profile save/reopen and legacy rejection, edited-chunk authority, bounded caches, shortcut oracle, regeneration benchmarks, debug maps | `src/voxel_app/world.zig`, `src/voxel_app/persistence/format.zig`, `main.zig`, `world_data_service.zig`, generator/service/GPU tests |
+| G6: Peak bodies and vertical scale | Pointed asymmetric peak bodies on a shared centerline, variable widths/heights and saddles, half-depth sea, actual 95%-depth high summits, bounded deterministic queries | `generation_mountains.zig`, `generation_geography.zig`, `natural_generator.zig`, `generation_preparation.zig`, generation tests and diagnostics |
 | F1: Later construction | Revisit the temporarily allowed soil platform over sand; foundation-to-rock rules and piles | Separate construction specification, then shared validator and support dependencies |
 | F2: Later simulation | Farming prohibition, clothing/water services, action food cost | Future simulation specification, consuming the shared environmental API |
 | F3: Material behavior consolidation | After G1–G5, add one behavior matrix near the runtime data model, shared material definitions, and table-driven invariant checks | `src/engine/voxel/voxel_chunk.zig`, `src/voxel_app/block_rules.zig`, road/collision/render/mining/timer consumers and tests |
@@ -1392,6 +1512,10 @@ merely because their environmental inputs exist.
 - **Geographic scale:** a four-chunk minimum frozen belt is small relative to this default
   world, while a 10% belt is approximately 3.3 km deep. Use overview maps and player-scale
   slices together; neither alone establishes good travel/resource balance.
+- **Peak geometry and overlap:** a nominal high descriptor can be attenuated below its
+  target, and overlapping profiles can flatten peaks or introduce steps. Check actual
+  summits, several directional sections, footprint lobes, saddle shapes, and climate cover;
+  measure height/width variation on offline fixtures without adding a runtime census.
 - **Temporary sand foundation policy:** soil platforms above sand are explicitly allowed by
   R18, while sand stays outside broad structural predicates. Do not accidentally reject the
   permitted platform route or claim a foundation-to-rock proof that does not exist.
@@ -1461,7 +1585,17 @@ merely from a compact macro map; complete residency remains separately measured.
   trees without relying on world origin. [R23, R29]
 - [x] T26: Add coherent dunes/flats fields, continuous lowland and climate-boundary blending,
   bounded coast caps, and nullable lowland biome queries. Preserve desert mountains and
-  expose stone on their classified surfaces. [R15, R43–R45]
+  expose higher/steeper stone surfaces while retaining sand on gentle feet. [R15, R43–R45]
+- [x] T28: Replace the single-axis ridge with bounded prepared peak descriptors and nearby
+  kernels in `generation_mountains.zig`, using precomputed centerline neighbors, varying
+  correlated heights/base widths, faceted directional profiles, smooth feet, pointed
+  summits, and overlapping saddles/gorges. Keep influence distinct from
+  height magnitude, climate cover at gentle feet, and existing topology/frozen rules.
+  Do not generate hills or add their enum. [R46–R48, R50]
+- [x] T29: Set natural sea level to exactly half depth and tune actual high summits near
+  95% of absolute depth while retaining the 32-chunk default and finite occupancy bounds.
+  Verify external/inline preparation accounting without double-counting peak storage.
+  [R1, R32, R49]
 
 ### Phase 3 — Materials, rendering, and resources
 
@@ -1522,6 +1656,12 @@ merely from a compact macro map; complete residency remains separately measured.
 
 ### Validation
 
+- [x] T30: Verify pointed asymmetric profiles, material transitions, height/width variation,
+  overlapping saddles/gorges and lobed footprints, half-depth sea and actual high summits.
+  Recheck frozen exclusion, land/water topology, desert slopes outside influence, wrapped-X
+  continuity, runtime layouts, deterministic eviction/restart/regeneration, oracle equivalence,
+  and bounded memory/query cost. Record evidence before checking these tasks complete.
+  [AC43–AC47; affected AC1–AC42]
 - [x] T27: Verify desert biome coherence and approximate sampled proportions, periodicity,
   lowland slopes/relief, coastal and climate transitions, preserved mountain ranges, stone
   surfaces, query eligibility, and deterministic regeneration. Record executed checks and

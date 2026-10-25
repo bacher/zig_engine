@@ -81,7 +81,7 @@ fn expectDesertNeighbors(g: *const Geography, x: i64, y: u32, checked: *usize, s
     }
 }
 
-test "generated desert mountains expose rock while both lowland biomes retain sand" {
+test "generated desert upper mountains expose rock while lowlands and gentle feet retain sand" {
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2048, 1024, 32 } });
     var prepared = try (generator.WorldGenerator{ .natural = .{ .seed = 12345 } }).prepare(std.testing.allocator, &layout);
     defer prepared.deinit(std.testing.allocator);
@@ -97,8 +97,7 @@ test "generated desert mountains expose rock while both lowland biomes retain sa
             try std.testing.expectEqual(@as(?environment.DesertBiome, null), e.desert_biome);
             continue;
         }
-        if (e.relief == .mountain) {
-            try std.testing.expectEqual(environment.SurfaceCover.rock, e.surface_cover);
+        if (e.surface_cover == .rock) {
             try std.testing.expectEqual(@as(?environment.DesertBiome, null), e.desert_biome);
             const top = prepared.referenceMaterialAt(x, y, e.terrain_height - 1);
             try std.testing.expect(top != .sand and !top.isEarth());
@@ -284,7 +283,7 @@ test "geography accounting matches exact allocation peak retained bytes and requ
     try std.testing.expectEqual(Geography.preparation_allocation_count, counted.alloc_index);
     try std.testing.expectEqual(Geography.retainedBytes(cells), counted.allocated_bytes - counted.freed_bytes);
     try std.testing.expectEqual(Geography.retainedBytes(cells), exact.end_index);
-    try std.testing.expectEqual(@as(u64, cells) * 134, Geography.preparationWorkBound(cells));
+    try std.testing.expectEqual(@as(u64, cells) * 134 + @import("generation_mountains.zig").Mountains.preparationWorkBound(cells), Geography.preparationWorkBound(cells));
     geography.deinit(counted.allocator());
     try std.testing.expectEqual(counted.allocated_bytes, counted.freed_bytes);
 }
@@ -569,6 +568,56 @@ test "accepted natural climate maps material oracle and regenerated derived data
         const surface_z: i32 = @intCast(@max(e.terrain_height, e.sea_level) / 32);
         const column = generator.ColumnGenerator.init(&reopened, coords);
         try std.testing.expectEqualSlices(u8, &hashes[i], &(try benchmark.snapshot(a, &column, surface_z, true)).digest);
+    }
+}
+
+test "fixed seed mountain summits passes and gorges survive oracle generation and restart in all supported profiles" {
+    const a = std.testing.allocator;
+    const benchmark = @import("generation_benchmark.zig");
+    for ([_][]const u8{ "half", "default", "double" }) |profile| {
+        const dimensions = try diagnostics.profileDimensions(profile);
+        const layout = try engine.WorldLayout.init(.{ .size_in_chunks = dimensions });
+        for ([_]u64{ 12345, 0, 87 }) |seed| {
+            var prepared = try generator.WorldGenerator.prepare(.{ .natural = .{ .seed = seed } }, a, &layout);
+            defer prepared.deinit(a);
+            const report = diagnostics.sampleMountains(&prepared);
+            try std.testing.expectEqual(layout.size_in_blocks[2] / 2, report.sea_level);
+            try std.testing.expectEqual(@as(u32, @intCast(@as(u64, layout.size_in_blocks[2]) * 95 / 100)), report.max_summit_height.?);
+            try std.testing.expect(report.high_summits_at_95_percent > 0 and report.rock_summits > 0);
+            try std.testing.expect(report.pointed_summits > 0 and report.asymmetric_peaks > 0);
+            try std.testing.expect(report.max_width_blocks.? > report.min_width_blocks.?);
+            try std.testing.expect(report.connected_passes > 0);
+            try std.testing.expect(report.pass != null and report.gorge != null);
+            try std.testing.expect(report.pass.?.connected and report.gorge.?.connected);
+            try std.testing.expect(report.pass.?.wall_relief > 0 and report.gorge.?.wall_relief > 0);
+            try std.testing.expect(report.column_probes < 130000);
+            const sites = [_]diagnostics.MountainSite{ report.summit.?, report.pass.?.site, report.gorge.?.site };
+            var digests: [sites.len][32]u8 = undefined;
+            for (sites, 0..) |site, i| {
+                const e = prepared.columnEnvironmentAt(site.block[0], site.block[1]);
+                try std.testing.expectEqual(report.sea_level, e.sea_level);
+                try std.testing.expect(!e.water_present and e.mountain_strength > 0);
+                try std.testing.expectEqualDeep(e, prepared.columnEnvironmentAt(@as(i64, site.block[0]) - layout.size_in_blocks[0], site.block[1]));
+                const coords = @Vector(2, i32){ @intCast(site.block[0] / 32), @intCast(site.block[1] / 32) };
+                const surface_z: i32 = @intCast((e.terrain_height - 1) / 32);
+                try expectReference(&prepared, coords, surface_z);
+                if (e.terrain_height % 32 == 0) try expectReference(&prepared, coords, surface_z + 1);
+                const column = generator.ColumnGenerator.init(&prepared, coords);
+                digests[i] = (try benchmark.snapshot(a, &column, surface_z, true)).digest;
+            }
+            var reopened = try generator.WorldGenerator.prepare(.{ .natural = .{ .seed = seed } }, a, &layout);
+            defer reopened.deinit(a);
+            try std.testing.expectEqualDeep(report, diagnostics.sampleMountains(&reopened));
+            try std.testing.expectEqualSlices(u8, &prepared.kind.natural.fingerprint(), &reopened.kind.natural.fingerprint());
+            var i: usize = sites.len;
+            while (i > 0) {
+                i -= 1;
+                const site = sites[i];
+                const column = generator.ColumnGenerator.init(&reopened, .{ @intCast(site.block[0] / 32), @intCast(site.block[1] / 32) });
+                const z: i32 = @intCast((site.height - 1) / 32);
+                try std.testing.expectEqualSlices(u8, &digests[i], &(try benchmark.snapshot(a, &column, z, true)).digest);
+            }
+        }
     }
 }
 

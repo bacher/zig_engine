@@ -14,7 +14,7 @@
   ],
   "passes": 2,
   "test_generation": "passed",
-  "platform": "Apple M4 Max; aarch64 macOS; Metal driver reports macOS 26.7.1 (25G241); Zig 0.16.0",
+  "platform": "Apple M4 Max, aarch64 macOS, Zig 0.16.0",
   "build_modes": {
     "ReleaseFast": 9,
     "ReleaseSafe": 3
@@ -26,13 +26,13 @@
     "maximum_offset_disagreement_pp": 0.046539306640625
   },
   "preparation_ms": {
-    "minimum": 24.771541,
-    "maximum": 50.240291,
-    "mean": 30.99458955859375
+    "minimum": 29.23725,
+    "maximum": 41.780792,
+    "mean": 36.769592609375
   },
-  "preparation_peak_owned_bytes": 2122272,
-  "feature_references_maximum": 101,
-  "index_bin_occupancy_maximum": 13,
+  "preparation_peak_owned_bytes": 2129016,
+  "feature_references_maximum": 98,
+  "index_bin_occupancy_maximum": 14,
   "retry_traces": [],
   "belt_percent_by_pass": [
     [
@@ -57,90 +57,90 @@
   "resource_distribution_by_pass": [
     {
       "metal_ore": {
-        "effective_blocks_exact_total": 3727825406,
+        "effective_blocks_exact_total": 3375168008,
         "estimated_mountain_fraction": 1.0,
         "estimated_sedimentary_fraction": 0.0,
         "estimated_density_per_lowland_host_voxel": 0.0,
-        "estimated_density_per_mountain_host_voxel": 0.00039174906287964246,
+        "estimated_density_per_mountain_host_voxel": 0.0003439564914815126,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "limestone": {
-        "effective_blocks_exact_total": 11547984102,
-        "estimated_mountain_fraction": 0.0017938587621556602,
-        "estimated_sedimentary_fraction": 0.9928150880774339,
-        "estimated_density_per_lowland_host_voxel": 0.00015846787581798348,
-        "estimated_density_per_mountain_host_voxel": 2.1769418379571653e-06,
+        "effective_blocks_exact_total": 11713091352,
+        "estimated_mountain_fraction": 0.005550772433397039,
+        "estimated_sedimentary_fraction": 0.9861868828071123,
+        "estimated_density_per_lowland_host_voxel": 0.00012267548070608796,
+        "estimated_density_per_mountain_host_voxel": 6.625719829137835e-06,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "clay": {
-        "effective_blocks_exact_total": 783837405,
-        "estimated_mountain_fraction": 0.0,
-        "estimated_sedimentary_fraction": 0.9981676815915879,
-        "estimated_density_per_lowland_host_voxel": 1.0775583733971393e-05,
-        "estimated_density_per_mountain_host_voxel": 0.0,
-        "minimum_large_source_volume_fraction_per_seed": 0.9993704792383551
+        "effective_blocks_exact_total": 786700970,
+        "estimated_mountain_fraction": 0.0005863889455102925,
+        "estimated_sedimentary_fraction": 0.9960939919123651,
+        "estimated_density_per_lowland_host_voxel": 8.28053827114492e-06,
+        "estimated_density_per_mountain_host_voxel": 4.7011442202787164e-08,
+        "minimum_large_source_volume_fraction_per_seed": 0.9993803819718959
       },
       "coal": {
-        "effective_blocks_exact_total": 1120938789,
-        "estimated_mountain_fraction": 4.280426537381991e-05,
-        "estimated_sedimentary_fraction": 0.9978239595131929,
-        "estimated_density_per_lowland_host_voxel": 1.540913036506452e-05,
-        "estimated_density_per_mountain_host_voxel": 5.0422148610263205e-09,
-        "minimum_large_source_volume_fraction_per_seed": 0.9995170450946397
+        "effective_blocks_exact_total": 1130558687,
+        "estimated_mountain_fraction": 0.0014079114479133132,
+        "estimated_sedimentary_fraction": 0.9938351203951072,
+        "estimated_density_per_lowland_host_voxel": 1.189008216127623e-05,
+        "estimated_density_per_mountain_host_voxel": 1.6220960474254883e-07,
+        "minimum_large_source_volume_fraction_per_seed": 0.9995245202978008
       },
       "sand": {
-        "effective_blocks_exact_total": 4486830742,
-        "estimated_mountain_fraction": 0.0016914745687756872,
-        "estimated_sedimentary_fraction": 0.991885369325663,
-        "estimated_density_per_lowland_host_voxel": 6.157710804244219e-05,
-        "estimated_density_per_mountain_host_voxel": 7.975493434024197e-07,
-        "minimum_large_source_volume_fraction_per_seed": 0.9998794188228909
+        "effective_blocks_exact_total": 4542798784,
+        "estimated_mountain_fraction": 0.0031464535228462676,
+        "estimated_sedimentary_fraction": 0.9909887833461819,
+        "estimated_density_per_lowland_host_voxel": 4.769342180860008e-05,
+        "estimated_density_per_mountain_host_voxel": 1.4566423633157756e-06,
+        "minimum_large_source_volume_fraction_per_seed": 0.9998799076899708
       }
     },
     {
       "metal_ore": {
-        "effective_blocks_exact_total": 3727825406,
+        "effective_blocks_exact_total": 3375168008,
         "estimated_mountain_fraction": 1.0,
         "estimated_sedimentary_fraction": 0.0,
         "estimated_density_per_lowland_host_voxel": 0.0,
-        "estimated_density_per_mountain_host_voxel": 0.0003918845980801301,
+        "estimated_density_per_mountain_host_voxel": 0.0003439783968870259,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "limestone": {
-        "effective_blocks_exact_total": 11547984102,
-        "estimated_mountain_fraction": 0.0017037685634983023,
-        "estimated_sedimentary_fraction": 0.9933666717627265,
-        "estimated_density_per_lowland_host_voxel": 0.00015848233636507625,
-        "estimated_density_per_mountain_host_voxel": 2.0683279908428476e-06,
+        "effective_blocks_exact_total": 11713091352,
+        "estimated_mountain_fraction": 0.0058357126302910865,
+        "estimated_sedimentary_fraction": 0.9857243974661127,
+        "estimated_density_per_lowland_host_voxel": 0.00012264532654959417,
+        "estimated_density_per_mountain_host_voxel": 6.966284395048442e-06,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "clay": {
-        "effective_blocks_exact_total": 783837405,
-        "estimated_mountain_fraction": 4.152375387845108e-06,
-        "estimated_sedimentary_fraction": 0.998174791427806,
-        "estimated_density_per_lowland_host_voxel": 1.077554976569242e-05,
-        "estimated_density_per_mountain_host_voxel": 3.421568380081157e-10,
-        "minimum_large_source_volume_fraction_per_seed": 0.9993704792383551
+        "effective_blocks_exact_total": 786700970,
+        "estimated_mountain_fraction": 0.0006234910141087755,
+        "estimated_sedimentary_fraction": 0.9959484619259307,
+        "estimated_density_per_lowland_host_voxel": 8.280568186412191e-06,
+        "estimated_density_per_mountain_host_voxel": 4.998913899792469e-08,
+        "minimum_large_source_volume_fraction_per_seed": 0.9993803819718959
       },
       "coal": {
-        "effective_blocks_exact_total": 1120938789,
-        "estimated_mountain_fraction": 5.95058404500901e-05,
-        "estimated_sedimentary_fraction": 0.9977998683586193,
-        "estimated_density_per_lowland_host_voxel": 1.5408888406817952e-05,
-        "estimated_density_per_mountain_host_voxel": 7.012035764207675e-09,
-        "minimum_large_source_volume_fraction_per_seed": 0.9995170450946397
+        "effective_blocks_exact_total": 1130558687,
+        "estimated_mountain_fraction": 0.0012366446965302964,
+        "estimated_sedimentary_fraction": 0.9939505654459931,
+        "estimated_density_per_lowland_host_voxel": 1.1892605870176017e-05,
+        "estimated_density_per_mountain_host_voxel": 1.424865342029015e-07,
+        "minimum_large_source_volume_fraction_per_seed": 0.9995245202978008
       },
       "sand": {
-        "effective_blocks_exact_total": 4486830742,
-        "estimated_mountain_fraction": 0.001610192905004024,
-        "estimated_sedimentary_fraction": 0.9922389437353821,
-        "estimated_density_per_lowland_host_voxel": 6.158218319725798e-05,
-        "estimated_density_per_mountain_host_voxel": 7.594867940796099e-07,
-        "minimum_large_source_volume_fraction_per_seed": 0.9998794188228909
+        "effective_blocks_exact_total": 4542798784,
+        "estimated_mountain_fraction": 0.0033801550852295592,
+        "estimated_sedimentary_fraction": 0.9907950597706942,
+        "estimated_density_per_lowland_host_voxel": 4.768418308271507e-05,
+        "estimated_density_per_mountain_host_voxel": 1.564933544393115e-06,
+        "minimum_large_source_volume_fraction_per_seed": 0.9998799076899708
       }
     }
   ],
-  "cross_mode_hash_count": 26,
+  "cross_mode_hash_count": 30,
   "cross_mode_hashes_equal": true,
   "cross_mode_prepared_fingerprints_equal": true,
   "limitations": [
@@ -181,22 +181,22 @@
     {
       "order": "dunes,flats",
       "sampled_columns": [
-        931126,
-        925938
+        938328,
+        933396
       ],
-      "dunes_percent": 50.13968285422581,
-      "per_seed_dunes_percent_min": 28.98230088495575,
-      "per_seed_dunes_percent_max": 73.94366197183099
+      "dunes_percent": 50.13175019393885,
+      "per_seed_dunes_percent_min": 29.42970417810308,
+      "per_seed_dunes_percent_max": 71.4622641509434
     },
     {
       "order": "dunes,flats",
       "sampled_columns": [
-        930838,
-        924972
+        938198,
+        932581
       ],
-      "dunes_percent": 50.15804419633476,
-      "per_seed_dunes_percent_min": 29.011370814908403,
-      "per_seed_dunes_percent_max": 73.75259875259876
+      "dunes_percent": 50.150124627227484,
+      "per_seed_dunes_percent_min": 29.552740039688597,
+      "per_seed_dunes_percent_max": 71.30185233498565
     }
   ],
   "desert_detail": {
@@ -209,19 +209,19 @@
           1600,
           14656
         ],
-        "min_height": 392,
-        "max_height": 431,
+        "min_height": 520,
+        "max_height": 559,
         "profiles": {
           "horizontal": {
-            "height_min": 393,
-            "height_max": 428,
+            "height_min": 521,
+            "height_max": 556,
             "steps": 163,
             "intervals": 511,
             "max_adjacent_delta": 1
           },
           "vertical": {
-            "height_min": 397,
-            "height_max": 407,
+            "height_min": 525,
+            "height_max": 535,
             "steps": 11,
             "intervals": 511,
             "max_adjacent_delta": 1
@@ -231,23 +231,23 @@
       {
         "biome": "flats",
         "center": [
-          11584,
+          9536,
           14528
         ],
-        "min_height": 392,
-        "max_height": 407,
+        "min_height": 520,
+        "max_height": 535,
         "profiles": {
           "horizontal": {
-            "height_min": 395,
-            "height_max": 407,
-            "steps": 13,
+            "height_min": 526,
+            "height_max": 535,
+            "steps": 14,
             "intervals": 511,
             "max_adjacent_delta": 1
           },
           "vertical": {
-            "height_min": 395,
-            "height_max": 407,
-            "steps": 13,
+            "height_min": 526,
+            "height_max": 535,
+            "steps": 14,
             "intervals": 511,
             "max_adjacent_delta": 1
           }
@@ -255,22 +255,21 @@
       }
     ]
   },
-  "test_counts": {
-    "full_cpu_passed": 922,
-    "full_cpu_skipped": 1,
-    "generation_passed": 235,
-    "generation_modes": [
-      "Debug",
-      "ReleaseSafe"
-    ]
-  },
-  "desert_slope_bound": {
-    "ideal_per_axis": 0.466319445,
-    "adjacent_integer_field_error_upper_bound": 0.024,
-    "total_upper_bound": 0.491,
-    "runtime_validation": false,
-    "mainland_coast_cap_gradient": 0.5,
-    "island_coast_cap_gradient": 0.25,
-    "mountain_influence_excluded": true
+  "mountains": {
+    "checked_seeds": 256,
+    "all_have_95_percent_summits": true,
+    "sea_level": 512,
+    "target_max_height": 972,
+    "minimum_high_summits": 3,
+    "active_peaks_min": 50,
+    "active_peaks_max": 99,
+    "connected_passes_min": 42,
+    "connected_passes_max": 88,
+    "pointed_summits_total": 17100,
+    "dry_summits_total": 17392,
+    "mountain_endpoint_pairs": 16366,
+    "influence_connected_pairs": 16165,
+    "coast_or_climate_separated_pairs": 201,
+    "connection_check": "257 samples per neighboring summit corridor, not exhaustive route or connectivity guarantee"
   }
 }

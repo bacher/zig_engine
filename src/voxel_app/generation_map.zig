@@ -1,4 +1,4 @@
-//! `zig build generation-map -Doptimize=ReleaseFast -- /absolute/map.ppm [seed] [seed-count]`.
+//! `zig build generation-map -Doptimize=ReleaseFast -- /absolute/map.ppm [seed] [seed-count] [half|default|double]`.
 //! Four overview panels: continents, climate, relief/vegetation, resource centres.
 //! JSONL measurements use two independent reproducible jittered grids, not a census.
 const std = @import("std");
@@ -197,6 +197,125 @@ fn exportDesertDetail(init: std.process.Init, path: []const u8, prepared: *const
     std.debug.print("desert_detail side={d} missing={any} image={s} metadata={s}\n", .{ side, missing, image_path, metadata_path });
 }
 
+const MountainDetailTile = struct {
+    label: []const u8,
+    center: [2]u32,
+    origin: [2]i64,
+    extent_blocks: [2]u32,
+    section_endpoints: [2][2]u32,
+    section_heights: []const u32 = &.{},
+    min_height: u32 = std.math.maxInt(u32),
+    max_height: u32 = 0,
+};
+
+fn mountainTile(prepared: *const generation.PreparedWorldGenerator, label: []const u8, site: diagnostics.MountainSite, pair: ?diagnostics.MountainPass) MountainDetailTile {
+    const field = &prepared.kind.natural.geography.mountains;
+    const peak = field.peaks[site.owner - 1][field.binAt(site.block[1])];
+    const half_x = @max(256, @max(peak.radii_x[0], peak.radii_x[1]) * 6 / 5);
+    const half_y = @max(256, @max(peak.radii_y[0], peak.radii_y[1]) * 6 / 5);
+    var a = [2]u32{ hash.wrappedX(@as(i64, site.block[0]) - half_x, field.width), site.block[1] };
+    var b = [2]u32{ hash.wrappedX(@as(i64, site.block[0]) + half_x, field.width), site.block[1] };
+    if (pair) |pass| {
+        a = pass.endpoints[0].block;
+        b = pass.endpoints[1].block;
+    }
+    const dx = hash.distanceX(b[0], a[0], field.width);
+    const ax: i64 = a[0];
+    const bx = ax + dx;
+    const x0 = @min(ax, bx) - half_x / 3;
+    const y0 = @max(0, @as(i64, @min(a[1], b[1])) - half_y / 2);
+    const x1 = @max(ax, bx) + half_x / 3;
+    const y1 = @min(@as(i64, field.height), @as(i64, @max(a[1], b[1])) + half_y / 2 + 1);
+    return .{ .label = label, .center = site.block, .origin = .{ x0, y0 }, .extent_blocks = .{ @intCast(x1 - x0 + 1), @intCast(y1 - y0) }, .section_endpoints = .{ a, b } };
+}
+
+/// Bounded views of final integrated heights, plus one-block cross-sections.
+/// PGM preserves sampled block heights as 16-bit values. PPM uses a shared
+/// sea..95%-depth grayscale, with submerged terrain shown blue.
+fn exportMountainDetail(init: std.process.Init, path: []const u8, prepared: *const generation.PreparedWorldGenerator, report: diagnostics.MountainReport) !void {
+    if (report.summit == null or report.pass == null or report.gorge == null) return error.MissingMountainDetailSite;
+    const a = init.arena.allocator();
+    const size = prepared.layout.size_in_blocks;
+    const side: usize = 768;
+    var tiles = [_]MountainDetailTile{
+        mountainTile(prepared, "summit", report.summit.?, null),
+        mountainTile(prepared, "pass", report.pass.?.site, report.pass),
+        mountainTile(prepared, "gorge", report.gorge.?.site, report.gorge),
+    };
+    const header = try std.fmt.allocPrint(a, "P6\n{d} {d}\n255\n", .{ side * tiles.len, side });
+    const image = try a.alloc(u8, header.len + side * side * tiles.len * 3);
+    @memcpy(image[0..header.len], header);
+    const height_header = try std.fmt.allocPrint(a, "P5\n{d} {d}\n{d}\n", .{ side * tiles.len, side, size[2] - 1 });
+    const height_image = try a.alloc(u8, height_header.len + side * side * tiles.len * 2);
+    @memcpy(height_image[0..height_header.len], height_header);
+    for (&tiles, 0..) |*tile, panel| {
+        for (0..side) |py| for (0..side) |px| {
+            const x = tile.origin[0] + @as(i64, @intCast((px * 2 + 1) * tile.extent_blocks[0] / (side * 2)));
+            const y: u32 = @intCast(tile.origin[1] + @as(i64, @intCast((py * 2 + 1) * tile.extent_blocks[1] / (side * 2))));
+            const e = prepared.columnEnvironmentAt(x, y);
+            tile.min_height = @min(tile.min_height, e.terrain_height);
+            tile.max_height = @max(tile.max_height, e.terrain_height);
+            const value: u8 = @intCast(@min(255, @as(u64, e.terrain_height -| report.sea_level) * 255 / @max(1, report.height_limit - report.sea_level)));
+            const color = if (e.water_present) water else [3]u8{ value, value, value };
+            const pixel = py * side * tiles.len + panel * side + px;
+            @memcpy(image[header.len + pixel * 3 ..][0..3], &color);
+            std.mem.writeInt(u16, height_image[height_header.len + pixel * 2 ..][0..2], @intCast(e.terrain_height), .big);
+        };
+        const p0 = tile.section_endpoints[0];
+        const p1 = tile.section_endpoints[1];
+        const length: u32 = @intCast(@max(@abs(hash.distanceX(p1[0], p0[0], size[0])), @abs(@as(i64, p1[1]) - p0[1])));
+        if (length == 0 or length > 32768) return error.InvalidMountainSection;
+        const heights = try a.alloc(u32, length + 1);
+        for (heights, 0..) |*h, i| {
+            const point = diagnostics.mountainPathPoint(p0, p1, @intCast(i), length, size[0]);
+            h.* = prepared.columnEnvironmentAt(point[0], point[1]).terrain_height;
+        }
+        tile.section_heights = heights;
+    }
+    const section_width: usize = 1536;
+    const section_height: usize = 512;
+    const section_header = try std.fmt.allocPrint(a, "P6\n{d} {d}\n255\n", .{ section_width, section_height * tiles.len });
+    const sections = try a.alloc(u8, section_header.len + section_width * section_height * tiles.len * 3);
+    @memcpy(sections[0..section_header.len], section_header);
+    for (tiles, 0..) |tile, panel| for (0..section_height) |py| for (0..section_width) |px| {
+        const z: u32 = @intCast((section_height - 1 - py) * size[2] / section_height);
+        const height_index = px * (tile.section_heights.len - 1) / (section_width - 1);
+        const h = tile.section_heights[height_index];
+        const sea_row = (section_height - 1 - py) * size[2] / section_height <= report.sea_level and (section_height - py) * size[2] / section_height > report.sea_level;
+        const color: [3]u8 = if (sea_row) .{ 35, 125, 230 } else if (z < h) .{ 110, 105, 98 } else if (z < report.sea_level) water else .{ 239, 244, 249 };
+        const pixel = (panel * section_height + py) * section_width + px;
+        @memcpy(sections[section_header.len + pixel * 3 ..][0..3], &color);
+    };
+    const image_path = try std.fmt.allocPrint(a, "{s}.mountains.ppm", .{path});
+    const height_path = try std.fmt.allocPrint(a, "{s}.mountains.height.pgm", .{path});
+    const sections_path = try std.fmt.allocPrint(a, "{s}.mountains.sections.ppm", .{path});
+    const metadata_path = try std.fmt.allocPrint(a, "{s}.mountains.json", .{path});
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = image_path, .data = image });
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = height_path, .data = height_image });
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = sections_path, .data = sections });
+    const metadata = try std.json.Stringify.valueAlloc(a, .{
+        .seed = prepared.seed(),
+        .dimensions_blocks = size,
+        .tile_order = "summit,pass,gorge; top-down panels left to right, cross-sections top to bottom",
+        .row_direction = "increasing world Y; X wraps",
+        .top_down_tile_pixels = side,
+        .height_pgm = "big-endian 16-bit actual sampled terrain heights, maxval=world depth-1",
+        .display_grayscale_min = report.sea_level,
+        .display_grayscale_max = report.height_limit,
+        .section_z_min = 0,
+        .section_z_max_exclusive = size[2],
+        .section_sampling = "one block along the dominant horizontal axis; exact heights retained in section_heights",
+        .pass_selection = "highest connected centerline saddle between adjacent active summit bins",
+        .gorge_selection = "greatest two-wall relief among centerline and parallel quarter-width-offset corridors; geometric depression, no carved river",
+        .connectivity_sampling = "257 equally spaced probes per corridor; sampled influence connectivity, not an exhaustive connected-component proof",
+        .range_separation = "coasts, owner boundaries and frozen climate taper may separate exposed ranges between consecutive prepared summit bins",
+        .diagnostics = report,
+        .tiles = tiles,
+    }, .{});
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = metadata_path, .data = metadata });
+    std.debug.print("mountain_detail image={s} heights={s} sections={s} metadata={s}\n", .{ image_path, height_path, sections_path, metadata_path });
+}
+
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
@@ -204,7 +323,8 @@ pub fn main(init: std.process.Init) !void {
     const first_seed = if (args.len > 2) try std.fmt.parseInt(u64, args[2], 10) else 12345;
     const seed_count = if (args.len > 3) try std.fmt.parseInt(u32, args[3], 10) else 1;
     if (seed_count == 0 or seed_count > 1024) return error.InvalidSeedCount;
-    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2048, 1024, 32 } });
+    const profile = if (args.len > 4) args[4] else "default";
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = try diagnostics.profileDimensions(profile) });
     var lines: std.ArrayList(u8) = .empty;
     var accepted: usize = 0;
     var rejected: usize = 0;
@@ -215,7 +335,7 @@ pub fn main(init: std.process.Init) !void {
         const beginning = std.Io.Clock.awake.now(init.io);
         var prepared = generation.WorldGenerator.prepareWithReport(.{ .natural = .{ .seed = seed } }, init.gpa, &layout, &report) catch |err| {
             rejected += 1;
-            const line = try std.json.Stringify.valueAlloc(a, .{ .seed = seed, .status = @errorName(err), .preparation = report }, .{});
+            const line = try std.json.Stringify.valueAlloc(a, .{ .seed = seed, .profile = profile, .status = @errorName(err), .preparation = report }, .{});
             try lines.appendSlice(a, line);
             try lines.append(a, '\n');
             std.debug.print("seed={d} status={s} attempts={d} reason={s}\n", .{ seed, @errorName(err), report.attempts_started, @tagName(report.reason) });
@@ -225,6 +345,7 @@ pub fn main(init: std.process.Init) !void {
         const preparation_ns = beginning.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
         const sample0 = diagnostics.sampleEnvironment(&prepared, 512, 256, 0);
         const sample1 = diagnostics.sampleEnvironment(&prepared, 512, 256, 1);
+        const mountain_report = diagnostics.sampleMountains(&prepared);
         const land_estimate = (sample0.landPercent() + sample1.landPercent()) / 2;
         var coarse_mainland_cells: usize = 0;
         const geography = &prepared.kind.natural.geography;
@@ -260,7 +381,7 @@ pub fn main(init: std.process.Init) !void {
             mountains[r] += @intFromBool(e.relief == .mountain);
             sedimentary[r] += @intFromBool(e.geology == .sedimentary);
         }
-        const line = try std.json.Stringify.valueAlloc(a, .{ .seed = seed, .status = "accepted", .preparation = report, .preparation_ns = preparation_ns, .coarse_mainland = coarse_mainland, .first_start = start, .first_start_climate = start_climate, .sample_grid = .{ 512, 256 }, .sample_pass0 = sample0, .sample_pass1 = sample1, .desert_biome_order = "dunes,flats", .land_percent_pass0 = sample0.landPercent(), .land_percent_pass1 = sample1.landPercent(), .sample_disagreement_percentage_points = @abs(sample0.landPercent() - sample1.landPercent()), .resource_order = "metal_ore,limestone,clay,coal,sand", .size_order = "large,small,starter", .deposit_populations = populations, .exact_effective_blocks = effective_blocks, .estimated_resource_distribution_pass0 = resourceDistribution(&prepared, 0), .estimated_resource_distribution_pass1 = resourceDistribution(&prepared, 1), .distribution_axes = "resource,relief(lowland/mountain),geology(sedimentary/rocky)", .eligible_host_volume_estimator = "sample.host_depth_by_relief_geology * world_horizontal_area / sample.samples", .effective_centers = center_effective, .mountain_deposit_centers = mountains, .sedimentary_deposit_centers = sedimentary }, .{});
+        const line = try std.json.Stringify.valueAlloc(a, .{ .seed = seed, .status = "accepted", .profile = profile, .mountains = mountain_report, .preparation = report, .preparation_ns = preparation_ns, .coarse_mainland = coarse_mainland, .first_start = start, .first_start_climate = start_climate, .sample_grid = .{ 512, 256 }, .sample_pass0 = sample0, .sample_pass1 = sample1, .desert_biome_order = "dunes,flats", .land_percent_pass0 = sample0.landPercent(), .land_percent_pass1 = sample1.landPercent(), .sample_disagreement_percentage_points = @abs(sample0.landPercent() - sample1.landPercent()), .resource_order = "metal_ore,limestone,clay,coal,sand", .size_order = "large,small,starter", .deposit_populations = populations, .exact_effective_blocks = effective_blocks, .estimated_resource_distribution_pass0 = resourceDistribution(&prepared, 0), .estimated_resource_distribution_pass1 = resourceDistribution(&prepared, 1), .distribution_axes = "resource,relief(lowland/mountain),geology(sedimentary/rocky)", .eligible_host_volume_estimator = "sample.host_depth_by_relief_geology * world_horizontal_area / sample.samples", .effective_centers = center_effective, .mountain_deposit_centers = mountains, .sedimentary_deposit_centers = sedimentary }, .{});
         try lines.appendSlice(a, line);
         try lines.append(a, '\n');
         land_estimates[accepted] = land_estimate;
@@ -269,7 +390,10 @@ pub fn main(init: std.process.Init) !void {
         if (index < 4) {
             const map_path = if (index == 0) path else try std.fmt.allocPrint(a, "{s}.seed-{d}.ppm", .{ path, seed });
             try exportMap(init, map_path, &prepared);
-            if (index == 0) try exportDesertDetail(init, path, &prepared);
+            if (index == 0) {
+                try exportDesertDetail(init, path, &prepared);
+                try exportMountainDetail(init, path, &prepared, mountain_report);
+            }
         }
     }
     const report_path = try std.fmt.allocPrint(a, "{s}.jsonl", .{path});
@@ -277,6 +401,8 @@ pub fn main(init: std.process.Init) !void {
     const coverage = diagnostics.summarizeLandCoverage(land_estimates[0..accepted]);
     const summary = try std.json.Stringify.valueAlloc(a, .{
         .first_seed = first_seed,
+        .profile = profile,
+        .dimensions_in_chunks = layout.size_in_chunks,
         .requested_seeds = seed_count,
         .accepted_seeds = accepted,
         .rejected_seeds = rejected,

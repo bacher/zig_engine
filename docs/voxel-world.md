@@ -10,7 +10,8 @@ Natural-world generation currently supports X:Y = 2:1, targeting three chunk-siz
 profiles: 1024 × 512 × 16, the default 2048 × 1024 × 32, and 4096 × 2048 × 64.
 The smaller and larger profiles scale every axis by one half or two and should
 retain comparable generation quality; recorded broad validation currently covers
-the default. Other shapes and sizes remain experimental. See [supported sizes](world-configuration.md#creating-a-world).
+the default, while fixed-seed mountain/spawn/oracle checks cover all three profiles.
+Other shapes and sizes remain experimental. See [supported sizes](world-configuration.md#creating-a-world).
 
 World coordinates are centered using the immutable layout's half-dimension `origin_chunk`. With the current preset, world position zero corresponds to stored block coordinates (32768, 16384, 512). Spatial chunk coordinates are signed vectors; normalize x and validate y/z before encoding a storage ID through that world's layout. Its dimension exponents determine the packed ID widths: the current preset uses 11/10/5 bits, or 26 of the available 32 bits. The cache and service retain immutable copies of the scene's validated layout. A compile-time guard rejects an engine configuration with wrapping disabled. See [world configuration](world-configuration.md) and [coordinates](coordinates.md).
 
@@ -25,6 +26,8 @@ The six solid-face flags describe whether every block of one of the chunk's own 
 Playable generator ID 2/version 1 has seeded `natural` and `flat` profiles. The voxel app
 uses natural seed 12345 by default. Old generator IDs 0 and 1 are rejected on reopen;
 `.terrain` remains an isolated fixture for the existing noise regressions.
+ID 2/version 1 is still unfrozen in the current implementation PR; compatibility
+with worlds from intermediate builds of this design is not required.
 
 `WorldDataService.create` prepares immutable world data before starting workers. Preparation
 validates configuration, builds a bounded coarse continental map and feature data, selects a
@@ -55,10 +58,16 @@ Natural worlds have 3–5 connected continents, detached islands, a shared sea l
 cave-free terrain, climate belts, mountain ranges, finite geological deposits, and forests
 separated by meadows. The north-to-south belts occupy approximately 10/10/25/10/25/10/10%
 of the whole map. Each column has one climate, independent of chunk boundaries. Desert
-lowlands have sand cover; desert mountains expose stone. Other covered soil renders green,
-yellow, or snowy according to climate.
+lowlands have sand cover; higher or steeper desert mountain surfaces expose stone. Other
+covered soil renders green, yellow, or snowy according to climate.
 Soil types and timers are saved unchanged. Water and foliage render opaque cubes and retain
 full-cube collision.
+
+Natural sea level is exactly half the world depth. The unchanged 32-chunk default is
+1024 blocks deep, with sea level 512; the high mountain target is
+`floor(depth_in_blocks * 95 / 100)`, or absolute storage Z=972 at default,
+roughly 460 metres above sea level.
+
 Land has a soft 35% target: roughly 95% of default-profile seeds within 25–45% is sufficient.
 Weighted macro growth stops at a cost horizon, so coherent regional costs can form uneven
 lobes and bays without filling to an exact area quota. Only topology and feature validity
@@ -70,6 +79,32 @@ automatic amplitude, while nonzero values specify an explicit block amplitude.
 Mountain uplift tapers before both displaced frozen boundaries, reaching zero on the
 adjoining nonfrozen rows. Classification and uplift use the same climate-boundary sample.
 
+The mountain refinement uses overlapping peak bodies with varying heights and base widths;
+taller mountains are usually wider. Their connected saddles and gorges produce an irregular,
+lobed footprint. Mountains have clear pointed peaks, predominantly rocky upper/steeper
+surfaces, and asymmetric slopes that grow steeper from gentle feet to some nearly vertical
+faces. Gentle feet retain soil in temperate/steppe climate and sand in desert; higher or
+steeper faces expose stone independently of the mountain classification threshold.
+Geometric passes do not yet guarantee a traversable route. Coast and frozen-climate masks
+can separate exposed segments; no mountain connection is forced through ocean or frozen land.
+
+`generation_mountains.zig` stores 32 peak slots per continent in fixed inline arrays,
+with at most 160 slots overall and at most five nearby kernels sampled per column.
+Precomputed `previous_bins` and `next_bins` locate the anchors of a shared piecewise-linear
+centerline, which bends the separate bodies without a continuous ridge uplift or a
+descriptor scan. The module allocates no memory. Seeded anisotropic, faceted rational
+profiles give smooth feet, pointed cusps, and directional steepness; body heights combine
+by maximum. Mountain influence and nonlinear height profiles remain separate inputs to
+classification and other environmental fields. Cover uses body profile magnitude and
+analytic body grade; that grade excludes lowland and taper derivatives and is a cover
+heuristic, not a final terrain-gradient bound. Queries require no runtime world census
+or per-visit feature preparation. Inline descriptor and index arrays already count in
+`@sizeOf(NaturalWorld)` and are not added again as external preparation allocations.
+
+Hills remain deferred: they would be soil-covered, rounded forms with a broad fairly flat
+top, no clear peak, and at most a one-block cardinal rise (about 45 degrees). This refinement
+adds neither hill generation nor a hill relief enum.
+
 Desert lowlands split into coherent dune and gently rolling flat regions with an approximate
 50/50 target. A seeded regional selector produces arbitrary boundaries across chunks;
 preparation does not count biome areas, impose quotas, or retry for their proportions.
@@ -80,14 +115,16 @@ blocks, allowing quantized terraces. Shore transitions may be steeper within the
 cardinal limit. Continuous blending joins the lowland regions and reaches the older rolling
 terrain within a 256-block temperate collar outside the desert.
 Near shores, lowland height is capped by coast proximity rather than multiplied by a ramp.
-Mountain uplift remains separate and is excluded from the lowland slope cap; desert
-mountain surfaces are stone, while foothills may retain sand.
+Mountain uplift remains separate and is excluded from the lowland slope cap; higher or
+steeper desert mountain surfaces are stone, while gentle feet may retain sand independently
+of the mountain classification threshold.
 
 `ColumnEnvironment.desert_biome` returns `.dunes` or `.flats` only for dry desert columns
 with zero mountain strength, and `null` elsewhere. This derived location query shares the
 generation fields and does not require resident chunks. Climate and mountain relief remain
-independent properties. The desert refinement's acceptance checks are tracked in the
-[generation spec](../specs/features/world-generation.md); executed evidence belongs in the
+independent properties. The desert and mountain refinements' acceptance checks are tracked
+in the [generation spec](../specs/features/world-generation.md). Executed checks, seed maps,
+geometry profiles, and their limits are recorded in the
 [validation report](validation/world-generation/README.md).
 
 Mainland shore proximity combines a capped distance to conservative coastal rectangles
@@ -266,7 +303,8 @@ The simulation worker initially loads the central chunk column, finds the surfac
 | [`main.zig`](../src/voxel_app/main.zig) | Streaming/pinning, handoffs, package application, mesh reuse, mask precedence, camera tools, and capacity fallback. |
 | [`block_targeting.zig`](../src/voxel_app/block_targeting.zig) | Camera rays, candidate cube reach by nearest vertex, hit faces, bounds, missing chunks, and wrapped seams. |
 | [`world_generator.zig`](../src/voxel_app/world_generator.zig), [`natural_generator.zig`](../src/voxel_app/natural_generator.zig), [`generation_tests.zig`](../src/voxel_app/generation_tests.zig) | Natural/flat profiles, deterministic geography, material oracle, periodic X, and enclosure certification. |
-| [`generation_desert.zig`](../src/voxel_app/generation_desert.zig), [`generation_geography.zig`](../src/voxel_app/generation_geography.zig) | Dunes/flats fields, lowland slopes and shore transitions, separate mountain uplift, and exposed desert mountain stone. |
+| [`generation_desert.zig`](../src/voxel_app/generation_desert.zig), [`generation_geography.zig`](../src/voxel_app/generation_geography.zig) | Dunes/flats fields, lowland slopes and shore transitions, mountain integration, and climate-appropriate feet versus exposed upper/steeper stone. |
+| [`generation_mountains.zig`](../src/voxel_app/generation_mountains.zig) | Fixed peak slots, bounded nearby kernels, shared centerline, asymmetric pointed bodies, saddles, and separate influence/profile/grade samples. |
 | [`boundary_mask.zig`](../src/voxel_app/boundary_mask.zig), [`world_engine_glue.zig`](../src/voxel_app/world_engine_glue.zig) | Mask coordinates/sizes and cross-chunk face extraction. |
 | [`simulation_worker.zig`](../src/voxel_app/simulation_worker.zig) | Surface selection, result-dependent action changes, cancellation, and subscription updates. |
 | [`voxel_tests.zig`](../src/engine/voxel_tests.zig), [`voxel_grid.zig`](../src/engine/voxel/voxel_grid.zig), [`voxel/`](../src/engine/voxel) | GPU data preparation, slot allocation/reuse, exact preflight, and fixed limits. |

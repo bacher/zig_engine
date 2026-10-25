@@ -1,0 +1,1647 @@
+[
+  {
+    "seed": 0,
+    "status": "accepted",
+    "profile": "half",
+    "mountains": {
+      "active_peaks": 65,
+      "dry_summits": 58,
+      "high_summits_at_95_percent": 3,
+      "rock_summits": 58,
+      "asymmetric_peaks": 65,
+      "pointed_summits": 58,
+      "consecutive_bin_pairs": 62,
+      "mountain_endpoint_pairs": 55,
+      "influence_connected_pairs": 55,
+      "disconnected_pairs_with_mountain_endpoints": 0,
+      "first_disconnected_pair": null,
+      "connected_passes": 55,
+      "sea_level": 256,
+      "height_limit": 486,
+      "min_summit_height": 325,
+      "max_summit_height": 486,
+      "min_width_blocks": 403,
+      "max_width_blocks": 1047,
+      "summit": {
+        "block": [
+          6336,
+          9920
+        ],
+        "height": 486,
+        "owner": 1
+      },
+      "pass": {
+        "site": {
+          "block": [
+            31512,
+            9801
+          ],
+          "height": 335,
+          "owner": 3
+        },
+        "endpoints": [
+          {
+            "block": [
+              31424,
+              9536
+            ],
+            "height": 463,
+            "owner": 3
+          },
+          {
+            "block": [
+              31552,
+              9920
+            ],
+            "height": 396,
+            "owner": 3
+          }
+        ],
+        "wall_relief": 61,
+        "connected": true,
+        "transverse_offset_blocks": 0
+      },
+      "gorge": {
+        "site": {
+          "block": [
+            31296,
+            11724
+          ],
+          "height": 328,
+          "owner": 3
+        },
+        "endpoints": [
+          {
+            "block": [
+              31296,
+              11456
+            ],
+            "height": 458,
+            "owner": 3
+          },
+          {
+            "block": [
+              31296,
+              11968
+            ],
+            "height": 486,
+            "owner": 3
+          }
+        ],
+        "wall_relief": 130,
+        "connected": true,
+        "transverse_offset_blocks": 0
+      },
+      "column_probes": 48536
+    },
+    "preparation": {
+      "generator_id": 2,
+      "generator_version": 1,
+      "profile": "natural",
+      "seed": 0,
+      "category": "none",
+      "reason": "none",
+      "stage": "complete",
+      "attempts_started": 1,
+      "candidates_rejected": 0,
+      "selected_attempt": 0,
+      "rejections": [
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none"
+      ],
+      "rejection_details": [
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        }
+      ],
+      "peak_owned_bytes": 556152,
+      "feature_references": 93,
+      "max_bin_occupancy": 7,
+      "observed": 0,
+      "limit": 0,
+      "work_units": 15693544
+    },
+    "preparation_ns": 23187166,
+    "coarse_mainland": {
+      "land_cells": 13523,
+      "total_cells": 32768,
+      "land_percent": 41.2689208984375,
+      "scope": "mainland macro ownership before coast refinement; excludes islands"
+    },
+    "first_start": [
+      64,
+      11200,
+      258
+    ],
+    "first_start_climate": {
+      "climate": "temperate",
+      "belt_min_y": 9214,
+      "belt_max_y_exclusive": 13260,
+      "distance_to_lower_edge": 1986,
+      "distance_to_upper_edge": 2059
+    },
+    "sample_grid": [
+      512,
+      256
+    ],
+    "sample_pass0": {
+      "samples": 131072,
+      "land": 53641,
+      "mainland": 53606,
+      "island": 35,
+      "climate_belts": [
+        13108,
+        13092,
+        32776,
+        13112,
+        32764,
+        13125,
+        13095
+      ],
+      "land_climate_belts": [
+        0,
+        2,
+        8809,
+        8700,
+        26378,
+        6485,
+        3267
+      ],
+      "relief": [
+        127651,
+        3421
+      ],
+      "land_relief": [
+        50220,
+        3421
+      ],
+      "land_geology": [
+        49686,
+        3955
+      ],
+      "desert_biomes": [
+        4490,
+        3461
+      ],
+      "host_depth_by_relief_geology": [
+        [
+          13400564,
+          146327
+        ],
+        [
+          0,
+          1020474
+        ]
+      ],
+      "vegetation": [
+        89398,
+        16282,
+        18905,
+        6487
+      ],
+      "fingerprint": 17937472835363316909
+    },
+    "sample_pass1": {
+      "samples": 131072,
+      "land": 53647,
+      "mainland": 53602,
+      "island": 45,
+      "climate_belts": [
+        13103,
+        13101,
+        32761,
+        13132,
+        32756,
+        13107,
+        13112
+      ],
+      "land_climate_belts": [
+        0,
+        9,
+        8804,
+        8707,
+        26381,
+        6467,
+        3279
+      ],
+      "relief": [
+        127661,
+        3411
+      ],
+      "land_relief": [
+        50236,
+        3411
+      ],
+      "land_geology": [
+        49703,
+        3944
+      ],
+      "desert_biomes": [
+        4522,
+        3433
+      ],
+      "host_depth_by_relief_geology": [
+        [
+          13405461,
+          145733
+        ],
+        [
+          0,
+          1018640
+        ]
+      ],
+      "vegetation": [
+        89411,
+        16309,
+        18876,
+        6476
+      ],
+      "fingerprint": 15379965810750417097
+    },
+    "desert_biome_order": "dunes,flats",
+    "land_percent_pass0": 40.924835205078125,
+    "land_percent_pass1": 40.929412841796875,
+    "sample_disagreement_percentage_points": 0.00457763671875,
+    "resource_order": "metal_ore,limestone,clay,coal,sand",
+    "size_order": "large,small,starter",
+    "deposit_populations": [
+      [
+        8,
+        0,
+        0
+      ],
+      [
+        8,
+        0,
+        0
+      ],
+      [
+        8,
+        12,
+        1
+      ],
+      [
+        8,
+        12,
+        1
+      ],
+      [
+        8,
+        12,
+        1
+      ]
+    ],
+    "exact_effective_blocks": [
+      [
+        5955786,
+        0,
+        0
+      ],
+      [
+        31697306,
+        0,
+        0
+      ],
+      [
+        2559810,
+        1360,
+        83
+      ],
+      [
+        4116188,
+        1358,
+        83
+      ],
+      [
+        17614206,
+        1400,
+        83
+      ]
+    ],
+    "estimated_resource_distribution_pass0": {
+      "blocks": [
+        [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            5955786
+          ]
+        ],
+        [
+          [
+            30411660.526104417,
+            633768.8955823294
+          ],
+          [
+            0,
+            651876.578313253
+          ]
+        ],
+        [
+          [
+            2561253,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            4014548.1,
+            79293
+          ],
+          [
+            0,
+            23787.9
+          ]
+        ],
+        [
+          [
+            17615689,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "accepted_samples": [
+        2038,
+        2083,
+        3340,
+        3389,
+        3487
+      ],
+      "total_samples": 40448
+    },
+    "estimated_resource_distribution_pass1": {
+      "blocks": [
+        [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            5955786
+          ]
+        ],
+        [
+          [
+            30337778.416030534,
+            533485.5076335878
+          ],
+          [
+            0,
+            826042.0763358779
+          ]
+        ],
+        [
+          [
+            2561253,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            3968969.0524017466,
+            138041.37991266375
+          ],
+          [
+            0,
+            10618.56768558952
+          ]
+        ],
+        [
+          [
+            17615689,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "accepted_samples": [
+        1995,
+        2070,
+        3356,
+        3398,
+        3512
+      ],
+      "total_samples": 40448
+    },
+    "distribution_axes": "resource,relief(lowland/mountain),geology(sedimentary/rocky)",
+    "eligible_host_volume_estimator": "sample.host_depth_by_relief_geology * world_horizontal_area / sample.samples",
+    "effective_centers": [
+      [
+        8,
+        0,
+        0
+      ],
+      [
+        8,
+        0,
+        0
+      ],
+      [
+        8,
+        12,
+        1
+      ],
+      [
+        8,
+        12,
+        1
+      ],
+      [
+        8,
+        12,
+        1
+      ]
+    ],
+    "mountain_deposit_centers": [
+      8,
+      0,
+      0,
+      0,
+      0
+    ],
+    "sedimentary_deposit_centers": [
+      0,
+      8,
+      21,
+      21,
+      21
+    ]
+  },
+  {
+    "seed": 12345,
+    "status": "accepted",
+    "profile": "default",
+    "mountains": {
+      "active_peaks": 59,
+      "dry_summits": 51,
+      "high_summits_at_95_percent": 3,
+      "rock_summits": 51,
+      "asymmetric_peaks": 59,
+      "pointed_summits": 51,
+      "consecutive_bin_pairs": 56,
+      "mountain_endpoint_pairs": 48,
+      "influence_connected_pairs": 47,
+      "disconnected_pairs_with_mountain_endpoints": 1,
+      "first_disconnected_pair": {
+        "endpoints": [
+          {
+            "block": [
+              15936,
+              7104
+            ],
+            "height": 742,
+            "owner": 1
+          },
+          {
+            "block": [
+              9408,
+              8128
+            ],
+            "height": 912,
+            "owner": 1
+          }
+        ],
+        "first_gap": {
+          "block": [
+            14738,
+            7292
+          ],
+          "height": 513,
+          "owner": 1,
+          "coast_distance": 2,
+          "climate": "temperate",
+          "mountain_strength": 0,
+          "reason": "coastal_collar"
+        }
+      },
+      "connected_passes": 47,
+      "sea_level": 512,
+      "height_limit": 972,
+      "min_summit_height": 650,
+      "max_summit_height": 972,
+      "min_width_blocks": 807,
+      "max_width_blocks": 2095,
+      "summit": {
+        "block": [
+          11328,
+          15808
+        ],
+        "height": 972,
+        "owner": 1
+      },
+      "pass": {
+        "site": {
+          "block": [
+            10159,
+            8462
+          ],
+          "height": 763,
+          "owner": 1
+        },
+        "endpoints": [
+          {
+            "block": [
+              9408,
+              8128
+            ],
+            "height": 912,
+            "owner": 1
+          },
+          {
+            "block": [
+              10560,
+              8640
+            ],
+            "height": 898,
+            "owner": 1
+          }
+        ],
+        "wall_relief": 135,
+        "connected": true,
+        "transverse_offset_blocks": 0
+      },
+      "gorge": {
+        "site": {
+          "block": [
+            35460,
+            26596
+          ],
+          "height": 606,
+          "owner": 2
+        },
+        "endpoints": [
+          {
+            "block": [
+              35392,
+              26048
+            ],
+            "height": 866,
+            "owner": 2
+          },
+          {
+            "block": [
+              35520,
+              27072
+            ],
+            "height": 861,
+            "owner": 2
+          }
+        ],
+        "wall_relief": 255,
+        "connected": true,
+        "transverse_offset_blocks": 0
+      },
+      "column_probes": 43834
+    },
+    "preparation": {
+      "generator_id": 2,
+      "generator_version": 1,
+      "profile": "natural",
+      "seed": 12345,
+      "category": "none",
+      "reason": "none",
+      "stage": "complete",
+      "attempts_started": 1,
+      "candidates_rejected": 0,
+      "selected_attempt": 0,
+      "rejections": [
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none"
+      ],
+      "rejection_details": [
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        }
+      ],
+      "peak_owned_bytes": 2129016,
+      "feature_references": 87,
+      "max_bin_occupancy": 7,
+      "observed": 0,
+      "limit": 0,
+      "work_units": 28964584
+    },
+    "preparation_ns": 34834083,
+    "coarse_mainland": {
+      "land_cells": 48181,
+      "total_cells": 131072,
+      "land_percent": 36.759185791015625,
+      "scope": "mainland macro ownership before coast refinement; excludes islands"
+    },
+    "first_start": [
+      1600,
+      10688,
+      529
+    ],
+    "first_start_climate": {
+      "climate": "temperate",
+      "belt_min_y": 6945,
+      "belt_max_y_exclusive": 14393,
+      "distance_to_lower_edge": 3743,
+      "distance_to_upper_edge": 3704
+    },
+    "sample_grid": [
+      512,
+      256
+    ],
+    "sample_pass0": {
+      "samples": 131072,
+      "land": 47960,
+      "mainland": 47944,
+      "island": 16,
+      "climate_belts": [
+        13095,
+        13121,
+        32755,
+        13121,
+        32761,
+        13128,
+        13091
+      ],
+      "land_climate_belts": [
+        7,
+        3,
+        9581,
+        7614,
+        21482,
+        5224,
+        4049
+      ],
+      "relief": [
+        128145,
+        2927
+      ],
+      "land_relief": [
+        45033,
+        2927
+      ],
+      "land_geology": [
+        44552,
+        3408
+      ],
+      "desert_biomes": [
+        3069,
+        3750
+      ],
+      "host_depth_by_relief_geology": [
+        [
+          23691983,
+          258710
+        ],
+        [
+          0,
+          1740444
+        ]
+      ],
+      "vegetation": [
+        94782,
+        15400,
+        15663,
+        5227
+      ],
+      "fingerprint": 12435571781339444394
+    },
+    "sample_pass1": {
+      "samples": 131072,
+      "land": 47937,
+      "mainland": 47921,
+      "island": 16,
+      "climate_belts": [
+        13092,
+        13119,
+        32760,
+        13114,
+        32766,
+        13103,
+        13118
+      ],
+      "land_climate_belts": [
+        6,
+        4,
+        9563,
+        7633,
+        21466,
+        5216,
+        4049
+      ],
+      "relief": [
+        128139,
+        2933
+      ],
+      "land_relief": [
+        45004,
+        2933
+      ],
+      "land_geology": [
+        44567,
+        3370
+      ],
+      "desert_biomes": [
+        3071,
+        3749
+      ],
+      "host_depth_by_relief_geology": [
+        [
+          23699339,
+          234938
+        ],
+        [
+          0,
+          1744669
+        ]
+      ],
+      "vegetation": [
+        94823,
+        15353,
+        15676,
+        5220
+      ],
+      "fingerprint": 2903231401865342858
+    },
+    "desert_biome_order": "dunes,flats",
+    "land_percent_pass0": 36.590576171875,
+    "land_percent_pass1": 36.573028564453125,
+    "sample_disagreement_percentage_points": 0.017547607421875,
+    "resource_order": "metal_ore,limestone,clay,coal,sand",
+    "size_order": "large,small,starter",
+    "deposit_populations": [
+      [
+        8,
+        0,
+        0
+      ],
+      [
+        8,
+        0,
+        0
+      ],
+      [
+        8,
+        12,
+        1
+      ],
+      [
+        8,
+        12,
+        1
+      ],
+      [
+        8,
+        12,
+        1
+      ]
+    ],
+    "exact_effective_blocks": [
+      [
+        12731566,
+        0,
+        0
+      ],
+      [
+        47869308,
+        0,
+        0
+      ],
+      [
+        2968082,
+        1512,
+        83
+      ],
+      [
+        4659114,
+        1336,
+        83
+      ],
+      [
+        18581492,
+        1280,
+        83
+      ]
+    ],
+    "estimated_resource_distribution_pass0": {
+      "blocks": [
+        [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            12731566
+          ]
+        ],
+        [
+          [
+            47869308,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            2969677,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            4660533,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            18582855,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "accepted_samples": [
+        2073,
+        2073,
+        3403,
+        3314,
+        3503
+      ],
+      "total_samples": 40448
+    },
+    "estimated_resource_distribution_pass1": {
+      "blocks": [
+        [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            12731566
+          ]
+        ],
+        [
+          [
+            47869308,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            2969677,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            4660533,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            18582855,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "accepted_samples": [
+        2022,
+        2093,
+        3364,
+        3330,
+        3483
+      ],
+      "total_samples": 40448
+    },
+    "distribution_axes": "resource,relief(lowland/mountain),geology(sedimentary/rocky)",
+    "eligible_host_volume_estimator": "sample.host_depth_by_relief_geology * world_horizontal_area / sample.samples",
+    "effective_centers": [
+      [
+        8,
+        0,
+        0
+      ],
+      [
+        8,
+        0,
+        0
+      ],
+      [
+        8,
+        12,
+        1
+      ],
+      [
+        8,
+        12,
+        1
+      ],
+      [
+        8,
+        12,
+        1
+      ]
+    ],
+    "mountain_deposit_centers": [
+      8,
+      0,
+      0,
+      0,
+      0
+    ],
+    "sedimentary_deposit_centers": [
+      0,
+      8,
+      21,
+      21,
+      21
+    ]
+  },
+  {
+    "seed": 87,
+    "status": "accepted",
+    "profile": "double",
+    "mountains": {
+      "active_peaks": 58,
+      "dry_summits": 52,
+      "high_summits_at_95_percent": 3,
+      "rock_summits": 52,
+      "asymmetric_peaks": 58,
+      "pointed_summits": 50,
+      "consecutive_bin_pairs": 55,
+      "mountain_endpoint_pairs": 49,
+      "influence_connected_pairs": 49,
+      "disconnected_pairs_with_mountain_endpoints": 0,
+      "first_disconnected_pair": null,
+      "connected_passes": 48,
+      "sea_level": 1024,
+      "height_limit": 1945,
+      "min_summit_height": 1097,
+      "max_summit_height": 1945,
+      "min_width_blocks": 1651,
+      "max_width_blocks": 4195,
+      "summit": {
+        "block": [
+          39488,
+          41920
+        ],
+        "height": 1945,
+        "owner": 1
+      },
+      "pass": {
+        "site": {
+          "block": [
+            38163,
+            27786
+          ],
+          "height": 1303,
+          "owner": 1
+        },
+        "endpoints": [
+          {
+            "block": [
+              35264,
+              26560
+            ],
+            "height": 1834,
+            "owner": 1
+          },
+          {
+            "block": [
+              38592,
+              27968
+            ],
+            "height": 1346,
+            "owner": 1
+          }
+        ],
+        "wall_relief": 43,
+        "connected": true,
+        "transverse_offset_blocks": 0
+      },
+      "gorge": {
+        "site": {
+          "block": [
+            113984,
+            8024
+          ],
+          "height": 1192,
+          "owner": 3
+        },
+        "endpoints": [
+          {
+            "block": [
+              113984,
+              7104
+            ],
+            "height": 1816,
+            "owner": 3
+          },
+          {
+            "block": [
+              113984,
+              9152
+            ],
+            "height": 1825,
+            "owner": 3
+          }
+        ],
+        "wall_relief": 624,
+        "connected": true,
+        "transverse_offset_blocks": 0
+      },
+      "column_probes": 43059
+    },
+    "preparation": {
+      "generator_id": 2,
+      "generator_version": 1,
+      "profile": "natural",
+      "seed": 87,
+      "category": "none",
+      "reason": "none",
+      "stage": "complete",
+      "attempts_started": 1,
+      "candidates_rejected": 0,
+      "selected_attempt": 0,
+      "rejections": [
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none",
+        "none"
+      ],
+      "rejection_details": [
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        },
+        {
+          "reason": "none",
+          "stage": "preflight",
+          "observed": 0,
+          "limit": 0
+        }
+      ],
+      "peak_owned_bytes": 8420472,
+      "feature_references": 87,
+      "max_bin_occupancy": 9,
+      "observed": 0,
+      "limit": 0,
+      "work_units": 82048744
+    },
+    "preparation_ns": 53093292,
+    "coarse_mainland": {
+      "land_cells": 182417,
+      "total_cells": 524288,
+      "land_percent": 34.79328155517578,
+      "scope": "mainland macro ownership before coast refinement; excludes islands"
+    },
+    "first_start": [
+      14016,
+      44864,
+      1052
+    ],
+    "first_start_climate": {
+      "climate": "temperate",
+      "belt_min_y": 36592,
+      "belt_max_y_exclusive": 53088,
+      "distance_to_lower_edge": 8272,
+      "distance_to_upper_edge": 8223
+    },
+    "sample_grid": [
+      512,
+      256
+    ],
+    "sample_pass0": {
+      "samples": 131072,
+      "land": 45512,
+      "mainland": 45511,
+      "island": 1,
+      "climate_belts": [
+        13109,
+        13101,
+        32777,
+        13112,
+        32756,
+        13101,
+        13116
+      ],
+      "land_climate_belts": [
+        5020,
+        6077,
+        17866,
+        6231,
+        8415,
+        1814,
+        89
+      ],
+      "relief": [
+        128099,
+        2973
+      ],
+      "land_relief": [
+        42539,
+        2973
+      ],
+      "land_geology": [
+        42069,
+        3443
+      ],
+      "desert_biomes": [
+        3000,
+        2459
+      ],
+      "host_depth_by_relief_geology": [
+        [
+          43940238,
+          495919
+        ],
+        [
+          0,
+          3480198
+        ]
+      ],
+      "vegetation": [
+        96900,
+        12983,
+        13298,
+        7891
+      ],
+      "fingerprint": 10343746963392268137
+    },
+    "sample_pass1": {
+      "samples": 131072,
+      "land": 45505,
+      "mainland": 45501,
+      "island": 4,
+      "climate_belts": [
+        13109,
+        13091,
+        32776,
+        13083,
+        32781,
+        13124,
+        13108
+      ],
+      "land_climate_belts": [
+        5029,
+        6072,
+        17881,
+        6201,
+        8419,
+        1820,
+        83
+      ],
+      "relief": [
+        128084,
+        2988
+      ],
+      "land_relief": [
+        42517,
+        2988
+      ],
+      "land_geology": [
+        42066,
+        3439
+      ],
+      "desert_biomes": [
+        2965,
+        2462
+      ],
+      "host_depth_by_relief_geology": [
+        [
+          43938156,
+          475902
+        ],
+        [
+          0,
+          3494411
+        ]
+      ],
+      "vegetation": [
+        96880,
+        12999,
+        13301,
+        7892
+      ],
+      "fingerprint": 4377860740217404030
+    },
+    "desert_biome_order": "dunes,flats",
+    "land_percent_pass0": 34.722900390625,
+    "land_percent_pass1": 34.717559814453125,
+    "sample_disagreement_percentage_points": 0.005340576171875,
+    "resource_order": "metal_ore,limestone,clay,coal,sand",
+    "size_order": "large,small,starter",
+    "deposit_populations": [
+      [
+        8,
+        0,
+        0
+      ],
+      [
+        8,
+        0,
+        0
+      ],
+      [
+        8,
+        12,
+        1
+      ],
+      [
+        8,
+        12,
+        1
+      ],
+      [
+        8,
+        12,
+        1
+      ]
+    ],
+    "exact_effective_blocks": [
+      [
+        14797960,
+        0,
+        0
+      ],
+      [
+        51157896,
+        0,
+        0
+      ],
+      [
+        3241768,
+        1426,
+        83
+      ],
+      [
+        4863304,
+        1356,
+        83
+      ],
+      [
+        18581492,
+        1364,
+        83
+      ]
+    ],
+    "estimated_resource_distribution_pass0": {
+      "blocks": [
+        [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            14797960
+          ]
+        ],
+        [
+          [
+            51157896,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            3243277,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            4864743,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            18582939,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "accepted_samples": [
+        2006,
+        2032,
+        3369,
+        3401,
+        3477
+      ],
+      "total_samples": 40448
+    },
+    "estimated_resource_distribution_pass1": {
+      "blocks": [
+        [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            14797960
+          ]
+        ],
+        [
+          [
+            51157896,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            3243277,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            4864743,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ],
+        [
+          [
+            18582939,
+            0
+          ],
+          [
+            0,
+            0
+          ]
+        ]
+      ],
+      "accepted_samples": [
+        2070,
+        2071,
+        3347,
+        3326,
+        3500
+      ],
+      "total_samples": 40448
+    },
+    "distribution_axes": "resource,relief(lowland/mountain),geology(sedimentary/rocky)",
+    "eligible_host_volume_estimator": "sample.host_depth_by_relief_geology * world_horizontal_area / sample.samples",
+    "effective_centers": [
+      [
+        8,
+        0,
+        0
+      ],
+      [
+        8,
+        0,
+        0
+      ],
+      [
+        8,
+        12,
+        1
+      ],
+      [
+        8,
+        12,
+        1
+      ],
+      [
+        8,
+        12,
+        1
+      ]
+    ],
+    "mountain_deposit_centers": [
+      8,
+      0,
+      0,
+      0,
+      0
+    ],
+    "sedimentary_deposit_centers": [
+      0,
+      8,
+      21,
+      21,
+      21
+    ]
+  }
+]

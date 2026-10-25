@@ -107,6 +107,7 @@ pub const NaturalWorld = struct {
                 report.reason = .cancelled;
                 return error.Cancelled;
             }
+            geography.prepareMountains(climate);
             var result = NaturalWorld{ .layout = layout, .seed = seed, .settings = settings, .climate = climate, .geography = geography, .first_start = undefined, .report = report.* };
             report.stage = .first_start;
             result.first_start = result.findStart() orelse {
@@ -187,6 +188,19 @@ pub const NaturalWorld = struct {
             fingerprintScalar(&digest, island.radius_x);
             fingerprintScalar(&digest, island.radius_y);
         }
+        for (self.geography.mountains.previous_bins[0..self.geography.continent_count]) |bins| digest.update(&bins);
+        for (self.geography.mountains.next_bins[0..self.geography.continent_count]) |bins| digest.update(&bins);
+        for (self.geography.mountains.peaks[0..self.geography.continent_count]) |peaks| for (peaks) |peak| {
+            fingerprintScalar(&digest, @as(u8, @intFromBool(peak.active)));
+            if (!peak.active) continue;
+            for (peak.center) |coordinate| fingerprintScalar(&digest, coordinate);
+            fingerprintScalar(&digest, peak.summit_height);
+            for (peak.radii_x) |radius| fingerprintScalar(&digest, radius);
+            for (peak.radii_y) |radius| fingerprintScalar(&digest, radius);
+            for (peak.shape_x) |shape| fingerprintScalar(&digest, shape);
+            for (peak.shape_y) |shape| fingerprintScalar(&digest, shape);
+            fingerprintScalar(&digest, peak.skew_q16);
+        };
         for (self.deposits.items[0..self.deposits.count]) |deposit| {
             fingerprintScalar(&digest, deposit.id);
             fingerprintScalar(&digest, @intFromEnum(deposit.resource));
@@ -239,11 +253,11 @@ pub const NaturalWorld = struct {
                     const owner = self.geography.owners[y / cell_size * self.geography.macro_width + macro_x];
                     if (owner == 0) continue;
                     const e = self.baseEnvironmentAt(x, y);
-                    if (e.water_present or e.climate != .temperate or e.relief != .lowland or e.vegetation != .meadow or e.coast_distance < 128 or e.surface_cover != .soil) continue;
+                    if (e.water_present or e.climate != .temperate or e.mountain_strength != 0 or e.vegetation != .meadow or e.coast_distance < 128 or e.surface_cover != .soil) continue;
                     var safe = true;
                     for ([_][2]i32{ .{ -64, 0 }, .{ 64, 0 }, .{ 0, -64 }, .{ 0, 64 } }) |delta| {
                         const near = self.baseEnvironmentAt(@as(i64, x) + delta[0], @intCast(@as(i64, y) + delta[1]));
-                        if (near.water_present or near.landmass_id != owner or @abs(@as(i64, near.terrain_height) - e.terrain_height) > 4) safe = false;
+                        if (near.water_present or near.landmass_id != owner or near.mountain_strength != 0 or @abs(@as(i64, near.terrain_height) - e.terrain_height) > 4) safe = false;
                     }
                     if (safe) return .{ x, y, e.terrain_height };
                 }

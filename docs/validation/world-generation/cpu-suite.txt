@@ -1,17 +1,4 @@
 run test w
-SSAO = false
-Debug SSAO = true
-SSAO = true
-
-run test w
-SSAO = false
-Debug SSAO = true
-SSAO = true
-
-run test w
-approx adversarial mainland columns=514882 flat-collar columns=52178 maximum adjacent-land height delta=4
-
-run test w
 selected material: tree_trunk
 control mode: spectator
 control mode: player
@@ -75,20 +62,33 @@ voxel buffer capacity reached; reducing the visible box to 5x5x5
 voxel uploads exceed buffer capacity even at 5x5x5; retaining pending uploads
 control mode: player
 7x7x7 terrain: 269 KiB of mesh payload; fits 4 MiB slot allocator
-approx adversarial mainland columns=514882 flat-collar columns=52178 maximum adjacent-land height delta=4
+approx adversarial mainland columns=514882 flat-collar columns=52178 maximum adjacent-land height delta=2
 
-Build Summary: 45/45 steps succeeded; 922/923 tests passed (1 skipped)
+run test w
+approx adversarial mainland columns=514882 flat-collar columns=52178 maximum adjacent-land height delta=2
+
+run test w
+SSAO = false
+Debug SSAO = true
+SSAO = true
+
+run test w
+SSAO = false
+Debug SSAO = true
+SSAO = true
+
+Build Summary: 45/45 steps succeeded; 935/936 tests passed (1 skipped)
 test success
-+- run test 235 pass (235 total) 22s MaxRSS:98M
-|  +- compile test Debug native success 3s MaxRSS:674M
++- run test 242 pass (242 total) 38s MaxRSS:99M
+|  +- compile test Debug native success 3s MaxRSS:691M
 |     +- WriteFile cached
-|     +- compile lib engine_wrapped Debug native cached 203ms MaxRSS:35M
+|     +- compile lib engine_wrapped Debug native cached 167ms MaxRSS:35M
 |     |  +- WriteFile  cached
-|     |  +- compile lib glfw Debug native cached 221ms MaxRSS:34M
+|     |  +- compile lib glfw Debug native cached 224ms MaxRSS:34M
 |     |  +- WriteFile cached
-|     |  +- compile lib zdawn Debug native cached 138ms MaxRSS:34M
+|     |  +- compile lib zdawn Debug native cached 294ms MaxRSS:34M
 |     |  +- WriteFile cached
-|     |  +- compile lib imgui Debug native cached 168ms MaxRSS:34M
+|     |  +- compile lib imgui Debug native cached 135ms MaxRSS:34M
 |     |  +- compile lib glfw Debug native (reused)
 |     |  +- compile lib zdawn Debug native (reused)
 |     |  +- compile lib imgui Debug native (reused)
@@ -110,13 +110,13 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 43 pass (43 total) 2s MaxRSS:8M
-|  +- compile test Debug native cached 100ms MaxRSS:34M
-+- run test 18 pass, 1 skip (19 total) 18ms MaxRSS:2M
-|  +- compile test Debug native cached 110ms MaxRSS:34M
++- run test 43 pass (43 total) 1s MaxRSS:8M
+|  +- compile test Debug native cached 126ms MaxRSS:34M
++- run test 18 pass, 1 skip (19 total) 33ms MaxRSS:2M
+|  +- compile test Debug native cached 111ms MaxRSS:34M
 |     +- options (reused)
-+- run test 65 pass (65 total) 405ms MaxRSS:26M
-|  +- compile test Debug native cached 181ms MaxRSS:35M
++- run test 65 pass (65 total) 402ms MaxRSS:26M
+|  +- compile test Debug native cached 164ms MaxRSS:35M
 |     +- WriteFile  (reused)
 |     +- compile lib glfw Debug native (reused)
 |     +- WriteFile (reused)
@@ -130,11 +130,11 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 19 pass (19 total) 27ms MaxRSS:2M
-|  +- compile test Debug native cached 160ms MaxRSS:34M
++- run test 19 pass (19 total) 20ms MaxRSS:2M
+|  +- compile test Debug native cached 253ms MaxRSS:34M
 |     +- options (reused)
-+- run test 65 pass (65 total) 397ms MaxRSS:26M
-|  +- compile test Debug native cached 222ms MaxRSS:35M
++- run test 65 pass (65 total) 406ms MaxRSS:26M
+|  +- compile test Debug native cached 167ms MaxRSS:35M
 |     +- WriteFile  (reused)
 |     +- compile lib glfw Debug native (reused)
 |     +- WriteFile (reused)
@@ -148,14 +148,14 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 20 pass (20 total) 16ms MaxRSS:2M
-|  +- compile test Debug native cached 136ms MaxRSS:34M
++- run test 20 pass (20 total) 31ms MaxRSS:2M
+|  +- compile test Debug native cached 109ms MaxRSS:34M
 |     +- options (reused)
 |     +- options (reused)
-+- run test success 17ms MaxRSS:9M
-|  +- compile test Debug native cached 155ms MaxRSS:35M
++- run test success 18ms MaxRSS:9M
+|  +- compile test Debug native cached 183ms MaxRSS:35M
 |     +- WriteFile cached
-|     +- compile lib engine Debug native cached 130ms MaxRSS:35M
+|     +- compile lib engine Debug native cached 152ms MaxRSS:34M
 |     |  +- WriteFile  (reused)
 |     |  +- compile lib glfw Debug native (reused)
 |     |  +- WriteFile (reused)
@@ -184,8 +184,8 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 438 pass (438 total) 35s MaxRSS:88M
-|  +- compile test Debug native success 5s MaxRSS:900M
++- run test 444 pass (444 total) 34s MaxRSS:88M
+|  +- compile test Debug native success 5s MaxRSS:901M
 |     +- WriteFile (reused)
 |     +- compile lib engine_wrapped Debug native (+13 more reused dependencies)
 |     +- compile lib engine_wrapped Debug native (+13 more reused dependencies)
@@ -203,15 +203,15 @@ test success
 |     +- options (reused)
 |     +- options (reused)
 |     +- options (reused)
-+- run test 1 pass (1 total) 17ms MaxRSS:2M
-|  +- compile test Debug native cached 159ms MaxRSS:34M
++- run test 1 pass (1 total) 21ms MaxRSS:2M
+|  +- compile test Debug native cached 110ms MaxRSS:34M
 |     +- options (reused)
 +- run test 2 pass (2 total) 1s MaxRSS:34M
-|  +- compile test Debug native cached 108ms MaxRSS:34M
+|  +- compile test Debug native cached 100ms MaxRSS:34M
 |     +- options (reused)
-+- run test 10 pass (10 total) 16ms MaxRSS:2M
-|  +- compile test Debug native cached 102ms MaxRSS:34M
-+- run test 1 pass (1 total) 16ms MaxRSS:2M
-|  +- compile test Debug native cached 125ms MaxRSS:34M
-+- run test 5 pass (5 total) 29ms MaxRSS:2M
-   +- compile test Debug native cached 107ms MaxRSS:34M
++- run test 10 pass (10 total) 35ms MaxRSS:2M
+|  +- compile test Debug native cached 207ms MaxRSS:34M
++- run test 1 pass (1 total) 29ms MaxRSS:2M
+|  +- compile test Debug native cached 192ms MaxRSS:34M
++- run test 5 pass (5 total) 20ms MaxRSS:2M
+   +- compile test Debug native cached 117ms MaxRSS:34M
