@@ -1,6 +1,6 @@
 # World generation validation
 
-Updated on 2026-10-24 for G1–G5 and AC1–AC38 of the
+Updated on 2026-10-25 for G1–G5 and AC1–AC38 of the
 [world generation specification](../../../specs/features/world-generation.md).
 The default profile is generator **2 / version 1**, natural, seed **12345**, with
 **2048 × 1024 × 32 chunks**. Beaches are available but disabled by default.
@@ -18,6 +18,16 @@ terrain, mountain ridges, and forest/meadow regions. Climate belts run north to
 south in proportions 10/10/25/10/25/10/10 over the entire horizontal area,
 including water. Sea level is 384 blocks at the default height. Ridges uplift
 existing land and fade to zero before both displaced frozen boundaries.
+
+Climate boundaries now combine independently phased periodic fields at 6, 14,
+and 30 cells around X, weighted 2:3:1. Automatic displacement scales with height
+to 1310 blocks at the default size, replacing the barely visible 96-block
+default. Opposite control points have opposite signs, preserving exact boundary
+means over all X columns and the target belt areas up to integer rounding of
+nominal latitudes. These allocation-free queries need no retained field table.
+The [before-and-after climate map](climate-before-after.png) shows seed 12345.
+New natural worlds use automatic mode; saved nonzero amplitudes retain their
+explicit block values.
 
 Finite, disjoint ellipsoidal deposits supply eight large sources of each of
 metal ore, limestone, clay, coal, and sand; twelve small sources each of clay,
@@ -48,8 +58,10 @@ including maximally conservative trim records. Maximum adjacent-land height delt
 in those reduced fixtures is four blocks.
 
 Mountain uplift uses the same displaced climate boundaries as classification and
-reaches zero on both nonfrozen border rows. The reported frozen/steppe join at
-`(11647,3212)` → `(11647,3213)` changes from **408 → 555** to **408 → 408**.
+reaches zero on both nonfrozen border rows. The original review fixture at
+`(11647,3212)` → `(11647,3213)` changed from **408 → 555** to **408 → 408**
+with the previous 96-block climate amplitude. The current regression derives
+the actual displaced boundary at X=11647 rather than fixing its old latitude.
 Tests cover both poles, both horizontal axes, seam equivalence, and nonzero inland
 attenuation; these are not a universal height-gradient guarantee for all settings.
 
@@ -63,7 +75,8 @@ The [coast prototype comparison](coast-comparison/README.md) records the exact-i
 experiment and the chosen approximation, including a cross-section and complete
 regeneration measurements. The separate [chunk-fill comparison](column-fill-comparison/README.md)
 isolates material-input reuse with identical terrain. The final production
-measurements below include both changes.
+measurements below include both changes and the stronger climate curves. Those
+two comparison experiments retain their original snapshots and measurements.
 
 ## Connectivity evidence
 
@@ -99,9 +112,9 @@ macOS 26.7.1 (25G241).
 | Check | Result |
 | --- | --- |
 | `zig build` | Passed; both applications and installed content built |
-| `zig build test` | 45/45 steps; 897 passed, 1 skipped of 898 registered tests |
-| `zig build test-generation` | 15/15 steps; 221/221 passed |
-| `zig build test-persistence` | 42/42 passed; also included in the full suite |
+| `zig build test` | 45/45 steps; 904 passed, 1 skipped of 905 registered tests |
+| `zig build test-generation` | 224/224 passed; included in the full suite |
+| `zig build test-persistence` | 43/43 passed; included in the full suite |
 | `zig build test-capture` | Passed on 2026-10-23 |
 | `zig build test-gpu` | 2026-10-23: 19/19 steps; 90/90 passed on Metal, both wrapping configurations |
 | ReleaseFast / ReleaseSafe regeneration | All 24 representative hashes agree between builds |
@@ -110,17 +123,17 @@ macOS 26.7.1 (25G241).
 
 The CPU skip is the existing nonwrapping counterpart of a wrap-specific
 coordinate test. See the [final CPU transcript](cpu-suite.txt).
-The 2026-10-24 rerun covers the build, full CPU suite (including persistence),
+The 2026-10-25 rerun covers the build, full CPU suite (including persistence),
 generation diagnostics, both benchmark modes, and overview maps. GPU and
 player-scale results above are retained from 2026-10-23; shaders and material
-rendering were unchanged by these review corrections. Those GPU checks compile
-production shaders and read back material colors; climate soil meshing and
+rendering were unchanged by these review corrections and climate tuning. Those
+GPU checks compile production shaders and read back material colors; climate soil meshing and
 saved-material identity also have CPU tests. Prior manual inspection covered
 spawn terrain and nearby forest, not every climate or water configuration.
 
 | Acceptance criteria | Evidence |
 | --- | --- |
-| AC1–AC5, AC11, AC22, AC24 | Layout/bounds tests, climate ordering and map/point equivalence, environment flags, configuration validation, seed-suite area measurements |
+| AC1–AC5, AC11, AC22, AC24 | Layout/bounds tests, climate ordering and map/point equivalence, environment flags, configuration validation, seed-suite area measurements; exact boundary means across eight seeds and ordering/wrapping across 64 seeds and four layouts |
 | AC2, AC37 | Protected-path construction above; final-column reduced and adversarial topology tests |
 | AC6–AC10, AC17, AC23, AC35 | Shared material/support tests, timer regressions, render-only climate meshing, GPU material/shadow checks, sand and single-cell deeprock foundation tests |
 | AC12–AC16 | Effective deposit counts and distribution below; starter dry-route checks; tree density, full-form overlap, XYZ-chunk and seam tests |
@@ -142,17 +155,17 @@ The second offset measures sensitivity to the sampling grid, not a statistical
 confidence interval. Reduced topology fixtures separately enumerate final
 land columns exactly to verify connectivity.
 
-- Mean estimated land: **60.7438%**; individual pass estimates
+- Mean estimated land: **60.7434%**; individual pass estimates
   **60.6796–60.8116%**. Maximum disagreement between offsets: **0.0397 percentage
   points**. Normal preparation does not run this coverage scan.
-- Mean belt areas are approximately **9.99 / 9.99 / 25.00 / 10.03 / 24.99 /
+- Mean belt areas are approximately **10.00 / 10.00 / 25.00 / 10.00 / 25.00 /
   10.00 / 10.00%**, within the specified one-percentage-point tolerance.
   Per-seed world and land-only climate counts are retained in the JSONL.
-- 63 seeds accepted attempt 0. Seed **12365** rejected its first candidate for
+- 63 seeds accepted attempt 0. Seed **12376** rejected its first candidate for
   `start_access_unavailable` and accepted attempt 1; the full trace is retained.
-- Preparation took **31.33–76.06 ms**, mean **38.39 ms**. Peak requested owned
+- Preparation took **32.37–79.79 ms**, mean **39.05 ms**. Peak requested owned
   allocation was **2,122,272 bytes**, below the 32-MiB preparation gate.
-  Maximum indexed feature references: **94**; maximum bucket occupancy: **9**
+  Maximum indexed feature references: **95**; maximum bucket occupancy: **9**
   against the configured per-bucket limit of 64.
 
 Every seed has eight large deposits per resource. Large sources account for at
@@ -160,9 +173,9 @@ least **99.9461%** of descriptor resource volume for every resource in every
 seed. Spatial allocation is estimated separately: per-deposit accepted samples
 are weighted by exact effective block counts, and eligible host volume is
 estimated from the two column passes. These estimates place **100%** of metal
-in mountains in both passes (mountain host density approximately 0.000279,
+in mountains in both passes (mountain host density approximately 0.000278,
 sampled lowland density zero). Non-metal resources are at least approximately
-**99.17% sedimentary** and **99.77% lowland**. Exact totals and sampled spatial
+**99.19% sedimentary** and **99.77% lowland**. Exact totals and sampled spatial
 fractions are separate fields in the summary. Desert surface sand is not
 included in descriptor totals. Extraction lifetimes and transport balance remain
 untuned until production rates and recipes exist.
@@ -180,14 +193,17 @@ checked separately by generator tests and conservative generation bounds.
 
 | ReleaseFast workload | Beaches off | Beaches on |
 | --- | ---: | ---: |
-| Cold column + surface chunk + hash, median | 0.372 ms | 0.309 ms |
-| 32 vertical chunks from a cached column, median | 5.346 ms | 5.419 ms |
-| Mainland shore column initialization, median | 0.112 ms | 0.176 ms |
-| 96-column forward traversal | 18.975 ms | 18.881 ms |
-| Reverse traversal after eviction | 15.324 ms | 15.053 ms |
+| Cold column + surface chunk + hash, median | 0.391 ms | 0.341 ms |
+| 32 vertical chunks from a cached column, median | 7.214 ms | 7.210 ms |
+| Mainland shore column initialization, median | 0.176 ms | 0.372 ms |
+| 96-column forward traversal | 35.692 ms | 35.402 ms |
+| Reverse traversal after eviction | 29.528 ms | 30.306 ms |
 
 These small workloads show timing noise and location-dependent beach cost;
-they do not establish a general speedup. Beaches remain **off by default**.
+they do not establish a general speedup or a controlled before/after comparison
+with the prior report. The layered climate queries perform more integer field
+evaluations; the measured retained and peak allocation sizes are unchanged.
+Beaches remain **off by default**.
 The logs separately report column, chunk-fill, and meshing times, throughput,
 allocation calls/resizes, and p95. Retained environment/border sample counts
 explicitly exclude internal feature probes. Mesh timing uses already prepared

@@ -46,6 +46,10 @@ of the whole map. Each column has one climate, independent of chunk boundaries. 
 cover is sand; other covered soil renders green, yellow, or snowy according to climate.
 Soil types and timers are saved unchanged. Water and foliage render opaque cubes and retain
 full-cube collision.
+Climate boundaries combine broad periodic bends and smaller irregularities. Their default
+amplitude scales with world height (1310 blocks at the default size); centered fields retain
+the agreed belt areas. In natural settings, zero `climate_displacement` selects this
+automatic amplitude, while nonzero values specify an explicit block amplitude.
 Mountain uplift tapers before both displaced frozen boundaries, reaching zero on the
 adjoining nonfrozen rows. Classification and uplift use the same climate-boundary sample.
 

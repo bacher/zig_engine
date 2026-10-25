@@ -1,7 +1,7 @@
 ---
 service: zig_engine
 created: 2026-10-22
-updated: 2026-10-24
+updated: 2026-10-25
 status: implemented
 ---
 
@@ -865,11 +865,22 @@ The confirmed normalized targets are:
 | Southern frozen | 10% | Included above |
 
 Represent the six boundaries as smooth periodic functions `b_i(x)` around their nominal
-latitudes, using fixed low-frequency components with approximately zero-mean displacement.
-Use bounded amplitudes and validate minimum separation analytically/conservatively, rather
-than fixing crossings after the fact. Small independent north/south fields avoid mirror
-symmetry. Proposed boundary displacement is 1–4 chunks, tuned as a length in blocks rather
-than quantizing boundary positions to chunks. No transition-band blending width is needed.
+latitudes. Combine three independently phased cubic value fields at 6, 14, and 30 cells
+around X, weighted 2:3:1: broad bends, stronger medium-scale curves, and smaller irregularities.
+Each even-length control ring negates its first half in the second half, so opposite
+X positions have equal and
+opposite displacement. Symmetric integer rounding preserves zero mean over the full X
+extent; stronger curves therefore retain the target belt areas. Give each boundary and
+octave its own seed and phase; the hemispheres need not mirror one another.
+
+The default `climate_displacement = 0` selects automatic amplitude in blocks:
+`min(height / 25, height / 10 - 128, (height / 10 - 2) / 2)`, with saturating subtraction
+before validation. At default size this is 1310 blocks (about 4% of world height), making
+the curves visible on a world overview. Nonzero settings remain explicit block amplitudes
+and must pass width validation. This replaces the initial 1–4-chunk tuning, which looked
+straight at full-world scale. Boundaries remain at column resolution. Validate minimum
+separation conservatively rather than correcting crossings after the fact. No color
+blending or climate transition-band width is needed.
 
 Compare Y to the six boundary positions to return exactly one `ClimateId`; tie-break exact
 equality explicitly. Low-frequency variation makes boundaries curved at macro scale and

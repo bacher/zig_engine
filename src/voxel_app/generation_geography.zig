@@ -389,7 +389,7 @@ test "ridge uplift fades at both polar boundaries in X and Y" {
     try geography.prepareCoast(allocator);
     defer geography.coast_field.deinit(allocator);
     geography.core_seeds[0] = .{ 65, 128 };
-    const climate = env.ClimateField{ .seed = hash.stream(12345, .climate, 0), .width = geography.width, .height = geography.height, .displacement = 96 };
+    const climate = env.ClimateField{ .seed = hash.stream(12345, .climate, 0), .width = geography.width, .height = geography.height, .displacement = (Settings{}).climateDisplacement(geography.height) };
     var tapered_columns: usize = 0;
     for (0..1024) |i| {
         const x: i64 = @intCast(i * 64);
@@ -419,12 +419,13 @@ test "ridge uplift fades at both polar boundaries in X and Y" {
     try std.testing.expect(tapered_columns > 0);
 }
 
-test "reported frozen-steppe ridge join has no height cliff" {
+test "default frozen-steppe ridge join has no height cliff" {
     var geography = try Geography.init(std.testing.allocator, hash.stream(12345, .continents, 0), .{ 65536, 32768, 1024 }, .{});
     defer geography.deinit(std.testing.allocator);
-    const climate = env.ClimateField{ .seed = hash.stream(12345, .climate, 0), .width = geography.width, .height = geography.height, .displacement = 96 };
-    const frozen = geography.atWithClimate(climate, 11647, 3212);
-    const steppe = geography.atWithClimate(climate, 11647, 3213);
+    const climate = env.ClimateField{ .seed = hash.stream(12345, .climate, 0), .width = geography.width, .height = geography.height, .displacement = (Settings{}).climateDisplacement(geography.height) };
+    const boundary = climate.boundaries(11647)[0];
+    const frozen = geography.atWithClimate(climate, 11647, boundary - 1);
+    const steppe = geography.atWithClimate(climate, 11647, boundary);
     try std.testing.expectEqual(env.ClimateId.frozen, frozen.climate);
     try std.testing.expectEqual(env.ClimateId.steppe, steppe.climate);
     try std.testing.expectEqual(@as(u16, 0), frozen.mountain_strength);
@@ -436,7 +437,7 @@ test "reported frozen-steppe ridge join has no height cliff" {
 test "reported internal macro join has no mainland height cliff" {
     var geography = try Geography.init(std.testing.allocator, hash.stream(12345, .continents, 0), .{ 65536, 32768, 1024 }, .{});
     defer geography.deinit(std.testing.allocator);
-    const climate = env.ClimateField{ .seed = hash.stream(12345, .climate, 0), .width = geography.width, .height = geography.height, .displacement = 96 };
+    const climate = env.ClimateField{ .seed = hash.stream(12345, .climate, 0), .width = geography.width, .height = geography.height, .displacement = (Settings{}).climateDisplacement(geography.height) };
     const west = geography.atWithClimate(climate, 36735, 13632);
     const east = geography.atWithClimate(climate, 36736, 13632);
     try std.testing.expect(west.landmass_id > 0 and west.landmass_id < 128);

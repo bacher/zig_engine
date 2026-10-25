@@ -343,6 +343,7 @@ pub fn encodeNaturalSettings(settings: NaturalSettings) [natural_settings_size]u
     var p: usize = 0;
     put(u8, &out, &p, @intFromEnum(Profile.natural));
     put(u8, &out, &p, @intFromBool(settings.beaches));
+    // Zero selects the height-scaled climate amplitude; nonzero is in blocks.
     put(u16, &out, &p, settings.climate_displacement);
     put(u8, &out, &p, settings.island_count);
     put(u8, &out, &p, settings.large_deposits_per_resource);
@@ -562,6 +563,10 @@ test "descriptor global and player strict wire roundtrips" {
 
 test "generator profiles retain settings seed version and layout" {
     const allocator = std.testing.allocator;
+    const automatic_bytes = encodeNaturalSettings(.{});
+    const automatic = try decodeGeneratorSettings(&automatic_bytes);
+    try std.testing.expectEqual(@as(u16, 0), automatic.natural.climate_displacement);
+    try std.testing.expectEqual(@as(u32, 1310), automatic.natural.climateDisplacement(32768));
     const natural = NaturalSettings{
         .beaches = true,
         .climate_displacement = 112,

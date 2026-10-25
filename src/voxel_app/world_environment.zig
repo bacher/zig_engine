@@ -53,7 +53,22 @@ pub const ClimateField = struct {
     seed: u64,
     width: u32,
     height: u32,
-    displacement: u16,
+    displacement: u32,
+
+    /// Pair opposite lattice nodes with opposite signs, so every octave has
+    /// f(x + width / 2) = -f(x). World widths are even, making the integer column
+    /// mean exactly zero without a scan or retained noise tables.
+    fn periodicBoundary(seed: u64, x: u32, width: u32, comptime cells: u16) i64 {
+        const scaled = @as(u64, x) * cells * 65536 / width + (seed & 65535) * cells;
+        const cell: u16 = @intCast((scaled >> 16) % cells);
+        const next = (cell + 1) % cells;
+        const t: i64 = @intCast(scaled & 65535);
+        const smooth = @divTrunc(t * t * (3 * 65536 - 2 * t), 65536 * 65536);
+        const half = cells / 2;
+        const a = (@as(i64, @intCast(hash.at(seed, cell % half, 0) & 65535)) * 2 - 65535) * @as(i64, if (cell < half) 1 else -1);
+        const b = (@as(i64, @intCast(hash.at(seed, next % half, 0) & 65535)) * 2 - 65535) * @as(i64, if (next < half) 1 else -1);
+        return a + @divTrunc((b - a) * smooth, 65536);
+    }
 
     /// Boundaries ascend from the storage-south edge to storage-north.
     /// Equality belongs to the belt north of a boundary.
@@ -61,8 +76,13 @@ pub const ClimateField = struct {
         const canonical = hash.wrappedX(x, self.width);
         const shares = [_]u32{ 10, 20, 45, 55, 80, 90 };
         var out: [6]u32 = undefined;
-        for (shares, 0..) |share, i| {
-            const noise = hash.periodic(hash.mix(self.seed +% i), canonical, self.width, @intCast(3 + i % 3));
+        inline for (shares, 0..) |share, i| {
+            const seed = hash.mix(self.seed +% i);
+            var layered: i64 = 0;
+            inline for ([_]u16{ 6, 14, 30 }, [_]i64{ 2, 3, 1 }, 0..) |cells, weight, octave| {
+                layered += weight * periodicBoundary(hash.mix(seed +% octave), canonical, self.width, cells);
+            }
+            const noise = @divTrunc(layered, 6);
             const nominal: i64 = @intCast(@as(u64, self.height) * share / 100);
             out[i] = @intCast(nominal + @divTrunc(noise * self.displacement, 65536));
         }
@@ -125,4 +145,55 @@ test "climate fields wrap, preserve ordered polar widths, and expose future work
     try std.testing.expect(rules(.frozen).clothing_required);
     try std.testing.expect(rules(.frozen).increased_food_cost);
     try std.testing.expect(rules(.desert).additional_water_required);
+}
+
+test "layered climate boundaries keep exact whole-world belt areas" {
+    const settings = @import("generation_settings.zig").NaturalSettings{};
+    const width = 65536;
+    const height = 32768;
+    const shares = [_]u32{ 10, 20, 45, 55, 80, 90 };
+    for (0..8) |seed| {
+        const field = ClimateField{ .seed = hash.stream(12345 + seed, .climate, 0), .width = width, .height = height, .displacement = settings.climateDisplacement(height) };
+        var totals: [6]u64 = @splat(0);
+        for (0..width) |x| {
+            const b = field.boundaries(@intCast(x));
+            for (b, 0..) |boundary, i| totals[i] += boundary;
+        }
+        for (shares, totals) |share, total| {
+            try std.testing.expectEqual(@as(u64, height * share / 100) * width, total);
+        }
+    }
+}
+
+test "automatic climate curves stay visible ordered polar and periodic across seeds and layouts" {
+    const settings = @import("generation_settings.zig").NaturalSettings{};
+    for ([_][2]u32{ .{ 2048, 2048 }, .{ 4096, 3072 }, .{ 65536, 32768 }, .{ 2048, 8388608 } }) |size| {
+        for (0..64) |seed| {
+            const field = ClimateField{ .seed = hash.stream(12345 + seed, .climate, 0), .width = size[0], .height = size[1], .displacement = settings.climateDisplacement(size[1]) };
+            for (0..128) |sample| {
+                const x: i64 = @intCast(@as(u64, size[0]) * sample / 128);
+                const b = field.boundaries(x);
+                try std.testing.expect(b[0] >= 128 and field.height - b[5] >= 128);
+                for (0..5) |i| try std.testing.expect(b[i] < b[i + 1]);
+                try std.testing.expectEqualDeep(b, field.boundaries(x - field.width));
+                try std.testing.expectEqualDeep(b, field.boundaries(x + field.width));
+            }
+        }
+    }
+
+    const field = ClimateField{ .seed = hash.stream(12345, .climate, 0), .width = 65536, .height = 32768, .displacement = settings.climateDisplacement(32768) };
+    var lows: [6]u32 = @splat(field.height);
+    var highs: [6]u32 = @splat(0);
+    for (0..1024) |sample| {
+        for (field.boundaries(@intCast(sample * 64)), 0..) |boundary, i| {
+            lows[i] = @min(lows[i], boundary);
+            highs[i] = @max(highs[i], boundary);
+        }
+    }
+    var greatest_range: u32 = 0;
+    for (lows, highs) |low, high| greatest_range = @max(greatest_range, high - low);
+    try std.testing.expect(greatest_range >= field.height / 32);
+    const west = field.boundaries(field.width - 1);
+    const east = field.boundaries(0);
+    for (west, east) |a, b| try std.testing.expect(@max(a, b) - @min(a, b) <= 1);
 }

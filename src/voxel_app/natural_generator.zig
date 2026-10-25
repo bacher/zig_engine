@@ -49,7 +49,7 @@ pub const NaturalWorld = struct {
 
     /// Only the two checked entry points above may begin candidate preparation.
     fn initPreflighted(allocator: std.mem.Allocator, layout: *const WorldLayout, seed: u64, settings: NaturalSettings, report: *PreparationReport, options: preparation.PrepareOptions, cells: usize) preparation.PrepareError!NaturalWorld {
-        const climate = environment.ClimateField{ .seed = hash.stream(seed, .climate, 0), .width = layout.size_in_blocks[0], .height = layout.size_in_blocks[1], .displacement = settings.climate_displacement };
+        const climate = environment.ClimateField{ .seed = hash.stream(seed, .climate, 0), .width = layout.size_in_blocks[0], .height = layout.size_in_blocks[1], .displacement = settings.climateDisplacement(layout.size_in_blocks[1]) };
         for (0..8) |attempt| {
             if (options.is_cancelled) |cancel| if (cancel(options.cancellation_context)) {
                 report.category = .preparation_aborted;
