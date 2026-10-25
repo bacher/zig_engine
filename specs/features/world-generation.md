@@ -54,6 +54,12 @@ Implementation evidence and measured defaults are recorded in the
   the user. With `32³` chunks this is `65536 × 32768 × 1024` blocks, approximately
   `65.536 × 32.768 km` horizontally. The 67,108,864 possible chunks use 26 ID bits;
   chunk size and `u32` chunk IDs remain unchanged. The demo app need not change its preset.
+  Current natural-world support is limited to an X:Y ratio of **2:1**, with three
+  size targets: `1024 × 512 × 16`, `2048 × 1024 × 32` (default), and
+  `4096 × 2048 × 64` chunks. Half/double size scales all three axes; chunk and block
+  sizes stay fixed. The half-size and double-size profiles should retain broadly comparable
+  generation quality without aspect-ratio-specific growth logic. Other engine-valid layouts
+  remain experimental; accepting their dimensions does not establish generation support.
 - R2: X wraps; Y and Z do not. All procedural fields, feature distances, neighborhood
   searches, and connectivity checks respect the cylindrical topology. Climate belts extend
   predominantly along X and vary with Y. The equator is the horizontal midpoint of Y.
@@ -417,8 +423,15 @@ Implementation evidence and measured defaults are recorded in the
   A19: CONFIRMED on 2026-10-25: change the nominal target to 35% and treat it as soft
   guidance. Approximately 95% of seeds within 25–45% is acceptable; favor natural shapes
   and performance over enforcing an exact fraction. Connectivity and island separation
-  remain validity requirements. Highly elongated custom layouts need no special growth
-  handling or coverage tuning.
+  remain validity requirements. As clarified in Q20, other aspect ratios are outside the
+  current support scope and need no special growth handling or coverage tuning.
+- Q20: Which world shapes and sizes are currently supported?
+  A20: CONFIRMED on 2026-10-25: support X:Y = 2:1, with `2048 × 1024 × 32` chunks as
+  the default, plus half-size `1024 × 512 × 16` and double-size `4096 × 2048 × 64`.
+  These profiles should generate reasonably well without a narrow-world adjustment.
+  Recorded seed-suite and timing evidence currently covers the default profile; quality
+  checks and performance measurements at the other two sizes remain pending. This documents
+  generation support rather than changing the engine's general layout validation.
 
 ## Acceptance Criteria
 
@@ -430,6 +443,8 @@ consolidation tasks remain separate.
 
 - AC1: GIVEN a new default voxel world WHEN its layout is created THEN dimensions are
   `2048 × 1024 × 32` chunks, ID round trips fit `u32`, X wraps, and Y/Z remain finite. [R1–R2]
+  The half-size and double-size profiles in R1 are additional generation validation
+  targets; their evidence must be reported separately from the default-profile results.
 - AC2: GIVEN an accepted prepared layout WHEN continent connectivity is checked on its
   final block-column cylindrical land graph THEN K separate major components exist for
   K in [3,5], additional smaller island components exist, and seam-crossing components count
@@ -618,8 +633,9 @@ consolidation tasks remain separate.
 
 ## Out of Scope
 
-Old-save migration; spherical or
-toroidal topology; seasons; altitude-driven climate; jungle; bushes; multiple tree species;
+Old-save migration; natural-generation support for aspect ratios other than X:Y = 2:1 or
+sizes outside R1's three profiles; spherical or toroidal topology; seasons; altitude-driven
+climate; jungle; bushes; multiple tree species;
 texture/color blending between climates; dynamic water, swimming, ice, rivers, hydrology,
 erosion, and caves; extraction buildings,
 processing recipes, prospecting UI, and transport simulation; research gates; farming/NPC

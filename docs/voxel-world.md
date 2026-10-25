@@ -6,6 +6,12 @@ The voxel application combines deterministic terrain generation with an in-memor
 
 Chunks remain fixed at 32 by 32 by 32 blocks. The application chooses world dimensions at scene creation; its current preset is 2048 by 1024 by 32 chunks: 65536 by 32768 by 1024 blocks. Each block occupies one world-coordinate unit, defined as one metre. X wrapping is always enabled by the application's compile-time engine configuration. Positions beyond y/z storage boundaries cannot index terrain; outer faces at those boundaries remain exposed, and the player treats those edges as collision walls.
 
+Natural-world generation currently supports X:Y = 2:1, targeting three chunk-size
+profiles: 1024 × 512 × 16, the default 2048 × 1024 × 32, and 4096 × 2048 × 64.
+The smaller and larger profiles scale every axis by one half or two and should
+retain comparable generation quality; recorded broad validation currently covers
+the default. Other shapes and sizes remain experimental. See [supported sizes](world-configuration.md#creating-a-world).
+
 World coordinates are centered using the immutable layout's half-dimension `origin_chunk`. With the current preset, world position zero corresponds to stored block coordinates (32768, 16384, 512). Spatial chunk coordinates are signed vectors; normalize x and validate y/z before encoding a storage ID through that world's layout. Its dimension exponents determine the packed ID widths: the current preset uses 11/10/5 bits, or 26 of the available 32 bits. The cache and service retain immutable copies of the scene's validated layout. A compile-time guard rejects an engine configuration with wrapping disabled. See [world configuration](world-configuration.md) and [coordinates](coordinates.md).
 
 `WorldChunkData.blocks` is indexed `[z][y][x]` and contains one `BlockType` per block. Types include air, natural/crushed stone, loose/packed soil, grass-covered packed soil, trunks, foliage, planks, rebar, reinforced concrete, water, sand, snow, metal ore, limestone, clay, coal, and deeprock. Current occupancy tests treat every non-air type as solid; water does not have a separate transparent/fluid occupancy rule. Custom cells use value 255 and sparse metadata; country roads save their formed slope ownership there. Occupancy, face occlusion, and collision are separate: custom cells stay occupied, expose neighboring ordinary faces, and use their recorded collision shape. Sparse construction indices and ordered time events also live in chunk metadata. See [block placement and transformations](block-placement.md).

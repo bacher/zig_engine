@@ -35,6 +35,25 @@ Invalid settings return `InvalidWorldDimension`, `WorldDimensionTooLarge`, or `T
 
 The voxel app's current dimension preset is in [`consts.zig`](../src/voxel_app/consts.zig): 2048×1024×32 chunks (65536×32768×1024 blocks). The demo retains 512×256×8 chunks. `WorldSettings` contains only dimensions; wrapping is supplied by the application's engine configuration. Neither has an implicit engine default.
 
+Natural-world generation currently supports an X:Y ratio of **2:1**, with these
+three size profiles:
+
+| Profile | X × Y × Z, chunks | X × Y × Z, blocks |
+| --- | --- | --- |
+| Half size | 1024 × 512 × 16 | 32768 × 16384 × 512 |
+| Default | 2048 × 1024 × 32 | 65536 × 32768 × 1024 |
+| Double size | 4096 × 2048 × 64 | 131072 × 65536 × 2048 |
+
+Half/double scales every dimension; chunk size stays 32³. The default has recorded
+seed-suite, map, and performance validation. Half-size and double-size worlds are
+expected to retain comparable generation quality; their broader quality and
+performance validation remains pending. See the [generation validation report](validation/world-generation/README.md).
+
+This is the natural generator's support scope. General engine layout validation
+remains as described above, and other accepted layouts can still serve as test or
+experimental worlds without a generation-quality guarantee. No special growth
+adjustment is provided for narrow worlds or other aspect ratios.
+
 ## Coordinates and IDs
 
 `WorldLayout` derives chunk dimensions, unsigned block extents, the origin at half each dimension, and contiguous ID masks/shifts. World position zero maps to the storage midpoint. Dimensions bound stored terrain and IDs; they do not clip ordinary engine objects or camera movement to that storage zone.

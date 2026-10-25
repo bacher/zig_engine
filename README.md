@@ -45,6 +45,9 @@ The [world generation specification](specs/features/world-generation.md) defines
 world: 2048×1024×32 chunks, connected continents and islands, climate belts, mountain ranges,
 finite deposits, forests, and an immutable deeprock floor. Climate queries are shared by
 generation, rendering, and future simulation. Old saves using generator IDs 0/1 are rejected.
+Current support targets X:Y = 2:1 at the default size and at half/double every dimension;
+[world configuration](docs/world-configuration.md#creating-a-world) lists all three sizes
+and their validation status.
 The [validation report](docs/validation/world-generation/README.md) records seed maps,
 regeneration benchmarks, memory bounds, and CPU/GPU results.
 

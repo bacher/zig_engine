@@ -5,10 +5,17 @@ Updated on 2026-10-25 for G1–G5 and AC1–AC38 of the
 The default profile is generator **2 / version 1**, natural, seed **12345**, with
 **2048 × 1024 × 32 chunks**. Beaches are available but disabled by default.
 
+The current natural-generation support scope is **X:Y = 2:1**, targeting
+`1024 × 512 × 16`, `2048 × 1024 × 32` (default), and `4096 × 2048 × 64` chunks.
+The seed suites, timings, and overview maps in this report use the default size.
+Comparable quality at half/double size is an expectation to validate, not a result
+established by these measurements. Other shapes and sizes remain experimental;
+general engine layout acceptance does not guarantee natural-generation quality.
+
 ## Delivered behavior
 
-Preparation grows 3–5 cardinally connected continents on a 512 × 256 macro grid
-(128 × 128 blocks per cell), refines their coasts by bounded erosion, and places
+At the default size, preparation grows 3–5 cardinally connected continents on a
+512 × 256 macro grid (128 × 128 blocks per cell), refines their coasts by bounded erosion, and places
 12 smaller, separated islands. Land now has a soft 35% target, with roughly 95%
 of default-profile seeds within 25–45% considered sufficient. Growth stops at
 an integer cost horizon instead of filling an exact occupied-cell quota. Stronger
@@ -288,8 +295,9 @@ internal joins continuously but can add a flat coastal collar up to 16 blocks.
 The existing abrupt seabed-height step at the actual shore is unchanged. Ridges
 taper with coast/climate and are not branched tectonic networks. No exact final
 land quota or equal continent-size guarantee is claimed. The soft coverage envelope
-is tuned for the default profile; highly elongated custom layouts are not a tuning
-target and receive no special growth handling. F1 foundation/pile rules, F2 NPC/farm
+is tuned for the default profile. Half/double-size quality and performance still need
+separate seed suites and map inspection; other aspect ratios are outside the current
+support scope and receive no special growth handling. F1 foundation/pile rules, F2 NPC/farm
 execution, and F3 material-definition consolidation remain deferred. Clay currently supports a
 packed-soil-style stable platform without soil timers, while its mining remains
 forbidden until its use flow exists.
