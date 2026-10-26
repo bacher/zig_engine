@@ -54,7 +54,7 @@ const AllocationMeter = struct {
 };
 
 const Site = struct { label: []const u8, block: [2]u32, chunk_z: ?i32 = null };
-fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![14]Site {
+fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![17]Site {
     const natural = prepared.kind.natural;
     const size = prepared.layout.size_in_blocks;
     const start = prepared.firstStart().?;
@@ -77,12 +77,16 @@ fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![14]
         .{ .label = "desert_flats", .block = .{ 0, size[1] / 2 } },
         .{ .label = "mountain_pass", .block = mountain_report.pass.?.site.block },
         .{ .label = "mountain_gorge", .block = mountain_report.gorge.?.site.block },
+        .{ .label = "temperate_flatland", .block = .{ start[0], start[1] } },
+        .{ .label = "temperate_rolling_hills", .block = .{ start[0], start[1] } },
+        .{ .label = "temperate_hilly", .block = .{ start[0], start[1] } },
     };
     std.debug.print("mountain_sites actual_high_summits={d} consecutive_bin_pairs={d} mountain_endpoint_pairs={d} influence_connected_pairs={d} connected_passes={d} pass_wall_relief={d} gorge_wall_relief={d} diagnostic_column_probes={d}\n", .{ mountain_report.high_summits_at_95_percent, mountain_report.consecutive_bin_pairs, mountain_report.mountain_endpoint_pairs, mountain_report.influence_connected_pairs, mountain_report.connected_passes, mountain_report.pass.?.wall_relief, mountain_report.gorge.?.wall_relief, mountain_report.column_probes });
     var coast_found = false;
     var dunes_found = false;
     var flats_found = false;
     var ocean_found = false;
+    var temperate_found: [3]bool = @splat(false);
     var maximum_trees: usize = 0;
     var maximum_slope: u32 = 0;
     // Macro edge probes hit the actual refined coast, rather than a random
@@ -99,6 +103,16 @@ fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![14]
         }
         const center = [2]u32{ @intCast(mx * 128 + 64), @intCast(my * 128 + 64) };
         const e = prepared.columnEnvironmentAt(center[0], center[1]);
+        if (e.temperate_landform) |landform| {
+            const index = @intFromEnum(landform);
+            if (!temperate_found[index] and e.vegetation == .forest and e.coast_distance >= 512 and natural.climate.sample(center[0], center[1]).temperate_terrain == 65535) {
+                const column = Column.init(prepared, .{ @intCast(center[0] / 32), @intCast(center[1] / 32) });
+                if (column.column.natural.tree_count != 0) {
+                    sites[14 + index].block = center;
+                    temperate_found[index] = true;
+                }
+            }
+        }
         if (e.climate == .desert and !e.water_present and e.coast_distance >= 128 and e.mountain_strength == 0) {
             if (e.desert_biome) |biome| switch (biome) {
                 .dunes => if (!dunes_found) {
@@ -140,6 +154,7 @@ fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![14]
     if (!dunes_found) return error.MissingDesertDunesSite;
     if (!flats_found) return error.MissingDesertFlatsSite;
     if (!coast_found or !ocean_found) return error.MissingRepresentativeSite;
+    for (temperate_found) |found| if (!found) return error.MissingTemperateSite;
     std.debug.print("representative_sites dense_forest_trees={d} maximum_shore_delta_8={d}\n", .{ maximum_trees, maximum_slope });
     return sites;
 }
@@ -154,7 +169,7 @@ fn isolatedWorkload(init: std.process.Init, a: std.mem.Allocator, prepared: *con
         sample.* = elapsed(init.io, begin);
         std.mem.doNotOptimizeAway(column);
     }
-    std.debug.print("site={s} x={d} y={d} z={d} coast={d} relief={s} mountain_strength={d} climate={s} desert_biome={s} ", .{ site.label, site.block[0], site.block[1], z, e.coast_distance, @tagName(e.relief), e.mountain_strength, @tagName(e.climate), if (e.desert_biome) |biome| @tagName(biome) else "none" });
+    std.debug.print("site={s} x={d} y={d} z={d} coast={d} relief={s} mountain_strength={d} climate={s} desert_biome={s} temperate_landform={s} ", .{ site.label, site.block[0], site.block[1], z, e.coast_distance, @tagName(e.relief), e.mountain_strength, @tagName(e.climate), if (e.desert_biome) |biome| @tagName(biome) else "none", if (e.temperate_landform) |landform| @tagName(landform) else "none" });
     printSamples("column_initialization", samples, 1);
     const cached = Column.init(prepared, coords);
     const adjacent_samples: usize = if (coords[1] == 0 or coords[1] + 1 == prepared.layout.size_in_chunks[1]) 0 else 128;

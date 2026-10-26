@@ -42,9 +42,14 @@ pub fn eligible(world: anytype, raw_x: i64, cell_y: i64) ?Tree {
     for (0..5) |oy| for (0..5) |ox| {
         const nx = @as(i64, x) + @as(i64, @intCast(ox)) - 2;
         const ny: u32 = @intCast(@as(i64, y) + @as(i64, @intCast(oy)) - 2);
-        const other = world.baseEnvironmentAt(nx, ny);
-        if (other.climate == .frozen or other.climate == .desert or other.water_present or other.terrain_height > e.terrain_height + trunk_height - 2) return null;
-        if (@abs(@as(i64, other.terrain_height) - e.terrain_height) > 1) return null;
+        const trunk_column = ox == 2 and oy == 2;
+        const other = if (trunk_column) e else world.baseEnvironmentAt(nx, ny);
+        // Terrain occupies every block below terrain_height. Check the first
+        // occupied tree block in each column: the trunk root at the center,
+        // and the radius-two crown floor everywhere else. Downhill terrain
+        // needs no flatness restriction; the whole form remains clear above it.
+        const lowest_block = e.terrain_height + if (trunk_column) @as(u32, 0) else trunk_height - 2;
+        if (other.climate == .frozen or other.climate == .desert or other.water_present or other.terrain_height > lowest_block) return null;
     };
     return .{ .cell = .{ cell_x, cell_y }, .root = .{ x, y, e.terrain_height }, .trunk_height = trunk_height, .priority = hash.mix(h ^ 0x5052494f52495459) };
 }
@@ -120,4 +125,8 @@ pub fn trunkRootAt(world: anytype, x: i64, y: u32) bool {
     if (canonical % 8 != (h & 7) or y % 8 != ((h >> 3) & 7)) return false;
     const tree = eligible(world, canonical / 8, y / 8) orelse return false;
     return tree.root[0] == canonical and tree.root[1] == y and accepted(world, tree);
+}
+
+test {
+    _ = @import("generation_vegetation_tests.zig");
 }

@@ -8,6 +8,10 @@ const NaturalWorld = @import("natural_generator.zig").NaturalWorld;
 const preparation = @import("generation_preparation.zig");
 const environment = @import("world_environment.zig");
 
+test {
+    _ = @import("generation_temperate_tests.zig");
+}
+
 test "desert lowlands retain bounded steps at shores islands macro joins and the X seam" {
     const width = 4096;
     const height = 2048;
@@ -533,17 +537,22 @@ test "accepted natural climate maps material oracle and regenerated derived data
     const island = natural.geography.islands[0];
     const deposit = natural.deposits.items[0];
     var forest: ?[2]u32 = null;
+    var temperate_forests: [3]?[2]u32 = @splat(null);
     for (natural.geography.owners, 0..) |owner, index| {
         if (owner == 0) continue;
         const point = [2]u32{ @intCast(index % natural.geography.macro_width * 128 + 64), @intCast(index / natural.geography.macro_width * 128 + 64) };
-        if (prepared.columnEnvironmentAt(point[0], point[1]).vegetation != .forest) continue;
+        const at = prepared.columnEnvironmentAt(point[0], point[1]);
+        if (at.vegetation != .forest) continue;
+        if (forest != null and (at.temperate_landform == null or temperate_forests[@intFromEnum(at.temperate_landform.?)] != null)) continue;
         const column = generator.ColumnGenerator.init(&prepared, .{ @intCast(point[0] / 32), @intCast(point[1] / 32) });
         if (column.column.natural.tree_count == 0) continue;
-        forest = point;
-        break;
+        if (forest == null) forest = point;
+        if (at.temperate_landform) |landform| temperate_forests[@intFromEnum(landform)] = point;
+        if (temperate_forests[0] != null and temperate_forests[1] != null and temperate_forests[2] != null) break;
     }
     try std.testing.expect(forest != null);
-    const sites = [_][2]u32{ .{ start[0], start[1] }, .{ @intCast(island.x), island.y }, .{ 0, 0 }, .{ layout.size_in_blocks[0] - 1, layout.size_in_blocks[1] / 2 }, .{ deposit.center[0], deposit.center[1] }, forest.? };
+    for (temperate_forests) |site| try std.testing.expect(site != null);
+    const sites = [_][2]u32{ .{ start[0], start[1] }, .{ @intCast(island.x), island.y }, .{ 0, 0 }, .{ layout.size_in_blocks[0] - 1, layout.size_in_blocks[1] / 2 }, .{ deposit.center[0], deposit.center[1] }, forest.?, temperate_forests[0].?, temperate_forests[1].?, temperate_forests[2].? };
     try expectReference(&prepared, .{ @intCast(deposit.center[0] / 32), @intCast(deposit.center[1] / 32) }, @intCast(deposit.center[2] / 32));
     var hashes: [sites.len][32]u8 = undefined;
     const benchmark = @import("generation_benchmark.zig");

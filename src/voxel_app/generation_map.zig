@@ -9,6 +9,7 @@ const deposits = @import("generation_deposits.zig");
 const hash = @import("generation_hash.zig");
 const env = @import("world_environment.zig");
 const desert = @import("generation_desert.zig");
+const temperate = @import("generation_temperate.zig");
 
 const width = 1024;
 const height = 512;
@@ -58,10 +59,17 @@ fn exportMap(init: std.process.Init, path: []const u8, prepared: *const generati
         if (e.water_present) {
             for (&climate_color, water) |*component, blue| component.* = @intCast((@as(u16, component.*) + blue) / 2);
         }
-        const relief_color: [3]u8 = if (e.water_present) water else if (e.relief == .mountain) .{ 128 + @as(u8, @intCast(e.mountain_strength / 1024)), 116, 104 } else if (e.desert_biome) |biome| switch (biome) {
+        var relief_color: [3]u8 = if (e.water_present) water else if (e.relief == .mountain) .{ 128 + @as(u8, @intCast(e.mountain_strength / 1024)), 116, 104 } else if (e.desert_biome) |biome| switch (biome) {
             .dunes => .{ 224, 171, 82 },
             .flats => .{ 211, 201, 159 },
+        } else if (e.temperate_landform) |landform| switch (landform) {
+            .flatland => .{ 155, 191, 109 },
+            .rolling_hills => .{ 194, 174, 107 },
+            .hilly => .{ 175, 133, 93 },
         } else if (e.vegetation == .forest) .{ 40, 103, 58 } else .{ 132, 169, 88 };
+        if (e.temperate_landform != null and e.vegetation == .forest) for (&relief_color) |*component| {
+            component.* = @intCast(@as(u16, component.*) * 2 / 3);
+        };
         const resource_background: [3]u8 = if (e.water_present) .{ 40, 73, 99 } else .{ 125, 139, 111 };
         for ([_][3]u8{ land_color, climate_color, relief_color, resource_background }, 0..) |color, panel| {
             const offset = header.len + ((panel * height + py) * width + px) * 3;
@@ -195,6 +203,258 @@ fn exportDesertDetail(init: std.process.Init, path: []const u8, prepared: *const
     const metadata_path = try std.fmt.allocPrint(a, "{s}.desert.json", .{path});
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = metadata_path, .data = json });
     std.debug.print("desert_detail side={d} missing={any} image={s} metadata={s}\n", .{ side, missing, image_path, metadata_path });
+}
+
+const TemperateProfile = struct {
+    origin: [2]u32,
+    step_blocks: [2]u32,
+    terrain_heights: []const u32,
+    vegetation: []const env.VegetationId,
+    landforms: []const ?env.TemperateLandform,
+    weights_q16: []const [3]u32,
+    water_present: []const bool,
+    coast_distance: []const u32,
+    mountain_strength: []const u16,
+    temperate_terrain: []const u16,
+    temperate_boundary_distance: []const u32,
+};
+
+const TemperateDetailTile = struct {
+    landform: env.TemperateLandform,
+    extent_blocks: u32,
+    center: ?[2]u32 = null,
+    origin: ?[2]i64 = null,
+    center_temperate_boundary_distance: ?u32 = null,
+    center_temperate_terrain: ?u16 = null,
+    center_weights_q16: ?[3]u32 = null,
+    center_coast_distance: ?u32 = null,
+    selection_probes: u32 = 0,
+    selection_eligible_probes: u32 = 0,
+    selection_target_probes: u32 = 0,
+    selection_full_interior_probes: u32 = 0,
+    selection_unclipped_full_interior_probes: u32 = 0,
+    sampled_columns: u32 = 0,
+    sampled_landforms: [3]u32 = @splat(0),
+    sampled_water_columns: u32 = 0,
+    sampled_mountain_columns: u32 = 0,
+    sampled_full_temperate_interior_columns: u32 = 0,
+    sampled_forest_columns: u32 = 0,
+    min_temperate_terrain: ?u16 = null,
+    max_temperate_terrain: ?u16 = null,
+    min_coast_distance: ?u32 = null,
+    min_height: ?u32 = null,
+    max_height: ?u32 = null,
+    horizontal_profile: ?TemperateProfile = null,
+    vertical_profile: ?TemperateProfile = null,
+};
+
+fn temperateBoundaryDistance(prepared: *const generation.PreparedWorldGenerator, x: i64, y: u32) u32 {
+    const b = prepared.kind.natural.climate.boundaries(x);
+    if (y >= b[1] and y < b[2]) return @min(y - b[1], b[2] - 1 - y);
+    if (y >= b[3] and y < b[4]) return @min(y - b[3], b[4] - 1 - y);
+    return 0;
+}
+
+/// Select among a fixed 64x32 jittered grid, with 25 actual world probes per
+/// eligible candidate. Prefer eligible columns, full unclipped interior
+/// coverage, then the requested class. Final exports report their own samples;
+/// this selection grid does not establish that a window is pure.
+fn findTemperateDetailTiles(prepared: *const generation.PreparedWorldGenerator, tiles: *[3]TemperateDetailTile, only: ?env.TemperateLandform) u32 {
+    const size = prepared.layout.size_in_blocks;
+    var best_scores: [3]u32 = @splat(0);
+    var probes: u32 = 0;
+    for (0..32) |py| for (0..64) |px| {
+        const h = hash.at(hash.mix(prepared.seed() ^ 0x74656d7065726174), @intCast(px), @intCast(py));
+        const x: u32 = @intCast((@as(u64, @intCast(px)) * size[0] + h % size[0]) / 64);
+        const y: u32 = @intCast((@as(u64, @intCast(py)) * size[1] + (h >> 32) % size[1]) / 32);
+        const e = prepared.columnEnvironmentAt(x, y);
+        probes += 1;
+        const landform = e.temperate_landform orelse continue;
+        if (only) |wanted| if (landform != wanted) continue;
+        const index = @intFromEnum(landform);
+        const tile = &tiles[index];
+        const half = tile.extent_blocks / 2;
+        if (y < half or y + half > size[1]) continue;
+        const origin = [2]i64{ @as(i64, x) - half, @as(i64, y) - half };
+        var eligible: u32 = 0;
+        var target: u32 = 0;
+        var interior: u32 = 0;
+        var unclipped: u32 = 0;
+        for (0..5) |dy| for (0..5) |dx| {
+            const at_x = origin[0] + @as(i64, @intCast(dx * (tile.extent_blocks - 1) / 4));
+            const at_y: u32 = @intCast(origin[1] + @as(i64, @intCast(dy * (tile.extent_blocks - 1) / 4)));
+            const at = prepared.columnEnvironmentAt(at_x, at_y);
+            probes += 1;
+            eligible += @intFromBool(at.temperate_landform != null);
+            target += @intFromBool(at.temperate_landform == landform);
+            const full_interior = at.temperate_landform != null and temperateBoundaryDistance(prepared, at_x, at_y) >= 1792;
+            interior += @intFromBool(full_interior);
+            unclipped += @intFromBool(full_interior and at.landmass_id < 128 and at.coast_distance >= 512);
+        };
+        const score = eligible * 100000000 + unclipped * 1000000 + interior * 10000 + target;
+        if (tile.center != null and score <= best_scores[index]) continue;
+        best_scores[index] = score;
+        tile.center = .{ x, y };
+        tile.origin = origin;
+        tile.center_temperate_boundary_distance = temperateBoundaryDistance(prepared, x, y);
+        tile.center_temperate_terrain = prepared.kind.natural.climate.sample(x, y).temperate_terrain;
+        tile.center_weights_q16 = temperate.sample(prepared.kind.natural.geography.seed, x, y, size[0], size[2]).weights_q16;
+        tile.center_coast_distance = e.coast_distance;
+        tile.selection_probes = 25;
+        tile.selection_eligible_probes = eligible;
+        tile.selection_target_probes = target;
+        tile.selection_full_interior_probes = interior;
+        tile.selection_unclipped_full_interior_probes = unclipped;
+    };
+    return probes;
+}
+
+fn temperateProfile(a: std.mem.Allocator, prepared: *const generation.PreparedWorldGenerator, origin: [2]i64, step: [2]u32, length: u32) !TemperateProfile {
+    const heights = try a.alloc(u32, length);
+    const vegetation = try a.alloc(env.VegetationId, length);
+    const landforms = try a.alloc(?env.TemperateLandform, length);
+    const weights = try a.alloc([3]u32, length);
+    const water_present = try a.alloc(bool, length);
+    const coast_distance = try a.alloc(u32, length);
+    const mountain_strength = try a.alloc(u16, length);
+    const temperate_terrain = try a.alloc(u16, length);
+    const boundary_distance = try a.alloc(u32, length);
+    for (0..length) |i| {
+        const x = origin[0] + @as(i64, @intCast(i * step[0]));
+        const y: u32 = @intCast(origin[1] + @as(i64, @intCast(i * step[1])));
+        const e = prepared.columnEnvironmentAt(x, y);
+        heights[i] = e.terrain_height;
+        vegetation[i] = e.vegetation;
+        landforms[i] = e.temperate_landform;
+        weights[i] = temperate.sample(prepared.kind.natural.geography.seed, hash.wrappedX(x, prepared.layout.size_in_blocks[0]), y, prepared.layout.size_in_blocks[0], prepared.layout.size_in_blocks[2]).weights_q16;
+        water_present[i] = e.water_present;
+        coast_distance[i] = e.coast_distance;
+        mountain_strength[i] = e.mountain_strength;
+        temperate_terrain[i] = prepared.kind.natural.climate.sample(x, y).temperate_terrain;
+        boundary_distance[i] = temperateBoundaryDistance(prepared, x, y);
+    }
+    return .{
+        .origin = .{ hash.wrappedX(origin[0], prepared.layout.size_in_blocks[0]), @intCast(origin[1]) },
+        .step_blocks = step,
+        .terrain_heights = heights,
+        .vegetation = vegetation,
+        .landforms = landforms,
+        .weights_q16 = weights,
+        .water_present = water_present,
+        .coast_distance = coast_distance,
+        .mountain_strength = mountain_strength,
+        .temperate_terrain = temperate_terrain,
+        .temperate_boundary_distance = boundary_distance,
+    };
+}
+
+/// Actual integrated terrain at the spatial scales of each landform. The three
+/// 256-square windows cover 512, 1024..4096 and 512 blocks respectively. Profiles
+/// retain every block along both midlines, including any boundary crossings.
+fn exportTemperateDetail(init: std.process.Init, path: []const u8, prepared: *const generation.PreparedWorldGenerator) !void {
+    const a = init.arena.allocator();
+    const side: usize = 256;
+    var tiles = [_]TemperateDetailTile{
+        .{ .landform = .flatland, .extent_blocks = 512 },
+        .{ .landform = .rolling_hills, .extent_blocks = 4096 },
+        .{ .landform = .hilly, .extent_blocks = 512 },
+    };
+    var selection_probes = findTemperateDetailTiles(prepared, &tiles, null);
+    while (tiles[1].selection_eligible_probes < 25 and tiles[1].extent_blocks > 1024) {
+        const extent = tiles[1].extent_blocks / 2;
+        tiles[1] = .{ .landform = .rolling_hills, .extent_blocks = extent };
+        selection_probes += findTemperateDetailTiles(prepared, &tiles, .rolling_hills);
+    }
+    const heights = try a.alloc(u32, tiles.len * side * side);
+    const vegetation = try a.alloc(env.VegetationId, heights.len);
+    const submerged = try a.alloc(bool, heights.len);
+    var minimum: u32 = std.math.maxInt(u32);
+    var maximum: u32 = 0;
+    var missing = false;
+    for (&tiles, 0..) |*tile, panel| {
+        const origin = tile.origin orelse {
+            missing = true;
+            continue;
+        };
+        for (0..side) |py| for (0..side) |px| {
+            const x = origin[0] + @as(i64, @intCast((px * 2 + 1) * tile.extent_blocks / (side * 2)));
+            const y: u32 = @intCast(origin[1] + @as(i64, @intCast((py * 2 + 1) * tile.extent_blocks / (side * 2))));
+            const e = prepared.columnEnvironmentAt(x, y);
+            const index = panel * side * side + py * side + px;
+            heights[index] = e.terrain_height;
+            vegetation[index] = e.vegetation;
+            submerged[index] = e.water_present;
+            tile.sampled_columns += 1;
+            if (e.temperate_landform) |landform| tile.sampled_landforms[@intFromEnum(landform)] += 1;
+            tile.sampled_water_columns += @intFromBool(e.water_present);
+            tile.sampled_mountain_columns += @intFromBool(e.mountain_strength != 0);
+            tile.sampled_full_temperate_interior_columns += @intFromBool(e.temperate_landform != null and temperateBoundaryDistance(prepared, x, y) >= 1792);
+            tile.sampled_forest_columns += @intFromBool(e.vegetation == .forest);
+            const influence = prepared.kind.natural.climate.sample(x, y).temperate_terrain;
+            tile.min_temperate_terrain = @min(tile.min_temperate_terrain orelse influence, influence);
+            tile.max_temperate_terrain = @max(tile.max_temperate_terrain orelse influence, influence);
+            tile.min_coast_distance = @min(tile.min_coast_distance orelse e.coast_distance, e.coast_distance);
+            tile.min_height = @min(tile.min_height orelse e.terrain_height, e.terrain_height);
+            tile.max_height = @max(tile.max_height orelse e.terrain_height, e.terrain_height);
+        };
+        minimum = @min(minimum, tile.min_height.?);
+        maximum = @max(maximum, tile.max_height.?);
+        tile.horizontal_profile = try temperateProfile(a, prepared, .{ origin[0], tile.center.?[1] }, .{ 1, 0 }, tile.extent_blocks);
+        tile.vertical_profile = try temperateProfile(a, prepared, .{ tile.center.?[0], origin[1] }, .{ 0, 1 }, tile.extent_blocks);
+    }
+    if (minimum == std.math.maxInt(u32)) minimum = 0;
+    const header = try std.fmt.allocPrint(a, "P6\n{d} {d}\n255\n", .{ side * tiles.len, side * 2 });
+    const image = try a.alloc(u8, header.len + side * side * tiles.len * 2 * 3);
+    @memcpy(image[0..header.len], header);
+    const height_header = try std.fmt.allocPrint(a, "P5\n{d} {d}\n{d}\n", .{ side * tiles.len, side, prepared.layout.size_in_blocks[2] - 1 });
+    const height_image = try a.alloc(u8, height_header.len + heights.len * 2);
+    @memcpy(height_image[0..height_header.len], height_header);
+    const forest_header = try std.fmt.allocPrint(a, "P5\n{d} {d}\n255\n", .{ side * tiles.len, side });
+    const forest_image = try a.alloc(u8, forest_header.len + heights.len);
+    @memcpy(forest_image[0..forest_header.len], forest_header);
+    for (tiles, 0..) |tile, panel| for (0..side) |py| for (0..side) |px| {
+        const sample_index = panel * side * side + py * side + px;
+        const pixel = py * side * tiles.len + panel * side + px;
+        const found = tile.center != null;
+        const value: u8 = if (found) @intCast(@as(u64, heights[sample_index] - minimum) * 255 / @max(1, maximum - minimum)) else 0;
+        const color: [3]u8 = if (!found) .{ 255, 0, 255 } else if (submerged[sample_index]) water else .{ value, value, value };
+        const forest = found and vegetation[sample_index] == .forest;
+        const overlay: [3]u8 = if (forest) .{ value / 3, 70 + value / 2, value / 4 } else color;
+        @memcpy(image[header.len + pixel * 3 ..][0..3], &color);
+        @memcpy(image[header.len + (side * side * tiles.len + pixel) * 3 ..][0..3], &overlay);
+        std.mem.writeInt(u16, height_image[height_header.len + pixel * 2 ..][0..2], if (found) @intCast(heights[sample_index]) else 0, .big);
+        forest_image[forest_header.len + pixel] = if (forest) 255 else 0;
+    };
+    const image_path = try std.fmt.allocPrint(a, "{s}.temperate.ppm", .{path});
+    const height_path = try std.fmt.allocPrint(a, "{s}.temperate.height.pgm", .{path});
+    const forest_path = try std.fmt.allocPrint(a, "{s}.temperate.forest.pgm", .{path});
+    const metadata_path = try std.fmt.allocPrint(a, "{s}.temperate.json", .{path});
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = image_path, .data = image });
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = height_path, .data = height_image });
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = forest_path, .data = forest_image });
+    const metadata = try std.json.Stringify.valueAlloc(a, .{
+        .seed = prepared.seed(),
+        .dimensions_blocks = prepared.layout.size_in_blocks,
+        .missing = missing,
+        .tile_order = "flatland,rolling_hills,hilly; top row shared-scale heights, bottom row forest overlay",
+        .top_down_tile_pixels = side,
+        .blocks_per_pixel = .{ tiles[0].extent_blocks / side, tiles[1].extent_blocks / side, tiles[2].extent_blocks / side },
+        .row_direction = "increasing world Y; X wraps; pixel centers sampled, no filtering",
+        .height_pgm = "big-endian 16-bit actual sampled terrain heights, maxval=world depth-1; missing panels zero",
+        .forest_pgm = "255=actual forest vegetation, 0=other vegetation or missing; consult tile.center for availability",
+        .display_grayscale_min = minimum,
+        .display_grayscale_max = maximum,
+        .selection = "fixed 64x32 jittered candidates; 25 probes per candidate whose center has a temperate landform; prefer eligible columns, full temperate mainland interior >=512 blocks inland, full climate influence, then requested class; not a purity guarantee",
+        .rolling_window_selection = "try 4096,2048,1024 blocks in order, retaining the largest with all 25 selection probes eligible (dry temperate, zero mountain); if none qualifies, report the best 1024-block candidate with actual sample counts",
+        .selection_column_probes = selection_probes,
+        .full_temperate_interior = "at least 1792 blocks from either temperate belt boundary; zero mountain influence and dry",
+        .temperate_terrain_scale = "0..65535 climate blend influence; 65535=full temperate terrain, profiles and tiles retain actual influence",
+        .weights_q16_scale = "flatland,rolling_hills,hilly selector weights sum to 65536; separate from climate influence and coast capping; terrain heights always come from actual integrated columns",
+        .profile_sampling = "one block per entry along each complete midpoint row/column; all heights from columnEnvironmentAt; boundary crossings retained",
+        .tiles = tiles,
+    }, .{});
+    try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = metadata_path, .data = metadata });
+    std.debug.print("temperate_detail missing={any} selection_probes={d} image={s} heights={s} forest={s} metadata={s}\n", .{ missing, selection_probes, image_path, height_path, forest_path, metadata_path });
 }
 
 const MountainDetailTile = struct {
@@ -357,10 +617,13 @@ pub fn main(init: std.process.Init) !void {
             .scope = "mainland macro ownership before coast refinement; excludes islands",
         };
         const start = prepared.firstStart().?;
+        const start_environment = prepared.columnEnvironmentAt(start[0], start[1]);
         const start_boundaries = prepared.kind.natural.climate.boundaries(start[0]);
         const belt_index: usize = if (start[1] < start_boundaries[2]) 1 else 3;
         const start_climate = .{
             .climate = prepared.climateAt(start[0], start[1]),
+            .landform = start_environment.temperate_landform,
+            .vegetation = start_environment.vegetation,
             .belt_min_y = start_boundaries[belt_index],
             .belt_max_y_exclusive = start_boundaries[belt_index + 1],
             .distance_to_lower_edge = start[1] - start_boundaries[belt_index],
@@ -381,7 +644,7 @@ pub fn main(init: std.process.Init) !void {
             mountains[r] += @intFromBool(e.relief == .mountain);
             sedimentary[r] += @intFromBool(e.geology == .sedimentary);
         }
-        const line = try std.json.Stringify.valueAlloc(a, .{ .seed = seed, .status = "accepted", .profile = profile, .mountains = mountain_report, .preparation = report, .preparation_ns = preparation_ns, .coarse_mainland = coarse_mainland, .first_start = start, .first_start_climate = start_climate, .sample_grid = .{ 512, 256 }, .sample_pass0 = sample0, .sample_pass1 = sample1, .desert_biome_order = "dunes,flats", .land_percent_pass0 = sample0.landPercent(), .land_percent_pass1 = sample1.landPercent(), .sample_disagreement_percentage_points = @abs(sample0.landPercent() - sample1.landPercent()), .resource_order = "metal_ore,limestone,clay,coal,sand", .size_order = "large,small,starter", .deposit_populations = populations, .exact_effective_blocks = effective_blocks, .estimated_resource_distribution_pass0 = resourceDistribution(&prepared, 0), .estimated_resource_distribution_pass1 = resourceDistribution(&prepared, 1), .distribution_axes = "resource,relief(lowland/mountain),geology(sedimentary/rocky)", .eligible_host_volume_estimator = "sample.host_depth_by_relief_geology * world_horizontal_area / sample.samples", .effective_centers = center_effective, .mountain_deposit_centers = mountains, .sedimentary_deposit_centers = sedimentary }, .{});
+        const line = try std.json.Stringify.valueAlloc(a, .{ .seed = seed, .status = "accepted", .profile = profile, .mountains = mountain_report, .preparation = report, .preparation_ns = preparation_ns, .coarse_mainland = coarse_mainland, .first_start = start, .first_start_climate = start_climate, .sample_grid = .{ 512, 256 }, .sample_pass0 = sample0, .sample_pass1 = sample1, .desert_biome_order = "dunes,flats", .temperate_landform_order = "flatland,rolling_hills,hilly", .temperate_landform_vegetation_axes = "landform,vegetation(meadow,forest)", .temperate_landform_scope = "dry temperate columns with zero mountain influence; shared two-pass area estimator; nominal soft mix 50/30/20", .land_percent_pass0 = sample0.landPercent(), .land_percent_pass1 = sample1.landPercent(), .sample_disagreement_percentage_points = @abs(sample0.landPercent() - sample1.landPercent()), .resource_order = "metal_ore,limestone,clay,coal,sand", .size_order = "large,small,starter", .deposit_populations = populations, .exact_effective_blocks = effective_blocks, .estimated_resource_distribution_pass0 = resourceDistribution(&prepared, 0), .estimated_resource_distribution_pass1 = resourceDistribution(&prepared, 1), .distribution_axes = "resource,relief(lowland/mountain),geology(sedimentary/rocky)", .eligible_host_volume_estimator = "sample.host_depth_by_relief_geology * world_horizontal_area / sample.samples", .effective_centers = center_effective, .mountain_deposit_centers = mountains, .sedimentary_deposit_centers = sedimentary }, .{});
         try lines.appendSlice(a, line);
         try lines.append(a, '\n');
         land_estimates[accepted] = land_estimate;
@@ -392,6 +655,7 @@ pub fn main(init: std.process.Init) !void {
             try exportMap(init, map_path, &prepared);
             if (index == 0) {
                 try exportDesertDetail(init, path, &prepared);
+                try exportTemperateDetail(init, path, &prepared);
                 try exportMountainDetail(init, path, &prepared, mountain_report);
             }
         }

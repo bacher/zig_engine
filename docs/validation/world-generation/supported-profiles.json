@@ -33,10 +33,10 @@
       "pass": {
         "site": {
           "block": [
-            31512,
-            9801
+            31511,
+            9798
           ],
-          "height": 335,
+          "height": 334,
           "owner": 3
         },
         "endpoints": [
@@ -57,38 +57,38 @@
             "owner": 3
           }
         ],
-        "wall_relief": 61,
+        "wall_relief": 62,
         "connected": true,
         "transverse_offset_blocks": 0
       },
       "gorge": {
         "site": {
           "block": [
-            31296,
-            11724
+            18050,
+            11194
           ],
-          "height": 328,
-          "owner": 3
+          "height": 306,
+          "owner": 2
         },
         "endpoints": [
           {
             "block": [
-              31296,
-              11456
+              18112,
+              10944
             ],
-            "height": 458,
-            "owner": 3
+            "height": 446,
+            "owner": 2
           },
           {
             "block": [
-              31296,
-              11968
+              17984,
+              11456
             ],
             "height": 486,
-            "owner": 3
+            "owner": 2
           }
         ],
-        "wall_relief": 130,
+        "wall_relief": 140,
         "connected": true,
         "transverse_offset_blocks": 0
       },
@@ -172,7 +172,7 @@
       "limit": 0,
       "work_units": 15693544
     },
-    "preparation_ns": 23187166,
+    "preparation_ns": 25652334,
     "coarse_mainland": {
       "land_cells": 13523,
       "total_cells": 32768,
@@ -182,10 +182,12 @@
     "first_start": [
       64,
       11200,
-      258
+      283
     ],
     "first_start_climate": {
       "climate": "temperate",
+      "landform": "rolling_hills",
+      "vegetation": "meadow",
       "belt_min_y": 9214,
       "belt_max_y_exclusive": 13260,
       "distance_to_lower_edge": 1986,
@@ -234,14 +236,33 @@
         4490,
         3461
       ],
+      "temperate_landforms": [
+        13741,
+        11732,
+        6063
+      ],
+      "temperate_landform_vegetation": [
+        [
+          5723,
+          8018
+        ],
+        [
+          5969,
+          5763
+        ],
+        [
+          3037,
+          3026
+        ]
+      ],
       "host_depth_by_relief_geology": [
         [
-          13400564,
-          146327
+          13328448,
+          145002
         ],
         [
           0,
-          1020474
+          1013254
         ]
       ],
       "vegetation": [
@@ -250,7 +271,7 @@
         18905,
         6487
       ],
-      "fingerprint": 17937472835363316909
+      "fingerprint": 17251825261496374898
     },
     "sample_pass1": {
       "samples": 131072,
@@ -291,14 +312,33 @@
         4522,
         3433
       ],
+      "temperate_landforms": [
+        13747,
+        11710,
+        6069
+      ],
+      "temperate_landform_vegetation": [
+        [
+          5721,
+          8026
+        ],
+        [
+          5985,
+          5725
+        ],
+        [
+          3041,
+          3028
+        ]
+      ],
       "host_depth_by_relief_geology": [
         [
-          13405461,
-          145733
+          13333405,
+          144556
         ],
         [
           0,
-          1018640
+          1011279
         ]
       ],
       "vegetation": [
@@ -307,9 +347,12 @@
         18876,
         6476
       ],
-      "fingerprint": 15379965810750417097
+      "fingerprint": 13276014253939196986
     },
     "desert_biome_order": "dunes,flats",
+    "temperate_landform_order": "flatland,rolling_hills,hilly",
+    "temperate_landform_vegetation_axes": "landform,vegetation(meadow,forest)",
+    "temperate_landform_scope": "dry temperate columns with zero mountain influence; shared two-pass area estimator; nominal soft mix 50/30/20",
     "land_percent_pass0": 40.924835205078125,
     "land_percent_pass1": 40.929412841796875,
     "sample_disagreement_percentage_points": 0.00457763671875,
@@ -602,10 +645,10 @@
       "pass": {
         "site": {
           "block": [
-            10159,
-            8462
+            10164,
+            8464
           ],
-          "height": 763,
+          "height": 750,
           "owner": 1
         },
         "endpoints": [
@@ -626,7 +669,7 @@
             "owner": 1
           }
         ],
-        "wall_relief": 135,
+        "wall_relief": 148,
         "connected": true,
         "transverse_offset_blocks": 0
       },
@@ -741,7 +784,7 @@
       "limit": 0,
       "work_units": 28964584
     },
-    "preparation_ns": 34834083,
+    "preparation_ns": 38041875,
     "coarse_mainland": {
       "land_cells": 48181,
       "total_cells": 131072,
@@ -755,6 +798,8 @@
     ],
     "first_start_climate": {
       "climate": "temperate",
+      "landform": "flatland",
+      "vegetation": "meadow",
       "belt_min_y": 6945,
       "belt_max_y_exclusive": 14393,
       "distance_to_lower_edge": 3743,
@@ -803,14 +848,33 @@
         3069,
         3750
       ],
+      "temperate_landforms": [
+        14898,
+        8292,
+        4795
+      ],
+      "temperate_landform_vegetation": [
+        [
+          7771,
+          7127
+        ],
+        [
+          4339,
+          3953
+        ],
+        [
+          1890,
+          2905
+        ]
+      ],
       "host_depth_by_relief_geology": [
         [
-          23691983,
-          258710
+          23660636,
+          259014
         ],
         [
           0,
-          1740444
+          1742413
         ]
       ],
       "vegetation": [
@@ -819,7 +883,7 @@
         15663,
         5227
       ],
-      "fingerprint": 12435571781339444394
+      "fingerprint": 14340128153100962115
     },
     "sample_pass1": {
       "samples": 131072,
@@ -860,14 +924,33 @@
         3071,
         3749
       ],
+      "temperate_landforms": [
+        14849,
+        8299,
+        4792
+      ],
+      "temperate_landform_vegetation": [
+        [
+          7750,
+          7099
+        ],
+        [
+          4320,
+          3979
+        ],
+        [
+          1877,
+          2915
+        ]
+      ],
       "host_depth_by_relief_geology": [
         [
-          23699339,
-          234938
+          23668206,
+          235545
         ],
         [
           0,
-          1744669
+          1746558
         ]
       ],
       "vegetation": [
@@ -876,9 +959,12 @@
         15676,
         5220
       ],
-      "fingerprint": 2903231401865342858
+      "fingerprint": 12376891156046519515
     },
     "desert_biome_order": "dunes,flats",
+    "temperate_landform_order": "flatland,rolling_hills,hilly",
+    "temperate_landform_vegetation_axes": "landform,vegetation(meadow,forest)",
+    "temperate_landform_scope": "dry temperate columns with zero mountain influence; shared two-pass area estimator; nominal soft mix 50/30/20",
     "land_percent_pass0": 36.590576171875,
     "land_percent_pass1": 36.573028564453125,
     "sample_disagreement_percentage_points": 0.017547607421875,
@@ -1143,7 +1229,7 @@
             38163,
             27786
           ],
-          "height": 1303,
+          "height": 1305,
           "owner": 1
         },
         "endpoints": [
@@ -1164,7 +1250,7 @@
             "owner": 1
           }
         ],
-        "wall_relief": 43,
+        "wall_relief": 41,
         "connected": true,
         "transverse_offset_blocks": 0
       },
@@ -1174,7 +1260,7 @@
             113984,
             8024
           ],
-          "height": 1192,
+          "height": 1191,
           "owner": 3
         },
         "endpoints": [
@@ -1195,7 +1281,7 @@
             "owner": 3
           }
         ],
-        "wall_relief": 624,
+        "wall_relief": 625,
         "connected": true,
         "transverse_offset_blocks": 0
       },
@@ -1279,7 +1365,7 @@
       "limit": 0,
       "work_units": 82048744
     },
-    "preparation_ns": 53093292,
+    "preparation_ns": 57922666,
     "coarse_mainland": {
       "land_cells": 182417,
       "total_cells": 524288,
@@ -1289,10 +1375,12 @@
     "first_start": [
       14016,
       44864,
-      1052
+      1035
     ],
     "first_start_climate": {
       "climate": "temperate",
+      "landform": "flatland",
+      "vegetation": "meadow",
       "belt_min_y": 36592,
       "belt_max_y_exclusive": 53088,
       "distance_to_lower_edge": 8272,
@@ -1341,14 +1429,33 @@
         3000,
         2459
       ],
+      "temperate_landforms": [
+        11768,
+        8099,
+        3544
+      ],
+      "temperate_landform_vegetation": [
+        [
+          6019,
+          5749
+        ],
+        [
+          3298,
+          4801
+        ],
+        [
+          2132,
+          1412
+        ]
+      ],
       "host_depth_by_relief_geology": [
         [
-          43940238,
-          495919
+          43936935,
+          495157
         ],
         [
           0,
-          3480198
+          3476272
         ]
       ],
       "vegetation": [
@@ -1357,7 +1464,7 @@
         13298,
         7891
       ],
-      "fingerprint": 10343746963392268137
+      "fingerprint": 1096437579176705407
     },
     "sample_pass1": {
       "samples": 131072,
@@ -1398,14 +1505,33 @@
         2965,
         2462
       ],
+      "temperate_landforms": [
+        11824,
+        8079,
+        3564
+      ],
+      "temperate_landform_vegetation": [
+        [
+          6077,
+          5747
+        ],
+        [
+          3248,
+          4831
+        ],
+        [
+          2138,
+          1426
+        ]
+      ],
       "host_depth_by_relief_geology": [
         [
-          43938156,
-          475902
+          43934588,
+          475082
         ],
         [
           0,
-          3494411
+          3490523
         ]
       ],
       "vegetation": [
@@ -1414,9 +1540,12 @@
         13301,
         7892
       ],
-      "fingerprint": 4377860740217404030
+      "fingerprint": 16563399700001116996
     },
     "desert_biome_order": "dunes,flats",
+    "temperate_landform_order": "flatland,rolling_hills,hilly",
+    "temperate_landform_vegetation_axes": "landform,vegetation(meadow,forest)",
+    "temperate_landform_scope": "dry temperate columns with zero mountain influence; shared two-pass area estimator; nominal soft mix 50/30/20",
     "land_percent_pass0": 34.722900390625,
     "land_percent_pass1": 34.717559814453125,
     "sample_disagreement_percentage_points": 0.005340576171875,

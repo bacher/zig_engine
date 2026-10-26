@@ -3,6 +3,7 @@ const std = @import("std");
 const generator = @import("world_generator.zig");
 const hash = @import("generation_hash.zig");
 const mountains = @import("generation_mountains.zig");
+const environment = @import("world_environment.zig");
 
 /// Shared command-line profile names for the offline map and benchmark tools.
 pub fn profileDimensions(name: []const u8) ![3]u32 {
@@ -367,6 +368,11 @@ pub const SampleReport = struct {
     land_geology: [2]u64 = @splat(0),
     /// Dry-land desert columns, ordered dunes then flats.
     desert_biomes: [2]u64 = @splat(0),
+    /// Dry temperate columns with zero mountain influence, ordered flatland,
+    /// rolling_hills, hilly. These are sampled areas, not acceptance quotas.
+    temperate_landforms: [3]u64 = @splat(0),
+    /// Same columns, with the second axis ordered meadow then forest.
+    temperate_landform_vegetation: [3][2]u64 = @splat(@splat(0)),
     /// Sum of mutable dry-land host depths over sampled columns. Multiplying by
     /// world horizontal area / samples estimates eligible host voxel volume.
     host_depth_by_relief_geology: [2][2]u64 = @splat(@splat(0)),
@@ -377,6 +383,62 @@ pub const SampleReport = struct {
         return if (self.samples == 0) 0 else @as(f64, @floatFromInt(self.land)) * 100 / @as(f64, @floatFromInt(self.samples));
     }
 };
+
+fn recordTemperateColumn(result: *SampleReport, e: environment.ColumnEnvironment) void {
+    if (e.water_present or e.terrain_height < e.sea_level or e.climate != .temperate or e.mountain_strength != 0) return;
+    const landform = e.temperate_landform orelse return;
+    const index = @intFromEnum(landform);
+    result.temperate_landforms[index] += 1;
+    if (e.vegetation == .meadow or e.vegetation == .forest) {
+        result.temperate_landform_vegetation[index][@intFromBool(e.vegetation == .forest)] += 1;
+    }
+}
+
+test "temperate area accounting preserves separate landform and vegetation axes" {
+    var report: SampleReport = .{};
+    var column: environment.ColumnEnvironment = .{
+        .climate = .temperate,
+        .terrain_height = 520,
+        .sea_level = 512,
+        .water_present = false,
+        .relief = .lowland,
+        .mountain_strength = 0,
+        .vegetation = .forest,
+        .geology = .sedimentary,
+        .surface_cover = .soil,
+        .landmass_id = 1,
+        .coast_distance = 1024,
+    };
+    const observations = [_]struct { environment.TemperateLandform, environment.VegetationId }{
+        .{ .hilly, .forest },    .{ .flatland, .meadow },      .{ .rolling_hills, .forest },
+        .{ .flatland, .forest }, .{ .hilly, .meadow },         .{ .rolling_hills, .forest },
+        .{ .flatland, .meadow }, .{ .rolling_hills, .meadow },
+    };
+    for (observations) |observation| {
+        column.temperate_landform = observation[0];
+        column.vegetation = observation[1];
+        recordTemperateColumn(&report, column);
+    }
+    try std.testing.expectEqualDeep([3]u64{ 3, 3, 2 }, report.temperate_landforms);
+    try std.testing.expectEqualDeep([3][2]u64{ .{ 2, 1 }, .{ 1, 2 }, .{ 1, 1 } }, report.temperate_landform_vegetation);
+
+    const before = report;
+    column.temperate_landform = null;
+    recordTemperateColumn(&report, column);
+    column.temperate_landform = .flatland;
+    column.mountain_strength = 1;
+    recordTemperateColumn(&report, column);
+    column.mountain_strength = 0;
+    column.water_present = true;
+    recordTemperateColumn(&report, column);
+    column.water_present = false;
+    column.terrain_height = 511;
+    recordTemperateColumn(&report, column);
+    column.terrain_height = 520;
+    column.climate = .steppe;
+    recordTemperateColumn(&report, column);
+    try std.testing.expectEqualDeep(before, report);
+}
 
 /// A reproducible jittered grid with O(1) retained memory. Offset passes are
 /// estimators; their disagreement is reported without claiming a confidence bound.
@@ -407,6 +469,7 @@ pub fn sampleEnvironment(prepared: *const generator.PreparedWorldGenerator, widt
             result.land_relief[@intFromEnum(e.relief)] += 1;
             result.land_geology[@intFromEnum(e.geology)] += 1;
             if (e.desert_biome) |biome| result.desert_biomes[@intFromEnum(biome)] += 1;
+            recordTemperateColumn(&result, e);
             const top = e.terrain_height - @min(e.terrain_height, if (e.surface_cover == .sand) @as(u32, 5) else 0);
             const floor = prepared.deeprockThickness(x, y);
             result.host_depth_by_relief_geology[@intFromEnum(e.relief)][@intFromEnum(e.geology)] += top - @min(top, floor);
@@ -415,7 +478,8 @@ pub fn sampleEnvironment(prepared: *const generator.PreparedWorldGenerator, widt
         result.relief[@intFromEnum(e.relief)] += 1;
         result.vegetation[@intFromEnum(e.vegetation)] += 1;
         const desert_biome: u64 = if (e.desert_biome) |biome| @as(u64, @intFromEnum(biome)) + 1 else 0;
-        result.fingerprint = hash.mix(result.fingerprint ^ @as(u64, e.terrain_height) ^ (@as(u64, @intFromEnum(e.climate)) << 32) ^ (@as(u64, e.landmass_id) << 40) ^ (@as(u64, @intFromEnum(e.vegetation)) << 48) ^ (desert_biome << 56));
+        const temperate_landform: u64 = if (e.temperate_landform) |landform| @as(u64, @intFromEnum(landform)) + 1 else 0;
+        result.fingerprint = hash.mix(result.fingerprint ^ @as(u64, e.terrain_height) ^ (@as(u64, @intFromEnum(e.climate)) << 32) ^ (@as(u64, e.landmass_id) << 40) ^ (@as(u64, @intFromEnum(e.vegetation)) << 48) ^ (desert_biome << 56) ^ (temperate_landform << 58));
     };
     return result;
 }

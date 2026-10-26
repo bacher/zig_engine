@@ -253,12 +253,23 @@ pub const NaturalWorld = struct {
                     const owner = self.geography.owners[y / cell_size * self.geography.macro_width + macro_x];
                     if (owner == 0) continue;
                     const e = self.baseEnvironmentAt(x, y);
-                    if (e.water_present or e.climate != .temperate or e.mountain_strength != 0 or e.vegetation != .meadow or e.coast_distance < 128 or e.surface_cover != .soil) continue;
+                    if (!startTerrainAllowed(e) or e.coast_distance < 128) continue;
                     var safe = true;
                     for ([_][2]i32{ .{ -64, 0 }, .{ 64, 0 }, .{ 0, -64 }, .{ 0, 64 } }) |delta| {
                         const near = self.baseEnvironmentAt(@as(i64, x) + delta[0], @intCast(@as(i64, y) + delta[1]));
-                        if (near.water_present or near.landmass_id != owner or near.mountain_strength != 0 or @abs(@as(i64, near.terrain_height) - e.terrain_height) > 4) safe = false;
+                        if (!startTerrainAllowed(near) or near.landmass_id != owner or @abs(@as(i64, near.terrain_height) - e.terrain_height) > 4) safe = false;
                     }
+                    // The live search can shift eight blocks and asks for two
+                    // blocks of horizontal clearance. Check that whole patch,
+                    // rather than allowing a neighboring hilly label to slip
+                    // through after the preferred center has been accepted.
+                    if (safe) clearance: for (0..19) |dy| for (0..19) |dx| {
+                        const near = self.baseEnvironmentAt(@as(i64, x) + @as(i64, @intCast(dx)) - 9, @intCast(@as(i64, y) + @as(i64, @intCast(dy)) - 9));
+                        if (!startTerrainAllowed(near)) {
+                            safe = false;
+                            break :clearance;
+                        }
+                    };
                     if (safe) return .{ x, y, e.terrain_height };
                 }
             }
@@ -280,8 +291,9 @@ pub const NaturalWorld = struct {
         const e = self.baseEnvironmentAt(x, y);
         const base = self.materialFromEnvironment(x, y, z, e);
         if (base == .grass and z + 1 == e.terrain_height and vegetation.trunkRootAt(self, x, y)) return .packed_dirt;
-        // Full-form eligibility bounds every canopy column to +/-1 of its root.
-        if (base == .none and z < e.terrain_height + 8) return vegetation.at(self, x, y, z) orelse .none;
+        // A downhill crown may stand well above this column's own terrain.
+        // Complete candidate geometry bounds the probe, not local ground + 8.
+        if (base == .none) return vegetation.at(self, x, y, z) orelse .none;
         return base;
     }
 
@@ -309,6 +321,14 @@ pub const NaturalWorld = struct {
     }
 };
 
+fn startTerrainAllowed(e: environment.ColumnEnvironment) bool {
+    // Forest labels do not forbid a start: vegetation reserves the whole local
+    // clearing. Both accepted landforms have identical eligibility.
+    return !e.water_present and e.climate == .temperate and e.landmass_id > 0 and e.landmass_id < 128 and
+        e.mountain_strength == 0 and e.surface_cover == .soil and
+        (e.temperate_landform == .flatland or e.temperate_landform == .rolling_hills);
+}
+
 fn featureWorkBound(settings: NaturalSettings) u64 {
     var bound: u64 = 1_000_000;
     for (@import("generation_deposits.zig").definitions) |definition| {
@@ -325,6 +345,30 @@ fn fingerprintScalar(digest: *std.crypto.hash.sha2.Sha256, value: anytype) void 
     var bytes: [@sizeOf(@TypeOf(value))]u8 = undefined;
     std.mem.writeInt(@TypeOf(value), &bytes, value, .little);
     digest.update(&bytes);
+}
+
+test "first start landform eligibility treats rolling and flat forest clearings equally" {
+    var e: environment.ColumnEnvironment = .{ .climate = .temperate, .terrain_height = 540, .sea_level = 512, .water_present = false, .relief = .lowland, .mountain_strength = 0, .vegetation = .meadow, .geology = .sedimentary, .surface_cover = .soil, .landmass_id = 1, .coast_distance = 256 };
+    for ([_]environment.TemperateLandform{ .flatland, .rolling_hills }) |landform| {
+        e.temperate_landform = landform;
+        for ([_]environment.VegetationId{ .meadow, .forest }) |vegetation_id| {
+            e.vegetation = vegetation_id;
+            try std.testing.expect(startTerrainAllowed(e));
+        }
+    }
+    e.temperate_landform = .hilly;
+    try std.testing.expect(!startTerrainAllowed(e));
+    e.temperate_landform = null;
+    try std.testing.expect(!startTerrainAllowed(e));
+    e.temperate_landform = .flatland;
+    e.mountain_strength = 1;
+    try std.testing.expect(!startTerrainAllowed(e));
+    e.mountain_strength = 0;
+    e.landmass_id = 128;
+    try std.testing.expect(!startTerrainAllowed(e));
+    e.landmass_id = 1;
+    e.climate = .steppe;
+    try std.testing.expect(!startTerrainAllowed(e));
 }
 
 test "first starts stay in the interior of curved temperate belts at supported sizes" {
@@ -345,12 +389,15 @@ test "first starts stay in the interior of curved temperate belts at supported s
             // The authoritative standing-space search may shift by eight blocks.
             // Check its entire horizontal search/clearance area, including X wrap.
             for (0..19) |dy| for (0..19) |dx| {
-                try std.testing.expectEqual(environment.ClimateId.temperate, world.climate.at(@as(i64, start[0]) + @as(i64, @intCast(dx)) - 9, @intCast(@as(i64, start[1]) + @as(i64, @intCast(dy)) - 9)));
+                const near = world.baseEnvironmentAt(@as(i64, start[0]) + @as(i64, @intCast(dx)) - 9, @intCast(@as(i64, start[1]) + @as(i64, @intCast(dy)) - 9));
+                try std.testing.expectEqual(environment.ClimateId.temperate, near.climate);
+                try std.testing.expect(near.temperate_landform == .flatland or near.temperate_landform == .rolling_hills);
+                try std.testing.expect(!near.water_present and near.mountain_strength == 0 and near.surface_cover == .soil);
             };
             const e = world.baseEnvironmentAt(start[0], start[1]);
             try std.testing.expect(!e.water_present and e.landmass_id > 0 and e.landmass_id < 128);
             try std.testing.expectEqual(environment.ReliefId.lowland, e.relief);
-            try std.testing.expectEqual(environment.VegetationId.meadow, e.vegetation);
+            try std.testing.expect(e.temperate_landform == .flatland or e.temperate_landform == .rolling_hills);
             try std.testing.expect(e.coast_distance >= 128);
             try std.testing.expectEqualDeep(start, world.findStart().?);
         }
@@ -431,14 +478,15 @@ test "trees retain complete nonintersecting shapes and climate clearance" {
         const y: u32 = @intCast(i / world.geography.macro_width * 128 + 64);
         const e = world.baseEnvironmentAt(x, y);
         if (e.climate != .temperate or e.relief == .mountain or e.water_present) continue;
-        if (e.vegetation == .forest and forest_sites >= 20) continue;
-        if (e.vegetation == .meadow and meadow_sites >= 20) continue;
+        const complete_features = complete_tree_seen and boundary_tree_seen and vertical_tree_seen;
+        if (complete_features and e.vegetation == .forest and forest_sites >= 20) continue;
+        if (complete_features and e.vegetation == .meadow and meadow_sites >= 20) continue;
         const column = NaturalColumn.init(&world, .{ @intCast(x / 32), @intCast(y / 32) });
-        if (e.vegetation == .forest) {
+        if (e.vegetation == .forest and forest_sites < 20) {
             forest_sites += 1;
             forest_trees += column.tree_count;
         }
-        if (e.vegetation == .meadow) {
+        if (e.vegetation == .meadow and meadow_sites < 20) {
             meadow_sites += 1;
             meadow_trees += column.tree_count;
         }
@@ -452,7 +500,8 @@ test "trees retain complete nonintersecting shapes and climate clearance" {
                 const ty: u32 = @intCast(@as(i64, tree.root[1]) + @as(i64, @intCast(oy)) - 2);
                 const under = world.baseEnvironmentAt(tx, ty);
                 try std.testing.expect(under.climate != .frozen and under.climate != .desert and !under.water_present);
-                try std.testing.expect(@abs(@as(i64, under.terrain_height) - tree.root[2]) <= 1);
+                const bottom = tree.root[2] + if (ox == 2 and oy == 2) @as(u32, 0) else tree.trunk_height - 2;
+                try std.testing.expect(under.terrain_height <= bottom);
             };
             if (!complete_tree_seen or !boundary_tree_seen or (!vertical_tree_seen and tree.root[2] % 32 + tree.trunk_height + 2 > 32)) {
                 try expectTreeReassembly(&world, tree);

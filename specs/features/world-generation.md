@@ -1,7 +1,7 @@
 ---
 service: zig_engine
 created: 2026-10-22
-updated: 2026-10-25
+updated: 2026-10-26
 status: in-progress
 ---
 
@@ -16,8 +16,10 @@ of environmental data for generation, rendering, and future simulation.
 
 Implementation of G1–G5 was authorized on 2026-10-23. Confirmed requirements remain the
 acceptance contract; numeric tuning and the explicitly deferred follow-ups remain separate.
-The mountain-shape and half-depth sea-level refinement confirmed on 2026-10-25 is in
-progress; its new acceptance criteria remain unverified until recorded below.
+The mountain-shape and half-depth sea-level refinement confirmed on 2026-10-25 is
+implemented. The temperate flatland/rolling-hills/hilly extension and revised first-start
+selection authorized on 2026-10-26 are implemented and validated. Their numerical terrain
+tuning remains provisional for visual review.
 Implementation evidence and measured defaults are recorded in the
 [validation report](../../docs/validation/world-generation/README.md).
 
@@ -193,8 +195,10 @@ Implementation evidence and measured defaults are recorded in the
   temperate belt. Use the actual curved boundaries at the candidate's X: prefer their
   midpoint and restrict fallback candidates to the middle half of the belt, keeping at
   least one quarter of its local width away from both steppe and desert along Y.
-  Retain dry, gentle meadow terrain and starter-access checks. A candidate without such
-  a start is rejected rather than relaxing the climate requirement. Restoring a saved
+  Retain dry, gentle terrain and starter-access checks. Flatland and rolling hills are
+  equally eligible; hilly terrain is excluded. A forest vegetation label is allowed because
+  the reserved spawn/access patch excludes generated trees. A candidate without such
+  a start is rejected rather than relaxing these requirements. Restoring a saved
   player's position is unaffected.
 - R24: Resource blocks replace compatible solid host material below the actual surface,
   with shallow exposures allowed. Define stable overlap precedence, resource IDs, depth
@@ -229,8 +233,11 @@ Implementation evidence and measured defaults are recorded in the
   spawn, teleport/recovery, and future pathfinding. Outer strips still generate and render;
   no wall voxels are stored. X retains ordinary wrapping. Debug spectator movement may be
   exempt, but returning to player mode must find a legal position.
-- R29: Choose the first starting position on safe temperate mainland, preferably a meadow,
-  outside mountains, water, trees, and the polar exclusion strips. Prepare a suitable region
+- R29: Choose the first starting position on safe temperate mainland in flatland or rolling
+  hills, without preferring one over the other, outside hilly terrain, all mountain influence,
+  water, trees, and the polar exclusion strips. Forest and meadow vegetation labels are
+  equally eligible; reserve tree clearance around the start and starter routes. Prepare a
+  suitable region
   before the existing authoritative standing-space check; do not rely on searching only a
   few cells around world origin. Reopening uses saved player state and current blocks.
 - R30: Generation is deterministic for dimensions, generator version, seed, and serialized
@@ -362,10 +369,11 @@ Implementation evidence and measured defaults are recorded in the
 
 ### Mountain shape and vertical scale
 
-- R46: Distinguish mountains from the deferred hill concept. Hills would be soil-covered,
-  rounded forms with a broad, fairly flat top, no clear peak, and at most a one-block
-  rise between cardinally adjacent columns (approximately 45 degrees). Do not add a hill
-  generation layer or relief-enum value in this refinement; existing lowland rolls remain.
+- R46: Distinguish pointed mountains from temperate hills. Generate temperate hills as
+  soil-covered, rounded forms with broad, fairly flat tops and no clear peak. Outside any
+  mountain influence, temperate terrain rises at most one block between cardinally adjacent
+  columns (approximately 45 degrees). Classify temperate landforms separately from the
+  existing lowland/mountain relief enum; R51–R53 extend the earlier mountain refinement.
 - R47: Mountains are predominantly rock and have clearly pointed peaks. Their slopes start
   gently at the foot and steepen toward higher terrain, with some faces approaching vertical.
   Slopes vary by direction and local shape rather than forming ideal, symmetric cones.
@@ -389,6 +397,27 @@ Implementation evidence and measured defaults are recorded in the
   deferred. Preserve frozen-mountain exclusion, continent/island topology, desert slope
   limits outside mountain influence, deterministic regeneration, and bounded preparation
   and column-query work; these features must not require a full-world runtime census.
+
+### Temperate landforms
+
+- R51: Generate coherent flatland, rolling-hills, and hilly regions in temperate lowlands,
+  with a soft sampled mix of approximately 50%, 30%, and 20%. Regions cross chunk boundaries
+  and the wrapped X seam. Blend their height profiles continuously, preserving rounded
+  soil-covered hills and the one-block cardinal limit outside all mountain influence.
+  Do not impose a per-world ratio quota, area census, or ratio-based preparation retry.
+  Relief scales down vertically for the half-size profile and does not grow above the
+  default profile; numerical scales and amplitudes remain provisional tuning values.
+- R52: Expose nullable `temperate_landform` independently of climate, mountain relief, and
+  vegetation. Only dry temperate columns with zero mountain strength expose this
+  classification. The independent forest/meadow field crosses all three landforms and their
+  boundaries. Keep complete trees wherever their exact terrain, water, climate, headroom,
+  and tree-spacing clearance permits; do not require a flat neighborhood beneath the crown.
+- R53: Compose temperate relief, the ordinary baseline, desert collars, and shoreline caps
+  continuously before the final terrain-height quantization. Preserve all mountain kernels,
+  material/cover rules, protected land/water topology, and bounded deterministic queries;
+  mountain bodies receive the newly composed ground height. Record seed maps, measured
+  proportions, slope/transition checks, and query/regeneration cost before treating the new
+  terrain tuning as validated.
 
 ## Clarifications
 
@@ -497,7 +526,9 @@ Implementation evidence and measured defaults are recorded in the
 - Q21: Where should the first player spawn within temperate climate?
   A21: CONFIRMED on 2026-10-25: near the center of a temperate belt, away from both steppe
   and desert. The implementation searches from actual curved belt midpoints outward,
-  within their middle half, retaining the existing mainland, terrain-safety, and starter-resource rules.
+  within their middle half, retaining the existing mainland, terrain-safety, and starter-resource
+  rules. UPDATED on 2026-10-26: flatland and rolling hills are equally eligible, hilly terrain
+  is excluded, and forest labels are allowed under the reserved tree-clearance patch.
 - Q22: How should desert lowlands differ?
   A22: CONFIRMED on 2026-10-25: approximately half dunes and half gently rolling flats,
   without quotas, full-area counting, or retries. Regions may cross chunks. Dunes should
@@ -511,8 +542,10 @@ Implementation evidence and measured defaults are recorded in the
 - Q24: Should rounded hills and pointed mountains be generated together?
   A24: CONFIRMED on 2026-10-25: define hills separately as rounded soil-covered forms
   without a clear peak, with a broad fairly flat top and a one-block cardinal slope limit.
-  Defer hill generation and any hill enum. Implement pointed, mostly rocky mountains now,
-  with gentle climate-covered feet, directionally varied slopes, and some very steep faces.
+  UPDATED on 2026-10-26: generate the temperate flatland/rolling-hills/hilly layer alongside
+  pointed, mostly rocky mountains, with gentle climate-covered feet, directionally varied
+  slopes, and some very steep faces. Temperate landform classification is separate from
+  the lowland/mountain relief enum; hill profiles in other climates remain deferred.
 - Q25: Does reaching 95% depth require a taller default world?
   A25: CONFIRMED on 2026-10-25: retain the 32-chunk default depth. Sea level moves to exactly
   50% of depth; actual high summits near 95% depth are about 460 metres above the default
@@ -521,6 +554,21 @@ Implementation evidence and measured defaults are recorded in the
   A26: CONFIRMED on 2026-10-25: geometric passes only in this refinement. Defer traversable
   route guarantees. Range heights and widths vary together, overlapping bodies form
   saddles/gorges, and the top-down footprint has irregular lobes rather than constant width.
+- Q27: How are temperate landforms blended without steep shores or climate boundaries?
+  A27: PROVISIONAL IMPLEMENTATION on 2026-10-26: use exactly three periodic fields for the regional
+  selector, slow rolls, and short rounded relief. Current tuning uses 5120/1536/384-block
+  scales, an eight-metre floor, and 6/72/32-metre flatland/rolling/hilly relief at default
+  depth. Half-size depth halves vertical relief; larger depths cap it at default. Fade
+  temperate relief to the ordinary Q16 baseline near both belt edges before the existing
+  desert collar. Apply minimum shoreline caps and quantize once. These numbers remain
+  provisional until maps and measurements are reviewed; the shape, slope, and determinism
+  requirements are acceptance conditions rather than visual tuning claims.
+- Q28: Does allowing a forest start change the clearing or starter-access guarantees?
+  A28: AUTHORIZED on 2026-10-26: no. First-start selection treats flatland and rolling hills
+  equally and rejects hilly or mountain-influenced terrain. Forest/meadow labels do not
+  decide eligibility because generated trees already exclude the reserved spawn and dry
+  starter-route patch. Keep the middle-half curved-belt search, mainland/safety checks,
+  authoritative standing-space validation, and the small clay/sand/coal access guarantee.
 
 ## Acceptance Criteria
 
@@ -585,7 +633,9 @@ consolidation tasks remain separate.
   non-mountain settings; no small metal/limestone population is introduced. [R21–R24]
 - AC14: GIVEN a new world's first starting candidate WHEN preparation accepts it THEN
   it lies in the middle half of a temperate belt at its X, with the actual displaced
-  boundaries used for that test; the live standing-space search remains temperate,
+  boundaries used for that test; its safe mainland terrain is flatland or rolling hills
+  with equal eligibility, never hilly or mountain-influenced; forest labels are permitted
+  under the reserved tree-clearance patch; the live standing-space search remains temperate,
   shallow small clay/sand/coal deposits are reachable in the configured local land region
   without ocean crossing, and the final standing-space check accepts current blocks.
   Physical reachability does not enable mining of unconfigured clay/coal. [R23, R29, R36]
@@ -716,9 +766,11 @@ consolidation tasks remain separate.
   querying `ColumnEnvironment` THEN only dry desert columns with zero mountain influence
   expose a dunes/flats biome, independently of chunk residency and regeneration order.
   [R11, R30, R45]
-- AC43: GIVEN the mountain refinement WHEN inspecting generated relief and environmental
-  classifications THEN no new hill layer or enum is introduced, and mountains have clear
-  peaks instead of the deferred rounded, soil-covered, broad-topped hill profile. [R46–R47]
+- AC43: GIVEN the mountain refinement and temperate extension WHEN inspecting generated
+  relief and environmental classifications THEN mountains retain clear rocky peaks while
+  temperate hills are rounded, soil-covered, and broad-topped without a clear peak, and
+  temperate landform classification remains separate from lowland/mountain relief.
+  [R46–R47, R51–R52]
 - AC44: GIVEN fixed mountain fixtures and recorded seed views WHEN comparing radial
   sections, neighboring columns, and surface materials THEN slopes begin gently, steepen
   toward pointed peaks, include some nearly vertical faces, and differ across directions;
@@ -741,6 +793,35 @@ consolidation tasks remain separate.
   one-block cardinal limit holds outside influence. Prepared feature capacity and nearby
   query work remain bounded without a runtime land/peak census or per-visit preparation.
   [R2–R5, R30, R32, R44, R50]
+- AC48: GIVEN fixed seeds and dry temperate columns outside all mountain influence WHEN
+  sampling terrain and querying environments THEN flatland, rolling hills, and hilly regions
+  form coherent periodic areas with an approximate soft 50/30/20 sampled mix, expose the
+  matching nullable landform, and use no runtime census, quota, or ratio-based retry;
+  submerged, other-climate, and mountain-influenced columns expose null. [R11, R30, R51–R52]
+- AC49: GIVEN all three landforms, selector transitions, shores, islands, curved climate
+  boundaries, and the X seam at supported sizes WHEN comparing cardinal neighbors outside
+  all mountain influence THEN final temperate height differences never exceed one block,
+  soil hilltops are rounded without pointed peaks, shoreline/climate joins remain continuous,
+  half-size vertical relief scales down, and larger profiles cap relief at default.
+  [R2, R46, R51, R53]
+- AC50: GIVEN forest and meadow fields crossing temperate landform boundaries and fixed
+  uphill/downhill fixtures WHEN regenerating complete trees and comparing cached chunks
+  with the independent point oracle THEN vegetation labels remain independent of landform,
+  valid downhill crowns more than eight blocks above local ground remain complete, uphill
+  intersections are rejected, and water/climate/headroom exclusions, stable priorities,
+  whole-form nonoverlap, and the one-block horizontal canopy gap are preserved.
+  [R25–R26, R30, R33, R52]
+- AC51: GIVEN supported seed/profile worlds and explicit start fixtures WHEN selecting the
+  first start THEN flatland and rolling hills receive equal eligibility, hilly and all
+  mountain influence are rejected, forest labels remain eligible under reserved clearing,
+  and curved-belt middle-half, mainland, safe standing space, and dry starter access checks
+  still pass. [R23, R29, R51–R52]
+- AC52: GIVEN the temperate extension and recorded seed/profile fixtures WHEN repeating
+  preparation and queries in different orders and after cache eviction/restart THEN terrain,
+  environments, trees, deposits, and protected topology remain deterministic; existing
+  mountain kernels and cover rules remain intact with the new base height; and preparation
+  memory, nearby query work, and regeneration cost remain bounded with measured maps and
+  tuning evidence recorded separately from deterministic guarantees. [R30, R32–R35, R53]
 
 ## Constraints
 
@@ -775,17 +856,18 @@ erosion, and caves; extraction buildings,
 processing recipes, prospecting UI, and transport simulation; research gates; farming/NPC
 work execution and supply accounting; complete foundation/pile mechanics; tree growth,
 automatic felling, leaf decay, and physical collapse. Optional beaches may be deferred.
-Hill generation and a hill relief enum, and guaranteed traversable mountain routes remain
-deferred under R46 and R50.
+Hill profiles outside temperate climate and guaranteed traversable mountain routes remain
+deferred under R46 and R50; the temperate landforms in R51–R53 are in scope.
 
 Full consolidation of material behavior definitions and predicates is a follow-up after
 G1–G5 (F3); the material rules and shared safety checks required below remain in scope.
 
 ## Plan
 
-G1–G6 are implemented, including the mountain refinement in R46–R50. The completed
-tasks and recorded checks below extend the delivered baseline. Proposed tuning values describe design
-experiments rather than confirmed economic balance or frozen parameters.
+G1–G7 are implemented and validated, including the mountain refinement in R46–R50,
+temperate landforms, and revised first-start selection. Earlier completed tasks retain
+their historical scope. Proposed tuning values remain provisional rather than confirmed
+economic balance or frozen parameters.
 
 ### Implementation result
 
@@ -814,10 +896,12 @@ before publishing chunks. Clay uses packed-soil-style support without soil timer
 raw resources remain unmineable. Beaches are implemented as a bounded optional overlay and
 remain disabled by default after measuring location-dependent regeneration cost.
 
-The [validation report](../../docs/validation/world-generation/README.md) records the
-AC1–AC47 evidence, seed maps/raw measurements, memory and regeneration timings,
-CPU/build results, retained earlier GPU evidence, and execution limits. The mountain
-refinement rechecks affected baseline criteria and nine fixed seed/profile worlds. F1–F3 remain deferred: stronger foundations/piles, NPC/farm
+The [validation report](../../docs/validation/world-generation/README.md) records current
+AC1–AC52 evidence, seed maps/raw measurements, memory and regeneration timings,
+CPU/build results, retained earlier GPU evidence, and execution limits. The temperate
+extension rechecks affected baseline criteria, nine fixed seed/profile worlds, composed
+height/forest/spawn fixtures, and a 256-seed default-profile suite under T31–T36.
+Numerical terrain tuning remains provisional for visual review. F1–F3 remain deferred: stronger foundations/piles, NPC/farm
 execution, and material-definition consolidation.
 
 ### Approach
@@ -1124,16 +1208,56 @@ Skip the dune-warp query when its contribution is zero; columns use at most thre
 field evaluations. No full-area allocation or biome-ratio validation is
 part of preparation or regeneration.
 
-Use the desert target throughout desert climate and blend into existing rolling terrain
+Use the desert target throughout desert climate and blend into the ordinary Q16 baseline
 within a 256-block collar on the temperate side of each displaced desert boundary.
-Cap lowland elevation near shores with `min(target, 1 + coast / 4)` on mainland and
-`min(target, 1 + coast / 32)` on islands instead of multiplying dune heights by a coast
-ramp. Add mountain uplift separately. Derive the optional dunes/flats query value only
+The new temperate contribution is zero throughout that collar. Cap every land lowland
+profile near shores with `min(target, 1 + coast / 4)` on mainland and
+`min(target, 1 + coast / 32)` on islands. This replaces the earlier 96-block
+multiplicative coast ramp for ordinary lowlands as well as the desert-specific treatment;
+applying a short multiplicative ramp to high rolling terrain would violate its grade budget.
+Keep the cap and all blends in Q16, quantize the composed lowland height once, and then
+pass it to the unchanged mountain kernel as the base height. Derive the optional dunes/flats
+query value only
 when the column is dry desert with zero mountain strength; mountain-influenced columns
 have no desert lowland classification. Gentle feet may retain sand regardless of relief
 classification. Temperate/steppe feet retain soil, while higher or steeper mountain terrain
 exposes rock. Classification and cover tuning
 must remain consistent with R45 and R47 as the new height profiles are tuned.
+
+Add `generation_temperate.zig` as a pure allocation-free sampler using exactly three
+independent periodic integer fields: a 5120-block selector, 1536-block slow rolls, and
+384-block short relief. At default depth, the unmixed profiles use an eight-block floor
+above sea level and peak-to-trough relief of six blocks for flatland, 72 for rolling hills,
+and 32 for hilly terrain. Apply smoothstep to the normalized slow/short fields to flatten
+crests and troughs into rounded, broad tops without pointed peaks. Depth scales every
+profile by `min(depth, 1024) / 1024`, halving the vertical profile at half size and capping
+it at default above that size. Physical horizontal field scales stay in blocks.
+
+The signed selector uses zero and 26624 thresholds with nonoverlapping 16384-unit smooth
+transition bands. Blend the three profiles in fixed-point instead of switching heights.
+The thresholds target a soft ensemble mix near 50/30/20 without world-area retention,
+startup counting, quotas, or retries. Record sampled label proportions separately from
+blend weights. These wavelengths, heights, thresholds, and transition widths are current
+provisional tuning, to be assessed through maps and metrics rather than frozen as balance.
+
+`ClimateSample.temperate_terrain: u16` uses the nearest displaced temperate-belt edge:
+its weight is zero at distances up to 256 blocks, ramps over the next 1536 blocks, and
+then reaches full weight. Other climates use zero. Blend the new profile from the legacy
+ordinary Q16 baseline with this weight, retain that baseline outside the temperate interior,
+and apply the existing desert 256-block collar only while the new uplift is zero. This
+separates the tall rolling profile from the short desert collar. Compute shoreline minima
+after these blends and floor only their final composition. Mountain body equations,
+influence/cover rules, and frozen exclusion are unchanged; their input ground height is new.
+
+The pure sampler documents an analytical cardinal difference bound below 0.64 blocks,
+including conservative fixed-point error, so flooring it preserves a one-block step.
+The wide climate mask and continuous ordinary/desert/shore composition must preserve the
+remaining slope budget; test final heights across selector bands, climate boundaries,
+coasts, narrow islands, and the X seam at all supported profiles. The guarantee excludes
+every nonzero mountain influence, including gentle feet below the mountain-class threshold.
+Expose `temperate_landform` only on dry temperate columns with zero mountain strength.
+Keep soil/sand/rock selection, geology, and the independent forest/meadow moisture field
+separate from this label; a forest can cross flatland, rolling hills, and hilly regions.
 
 Use broad sedimentary basin / rocky mountain province masks as geological preferences.
 No plate simulation is required. A sedimentary lens may reach a mountain foothill, but the
@@ -1225,16 +1349,22 @@ also validate clipping and connected center planes. All work is bounded by the p
 budget; fingerprints hash descriptors/prepared data, not all resource voxels. Diagnostics
 distinguish exact counts from sampled spatial allocation and eligible-host volume.
 
-Select a temperate, low-slope mainland start near a belt's local midpoint, then reuse or
+Select a temperate, low-slope mainland start in flatland or rolling hills near a belt's
+local midpoint, without preferring either landform, then reuse or
 insert the three small starter pockets. Search macro-cell centers outward from both actual
 curved temperate midpoints, with a deterministic order and no allocations. Restrict
 candidates to the middle half of their local belt; do not fall back to a climate edge.
+Exclude hilly terrain and all mountain influence at the candidate and its safety probes.
+Preserve dry soil, same-mainland, coast-distance, and local height-difference checks.
+Allow forest and meadow labels equally because the spawn/access reservation clears trees;
+forest classification alone does not imply an occupied start.
 The maximum belt width bounds the search. Reject an unsuitable candidate world through
 the existing `start_access_unavailable` retry path. This preparation-only search adds no
 work to chunk regeneration. Proposed access radius: 256 blocks by shortest wrapped distance,
 with at most four blocks of cover and a dry traversable route within the local land region. Validate routes
 against the implemented movement/climb limits and final generated trees, not only Euclidean
-distance. Prefer selecting an already suitable plain over flattening a large area. Reserve
+distance. Select already suitable flatland or rolling terrain instead of flattening a large
+area. Reserve
 spawn clearance and access patches from tree placement. Bound local searches and include
 their failure in preparation retries. No general NPC routing system is required.
 
@@ -1249,7 +1379,9 @@ remain forbidden until their complete usable-result flow is configured under R36
 ### Vegetation and trees
 
 Use a periodic moisture/vegetation field and broad thresholds for temperate forest versus
-meadow. Scale broad patches in blocks, with finer edge variation, rather than assigning
+meadow, independently of the temperate landform selector. Forest and meadow regions can
+cross flatland, rolling hills, hilly terrain, and their boundaries. Scale broad patches in
+blocks, with finer edge variation, rather than assigning
 chunk labels. Proposed forest coverage is 35–55% of eligible temperate land; no global
 quota is required in the first prototype.
 
@@ -1259,7 +1391,8 @@ Record both candidate and accepted density, since collision rejection lowers the
 
 Generate one jittered candidate per cell of a global eight-block placement lattice, with
 the cell identity normalized around X. Eligibility depends on original terrain, full shape
-clearance, climate, vegetation, slope, and exclusion patches. Candidate priority is a stable
+clearance, climate, vegetation, root surface eligibility, and exclusion patches. Candidate
+priority is a stable
 hash. A candidate is accepted only if no eligible overlapping candidate has a higher
 priority, with cell ID breaking ties. Compare against the complete local candidate set,
 including candidates that themselves lose another comparison; this avoids recursive,
@@ -1269,7 +1402,13 @@ Trunks occupy 4 or 5 cells from the terrain top. Proposed crown: two lower `5 ×
 layers around the upper trunk and two upper `3 × 3` layers, excluding trunk cells. Exact
 shape is versioned. Reject the entire tree if its shape crosses a frozen/desert column,
 intersects terrain/water, or lacks headroom. Adjacent meadow/forest boundaries may pass
-under a crown; those vegetation labels do not forbid tree overhang.
+under a crown; those vegetation labels do not forbid tree overhang. Validate the exact
+lowest occupied tree block in every footprint column: the trunk root at the center and
+the crown floor elsewhere, with 25 environment probes including the reused root sample.
+There is no blanket flatness or maximum downhill-ground difference. A crown may be more
+than eight blocks above local ground, so the independent point oracle cannot use a
+terrain-relative eight-block cutoff. Preserve the dry/nonfrozen/nondesert checks over
+the whole `5 × 5` footprint and root soil/mountain restrictions.
 
 For a chunk, enumerate every candidate whose complete form can intersect it, using the
 maximum crown radius/height and a conflict halo. Generate the accepted complete form in
@@ -1286,6 +1425,14 @@ Proposed interfaces, names subject to Zig integration:
 ```zig
 const ClimateId = enum(u8) { frozen, steppe, temperate, desert };
 const DesertBiome = enum(u8) { dunes, flats };
+const TemperateLandform = enum(u8) { flatland, rolling_hills, hilly };
+
+// Derived natural-world environment fields; never saved as per-voxel metadata.
+const ColumnEnvironment = struct {
+    // Existing climate, terrain, mountain, vegetation, geology and cover fields...
+    desert_biome: ?DesertBiome = null,
+    temperate_landform: ?TemperateLandform = null,
+};
 
 // Coordinates are storage block X/Y; X is normalized, Y must be in range.
 fn climateAt(prepared: *const PreparedWorldGenerator, x: i64, y: u32) ClimateId;
@@ -1297,8 +1444,12 @@ fn columnEnvironmentAt(prepared: *const PreparedWorldGenerator,
 
 `ColumnEnvironment` includes climate, original terrain height, water level/presence,
 mountain strength/class, vegetation class, surface-cover intent, and nullable
-`desert_biome: ?DesertBiome`. The latter is set only for dry desert columns with zero
-mountain strength. Query results are derived values, not per-voxel metadata. Rich queries
+`desert_biome: ?DesertBiome` and `temperate_landform: ?TemperateLandform`. They are set only
+for dry columns in the matching climate with zero mountain strength. Temperate landform
+does not replace `ReliefId` or the forest/meadow vegetation value. Natural first-start
+selection accepts `.flatland` and `.rolling_hills` equally, rejects `.hilly` and null,
+and applies the separate mainland/clearance/access checks without a meadow requirement.
+Query results are derived values, not per-voxel metadata. Rich queries
 may evaluate indexed relief descriptors;
 the cheap climate-only query does not. Map indexing is `[local_y][local_x]`, independent of Z.
 Environmental profiles expose future work/farming flags and tunable multipliers. Clothing
@@ -1409,8 +1560,9 @@ generator, profile/settings, seed, and layout agree with the store's descriptor.
 Keep the complete persisted descriptor within the existing 4-KiB limit; rebuild macro grids,
 indices, and starting candidates deterministically during preparation. No full-resolution
 climate map or generated deposit contents are saved up front.
-Generator ID 2/version 1 is still unfrozen in this ongoing design. The mountain and sea-level
-refinement remains within that identity; compatibility with intermediate worlds is not
+Generator ID 2/version 1 is still unfrozen in this ongoing design. The mountain/sea-level
+refinement and temperate extension remain within that identity; compatibility with
+intermediate worlds is not
 required, and this refinement does not itself bump the version. Before freezing the version,
 review material IDs, rounding, candidate order, and field semantics.
 Compare prepared-data fingerprints on reopen in tests to detect accidental drift.
@@ -1495,11 +1647,12 @@ pristine chunks, enlarging cache limits, or redoing global preparation on each r
 | G4: Vegetation | Forest/meadow fields, leaves with null-safe no-item clearing, complete cross-chunk trees, mesh pressure checks | `generation_vegetation.zig`, `world_generator.zig`, voxel/collision/render material code, `player_interaction.zig` |
 | G5: Integration | Mutation guard verification, validated bottom restoration, both-profile save/reopen and legacy rejection, edited-chunk authority, bounded caches, shortcut oracle, regeneration benchmarks, debug maps | `src/voxel_app/world.zig`, `src/voxel_app/persistence/format.zig`, `main.zig`, `world_data_service.zig`, generator/service/GPU tests |
 | G6: Peak bodies and vertical scale | Pointed asymmetric peak bodies on a shared centerline, variable widths/heights and saddles, half-depth sea, actual 95%-depth high summits, bounded deterministic queries | `generation_mountains.zig`, `generation_geography.zig`, `natural_generator.zig`, `generation_preparation.zig`, generation tests and diagnostics |
+| G7: Temperate landforms | Coherent flatland/rolling/hilly profiles, continuous climate and shore composition, independent forest labels, exact tree clearance, flatland/rolling first starts, maps and measured tuning | `generation_temperate.zig`, `generation_geography.zig`, `world_environment.zig`, `natural_generator.zig`, `generation_vegetation.zig`, `generation_vegetation_tests.zig`, generation tests, `generation_map.zig`, `generation_diagnostics.zig` |
 | F1: Later construction | Revisit the temporarily allowed soil platform over sand; foundation-to-rock rules and piles | Separate construction specification, then shared validator and support dependencies |
 | F2: Later simulation | Farming prohibition, clothing/water services, action food cost | Future simulation specification, consuming the shared environmental API |
 | F3: Material behavior consolidation | After G1–G5, add one behavior matrix near the runtime data model, shared material definitions, and table-driven invariant checks | `src/engine/voxel/voxel_chunk.zig`, `src/voxel_app/block_rules.zig`, road/collision/render/mining/timer consumers and tests |
 
-G1–G5 together are the implemented generation
+G1–G7 together are the implemented generation
 delivery; F1–F3 do not block exploring the generator, and must not be reported as implemented
 merely because their environmental inputs exist.
 
@@ -1516,6 +1669,14 @@ merely because their environmental inputs exist.
   target, and overlapping profiles can flatten peaks or introduce steps. Check actual
   summits, several directional sections, footprint lobes, saddle shapes, and climate cover;
   measure height/width variation on offline fixtures without adding a runtime census.
+- **Temperate slope composition:** a gentle pure field can become too steep when high
+  relief is multiplied by a short coast ramp or blended at a narrow climate edge. Keep
+  the wide zero-uplift collar, minimum shoreline caps, and single final quantization;
+  check final cardinal steps and seam joins rather than only the pure sampler bound.
+- **Landform labels versus behavior:** a forest label must neither forbid a cleared start
+  nor suppress valid trees on hills. Check independent fields, both eligible start
+  landforms, excluded hilly starts, and complete trees above downhill terrain with the
+  point oracle and cached chunk generation.
 - **Temporary sand foundation policy:** soil platforms above sand are explicitly allowed by
   R18, while sand stays outside broad structural predicates. Do not accidentally reject the
   permitted platform route or claim a foundation-to-rock proof that does not exist.
@@ -1582,16 +1743,19 @@ merely from a compact macro map; complete residency remains separately measured.
   conservative terrain/water occupancy bounds; generate the canonical 1–3-block deeprock
   floor in playable profiles and bottom-chunk solid shortcuts. [R5–R6, R15, R33, R38]
 - [x] T8: Select/validate a safe first-start region; add spawn/access exclusions for later
-  trees without relying on world origin. [R23, R29]
+  trees without relying on world origin. This records the original start rule; T34 extends
+  landform and forest-label eligibility. [R23, R29]
 - [x] T26: Add coherent dunes/flats fields, continuous lowland and climate-boundary blending,
   bounded coast caps, and nullable lowland biome queries. Preserve desert mountains and
-  expose higher/steeper stone surfaces while retaining sand on gentle feet. [R15, R43–R45]
+  expose higher/steeper stone surfaces while retaining sand on gentle feet. This records the
+  original desert extension; T32 extends the composition and caps to all lowlands. [R15, R43–R45]
 - [x] T28: Replace the single-axis ridge with bounded prepared peak descriptors and nearby
   kernels in `generation_mountains.zig`, using precomputed centerline neighbors, varying
   correlated heights/base widths, faceted directional profiles, smooth feet, pointed
   summits, and overlapping saddles/gorges. Keep influence distinct from
   height magnitude, climate cover at gentle feet, and existing topology/frozen rules.
-  Do not generate hills or add their enum. [R46–R48, R50]
+  This completed mountain-only task predates the temperate extension in T31–T36;
+  it did not add hill generation at that stage. [R46–R48, R50]
 - [x] T29: Set natural sea level to exactly half depth and tune actual high summits near
   95% of absolute depth while retaining the 32-chunk default and finite occupancy bounds.
   Verify external/inline preparation accounting without double-counting peak storage.
@@ -1627,16 +1791,44 @@ merely from a compact macro map; complete residency remains separately measured.
 
 - [x] T14: Add leaves and forest/meadow fields; implement bounded globally prioritized tree
   candidates and complete-form clipping into chunks; explicitly enable no-item foliage
-  clearing and verify empty/occupied-slot behavior. [R25–R27, R36–R37]
+  clearing and verify empty/occupied-slot behavior. T33 extends the original terrain-clearance
+  rule for the new slopes. [R25–R27, R36–R37]
 - [x] T15: Update column caches, boundary/enclosure/empty/rock shortcuts, and client/service
   generation paths; compare them with a slow reference including deeprock priority in
-  bottom chunks. [R10–R11, R30, R32–R33, R38–R39]
+  bottom chunks. T33/T36 extend the oracle checks for high downhill crowns and new terrain.
+  [R10–R11, R30, R32–R33, R38–R39]
 - [x] T16: Integrate new descriptor/material serialization and new-world save/reopen tests
   with sand or explicitly configured usable resource mining and no-item foliage removal.
   Cover natural and seeded flat profiles, malformed/legacy identity rejection, profile-aware
   settings bounds, and runtime descriptor/seed/layout mismatch before service startup.
   Validate canonical deeprock before publishing each restored bottom chunk/base/WAL result;
   preserve valid upper edits and report invalid records without regeneration. [R30–R31, R36–R39]
+
+### Phase 5 — Temperate landforms and first-start correction
+
+- [x] T31: Add the pure three-field `generation_temperate.zig` sampler with coherent
+  flatland/rolling/hilly labels, continuous rounded profiles, depth scaling, soft sampled
+  proportions, periodicity, and the analytical cardinal difference bound. Keep numerical
+  tuning provisional and preparation free of terrain-area census or quotas. [R46, R51, AC48–AC49]
+- [x] T32: Integrate nullable temperate landforms and the wide climate weight in
+  `world_environment.zig` and `generation_geography.zig`. Keep the ordinary/desert collar
+  baseline, apply minimum shore caps to all lowland profiles, and quantize their final
+  composition once before the existing mountain kernel. Verify eligibility, climate edges,
+  shores/islands, all supported sizes, and the X seam. [R51–R53, AC48–AC49, AC52]
+- [x] T33: Replace blanket tree-neighborhood flatness with exact whole-form clearance,
+  preserving 25 environment probes, global priorities, footprint exclusions, and the
+  one-block canopy gap. Remove the point oracle's terrain-relative eight-block shortcut;
+  verify complete downhill/uphill forms, vertical bounds, seams, and cached/oracle equality.
+  [R25–R26, R33, R52, AC15–AC16, AC50]
+- [x] T34: Accept flatland and rolling hills equally for the first start and its safety
+  probes, reject hilly and all mountain influence, and remove the meadow-label requirement.
+  Preserve the reserved tree-free patch, curved-belt middle-half mainland search, final
+  standing-space validation, and dry starter routes/resources. Add fixtures for both accepted
+  landforms and forest-labeled starts. [R23, R29, AC14, AC51]
+- [x] T35: Add temperate landform map/diagnostic output and record provisional tuning maps,
+  sampled proportions and steps, climate/shore transitions, and bounded query/regeneration
+  measurements. Distinguish these observations from mathematical invariants and prior
+  mountain-only evidence. [R34–R35, R53, AC48–AC49, AC52]
 
 ### Follow-up specifications
 
@@ -1656,12 +1848,19 @@ merely from a compact macro map; complete residency remains separately measured.
 
 ### Validation
 
+- [x] T36: Verify new AC48–AC52 and extended AC14/AC43 against supported seed/profile
+  worlds, final composed heights, forest/landform boundaries, start fixtures, exact tree
+  clearance and cached/point-oracle reconstruction, topology, mountain behavior, deterministic
+  eviction/restart/regeneration, bounded memory/query cost, and recorded maps/measurements.
+  Run relevant generation/build regressions and record results before checking T31–T36
+  complete. [AC14–AC16, AC43–AC52; affected AC1–AC42]
 - [x] T30: Verify pointed asymmetric profiles, material transitions, height/width variation,
   overlapping saddles/gorges and lobed footprints, half-depth sea and actual high summits.
   Recheck frozen exclusion, land/water topology, desert slopes outside influence, wrapped-X
   continuity, runtime layouts, deterministic eviction/restart/regeneration, oracle equivalence,
   and bounded memory/query cost. Record evidence before checking these tasks complete.
-  [AC43–AC47; affected AC1–AC42]
+  This records the original mountain-only AC43–AC47 checks; the extended temperate AC43
+  and affected baseline contracts require fresh validation in T36. [AC43–AC47; affected AC1–AC42]
 - [x] T27: Verify desert biome coherence and approximate sampled proportions, periodicity,
   lowland slopes/relief, coastal and climate transitions, preserved mountain ranges, stone
   surfaces, query eligibility, and deterministic regeneration. Record executed checks and

@@ -17,7 +17,7 @@
   "platform": "Apple M4 Max, aarch64 macOS, Zig 0.16.0",
   "build_modes": {
     "ReleaseFast": 9,
-    "ReleaseSafe": 3
+    "ReleaseSafe": 9
   },
   "land_percent": {
     "mean": 35.46496480703354,
@@ -26,9 +26,9 @@
     "maximum_offset_disagreement_pp": 0.046539306640625
   },
   "preparation_ms": {
-    "minimum": 29.23725,
-    "maximum": 41.780792,
-    "mean": 36.769592609375
+    "minimum": 26.085166,
+    "maximum": 38.041875,
+    "mean": 32.316817046875
   },
   "preparation_peak_owned_bytes": 2129016,
   "feature_references_maximum": 98,
@@ -61,39 +61,39 @@
         "estimated_mountain_fraction": 1.0,
         "estimated_sedimentary_fraction": 0.0,
         "estimated_density_per_lowland_host_voxel": 0.0,
-        "estimated_density_per_mountain_host_voxel": 0.0003439564914815126,
+        "estimated_density_per_mountain_host_voxel": 0.0003441796992459798,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "limestone": {
         "effective_blocks_exact_total": 11713091352,
         "estimated_mountain_fraction": 0.005550772433397039,
         "estimated_sedimentary_fraction": 0.9861868828071123,
-        "estimated_density_per_lowland_host_voxel": 0.00012267548070608796,
-        "estimated_density_per_mountain_host_voxel": 6.625719829137835e-06,
+        "estimated_density_per_lowland_host_voxel": 0.0001228338782942046,
+        "estimated_density_per_mountain_host_voxel": 6.630019536070761e-06,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "clay": {
         "effective_blocks_exact_total": 786700970,
         "estimated_mountain_fraction": 0.0005863889455102925,
         "estimated_sedimentary_fraction": 0.9960939919123651,
-        "estimated_density_per_lowland_host_voxel": 8.28053827114492e-06,
-        "estimated_density_per_mountain_host_voxel": 4.7011442202787164e-08,
+        "estimated_density_per_lowland_host_voxel": 8.291230035162533e-06,
+        "estimated_density_per_mountain_host_voxel": 4.7041949895412087e-08,
         "minimum_large_source_volume_fraction_per_seed": 0.9993803819718959
       },
       "coal": {
         "effective_blocks_exact_total": 1130558687,
         "estimated_mountain_fraction": 0.0014079114479133132,
         "estimated_sedimentary_fraction": 0.9938351203951072,
-        "estimated_density_per_lowland_host_voxel": 1.189008216127623e-05,
-        "estimated_density_per_mountain_host_voxel": 1.6220960474254883e-07,
+        "estimated_density_per_lowland_host_voxel": 1.190543453915985e-05,
+        "estimated_density_per_mountain_host_voxel": 1.623148693447482e-07,
         "minimum_large_source_volume_fraction_per_seed": 0.9995245202978008
       },
       "sand": {
         "effective_blocks_exact_total": 4542798784,
         "estimated_mountain_fraction": 0.0031464535228462676,
         "estimated_sedimentary_fraction": 0.9909887833461819,
-        "estimated_density_per_lowland_host_voxel": 4.769342180860008e-05,
-        "estimated_density_per_mountain_host_voxel": 1.4566423633157756e-06,
+        "estimated_density_per_lowland_host_voxel": 4.7755003168950406e-05,
+        "estimated_density_per_mountain_host_voxel": 1.4575876395166797e-06,
         "minimum_large_source_volume_fraction_per_seed": 0.9998799076899708
       }
     },
@@ -103,44 +103,44 @@
         "estimated_mountain_fraction": 1.0,
         "estimated_sedimentary_fraction": 0.0,
         "estimated_density_per_lowland_host_voxel": 0.0,
-        "estimated_density_per_mountain_host_voxel": 0.0003439783968870259,
+        "estimated_density_per_mountain_host_voxel": 0.0003442001090593758,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "limestone": {
         "effective_blocks_exact_total": 11713091352,
         "estimated_mountain_fraction": 0.0058357126302910865,
         "estimated_sedimentary_fraction": 0.9857243974661127,
-        "estimated_density_per_lowland_host_voxel": 0.00012264532654959417,
-        "estimated_density_per_mountain_host_voxel": 6.966284395048442e-06,
+        "estimated_density_per_lowland_host_voxel": 0.00012280372075292828,
+        "estimated_density_per_mountain_host_voxel": 6.970774531814038e-06,
         "minimum_large_source_volume_fraction_per_seed": 1.0
       },
       "clay": {
         "effective_blocks_exact_total": 786700970,
         "estimated_mountain_fraction": 0.0006234910141087755,
         "estimated_sedimentary_fraction": 0.9959484619259307,
-        "estimated_density_per_lowland_host_voxel": 8.280568186412191e-06,
-        "estimated_density_per_mountain_host_voxel": 4.998913899792469e-08,
+        "estimated_density_per_lowland_host_voxel": 8.291262389264756e-06,
+        "estimated_density_per_mountain_host_voxel": 5.0021359627770733e-08,
         "minimum_large_source_volume_fraction_per_seed": 0.9993803819718959
       },
       "coal": {
         "effective_blocks_exact_total": 1130558687,
         "estimated_mountain_fraction": 0.0012366446965302964,
         "estimated_sedimentary_fraction": 0.9939505654459931,
-        "estimated_density_per_lowland_host_voxel": 1.1892605870176017e-05,
-        "estimated_density_per_mountain_host_voxel": 1.424865342029015e-07,
+        "estimated_density_per_lowland_host_voxel": 1.190796495384735e-05,
+        "estimated_density_per_mountain_host_voxel": 1.4257837426993662e-07,
         "minimum_large_source_volume_fraction_per_seed": 0.9995245202978008
       },
       "sand": {
         "effective_blocks_exact_total": 4542798784,
         "estimated_mountain_fraction": 0.0033801550852295592,
         "estimated_sedimentary_fraction": 0.9907950597706942,
-        "estimated_density_per_lowland_host_voxel": 4.768418308271507e-05,
-        "estimated_density_per_mountain_host_voxel": 1.564933544393115e-06,
+        "estimated_density_per_lowland_host_voxel": 4.774576633585249e-05,
+        "estimated_density_per_mountain_host_voxel": 1.5659422263884107e-06,
         "minimum_large_source_volume_fraction_per_seed": 0.9998799076899708
       }
     }
   ],
-  "cross_mode_hash_count": 30,
+  "cross_mode_hash_count": 36,
   "cross_mode_hashes_equal": true,
   "cross_mode_prepared_fingerprints_equal": true,
   "limitations": [
@@ -174,8 +174,14 @@
     "checked_seeds": 256,
     "all_temperate": true,
     "all_in_middle_half": true,
-    "minimum_edge_distance_blocks": 3246,
-    "maximum_relative_midpoint_distance": 0.008986809682562713
+    "minimum_edge_distance_blocks": 3345,
+    "maximum_relative_midpoint_distance": 0.008716875871687568,
+    "landform_counts": {
+      "flatland": 127,
+      "rolling_hills": 129,
+      "hilly": 0
+    },
+    "forest_labels": 112
   },
   "desert_lowland_biomes": [
     {
@@ -265,11 +271,192 @@
     "active_peaks_max": 99,
     "connected_passes_min": 42,
     "connected_passes_max": 88,
-    "pointed_summits_total": 17100,
+    "pointed_summits_total": 17094,
     "dry_summits_total": 17392,
     "mountain_endpoint_pairs": 16366,
     "influence_connected_pairs": 16165,
     "coast_or_climate_separated_pairs": 201,
     "connection_check": "257 samples per neighboring summit corridor, not exhaustive route or connectivity guarantee"
+  },
+  "temperate_landforms": [
+    {
+      "order": [
+        "flatland",
+        "rolling_hills",
+        "hilly"
+      ],
+      "sampled_columns": [
+        3465958,
+        2171190,
+        1385712
+      ],
+      "percent": [
+        49.35251450263853,
+        30.91603705612813,
+        19.731448441233344
+      ],
+      "forest_percent": [
+        49.83545674817756,
+        49.485950101096634,
+        49.890597757687026
+      ],
+      "vegetation_meadow_forest": [
+        [
+          1738682,
+          1727276
+        ],
+        [
+          1096756,
+          1074434
+        ],
+        [
+          694372,
+          691340
+        ]
+      ]
+    },
+    {
+      "order": [
+        "flatland",
+        "rolling_hills",
+        "hilly"
+      ],
+      "sampled_columns": [
+        3465810,
+        2171188,
+        1385672
+      ],
+      "percent": [
+        49.35174228605359,
+        30.916845017635744,
+        19.731412696310663
+      ],
+      "forest_percent": [
+        49.834468710056235,
+        49.480284526259354,
+        49.924152324648254
+      ],
+      "vegetation_meadow_forest": [
+        [
+          1738642,
+          1727168
+        ],
+        [
+          1096878,
+          1074310
+        ],
+        [
+          693887,
+          691785
+        ]
+      ]
+    }
+  ],
+  "temperate_detail": {
+    "seed": 12345,
+    "tiles": [
+      {
+        "landform": "flatland",
+        "center": [
+          15547,
+          8160
+        ],
+        "extent_blocks": 512,
+        "min_height": 520,
+        "max_height": 524,
+        "sampled_landforms": [
+          65536,
+          0,
+          0
+        ],
+        "sampled_water_columns": 0,
+        "sampled_mountain_columns": 0,
+        "sampled_forest_columns": 0,
+        "profiles": {
+          "horizontal": {
+            "height_min": 521,
+            "height_max": 523,
+            "steps": 2,
+            "intervals": 511,
+            "max_adjacent_delta": 1
+          },
+          "vertical": {
+            "height_min": 521,
+            "height_max": 523,
+            "steps": 2,
+            "intervals": 511,
+            "max_adjacent_delta": 1
+          }
+        }
+      },
+      {
+        "landform": "rolling_hills",
+        "center": [
+          47225,
+          21302
+        ],
+        "extent_blocks": 4096,
+        "min_height": 520,
+        "max_height": 580,
+        "sampled_landforms": [
+          28562,
+          36974,
+          0
+        ],
+        "sampled_water_columns": 0,
+        "sampled_mountain_columns": 0,
+        "sampled_forest_columns": 51545,
+        "profiles": {
+          "horizontal": {
+            "height_min": 521,
+            "height_max": 579,
+            "steps": 71,
+            "intervals": 4095,
+            "max_adjacent_delta": 1
+          },
+          "vertical": {
+            "height_min": 521,
+            "height_max": 554,
+            "steps": 47,
+            "intervals": 4095,
+            "max_adjacent_delta": 1
+          }
+        }
+      },
+      {
+        "landform": "hilly",
+        "center": [
+          5109,
+          20316
+        ],
+        "extent_blocks": 512,
+        "min_height": 520,
+        "max_height": 545,
+        "sampled_landforms": [
+          0,
+          0,
+          65536
+        ],
+        "sampled_water_columns": 0,
+        "sampled_mountain_columns": 0,
+        "sampled_forest_columns": 36666,
+        "profiles": {
+          "horizontal": {
+            "height_min": 520,
+            "height_max": 545,
+            "steps": 30,
+            "intervals": 511,
+            "max_adjacent_delta": 1
+          },
+          "vertical": {
+            "height_min": 522,
+            "height_max": 542,
+            "steps": 24,
+            "intervals": 511,
+            "max_adjacent_delta": 1
+          }
+        }
+      }
+    ]
   }
 }

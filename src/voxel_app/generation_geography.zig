@@ -4,6 +4,7 @@ const env = @import("world_environment.zig");
 const CoastApprox = @import("generation_coast_approx.zig").CoastApprox;
 const Settings = @import("generation_settings.zig").NaturalSettings;
 const desert = @import("generation_desert.zig");
+const temperate = @import("generation_temperate.zig");
 const Mountains = @import("generation_mountains.zig").Mountains;
 
 pub const Island = struct { id: u8, x: u32, y: u32, radius_x: u32, radius_y: u32 };
@@ -271,7 +272,7 @@ pub const Geography = struct {
     /// Explicit unfaded climate probe for terrain fixtures. Runtime queries use
     /// atWithClimate so the shared polar-boundary taper is always included.
     pub fn at(self: *const Geography, climate: env.ClimateId, x: i64, y: u32) env.ColumnEnvironment {
-        return self.atSample(.{ .id = climate, .mountain_fade = if (climate == .frozen) 0 else 65535, .desert_terrain = if (climate == .desert) 65535 else 0 }, x, y);
+        return self.atSample(.{ .id = climate, .mountain_fade = if (climate == .frozen) 0 else 65535, .desert_terrain = if (climate == .desert) 65535 else 0, .temperate_terrain = if (climate == .temperate) 65535 else 0 }, x, y);
     }
 
     pub fn atWithClimate(self: *const Geography, climate: env.ClimateField, x: i64, y: u32) env.ColumnEnvironment {
@@ -283,25 +284,34 @@ pub const Geography = struct {
         const cx = hash.wrappedX(x, self.width);
         const land = self.landAt(cx, y);
         var desert_biome: ?env.DesertBiome = null;
+        var temperate_landform: ?env.TemperateLandform = null;
         const base_height: u32 = if (land.id != 0) land_height: {
-            var elevation: i64 = undefined;
-            if (sample.desert_terrain != 0) {
+            // Keep every lowland contribution continuous until the single final
+            // floor. Temperate uplift fades out before the existing desert
+            // collar, so tall rolling terrain cannot steepen its short blend.
+            var target: i64 = undefined;
+            if (sample.desert_terrain == 65535) {
                 const terrain = desert.sample(self.seed, cx, y, self.width);
-                // Min preserves the field's slope bound, unlike multiplying
-                // its height by a short coast ramp. Island radii can narrow
-                // eight times faster along Y, so use a gentler island cap.
-                const shore_cap = desert.unit + @divTrunc(@as(i64, land.coast) * desert.unit, if (land.id < 128) @as(i64, 4) else 32);
-                const target = @min(terrain.elevation_q16, shore_cap);
-                const blended = if (sample.desert_terrain == 65535) target else blend: {
-                    const ordinary = self.rollingElevation(cx, y, land.coast) * desert.unit;
-                    break :blend ordinary + @divTrunc((target - ordinary) * sample.desert_terrain, 65535);
-                };
-                // Quantize only after blending both desert biomes and shore.
-                elevation = @divFloor(blended, desert.unit);
-                if (climate == .desert) desert_biome = terrain.biome;
+                target = terrain.elevation_q16;
+                desert_biome = terrain.biome;
             } else {
-                elevation = self.rollingElevation(cx, y, land.coast);
+                if (climate == .temperate) {
+                    const terrain = temperate.sample(self.seed, cx, y, self.width, self.depth);
+                    temperate_landform = terrain.landform;
+                    target = if (sample.temperate_terrain == 65535) terrain.elevation_q16 else blend: {
+                        const ordinary = self.rollingElevationQ16(cx, y);
+                        break :blend ordinary + @divTrunc((terrain.elevation_q16 - ordinary) * sample.temperate_terrain, 65535);
+                    };
+                } else target = self.rollingElevationQ16(cx, y);
+                if (sample.desert_terrain != 0) {
+                    const terrain = desert.sample(self.seed, cx, y, self.width);
+                    target += @divTrunc((terrain.elevation_q16 - target) * sample.desert_terrain, 65535);
+                }
             }
+            // Min preserves bounded grades, unlike multiplying high hills by
+            // a short coast ramp. Island radii narrow faster along Y.
+            const shore_cap = temperate.unit + @divTrunc(@as(i64, land.coast) * temperate.unit, if (land.id < 128) @as(i64, 4) else 32);
+            const elevation = @divFloor(@min(target, shore_cap), temperate.unit);
             break :land_height @intCast(std.math.clamp(@as(i64, self.sea_level) + @max(1, elevation), 3, self.depth - 12));
         } else ocean_height: {
             const broad = hash.field2(hash.mix(self.seed ^ 0x5445525241494e), cx, y, self.width, @max(64, self.height / 16));
@@ -310,6 +320,7 @@ pub const Geography = struct {
         const mountain_sample = self.mountains.sample(land.id, cx, y, base_height, land.coast, sample.mountain_fade);
         const mountain = mountain_sample.strength;
         if (mountain != 0) desert_biome = null;
+        if (mountain != 0) temperate_landform = null;
         // Low, gentle feet retain the local climate's cover. Higher flanks and
         // steep faces expose rock without querying four neighbouring columns.
         const exposed_rock = mountain_sample.shape_q16 >= 8192 or mountain_sample.grade_q16 >= 32768;
@@ -329,6 +340,7 @@ pub const Geography = struct {
             .relief = if (mountain >= 18000) .mountain else .lowland,
             .mountain_strength = mountain,
             .desert_biome = desert_biome,
+            .temperate_landform = temperate_landform,
             .vegetation = vegetation,
             .geology = if (mountain >= 12000) .rocky else .sedimentary,
             .surface_cover = if (exposed_rock) .rock else if (climate == .desert) .sand else .soil,
@@ -337,12 +349,10 @@ pub const Geography = struct {
         };
     }
 
-    fn rollingElevation(self: *const Geography, x: u32, y: u32, coast: u32) i64 {
+    fn rollingElevationQ16(self: *const Geography, x: u32, y: u32) i64 {
         const broad = hash.field2(hash.mix(self.seed ^ 0x5445525241494e), x, y, self.width, @max(64, self.height / 16));
         const detail = hash.field2(hash.mix(self.seed ^ 0x44455441494c), x, y, self.width, 128);
-        const land_height = 1 + @divTrunc((broad + 65535) * @as(i64, @min(48, self.depth / 16)), 131070);
-        const coast_ramp: i64 = @intCast(@min(65535, @as(u64, coast) * 65535 / 96));
-        return @divTrunc(land_height * coast_ramp, 65535) + @divTrunc(detail * 2 * coast_ramp, 65535 * 65535);
+        return temperate.unit + @divTrunc((broad + 65535) * @as(i64, @min(48, self.depth / 16)) * temperate.unit, 131070) + @divTrunc(detail * 2 * temperate.unit, 65535);
     }
 };
 

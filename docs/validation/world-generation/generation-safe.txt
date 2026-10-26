@@ -1,18 +1,18 @@
 run test w
-approx adversarial mainland columns=514882 flat-collar columns=52178 maximum adjacent-land height delta=2
+approx adversarial mainland columns=514882 flat-collar columns=52178 maximum adjacent-land height delta=1
 
-Build Summary: 15/15 steps succeeded; 242/242 tests passed
+Build Summary: 15/15 steps succeeded; 258/258 tests passed
 test-generation success
-+- run test 242 pass (242 total) 5s MaxRSS:150M
-   +- compile test ReleaseSafe native success 12s MaxRSS:980M
++- run test 258 pass (258 total) 15s MaxRSS:153M
+   +- compile test ReleaseSafe native success 14s MaxRSS:997M
       +- WriteFile cached
-      +- compile lib engine_wrapped ReleaseSafe native cached 126ms MaxRSS:35M
+      +- compile lib engine_wrapped ReleaseSafe native cached 122ms MaxRSS:35M
       |  +- WriteFile  cached
-      |  +- compile lib glfw ReleaseSafe native cached 215ms MaxRSS:34M
+      |  +- compile lib glfw ReleaseSafe native cached 199ms MaxRSS:34M
       |  +- WriteFile cached
-      |  +- compile lib zdawn ReleaseSafe native cached 173ms MaxRSS:34M
+      |  +- compile lib zdawn ReleaseSafe native cached 182ms MaxRSS:34M
       |  +- WriteFile cached
-      |  +- compile lib imgui ReleaseSafe native cached 181ms MaxRSS:34M
+      |  +- compile lib imgui ReleaseSafe native cached 146ms MaxRSS:34M
       |  +- compile lib glfw ReleaseSafe native (reused)
       |  +- compile lib zdawn ReleaseSafe native (reused)
       |  +- compile lib imgui ReleaseSafe native (reused)
