@@ -98,7 +98,6 @@ fn drawPanel(texture: ?zgui.TextureRef, layout: *const engine.WorldLayout, view:
     const screen = zgui.io.getDisplaySize();
     const scale = zgui.getStyle().font_scale_dpi;
     const panel = panelLayout(screen, .{ layout.size_in_blocks[0], layout.size_in_blocks[1] }, scale) orelse return false;
-    zgui.getBackgroundDrawList().addRectFilled(.{ .pmin = .{ 0, 0 }, .pmax = screen, .col = color(.{ 0, 0, 0, 0.4 }) });
     zgui.setNextWindowPos(.{ .x = panel.window.position[0], .y = panel.window.position[1] });
     zgui.setNextWindowSize(.{ .w = panel.window.size[0], .h = panel.window.size[1] });
     zgui.setNextWindowFocus();

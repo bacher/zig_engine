@@ -8,9 +8,10 @@ original arrow remains visible when both positions coincide.
 
 The map captures movement, mouse look, block tools, and control-mode switching.
 Opening or closing it cancels unfinished block actions and pending jumps, and
-discards mouse look deltas. World simulation continues. Close it with M, Escape,
-or the Close button. The game menu and map are exclusive; Escape closes the map
-first. Exiting the game also closes it.
+discards mouse look deltas. World time and background simulation continue while
+the map is open, and the world behind the panel stays at its normal brightness.
+Close it with M, Escape, or the Close button. The game menu and map are exclusive;
+Escape closes the map first. Exiting the game also closes it.
 
 The overview samples immutable generated terrain, climate, forests, and mountains;
 it does not reflect player terrain edits or show underground deposits. Sampling
