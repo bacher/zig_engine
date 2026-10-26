@@ -38,6 +38,10 @@ The subsystem documents describe the current implementation, extracted from exis
 | [World configuration](docs/world-configuration.md) | Runtime dimensions, compile-time optional x wrapping, immutable layouts, shader specialization, and validation. |
 | [World configuration research](docs/world-configuration-options.md) | Original tradeoff analysis and isolated compiler measurements. |
 
+The draft [world generation specification](specs/features/world-generation.md) plans continents,
+climate belts, mountain ranges, finite deposits, and forests, with shared environmental queries
+for rendering and future simulation.
+
 The subsystem docs link to implementing modules and existing tests. The [Zig/WGSL type naming agreement](docs/rendering.md#zigwgsl-type-naming-agreement) requires `GPU_` for Zig shader payload types. [TODO.md](TODO.md) is a task list. [Agent session logs](agent-sessions/README.md) are historical records.
 
 ## Controls
