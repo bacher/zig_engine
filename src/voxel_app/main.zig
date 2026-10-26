@@ -67,6 +67,7 @@ const world_map = @import("world_map.zig");
 const Game = struct {
     const MeshVersion = struct { chunk_revision: u64, mesh_revision: u64 };
     const BoundarySnapshot = struct { masks: world_engine.BoundaryMasks, mesh_revision: u64 };
+    const Overlay = enum { none, menu, world_map };
     allocator: std.mem.Allocator,
     engine: *Engine,
     world: ?World = null,
@@ -77,8 +78,7 @@ const Game = struct {
     player_id: u64 = 1,
     next_autosave_at: f64 = 60,
     next_compaction_at: f64 = 600,
-    menu_open: bool = false,
-    map_open: bool = false,
+    overlay: Overlay = .none,
     map_state: world_map.State = .{},
     /// Future multiplayer sessions leave simulation running behind the menu.
     menu_pauses_game: bool = true,
@@ -131,18 +131,11 @@ const Game = struct {
     saved_game_objects: std.StringHashMapUnmanaged(*GameObject) = .empty,
     saved_game_object_groups: std.StringHashMapUnmanaged(*GameObjectGroup) = .empty,
 
-    fn setMenuOpen(game: *Game, open: bool) void {
-        if (game.exit_requested or open == game.menu_open) return;
-        game.menu_open = open;
-        if (open) game.map_open = false;
-        game.engine.setPaused(open and game.menu_pauses_game);
-        game.engine.setGameplayInputBlocked(open or game.map_open);
-    }
-
-    fn setMapOpen(game: *Game, open: bool) void {
-        if (game.exit_requested or game.menu_open or open == game.map_open) return;
-        game.map_open = open;
-        game.engine.setGameplayInputBlocked(open or game.menu_open);
+    fn setOverlay(game: *Game, overlay: Overlay) void {
+        if (game.exit_requested or overlay == game.overlay) return;
+        game.overlay = overlay;
+        game.engine.setPaused(overlay == .menu and game.menu_pauses_game);
+        game.engine.setGameplayInputBlocked(overlay != .none);
     }
 
     fn mapView(game: *const Game, scene: *const Scene) world_map.View {
@@ -156,9 +149,9 @@ const Game = struct {
     }
 
     fn handleMenuAction(game: *Game, action: menu.Action) void {
-        if (!game.menu_open) return;
+        if (game.overlay != .menu) return;
         switch (action) {
-            .resume_game => game.setMenuOpen(false),
+            .resume_game => game.setOverlay(.none),
             .exit_game => game.engine.requestExit(),
         }
     }
@@ -345,8 +338,7 @@ const Game = struct {
     fn beginExit(game: *Game) void {
         if (game.exit_requested) return;
         game.exit_requested = true;
-        game.menu_open = false;
-        game.map_open = false;
+        game.overlay = .none;
         game.engine.setPaused(true);
         game.engine.setGameplayInputBlocked(true);
         game.block_interaction.cancelHold();
@@ -1450,11 +1442,11 @@ fn onUIKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque)
 fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
     switch (key_params.key) {
         .escape => {
-            if (game.map_open) game.setMapOpen(false) else game.setMenuOpen(!game.menu_open);
+            game.setOverlay(if (game.overlay == .none) .menu else .none);
             return true;
         },
         .m => {
-            game.setMapOpen(!game.map_open);
+            if (game.overlay != .menu) game.setOverlay(if (game.overlay == .world_map) .none else .world_map);
             return true;
         },
         else => return false,
@@ -1551,15 +1543,15 @@ fn onRenderOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque:
 
 fn onRender(engine: *Engine, _: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
-    if (!game.menu_open and !game.map_open) {
+    if (game.overlay == .none) {
         block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
         drawCrosshair();
     }
-    if (game.map_open) if (game.world_data) |service| if (engine.active_scene) |scene| {
-        if (game.map_state.draw(game.allocator, engine.gctx, service.preparedGenerator(), game.mapView(scene))) game.setMapOpen(false);
+    if (game.overlay == .world_map) if (game.world_data) |service| if (engine.active_scene) |scene| {
+        if (game.map_state.draw(game.allocator, engine.gctx, service.preparedGenerator(), game.mapView(scene))) game.setOverlay(.none);
     };
     drawPersistence(game);
-    if (game.menu_open) if (menu.draw(engine.paused)) |action| game.handleMenuAction(action);
+    if (game.overlay == .menu) if (menu.draw(engine.paused)) |action| game.handleMenuAction(action);
 }
 
 fn drawPersistence(game: *Game) void {
@@ -1616,7 +1608,7 @@ test "menu cancels pending controls and pauses world time and background simulat
     // Pausing alone gates simulation without opening UI or canceling controls.
     fixture.engine.setPaused(true);
     try std.testing.expect(simulation.paused.load(.acquire));
-    try std.testing.expect(!game.menu_open);
+    try std.testing.expectEqual(.none, game.overlay);
     try std.testing.expect(!fixture.engine.gameplay_input_blocked);
     try std.testing.expect(game.block_interaction.holding != null);
     fixture.engine.setPaused(false);
@@ -1627,7 +1619,7 @@ test "menu cancels pending controls and pauses world time and background simulat
     const tick = game.world.?.simulation_tick;
     const fraction = game.fractional_ticks;
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
-    try std.testing.expect(game.menu_open);
+    try std.testing.expectEqual(.menu, game.overlay);
     try std.testing.expect(fixture.engine.paused);
     try std.testing.expect(fixture.engine.gameplay_input_blocked);
     try std.testing.expect(simulation.paused.load(.acquire));
@@ -1657,7 +1649,7 @@ test "menu cancels pending controls and pauses world time and background simulat
     game.jump_requested = true;
     try game.tool_commands.append(game.allocator, .remove);
     const frame_delta = fixture.engine.frame_delta;
-    game.setMenuOpen(true);
+    game.setOverlay(.menu);
     try std.testing.expect(!fixture.engine.paused);
     try std.testing.expect(fixture.engine.gameplay_input_blocked);
     try std.testing.expectEqual(null, game.block_interaction.requested);
@@ -1669,7 +1661,7 @@ test "menu cancels pending controls and pauses world time and background simulat
     game.advanceWorldClock();
     try std.testing.expect(game.world.?.simulation_tick > tick + transformations.ticks_per_second / 2);
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
-    try std.testing.expect(!game.menu_open);
+    try std.testing.expectEqual(.none, game.overlay);
     try std.testing.expect(!fixture.engine.gameplay_input_blocked);
     try std.testing.expectEqual(1, fixture.engine.frame_delta);
 }
@@ -1695,8 +1687,7 @@ test "world map captures gameplay and pending controls while simulation keeps ru
     const tick = game.world.?.simulation_tick;
 
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
-    try std.testing.expect(game.map_open);
-    try std.testing.expect(!game.menu_open);
+    try std.testing.expectEqual(.world_map, game.overlay);
     try std.testing.expect(!fixture.engine.paused);
     try std.testing.expect(!simulation.paused.load(.acquire));
     try std.testing.expect(fixture.engine.gameplay_input_blocked);
@@ -1719,7 +1710,7 @@ test "world map captures gameplay and pending controls while simulation keeps ru
     // The click that closes the map can remain physically held without starting a tool.
     fixture.input.cursor_left_button_pressed = true;
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
-    try std.testing.expect(!game.map_open);
+    try std.testing.expectEqual(.none, game.overlay);
     try std.testing.expect(!fixture.engine.gameplay_input_blocked);
     try std.testing.expectEqual(.always, fixture.input.cursor_capture);
     try std.testing.expectEqual(0.125, fixture.engine.frame_delta);
@@ -1779,7 +1770,7 @@ test "world map keeps jump physics and terrain collisions running while capturin
             fixture.engine.time += fixture.engine.frame_delta;
             game.updateGameplay(false);
         }
-        try std.testing.expect(game.map_open);
+        try std.testing.expectEqual(.world_map, game.overlay);
         try std.testing.expect(game.player.?.grounded);
         try std.testing.expectApproxEqAbs(@as(f64, 0), game.player.?.position[2], 0.000001);
         try std.testing.expectEqual(@as(f64, 0), game.player.?.vertical_velocity);
@@ -1793,7 +1784,7 @@ test "world map keeps jump physics and terrain collisions running while capturin
         try std.testing.expect(game.player.?.vertical_velocity < 0);
 
         // The game menu retains its actual pause, even with an elapsed sample.
-        game.setMenuOpen(true);
+        game.setOverlay(.menu);
         const paused_position = game.player.?.position;
         const paused_velocity = game.player.?.vertical_velocity;
         fixture.engine.frame_delta = 0.1;
@@ -1810,42 +1801,42 @@ test "map Escape, menu, and exit transitions preserve modal input capture" {
     const game = &fixture.game;
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
-    try std.testing.expect(!game.map_open);
-    try std.testing.expect(!game.menu_open);
+    try std.testing.expectEqual(.none, game.overlay);
     try std.testing.expect(!fixture.engine.paused);
     try std.testing.expect(!fixture.engine.gameplay_input_blocked);
 
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
-    try std.testing.expect(game.menu_open);
+    try std.testing.expectEqual(.menu, game.overlay);
     try std.testing.expect(fixture.engine.paused);
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
-    try std.testing.expect(!game.map_open);
-    try std.testing.expect(game.menu_open);
+    try std.testing.expectEqual(.menu, game.overlay);
     try std.testing.expect(fixture.engine.gameplay_input_blocked);
     try std.testing.expectEqual(.never, fixture.input.cursor_capture);
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
 
-    game.setMapOpen(true);
-    game.setMenuOpen(true);
-    try std.testing.expect(!game.map_open);
-    try std.testing.expect(game.menu_open);
+    game.setOverlay(.world_map);
+    game.setOverlay(.menu);
+    try std.testing.expectEqual(.menu, game.overlay);
+    try std.testing.expect(fixture.engine.paused);
     try std.testing.expect(fixture.engine.gameplay_input_blocked);
     try std.testing.expectEqual(.never, fixture.input.cursor_capture);
     game.handleMenuAction(.resume_game);
+    try std.testing.expectEqual(.none, game.overlay);
+    try std.testing.expect(!fixture.engine.paused);
     try std.testing.expect(!fixture.engine.gameplay_input_blocked);
     try std.testing.expectEqual(.always, fixture.input.cursor_capture);
 
-    game.setMapOpen(true);
+    game.setOverlay(.world_map);
     game.beginExit();
-    try std.testing.expect(!game.map_open);
-    try std.testing.expect(!game.menu_open);
+    try std.testing.expectEqual(.none, game.overlay);
     try std.testing.expect(fixture.engine.paused);
     try std.testing.expect(fixture.engine.gameplay_input_blocked);
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
-    try std.testing.expect(!game.map_open);
-    try std.testing.expect(!game.menu_open);
+    try std.testing.expectEqual(.none, game.overlay);
     game.cancelExit();
+    try std.testing.expectEqual(.none, game.overlay);
+    try std.testing.expect(!fixture.engine.paused);
     try std.testing.expect(!fixture.engine.gameplay_input_blocked);
     try std.testing.expectEqual(.always, fixture.input.cursor_capture);
 }
@@ -1867,13 +1858,13 @@ test "world map freezes spectator movement and look without replaying mouse delt
     fixture.game.control_mode = .spectator;
     try fixture.input.pressed_keys.put(.w, {});
     const position = fixture.camera.position;
-    fixture.game.setMapOpen(true);
+    fixture.game.setOverlay(.world_map);
     fixture.input.cursor_position_delta = .{ 10, 20 };
     fixture.scene.update(2);
     try std.testing.expectEqualDeep(position, fixture.camera.position);
     try std.testing.expectEqual(@as(f32, 0.7), spectator.yaw);
     try std.testing.expectEqual(@as(f32, -0.2), spectator.pitch);
-    fixture.game.setMapOpen(false);
+    fixture.game.setOverlay(.none);
     fixture.scene.update(2.1);
     try std.testing.expect(!std.meta.eql(position, fixture.camera.position));
     try std.testing.expectEqual(@as(f32, 0.7), spectator.yaw);
@@ -4176,12 +4167,12 @@ test "shutdown cannot save ahead of optimistic edits that have not been admitted
     try std.testing.expectEqual(null, game.world.?.pending_operations.items[0].request_id);
     try std.testing.expectEqual(@as(u64, 0), game.world_client.?.last_operation_id);
     fixture.engine.callbacks.onCloseRequest = onCloseRequest;
-    game.setMenuOpen(true);
+    game.setOverlay(.menu);
     game.handleMenuAction(.exit_game);
     try std.testing.expect(game.exit_requested);
-    try std.testing.expect(!game.menu_open);
-    game.setMenuOpen(true);
-    try std.testing.expect(!game.menu_open);
+    try std.testing.expectEqual(.none, game.overlay);
+    game.setOverlay(.menu);
+    try std.testing.expectEqual(.none, game.overlay);
     try std.testing.expectEqual(null, game.exit_intent);
     try std.testing.expectEqual(@as(u64, 0), service.persistenceStatus().intent_id);
     // Canceling this drain restores controls without discarding the intent.
