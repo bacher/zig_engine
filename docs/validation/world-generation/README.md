@@ -293,6 +293,13 @@ Those GPU checks compile production shaders and read back material
 colors; climate soil meshing and saved-material identity also have CPU tests. Prior manual inspection covered
 spawn terrain and nearby forest, not every climate or water configuration.
 
+The subsequent shared coast-fringe and named benchmark-site refactor was checked on
+2026-10-26 with all 258 ReleaseSafe generation tests and a one-round ReleaseFast
+benchmark at seed 12345/default, beaches off/on. Site order and coordinates, all 36
+snapshot hashes, both prepared fingerprints, and preparation allocation/memory records
+match the recorded benchmark. Timing was excluded from this comparison; independent
+geometry/distance fixtures remain unchanged.
+
 | Acceptance criteria | Evidence |
 | --- | --- |
 | AC1–AC5, AC11, AC22, AC24 | Layout/bounds tests, climate ordering and map/point equivalence, environment flags, configuration validation, seed-suite area measurements; exact boundary means across eight seeds and ordering/wrapping across 64 seeds and four layouts |

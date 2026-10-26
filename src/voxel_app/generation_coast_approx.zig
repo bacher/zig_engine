@@ -1,5 +1,5 @@
 const std = @import("std");
-const hash = @import("generation_hash.zig");
+const coast_fringe = @import("generation_coast_fringe.zig");
 
 /// Approximate mainland relief scalar. Ownership/refinement still decides land.
 /// On refined mainland, the zero collar extends at most 16 blocks inland.
@@ -40,19 +40,19 @@ pub const CoastApprox = struct {
             var maximum: u32 = 0;
             if (exposed[0]) {
                 mask |= 1;
-                maximum = @max(maximum, @max(trim(seed, width, x, y), trim(seed, width, x, y + 127)));
+                maximum = @max(maximum, @max(coast_fringe.sample(seed, width, x, y), coast_fringe.sample(seed, width, x, y + 127)));
             }
             if (exposed[1]) {
                 mask |= 2;
-                maximum = @max(maximum, @max(trim(seed, width, x + 127, y), trim(seed, width, x + 127, y + 127)));
+                maximum = @max(maximum, @max(coast_fringe.sample(seed, width, x + 127, y), coast_fringe.sample(seed, width, x + 127, y + 127)));
             }
             if (exposed[2]) {
                 mask |= 4;
-                maximum = @max(maximum, trim(seed, width, x + 64, y));
+                maximum = @max(maximum, coast_fringe.sample(seed, width, x + 64, y));
             }
             if (exposed[3]) {
                 mask |= 8;
-                maximum = @max(maximum, trim(seed, width, x + 64, y + 127));
+                maximum = @max(maximum, coast_fringe.sample(seed, width, x + 64, y + 127));
             }
             features[i] = mask | @as(u16, @intCast(maximum << 4));
         }
@@ -61,11 +61,6 @@ pub const CoastApprox = struct {
 
     pub fn deinit(self: *CoastApprox, allocator: std.mem.Allocator) void {
         allocator.free(self.features);
-    }
-
-    fn trim(seed: u64, width: u32, x: u32, y: u32) u32 {
-        const n = hash.field2(hash.mix(seed ^ 0x434f415354), x % width, y, width, 256);
-        return @intCast(8 + @divTrunc((n + 65535) * 16, 131070));
     }
 
     fn rectangle(x: i64, y: i64, x0: i64, y0: i64, x1: i64, y1: i64) u32 {

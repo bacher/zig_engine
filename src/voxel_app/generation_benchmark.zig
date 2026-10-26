@@ -3,6 +3,7 @@
 const std = @import("std");
 const engine = @import("engine");
 const generation = @import("world_generator.zig");
+const env = @import("world_environment.zig");
 const world = @import("world.zig");
 const glue = @import("world_engine_glue.zig");
 const diagnostics = @import("generation_diagnostics.zig");
@@ -54,7 +55,29 @@ const AllocationMeter = struct {
 };
 
 const Site = struct { label: []const u8, block: [2]u32, chunk_z: ?i32 = null };
-fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![17]Site {
+// Declaration order preserves the benchmark's output and replay order.
+const SiteId = enum {
+    plains,
+    mainland_coast,
+    island_coast,
+    steep_shore,
+    desert_dunes,
+    dense_forest,
+    deposit,
+    x_seam,
+    ocean,
+    polar,
+    mountain_summit,
+    desert_flats,
+    mountain_pass,
+    mountain_gorge,
+    temperate_flatland,
+    temperate_rolling_hills,
+    temperate_hilly,
+};
+const Sites = std.EnumArray(SiteId, Site);
+
+fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![Sites.len]Site {
     const natural = prepared.kind.natural;
     const size = prepared.layout.size_in_blocks;
     const start = prepared.firstStart().?;
@@ -62,31 +85,31 @@ fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![17]
     const deposit = natural.deposits.items[0];
     const mountain_report = diagnostics.sampleMountains(prepared);
     if (mountain_report.summit == null or mountain_report.pass == null or mountain_report.gorge == null) return error.MissingMountainSite;
-    var sites = [_]Site{
-        .{ .label = "plains", .block = .{ start[0], start[1] } },
-        .{ .label = "mainland_coast", .block = .{ start[0], start[1] } },
-        .{ .label = "island_coast", .block = .{ @intCast(@mod(@as(i64, island.x) + island.radius_x - 2, size[0])), island.y } },
-        .{ .label = "steep_shore", .block = .{ start[0], start[1] } },
-        .{ .label = "desert_dunes", .block = .{ 0, size[1] / 2 } },
-        .{ .label = "dense_forest", .block = .{ start[0], start[1] } },
-        .{ .label = "deposit", .block = .{ deposit.center[0], deposit.center[1] }, .chunk_z = @intCast(deposit.center[2] / 32) },
-        .{ .label = "x_seam", .block = .{ size[0] - 1, size[1] / 2 } },
-        .{ .label = "ocean", .block = .{ 0, 0 } },
-        .{ .label = "polar", .block = .{ size[0] / 2, 0 } },
-        .{ .label = "mountain_summit", .block = mountain_report.summit.?.block },
-        .{ .label = "desert_flats", .block = .{ 0, size[1] / 2 } },
-        .{ .label = "mountain_pass", .block = mountain_report.pass.?.site.block },
-        .{ .label = "mountain_gorge", .block = mountain_report.gorge.?.site.block },
-        .{ .label = "temperate_flatland", .block = .{ start[0], start[1] } },
-        .{ .label = "temperate_rolling_hills", .block = .{ start[0], start[1] } },
-        .{ .label = "temperate_hilly", .block = .{ start[0], start[1] } },
-    };
+    var sites = Sites.init(.{
+        .plains = .{ .label = "plains", .block = .{ start[0], start[1] } },
+        .mainland_coast = .{ .label = "mainland_coast", .block = .{ start[0], start[1] } },
+        .island_coast = .{ .label = "island_coast", .block = .{ @intCast(@mod(@as(i64, island.x) + island.radius_x - 2, size[0])), island.y } },
+        .steep_shore = .{ .label = "steep_shore", .block = .{ start[0], start[1] } },
+        .desert_dunes = .{ .label = "desert_dunes", .block = .{ 0, size[1] / 2 } },
+        .dense_forest = .{ .label = "dense_forest", .block = .{ start[0], start[1] } },
+        .deposit = .{ .label = "deposit", .block = .{ deposit.center[0], deposit.center[1] }, .chunk_z = @intCast(deposit.center[2] / 32) },
+        .x_seam = .{ .label = "x_seam", .block = .{ size[0] - 1, size[1] / 2 } },
+        .ocean = .{ .label = "ocean", .block = .{ 0, 0 } },
+        .polar = .{ .label = "polar", .block = .{ size[0] / 2, 0 } },
+        .mountain_summit = .{ .label = "mountain_summit", .block = mountain_report.summit.?.block },
+        .desert_flats = .{ .label = "desert_flats", .block = .{ 0, size[1] / 2 } },
+        .mountain_pass = .{ .label = "mountain_pass", .block = mountain_report.pass.?.site.block },
+        .mountain_gorge = .{ .label = "mountain_gorge", .block = mountain_report.gorge.?.site.block },
+        .temperate_flatland = .{ .label = "temperate_flatland", .block = .{ start[0], start[1] } },
+        .temperate_rolling_hills = .{ .label = "temperate_rolling_hills", .block = .{ start[0], start[1] } },
+        .temperate_hilly = .{ .label = "temperate_hilly", .block = .{ start[0], start[1] } },
+    });
     std.debug.print("mountain_sites actual_high_summits={d} consecutive_bin_pairs={d} mountain_endpoint_pairs={d} influence_connected_pairs={d} connected_passes={d} pass_wall_relief={d} gorge_wall_relief={d} diagnostic_column_probes={d}\n", .{ mountain_report.high_summits_at_95_percent, mountain_report.consecutive_bin_pairs, mountain_report.mountain_endpoint_pairs, mountain_report.influence_connected_pairs, mountain_report.connected_passes, mountain_report.pass.?.wall_relief, mountain_report.gorge.?.wall_relief, mountain_report.column_probes });
     var coast_found = false;
     var dunes_found = false;
     var flats_found = false;
     var ocean_found = false;
-    var temperate_found: [3]bool = @splat(false);
+    var temperate_found = std.EnumArray(env.TemperateLandform, bool).initFill(false);
     var maximum_trees: usize = 0;
     var maximum_slope: u32 = 0;
     // Macro edge probes hit the actual refined coast, rather than a random
@@ -96,7 +119,7 @@ fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![17]
         const my = i / natural.geography.macro_width;
         if (owner == 0) {
             if (!ocean_found) {
-                sites[8].block = .{ @intCast(mx * 128 + 64), @intCast(my * 128 + 64) };
+                sites.getPtr(.ocean).block = .{ @intCast(mx * 128 + 64), @intCast(my * 128 + 64) };
                 ocean_found = true;
             }
             continue;
@@ -104,23 +127,27 @@ fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![17]
         const center = [2]u32{ @intCast(mx * 128 + 64), @intCast(my * 128 + 64) };
         const e = prepared.columnEnvironmentAt(center[0], center[1]);
         if (e.temperate_landform) |landform| {
-            const index = @intFromEnum(landform);
-            if (!temperate_found[index] and e.vegetation == .forest and e.coast_distance >= 512 and natural.climate.sample(center[0], center[1]).temperate_terrain == 65535) {
+            if (!temperate_found.get(landform) and e.vegetation == .forest and e.coast_distance >= 512 and natural.climate.sample(center[0], center[1]).temperate_terrain == 65535) {
                 const column = Column.init(prepared, .{ @intCast(center[0] / 32), @intCast(center[1] / 32) });
                 if (column.column.natural.tree_count != 0) {
-                    sites[14 + index].block = center;
-                    temperate_found[index] = true;
+                    const site_id: SiteId = switch (landform) {
+                        .flatland => .temperate_flatland,
+                        .rolling_hills => .temperate_rolling_hills,
+                        .hilly => .temperate_hilly,
+                    };
+                    sites.getPtr(site_id).block = center;
+                    temperate_found.set(landform, true);
                 }
             }
         }
         if (e.climate == .desert and !e.water_present and e.coast_distance >= 128 and e.mountain_strength == 0) {
             if (e.desert_biome) |biome| switch (biome) {
                 .dunes => if (!dunes_found) {
-                    sites[4].block = center;
+                    sites.getPtr(.desert_dunes).block = center;
                     dunes_found = true;
                 },
                 .flats => if (!flats_found) {
-                    sites[11].block = center;
+                    sites.getPtr(.desert_flats).block = center;
                     flats_found = true;
                 },
             };
@@ -130,7 +157,7 @@ fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![17]
             const tree_count = if (@hasField(@TypeOf(column.column.natural), "tree_count")) column.column.natural.tree_count else 0;
             if (tree_count > maximum_trees) {
                 maximum_trees = tree_count;
-                sites[5].block = center;
+                sites.getPtr(.dense_forest).block = center;
             }
         }
         if (coast_found and i % 113 != 0) continue;
@@ -140,23 +167,23 @@ fn representativeSites(prepared: *const generation.PreparedWorldGenerator) ![17]
             const shore = prepared.columnEnvironmentAt(x, y);
             if (shore.water_present or shore.coast_distance > 8 or shore.landmass_id == 0) continue;
             if (!coast_found and shore.climate != .frozen) {
-                sites[1].block = .{ x, y };
+                sites.getPtr(.mainland_coast).block = .{ x, y };
                 coast_found = true;
             }
             const neighbor = prepared.columnEnvironmentAt(@as(i64, x) + 8, y);
             const slope: u32 = @intCast(@abs(@as(i64, shore.terrain_height) - neighbor.terrain_height));
             if (slope > maximum_slope) {
                 maximum_slope = slope;
-                sites[3].block = .{ x, y };
+                sites.getPtr(.steep_shore).block = .{ x, y };
             }
         }
     }
     if (!dunes_found) return error.MissingDesertDunesSite;
     if (!flats_found) return error.MissingDesertFlatsSite;
     if (!coast_found or !ocean_found) return error.MissingRepresentativeSite;
-    for (temperate_found) |found| if (!found) return error.MissingTemperateSite;
+    for (temperate_found.values) |found| if (!found) return error.MissingTemperateSite;
     std.debug.print("representative_sites dense_forest_trees={d} maximum_shore_delta_8={d}\n", .{ maximum_trees, maximum_slope });
-    return sites;
+    return sites.values;
 }
 
 fn isolatedWorkload(init: std.process.Init, a: std.mem.Allocator, prepared: *const generation.PreparedWorldGenerator, site: Site, rounds: usize, samples: []u64) !void {

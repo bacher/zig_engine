@@ -1,5 +1,6 @@
 const std = @import("std");
 const hash = @import("generation_hash.zig");
+const coast_fringe = @import("generation_coast_fringe.zig");
 const env = @import("world_environment.zig");
 const CoastApprox = @import("generation_coast_approx.zig").CoastApprox;
 const Settings = @import("generation_settings.zig").NaturalSettings;
@@ -265,8 +266,7 @@ pub const Geography = struct {
     }
 
     fn trim(self: *const Geography, x: u32, y: u32) u32 {
-        const n = hash.field2(hash.mix(self.seed ^ 0x434f415354), x % self.width, y, self.width, 256);
-        return @intCast(8 + @divTrunc((n + 65535) * 16, 131070));
+        return coast_fringe.sample(self.seed, self.width, x, y);
     }
 
     /// Explicit unfaded climate probe for terrain fixtures. Runtime queries use
