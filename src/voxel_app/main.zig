@@ -255,10 +255,7 @@ const Game = struct {
         const has_new_chunks = game.receiveChunks();
         // Synchronize blocks first, then resolve local movement against that cache.
         // Player input remains independent of mesh work and GPU upload capacity.
-        if (!game.exit_requested and !game.engine.paused and !game.engine.gameplay_input_blocked) {
-            if (game.player != null) game.updatePlayer(has_new_chunks);
-            game.updateBlockTool();
-        }
+        game.updateGameplay(has_new_chunks);
         game.flushBlockOperations();
         game.updatePersistence();
         game.updateChunksAroundCamera(has_new_chunks);
@@ -378,6 +375,12 @@ const Game = struct {
         if (game.simulation) |simulation| simulation.resumeDispatch();
     }
 
+    fn updateGameplay(game: *Game, terrain_changed: bool) void {
+        if (game.exit_requested or game.engine.paused) return;
+        if (game.player != null) game.updatePlayer(terrain_changed);
+        if (!game.engine.gameplay_input_blocked) game.updateBlockTool();
+    }
+
     fn updatePlayer(game: *Game, terrain_changed: bool) void {
         const player = &game.player.?;
         const engine = game.engine;
@@ -392,15 +395,20 @@ const Game = struct {
         }
         const elapsed = if (input.focus_changed) 0 else engine.frame_delta;
         if (input.focus_changed) game.jump_requested = false;
-        player.look(input.cursor_position_delta);
-        const forward = @as(i8, @intFromBool(input.isKeyPressed(.w))) - @as(i8, @intFromBool(input.isKeyPressed(.s)));
-        const right = @as(i8, @intFromBool(input.isKeyPressed(.d))) - @as(i8, @intFromBool(input.isKeyPressed(.a)));
-        const result = player.update(&game.world.?, .{
-            .forward = @floatFromInt(forward),
-            .right = @floatFromInt(right),
-            .jump_pressed = game.jump_requested,
-            .jump_down = input.isKeyPressed(.space),
-        }, elapsed, engine.time) catch |err| {
+        // UI captures controls without suspending gravity or terrain collisions.
+        var player_input: player_module.Input = .{};
+        if (!engine.gameplay_input_blocked) {
+            player.look(input.cursor_position_delta);
+            const forward = @as(i8, @intFromBool(input.isKeyPressed(.w))) - @as(i8, @intFromBool(input.isKeyPressed(.s)));
+            const right = @as(i8, @intFromBool(input.isKeyPressed(.d))) - @as(i8, @intFromBool(input.isKeyPressed(.a)));
+            player_input = .{
+                .forward = @floatFromInt(forward),
+                .right = @floatFromInt(right),
+                .jump_pressed = game.jump_requested,
+                .jump_down = input.isKeyPressed(.space),
+            };
+        }
+        const result = player.update(&game.world.?, player_input, elapsed, engine.time) catch |err| {
             std.debug.print("player update failed: {}\n", .{err});
             game.jump_requested = false;
             player.applyCamera(engine.active_scene.?.camera);
@@ -1722,6 +1730,77 @@ test "world map captures gameplay and pending controls while simulation keeps ru
     handleMouseButtonPress(game, .{ .button = .left, .mods = .{} });
     game.updateBlockTool();
     try std.testing.expect(game.block_interaction.holding != null);
+}
+
+test "world map keeps jump physics and terrain collisions running while capturing controls" {
+    const coordinates = @import("block_coordinates.zig");
+    for ([_]f64{ 0.1, 0.6 }) |jump_elapsed| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        const game = &fixture.game;
+        try game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
+        try game.world.?.insertChunk(test_layout.origin_chunk - ChunkCoords{ 0, 0, 1 }, WorldChunk.initEmpty());
+        const floor = coordinates.fromWorld(&test_layout, .{ 0, 0, -1 }).?;
+        game.world.?.setBlockUnchecked(floor, .stone);
+        game.control_mode = .player;
+        game.player = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
+        try fixture.input.pressed_keys.put(.space, {});
+        handleKeyPress(game, .{ .key = .space, .mods = .{} });
+        fixture.engine.frame_delta = jump_elapsed;
+        fixture.engine.time = jump_elapsed;
+        game.updateGameplay(false);
+        const position = game.player.?.position;
+        const velocity = game.player.?.vertical_velocity;
+        try std.testing.expect(position[2] > 0);
+        try std.testing.expect(!game.player.?.grounded);
+        try std.testing.expect(if (jump_elapsed < 0.5) velocity > 0 else velocity < 0);
+
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
+        // Held controls and mouse motion must not alter the jump or view.
+        try fixture.input.pressed_keys.put(.w, {});
+        try fixture.input.pressed_keys.put(.d, {});
+        fixture.input.cursor_position_delta = .{ 20, -10 };
+        handleKeyPress(game, .{ .key = .space, .mods = .{} });
+        fixture.engine.frame_delta = 0.1;
+        fixture.engine.time += fixture.engine.frame_delta;
+        game.updateGameplay(false);
+        try std.testing.expectApproxEqAbs(position[2] + velocity * 0.1 - 0.5 * player_module.gravity * 0.1 * 0.1, game.player.?.position[2], 0.000001);
+        try std.testing.expectApproxEqAbs(velocity - player_module.gravity * 0.1, game.player.?.vertical_velocity, 0.000001);
+        try std.testing.expectEqual(position[0], game.player.?.position[0]);
+        try std.testing.expectEqual(position[1], game.player.?.position[1]);
+        try std.testing.expectEqual(@as(f32, 0), game.player.?.yaw);
+        try std.testing.expectEqual(@as(f32, 0), game.player.?.pitch);
+        try std.testing.expectEqualDeep(game.player.?.position + Position{ 0, 0, game.player.?.body.eye_height }, fixture.camera.position);
+        try std.testing.expectEqualDeep(game.player.?.position, game.mapView(&fixture.scene).player.?.position);
+
+        // Land while the map is still open, without jumping again from held Space.
+        for (0..20) |_| {
+            fixture.engine.time += fixture.engine.frame_delta;
+            game.updateGameplay(false);
+        }
+        try std.testing.expect(game.map_open);
+        try std.testing.expect(game.player.?.grounded);
+        try std.testing.expectApproxEqAbs(@as(f64, 0), game.player.?.position[2], 0.000001);
+        try std.testing.expectEqual(@as(f64, 0), game.player.?.vertical_velocity);
+        try std.testing.expect(!game.player.?.auto_climb);
+
+        // Terrain changes under the player also take effect behind the map.
+        game.world.?.setBlockUnchecked(floor, .none);
+        fixture.engine.time += fixture.engine.frame_delta;
+        game.updateGameplay(true);
+        try std.testing.expect(game.player.?.position[2] < 0);
+        try std.testing.expect(game.player.?.vertical_velocity < 0);
+
+        // The game menu retains its actual pause, even with an elapsed sample.
+        game.setMenuOpen(true);
+        const paused_position = game.player.?.position;
+        const paused_velocity = game.player.?.vertical_velocity;
+        fixture.engine.frame_delta = 0.1;
+        game.updateGameplay(false);
+        try std.testing.expectEqualDeep(paused_position, game.player.?.position);
+        try std.testing.expectEqual(paused_velocity, game.player.?.vertical_velocity);
+    }
 }
 
 test "map Escape, menu, and exit transitions preserve modal input capture" {
