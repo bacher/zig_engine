@@ -1,0 +1,485 @@
+//! Bounded offline diagnostics. No map census is part of preparation or queries.
+const std = @import("std");
+const generator = @import("world_generator.zig");
+const hash = @import("generation_hash.zig");
+const mountains = @import("generation_mountains.zig");
+const environment = @import("world_environment.zig");
+
+/// Shared command-line profile names for the offline map and benchmark tools.
+pub fn profileDimensions(name: []const u8) ![3]u32 {
+    if (std.mem.eql(u8, name, "half")) return .{ 1024, 512, 16 };
+    if (std.mem.eql(u8, name, "default")) return .{ 2048, 1024, 32 };
+    if (std.mem.eql(u8, name, "double")) return .{ 4096, 2048, 64 };
+    return error.InvalidProfile;
+}
+
+pub const MountainSite = struct {
+    block: [2]u32,
+    height: u32,
+    owner: u8,
+};
+
+pub const MountainPass = struct {
+    site: MountainSite,
+    endpoints: [2]MountainSite,
+    /// Both endpoints stand this far above the sampled corridor floor.
+    wall_relief: u32,
+    /// Every probe remains dry land of this owner with mountain influence.
+    connected: bool,
+    transverse_offset_blocks: i32,
+};
+
+pub const DisconnectedMountainPair = struct {
+    endpoints: [2]MountainSite,
+    first_gap: struct {
+        block: [2]u32,
+        height: u32,
+        owner: u8,
+        coast_distance: u32,
+        climate: @import("world_environment.zig").ClimateId,
+        mountain_strength: u16,
+        reason: enum { water_or_owner_change, coastal_collar, frozen_or_climate_taper, zero_integrated_influence },
+    },
+};
+
+pub const MountainReport = struct {
+    active_peaks: u32 = 0,
+    dry_summits: u32 = 0,
+    high_summits_at_95_percent: u32 = 0,
+    rock_summits: u32 = 0,
+    asymmetric_peaks: u32 = 0,
+    pointed_summits: u32 = 0,
+    consecutive_bin_pairs: u32 = 0,
+    mountain_endpoint_pairs: u32 = 0,
+    influence_connected_pairs: u32 = 0,
+    disconnected_pairs_with_mountain_endpoints: u32 = 0,
+    first_disconnected_pair: ?DisconnectedMountainPair = null,
+    connected_passes: u32 = 0,
+    sea_level: u32,
+    height_limit: u32,
+    min_summit_height: ?u32 = null,
+    max_summit_height: ?u32 = null,
+    min_width_blocks: ?u32 = null,
+    max_width_blocks: ?u32 = null,
+    summit: ?MountainSite = null,
+    pass: ?MountainPass = null,
+    gorge: ?MountainPass = null,
+    column_probes: u32 = 0,
+};
+
+fn mountainSite(prepared: *const generator.PreparedWorldGenerator, point: [2]u32, probes: *u32) MountainSite {
+    const e = prepared.columnEnvironmentAt(point[0], point[1]);
+    probes.* += 1;
+    return .{ .block = point, .height = e.terrain_height, .owner = e.landmass_id };
+}
+
+/// Integer interpolation follows the shortest cylindrical X segment. The same
+/// path is used by the image exporter and by the bounded feature diagnostics.
+pub fn mountainPathPoint(a: [2]u32, b: [2]u32, index: u32, steps: u32, width: u32) [2]u32 {
+    std.debug.assert(steps > 0 and index <= steps);
+    const dx = hash.distanceX(b[0], a[0], width);
+    return .{
+        hash.wrappedX(@as(i64, a[0]) + @divTrunc(dx * index, steps), width),
+        @intCast(@as(i64, a[1]) + @divTrunc((@as(i64, b[1]) - a[1]) * index, steps)),
+    };
+}
+
+/// Offline geometry probes only: at most 160 summits and 159 * 3 * 257 path
+/// samples. This is neither a census nor a preparation/acceptance condition.
+/// The pass follows adjacent summits; the gorge is the strongest two-wall
+/// depression on that path or either parallel offset, with no terrain carving.
+pub fn sampleMountains(prepared: *const generator.PreparedWorldGenerator) MountainReport {
+    const field = &prepared.kind.natural.geography.mountains;
+    const size = prepared.layout.size_in_blocks;
+    var result = MountainReport{ .sea_level = size[2] / 2, .height_limit = @intCast(@as(u64, size[2]) * 95 / 100) };
+    for (field.peaks[0..field.continent_count], 0..) |peaks, owner_index| {
+        var previous: ?mountains.Peak = null;
+        for (peaks) |peak| {
+            if (!peak.active) continue;
+            result.active_peaks += 1;
+            const site = mountainSite(prepared, peak.center, &result.column_probes);
+            const e = prepared.columnEnvironmentAt(peak.center[0], peak.center[1]);
+            result.column_probes += 1;
+            if (!e.water_present and site.owner == owner_index + 1 and e.mountain_strength > 0) {
+                result.dry_summits += 1;
+                result.high_summits_at_95_percent += @intFromBool(site.height == result.height_limit);
+                result.rock_summits += @intFromBool(e.surface_cover == .rock);
+                result.min_summit_height = @min(result.min_summit_height orelse site.height, site.height);
+                result.max_summit_height = @max(result.max_summit_height orelse site.height, site.height);
+                if (result.summit == null or site.height > result.summit.?.height) result.summit = site;
+                var pointed = true;
+                for ([_][2]i32{ .{ -8, 0 }, .{ 8, 0 }, .{ 0, -8 }, .{ 0, 8 } }) |offset| {
+                    const y = @as(i64, peak.center[1]) + offset[1];
+                    if (y < 0 or y >= size[1]) continue;
+                    const near = prepared.columnEnvironmentAt(@as(i64, peak.center[0]) + offset[0], @intCast(y));
+                    result.column_probes += 1;
+                    pointed = pointed and near.terrain_height < site.height;
+                }
+                result.pointed_summits += @intFromBool(pointed);
+            }
+            result.asymmetric_peaks += @intFromBool(peak.radii_x[0] != peak.radii_x[1] or peak.radii_y[0] != peak.radii_y[1] or peak.shape_x[0] != peak.shape_x[1] or peak.shape_y[0] != peak.shape_y[1] or peak.skew_q16 != 0);
+            const width = peak.radii_x[0] + peak.radii_x[1];
+            result.min_width_blocks = @min(result.min_width_blocks orelse width, width);
+            result.max_width_blocks = @max(result.max_width_blocks orelse width, width);
+            if (previous) |first| {
+                // Gaps of more than one bin are not claimed to be a range.
+                if (field.binAt(peak.center[1]) == field.binAt(first.center[1]) + 1) {
+                    result.consecutive_bin_pairs += 1;
+                    const offset: i32 = @intCast(@min(first.radii_x[1], peak.radii_x[0]) / 4);
+                    for ([_]i32{ 0, -offset, offset }) |shift| {
+                        const a = [2]u32{ hash.wrappedX(@as(i64, first.center[0]) + shift, size[0]), first.center[1] };
+                        const b = [2]u32{ hash.wrappedX(@as(i64, peak.center[0]) + shift, size[0]), peak.center[1] };
+                        const endpoints = [2]MountainSite{ mountainSite(prepared, a, &result.column_probes), mountainSite(prepared, b, &result.column_probes) };
+                        var minimum: ?MountainSite = null;
+                        var connected = true;
+                        var mountain_endpoints = true;
+                        var first_gap: ?@FieldType(DisconnectedMountainPair, "first_gap") = null;
+                        for (0..257) |i| {
+                            const point = mountainPathPoint(a, b, @intCast(i), 256, size[0]);
+                            const at = prepared.columnEnvironmentAt(point[0], point[1]);
+                            result.column_probes += 1;
+                            const influenced = !at.water_present and at.landmass_id == owner_index + 1 and at.mountain_strength > 0;
+                            connected = connected and influenced;
+                            if (!influenced and first_gap == null) first_gap = .{
+                                .block = point,
+                                .height = at.terrain_height,
+                                .owner = at.landmass_id,
+                                .coast_distance = at.coast_distance,
+                                .climate = at.climate,
+                                .mountain_strength = at.mountain_strength,
+                                .reason = if (at.water_present or at.landmass_id != owner_index + 1) .water_or_owner_change else if (at.coast_distance <= 16) .coastal_collar else if (prepared.kind.natural.climate.sample(point[0], point[1]).mountain_fade == 0) .frozen_or_climate_taper else .zero_integrated_influence,
+                            };
+                            if (i == 0 or i == 256) mountain_endpoints = mountain_endpoints and !at.water_present and at.landmass_id == owner_index + 1 and at.mountain_strength > 0;
+                            // Excluding endpoint shoulders makes a measured
+                            // depression distinct from an ordinary downhill face.
+                            if (i < 26 or i > 230) continue;
+                            if (minimum == null or at.terrain_height < minimum.?.height) minimum = .{ .block = point, .height = at.terrain_height, .owner = at.landmass_id };
+                        }
+                        const floor = minimum.?;
+                        const wall_relief = @min(endpoints[0].height, endpoints[1].height) -| floor.height;
+                        if (shift == 0) {
+                            result.mountain_endpoint_pairs += @intFromBool(mountain_endpoints);
+                            result.influence_connected_pairs += @intFromBool(connected);
+                            result.disconnected_pairs_with_mountain_endpoints += @intFromBool(mountain_endpoints and !connected);
+                            if (mountain_endpoints and !connected and result.first_disconnected_pair == null) result.first_disconnected_pair = .{ .endpoints = endpoints, .first_gap = first_gap.? };
+                        }
+                        if (!connected or wall_relief == 0) continue;
+                        const pass = MountainPass{ .site = floor, .endpoints = endpoints, .wall_relief = wall_relief, .connected = connected, .transverse_offset_blocks = shift };
+                        if (shift == 0) {
+                            result.connected_passes += 1;
+                            if (result.pass == null or pass.site.height > result.pass.?.site.height) result.pass = pass;
+                        }
+                        if (result.gorge == null or pass.wall_relief > result.gorge.?.wall_relief) result.gorge = pass;
+                    }
+                }
+            }
+            previous = peak;
+        }
+    }
+    return result;
+}
+
+pub const LandCoverageSummary = struct {
+    measured_seeds: usize,
+    mean_percent: ?f64 = null,
+    p2_5_percent: ?f64 = null,
+    p50_percent: ?f64 = null,
+    p95_percent: ?f64 = null,
+    p97_5_percent: ?f64 = null,
+    seeds_within_25_45_percent: usize = 0,
+    fraction_within_25_45_percent: ?f64 = null,
+};
+
+/// Empirical percentiles interpolate between adjacent sorted observations at
+/// (n - 1) * p. They describe this suite, not confidence bounds for world coverage.
+fn percentileSorted(sorted: []const f64, p: f64) f64 {
+    std.debug.assert(sorted.len > 0 and p >= 0 and p <= 1);
+    const position = @as(f64, @floatFromInt(sorted.len - 1)) * p;
+    const lower: usize = @intFromFloat(@floor(position));
+    const upper = @min(lower + 1, sorted.len - 1);
+    return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - @as(f64, @floatFromInt(lower)));
+}
+
+/// Offline informational summary; sorts the supplied per-seed estimates in place.
+/// The inclusive 25–45% envelope is a tuning diagnostic, never a seed rejection rule.
+pub fn summarizeLandCoverage(estimates: []f64) LandCoverageSummary {
+    var summary: LandCoverageSummary = .{ .measured_seeds = estimates.len };
+    if (estimates.len == 0) return summary;
+    var total: f64 = 0;
+    for (estimates) |estimate| {
+        std.debug.assert(std.math.isFinite(estimate) and estimate >= 0 and estimate <= 100);
+        total += estimate;
+        summary.seeds_within_25_45_percent += @intFromBool(estimate >= 25 and estimate <= 45);
+    }
+    std.mem.sort(f64, estimates, {}, std.sort.asc(f64));
+    summary.mean_percent = total / @as(f64, @floatFromInt(estimates.len));
+    summary.p2_5_percent = percentileSorted(estimates, 0.025);
+    summary.p50_percent = percentileSorted(estimates, 0.5);
+    summary.p95_percent = percentileSorted(estimates, 0.95);
+    summary.p97_5_percent = percentileSorted(estimates, 0.975);
+    summary.fraction_within_25_45_percent = @as(f64, @floatFromInt(summary.seeds_within_25_45_percent)) / @as(f64, @floatFromInt(estimates.len));
+    return summary;
+}
+
+test "land coverage summary interpolates percentiles and includes envelope endpoints" {
+    var estimates = [_]f64{ 50, 25, 35, 20, 45 };
+    const summary = summarizeLandCoverage(&estimates);
+    try std.testing.expectEqual(@as(usize, 5), summary.measured_seeds);
+    try std.testing.expectApproxEqAbs(@as(f64, 35), summary.mean_percent.?, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 20.5), summary.p2_5_percent.?, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 35), summary.p50_percent.?, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 49), summary.p95_percent.?, 1e-10);
+    try std.testing.expectApproxEqAbs(@as(f64, 49.5), summary.p97_5_percent.?, 1e-10);
+    try std.testing.expectEqual(@as(usize, 3), summary.seeds_within_25_45_percent);
+    try std.testing.expectApproxEqAbs(@as(f64, 0.6), summary.fraction_within_25_45_percent.?, 1e-10);
+}
+
+test "land coverage summary handles empty singleton and even suites" {
+    var empty: [0]f64 = .{};
+    const no_measurements = summarizeLandCoverage(&empty);
+    try std.testing.expectEqual(@as(usize, 0), no_measurements.measured_seeds);
+    try std.testing.expectEqual(null, no_measurements.mean_percent);
+    try std.testing.expectEqual(null, no_measurements.p2_5_percent);
+    try std.testing.expectEqual(null, no_measurements.p50_percent);
+    try std.testing.expectEqual(null, no_measurements.p95_percent);
+    try std.testing.expectEqual(null, no_measurements.p97_5_percent);
+    try std.testing.expectEqual(null, no_measurements.fraction_within_25_45_percent);
+    var singleton = [_]f64{24};
+    const one = summarizeLandCoverage(&singleton);
+    try std.testing.expectEqual(@as(?f64, 24), one.mean_percent);
+    try std.testing.expectEqual(@as(?f64, 24), one.p2_5_percent);
+    try std.testing.expectEqual(@as(?f64, 24), one.p50_percent);
+    try std.testing.expectEqual(@as(?f64, 24), one.p95_percent);
+    try std.testing.expectEqual(@as(?f64, 24), one.p97_5_percent);
+    try std.testing.expectEqual(@as(?f64, 0), one.fraction_within_25_45_percent);
+    var even = [_]f64{ 45, 25 };
+    const two = summarizeLandCoverage(&even);
+    try std.testing.expectEqual(@as(?f64, 35), two.p50_percent);
+    try std.testing.expectEqual(@as(?f64, 1), two.fraction_within_25_45_percent);
+}
+
+pub const Column = struct {
+    terrain_height: u32,
+    sea_level: u32,
+    /// Intended mainland/island owner remains available even after a bad refinement.
+    owner: u8 = 0,
+    core: bool = false,
+    protected_water: bool = false,
+    pub fn isLand(self: Column) bool {
+        return self.terrain_height >= self.sea_level;
+    }
+};
+pub const TopologyGrid = struct {
+    width: u32,
+    height: u32,
+    columns: []const Column,
+    /// Minimum Chebyshev water gap between distinct intended owners (includes corners).
+    water_gap: u8 = 1,
+};
+pub const TopologyReport = struct { land_columns: usize = 0, components: usize = 0, mainlands: usize = 0, islands: usize = 0 };
+pub const TopologyError = error{ InvalidGrid, MissingCore, MissingOwner, MultipleCores, UnknownLand, MergedOwners, DisconnectedOwner, ProtectedWaterLost, WaterGapBreached } || std.mem.Allocator.Error;
+
+/// Exhaustive cardinal graph over actual final H/S columns, cylindrical only in X.
+/// Used on reduced/adversarial fixtures and explicit offline diagnostics.
+pub fn validateTopology(a: std.mem.Allocator, grid: TopologyGrid) TopologyError!TopologyReport {
+    if (grid.width == 0 or grid.height == 0 or grid.water_gap > 8 or @as(u64, grid.width) * grid.height != grid.columns.len) return error.InvalidGrid;
+    var report: TopologyReport = .{};
+    const visited = try a.alloc(bool, grid.columns.len);
+    defer a.free(visited);
+    @memset(visited, false);
+    const queue = try a.alloc(usize, grid.columns.len);
+    defer a.free(queue);
+    var owners = [_]bool{false} ** 256;
+    for (grid.columns, 0..) |column, start| {
+        if (column.protected_water and column.isLand()) return error.ProtectedWaterLost;
+        if (column.core and !column.isLand()) return error.MissingCore;
+        if (!column.isLand() or visited[start]) continue;
+        if (column.owner == 0) return error.UnknownLand;
+        if (owners[column.owner]) return error.DisconnectedOwner;
+        owners[column.owner] = true;
+        queue[0] = start;
+        visited[start] = true;
+        var count: usize = 1;
+        var cursor: usize = 0;
+        var cores: usize = 0;
+        while (cursor < count) : (cursor += 1) {
+            const index = queue[cursor];
+            const current = grid.columns[index];
+            report.land_columns += 1;
+            cores += @intFromBool(current.core);
+            if (current.owner != column.owner) return error.MergedOwners;
+            const x = index % grid.width;
+            const y = index / grid.width;
+            const neighbors = [_]?usize{
+                y * grid.width + (x + grid.width - 1) % grid.width,
+                y * grid.width + (x + 1) % grid.width,
+                if (y > 0) index - grid.width else null,
+                if (y + 1 < grid.height) index + grid.width else null,
+            };
+            for (neighbors) |neighbor| {
+                const next = neighbor orelse continue;
+                if (visited[next] or !grid.columns[next].isLand()) continue;
+                visited[next] = true;
+                queue[count] = next;
+                count += 1;
+            }
+        }
+        if (column.owner < 128) {
+            if (cores == 0) return error.MissingCore;
+            if (cores != 1) return error.MultipleCores;
+            report.mainlands += 1;
+        } else {
+            if (cores != 0) return error.MultipleCores;
+            report.islands += 1;
+        }
+        report.components += 1;
+    }
+    for (grid.columns) |column| if (column.owner != 0 and !owners[column.owner]) return error.MissingOwner;
+    // Connectivity alone misses diagonal approaches and lost clearance corridors.
+    for (grid.columns, 0..) |column, index| {
+        if (!column.isLand()) continue;
+        const x: i64 = @intCast(index % grid.width);
+        const y: i64 = @intCast(index / grid.width);
+        const gap: i64 = grid.water_gap;
+        var dy = -gap;
+        while (dy <= gap) : (dy += 1) {
+            if (y + dy < 0 or y + dy >= grid.height) continue;
+            var dx = -gap;
+            while (dx <= gap) : (dx += 1) {
+                const nx: usize = @intCast(@mod(x + dx, @as(i64, grid.width)));
+                const ny: usize = @intCast(y + dy);
+                const neighbor = grid.columns[ny * grid.width + nx];
+                if (neighbor.isLand() and neighbor.owner != column.owner) return error.WaterGapBreached;
+            }
+        }
+    }
+    return report;
+}
+
+pub const SampleReport = struct {
+    samples: u64 = 0,
+    land: u64 = 0,
+    mainland: u64 = 0,
+    island: u64 = 0,
+    climate_belts: [7]u64 = @splat(0),
+    land_climate_belts: [7]u64 = @splat(0),
+    relief: [2]u64 = @splat(0),
+    land_relief: [2]u64 = @splat(0),
+    land_geology: [2]u64 = @splat(0),
+    /// Dry-land desert columns, ordered dunes then flats.
+    desert_biomes: [2]u64 = @splat(0),
+    /// Dry temperate columns with zero mountain influence, ordered flatland,
+    /// rolling_hills, hilly. These are sampled areas, not acceptance quotas.
+    temperate_landforms: [3]u64 = @splat(0),
+    /// Same columns, with the second axis ordered meadow then forest.
+    temperate_landform_vegetation: [3][2]u64 = @splat(@splat(0)),
+    /// Sum of mutable dry-land host depths over sampled columns. Multiplying by
+    /// world horizontal area / samples estimates eligible host voxel volume.
+    host_depth_by_relief_geology: [2][2]u64 = @splat(@splat(0)),
+    vegetation: [4]u64 = @splat(0),
+    fingerprint: u64 = 0,
+
+    pub fn landPercent(self: SampleReport) f64 {
+        return if (self.samples == 0) 0 else @as(f64, @floatFromInt(self.land)) * 100 / @as(f64, @floatFromInt(self.samples));
+    }
+};
+
+fn recordTemperateColumn(result: *SampleReport, e: environment.ColumnEnvironment) void {
+    if (e.water_present or e.terrain_height < e.sea_level or e.climate != .temperate or e.mountain_strength != 0) return;
+    const landform = e.temperate_landform orelse return;
+    const index = @intFromEnum(landform);
+    result.temperate_landforms[index] += 1;
+    if (e.vegetation == .meadow or e.vegetation == .forest) {
+        result.temperate_landform_vegetation[index][@intFromBool(e.vegetation == .forest)] += 1;
+    }
+}
+
+test "temperate area accounting preserves separate landform and vegetation axes" {
+    var report: SampleReport = .{};
+    var column: environment.ColumnEnvironment = .{
+        .climate = .temperate,
+        .terrain_height = 520,
+        .sea_level = 512,
+        .water_present = false,
+        .relief = .lowland,
+        .mountain_strength = 0,
+        .vegetation = .forest,
+        .geology = .sedimentary,
+        .surface_cover = .soil,
+        .landmass_id = 1,
+        .coast_distance = 1024,
+    };
+    const observations = [_]struct { environment.TemperateLandform, environment.VegetationId }{
+        .{ .hilly, .forest },    .{ .flatland, .meadow },      .{ .rolling_hills, .forest },
+        .{ .flatland, .forest }, .{ .hilly, .meadow },         .{ .rolling_hills, .forest },
+        .{ .flatland, .meadow }, .{ .rolling_hills, .meadow },
+    };
+    for (observations) |observation| {
+        column.temperate_landform = observation[0];
+        column.vegetation = observation[1];
+        recordTemperateColumn(&report, column);
+    }
+    try std.testing.expectEqualDeep([3]u64{ 3, 3, 2 }, report.temperate_landforms);
+    try std.testing.expectEqualDeep([3][2]u64{ .{ 2, 1 }, .{ 1, 2 }, .{ 1, 1 } }, report.temperate_landform_vegetation);
+
+    const before = report;
+    column.temperate_landform = null;
+    recordTemperateColumn(&report, column);
+    column.temperate_landform = .flatland;
+    column.mountain_strength = 1;
+    recordTemperateColumn(&report, column);
+    column.mountain_strength = 0;
+    column.water_present = true;
+    recordTemperateColumn(&report, column);
+    column.water_present = false;
+    column.terrain_height = 511;
+    recordTemperateColumn(&report, column);
+    column.terrain_height = 520;
+    column.climate = .steppe;
+    recordTemperateColumn(&report, column);
+    try std.testing.expectEqualDeep(before, report);
+}
+
+/// A reproducible jittered grid with O(1) retained memory. Offset passes are
+/// estimators; their disagreement is reported without claiming a confidence bound.
+pub fn sampleEnvironment(prepared: *const generator.PreparedWorldGenerator, width: u32, height: u32, pass: u64) SampleReport {
+    std.debug.assert(width > 0 and height > 0);
+    var result: SampleReport = .{};
+    const size = prepared.layout.size_in_blocks;
+    for (0..height) |py| for (0..width) |px| {
+        const h = hash.at(hash.mix(pass), @intCast(px), @intCast(py));
+        const x0 = @as(u64, @intCast(px)) * size[0] / width;
+        const x1 = @as(u64, @intCast(px + 1)) * size[0] / width;
+        const y0 = @as(u64, @intCast(py)) * size[1] / height;
+        const y1 = @as(u64, @intCast(py + 1)) * size[1] / height;
+        const x: i64 = @intCast(x0 + h % @max(1, x1 - x0));
+        const y: u32 = @intCast(y0 + (h >> 32) % @max(1, y1 - y0));
+        const e = prepared.columnEnvironmentAt(x, y);
+        const belt: usize = switch (e.climate) {
+            .frozen => if (y < size[1] / 2) 0 else 6,
+            .steppe => if (y < size[1] / 2) 1 else 5,
+            .temperate => if (y < size[1] / 2) 2 else 4,
+            .desert => 3,
+        };
+        result.samples += 1;
+        result.climate_belts[belt] += 1;
+        if (e.terrain_height >= e.sea_level) {
+            result.land += 1;
+            result.land_climate_belts[belt] += 1;
+            result.land_relief[@intFromEnum(e.relief)] += 1;
+            result.land_geology[@intFromEnum(e.geology)] += 1;
+            if (e.desert_biome) |biome| result.desert_biomes[@intFromEnum(biome)] += 1;
+            recordTemperateColumn(&result, e);
+            const top = e.terrain_height - @min(e.terrain_height, if (e.surface_cover == .sand) @as(u32, 5) else 0);
+            const floor = prepared.deeprockThickness(x, y);
+            result.host_depth_by_relief_geology[@intFromEnum(e.relief)][@intFromEnum(e.geology)] += top - @min(top, floor);
+            if (e.landmass_id >= 128) result.island += 1 else result.mainland += 1;
+        }
+        result.relief[@intFromEnum(e.relief)] += 1;
+        result.vegetation[@intFromEnum(e.vegetation)] += 1;
+        const desert_biome: u64 = if (e.desert_biome) |biome| @as(u64, @intFromEnum(biome)) + 1 else 0;
+        const temperate_landform: u64 = if (e.temperate_landform) |landform| @as(u64, @intFromEnum(landform)) + 1 else 0;
+        result.fingerprint = hash.mix(result.fingerprint ^ @as(u64, e.terrain_height) ^ (@as(u64, @intFromEnum(e.climate)) << 32) ^ (@as(u64, e.landmass_id) << 40) ^ (@as(u64, @intFromEnum(e.vegetation)) << 48) ^ (desert_biome << 56) ^ (temperate_landform << 58));
+    };
+    return result;
+}

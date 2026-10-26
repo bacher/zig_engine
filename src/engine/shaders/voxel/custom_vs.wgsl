@@ -11,6 +11,7 @@ struct VertexOut {
     @location(2) position_light_clip_0: vec4f,
     @location(3) position_light_clip_1: vec4f,
     @location(4) position_light_clip_2: vec4f,
+    @location(5) @interpolate(flat) material_and_side: vec2u,
 }
 
 @vertex fn main(@builtin(instance_index) instance_index: u32, @builtin(vertex_index) vertex_index: u32) -> VertexOut {
@@ -19,5 +20,5 @@ struct VertexOut {
         (view_from_world * vec4f(vertex.normal, 0.0)).xyz, vertex.uv,
         light_clip_from_chunk_array[0] * vertex.position,
         light_clip_from_chunk_array[1] * vertex.position,
-        light_clip_from_chunk_array[2] * vertex.position);
+        light_clip_from_chunk_array[2] * vertex.position, vertex.material_and_side);
 }

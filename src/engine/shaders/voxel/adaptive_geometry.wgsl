@@ -2,6 +2,7 @@ struct VoxelVertex {
     position: vec4f,
     normal: vec3f,
     uv: vec2f,
+    material_and_side: vec2u,
 }
 
 // Four patches along each edge; opposite profiles match for rows in either axis.
@@ -30,6 +31,7 @@ fn adaptiveVertex(vertex_index: u32) -> VoxelVertex {
     var local: vec3f;
     var normal: vec3f;
     var uv: vec2f;
+    var material_side = 5u;
     if (quad < 16u) {
         let cell = vec2u(quad % 4u, quad / 4u);
         let offset = getPosition(5u, corner).xy;
@@ -45,6 +47,7 @@ fn adaptiveVertex(vertex_index: u32) -> VoxelVertex {
         uv = vec2f(local.x, 1.0 - local.y);
     } else if (quad < 32u) {
         let side = (quad - 16u) / 4u;
+        material_side = side;
         let segment = (quad - 16u) % 4u;
         let cube = getPosition(side, corner);
         var point = cube.xy * 4u;
@@ -62,9 +65,9 @@ fn adaptiveVertex(vertex_index: u32) -> VoxelVertex {
     } else {
         local = vec3f(getPosition(4u, corner));
         normal = getNormal(4u);
-        return VoxelVertex(vec4f(local, 1.0), normal, getUv(4u, corner, 14u));
+        return VoxelVertex(vec4f(local, 1.0), normal, getUv(4u, corner, 14u), vec2u(14u, 4u));
     }
-    return VoxelVertex(vec4f(local, 1.0), normal, (vec2f(4.0, 0.0) + uv) * ATLAS_SLOT);
+    return VoxelVertex(vec4f(local, 1.0), normal, (vec2f(4.0, 0.0) + uv) * ATLAS_SLOT, vec2u(14u, material_side));
 }
 
 // Local material geometry shared by world blocks and camera-held previews.
@@ -75,5 +78,5 @@ fn blockVertex(vertex_index: u32, material: u32) -> VoxelVertex {
     let side = vertex_index / 6u;
     let corner = vertex_index % 6u;
     return VoxelVertex(vec4f(vec3f(getPosition(side, corner)), 1.0),
-                       getNormal(side), getUv(side, corner, material));
+                       getNormal(side), getUv(side, corner, material), vec2u(material, side));
 }

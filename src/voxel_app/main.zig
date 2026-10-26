@@ -187,6 +187,8 @@ const Game = struct {
         if (game.world_data) |world_data| {
             // Setup can fail before both world and client have been initialized.
             if (game.world != null and game.world_client != null) game.flushBlockOperations();
+            // The floor callback borrows the service's immutable prepared generator.
+            if (game.world) |*world| world.immutable_floor = null;
             world_data.destroy();
         }
         game.world_data = null;
@@ -417,6 +419,14 @@ const Game = struct {
             scene.spectator_enabled = true;
             game.engine.input_controller.cursor_capture = .always;
         } else {
+            if (game.world) |*world| {
+                var query: terrain_collision.Query = .{ .world = world, .body = player.body };
+                switch (query.overlap(player.position, false)) {
+                    .clear => {},
+                    .solid => if (!player.recover(&query, game.engine.time)) return,
+                    .missing => return,
+                }
+            }
             game.control_mode = .player;
             scene.spectator_enabled = false;
             game.engine.input_controller.cursor_capture = .always;
@@ -961,9 +971,11 @@ const Game = struct {
             _ = game.mesh_versions.remove(chunk_id.*);
             voxel_grid.removeChunk(coords);
             if (chunk.content == .blocks and !chunk.flags.is_unreachable) {
+                var climate: world_engine.ClimateMap = @splat(@splat(.temperate));
+                if (game.world_data) |service| service.preparedGenerator().fillClimateMap(.{ coords[0], coords[1] }, &climate);
                 voxel_grid.appendChunk(.{
                     .chunk_coords = coords,
-                    .chunk_side_data = world_engine.extractChunkGeometry(game.allocator, chunk, game.meshNeighbors(coords)),
+                    .chunk_side_data = world_engine.extractChunkGeometryWithClimate(game.allocator, chunk, game.meshNeighbors(coords), &climate),
                 });
             }
         }
@@ -1014,40 +1026,47 @@ const BlockAction = union(enum) {
 };
 
 fn initWorld(game: *Game) !void {
-    const generator = if (game.persistence_store) |store| try savedGenerator(store.descriptor) else world_generator.WorldGenerator{ .terrain = .{ .seed = 12345 } };
+    const generator = if (game.persistence_store) |store| try savedGenerator(store.descriptor) else world_generator.WorldGenerator{ .natural = .{ .seed = 12345 } };
     game.world_data = if (game.persistence_store) |store|
         try WorldDataService.createPersistent(game.engine.io, game.allocator, game.engine.active_scene.?.layout, generator, store, .{})
     else
         try WorldDataService.create(game.engine.io, game.allocator, game.engine.active_scene.?.layout, generator);
     game.world = try World.init(game.allocator, game.engine.active_scene.?.layout);
+    game.world.?.playable_y_inset = game.world_data.?.preparedGenerator().playableYInset();
+    game.world.?.immutable_floor = .{ .context = game.world_data.?.preparedGenerator(), .immutable_at = canonicalFloorAt };
     game.world.?.pending_operation_limit = 256;
     game.world.?.simulation_tick = game.world_data.?.restoredTick();
     game.world_client = try game.world_data.?.createClient();
 }
 
+fn canonicalFloorAt(context: *const anyopaque, block: [3]u32) bool {
+    const generator: *const world_generator.PreparedWorldGenerator = @ptrCast(@alignCast(context));
+    return block[2] < generator.deeprockThickness(block[0], block[1]);
+}
+
 fn savedGenerator(bytes: []const u8) !world_generator.WorldGenerator {
     const descriptor = try persistence_format.decodeDescriptor(bytes);
-    if (descriptor.generator_id == 0) return .flat;
-    const settings = try persistence_format.decodeTerrainSettings(descriptor.settings);
-    return .{ .terrain = .{ .seed = descriptor.seed, .params = .{
-        .noise_scale = settings.noise_scale,
-        .octaves = settings.octaves,
-        .lacunarity = settings.lacunarity,
-        .persistence = settings.persistence,
-        .base_height = settings.base_height,
-        .height_amplitude = settings.height_amplitude,
-        .dirt_depth = settings.dirt_depth,
-    } } };
+    return switch (descriptor.generator_id) {
+        persistence_format.generator_id => switch (descriptor.generator_version) {
+            persistence_format.generator_version => switch (try persistence_format.decodeGeneratorSettings(descriptor.settings)) {
+                .flat => .{ .flat_seeded = descriptor.seed },
+                .natural => |settings| .{ .natural = .{ .seed = descriptor.seed, .settings = settings } },
+            },
+            else => error.UnsupportedVersion,
+        },
+        else => error.UnsupportedGenerator,
+    };
 }
 
 fn openSelectedWorld(init: std.process.Init, options: persistence_launch.Options, path: [:0]const u8) !persistence_storage.Store {
     if (options.mode == .open) return persistence_storage.Store.open(init.gpa, path, .{});
     var uuid: [16]u8 = undefined;
     try init.io.randomSecure(&uuid);
-    const settings = persistence_format.encodeTerrainSettings(.{});
+    const settings = persistence_format.encodeNaturalSettings(.{});
     const descriptor = try persistence_format.encodeDescriptor(init.gpa, .{
         .dimensions = consts.WORLD_SETTINGS.size_in_chunks,
-        .generator_id = 1,
+        .generator_id = persistence_format.generator_id,
+        .generator_version = persistence_format.generator_version,
         .seed = 12345,
         .settings = &settings,
     });
@@ -1213,11 +1232,15 @@ pub fn main(init: std.process.Init) !void {
     try initWorld(game);
     const body: terrain_collision.Body = .{};
     const saved_player = game.world_data.?.restoredPlayer(game.player_id);
+    const initial_xy: [2]f64 = if (game.world_data.?.preparedGenerator().firstStart()) |start| .{
+        @as(f64, @floatFromInt(start[0])) - @as(f64, @floatFromInt(scene.layout.origin_chunk[0])) * consts.CHUNK_SIZE + 0.5,
+        @as(f64, @floatFromInt(start[1])) - @as(f64, @floatFromInt(scene.layout.origin_chunk[1])) * consts.CHUNK_SIZE + 0.5,
+    } else .{ -2.06, -2.96 };
     const spawn = if (saved_player) |saved|
         try game.world_client.?.resolveRestoredPosition(saved.feet, body)
     else
         try game.world_client.?.findStandingSpace(.{
-            .preferred_xy = .{ -2.06, -2.96 },
+            .preferred_xy = initial_xy,
             .clearance_size = .{ 2, 2, 3 },
             .support_size = .{ 2 * body.half_width, 2 * body.half_width },
             .search_radius = 8,
@@ -1919,6 +1942,7 @@ test "tool shortcuts respect Tab mode, edit once and preserve material selection
         @intCast(origin[2] * consts.CHUNK_SIZE),
     };
     fixture.game.world.?.setBlockUnchecked(target, .stone);
+    try fixture.supportSandPlacement(.{ target[0], target[1] - 1, target[2] });
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
 
     const materials = [_]voxel_chunk_module.BlockType{ .dirt, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive };
@@ -1979,7 +2003,7 @@ test "tool presses across a Tab switch retain the action captured at each press"
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    try fixture.prepareToolTest();
+    try fixture.prepareSupportedToolTest();
     handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
     handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
     handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
@@ -1998,7 +2022,7 @@ test "two keyboard or mouse placement presses before an update both edit the wor
         var fixture: StreamingTest = .{};
         fixture.init();
         defer fixture.deinit();
-        try fixture.prepareToolTest();
+        try fixture.prepareSupportedToolTest();
         handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
         for (0..2) |_| {
             if (mouse) {
@@ -2018,7 +2042,7 @@ test "a placement press captures its material before the next selection" {
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    try fixture.prepareToolTest();
+    try fixture.prepareSupportedToolTest();
     handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
     handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
     fixture.game.selected_material = .snow;
@@ -2030,7 +2054,7 @@ test "mixed keyboard and mouse commands execute in order with each press's mater
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    try fixture.prepareToolTest();
+    try fixture.prepareSupportedToolTest();
     handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
     handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
     fixture.game.selected_material = .snow;
@@ -2055,13 +2079,13 @@ test "queued edits use the camera view updated after the press" {
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    try fixture.prepareToolTest();
+    try fixture.prepareSupportedToolTest();
     handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
     const origin = test_layout.origin_chunk;
     try fixture.game.world.?.insertChunk(origin - ChunkCoords{ 0, 0, 1 }, WorldChunk.initEmpty());
     const target = StreamingTest.toolTarget();
     const placement: [3]u32 = .{ target[0], target[1] - 3, target[2] };
-    fixture.game.world.?.setBlockUnchecked(.{ placement[0], placement[1], placement[2] - 1 }, .stone);
+    try fixture.supportSandPlacement(placement);
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
     handleKeyPress(&fixture.game, .{ .key = .e, .mods = .{} });
     try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
@@ -2185,6 +2209,7 @@ test "nearest-vertex previews and actions agree in both block and control modes 
             const candidate = coordinates.fromWorld(&test_layout, .{ 0, 4, 0 }).?;
             const backing = coordinates.fromWorld(&test_layout, .{ 0, 5, 0 }).?;
             fixture.game.world.?.setBlockUnchecked(if (mode == .removing) candidate else backing, .stone);
+            if (mode == .putting) try fixture.supportSandPlacement(candidate);
             fixture.game.world.?.pending_operations.clearRetainingCapacity();
             fixture.game.updateBlockFocus();
             // Plain R has no block-tool action; Ctrl+R belongs to the engine's SSAO debug view.
@@ -2235,6 +2260,7 @@ test "observer removes and replaces the same slot without camera movement" {
     const backing = coordinates.fromWorld(&test_layout, .{ 0, 5, 0 }).?;
     fixture.game.world.?.setBlockUnchecked(candidate, .stone);
     fixture.game.world.?.setBlockUnchecked(backing, .stone);
+    try fixture.supportSandPlacement(candidate);
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
     fixture.game.updateBlockFocus();
     try std.testing.expectEqual(candidate, fixture.scene.highlighted_block.?);
@@ -2372,7 +2398,7 @@ test "placement preview shows missing footprint cells and refreshes after edits,
     try std.testing.expectEqual(3, validation_calls);
     try std.testing.expectEqual(@import("block_rules.zig").Reason.earth_footprint, fixture.game.current_placement_preview.?.result.failure.?.reason);
     try std.testing.expect(fixture.scene.block_overlays.count > 1);
-    fixture.game.selected_material = .sand;
+    fixture.game.selected_material = .snow;
     fixture.game.updateBlockFocus();
     try std.testing.expectEqual(4, validation_calls);
     try std.testing.expectEqual(world_module.OperationStatus.success, fixture.game.current_placement_preview.?.result.status);
@@ -2391,6 +2417,9 @@ test "preview errors and timed edit feedback coexist and clear independently" {
     fixture.init();
     defer fixture.deinit();
     try fixture.prepareToolTest();
+    const origin = test_layout.origin_chunk;
+    for ([_]ChunkCoords{ origin - ChunkCoords{ 1, 0, 0 }, origin - ChunkCoords{ 0, 0, 1 }, origin - ChunkCoords{ 1, 0, 1 } }) |chunk|
+        try fixture.game.world.?.insertChunk(chunk, WorldChunk.initEmpty());
     fixture.game.toggleBlockMode();
     fixture.game.selected_material = .dirt;
     fixture.game.updateBlockFocus();
@@ -2407,11 +2436,11 @@ test "preview errors and timed edit feedback coexist and clear independently" {
     fixture.engine.time = 5;
     fixture.game.editBlockInView(.{ .place = .dirt });
     // A valid preview immediately removes the hint without erasing action feedback.
-    fixture.game.selected_material = .sand;
+    fixture.game.selected_material = .snow;
     fixture.game.updateBlockFocus();
     try std.testing.expectEqual(null, fixture.game.current_placement_preview.?.errorMessage(&buffer));
     try std.testing.expect(fixture.game.block_action_error.message(5) != null);
-    fixture.game.editBlockInView(.{ .place = .sand });
+    fixture.game.editBlockInView(.{ .place = .snow });
     try std.testing.expect(fixture.game.block_action_error.message(5) != null);
 
     fixture.game.selected_material = .dirt;
@@ -2462,7 +2491,7 @@ test "placement cache ignores distant streaming and validates each relevant chan
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    try fixture.prepareToolTest();
+    try fixture.prepareSupportedToolTest();
     const target = StreamingTest.toolTarget();
     fixture.game.world.?.setBlockUnchecked(.{ target[0] + 1, target[1], target[2] }, .stone);
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
@@ -2548,7 +2577,7 @@ test "placement preview checks the frozen player each frame independently of str
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
-    try fixture.prepareToolTest();
+    try fixture.prepareSupportedToolTest();
     handleKeyPress(&fixture.game, .{ .key = .tab, .mods = .{} });
     var validation_calls: usize = 0;
     fixture.game.world.?.preview_call_counter = &validation_calls;
@@ -2653,7 +2682,7 @@ test "chunk loads, edits, and snapshots share one rebuild using the final conten
     try std.testing.expectEqual(coords, upload.chunk_coords);
     for (upload.chunk_side_data.blocks_grouped_by_side) |side| {
         try std.testing.expectEqual(1, side.items.len);
-        try std.testing.expectEqual(voxel_chunk_module.BlockType.grass, side.items[0].block_type);
+        try std.testing.expectEqual(voxel_chunk_module.RenderMaterial.grass, side.items[0].block_type);
         try std.testing.expectEqual([3]u8{ 2, 3, 4 }, side.items[0].coords);
     }
     game.rebuildDirtyChunks();
@@ -2971,10 +3000,31 @@ const StreamingTest = struct {
     }
 
     fn preparePlayerToolTest(self: *StreamingTest) !void {
-        try self.prepareToolTest();
+        try self.prepareSupportedToolTest();
         self.game.control_mode = .player;
         self.changeToolMaterial(.sand);
         self.engine.frame_delta = 0;
+    }
+
+    fn supportSandPlacement(self: *StreamingTest, block: [3]u32) !void {
+        var dy: i32 = -1;
+        while (dy <= 1) : (dy += 1) {
+            var dx: i32 = -1;
+            while (dx <= 1) : (dx += 1) {
+                const support: [3]u32 = .{ @intCast(@as(i64, block[0]) + dx), @intCast(@as(i64, block[1]) + dy), block[2] - 1 };
+                const coords, _ = world_module.splitBlockCoords(support);
+                if (!self.game.world.?.hasChunk(coords)) try self.game.world.?.insertChunk(coords, WorldChunk.initEmpty());
+                self.game.world.?.setBlockUnchecked(support, .stone);
+            }
+        }
+    }
+
+    fn prepareSupportedToolTest(self: *StreamingTest) !void {
+        try self.prepareToolTest();
+        const target = toolTarget();
+        for (0..4) |offset| for (0..2) |x|
+            try self.supportSandPlacement(.{ target[0] + @as(u32, @intCast(x)), target[1] - @as(u32, @intCast(offset)), target[2] });
+        self.game.world.?.pending_operations.clearRetainingCapacity();
     }
 
     fn changeToolMaterial(self: *StreamingTest, material: voxel_chunk_module.BlockType) void {
@@ -3251,7 +3301,7 @@ test "material-only boundary snapshots leave neighboring geometry unchanged" {
     try std.testing.expect(!fixture.game.dirty_chunk_ids.contains(neighbor_id));
     fixture.game.rebuildDirtyChunks();
     try std.testing.expectEqual(neighbor_faces, fixture.upload(neighbor).chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.bottom)].items.ptr);
-    try std.testing.expectEqual(voxel_chunk_module.BlockType.grass, fixture.upload(coords).chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.bottom)].items[0].block_type);
+    try std.testing.expectEqual(voxel_chunk_module.RenderMaterial.grass, fixture.upload(coords).chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.bottom)].items[0].block_type);
 }
 
 test "snapshot boundary invalidation follows optimistic replay and failed edit rollback" {
@@ -3436,7 +3486,7 @@ test "mixed packages retire all commands and produce one final optimistic mesh" 
     try std.testing.expectEqual(0, fixture.grid.chunks_to_upload.items.len);
     fixture.game.rebuildDirtyChunks();
     try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items.len);
-    for (fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side) |side| try std.testing.expectEqual(voxel_chunk_module.BlockType.stone, side.items[0].block_type);
+    for (fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side) |side| try std.testing.expectEqual(voxel_chunk_module.RenderMaterial.stone, side.items[0].block_type);
 }
 
 test "streaming holds 27 block chunks, pins edits across movement, and completes mesh handoffs" {
@@ -3452,7 +3502,7 @@ test "streaming holds 27 block chunks, pins edits across movement, and completes
     try std.testing.expectEqual(27, fixture.game.world.?.chunks.count());
     const origin = test_layout.origin_chunk;
     const block = [3]u32{ origin[0] * consts.CHUNK_SIZE, origin[1] * consts.CHUNK_SIZE + 8, origin[2] * consts.CHUNK_SIZE + 8 };
-    fixture.game.world.?.setBlockUnchecked(block, .sand);
+    fixture.game.world.?.setBlockUnchecked(block, .snow);
     fixture.game.markChunksAroundBlockDirty(block);
     fixture.game.flushBlockOperations();
     fixture.camera.position[0] = 64;
@@ -3492,6 +3542,7 @@ test "camera tools place on the hit face and enforce four-metre cube reach" {
     };
     const placement: [3]u32 = .{ target[0], target[1] - 1, target[2] };
     fixture.game.world.?.setBlockUnchecked(target, .stone);
+    try fixture.supportSandPlacement(placement);
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
     fixture.game.editBlockInView(.{ .place = fixture.game.selected_material });
     try std.testing.expect(try fixture.game.world.?.isBlockSolid(placement));
@@ -3785,7 +3836,7 @@ test "different runtime layouts stream, edit, and evict across their own x seams
         try std.testing.expect(fixture.game.world.?.hasChunk(local));
         try std.testing.expect(fixture.game.world.?.hasChunk(neighbor));
         const block = [3]u32{ 0, @as(u32, @intCast(origin[1])) * consts.CHUNK_SIZE + 8, @as(u32, @intCast(origin[2])) * consts.CHUNK_SIZE + 8 };
-        fixture.game.world.?.setBlockUnchecked(block, .sand);
+        fixture.game.world.?.setBlockUnchecked(block, .snow);
         fixture.game.markChunksAroundBlockDirty(block);
         fixture.game.flushBlockOperations();
         try std.testing.expect(fixture.game.dirty_chunk_ids.contains(layout.encodeChunkCoords(neighbor)));
@@ -3816,9 +3867,9 @@ test "shutdown cannot save ahead of optimistic edits that have not been admitted
     defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
     const descriptor = try persistence_format.encodeDescriptor(allocator, .{
         .dimensions = test_layout.size_in_chunks,
-        .generator_id = 0,
+        .generator_id = 2,
         .seed = 0,
-        .settings = &.{},
+        .settings = &persistence_format.flat_settings,
     });
     defer allocator.free(descriptor);
     const global = persistence_format.encodeGlobal(0);
@@ -3880,9 +3931,9 @@ test "persistent service initialization releases partial ownership at every allo
     defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
     const descriptor = try persistence_format.encodeDescriptor(allocator, .{
         .dimensions = test_layout.size_in_chunks,
-        .generator_id = 0,
+        .generator_id = 2,
         .seed = 0,
-        .settings = &.{},
+        .settings = &persistence_format.flat_settings,
     });
     defer allocator.free(descriptor);
     const global = persistence_format.encodeGlobal(12);
@@ -4116,16 +4167,19 @@ test "real service reconciles NPC-winning extraction and placement conflicts" {
         const game = &fixture.game;
         game.world_client = try service.createClient();
         const npc = try service.createClient();
-        const target = StreamingTest.toolTarget();
+        const original = StreamingTest.toolTarget();
+        // Use the flat world's natural surface so both authority and prediction
+        // see the complete nine-cell footprint for each sand transfer.
+        const target: [3]u32 = .{ original[0] + 8, original[1], original[2] - consts.CHUNK_SIZE / 2 };
         const backing = [3]u32{ target[0], target[1] + 1, target[2] };
         _ = try StreamingTest.serviceOperation(npc, .{ .block = target, .action = .{ .put = .sand } });
         _ = try StreamingTest.serviceOperation(npc, .{ .block = backing, .action = .{ .put = .sand } });
         game.world_client.?.publishCheckpoint(.{ .id = game.player_id, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
-        const coords = test_layout.origin_chunk;
+        const coords, _ = world_module.splitBlockCoords(target);
         const token = game.world_client.?.requestChunks(.{ coords[0], coords[1] }, coords[2], coords[2] + 1);
         try fixture.subscribe(coords, token, .blocks);
         try fixture.waitAndApplyPackages();
-        fixture.camera.updatePosition(.{ 0.5, 0.5, 0.5 });
+        fixture.camera.updatePosition(.{ 8.5, 0.5, 0.5 - consts.CHUNK_SIZE / 2 });
         if (placing) {
             game.block_interaction.press(.key);
             game.updateBlockTool();
@@ -4159,6 +4213,9 @@ test "invalid local placement retains the carried block without submitting a tra
     defer fixture.deinit();
     try fixture.preparePlayerToolTest();
     const game = &fixture.game;
+    const target = StreamingTest.toolTarget();
+    game.world.?.setBlockUnchecked(.{ target[0] - 1, target[1] - 1, target[2] - 1 }, .none);
+    game.world.?.pending_operations.clearRetainingCapacity();
     game.block_interaction.inventory = .dirt;
     game.block_interaction.press(.mouse);
     game.updateBlockTool();
@@ -4199,4 +4256,27 @@ test "player work survives unrelated cell edits and cancels a same-material repl
         try std.testing.expectEqual(if (replace_target) null else @as(?voxel_chunk_module.BlockType, .sand), game.heldMaterial());
         try std.testing.expectEqual(@as(usize, if (replace_target) 0 else 1), game.world.?.pending_operations.items.len);
     }
+}
+
+test "return from spectator waits for a legal player pose above the finite floor" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    var fixture: StreamingTest = undefined;
+    fixture.initWithLayout(&layout);
+    defer fixture.deinit();
+    var spectator: std.meta.Child(@TypeOf(@as(Scene, undefined).spectator_camera)) = .{
+        .camera = &fixture.camera,
+        .input_controller = @ptrCast(&fixture.input),
+    };
+    fixture.scene.spectator_camera = &spectator;
+    fixture.scene.spectator_enabled = true;
+    fixture.game.player = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, -65 });
+    fixture.game.control_mode = .spectator;
+    fixture.game.toggleControlMode();
+    try std.testing.expectEqual(.spectator, fixture.game.control_mode);
+    try fixture.game.world.?.insertChunk(.{ 2, 2, 0 }, WorldChunk.initEmpty());
+    fixture.game.toggleControlMode();
+    try std.testing.expectEqual(.player, fixture.game.control_mode);
+    try std.testing.expect(fixture.game.player.?.position[2] >= -64);
+    var query: terrain_collision.Query = .{ .world = &fixture.game.world.?, .body = fixture.game.player.?.body };
+    try std.testing.expectEqual(terrain_collision.Overlap.clear, query.overlap(fixture.game.player.?.position, false));
 }

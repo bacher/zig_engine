@@ -1,0 +1,42 @@
+{
+  "hash_algorithm": "SHA256",
+  "verification": "All source files match source-manifest.json; file sets match; only natural_generator.zig differs; both build files match.",
+  "source_file_count_per_variant": 211,
+  "source_manifest_canonical_sha256": {
+    "baseline": "fe77613e56b805476afa5eb173d4534ee56cb1ea0070c701c6394e0b9c5b58de",
+    "optimized": "7e2349f93876011a6d11adb418e1a7d073543b39dbe214e02eb69b03611e584d"
+  },
+  "shared_build_inputs": {
+    "build.zig": "29bdb3d0df87e0e636c10886c456ca3e63a8df1f4aa42ab431c7c689cfd3f00c",
+    "build.zig.zon": "e221c6acaaa4c46dc21815a971197109eb85fe2c436ef8b6ce1b5932fa3a4ef8"
+  },
+  "shared_source_inputs": {
+    "src/voxel_app/generation_benchmark.zig": "6958addec680c352c52c3abead0085ed7ca887cbb9e49c43d686e958746bf6ed",
+    "src/voxel_app/generation_geography.zig": "0d10d9caf3da3e7d22716e5b2a8ba8592e5984e45f6a30f6db8f89e27193797d",
+    "src/voxel_app/world_environment.zig": "6f77d31b9f5ab11c70cb52dc6ccba00c45d51c545c014b504b0a6899fe870f3a",
+    "src/voxel_app/generation_settings.zig": "6fca7de59aa3e90d45a541e4929b224bb60a75f00b4e7730157b60e7e9fc3c27",
+    "src/voxel_app/generation_preparation.zig": "b9d01c1da2ab83af1ef5ca188b7dafceadb01ad47372bdf90eed1b26097866fb",
+    "src/voxel_app/generation_deposits.zig": "f78897eb676d9baf68b5fa5e46e5eb3e2179da105f549612385196abe1f1469c"
+  },
+  "changed_source_input": {
+    "src/voxel_app/natural_generator.zig": {
+      "baseline": "218aadbad7f635270bc218fdc412978d63aa4eeb8b8f7df10b0752d1d22724d5",
+      "optimized": "c52993bee79b13249a532a7bee3bcdcd86b3fa6b3a57f4436be6232962d72c34"
+    }
+  },
+  "source_diff": {
+    "file": "column-fill-source.diff",
+    "sha256": "a241b1d134a266ba2cb59f919b577bf342bafa8ab41128cc47e1e3883017b1b5",
+    "normalization": "Blank context lines have no prefix space; applying the diff produces the same source."
+  },
+  "dependency_symlinks": {
+    "baseline": {
+      "gltf_loader": "/Users/ilia.lebedev/projects/zig_engine/gltf_loader",
+      "zig-pkg": "/Users/ilia.lebedev/projects/zig_engine/zig-pkg"
+    },
+    "optimized": {
+      "gltf_loader": "/Users/ilia.lebedev/projects/zig_engine/gltf_loader",
+      "zig-pkg": "/Users/ilia.lebedev/projects/zig_engine/zig-pkg"
+    }
+  }
+}

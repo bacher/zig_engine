@@ -25,6 +25,12 @@ pub fn movementCollision(block: engine.voxel_chunk.BlockType) MovementCollision 
         .reinforced_concrete,
         .country_road_solid,
         .country_road_adaptive,
+        .leaves,
+        .metal_ore,
+        .limestone,
+        .clay,
+        .coal,
+        .deeprock,
         .custom,
         => .full_cube,
     };

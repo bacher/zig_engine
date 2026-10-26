@@ -1,0 +1,940 @@
+{
+  "protocol": "ReleaseFast aarch64-macos seed12345 31 samples per site, beaches false/true; runtime order baseline,optimized,optimized,baseline; identical pre-coast-fix geography snapshots",
+  "source_difference": "Only NaturalWorld point/fill material inputs and NaturalColumn.generateData",
+  "all_22_site_digests_and_size_counters_identical": true,
+  "all_2_start_digests_and_metadata_fingerprints_identical": true,
+  "runs": {
+    "baseline": [
+      {
+        "sizes": [
+          {
+            "preparation_allocations": "7",
+            "preparation_peak_requested": "2122224",
+            "prepared_live_requested": "418288",
+            "column_bytes": "27200",
+            "natural_column_bytes": "27168",
+            "cache_column_limit": "64",
+            "retained_column_upper_bound": "1740800",
+            "chunk_scratch_stack_bytes": "32768"
+          },
+          {
+            "preparation_allocations": "7",
+            "preparation_peak_requested": "2122224",
+            "prepared_live_requested": "418288",
+            "column_bytes": "27200",
+            "natural_column_bytes": "27168",
+            "cache_column_limit": "64",
+            "retained_column_upper_bound": "1740800",
+            "chunk_scratch_stack_bytes": "32768"
+          }
+        ],
+        "sites": {
+          "false/plains": {
+            "column_initialization_ms": 0.091,
+            "fill_ms": 0.174,
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/mainland_coast": {
+            "column_initialization_ms": 0.115,
+            "fill_ms": 0.038,
+            "digest": "c76ee0a3a06e700e8599df028686a7c3798eb07649e0fb263429dbb398e1e07b",
+            "faces": "704",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "3392"
+          },
+          "false/island_coast": {
+            "column_initialization_ms": 0.083,
+            "fill_ms": 0.035,
+            "digest": "b868ec8dd64a59e2261bedb310ccdf5cd4f3289031dac2ff977792600b614130",
+            "faces": "473",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "2648"
+          },
+          "false/steep_shore": {
+            "column_initialization_ms": 0.208,
+            "fill_ms": 0.043,
+            "digest": "37cef2f065fb8097c7303ab56a4b39ab3f04c5f05931d12e33bf7c8afb130ec3",
+            "faces": "1488",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "8252"
+          },
+          "false/desert": {
+            "column_initialization_ms": 0.104,
+            "fill_ms": 0.043,
+            "digest": "b5a975696448d7b5629fedeabc62bc87d7ec13575e192a8c13f570bfcb2fac99",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/dense_forest": {
+            "column_initialization_ms": 0.192,
+            "fill_ms": 0.071,
+            "digest": "990832c133122f1e4b4f7770592a059d6b860420510a79dd08c69fd20a623461",
+            "faces": "2278",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "11940"
+          },
+          "false/deposit": {
+            "column_initialization_ms": 0.112,
+            "fill_ms": 0.248,
+            "digest": "f5bf739d7efec5d8c7aa58af3fe39b8b497b9fdb5a7b13517efa00d89cf017d0",
+            "faces": "0",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "0"
+          },
+          "false/x_seam": {
+            "column_initialization_ms": 0.104,
+            "fill_ms": 0.034,
+            "digest": "5f3520f6ce7c9ff4d6834cf25afcf58c3db4792e0d1371f34efec6b7cdfdd893",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/ocean": {
+            "column_initialization_ms": 0.076,
+            "fill_ms": 0.034,
+            "digest": "589ebcfd0f034fa3c56fa2b57f75c22a23755bb0e2dfc72dc25ad8577b3f1fc7",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/polar": {
+            "column_initialization_ms": 0.067,
+            "fill_ms": 0.039,
+            "digest": "b7f77a3eb47c37078398febf2f1148d7650f9524453b590de9acb69e521e5634",
+            "faces": "2048",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "8544"
+          },
+          "false/mountain": {
+            "column_initialization_ms": 0.112,
+            "fill_ms": 0.084,
+            "digest": "76245aadc83208aef57a129bc417063516d85aa72bfda58fad2402a56e048db7",
+            "faces": "1490",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "6896"
+          },
+          "true/plains": {
+            "column_initialization_ms": 0.098,
+            "fill_ms": 0.175,
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/mainland_coast": {
+            "column_initialization_ms": 0.169,
+            "fill_ms": 0.037,
+            "digest": "76bf20987793d01e9fa0cf342ff298cc6129d3d4b107d846e222c8430d484bb0",
+            "faces": "704",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "3392"
+          },
+          "true/island_coast": {
+            "column_initialization_ms": 0.125,
+            "fill_ms": 0.036,
+            "digest": "040f8f03d8a0ff8355da07cbd9c24363a969f2b8de67eadf75716f3b65f7eb0b",
+            "faces": "473",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "2648"
+          },
+          "true/steep_shore": {
+            "column_initialization_ms": 0.264,
+            "fill_ms": 0.044,
+            "digest": "4ce93c778d015c687223aabe4b6afcf0b112520a1d6d91788bc14008fbf563e5",
+            "faces": "1412",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "7280"
+          },
+          "true/desert": {
+            "column_initialization_ms": 0.104,
+            "fill_ms": 0.043,
+            "digest": "b5a975696448d7b5629fedeabc62bc87d7ec13575e192a8c13f570bfcb2fac99",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/dense_forest": {
+            "column_initialization_ms": 0.192,
+            "fill_ms": 0.071,
+            "digest": "990832c133122f1e4b4f7770592a059d6b860420510a79dd08c69fd20a623461",
+            "faces": "2278",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "11940"
+          },
+          "true/deposit": {
+            "column_initialization_ms": 0.112,
+            "fill_ms": 0.249,
+            "digest": "f5bf739d7efec5d8c7aa58af3fe39b8b497b9fdb5a7b13517efa00d89cf017d0",
+            "faces": "0",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "0"
+          },
+          "true/x_seam": {
+            "column_initialization_ms": 0.104,
+            "fill_ms": 0.037,
+            "digest": "5f3520f6ce7c9ff4d6834cf25afcf58c3db4792e0d1371f34efec6b7cdfdd893",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/ocean": {
+            "column_initialization_ms": 0.077,
+            "fill_ms": 0.034,
+            "digest": "589ebcfd0f034fa3c56fa2b57f75c22a23755bb0e2dfc72dc25ad8577b3f1fc7",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/polar": {
+            "column_initialization_ms": 0.07,
+            "fill_ms": 0.038,
+            "digest": "b7f77a3eb47c37078398febf2f1148d7650f9524453b590de9acb69e521e5634",
+            "faces": "2048",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "8544"
+          },
+          "true/mountain": {
+            "column_initialization_ms": 0.114,
+            "fill_ms": 0.084,
+            "digest": "76245aadc83208aef57a129bc417063516d85aa72bfda58fad2402a56e048db7",
+            "faces": "1490",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "6896"
+          }
+        },
+        "workloads": {
+          "false": {
+            "cold_column_plus_surface_chunk": 0.326,
+            "cached_column_vertical_chunks": 6.714
+          },
+          "true": {
+            "cold_column_plus_surface_chunk": 0.318,
+            "cached_column_vertical_chunks": 6.679
+          }
+        },
+        "start": {
+          "false": {
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "metadata_fingerprint": "d17867cf8466f4cb"
+          },
+          "true": {
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "metadata_fingerprint": "d17867cf8466f4cb"
+          }
+        },
+        "replay": [
+          {
+            "sites": "11",
+            "derived_mesh_boundary_climate_hashes_match_after_eviction_and_restart": "true"
+          },
+          {
+            "sites": "11",
+            "derived_mesh_boundary_climate_hashes_match_after_eviction_and_restart": "true"
+          }
+        ]
+      },
+      {
+        "sizes": [
+          {
+            "preparation_allocations": "7",
+            "preparation_peak_requested": "2122224",
+            "prepared_live_requested": "418288",
+            "column_bytes": "27200",
+            "natural_column_bytes": "27168",
+            "cache_column_limit": "64",
+            "retained_column_upper_bound": "1740800",
+            "chunk_scratch_stack_bytes": "32768"
+          },
+          {
+            "preparation_allocations": "7",
+            "preparation_peak_requested": "2122224",
+            "prepared_live_requested": "418288",
+            "column_bytes": "27200",
+            "natural_column_bytes": "27168",
+            "cache_column_limit": "64",
+            "retained_column_upper_bound": "1740800",
+            "chunk_scratch_stack_bytes": "32768"
+          }
+        ],
+        "sites": {
+          "false/plains": {
+            "column_initialization_ms": 0.092,
+            "fill_ms": 0.177,
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/mainland_coast": {
+            "column_initialization_ms": 0.115,
+            "fill_ms": 0.035,
+            "digest": "c76ee0a3a06e700e8599df028686a7c3798eb07649e0fb263429dbb398e1e07b",
+            "faces": "704",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "3392"
+          },
+          "false/island_coast": {
+            "column_initialization_ms": 0.083,
+            "fill_ms": 0.035,
+            "digest": "b868ec8dd64a59e2261bedb310ccdf5cd4f3289031dac2ff977792600b614130",
+            "faces": "473",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "2648"
+          },
+          "false/steep_shore": {
+            "column_initialization_ms": 0.207,
+            "fill_ms": 0.039,
+            "digest": "37cef2f065fb8097c7303ab56a4b39ab3f04c5f05931d12e33bf7c8afb130ec3",
+            "faces": "1488",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "8252"
+          },
+          "false/desert": {
+            "column_initialization_ms": 0.104,
+            "fill_ms": 0.043,
+            "digest": "b5a975696448d7b5629fedeabc62bc87d7ec13575e192a8c13f570bfcb2fac99",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/dense_forest": {
+            "column_initialization_ms": 0.195,
+            "fill_ms": 0.07,
+            "digest": "990832c133122f1e4b4f7770592a059d6b860420510a79dd08c69fd20a623461",
+            "faces": "2278",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "11940"
+          },
+          "false/deposit": {
+            "column_initialization_ms": 0.114,
+            "fill_ms": 0.249,
+            "digest": "f5bf739d7efec5d8c7aa58af3fe39b8b497b9fdb5a7b13517efa00d89cf017d0",
+            "faces": "0",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "0"
+          },
+          "false/x_seam": {
+            "column_initialization_ms": 0.104,
+            "fill_ms": 0.033,
+            "digest": "5f3520f6ce7c9ff4d6834cf25afcf58c3db4792e0d1371f34efec6b7cdfdd893",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/ocean": {
+            "column_initialization_ms": 0.076,
+            "fill_ms": 0.033,
+            "digest": "589ebcfd0f034fa3c56fa2b57f75c22a23755bb0e2dfc72dc25ad8577b3f1fc7",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/polar": {
+            "column_initialization_ms": 0.067,
+            "fill_ms": 0.038,
+            "digest": "b7f77a3eb47c37078398febf2f1148d7650f9524453b590de9acb69e521e5634",
+            "faces": "2048",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "8544"
+          },
+          "false/mountain": {
+            "column_initialization_ms": 0.113,
+            "fill_ms": 0.084,
+            "digest": "76245aadc83208aef57a129bc417063516d85aa72bfda58fad2402a56e048db7",
+            "faces": "1490",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "6896"
+          },
+          "true/plains": {
+            "column_initialization_ms": 0.098,
+            "fill_ms": 0.175,
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/mainland_coast": {
+            "column_initialization_ms": 0.169,
+            "fill_ms": 0.036,
+            "digest": "76bf20987793d01e9fa0cf342ff298cc6129d3d4b107d846e222c8430d484bb0",
+            "faces": "704",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "3392"
+          },
+          "true/island_coast": {
+            "column_initialization_ms": 0.131,
+            "fill_ms": 0.035,
+            "digest": "040f8f03d8a0ff8355da07cbd9c24363a969f2b8de67eadf75716f3b65f7eb0b",
+            "faces": "473",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "2648"
+          },
+          "true/steep_shore": {
+            "column_initialization_ms": 0.268,
+            "fill_ms": 0.044,
+            "digest": "4ce93c778d015c687223aabe4b6afcf0b112520a1d6d91788bc14008fbf563e5",
+            "faces": "1412",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "7280"
+          },
+          "true/desert": {
+            "column_initialization_ms": 0.104,
+            "fill_ms": 0.042,
+            "digest": "b5a975696448d7b5629fedeabc62bc87d7ec13575e192a8c13f570bfcb2fac99",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/dense_forest": {
+            "column_initialization_ms": 0.192,
+            "fill_ms": 0.07,
+            "digest": "990832c133122f1e4b4f7770592a059d6b860420510a79dd08c69fd20a623461",
+            "faces": "2278",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "11940"
+          },
+          "true/deposit": {
+            "column_initialization_ms": 0.117,
+            "fill_ms": 0.253,
+            "digest": "f5bf739d7efec5d8c7aa58af3fe39b8b497b9fdb5a7b13517efa00d89cf017d0",
+            "faces": "0",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "0"
+          },
+          "true/x_seam": {
+            "column_initialization_ms": 0.104,
+            "fill_ms": 0.033,
+            "digest": "5f3520f6ce7c9ff4d6834cf25afcf58c3db4792e0d1371f34efec6b7cdfdd893",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/ocean": {
+            "column_initialization_ms": 0.076,
+            "fill_ms": 0.034,
+            "digest": "589ebcfd0f034fa3c56fa2b57f75c22a23755bb0e2dfc72dc25ad8577b3f1fc7",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/polar": {
+            "column_initialization_ms": 0.068,
+            "fill_ms": 0.037,
+            "digest": "b7f77a3eb47c37078398febf2f1148d7650f9524453b590de9acb69e521e5634",
+            "faces": "2048",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "8544"
+          },
+          "true/mountain": {
+            "column_initialization_ms": 0.111,
+            "fill_ms": 0.085,
+            "digest": "76245aadc83208aef57a129bc417063516d85aa72bfda58fad2402a56e048db7",
+            "faces": "1490",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "6896"
+          }
+        },
+        "workloads": {
+          "false": {
+            "cold_column_plus_surface_chunk": 0.316,
+            "cached_column_vertical_chunks": 6.724
+          },
+          "true": {
+            "cold_column_plus_surface_chunk": 0.33,
+            "cached_column_vertical_chunks": 6.745
+          }
+        },
+        "start": {
+          "false": {
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "metadata_fingerprint": "d17867cf8466f4cb"
+          },
+          "true": {
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "metadata_fingerprint": "d17867cf8466f4cb"
+          }
+        },
+        "replay": [
+          {
+            "sites": "11",
+            "derived_mesh_boundary_climate_hashes_match_after_eviction_and_restart": "true"
+          },
+          {
+            "sites": "11",
+            "derived_mesh_boundary_climate_hashes_match_after_eviction_and_restart": "true"
+          }
+        ]
+      }
+    ],
+    "optimized": [
+      {
+        "sizes": [
+          {
+            "preparation_allocations": "7",
+            "preparation_peak_requested": "2122224",
+            "prepared_live_requested": "418288",
+            "column_bytes": "27200",
+            "natural_column_bytes": "27168",
+            "cache_column_limit": "64",
+            "retained_column_upper_bound": "1740800",
+            "chunk_scratch_stack_bytes": "32768"
+          },
+          {
+            "preparation_allocations": "7",
+            "preparation_peak_requested": "2122224",
+            "prepared_live_requested": "418288",
+            "column_bytes": "27200",
+            "natural_column_bytes": "27168",
+            "cache_column_limit": "64",
+            "retained_column_upper_bound": "1740800",
+            "chunk_scratch_stack_bytes": "32768"
+          }
+        ],
+        "sites": {
+          "false/plains": {
+            "column_initialization_ms": 0.099,
+            "fill_ms": 0.136,
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/mainland_coast": {
+            "column_initialization_ms": 0.128,
+            "fill_ms": 0.043,
+            "digest": "c76ee0a3a06e700e8599df028686a7c3798eb07649e0fb263429dbb398e1e07b",
+            "faces": "704",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "3392"
+          },
+          "false/island_coast": {
+            "column_initialization_ms": 0.087,
+            "fill_ms": 0.043,
+            "digest": "b868ec8dd64a59e2261bedb310ccdf5cd4f3289031dac2ff977792600b614130",
+            "faces": "473",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "2648"
+          },
+          "false/steep_shore": {
+            "column_initialization_ms": 0.207,
+            "fill_ms": 0.042,
+            "digest": "37cef2f065fb8097c7303ab56a4b39ab3f04c5f05931d12e33bf7c8afb130ec3",
+            "faces": "1488",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "8252"
+          },
+          "false/desert": {
+            "column_initialization_ms": 0.109,
+            "fill_ms": 0.043,
+            "digest": "b5a975696448d7b5629fedeabc62bc87d7ec13575e192a8c13f570bfcb2fac99",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/dense_forest": {
+            "column_initialization_ms": 0.185,
+            "fill_ms": 0.06,
+            "digest": "990832c133122f1e4b4f7770592a059d6b860420510a79dd08c69fd20a623461",
+            "faces": "2278",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "11940"
+          },
+          "false/deposit": {
+            "column_initialization_ms": 0.108,
+            "fill_ms": 0.162,
+            "digest": "f5bf739d7efec5d8c7aa58af3fe39b8b497b9fdb5a7b13517efa00d89cf017d0",
+            "faces": "0",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "0"
+          },
+          "false/x_seam": {
+            "column_initialization_ms": 0.096,
+            "fill_ms": 0.034,
+            "digest": "5f3520f6ce7c9ff4d6834cf25afcf58c3db4792e0d1371f34efec6b7cdfdd893",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/ocean": {
+            "column_initialization_ms": 0.078,
+            "fill_ms": 0.046,
+            "digest": "589ebcfd0f034fa3c56fa2b57f75c22a23755bb0e2dfc72dc25ad8577b3f1fc7",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/polar": {
+            "column_initialization_ms": 0.069,
+            "fill_ms": 0.045,
+            "digest": "b7f77a3eb47c37078398febf2f1148d7650f9524453b590de9acb69e521e5634",
+            "faces": "2048",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "8544"
+          },
+          "false/mountain": {
+            "column_initialization_ms": 0.116,
+            "fill_ms": 0.071,
+            "digest": "76245aadc83208aef57a129bc417063516d85aa72bfda58fad2402a56e048db7",
+            "faces": "1490",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "6896"
+          },
+          "true/plains": {
+            "column_initialization_ms": 0.099,
+            "fill_ms": 0.137,
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/mainland_coast": {
+            "column_initialization_ms": 0.171,
+            "fill_ms": 0.048,
+            "digest": "76bf20987793d01e9fa0cf342ff298cc6129d3d4b107d846e222c8430d484bb0",
+            "faces": "704",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "3392"
+          },
+          "true/island_coast": {
+            "column_initialization_ms": 0.126,
+            "fill_ms": 0.044,
+            "digest": "040f8f03d8a0ff8355da07cbd9c24363a969f2b8de67eadf75716f3b65f7eb0b",
+            "faces": "473",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "2648"
+          },
+          "true/steep_shore": {
+            "column_initialization_ms": 0.267,
+            "fill_ms": 0.043,
+            "digest": "4ce93c778d015c687223aabe4b6afcf0b112520a1d6d91788bc14008fbf563e5",
+            "faces": "1412",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "7280"
+          },
+          "true/desert": {
+            "column_initialization_ms": 0.109,
+            "fill_ms": 0.043,
+            "digest": "b5a975696448d7b5629fedeabc62bc87d7ec13575e192a8c13f570bfcb2fac99",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/dense_forest": {
+            "column_initialization_ms": 0.195,
+            "fill_ms": 0.056,
+            "digest": "990832c133122f1e4b4f7770592a059d6b860420510a79dd08c69fd20a623461",
+            "faces": "2278",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "11940"
+          },
+          "true/deposit": {
+            "column_initialization_ms": 0.11,
+            "fill_ms": 0.169,
+            "digest": "f5bf739d7efec5d8c7aa58af3fe39b8b497b9fdb5a7b13517efa00d89cf017d0",
+            "faces": "0",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "0"
+          },
+          "true/x_seam": {
+            "column_initialization_ms": 0.105,
+            "fill_ms": 0.035,
+            "digest": "5f3520f6ce7c9ff4d6834cf25afcf58c3db4792e0d1371f34efec6b7cdfdd893",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/ocean": {
+            "column_initialization_ms": 0.077,
+            "fill_ms": 0.04,
+            "digest": "589ebcfd0f034fa3c56fa2b57f75c22a23755bb0e2dfc72dc25ad8577b3f1fc7",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/polar": {
+            "column_initialization_ms": 0.068,
+            "fill_ms": 0.044,
+            "digest": "b7f77a3eb47c37078398febf2f1148d7650f9524453b590de9acb69e521e5634",
+            "faces": "2048",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "8544"
+          },
+          "true/mountain": {
+            "column_initialization_ms": 0.104,
+            "fill_ms": 0.068,
+            "digest": "76245aadc83208aef57a129bc417063516d85aa72bfda58fad2402a56e048db7",
+            "faces": "1490",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "6896"
+          }
+        },
+        "workloads": {
+          "false": {
+            "cold_column_plus_surface_chunk": 0.297,
+            "cached_column_vertical_chunks": 5.448
+          },
+          "true": {
+            "cold_column_plus_surface_chunk": 0.294,
+            "cached_column_vertical_chunks": 5.248
+          }
+        },
+        "start": {
+          "false": {
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "metadata_fingerprint": "d17867cf8466f4cb"
+          },
+          "true": {
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "metadata_fingerprint": "d17867cf8466f4cb"
+          }
+        },
+        "replay": [
+          {
+            "sites": "11",
+            "derived_mesh_boundary_climate_hashes_match_after_eviction_and_restart": "true"
+          },
+          {
+            "sites": "11",
+            "derived_mesh_boundary_climate_hashes_match_after_eviction_and_restart": "true"
+          }
+        ]
+      },
+      {
+        "sizes": [
+          {
+            "preparation_allocations": "7",
+            "preparation_peak_requested": "2122224",
+            "prepared_live_requested": "418288",
+            "column_bytes": "27200",
+            "natural_column_bytes": "27168",
+            "cache_column_limit": "64",
+            "retained_column_upper_bound": "1740800",
+            "chunk_scratch_stack_bytes": "32768"
+          },
+          {
+            "preparation_allocations": "7",
+            "preparation_peak_requested": "2122224",
+            "prepared_live_requested": "418288",
+            "column_bytes": "27200",
+            "natural_column_bytes": "27168",
+            "cache_column_limit": "64",
+            "retained_column_upper_bound": "1740800",
+            "chunk_scratch_stack_bytes": "32768"
+          }
+        ],
+        "sites": {
+          "false/plains": {
+            "column_initialization_ms": 0.1,
+            "fill_ms": 0.137,
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/mainland_coast": {
+            "column_initialization_ms": 0.117,
+            "fill_ms": 0.048,
+            "digest": "c76ee0a3a06e700e8599df028686a7c3798eb07649e0fb263429dbb398e1e07b",
+            "faces": "704",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "3392"
+          },
+          "false/island_coast": {
+            "column_initialization_ms": 0.084,
+            "fill_ms": 0.045,
+            "digest": "b868ec8dd64a59e2261bedb310ccdf5cd4f3289031dac2ff977792600b614130",
+            "faces": "473",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "2648"
+          },
+          "false/steep_shore": {
+            "column_initialization_ms": 0.213,
+            "fill_ms": 0.043,
+            "digest": "37cef2f065fb8097c7303ab56a4b39ab3f04c5f05931d12e33bf7c8afb130ec3",
+            "faces": "1488",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "8252"
+          },
+          "false/desert": {
+            "column_initialization_ms": 0.105,
+            "fill_ms": 0.046,
+            "digest": "b5a975696448d7b5629fedeabc62bc87d7ec13575e192a8c13f570bfcb2fac99",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/dense_forest": {
+            "column_initialization_ms": 0.197,
+            "fill_ms": 0.061,
+            "digest": "990832c133122f1e4b4f7770592a059d6b860420510a79dd08c69fd20a623461",
+            "faces": "2278",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "11940"
+          },
+          "false/deposit": {
+            "column_initialization_ms": 0.101,
+            "fill_ms": 0.166,
+            "digest": "f5bf739d7efec5d8c7aa58af3fe39b8b497b9fdb5a7b13517efa00d89cf017d0",
+            "faces": "0",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "0"
+          },
+          "false/x_seam": {
+            "column_initialization_ms": 0.105,
+            "fill_ms": 0.034,
+            "digest": "5f3520f6ce7c9ff4d6834cf25afcf58c3db4792e0d1371f34efec6b7cdfdd893",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/ocean": {
+            "column_initialization_ms": 0.076,
+            "fill_ms": 0.044,
+            "digest": "589ebcfd0f034fa3c56fa2b57f75c22a23755bb0e2dfc72dc25ad8577b3f1fc7",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "false/polar": {
+            "column_initialization_ms": 0.072,
+            "fill_ms": 0.044,
+            "digest": "b7f77a3eb47c37078398febf2f1148d7650f9524453b590de9acb69e521e5634",
+            "faces": "2048",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "8544"
+          },
+          "false/mountain": {
+            "column_initialization_ms": 0.11,
+            "fill_ms": 0.068,
+            "digest": "76245aadc83208aef57a129bc417063516d85aa72bfda58fad2402a56e048db7",
+            "faces": "1490",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "6896"
+          },
+          "true/plains": {
+            "column_initialization_ms": 0.099,
+            "fill_ms": 0.13,
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/mainland_coast": {
+            "column_initialization_ms": 0.169,
+            "fill_ms": 0.043,
+            "digest": "76bf20987793d01e9fa0cf342ff298cc6129d3d4b107d846e222c8430d484bb0",
+            "faces": "704",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "3392"
+          },
+          "true/island_coast": {
+            "column_initialization_ms": 0.126,
+            "fill_ms": 0.044,
+            "digest": "040f8f03d8a0ff8355da07cbd9c24363a969f2b8de67eadf75716f3b65f7eb0b",
+            "faces": "473",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "2648"
+          },
+          "true/steep_shore": {
+            "column_initialization_ms": 0.264,
+            "fill_ms": 0.041,
+            "digest": "4ce93c778d015c687223aabe4b6afcf0b112520a1d6d91788bc14008fbf563e5",
+            "faces": "1412",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "7280"
+          },
+          "true/desert": {
+            "column_initialization_ms": 0.105,
+            "fill_ms": 0.042,
+            "digest": "b5a975696448d7b5629fedeabc62bc87d7ec13575e192a8c13f570bfcb2fac99",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/dense_forest": {
+            "column_initialization_ms": 0.193,
+            "fill_ms": 0.061,
+            "digest": "990832c133122f1e4b4f7770592a059d6b860420510a79dd08c69fd20a623461",
+            "faces": "2278",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "11940"
+          },
+          "true/deposit": {
+            "column_initialization_ms": 0.111,
+            "fill_ms": 0.163,
+            "digest": "f5bf739d7efec5d8c7aa58af3fe39b8b497b9fdb5a7b13517efa00d89cf017d0",
+            "faces": "0",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "0"
+          },
+          "true/x_seam": {
+            "column_initialization_ms": 0.105,
+            "fill_ms": 0.034,
+            "digest": "5f3520f6ce7c9ff4d6834cf25afcf58c3db4792e0d1371f34efec6b7cdfdd893",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/ocean": {
+            "column_initialization_ms": 0.076,
+            "fill_ms": 0.044,
+            "digest": "589ebcfd0f034fa3c56fa2b57f75c22a23755bb0e2dfc72dc25ad8577b3f1fc7",
+            "faces": "1024",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "4272"
+          },
+          "true/polar": {
+            "column_initialization_ms": 0.068,
+            "fill_ms": 0.044,
+            "digest": "b7f77a3eb47c37078398febf2f1148d7650f9524453b590de9acb69e521e5634",
+            "faces": "2048",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "8544"
+          },
+          "true/mountain": {
+            "column_initialization_ms": 0.112,
+            "fill_ms": 0.069,
+            "digest": "76245aadc83208aef57a129bc417063516d85aa72bfda58fad2402a56e048db7",
+            "faces": "1490",
+            "chunk_peak_requested": "32768",
+            "mesh_peak_requested": "6896"
+          }
+        },
+        "workloads": {
+          "false": {
+            "cold_column_plus_surface_chunk": 0.294,
+            "cached_column_vertical_chunks": 5.297
+          },
+          "true": {
+            "cold_column_plus_surface_chunk": 0.293,
+            "cached_column_vertical_chunks": 5.271
+          }
+        },
+        "start": {
+          "false": {
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "metadata_fingerprint": "d17867cf8466f4cb"
+          },
+          "true": {
+            "digest": "ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a",
+            "metadata_fingerprint": "d17867cf8466f4cb"
+          }
+        },
+        "replay": [
+          {
+            "sites": "11",
+            "derived_mesh_boundary_climate_hashes_match_after_eviction_and_restart": "true"
+          },
+          {
+            "sites": "11",
+            "derived_mesh_boundary_climate_hashes_match_after_eviction_and_restart": "true"
+          }
+        ]
+      }
+    ]
+  }
+}

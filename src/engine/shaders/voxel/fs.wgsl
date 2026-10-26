@@ -17,9 +17,10 @@ struct FragmentOut {
     @location(2) position_light_clip_0: vec4<f32>,
     @location(3) position_light_clip_1: vec4<f32>,
     @location(4) position_light_clip_2: vec4<f32>,
+    @location(5) @interpolate(flat) material_and_side: vec2u,
 ) -> FragmentOut {
     let normal_rgb_encoded = vec4f((normalize(normal) + 1.0) * 0.5, 0); // [-1..1] -> [0..1] encoding
-    let color = textureSample(color_texture, texture_sampler, uv);
+    let color = materialColor(material_and_side, textureSample(color_texture, texture_sampler, uv));
 
     if (color.a < 0.25) {
         discard;

@@ -1,0 +1,203 @@
+{
+  "hash_algorithm": "SHA256",
+  "status": "Isolated prototype evidence; final integrated production validation is separate.",
+  "platform": {
+    "zig": "0.16.0",
+    "mode": "ReleaseFast",
+    "target": "aarch64-macos"
+  },
+  "full_regeneration_protocol": {
+    "seed": 12345,
+    "rounds_per_site": 9,
+    "beaches": [
+      false,
+      true
+    ],
+    "serial_order": [
+      "old",
+      "exact",
+      "approx"
+    ],
+    "command": "zig build benchmark-generation -Doptimize=ReleaseFast -j2 --global-cache-dir /private/tmp/zig-worldgen-cache -- 12345 9",
+    "quiet_window": "generation_impl handed off after its query probe; no other team heavy work until all three commands completed; all commands exited0.",
+    "repetitions": "One full run per variant; preparation and 96-column traversal values are single observations, site/workload values are medians of9 samples."
+  },
+  "snapshot_roots": {
+    "old": "/private/tmp/worldgen-coast-old-full",
+    "exact": "/private/tmp/worldgen-exact-index-full",
+    "approx": "/private/tmp/worldgen-coast-approx-full"
+  },
+  "source_inventory_canonical_sha256": {
+    "old": "23b46ccd5b88c67724e187a561975764d02f26643d684928706304736ea128fe",
+    "exact": "113b18863f56a1ec8317fa32a1db69b3dc9f577dae0c80716edc1d7a119a5633",
+    "approx": "3c89c90d62fac3d46461fab16f86eb1d6451642088ad39cae1037c9262cfee13"
+  },
+  "shared_runtime_build_inputs": {
+    "src/voxel_app/natural_generator.zig": "f903fe59c049c3111720ddc9b595aa4631e61f7b8b5a224fdb61fdbfc07296a4",
+    "src/voxel_app/generation_hash.zig": "3d0aecd419e0fe556c01e116ace0e9ac07357337d386d3c5ec470f924df50774",
+    "src/voxel_app/generation_deposits.zig": "f78897eb676d9baf68b5fa5e46e5eb3e2179da105f549612385196abe1f1469c",
+    "src/voxel_app/generation_vegetation.zig": "6f3a9776857f264a9161840207416bd8e4a8b251bcc0d6be85bf3149a29740b5",
+    "src/voxel_app/generation_settings.zig": "6fca7de59aa3e90d45a541e4929b224bb60a75f00b4e7730157b60e7e9fc3c27",
+    "src/voxel_app/world_generator.zig": "430e6244410e625de8d3390b9af8ba8eac5818f87a39b759efe2b12d854e8487",
+    "build.zig": "29bdb3d0df87e0e636c10886c456ca3e63a8df1f4aa42ab431c7c689cfd3f00c",
+    "build.zig.zon": "e221c6acaaa4c46dc21815a971197109eb85fe2c436ef8b6ce1b5932fa3a4ef8"
+  },
+  "binaries": {
+    "old": {
+      "path": "/private/tmp/worldgen-coast-old-full/.zig-cache/o/c15de105e8057a9fa5d10f327131d40f/benchmark-generation",
+      "sha256": "9a793d810c0641223f7b38228b8d269abdc2ed775a5bfbdf42243cdf32f7abc5"
+    },
+    "exact": {
+      "path": "/private/tmp/worldgen-exact-index-full/.zig-cache/o/4fde80221e6ffc72658819f976997807/benchmark-generation",
+      "sha256": "57ae4cb3cd3f6632a58021d7306d5b07e2f6e9acaedd6b9c0a7834648ce07597"
+    },
+    "approx": {
+      "path": "/private/tmp/worldgen-coast-approx-full/.zig-cache/o/6ba7e2b423ee5926a2c97e452952dedc/benchmark-generation",
+      "sha256": "55e8185967c2bd20937ba39d32eb2eba6500f5f96df0cc82e7697a90542a8fad"
+    }
+  },
+  "same_site_xyz_across_variants": true,
+  "site_output_differences_from_old": [
+    {
+      "variant": "exact",
+      "beaches": false,
+      "site": "mainland_coast"
+    },
+    {
+      "variant": "approx",
+      "beaches": false,
+      "site": "mainland_coast"
+    },
+    {
+      "variant": "exact",
+      "beaches": false,
+      "site": "steep_shore"
+    },
+    {
+      "variant": "approx",
+      "beaches": false,
+      "site": "steep_shore"
+    },
+    {
+      "variant": "exact",
+      "beaches": true,
+      "site": "mainland_coast"
+    },
+    {
+      "variant": "approx",
+      "beaches": true,
+      "site": "mainland_coast"
+    },
+    {
+      "variant": "exact",
+      "beaches": true,
+      "site": "steep_shore"
+    },
+    {
+      "variant": "approx",
+      "beaches": true,
+      "site": "steep_shore"
+    }
+  ],
+  "fingerprint_terminology": "mesh_start metadata_fingerprint hashes diagnostic environment samples; prepared_fingerprint is NaturalWorld.fingerprint(). Exact snapshot asserts equality of the latter on restart but prints only a boolean.",
+  "diff_normalization": "Blank context lines omit the leading prefix space; source changes are otherwise exact.",
+  "files": {
+    "approx-full-12345-9.txt": {
+      "sha256": "5ac38df7c3c075fd027d12c404b4663a9367b55be33b90c3168ca3f0185711db",
+      "bytes": 20369
+    },
+    "approx-source.diff": {
+      "sha256": "ff92a24fca9faecf2a839ceaa550a06cee4021fdac8c8e04d13a6efdababef88",
+      "bytes": 33390
+    },
+    "coast-cross-section.json": {
+      "sha256": "425442ee99f421773418fd183f31842d2da20f3e10835e08e9c6477e3183b420",
+      "bytes": 1555
+    },
+    "coast-cross-section.png": {
+      "sha256": "5cb857e16e88ec847f2ce539148e3103bc14261721ab1b5bb384d4488da1d882",
+      "bytes": 113874
+    },
+    "coast-cross-section.svg": {
+      "sha256": "8b88a3dcae187fd65b373e454a71ad774cc9d45a416677654d20452d995663b9",
+      "bytes": 54496
+    },
+    "cross-section.csv": {
+      "sha256": "c9db5865d77da68b74476d0650ab3142b0c094ac131da6431221b22790fccb91",
+      "bytes": 16592
+    },
+    "exact-full-12345-9.txt": {
+      "sha256": "a805a86c5813628dc0c38d2f8ee2b522e969bc749bd3f9a5b29f7a375c0bcc4f",
+      "bytes": 20255
+    },
+    "exact-source.diff": {
+      "sha256": "d6f2ff8bde7a4e42f9b25c0484c9ba0d8dfb2b7fb6b26be098f7a941505cf039",
+      "bytes": 26095
+    },
+    "full-regeneration-summary.json": {
+      "sha256": "8667c9dedc93fa8f3ce9a4e5a0cc2dc79fce31ca8acef0a51c505959e33b6068",
+      "bytes": 123179
+    },
+    "identical-query-comparison.txt": {
+      "sha256": "65d113b4a9083249ff436b7786848fee0d6e53d4335f5b898d05597d95fcfb05",
+      "bytes": 909
+    },
+    "identical-query-summary.json": {
+      "sha256": "35d5b8d207090a4723ab3421238d2ea811082fa66faff66ad21f75f2e1e2efd9",
+      "bytes": 2021
+    },
+    "old-full-12345-9.txt": {
+      "sha256": "f9cb8c245a58e14021c1e87c01840ca496d37dc68ab61a08049e9ac374406d02",
+      "bytes": 20372
+    },
+    "parse_generation_log.py": {
+      "sha256": "f46b0c3b8b1de1fba66637b82b500f9570be5ef408baab216002fe847bb577a3",
+      "bytes": 3002
+    },
+    "plot_cross_section.py": {
+      "sha256": "c3d70cb64fabf3a0f8feb38e047a1b362ddab26152ec91e661ab33e9affeed99",
+      "bytes": 7746
+    },
+    "probe-source/generation_coast_approx.zig": {
+      "sha256": "db1148f304c29deba421e1e423a043c201b06e03351ed074bad38db2a961fc7f",
+      "bytes": 5414
+    },
+    "probe-source/generation_coast_index.zig": {
+      "sha256": "d0034c42aa1d9512456886dbe06ff4f23c40e234db76c251809a338763520e65",
+      "bytes": 6714
+    },
+    "probe-source/generation_geography.zig": {
+      "sha256": "e9d8048970ecfd83878479971be509c4b673c03aa31969aa673840b5f354a86b",
+      "bytes": 26545
+    },
+    "probe-source/generation_hash.zig": {
+      "sha256": "3d0aecd419e0fe556c01e116ace0e9ac07357337d386d3c5ec470f924df50774",
+      "bytes": 2600
+    },
+    "probe-source/generation_settings.zig": {
+      "sha256": "6fca7de59aa3e90d45a541e4929b224bb60a75f00b4e7730157b60e7e9fc3c27",
+      "bytes": 1954
+    },
+    "probe-source/world_environment.zig": {
+      "sha256": "166389dc75f94cc3dbebc7f1af119df236a0c44e5f78247d2661e00a555523d3",
+      "bytes": 5265
+    },
+    "site-results.csv": {
+      "sha256": "dee21070a92fdc1ab7dc2de495a8b06fade57c713f37574b3cbd306352414c4b",
+      "bytes": 8676,
+      "original_crlf": {
+        "sha256": "0573fd03f502abd38fb673d49f1840dd87744aaa97ff1de8007c2fa810f45b2d",
+        "bytes": 8743
+      },
+      "normalization": "CRLF converted to LF for repository preservation; values unchanged. Replacing LF with CRLF reconstructs the original bytes."
+    },
+    "source-manifests.json": {
+      "sha256": "6aff1650de1444625463a328ea0cfc4765fe0627c0d898c59735d92e8ced9169",
+      "bytes": 72048
+    },
+    "write_report.py": {
+      "sha256": "d0031e425c124b6a03b95ff7c8c4e2f9f1e203dbfc4a5d5620afc7fb2204eba4",
+      "bytes": 17190
+    }
+  }
+}

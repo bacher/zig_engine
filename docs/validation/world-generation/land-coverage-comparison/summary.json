@@ -1,0 +1,21 @@
+{
+  "before": {
+    "count": 256,
+    "median_ms": 8.335958,
+    "p95_ms": 8.90735375,
+    "sum_ms": 2149.347695,
+    "header": "mode=ReleaseFast target=aarch64-macos retained_bytes=655360 peak_bytes=2097152 allocations=7 warmups=3 samples=256",
+    "summary": "accepted=256 preparation_ns_total=2149347695"
+  },
+  "after": {
+    "count": 256,
+    "median_ms": 4.1951875,
+    "p95_ms": 5.19711425,
+    "sum_ms": 1082.916419,
+    "header": "mode=ReleaseFast target=aarch64-macos retained_bytes=655360 peak_bytes=2097152 allocations=7 warmups=3 samples=256",
+    "summary": "accepted=256 preparation_ns_total=1082916419"
+  },
+  "median_reduction_percent": 49.673600802691176,
+  "total_reduction_percent": 49.61650823088445,
+  "percentile_method": "empirical linear interpolation at (n-1)*p"
+}

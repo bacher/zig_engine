@@ -9,6 +9,7 @@ const layouts_module = @import("bind_group_layouts.zig");
 const coordinate_readback = @import("world_coordinate_readback.zig");
 const terrain_pipeline = @import("pipelines/terrain_height_map_pipeline.zig");
 const custom_readback = @import("custom_block_readback.zig");
+const material_readback = @import("material_readback.zig");
 
 // Dawn's native entry points, also used by zgpu.GraphicsContext.create.
 extern fn dniCreate() ?*anyopaque;
@@ -191,6 +192,22 @@ test "GPU custom road vertices, normals and atlas UVs match every section in all
     const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 128, 2, 2 } });
     gpu.device.pushErrorScope(.validation);
     const checked = custom_readback.check(gpu.device, &layout, &mapping);
+    _ = gpu.device.popErrorScope(ValidationResponse.callback, &validation);
+    try coordinate_readback.waitForCallback(gpu.device, &validation.done);
+    try std.testing.expectEqual(@as(usize, 0), validation.errors);
+    try checked;
+    try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
+}
+
+test "GPU material appearances keep water and foliage opaque with transparent atlas texels" {
+    var uncaptured: ValidationResponse = .{};
+    var validation: ValidationResponse = .{};
+    var mapping: coordinate_readback.MapResponse = .{};
+    const gpu = try HeadlessDawn.init();
+    defer gpu.deinit();
+    gpu.device.setUncapturedErrorCallback(ValidationResponse.callback, &uncaptured);
+    gpu.device.pushErrorScope(.validation);
+    const checked = material_readback.check(gpu.device, &mapping);
     _ = gpu.device.popErrorScope(ValidationResponse.callback, &validation);
     try coordinate_readback.waitForCallback(gpu.device, &validation.done);
     try std.testing.expectEqual(@as(usize, 0), validation.errors);

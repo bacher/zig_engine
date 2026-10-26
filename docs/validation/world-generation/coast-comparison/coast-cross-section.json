@@ -1,0 +1,83 @@
+{
+  "csv": "/private/tmp/worldgen-coast-comparison/cross-section.csv",
+  "sha256": "c9db5865d77da68b74476d0650ab3142b0c094ac131da6431221b22790fccb91",
+  "renderer": "ReportLab LinePlot 4.4.9",
+  "seed": 12345,
+  "attempt": 0,
+  "y": 13632,
+  "x_range": [
+    36576,
+    36896
+  ],
+  "samples": 321,
+  "actual_water_samples": 52,
+  "extra_zero_collar_samples": 1,
+  "variants": {
+    "old": {
+      "height_range": [
+        299.0,
+        454.0
+      ],
+      "coast_range": [
+        0.0,
+        144.0
+      ],
+      "maximum_adjacent_height_delta": 86.0,
+      "maximum_adjacent_coast_delta": 144.0,
+      "reported_join": {
+        "heights": [
+          454.0,
+          385.0
+        ],
+        "coasts": [
+          144.0,
+          0.0
+        ]
+      }
+    },
+    "exact": {
+      "height_range": [
+        299.0,
+        446.0
+      ],
+      "coast_range": [
+        0.0,
+        138.0
+      ],
+      "maximum_adjacent_height_delta": 86.0,
+      "maximum_adjacent_coast_delta": 1.0,
+      "reported_join": {
+        "heights": [
+          405.0,
+          405.0
+        ],
+        "coasts": [
+          45.0,
+          45.0
+        ]
+      }
+    },
+    "approx": {
+      "height_range": [
+        299.0,
+        461.0
+      ],
+      "coast_range": [
+        0.0,
+        190.0
+      ],
+      "maximum_adjacent_height_delta": 86.0,
+      "maximum_adjacent_coast_delta": 2.0,
+      "reported_join": {
+        "heights": [
+          405.0,
+          405.0
+        ],
+        "coasts": [
+          43.0,
+          43.0
+        ]
+      }
+    }
+  }
+}

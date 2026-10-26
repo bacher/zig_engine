@@ -159,7 +159,7 @@ pub const Store = struct {
         const player_count = get(u64, &header, 96);
         const player_len = get(u64, &header, 104);
         const chunk_len = get(u64, &header, 112);
-        if (descriptor_len > 4096 or global_len != 10 or chunk_count > limits.max_chunks or player_len > limits.max_players_bytes) return error.Capacity;
+        if (descriptor_len > format.maximum_descriptor_size or global_len != 10 or chunk_count > limits.max_chunks or player_len > limits.max_players_bytes) return error.Capacity;
         const index_start = try add(120, try add(descriptor_len, global_len));
         const player_start = try add(index_start, try mul(chunk_count, 12));
         const chunk_start = try add(player_start, player_len);
@@ -991,7 +991,7 @@ test "native durable creation, WAL commit, repair, recovery, and indexed base re
     const path = try std.fmt.allocPrintSentinel(a, "/private/tmp/zig-world-{x}", .{uuid}, 0);
     defer a.free(path);
     defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
-    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
     defer a.free(descriptor);
     const global = format.encodeGlobal(0);
     var store = try Store.create(a, path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{});
@@ -1038,7 +1038,7 @@ const Fixture = struct {
         std.c.arc4random_buf(&uuid, uuid.len);
         const path = try std.fmt.allocPrintSentinel(a, "/private/tmp/zig-persistence-fault-{x}", .{uuid}, 0);
         errdefer a.free(path);
-        const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+        const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
         defer a.free(descriptor);
         const global = format.encodeGlobal(0);
         return .{ .path = path, .store = try Store.create(a, path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{}) };
@@ -1421,7 +1421,7 @@ test "snapshot zero includes initial overrides and canonical players and survive
     io.test_model = &model;
     defer io.test_model = null;
     const uuid: Uuid = @splat(0x4a);
-    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
     defer a.free(descriptor);
     var blocks: [32768]u8 = @splat(0);
     blocks[17] = 1;
@@ -1444,6 +1444,32 @@ test "snapshot zero includes initial overrides and canonical players and survive
     try std.testing.expectEqualSlices(u8, &player, store.players);
 }
 
+test "natural and seeded flat identities survive durable creation and reopen" {
+    const a = std.testing.allocator;
+    const natural_settings = format.encodeNaturalSettings(.{ .climate_displacement = 112, .island_count = 10 });
+    const descriptors = [_]format.Descriptor{
+        .{ .dimensions = .{ 4, 4, 4 }, .generator_id = format.generator_id, .seed = 0x123456789abcdef0, .settings = &format.flat_settings },
+        .{ .dimensions = .{ 2048, 1024, 32 }, .generator_id = format.generator_id, .seed = 0xfedcba9876543210, .settings = &natural_settings },
+    };
+    for (descriptors) |descriptor| {
+        var model = io.Model.init(a);
+        defer model.deinit();
+        io.test_model = &model;
+        defer io.test_model = null;
+        const encoded_descriptor = try format.encodeDescriptor(a, descriptor);
+        defer a.free(encoded_descriptor);
+        const global = format.encodeGlobal(0);
+        var store = try Store.create(a, "model", .{ .world_uuid = @splat(0x6b), .descriptor = encoded_descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{});
+        store.deinit();
+        try model.crash(.lose_unsynced);
+        store = try Store.open(a, "model", .{});
+        defer store.deinit();
+        const restored = try format.decodeDescriptor(store.descriptor);
+        try std.testing.expectEqualDeep(descriptor, restored);
+        try format.validateRuntimeIdentity(restored, descriptor.dimensions, descriptor.seed, try format.decodeGeneratorSettings(descriptor.settings));
+    }
+}
+
 test "checksummed invalid descriptors fail before recovery or source retirement" {
     const a = std.testing.allocator;
     const Case = struct { offset: usize, value: u8, expected: anyerror };
@@ -1453,9 +1479,12 @@ test "checksummed invalid descriptors fail before recovery or source retirement"
         .{ .offset = 124, .value = 16, .expected = error.UnsupportedVersion },
         .{ .offset = 126, .value = 3, .expected = error.InvalidDescriptor },
         .{ .offset = 138, .value = 0, .expected = error.InvalidDescriptor },
-        .{ .offset = 139, .value = 2, .expected = error.InvalidDescriptor },
+        .{ .offset = 139, .value = 0, .expected = error.UnsupportedGenerator },
+        .{ .offset = 139, .value = 1, .expected = error.UnsupportedGenerator },
+        .{ .offset = 139, .value = 3, .expected = error.UnsupportedGenerator },
         .{ .offset = 141, .value = 2, .expected = error.UnsupportedVersion },
-        .{ .offset = 157, .value = 61, .expected = error.InvalidDescriptor },
+        .{ .offset = 157, .value = 255, .expected = error.UnsupportedGenerator },
+        .{ .offset = 158, .value = 61, .expected = error.InvalidDescriptor },
     }) |case| {
         var model = io.Model.init(a);
         defer model.deinit();
@@ -1615,7 +1644,7 @@ test "modeled failed fullflush at publication and retirement has both uncertain 
 
 test "creation preserves orphaned persistence artifacts and accepts an empty precreated directory" {
     const a = std.testing.allocator;
-    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
     defer a.free(descriptor);
     const global = format.encodeGlobal(0);
     for ([_]?[:0]const u8{ null, "world.base", "orphan.wal", "initial.tmp", "initial-chunks.tmp", "compact.tmp", "segment.pending" }) |artifact| {
@@ -1672,7 +1701,7 @@ test "fresh nested save path through a parent alias creates parents and preserve
     // retain ordinary path semantics; only the world leaf rejects symlinks.
     const path = try std.fmt.allocPrintSentinel(a, "/tmp/zig-persistence-nested-{x}/saves/default", .{uuid}, 0);
     defer a.free(path);
-    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
     defer a.free(descriptor);
     const global = format.encodeGlobal(17);
     const initial: Initial = .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 };
@@ -1704,7 +1733,7 @@ test "fresh nested save path through a parent alias creates parents and preserve
 
 test "nested creation propagates mkdir namespace and fullflush failures without overwriting evidence" {
     const a = std.testing.allocator;
-    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
     defer a.free(descriptor);
     const global = format.encodeGlobal(0);
     const Failure = struct { operation: io.Operation, after: usize };

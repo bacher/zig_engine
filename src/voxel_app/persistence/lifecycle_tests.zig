@@ -72,7 +72,7 @@ fn scenario(mode: Mode) !void {
     const path = try std.fmt.allocPrintSentinel(a, "/private/tmp/persistence-lifecycle-{x}", .{uuid}, 0);
     defer a.free(path);
     defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
-    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 8, 8, 8 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 8, 8, 8 }, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
     defer a.free(descriptor);
     const global = format.encodeGlobal(0);
     var store = try storage.Store.create(a, path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{});

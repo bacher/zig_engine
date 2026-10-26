@@ -1,0 +1,96 @@
+{
+  "protocol": {
+    "seed": 12345,
+    "attempt": 0,
+    "size_blocks": [
+      65536,
+      32768,
+      1024
+    ],
+    "queries_per_trial": 250000,
+    "coordinate_rule": "h=hash.mix(i+12345); x=h%65536; y=(h>>32)%32768",
+    "mode_orders": [
+      [
+        "old",
+        "exact",
+        "approx"
+      ],
+      [
+        "approx",
+        "old",
+        "exact"
+      ],
+      [
+        "exact",
+        "approx",
+        "old"
+      ]
+    ],
+    "scope": "Geography.atWithClimate on the same prepared Geography and ClimateField; excludes feature/deposit preparation and beaches."
+  },
+  "variants": {
+    "old": {
+      "trials": [
+        {
+          "round": 0,
+          "milliseconds": 20.578,
+          "mainland_queries": 152002
+        },
+        {
+          "round": 1,
+          "milliseconds": 20.597,
+          "mainland_queries": 152002
+        },
+        {
+          "round": 2,
+          "milliseconds": 20.543,
+          "mainland_queries": 152002
+        }
+      ],
+      "median_ms": 20.578,
+      "median_cost_relative_to_old": 1.0
+    },
+    "exact": {
+      "trials": [
+        {
+          "round": 0,
+          "milliseconds": 144.328,
+          "mainland_queries": 152002
+        },
+        {
+          "round": 1,
+          "milliseconds": 143.415,
+          "mainland_queries": 152002
+        },
+        {
+          "round": 2,
+          "milliseconds": 142.521,
+          "mainland_queries": 152002
+        }
+      ],
+      "median_ms": 143.415,
+      "median_cost_relative_to_old": 6.969336184274468
+    },
+    "approx": {
+      "trials": [
+        {
+          "round": 0,
+          "milliseconds": 21.875,
+          "mainland_queries": 152002
+        },
+        {
+          "round": 1,
+          "milliseconds": 21.658,
+          "mainland_queries": 152002
+        },
+        {
+          "round": 2,
+          "milliseconds": 21.992,
+          "mainland_queries": 152002
+        }
+      ],
+      "median_ms": 21.875,
+      "median_cost_relative_to_old": 1.063028477014287
+    }
+  }
+}

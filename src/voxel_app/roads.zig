@@ -77,6 +77,7 @@ pub const Context = struct {
         var ids: std.ArrayList(u32) = .empty;
         errdefer ids.deinit(self.allocator);
         for (changes.items) |change| {
+            if (self.reader.isImmutable(change.cell)) return error.ImmutableCell;
             const coords, _ = world.splitBlockCoords(.{ @intCast(change.cell[0]), @intCast(change.cell[1]), @intCast(change.cell[2]) });
             const id = self.reader.layout.encodeChunkCoords(coords);
             if (std.mem.indexOfScalar(u32, ids.items, id) == null) try ids.append(self.allocator, id);
@@ -138,7 +139,7 @@ pub const Context = struct {
     fn supported(self: Context, cell: Cell) bool {
         const below = cell - Cell{ 0, 0, 1 };
         const material = self.readMaterial(below) orelse return false;
-        if (material == .none) return false;
+        if (!rules.supportsRoad(material)) return false;
         if (material == .custom) return if (self.record(below)) |road| road.slope == null else false;
         return true;
     }
@@ -150,6 +151,10 @@ pub const Context = struct {
 
     fn set(self: Context, cell: Cell, slope: ?data.Slope) void {
         const normalized = self.normalize(cell) orelse return;
+        if (self.reader.isImmutable(normalized)) {
+            if (self.planning_failure) |failure| failure.* = error.ImmutableCell;
+            return;
+        }
         const coords, const local = world.splitBlockCoords(.{ @intCast(normalized[0]), @intCast(normalized[1]), @intCast(normalized[2]) });
         const id = self.reader.layout.encodeChunkCoords(coords);
         const observed = self.record(normalized) orelse return;

@@ -9,6 +9,13 @@ const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const WorldLayout = @import("engine").WorldLayout;
 const test_layout = @import("test_world.zig").layout;
 const WORLD_SIZE = test_layout.size_in_chunks;
+const environment = @import("world_environment.zig");
+const generation_hash = @import("generation_hash.zig");
+const natural_generator = @import("natural_generator.zig");
+pub const NaturalSettings = @import("generation_settings.zig").NaturalSettings;
+pub const PreparationReport = @import("generation_preparation.zig").PreparationReport;
+pub const PrepareOptions = @import("generation_preparation.zig").PrepareOptions;
+pub const Profile = enum { flat, natural, legacy_terrain };
 
 pub const WorldGenerationParams = struct {
     /// Width, in blocks, of the first noise octave's features.
@@ -29,6 +36,8 @@ pub const WorldGenerationParams = struct {
 
 pub const WorldGenerator = union(enum) {
     flat,
+    flat_seeded: u64,
+    natural: struct { seed: u64, settings: NaturalSettings = .{} },
     terrain: struct {
         seed: u64,
         params: WorldGenerationParams = .{},
@@ -44,12 +53,40 @@ pub const WorldGenerator = union(enum) {
 
     /// Validate the layout/settings combination and derive immutable octaves once.
     /// The caller owns the result; the borrowed layout must outlive its columns.
-    pub fn prepare(self: WorldGenerator, allocator: std.mem.Allocator, layout: *const WorldLayout) (ValidationError || std.mem.Allocator.Error)!PreparedWorldGenerator {
+    pub fn prepare(self: WorldGenerator, allocator: std.mem.Allocator, layout: *const WorldLayout) (ValidationError || @import("generation_preparation.zig").PrepareError || std.mem.Allocator.Error)!PreparedWorldGenerator {
+        var report: PreparationReport = .{};
+        return self.prepareWithReport(allocator, layout, &report);
+    }
+
+    pub fn prepareWithReport(self: WorldGenerator, allocator: std.mem.Allocator, layout: *const WorldLayout, report: *PreparationReport) (ValidationError || @import("generation_preparation.zig").PrepareError || std.mem.Allocator.Error)!PreparedWorldGenerator {
+        return self.prepareWithReportOptions(allocator, layout, report, .{});
+    }
+
+    pub fn prepareWithReportOptions(self: WorldGenerator, allocator: std.mem.Allocator, layout: *const WorldLayout, report: *PreparationReport, options: PrepareOptions) (ValidationError || @import("generation_preparation.zig").PrepareError || std.mem.Allocator.Error)!PreparedWorldGenerator {
+        report.* = .{ .seed = switch (self) {
+            .flat => 0,
+            .flat_seeded => |value| value,
+            .terrain => |value| value.seed,
+            .natural => |value| value.seed,
+        } };
+        report.profile = switch (self) {
+            .natural => .natural,
+            .flat, .flat_seeded => .flat,
+            .terrain => .legacy_terrain,
+        };
+        if (self != .natural) report.stage = .complete;
         return .{
             .layout = layout,
+            .seed_value = switch (self) {
+                .flat => 0,
+                .flat_seeded => |seed| seed,
+                .terrain => |terrain| terrain.seed,
+                .natural => |natural| natural.seed,
+            },
             .kind = switch (self) {
-                .flat => .flat,
+                .flat, .flat_seeded => .flat,
                 .terrain => |terrain| .{ .terrain = try PreparedTerrain.init(allocator, layout, terrain.seed, terrain.params) },
+                .natural => |natural| .{ .natural = try natural_generator.NaturalWorld.createWithOptions(allocator, layout, natural.seed, natural.settings, report, options) },
             },
         };
     }
@@ -57,16 +94,85 @@ pub const WorldGenerator = union(enum) {
 
 pub const PreparedWorldGenerator = struct {
     layout: *const WorldLayout,
+    seed_value: u64 = 0,
     kind: union(enum) {
         flat,
         terrain: PreparedTerrain,
+        natural: *natural_generator.NaturalWorld,
     },
 
     pub fn deinit(self: *PreparedWorldGenerator, allocator: std.mem.Allocator) void {
         switch (self.kind) {
             .flat => {},
             .terrain => |terrain| allocator.free(terrain.octaves),
+            .natural => |natural| {
+                natural.deinit(allocator);
+                allocator.destroy(natural);
+            },
         }
+    }
+
+    pub fn seed(self: *const PreparedWorldGenerator) u64 {
+        return self.seed_value;
+    }
+    pub fn profile(self: *const PreparedWorldGenerator) Profile {
+        return switch (self.kind) {
+            .flat => .flat,
+            .natural => .natural,
+            .terrain => .legacy_terrain,
+        };
+    }
+    pub fn playableYInset(self: *const PreparedWorldGenerator) u32 {
+        return if (self.kind == .natural) 64 else 0;
+    }
+    pub fn polarInset(self: *const PreparedWorldGenerator) u32 {
+        return self.playableYInset();
+    }
+    pub fn firstStart(self: *const PreparedWorldGenerator) ?[3]u32 {
+        return if (self.kind == .natural) self.kind.natural.first_start else null;
+    }
+    pub fn deeprockThickness(self: *const PreparedWorldGenerator, x: i64, y: u32) u32 {
+        return if (self.kind == .terrain) 0 else generation_hash.deeprockThickness(self.seed_value, x, y, self.layout.size_in_blocks[0]);
+    }
+    pub fn isCanonicalDeeprock(self: *const PreparedWorldGenerator, block: [3]u32) bool {
+        return block[2] < self.deeprockThickness(block[0], block[1]);
+    }
+    pub fn climateAt(self: *const PreparedWorldGenerator, x: i64, y: u32) environment.ClimateId {
+        std.debug.assert(y < self.layout.size_in_blocks[1]);
+        return if (self.kind == .natural) self.kind.natural.climate.at(x, y) else .temperate;
+    }
+    pub fn fillClimateMap(self: *const PreparedWorldGenerator, column: @Vector(2, i32), out: *environment.ClimateMap) void {
+        for (0..32) |y| for (0..32) |x| {
+            out[y][x] = self.climateAt(@as(i64, column[0]) * 32 + @as(i64, @intCast(x)), @as(u32, @intCast(column[1])) * 32 + @as(u32, @intCast(y)));
+        };
+    }
+    pub fn columnEnvironmentAt(self: *const PreparedWorldGenerator, x: i64, y: u32) environment.ColumnEnvironment {
+        if (self.kind == .natural) return self.kind.natural.baseEnvironmentAt(x, y);
+        const height = if (self.kind == .terrain) self.kind.terrain.height(x, y) else self.layout.size_in_blocks[2] / 2 - CHUNK_SIZE / 2;
+        return .{ .climate = .temperate, .terrain_height = height, .sea_level = 0, .water_present = false, .relief = .lowland, .mountain_strength = 0, .vegetation = .meadow, .geology = .rocky, .surface_cover = .rock, .landmass_id = 1, .coast_distance = std.math.maxInt(u32) };
+    }
+
+    /// Slow block oracle for bounded diagnostics; production columns retain their
+    /// environment/feature samples instead of repeating these point queries.
+    pub fn referenceMaterialAt(self: *const PreparedWorldGenerator, x: i64, y: u32, z: u32) BlockType {
+        if (z < self.deeprockThickness(x, y)) return .deeprock;
+        return switch (self.kind) {
+            .natural => |natural| natural.materialAt(x, y, z),
+            .flat => blk: {
+                const height = self.layout.size_in_blocks[2] / 2 - CHUNK_SIZE / 2;
+                if (z >= height) break :blk .none;
+                const local_x = @mod(x, 32);
+                const local_y = y % 32;
+                if (z + 1 == height and ((local_y == 0 and local_x <= 1) or (local_y == 1 and local_x == 0))) break :blk .snow;
+                break :blk .stone;
+            },
+            .terrain => |*terrain| blk: {
+                const height = terrain.height(x, y);
+                if (z >= height) break :blk .none;
+                const depth = height - z - 1;
+                break :blk if (depth == 0) .grass else if (depth <= terrain.dirt_depth) .packed_dirt else .stone;
+            },
+        };
     }
 };
 
@@ -170,10 +276,12 @@ const ColumnHeights = [CHUNK_SIZE][CHUNK_SIZE]u32;
 /// computed once in `init`, so generating several vertical chunks reuses that work.
 pub const ColumnGenerator = struct {
     layout: *const WorldLayout,
+    prepared: ?*const PreparedWorldGenerator = null,
     coords: @Vector(2, i32),
     column: union(enum) {
         flat,
         terrain: TerrainColumn,
+        natural: natural_generator.NaturalColumn,
     },
 
     pub fn init(generator: *const PreparedWorldGenerator, coords: @Vector(2, i32)) ColumnGenerator {
@@ -183,10 +291,12 @@ pub const ColumnGenerator = struct {
 
         return .{
             .layout = layout,
+            .prepared = generator,
             .coords = coords,
             .column = switch (generator.kind) {
                 .flat => .flat,
                 .terrain => |*terrain| .{ .terrain = .init(layout, coords, terrain) },
+                .natural => |natural| .{ .natural = .init(natural, coords) },
             },
         };
     }
@@ -204,7 +314,24 @@ pub const ColumnGenerator = struct {
         var chunk = switch (self.column) {
             .flat => try generateFlatChunk(self.layout, allocator, chunk_z),
             .terrain => |*terrain| try terrain.generateChunk(allocator, chunk_z),
+            .natural => |*natural| if (@as(u32, @intCast(chunk_z)) * CHUNK_SIZE >= natural.maximum_occupancy) WorldChunk.initEmpty() else try allocateChunk(allocator, natural.generateData(chunk_z)),
         };
+        errdefer chunk.deinit(allocator);
+        if (chunk_z == 0) if (self.prepared) |prepared| if (prepared.kind != .terrain) {
+            // Original generation writes the canonical mask before publication.
+            const data = try chunk.tryEnsureData(allocator);
+            for (0..32) |y| for (0..32) |x| {
+                const thickness = prepared.deeprockThickness(@as(i64, self.coords[0]) * 32 + @as(i64, @intCast(x)), @as(u32, @intCast(self.coords[1])) * 32 + @as(u32, @intCast(y)));
+                for (0..thickness) |z| data.blocks[z][y][x] = .deeprock;
+            };
+            chunk.boundaries = @import("boundary_mask.zig").extract(data);
+            chunk.flags = @import("boundary_mask.zig").getFlags(&chunk.boundaries);
+            chunk.solid_block_count = data.countSolidBlocks();
+        };
+        if (chunk.solid_block_count == 0 and chunk.content == .blocks) {
+            chunk.content.deinit(allocator);
+            chunk.content = .empty;
+        }
         // Outer y/z faces have no neighboring wall. X is periodic.
         if (self.coords[1] > 0 and self.coords[1] + 1 < self.layout.size_in_chunks[1] and
             chunk_z > 0 and chunk_z + 1 < self.layout.size_in_chunks[2])
@@ -216,6 +343,7 @@ pub const ColumnGenerator = struct {
                 // horizontal strips need only cover the chunk's last block layer.
                 .terrain => |*terrain| chunk_top < terrain.minimum_height and
                     chunk_top <= terrain.minimum_adjacent_height,
+                .natural => |*natural| chunk_top < natural.minimum_height and chunk_top <= natural.minimum_adjacent_height,
             };
         }
         return chunk;
@@ -427,9 +555,16 @@ test "flat world has the surface chunk in the middle, stone below and air above"
             );
         } else if (z < surface_z) {
             try std.testing.expect(chunk.content == .blocks);
+            var expected = WorldChunkData.initSolid();
+            if (z == 0) for (0..32) |y| {
+                for (0..32) |x| {
+                    const thickness = prepared.deeprockThickness(@as(i64, WORLD_SIZE[0] - 1) * 32 + @as(i64, @intCast(x)), @as(u32, @intCast(WORLD_SIZE[1] - 1)) * 32 + @as(u32, @intCast(y)));
+                    for (0..thickness) |floor_z| expected.blocks[floor_z][y][x] = .deeprock;
+                }
+            };
             try std.testing.expectEqualSlices(
                 u8,
-                std.mem.asBytes(&WorldChunkData.initSolid().blocks),
+                std.mem.asBytes(&expected.blocks),
                 std.mem.asBytes(&chunk.content.blocks.blocks),
             );
         } else {
@@ -708,4 +843,32 @@ test "fallible generation preserves allocation-free air and retries materializat
         defer solid.deinit(std.testing.allocator);
         try std.testing.expect(solid.content == .blocks);
     }
+}
+
+test "seeded flat floor is complete irregular periodic and reproducible across reopen" {
+    const a = std.testing.allocator;
+    var prepared = try WorldGenerator.prepare(.{ .flat_seeded = 12345 }, a, &test_layout);
+    defer prepared.deinit(a);
+    var reopened = try WorldGenerator.prepare(.{ .flat_seeded = 12345 }, a, &test_layout);
+    defer reopened.deinit(a);
+    var thicknesses = [_]bool{false} ** 3;
+    for ([_]@Vector(2, i32){ .{ 0, 0 }, .{ WORLD_SIZE[0] - 1, WORLD_SIZE[1] - 1 } }) |coords| {
+        const column = ColumnGenerator.init(&prepared, coords);
+        const chunk = try column.tryGenerateChunk(a, 0);
+        defer chunk.deinit(a);
+        for (0..32) |y| for (0..32) |x| {
+            const global_x = @as(i64, coords[0]) * 32 + @as(i64, @intCast(x));
+            const global_y = @as(u32, @intCast(coords[1])) * 32 + @as(u32, @intCast(y));
+            const thickness = prepared.deeprockThickness(global_x, global_y);
+            try std.testing.expect(thickness >= 1 and thickness <= 3);
+            thicknesses[thickness - 1] = true;
+            try std.testing.expectEqual(thickness, prepared.deeprockThickness(global_x - test_layout.size_in_blocks[0], global_y));
+            try std.testing.expectEqual(thickness, reopened.deeprockThickness(global_x, global_y));
+            for (0..4) |z| try std.testing.expectEqual(if (z < thickness) BlockType.deeprock else BlockType.stone, chunk.content.getBlock(.{ @intCast(x), @intCast(y), @intCast(z) }));
+        };
+    }
+    try std.testing.expectEqualSlices(bool, &.{ true, true, true }, &thicknesses);
+    try std.testing.expectEqual(@as(u32, 0), prepared.playableYInset());
+    try std.testing.expectEqual(environment.ClimateId.temperate, prepared.climateAt(-1, 0));
+    try std.testing.expectEqual(@as(u64, 12345), prepared.seed());
 }

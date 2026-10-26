@@ -14,7 +14,8 @@ The adaptive road item held by the player or previewed in spectator putting mode
 same unformed model, atlas UVs, and faceted normals as a placed adaptive block.
 
 Every road cell needs a solid block immediately underneath it. Existing cube-colliding
-materials, including an unformed adaptive road, supply that support. Formed slopes cannot
+materials, including an unformed adaptive road, supply that support, except sand and
+foliage. One exposed deeprock cell is sufficient without a surrounding platform. Formed slopes cannot
 support a road stacked directly above them. Roads otherwise have no foundation, height, or
 horizontal span restrictions. Removing required support is rejected by the shared
 client/service validator.

@@ -2,6 +2,8 @@ const std = @import("std");
 const voxel = @import("engine").voxel_chunk;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const ChunkContent = @import("./world.zig").ChunkContent;
+const environment = @import("./world_environment.zig");
+pub const ClimateMap = environment.ClimateMap;
 
 pub const BoundaryMasks = @import("./boundary_mask.zig").BoundaryMasks;
 
@@ -14,6 +16,11 @@ pub fn extractChunkSideData(
 }
 
 pub fn tryExtractChunkSideData(allocator: std.mem.Allocator, content: ChunkContent, neighbors: BoundaryMasks) !voxel.ChunkSideData {
+    const climate: ClimateMap = @splat(@splat(.temperate));
+    return tryExtractChunkSideDataWithClimate(allocator, content, neighbors, &climate);
+}
+
+pub fn tryExtractChunkSideDataWithClimate(allocator: std.mem.Allocator, content: ChunkContent, neighbors: BoundaryMasks, climate: *const ClimateMap) !voxel.ChunkSideData {
     var result: voxel.ChunkSideData = .{};
     errdefer result.deinit(allocator);
     if (content == .empty) return result;
@@ -36,7 +43,7 @@ pub fn tryExtractChunkSideData(allocator: std.mem.Allocator, content: ChunkConte
                     };
                     if (!occluded) try result.blocks_grouped_by_side[index].append(allocator, .{
                         .coords = .{ local[0], local[1], local[2] },
-                        .block_type = block,
+                        .block_type = renderMaterial(block, climate[y][x]),
                     });
                 }
             }
@@ -50,13 +57,57 @@ pub fn extractChunkGeometry(allocator: std.mem.Allocator, chunk: @import("world.
 }
 
 pub fn tryExtractChunkGeometry(allocator: std.mem.Allocator, chunk: @import("world.zig").WorldChunk, neighbors: BoundaryMasks) !voxel.ChunkSideData {
-    var result = try tryExtractChunkSideData(allocator, chunk.content, neighbors);
+    const climate: ClimateMap = @splat(@splat(.temperate));
+    return tryExtractChunkGeometryWithClimate(allocator, chunk, neighbors, &climate);
+}
+
+pub fn extractChunkGeometryWithClimate(allocator: std.mem.Allocator, chunk: @import("world.zig").WorldChunk, neighbors: BoundaryMasks, climate: *const ClimateMap) voxel.ChunkSideData {
+    return tryExtractChunkGeometryWithClimate(allocator, chunk, neighbors, climate) catch @panic("OOM");
+}
+
+pub fn tryExtractChunkGeometryWithClimate(allocator: std.mem.Allocator, chunk: @import("world.zig").WorldChunk, neighbors: BoundaryMasks, climate: *const ClimateMap) !voxel.ChunkSideData {
+    var result = try tryExtractChunkSideDataWithClimate(allocator, chunk.content, neighbors, climate);
     errdefer result.deinit(allocator);
     for (chunk.metadata.roads.items) |road| {
         const local = @import("block_transformations.zig").coordinates(road.index);
         try result.custom_blocks.append(allocator, .{ .coords = .{ local[0], local[1], local[2] }, .shape = road.shape() });
     }
     return result;
+}
+
+fn renderMaterial(block: voxel.BlockType, climate: environment.ClimateId) voxel.RenderMaterial {
+    if (block == .grass) return switch (climate) {
+        .frozen => .grass_frozen,
+        .steppe => .grass_steppe,
+        .temperate, .desert => .grass,
+    };
+    return voxel.RenderMaterial.fromBlock(block);
+}
+
+test "column climate changes covered soil appearance without changing saved materials" {
+    const allocator = std.testing.allocator;
+    var data = @import("./world_chunk_data.zig").WorldChunkData.initEmpty();
+    var climate: ClimateMap = @splat(@splat(.temperate));
+    const climates = [_]environment.ClimateId{ .frozen, .steppe, .temperate, .desert };
+    const appearances = [_]voxel.RenderMaterial{ .grass_frozen, .grass_steppe, .grass, .grass };
+    for (climates, 0..) |column_climate, i| {
+        data.blocks[2][3][i * 2] = .grass;
+        climate[3][i * 2] = column_climate;
+    }
+    data.blocks[2][5][0] = .sand;
+    data.blocks[2][5][2] = .dirt;
+    data.blocks[2][5][4] = .packed_dirt;
+    climate[5] = @splat(.frozen);
+    var mesh = try tryExtractChunkSideDataWithClimate(allocator, .{ .blocks = &data }, @splat(.{}), &climate);
+    defer mesh.deinit(allocator);
+    const tops = mesh.blocks_grouped_by_side[@intFromEnum(voxel.Side.top)].items;
+    for (appearances, 0..) |appearance, i| {
+        try std.testing.expectEqual(appearance, tops[i].block_type);
+        try std.testing.expectEqual(voxel.BlockType.grass, data.blocks[2][3][i * 2]);
+    }
+    try std.testing.expectEqual(voxel.RenderMaterial.sand, tops[4].block_type);
+    try std.testing.expectEqual(voxel.RenderMaterial.dirt, tops[5].block_type);
+    try std.testing.expectEqual(voxel.RenderMaterial.packed_dirt, tops[6].block_type);
 }
 
 test "neighbor masks cull matching faces and retain real exterior surfaces" {

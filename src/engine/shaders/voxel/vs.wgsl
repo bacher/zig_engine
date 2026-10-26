@@ -13,6 +13,7 @@ struct VertexOut {
     @location(2) position_light_clip_0: vec4<f32>,
     @location(3) position_light_clip_1: vec4<f32>,
     @location(4) position_light_clip_2: vec4<f32>,
+    @location(5) @interpolate(flat) material_and_side: vec2u,
 }
 
 
@@ -25,6 +26,7 @@ struct VertexOut {
     output.position_clip = clip_from_chunk * vertex.position;
     output.normal = (view_from_world * vec4f(vertex.normal, 0)).xyz;
     output.texcoord = vertex.uv;
+    output.material_and_side = vertex.material_and_side;
     output.position_light_clip_0 = light_clip_from_chunk_array[0] * vertex.position;
     output.position_light_clip_1 = light_clip_from_chunk_array[1] * vertex.position;
     output.position_light_clip_2 = light_clip_from_chunk_array[2] * vertex.position;

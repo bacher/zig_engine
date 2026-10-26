@@ -1,0 +1,70 @@
+--- baseline/src/voxel_app/natural_generator.zig
++++ optimized/src/voxel_app/natural_generator.zig
+@@ -236,6 +236,16 @@
+         return null;
+     }
+
++    /// Borrowed per-fill inputs for one horizontal column, never retained in the
++    /// persistent column cache. Every Z cell uses the same floor and index bin.
++    const ColumnMaterialInputs = struct {
++        x: i64,
++        y: u32,
++        environment: environment.ColumnEnvironment,
++        floor_thickness: u32,
++        deposit_candidates: []const u8,
++    };
++
+     pub fn materialAt(self: *const NaturalWorld, x: i64, y: u32, z: u32) BlockType {
+         const e = self.baseEnvironmentAt(x, y);
+         const base = self.materialFromEnvironment(x, y, z, e);
+@@ -246,11 +256,24 @@
+     }
+
+     fn materialFromEnvironment(self: *const NaturalWorld, x: i64, y: u32, z: u32, e: environment.ColumnEnvironment) BlockType {
+-        if (z < hash.deeprockThickness(self.seed, x, y, self.layout.size_in_blocks[0])) return .deeprock;
++        // The slow point oracle evaluates inputs afresh, independently of the
++        // NaturalColumn cache and the chunk fill's per-horizontal-column reuse.
++        return self.materialFromColumn(.{
++            .x = x,
++            .y = y,
++            .environment = e,
++            .floor_thickness = hash.deeprockThickness(self.seed, x, y, self.layout.size_in_blocks[0]),
++            .deposit_candidates = self.deposits.candidates(x, y),
++        }, z);
++    }
++
++    fn materialFromColumn(self: *const NaturalWorld, column: ColumnMaterialInputs, z: u32) BlockType {
++        const e = column.environment;
++        if (z < column.floor_thickness) return .deeprock;
+         if (z >= e.terrain_height) return if (z < e.sea_level) .water else .none;
+         const depth = e.terrain_height - z - 1;
+         if (e.surface_cover == .sand and depth < 5) return .sand;
+-        if (self.deposits.at(self.deposits.candidates(x, y), x, y, z)) |resource| return resource;
++        if (self.deposits.at(column.deposit_candidates, column.x, column.y, z)) |resource| return resource;
+         if (e.surface_cover == .soil and depth < 5) return if (depth == 0 and !e.water_present) .grass else .packed_dirt;
+         return .stone;
+     }
+@@ -432,11 +455,20 @@
+
+     pub fn generateData(self: *const NaturalColumn, chunk_z: i32) WorldChunkData {
+         var data = WorldChunkData.initEmpty();
+-        for (0..32) |ly| for (0..32) |lx| for (0..32) |lz| {
++        for (0..32) |ly| for (0..32) |lx| {
+             const x = @as(i64, self.coords[0]) * 32 + @as(i64, @intCast(lx));
+             const y: u32 = @intCast(@as(i64, self.coords[1]) * 32 + @as(i64, @intCast(ly)));
+-            const z: u32 = @intCast(@as(i64, chunk_z) * 32 + @as(i64, @intCast(lz)));
+-            data.blocks[lz][ly][lx] = self.world.materialFromEnvironment(x, y, z, self.environments[ly][lx]);
++            const column: NaturalWorld.ColumnMaterialInputs = .{
++                .x = x,
++                .y = y,
++                .environment = self.environments[ly][lx],
++                .floor_thickness = hash.deeprockThickness(self.world.seed, x, y, self.world.layout.size_in_blocks[0]),
++                .deposit_candidates = self.world.deposits.candidates(x, y),
++            };
++            for (0..32) |lz| {
++                const z: u32 = @intCast(@as(i64, chunk_z) * 32 + @as(i64, @intCast(lz)));
++                data.blocks[lz][ly][lx] = self.world.materialFromColumn(column, z);
++            }
+         };
+         const width = self.world.layout.size_in_blocks[0];
+         const chunk_x = @as(i64, self.coords[0]) * 32;

@@ -199,7 +199,7 @@ pub fn run(a: std.mem.Allocator, io: std.Io, config: Config) !Report {
         construction[i] = @intCast(i);
         events[i] = .{ .block = @intCast(i), .kind = .grow_grass, .due_tick = 999999 };
     }
-    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 512, 256, 8 }, .generator_id = 0, .seed = 0, .settings = &.{} });
+    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 512, 256, 8 }, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
     defer a.free(descriptor);
     var uuid: [16]u8 = undefined;
     std.c.arc4random_buf(&uuid, 16);
