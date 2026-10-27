@@ -68,6 +68,7 @@ const Game = struct {
     const MeshVersion = struct { chunk_revision: u64, mesh_revision: u64 };
     const BoundarySnapshot = struct { masks: world_engine.BoundaryMasks, mesh_revision: u64 };
     const Overlay = enum { none, menu, world_map };
+    const map_teleport_timeout_seconds: f64 = 30;
     allocator: std.mem.Allocator,
     engine: *Engine,
     world: ?World = null,
@@ -80,7 +81,7 @@ const Game = struct {
     next_compaction_at: f64 = 600,
     overlay: Overlay = .none,
     map_state: world_map.State = .{},
-    map_teleport: ?struct { xy: [2]f64, request_id: ?u64 = null } = null,
+    map_teleport: ?struct { xy: [2]f64, deadline: f64, request_id: ?u64 = null } = null,
     map_teleport_error: ?[]const u8 = null,
     /// Future multiplayer sessions leave simulation running behind the menu.
     menu_pauses_game: bool = true,
@@ -143,8 +144,8 @@ const Game = struct {
     }
 
     fn cancelMapTeleport(game: *Game) void {
-        // Shutdown may abandon the read; request IDs keep its late reply from
-        // being applied if exiting is canceled and a new teleport is requested.
+        // Abandoned reads can finish after shutdown or a timeout. Request IDs
+        // keep their late replies from being applied to a new teleport.
         game.map_teleport = null;
         game.map_teleport_error = null;
     }
@@ -187,18 +188,31 @@ const Game = struct {
             game.resetAfterMapTeleport();
         } else {
             if (game.player == null or game.world_client == null) return;
-            game.map_teleport = .{ .xy = xy };
+            game.map_teleport = .{ .xy = xy, .deadline = game.engine.real_time + map_teleport_timeout_seconds };
         }
     }
 
     fn updateMapTeleport(game: *Game) void {
         if (comptime !world_map.debug_teleport_enabled) return;
         const pending = game.map_teleport orelse return;
+        if (game.engine.real_time >= pending.deadline) {
+            game.map_teleport = null;
+            game.map_teleport_error = "Teleport timed out; try again";
+            return;
+        }
         const client = game.world_client orelse return;
         if (pending.request_id == null) {
             // Submitted edits can still be delayed by persistence capture. Wait
             // for acknowledgments so the lookup sees their final terrain state.
-            if (game.world.?.pending_operations.items.len != 0) return;
+            if (game.world.?.pending_operations.items.len != 0) {
+                // A failed dependency can retain an edit without acknowledging
+                // it. Release the map controls without dropping that edit.
+                if (game.world_data) |service| if (service.persistenceStatus().phase == .failed) {
+                    game.map_teleport = null;
+                    game.map_teleport_error = "Teleport unavailable while terrain edits are blocked";
+                };
+                return;
+            }
             const player = if (game.player) |*player| player else return;
             game.map_teleport.?.request_id = client.requestStandingSpace(.{
                 .preferred_xy = pending.xy,
@@ -1958,6 +1972,138 @@ test "debug map teleport waits for edit acknowledgment and keeps player view and
     try std.testing.expect(game.pinned_chunks.contains(layout.encodeChunkCoords(layout.getChunkCoords(game.player.?.position))));
 }
 
+test "debug map teleport releases controls when a persisted edit dependency is corrupt" {
+    if (comptime !world_map.debug_teleport_enabled) return error.SkipZigTest;
+    const allocator = std.testing.allocator;
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    var uuid: [16]u8 = undefined;
+    std.c.arc4random_buf(&uuid, uuid.len);
+    const path = try std.fmt.allocPrintSentinel(allocator, "/private/tmp/map-teleport-dependency-{x}", .{uuid}, 0);
+    defer allocator.free(path);
+    defer std.Io.Dir.cwd().deleteTree(std.testing.io, path) catch {};
+    const descriptor = try persistence_format.encodeDescriptor(allocator, .{
+        .dimensions = .{ @intCast(layout.size_in_chunks[0]), @intCast(layout.size_in_chunks[1]), @intCast(layout.size_in_chunks[2]) },
+        .generator_id = persistence_format.generator_id,
+        .seed = 0,
+        .settings = &persistence_format.flat_settings,
+    });
+    defer allocator.free(descriptor);
+    const global = persistence_format.encodeGlobal(0);
+    var store = try persistence_storage.Store.create(allocator, path, .{
+        .world_uuid = uuid,
+        .descriptor = descriptor,
+        .global = &global,
+        .players = &.{},
+        .player_count = 0,
+    }, .{});
+    defer store.deinit();
+    {
+        const service = try WorldDataService.createPersistent(std.testing.io, allocator, &layout, .flat, &store, .{});
+        defer service.destroy();
+        const client = try service.createClient();
+        try std.testing.expectEqual(.success, (try StreamingTest.serviceOperation(client, .{
+            .block = .{ 10, 10, 48 },
+            .action = .{ .put = .snow },
+        })).status);
+        const intent = service.requestSave(true);
+        var saved = false;
+        for (0..5000) |_| {
+            const status = service.persistenceStatus();
+            if (status.intent_id == intent and !status.active and (status.phase == .complete or status.phase == .failed)) {
+                try std.testing.expectEqual(.complete, status.phase);
+                saved = true;
+                break;
+            }
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(saved);
+    }
+    {
+        var catalog = try store.snapshotCatalog();
+        defer catalog.deinit();
+        var read = (try catalog.prepareRead(layout.encodeChunkCoords(.{ 0, 0, 1 }))).?;
+        defer read.deinit();
+        const record = try read.read(allocator);
+        defer allocator.free(record);
+        record[record.len - 1] ^= 1;
+        try read.file.write(record[record.len - 1 ..], read.offset + record.len - 1);
+    }
+    const service = try WorldDataService.createPersistent(std.testing.io, allocator, &layout, .flat, &store, .{});
+    defer service.destroy();
+    var fixture: StreamingTest = .{};
+    fixture.initWithLayout(&layout);
+    defer fixture.deinit();
+    const game = &fixture.game;
+    game.world_data = service;
+    game.world_client = try service.createClient();
+    game.persistence_store = &store;
+    game.player = PlayerController.init(allocator, .{ 0.5, 0.5, -16 });
+    game.player.?.yaw = 0.7;
+    game.player.?.pitch = -0.2;
+    game.player.?.vertical_velocity = -30;
+    game.player.?.applyCamera(&fixture.camera);
+    game.block_interaction.inventory = .planks;
+    const original_camera = fixture.camera.position;
+
+    // Loading this generated chunk uses only face neighbors, excluding the
+    // corrupt chunk. Its edit validation later requires the wider +/-2 envelope.
+    const coords: ChunkCoords = .{ 2, 2, 1 };
+    const block = [3]u32{ 74, 74, 48 };
+    const token = game.world_client.?.requestChunks(.{ coords[0], coords[1] }, coords[2], coords[2] + 1);
+    try fixture.subscribe(coords, token, .blocks);
+    while (!fixture.settled()) try fixture.waitAndApplyPackages();
+    try std.testing.expectEqual(.success, game.world.?.tryOperation(.{ .block = block, .action = .{ .put = .snow } }).status);
+    game.flushBlockOperations();
+    try std.testing.expectEqual(1, game.world.?.pending_operations.items.len);
+    const edit_id = game.world.?.pending_operations.items[0].request_id.?;
+    const next_request_id = game.world_client.?.next_request_id;
+    var dependency_failed = false;
+    for (0..5000) |_| {
+        const status = service.persistenceStatus();
+        if (status.phase == .failed and status.pending_commands == 1) {
+            try std.testing.expectEqualStrings("ChecksumMismatch", status.error_name.?);
+            dependency_failed = true;
+            break;
+        }
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(dependency_failed);
+    _ = game.receiveChunks();
+    game.setOverlay(.world_map);
+    game.handleMapAction(.{ .teleport_xy = .{ 10.5, 10.5 } });
+    try std.testing.expect(game.mapView(&fixture.scene).teleport_pending);
+    game.updateMapTeleport();
+    try std.testing.expectEqual(null, game.map_teleport);
+    try std.testing.expectEqualStrings("Teleport unavailable while terrain edits are blocked", game.map_teleport_error.?);
+    try std.testing.expect(!game.mapView(&fixture.scene).teleport_pending);
+    try std.testing.expectEqual(.world_map, game.overlay);
+    try std.testing.expectEqual(Position{ 0.5, 0.5, -16 }, game.player.?.position);
+    try std.testing.expectEqualDeep(original_camera, fixture.camera.position);
+    try std.testing.expectEqual(@as(f32, 0.7), game.player.?.yaw);
+    try std.testing.expectEqual(@as(f32, -0.2), game.player.?.pitch);
+    try std.testing.expectEqual(@as(f64, -30), game.player.?.vertical_velocity);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.planks, game.block_interaction.inventory.?);
+    // The unsuccessful teleport neither dispatches a search nor resolves or
+    // drops the edit whose authoritative dependency remains unreadable.
+    try std.testing.expectEqual(next_request_id, game.world_client.?.next_request_id);
+    try std.testing.expectEqual(1, game.world.?.pending_operations.items.len);
+    try std.testing.expectEqual(edit_id, game.world.?.pending_operations.items[0].request_id.?);
+    try std.testing.expectEqualDeep(block, game.world.?.pending_operations.items[0].operation.block);
+
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.overlay);
+    game.setOverlay(.world_map);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.overlay);
+    game.setOverlay(.world_map);
+    game.handleMapAction(.{ .close = true });
+    try std.testing.expectEqual(.none, game.overlay);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expectEqual(.menu, game.overlay);
+    try std.testing.expect(fixture.engine.paused);
+    try std.testing.expectEqual(edit_id, game.world.?.pending_operations.items[0].request_id.?);
+}
+
 test "debug map teleport failure leaves the player at the original position" {
     if (comptime !world_map.debug_teleport_enabled) return error.SkipZigTest;
     const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
@@ -2023,6 +2169,64 @@ test "pending map teleport blocks all close controls and replacement clicks unti
     try std.testing.expectEqual(Position{ -10.5, -10.5, -16 }, game.player.?.position);
     try std.testing.expect(game.overlay == .none and !fixture.engine.gameplay_input_blocked);
     try std.testing.expectEqual(null, game.map_teleport_error);
+}
+
+test "map teleport timeout restores controls while preserving edits and ignores late search replies" {
+    if (comptime !world_map.debug_teleport_enabled) return error.SkipZigTest;
+    for ([_]bool{ false, true }) |submitted| {
+        const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+        const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &layout, .flat);
+        defer service.destroy();
+        var fixture: StreamingTest = .{};
+        fixture.initWithLayout(&layout);
+        defer fixture.deinit();
+        const game = &fixture.game;
+        game.world_data = service;
+        game.world_client = try service.createClient();
+        const original: Position = .{ 0.5, 0.5, -16 };
+        game.player = PlayerController.init(std.testing.allocator, original);
+        game.player.?.applyCamera(&fixture.camera);
+        const camera_position = fixture.camera.position;
+        game.block_interaction.inventory = .planks;
+        const block = [3]u32{ 42, 42, 48 };
+        if (!submitted) {
+            try game.world.?.insertChunk(layout.origin_chunk, WorldChunk.initEmpty());
+            game.world.?.setBlockUnchecked(block, .dirt);
+            try std.testing.expectEqual(1, game.world.?.pending_operations.items.len);
+        }
+        fixture.engine.real_time = 10;
+        game.setOverlay(.world_map);
+        game.handleMapAction(.{ .teleport_xy = .{ -10.5, -10.5 } });
+        const deadline = game.map_teleport.?.deadline;
+        try std.testing.expectEqual(@as(f64, 40), deadline);
+        fixture.engine.real_time = deadline - 0.001;
+        game.updateMapTeleport();
+        const request_id = game.map_teleport.?.request_id;
+        try std.testing.expectEqual(submitted, request_id != null);
+        game.handleMapAction(.{ .close = true });
+        try std.testing.expectEqual(.world_map, game.overlay);
+        fixture.engine.real_time = deadline;
+        game.updateMapTeleport();
+        try std.testing.expectEqual(null, game.map_teleport);
+        try std.testing.expectEqualStrings("Teleport timed out; try again", game.map_teleport_error.?);
+        try std.testing.expect(!game.mapView(&fixture.scene).teleport_pending);
+        try std.testing.expectEqual(original, game.player.?.position);
+        try std.testing.expectEqual(camera_position, fixture.camera.position);
+        try std.testing.expectEqual(voxel_chunk_module.BlockType.planks, game.block_interaction.inventory.?);
+        if (submitted) {
+            game.handleMapAction(.{ .teleport_xy = .{ 10.5, 10.5 } });
+            game.updateMapTeleport();
+            try std.testing.expect(game.map_teleport.?.request_id.? != request_id.?);
+            try finishMapTeleport(game);
+            try std.testing.expectEqual(Position{ 10.5, 10.5, -16 }, game.player.?.position);
+        } else {
+            try std.testing.expectEqual(1, game.world.?.pending_operations.items.len);
+            try std.testing.expectEqual(null, game.world.?.pending_operations.items[0].request_id);
+            try std.testing.expect(try game.world.?.isBlockSolid(block));
+            game.handleMapAction(.{ .close = true });
+        }
+        try std.testing.expect(game.overlay == .none and !fixture.engine.gameplay_input_blocked);
+    }
 }
 
 test "canceling exit allows a new teleport without applying an abandoned search reply" {

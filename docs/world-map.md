@@ -28,6 +28,9 @@ a safe standing position is available. The map shows progress or a failure.
 M, Escape, Close, and further terrain clicks are unavailable while the player
 teleport is pending. Success closes the map. Failure leaves the player where
 they were, keeps the map open, and permits another attempt or closing the map.
+While waiting for edit acknowledgments, a reported world-data failure ends the
+teleport attempt. Any attempt also times out after 30 seconds of real time.
+Both failures preserve pending edits and restore map controls.
 Quitting still cancels the pending request. For a spectator, the destination is
 four metres above the generated land or water surface; the original player
 stays in place. Both modes preserve the actor's heading.
@@ -46,6 +49,7 @@ CPU tests cover raster bounds and deterministic sampling, wrap seams and heading
 projection, panel margins/aspect, Close-button hit testing at normal and Retina
 framebuffer density, pending teleport controls, Debug-only terrain clicks and
 held-button suppression, teleport column selection, modal transitions,
+edit acknowledgment ordering, corrupt saved dependencies, timeouts and late replies,
 player/spectator poses, continued jump and terrain collision physics, and
 suppression of movement controls, look, and stale block actions. They run as part
 of `zig build test`.
