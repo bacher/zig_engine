@@ -24,10 +24,13 @@ teleport. Release builds omit this debugger control and its hint.
 
 For the player, teleportation looks up the current surface asynchronously at the
 exact selected column, including terrain edits, and places the player only when
-a safe standing position is available. The map shows progress or a failure;
-failure leaves the player where they were and keeps the map open. For a spectator,
-the destination is four metres above the generated land or water surface; the
-original player stays in place. Both modes preserve the actor's heading.
+a safe standing position is available. The map shows progress or a failure.
+M, Escape, Close, and further terrain clicks are unavailable while the player
+teleport is pending. Success closes the map. Failure leaves the player where
+they were, keeps the map open, and permits another attempt or closing the map.
+Quitting still cancels the pending request. For a spectator, the destination is
+four metres above the generated land or water surface; the original player
+stays in place. Both modes preserve the actor's heading.
 
 The overview samples immutable generated terrain, climate, forests, and mountains;
 it does not reflect player terrain edits or show underground deposits. Sampling
@@ -41,10 +44,11 @@ for the arrow in the surrounding gutter.
 
 CPU tests cover raster bounds and deterministic sampling, wrap seams and heading
 projection, panel margins/aspect, Close-button hit testing at normal and Retina
-framebuffer density, Debug-only terrain clicks and held-button suppression,
-teleport column selection, modal transitions, player/spectator poses, continued
-jump and terrain collision physics, and suppression of movement controls, look,
-and stale block actions. They run as part of `zig build test`.
+framebuffer density, pending teleport controls, Debug-only terrain clicks and
+held-button suppression, teleport column selection, modal transitions,
+player/spectator poses, continued jump and terrain collision physics, and
+suppression of movement controls, look, and stale block actions. They run as part
+of `zig build test`.
 
 ## Deferred work
 

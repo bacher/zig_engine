@@ -80,7 +80,7 @@ const Game = struct {
     next_compaction_at: f64 = 600,
     overlay: Overlay = .none,
     map_state: world_map.State = .{},
-    map_teleport: ?struct { xy: [2]f64, request_id: ?u64 = null, active: bool = true } = null,
+    map_teleport: ?struct { xy: [2]f64, request_id: ?u64 = null } = null,
     map_teleport_error: ?[]const u8 = null,
     /// Future multiplayer sessions leave simulation running behind the menu.
     menu_pauses_game: bool = true,
@@ -135,6 +135,7 @@ const Game = struct {
 
     fn setOverlay(game: *Game, overlay: Overlay) void {
         if (game.exit_requested or overlay == game.overlay) return;
+        if (game.overlay == .world_map and game.map_teleport != null) return;
         if (game.overlay == .world_map) game.cancelMapTeleport();
         game.overlay = overlay;
         game.engine.setPaused(overlay == .menu and game.menu_pauses_game);
@@ -142,7 +143,9 @@ const Game = struct {
     }
 
     fn cancelMapTeleport(game: *Game) void {
-        if (game.map_teleport) |*pending| pending.active = false;
+        // Shutdown may abandon the read; request IDs keep its late reply from
+        // being applied if exiting is canceled and a new teleport is requested.
+        game.map_teleport = null;
         game.map_teleport_error = null;
     }
 
@@ -153,7 +156,8 @@ const Game = struct {
                 .position = scene.camera.position,
                 .yaw = scene.spectator_camera.yaw,
             } else null,
-            .teleport_status = game.map_teleport_error orelse if (game.map_teleport != null and game.map_teleport.?.active) "Finding a safe surface..." else null,
+            .teleport_pending = game.map_teleport != null,
+            .teleport_status = game.map_teleport_error orelse if (game.map_teleport != null) "Finding a safe surface..." else null,
         };
     }
 
@@ -163,6 +167,8 @@ const Game = struct {
             game.setOverlay(.none);
             return;
         }
+        // Keep the map locked to one active teleport destination at a time.
+        if (game.map_teleport != null) return;
         if (comptime !world_map.debug_teleport_enabled) return;
         const xy = action.teleport_xy orelse return;
         for (xy) |coordinate| if (!std.math.isFinite(coordinate)) return;
@@ -180,8 +186,6 @@ const Game = struct {
             scene.camera.updatePosition(.{ xy[0], xy[1], z });
             game.resetAfterMapTeleport();
         } else {
-            // One search at a time bounds worker work even when Mouse1 is spammed.
-            if (game.map_teleport != null) return;
             if (game.player == null or game.world_client == null) return;
             game.map_teleport = .{ .xy = xy };
         }
@@ -192,10 +196,6 @@ const Game = struct {
         const pending = game.map_teleport orelse return;
         const client = game.world_client orelse return;
         if (pending.request_id == null) {
-            if (!pending.active) {
-                game.map_teleport = null;
-                return;
-            }
             // Submitted edits can still be delayed by persistence capture. Wait
             // for acknowledgments so the lookup sees their final terrain state.
             if (game.world.?.pending_operations.items.len != 0) return;
@@ -209,7 +209,7 @@ const Game = struct {
         }
         const response = client.pollStandingSpace(pending.request_id.?) orelse return;
         game.map_teleport = null;
-        if (!pending.active or game.overlay != .world_map or game.exit_requested or game.control_mode != .player) return;
+        if (game.overlay != .world_map or game.exit_requested or game.control_mode != .player) return;
         const position = response.result catch |err| {
             game.map_teleport_error = switch (err) {
                 error.NoSpace, error.NoSurface => "No safe surface at this point",
@@ -1963,9 +1963,53 @@ test "debug map teleport failure leaves the player at the original position" {
     try std.testing.expectEqual(original, game.player.?.position);
     try std.testing.expectEqualStrings("No safe surface at this point", game.map_teleport_error.?);
     try std.testing.expect(game.overlay == .world_map and fixture.engine.gameplay_input_blocked);
+    game.handleMapAction(.{ .close = true });
+    try std.testing.expect(game.overlay == .none and !fixture.engine.gameplay_input_blocked);
 }
 
-test "closing then reopening the map ignores a successful pending teleport" {
+test "pending map teleport blocks all close controls and replacement clicks until completion" {
+    if (comptime !world_map.debug_teleport_enabled) return error.SkipZigTest;
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &layout, .flat);
+    defer service.destroy();
+    var fixture: StreamingTest = .{};
+    fixture.initWithLayout(&layout);
+    defer fixture.deinit();
+    const game = &fixture.game;
+    game.world_data = service;
+    game.world_client = try service.createClient();
+    const original: Position = .{ 0.5, 0.5, -16 };
+    game.player = PlayerController.init(std.testing.allocator, original);
+    game.setOverlay(.world_map);
+    game.handleMapAction(.{ .teleport_xy = .{ -10.5, -10.5 } });
+    for (0..2) |phase| {
+        if (phase == 1) {
+            game.updateMapTeleport();
+            try std.testing.expect(game.map_teleport.?.request_id != null);
+        }
+        const pending = game.map_teleport.?;
+        for ([_]zglfw.Key{ .m, .escape }) |key| {
+            try std.testing.expect(handleUIKeyPress(game, .{ .key = key, .mods = .{} }));
+            try std.testing.expectEqual(.world_map, game.overlay);
+        }
+        game.handleMapAction(.{ .close = true });
+        game.setOverlay(.menu);
+        try std.testing.expectEqual(.world_map, game.overlay);
+        try std.testing.expect(fixture.engine.gameplay_input_blocked);
+        try std.testing.expectEqual(.never, fixture.input.cursor_capture);
+        game.handleMapAction(.{ .teleport_xy = .{ 10.5, 10.5 } });
+        try std.testing.expectEqualDeep(pending, game.map_teleport.?);
+        const view = game.mapView(&fixture.scene);
+        try std.testing.expect(view.teleport_pending);
+        try std.testing.expectEqualStrings("Finding a safe surface...", view.teleport_status.?);
+    }
+    try finishMapTeleport(game);
+    try std.testing.expectEqual(Position{ -10.5, -10.5, -16 }, game.player.?.position);
+    try std.testing.expect(game.overlay == .none and !fixture.engine.gameplay_input_blocked);
+    try std.testing.expectEqual(null, game.map_teleport_error);
+}
+
+test "canceling exit allows a new teleport without applying an abandoned search reply" {
     if (comptime !world_map.debug_teleport_enabled) return error.SkipZigTest;
     const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
     const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &layout, .flat);
@@ -1981,12 +2025,19 @@ test "closing then reopening the map ignores a successful pending teleport" {
     game.setOverlay(.world_map);
     game.handleMapAction(.{ .teleport_xy = .{ -10.5, -10.5 } });
     game.updateMapTeleport();
-    try std.testing.expect(game.map_teleport.?.request_id != null);
-    game.handleMapAction(.{ .close = true });
+    const old_id = game.map_teleport.?.request_id.?;
+    game.beginExit();
+    try std.testing.expect(game.exit_requested);
+    try std.testing.expectEqual(.none, game.overlay);
+    try std.testing.expectEqual(null, game.map_teleport);
+    game.cancelExit();
     game.setOverlay(.world_map);
+    game.handleMapAction(.{ .teleport_xy = .{ 10.5, 10.5 } });
+    game.updateMapTeleport();
+    try std.testing.expect(game.map_teleport.?.request_id.? != old_id);
     try finishMapTeleport(game);
-    try std.testing.expectEqual(original, game.player.?.position);
-    try std.testing.expectEqual(null, game.map_teleport_error);
+    try std.testing.expectEqual(Position{ 10.5, 10.5, -16 }, game.player.?.position);
+    try std.testing.expectEqual(.none, game.overlay);
 }
 
 test "debug map spectator teleport preserves the original player and spectator orientation" {
