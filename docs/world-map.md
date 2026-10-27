@@ -30,3 +30,68 @@ projection, panel margins/aspect, Close-button hit testing at normal and Retina
 framebuffer density, modal transitions, player/spectator poses, continued jump and
 terrain collision physics, and suppression of movement controls, look, and stale
 block actions. They run as part of `zig build test`.
+
+## Deferred work
+
+These items from [PR #41](https://github.com/bacher/zig_engine/pull/41) remain
+open and are tracked in [TODO.md](../TODO.md). The measurements below were taken
+during the review on 2026-10-26.
+
+### P2: Map generation stalls the first frame
+
+On the first M press, `State.draw` calls `State.prepare`, which builds the entire
+raster synchronously before drawing the panel. The default 1024×512 raster
+samples 524,288 terrain columns on the application thread, blocking rendering
+and event polling. This also delays frame-based player physics despite the map
+not pausing gameplay time.
+
+With the natural generator already prepared, seed 12345, and the default
+2048×1024×32-chunk world, local `Raster.init` measurements were approximately
+776 ms in Debug and 75 ms in ReleaseFast. These timings exclude generator
+preparation and GPU upload; they are evidence of the stall, not a portable
+performance budget.
+
+Avoid building the full CPU raster in the first render callback: prepare it
+before gameplay, build it incrementally within a frame budget, or use a worker while
+displaying a loading panel. Keep GPU upload on the render thread, retain the
+cache, and avoid loading voxel chunks. If a worker borrows the prepared
+generator, join it before destroying the world-data service during shutdown.
+Verify that first opening remains responsive and reopening reuses the texture;
+keep timing measurements in a benchmark.
+
+Source: [world_map.zig](../src/voxel_app/world_map.zig),
+[world_map_data.zig](../src/voxel_app/world_map_data.zig).
+[Original finding](https://github.com/bacher/zig_engine/pull/41#discussion_r4375176868).
+
+### P3: Header overlaps in narrow windows at high UI scale
+
+With a zgui display size of 400×400 and `font_scale_dpi = 2`, a focused UI probe
+measured the title at x=60..193, the north label at x=96, and the Close button at
+x=148..340. Both the label and button overlap the title. `panelLayout` clamps
+the requested minimum panel width to the available space, while the header
+continues to use fixed scaled offsets.
+
+Use a compact or wrapped header, or measure the title and reserve the button's
+width. Verify that the title, north label, and Close button remain readable and
+the button remains clickable at narrow sizes and 200% UI scale. Extend the UI
+tests to vary actual font/UI scale independently of framebuffer density; the
+current Retina click test keeps UI scale at 1.
+
+Source: [world_map.zig](../src/voxel_app/world_map.zig).
+[Original finding](https://github.com/bacher/zig_engine/pull/41#discussion_r4375176872).
+
+### Test improvement: Natural terrain and downsampling
+
+The raster determinism test covers flat and legacy terrain generators in a
+64×128-block world, where every pixel represents one block. It does not exercise
+the default natural generator or cell-centre sampling when a pixel represents
+many blocks. The palette tests use synthetic column environments.
+
+Add a fixed-seed natural-world regression with a valid layout large enough to
+require downsampling. Check repeated output, independently calculated sample
+locations at the north/south edges and X seam, and representative generated land
+and water colors. Keep wall-clock assertions out of unit tests; use a separate
+benchmark to track raster generation cost.
+
+Source: [world_map_data.zig](../src/voxel_app/world_map_data.zig).
+[Original suggestion](https://github.com/bacher/zig_engine/pull/41#discussion_r4375176883).
