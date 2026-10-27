@@ -18,3 +18,7 @@
 - [ ] Add temporary construction supports/scaffolding for multi-cell masonry gaps.
 - [ ] Add an inventory using authoritative `mined_type` results, recipes, and dedicated construction-material textures.
 - [ ] Add an incremental construction dependency index and a memory budget for retained timed chunk state when building scale requires it.
+
+- [ ] **P2:** Keep the first world-map opening responsive while generating its raster; preserve caching and bounded memory (see [map generation stall](docs/world-map.md#p2-map-generation-stalls-the-first-frame)).
+- [ ] **P3:** Make the world-map header fit narrow windows at high UI scale, and cover actual font scaling in UI tests (see [header overlap](docs/world-map.md#p3-header-overlaps-in-narrow-windows-at-high-ui-scale)).
+- [ ] Add natural-world and downsampling regressions for the world-map raster (see [missing test coverage](docs/world-map.md#test-improvement-natural-terrain-and-downsampling)).
