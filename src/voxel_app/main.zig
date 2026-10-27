@@ -1892,7 +1892,7 @@ fn finishMapTeleport(game: *Game) !void {
     return error.TeleportTimedOut;
 }
 
-test "debug map teleport resolves current edited surface and keeps player view and inventory" {
+test "debug map teleport waits for edit acknowledgment and keeps player view and inventory" {
     if (comptime !world_map.debug_teleport_enabled) return error.SkipZigTest;
     const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 2 } });
     const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &layout, .flat);
@@ -1908,18 +1908,34 @@ test "debug map teleport resolves current edited surface and keeps player view a
     game.player.?.pitch = -0.2;
     game.player.?.vertical_velocity = -30;
     game.block_interaction.inventory = .planks;
-    const edit = try StreamingTest.serviceOperation(game.world_client.?, .{ .block = .{ 234, 42, 16 }, .action = .{ .put = .dirt } });
-    try std.testing.expectEqual(.success, edit.status);
+    const block = [3]u32{ 234, 42, 16 };
+    const coords, const local = world_module.splitBlockCoords(block);
+    const token = game.world_client.?.requestChunks(.{ coords[0], coords[1] }, coords[2], coords[2] + 1);
+    try fixture.subscribe(coords, token, .blocks);
+    while (!fixture.settled()) try fixture.waitAndApplyPackages();
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.none, game.world.?.getChunk(coords).?.content.getBlock(local));
+    try std.testing.expectEqual(.success, game.world.?.tryOperation(.{ .block = block, .action = .{ .put = .dirt } }).status);
+    try std.testing.expectEqual(1, game.world.?.pending_operations.items.len);
+    try std.testing.expectEqual(null, game.world.?.pending_operations.items[0].request_id);
     game.setOverlay(.world_map);
     game.handleMapAction(.{ .teleport_xy = .{ 106.5, -85.5 } });
-    // A submitted edit may still await persistence admission/acknowledgment.
-    try game.world.?.pending_operations.append(game.allocator, .{
-        .operation = .{ .block = .{ 234, 42, 16 }, .action = .remove },
-        .request_id = 999,
-    });
     game.updateMapTeleport();
     try std.testing.expectEqual(null, game.map_teleport.?.request_id);
-    game.world.?.pending_operations.clearRetainingCapacity();
+    game.flushBlockOperations();
+    try std.testing.expect(game.world.?.pending_operations.items[0].request_id != null);
+    // Even a completed worker edit must be reconciled before the lookup starts.
+    for (0..5000) |_| {
+        game.updateMapTeleport();
+        try std.testing.expectEqual(null, game.map_teleport.?.request_id);
+        try std.testing.expectEqual(Position{ 0.5, 0.5, -16 }, game.player.?.position);
+        try std.testing.expectEqual(.world_map, game.overlay);
+        _ = game.receiveChunks();
+        if (game.world.?.pending_operations.items.len == 0) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
+    try std.testing.expectEqual(.success, game.world.?.last_edit_result.?.status);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.dirt, game.world.?.getChunk(coords).?.content.getBlock(local));
     game.updateMapTeleport();
     const request_id = game.map_teleport.?.request_id.?;
     // Repeated presses cannot enqueue an unbounded series of terrain searches.
