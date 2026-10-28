@@ -1649,6 +1649,9 @@ fn onRender(engine: *Engine, _: wgpu.RenderPassEncoder, game_opaque: *anyopaque)
     if (game.overlay == .none) {
         block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
         drawCrosshair();
+        if (game.control_mode == .player) if (game.block_interaction.holding) |hold| {
+            drawBlockActionProgress(hold);
+        };
     }
     if (game.overlay == .world_map) if (game.world_data) |service| if (engine.active_scene) |scene| {
         game.handleMapAction(game.map_state.draw(game.allocator, engine.gctx, service.preparedGenerator(), game.mapView(scene)));
@@ -2533,6 +2536,33 @@ fn drawCrosshair() void {
         .r = 4 * scale,
         .col = zgui.colorConvertFloat4ToU32(.{ 1, 1, 1, 1 }),
         .num_segments = 32,
+    });
+}
+
+fn drawBlockActionProgress(hold: player_interaction.Interaction.Hold) void {
+    const screen = zgui.io.getDisplaySize();
+    if (screen[0] <= 0 or screen[1] <= 0) return;
+    const scale = zgui.getStyle().font_scale_dpi;
+    const min: [2]f32 = .{ screen[0] / 2 - 32 * scale, screen[1] / 2 + 16 * scale };
+    const max: [2]f32 = .{ min[0] + 64 * scale, min[1] + 8 * scale };
+    const inner_min: [2]f32 = .{ min[0] + scale, min[1] + scale };
+    const inner_max: [2]f32 = .{ max[0] - scale, max[1] - scale };
+    const progress: f32 = @floatCast(std.math.clamp(hold.elapsed / hold.duration(), 0, 1));
+    const list = zgui.getForegroundDrawList();
+    list.addRectFilled(.{
+        .pmin = min,
+        .pmax = max,
+        .col = zgui.colorConvertFloat4ToU32(.{ 0, 0, 0, 1 }),
+    });
+    list.addRectFilled(.{
+        .pmin = inner_min,
+        .pmax = inner_max,
+        .col = zgui.colorConvertFloat4ToU32(.{ 0.15, 0.15, 0.15, 1 }),
+    });
+    if (progress > 0) list.addRectFilled(.{
+        .pmin = inner_min,
+        .pmax = .{ inner_min[0] + (inner_max[0] - inner_min[0]) * progress, inner_max[1] },
+        .col = zgui.colorConvertFloat4ToU32(.{ 1, 1, 1, 1 }),
     });
 }
 

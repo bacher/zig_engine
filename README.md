@@ -71,7 +71,7 @@ The player's carried block, or the observer's selected block in putting mode, is
 
 Held items and empty hands use Hybrid animation: walking bob, acceleration lag, jump/landing response, and look sway from actual camera movement. Looking down smoothly raises them to reveal more; looking up lowers them. This pitch offset persists while holding the angle, and looking straight ahead restores the resting pose after motion settles. Picking up or placing a block and changing material preserve the animation. Both player and spectator modes follow their active camera, with motion scaling with speed. See [held-item motion and tuning](docs/rendering.md#held-item-motion).
 
-The voxel app displays a small white circular crosshair with a black outline at the centre of the screen in both player and spectator modes. The crosshair, error-message fonts and layout, and debug window follow the current display's DPI when the window moves between monitors.
+The voxel app displays a small white circular crosshair with a black outline at the centre of the screen in both player and spectator modes. While the player holds to extract or place a block, a white progress bar fills below the crosshair over the action's three-second or one-second duration. It disappears when the action completes or is canceled. The crosshair, progress bar, error-message fonts and layout, and debug window follow the current display's DPI when the window moves between monitors.
 
 ## Voxel app
 
