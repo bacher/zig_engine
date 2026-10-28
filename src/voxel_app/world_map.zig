@@ -7,8 +7,15 @@ const zgpu = engine.zgpu;
 const generation = @import("world_generator.zig");
 const data = @import("world_map_data.zig");
 
+pub const debug_teleport_enabled = @import("builtin").mode == .Debug;
 pub const Pose = struct { position: engine.world_math.Position, yaw: f32 };
-pub const View = struct { player: ?Pose = null, spectator: ?Pose = null };
+pub const View = struct {
+    player: ?Pose = null,
+    spectator: ?Pose = null,
+    teleport_status: ?[]const u8 = null,
+    teleport_pending: bool = false,
+};
+pub const Action = struct { close: bool = false, teleport_xy: ?[2]f64 = null };
 
 const player_color = [4]f32{ 1, 0.85, 0.36, 1 };
 const spectator_color = [4]f32{ 0.34, 0.87, 1, 1 };
@@ -22,9 +29,9 @@ pub const State = struct {
         self.* = .{};
     }
 
-    /// Returns true when the close button is pressed. M/Escape are handled by
-    /// the application before gameplay input is dispatched.
-    pub fn draw(self: *State, allocator: std.mem.Allocator, gctx: *zgpu.GraphicsContext, prepared: *const generation.PreparedWorldGenerator, view: View) bool {
+    /// M/Escape are handled before gameplay input is dispatched. A Debug map
+    /// click requests teleportation; the application closes the panel on success.
+    pub fn draw(self: *State, allocator: std.mem.Allocator, gctx: *zgpu.GraphicsContext, prepared: *const generation.PreparedWorldGenerator, view: View) Action {
         if (self.texture == null and !self.failed) {
             self.prepare(allocator, gctx, prepared) catch |err| {
                 self.failed = true;
@@ -78,7 +85,7 @@ fn panelLayout(screen: [2]f32, world_size: [2]u32, scale: f32) ?Panel {
     const margin = @min(48 * scale, @min(screen[0], screen[1]) * 0.06);
     const padding = 18 * scale;
     const header = 40 * scale;
-    const footer = 34 * scale;
+    const footer = (if (debug_teleport_enabled) @as(f32, 56) else 34) * scale;
     const available: [2]f32 = .{ screen[0] - 2 * (margin + padding), screen[1] - 2 * (margin + padding) - header - footer };
     if (available[0] < 120 * scale or available[1] < 1) return null;
     const aspect = @as(f32, @floatFromInt(world_size[0])) / @as(f32, @floatFromInt(world_size[1]));
@@ -94,10 +101,10 @@ fn panelLayout(screen: [2]f32, world_size: [2]u32, scale: f32) ?Panel {
     };
 }
 
-fn drawPanel(texture: ?zgui.TextureRef, layout: *const engine.WorldLayout, view: View) bool {
+fn drawPanel(texture: ?zgui.TextureRef, layout: *const engine.WorldLayout, view: View) Action {
     const screen = zgui.io.getDisplaySize();
     const scale = zgui.getStyle().font_scale_dpi;
-    const panel = panelLayout(screen, .{ layout.size_in_blocks[0], layout.size_in_blocks[1] }, scale) orelse return false;
+    const panel = panelLayout(screen, .{ layout.size_in_blocks[0], layout.size_in_blocks[1] }, scale) orelse return .{};
     zgui.setNextWindowPos(.{ .x = panel.window.position[0], .y = panel.window.position[1] });
     zgui.setNextWindowSize(.{ .w = panel.window.size[0], .h = panel.window.size[1] });
     zgui.setNextWindowFocus();
@@ -121,10 +128,28 @@ fn drawPanel(texture: ?zgui.TextureRef, layout: *const engine.WorldLayout, view:
     draw.addTextUnformatted(title, color(.{ 0.94, 0.96, 0.97, 1 }), "World map");
     draw.addTextUnformatted(.{ right - 122 * scale, title[1] }, color(.{ 0.7, 0.77, 0.8, 1 }), "N");
     zgui.setCursorScreenPos(.{ right - 96 * scale, panel.window.position[1] + panel.padding });
-    const close = zgui.button("Close  [M]", .{ .w = 96 * scale, .h = 28 * scale });
+    zgui.beginDisabled(.{ .disabled = view.teleport_pending });
+    var action: Action = .{ .close = zgui.button("Close  [M]", .{ .w = 96 * scale, .h = 28 * scale }) };
+    zgui.endDisabled();
 
     if (texture) |image| {
         draw.addImage(image, .{ .pmin = panel.map.position, .pmax = panel.map.max() });
+        if (debug_teleport_enabled) {
+            zgui.setCursorScreenPos(panel.map.position);
+            zgui.beginDisabled(.{ .disabled = view.teleport_pending });
+            _ = zgui.invisibleButton("Debug map teleport", .{ .w = panel.map.size[0], .h = panel.map.size[1] });
+            // IsItemClicked fires on the press edge, without button repeat or
+            // release activation. The item bounds exclude the surrounding gutter.
+            if (!view.teleport_pending and !action.close and zgui.isItemClicked(.left)) {
+                const mouse = zgui.getMousePos();
+                action.teleport_xy = data.unprojectTeleport(layout, .{
+                    @as(f64, mouse[0] - panel.map.position[0]) / panel.map.size[0],
+                    @as(f64, mouse[1] - panel.map.position[1]) / panel.map.size[1],
+                });
+            }
+            zgui.endDisabled();
+            draw.addTextUnformatted(.{ title[0], panel.map.max()[1] + 34 * scale }, color(.{ 0.7, 0.77, 0.8, 1 }), view.teleport_status orelse "Debug: Mouse1 to teleport");
+        }
     } else {
         draw.addRectFilled(.{ .pmin = panel.map.position, .pmax = panel.map.max(), .col = color(.{ 0.12, 0.17, 0.2, 1 }) });
         draw.addTextUnformatted(.{ panel.map.position[0] + 16 * scale, panel.map.position[1] + 16 * scale }, color(.{ 1, 1, 1, 1 }), "World map unavailable");
@@ -143,7 +168,7 @@ fn drawPanel(texture: ?zgui.TextureRef, layout: *const engine.WorldLayout, view:
         drawLegend(draw, .{ title[0] + 6 * scale, legend_y }, player_color, if (view.spectator != null) 0.6 else 1, "Player", scale);
     }
     if (view.spectator != null) drawLegend(draw, .{ title[0] + 128 * scale, legend_y }, spectator_color, 1, "Spectator", scale);
-    return close;
+    return action;
 }
 
 fn color(value: [4]f32) u32 {
@@ -195,18 +220,18 @@ test "world map close button and directional overlays render at normal and Retin
     _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2048, 1024, 32 } });
     const Probe = struct {
-        fn frame(world_layout: *const engine.WorldLayout, view: View) bool {
+        fn frame(world_layout: *const engine.WorldLayout, view: View) Action {
             zgui.newFrame();
-            const closed = drawPanel(.{ .tex_data = null, .tex_id = @enumFromInt(1) }, world_layout, view);
+            const action = drawPanel(.{ .tex_data = null, .tex_id = @enumFromInt(1) }, world_layout, view);
             zgui.render();
-            return closed;
+            return action;
         }
     };
     const view: View = .{ .player = .{ .position = .{ 0, 0, 0 }, .yaw = 0 }, .spectator = .{ .position = .{ 1000, 1000, 0 }, .yaw = 1 } };
     for ([_]f32{ 1, 2 }) |density| {
         zgui.io.setDisplaySize(1280, 820);
         zgui.io.setDisplayFramebufferScale(density, density);
-        for (0..3) |_| try std.testing.expect(!Probe.frame(&layout, view));
+        for (0..3) |_| try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, view));
         try std.testing.expect(zgui.getDrawData().total_vtx_count > 0);
         const panel = panelLayout(.{ 1280, 820 }, .{ 65536, 32768 }, 1).?;
         zgui.io.addMousePositionEvent(panel.map.max()[0] - 48, panel.window.position[1] + panel.padding + 14);
@@ -214,6 +239,145 @@ test "world map close button and directional overlays render at normal and Retin
         zgui.io.addMouseButtonEvent(.left, true);
         _ = Probe.frame(&layout, view);
         zgui.io.addMouseButtonEvent(.left, false);
-        try std.testing.expect(Probe.frame(&layout, view));
+        try std.testing.expectEqualDeep(Action{ .close = true }, Probe.frame(&layout, view));
+    }
+}
+
+test "world map teleport accepts only Debug terrain presses once at normal and Retina density" {
+    zgui.init(std.testing.allocator);
+    defer zgui.deinit();
+    zgui.io.setIniFilename(null);
+    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
+    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 4, 2 } });
+    const Probe = struct {
+        fn frame(world_layout: *const engine.WorldLayout, available: bool) Action {
+            zgui.newFrame();
+            const action = drawPanel(if (available) .{ .tex_data = null, .tex_id = @enumFromInt(1) } else null, world_layout, .{});
+            zgui.render();
+            return action;
+        }
+
+        fn press(world_layout: *const engine.WorldLayout, point: [2]f32, available: bool) Action {
+            zgui.io.addMouseButtonEvent(.left, false);
+            _ = frame(world_layout, available);
+            zgui.io.addMousePositionEvent(point[0], point[1]);
+            _ = frame(world_layout, available);
+            zgui.io.addMouseButtonEvent(.left, true);
+            return frame(world_layout, available);
+        }
+    };
+    for ([_]f32{ 1, 2 }) |density| {
+        zgui.io.setDisplaySize(1280, 820);
+        zgui.io.setDisplayFramebufferScale(density, density);
+        const panel = panelLayout(.{ 1280, 820 }, .{ 256, 128 }, 1).?;
+        const centre: [2]f32 = .{ panel.map.position[0] + panel.map.size[0] / 2, panel.map.position[1] + panel.map.size[1] / 2 };
+        for (0..3) |_| try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, true));
+
+        const action = Probe.press(&layout, centre, true);
+        try std.testing.expectEqualDeep(Action{ .teleport_xy = if (debug_teleport_enabled) .{ 0.5, 0.5 } else null }, action);
+        for (0..4) |_| try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, true));
+        zgui.io.addMousePositionEvent(centre[0] + 10, centre[1] + 10);
+        try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, true));
+        zgui.io.addMouseButtonEvent(.left, false);
+        try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, true));
+
+        // Right-clicking terrain never emits a request.
+        zgui.io.addMouseButtonEvent(.right, true);
+        try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, true));
+        zgui.io.addMouseButtonEvent(.right, false);
+        try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, true));
+
+        // Image corners preserve north-up coordinates and block centres.
+        for ([_][2]f32{ .{ 0.001, 0.001 }, .{ 0.999, 0.001 }, .{ 0.001, 0.999 }, .{ 0.999, 0.999 } }) |uv| {
+            const point: [2]f32 = .{ panel.map.position[0] + uv[0] * panel.map.size[0], panel.map.position[1] + uv[1] * panel.map.size[1] };
+            const corner = Probe.press(&layout, point, true);
+            const expected = data.unprojectTeleport(&layout, .{
+                @as(f64, point[0] - panel.map.position[0]) / panel.map.size[0],
+                @as(f64, point[1] - panel.map.position[1]) / panel.map.size[1],
+            });
+            try std.testing.expectEqualDeep(Action{ .teleport_xy = if (debug_teleport_enabled) expected else null }, corner);
+        }
+
+        // Gutter, header, legend, and outside-window clicks cannot teleport.
+        for ([_][2]f32{
+            .{ panel.map.position[0] - 1, centre[1] },
+            .{ panel.map.max()[0] + 1, centre[1] },
+            .{ centre[0], panel.map.position[1] - 1 },
+            .{ centre[0], panel.map.max()[1] + 1 },
+            .{ panel.window.position[0] + panel.padding, panel.window.position[1] + panel.padding },
+            .{ panel.window.position[0] + panel.padding, panel.map.max()[1] + 18 },
+            .{ 1, 1 },
+        }) |point| try std.testing.expectEqualDeep(Action{}, Probe.press(&layout, point, true));
+
+        // Dragging a held button from outside into terrain is not a click.
+        zgui.io.addMousePositionEvent(centre[0], centre[1]);
+        try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, true));
+        try std.testing.expectEqualDeep(Action{}, Probe.press(&layout, centre, false));
+        zgui.io.addMouseButtonEvent(.left, false);
+        try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, false));
+    }
+}
+
+test "world map pending teleport disables Close and terrain clicks until failure at normal and Retina density" {
+    zgui.init(std.testing.allocator);
+    defer zgui.deinit();
+    zgui.io.setIniFilename(null);
+    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
+    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 4, 2 } });
+    const Probe = struct {
+        fn frame(world_layout: *const engine.WorldLayout, view: View) Action {
+            zgui.newFrame();
+            const action = drawPanel(.{ .tex_data = null, .tex_id = @enumFromInt(1) }, world_layout, view);
+            zgui.render();
+            return action;
+        }
+
+        fn press(world_layout: *const engine.WorldLayout, point: [2]f32, view: View) Action {
+            zgui.io.addMouseButtonEvent(.left, false);
+            _ = frame(world_layout, view);
+            zgui.io.addMousePositionEvent(point[0], point[1]);
+            _ = frame(world_layout, view);
+            zgui.io.addMouseButtonEvent(.left, true);
+            return frame(world_layout, view);
+        }
+    };
+    const pending: View = .{ .teleport_pending = true, .teleport_status = "Finding a safe surface..." };
+    const failed: View = .{ .teleport_status = "No safe surface at this point" };
+    for ([_]f32{ 1, 2 }) |density| {
+        zgui.io.setDisplaySize(1280, 820);
+        zgui.io.setDisplayFramebufferScale(density, density);
+        const panel = panelLayout(.{ 1280, 820 }, .{ 256, 128 }, 1).?;
+        const close: [2]f32 = .{ panel.window.max()[0] - panel.padding - 48, panel.window.position[1] + panel.padding + 14 };
+        const centre: [2]f32 = .{ panel.map.position[0] + panel.map.size[0] / 2, panel.map.position[1] + panel.map.size[1] / 2 };
+        for (0..3) |_| try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, pending));
+
+        try std.testing.expectEqualDeep(Action{}, Probe.press(&layout, close, pending));
+        try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, pending));
+        zgui.io.addMouseButtonEvent(.left, false);
+        try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, pending));
+
+        try std.testing.expectEqualDeep(Action{}, Probe.press(&layout, close, pending));
+        try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, failed));
+        zgui.io.addMouseButtonEvent(.left, false);
+        try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, failed));
+
+        try std.testing.expectEqualDeep(Action{}, Probe.press(&layout, centre, pending));
+        try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, pending));
+        // Completing a failed request while a mouse button is held must not
+        // turn that old press into a retry.
+        try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, failed));
+        zgui.io.addMouseButtonEvent(.left, false);
+        try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, failed));
+
+        const retry = Probe.press(&layout, centre, failed);
+        try std.testing.expectEqualDeep(Action{ .teleport_xy = if (debug_teleport_enabled) .{ 0.5, 0.5 } else null }, retry);
+        zgui.io.addMouseButtonEvent(.left, false);
+        try std.testing.expectEqualDeep(Action{}, Probe.frame(&layout, failed));
+
+        try std.testing.expectEqualDeep(Action{}, Probe.press(&layout, close, failed));
+        zgui.io.addMouseButtonEvent(.left, false);
+        try std.testing.expectEqualDeep(Action{ .close = true }, Probe.frame(&layout, failed));
     }
 }

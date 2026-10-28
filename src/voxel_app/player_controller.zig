@@ -97,6 +97,13 @@ pub const PlayerController = struct {
         self.next_recovery_attempt = 0;
     }
 
+    /// Start at an already validated destination with no motion or recovery path
+    /// leading back to the old location. Keep the body and viewing direction.
+    pub fn teleport(self: *PlayerController, position: Position) void {
+        _ = self.restore(position);
+        self.history.clearRetainingCapacity();
+    }
+
     /// Consume every frame immediately, including its final fractional substep. These
     /// subdivisions improve numerical stability; they impose no input/update rate cap.
     pub fn update(self: *PlayerController, world: *const World, input: Input, elapsed: f64, now: f64) !UpdateResult {
@@ -322,6 +329,46 @@ pub const PlayerController = struct {
 };
 
 const Fixture = @import("terrain_test_fixture.zig").Fixture;
+
+test "teleport clears motion and recovery history while preserving body and orientation" {
+    var player = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
+    defer player.deinit();
+    player.body = .{ .half_width = 0.4, .height = 1.9, .eye_height = 1.7 };
+    player.yaw = 1.25;
+    player.pitch = -0.3;
+    player.vertical_velocity = -12;
+    player.grounded = true;
+    player.last_grounded_z = 9;
+    player.space_held_seconds = 1;
+    player.auto_climb = true;
+    player.climb_blocked = true;
+    player.next_recovery_attempt = 42;
+    player.climb = .{
+        .start = player.position,
+        .approach_delta = .{ 1, 0, 0 },
+        .landing = .{ 1.5, 0.5, 1 },
+        .planned_velocity = .{ 5, 0, 0 },
+        .rise_duration = 0.25,
+        .duration = 0.3,
+    };
+    try player.recordPosition(1);
+
+    const destination: Position = .{ 100.25, -200.75, 30 };
+    player.teleport(destination);
+
+    try std.testing.expectEqual(destination, player.position);
+    try std.testing.expectEqual(@as(f64, 0), player.vertical_velocity);
+    try std.testing.expect(!player.grounded);
+    try std.testing.expectEqual(destination[2], player.last_grounded_z);
+    try std.testing.expectEqual(@as(f64, 0), player.space_held_seconds);
+    try std.testing.expect(!player.auto_climb and !player.climb_blocked);
+    try std.testing.expectEqual(null, player.climb);
+    try std.testing.expectEqual(@as(f64, 0), player.next_recovery_attempt);
+    try std.testing.expectEqual(@as(usize, 0), player.history.items.len);
+    try std.testing.expectEqual(@as(f32, 1.25), player.yaw);
+    try std.testing.expectEqual(@as(f32, -0.3), player.pitch);
+    try std.testing.expectEqualDeep(collision.Body{ .half_width = 0.4, .height = 1.9, .eye_height = 1.7 }, player.body);
+}
 
 test "gravity and walking consume wall time across frame rates, including short frames" {
     var fixture = try Fixture.init();

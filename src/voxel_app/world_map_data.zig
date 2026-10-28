@@ -73,6 +73,22 @@ pub fn projectMarker(layout: *const WorldLayout, position: Position, yaw: f32) M
     };
 }
 
+/// Invert a north-up map click into the centre of its selected block column.
+/// Block centres keep actor colliders half a block inside bounded world edges,
+/// and select the same column at every display/raster scale. Both outer edges
+/// are accepted here; the UI restricts clicks to the actual image rectangle.
+pub fn unprojectTeleport(layout: *const WorldLayout, uv: [2]f64) ?[2]f64 {
+    for (uv) |component| {
+        if (!std.math.isFinite(component) or component < 0 or component > 1) return null;
+    }
+    var xy: [2]f64 = undefined;
+    for (&xy, [_]f64{ uv[0], 1 - uv[1] }, layout.size_in_blocks[0..2]) |*coordinate, fraction, blocks| {
+        const size: f64 = @floatFromInt(blocks);
+        coordinate.* = @min(@floor(fraction * size), size - 1) + 0.5 - size / 2;
+    }
+    return xy;
+}
+
 fn blend(a: [3]u8, b: [3]u8, amount: u16) [3]u8 {
     var result: [3]u8 = undefined;
     for (&result, a, b) |*component, from, to| {
@@ -135,6 +151,51 @@ test "world map marker projects centred coordinates north up and bounds Y" {
         .{ .position = .{ 0, -1.7e308, 0 }, .uv = .{ 0.5, 1 } },
     };
     for (cases) |case| try std.testing.expectEqualDeep(case.uv, projectMarker(&layout, case.position, 0).uv);
+}
+
+test "world map teleport selects centred block columns north up including world edges" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 8, 4, 2 } });
+    const cases = [_]struct { uv: [2]f64, xy: [2]f64 }{
+        .{ .uv = .{ 0.5, 0.5 }, .xy = .{ 0.5, 0.5 } },
+        .{ .uv = .{ 0.25, 0.25 }, .xy = .{ -63.5, 32.5 } },
+        .{ .uv = .{ 0.75, 0.75 }, .xy = .{ 64.5, -31.5 } },
+        .{ .uv = .{ 0, 0 }, .xy = .{ -127.5, 63.5 } },
+        .{ .uv = .{ 1, 0 }, .xy = .{ 127.5, 63.5 } },
+        .{ .uv = .{ 0, 1 }, .xy = .{ -127.5, -63.5 } },
+        .{ .uv = .{ 1, 1 }, .xy = .{ 127.5, -63.5 } },
+    };
+    for (cases) |case| {
+        const actual = unprojectTeleport(&layout, case.uv).?;
+        try std.testing.expectEqualDeep(case.xy, actual);
+        const projected = projectMarker(&layout, .{ actual[0], actual[1], 0 }, 0);
+        // Each destination projects to the centre of the selected block, no
+        // more than half a block from the original edge/column boundary.
+        try std.testing.expectApproxEqAbs(case.uv[0], @as(f64, projected.uv[0]), 0.5 / 256.0);
+        try std.testing.expectApproxEqAbs(case.uv[1], @as(f64, projected.uv[1]), 0.5 / 128.0);
+    }
+    for ([_][2]f64{ .{ -0.01, 0.5 }, .{ 1.01, 0.5 }, .{ 0.5, -0.01 }, .{ 0.5, 1.01 }, .{ std.math.nan(f64), 0.5 }, .{ 0.5, std.math.inf(f64) } }) |uv| {
+        try std.testing.expectEqual(null, unprojectTeleport(&layout, uv));
+    }
+}
+
+test "world map teleport column centres round trip across dimensions and X seam" {
+    for ([_][3]u32{ .{ 2, 4, 2 }, .{ 2048, 1024, 32 }, .{ 1 << 26, 2, 2 } }) |chunks| {
+        const layout = try WorldLayout.init(.{ .size_in_chunks = chunks });
+        const width: f64 = @floatFromInt(layout.size_in_blocks[0]);
+        const height: f64 = @floatFromInt(layout.size_in_blocks[1]);
+        for ([_][2]f64{ .{ 0.5 / width, 0.5 / height }, .{ 1 - 0.5 / width, 1 - 0.5 / height }, .{ 0.5 + 0.5 / width, 0.5 - 0.5 / height } }) |uv| {
+            const xy = unprojectTeleport(&layout, uv).?;
+            try std.testing.expect(xy[0] >= -width / 2 + 0.5 and xy[0] <= width / 2 - 0.5);
+            try std.testing.expect(xy[1] >= -height / 2 + 0.5 and xy[1] <= height / 2 - 0.5);
+            try std.testing.expectEqual(xy[0] - 0.5, @floor(xy[0]));
+            try std.testing.expectEqual(xy[1] - 0.5, @floor(xy[1]));
+            // The largest legal world has finer block columns than f32 marker
+            // UV precision, so compare each projected component in UV space.
+            const projected = projectMarker(&layout, .{ xy[0], xy[1], 0 }, 0).uv;
+            try std.testing.expectApproxEqAbs(uv[0], @as(f64, projected[0]), std.math.floatEps(f32));
+            try std.testing.expectApproxEqAbs(uv[1], @as(f64, projected[1]), std.math.floatEps(f32));
+        }
+    }
 }
 
 test "world map marker respects compiled X wrapping at the seam and repeated laps" {
