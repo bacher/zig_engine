@@ -36,6 +36,57 @@ resources default to forbidden mining. `mined_type` is optional even on success;
 leaves keeps an empty player slot empty. An occupied slot still rejects all player mining.
 Deeprock has an independent mutation guard covering all direct and indirect writes.
 
+### Planned blueprint normalization
+
+The [blueprint specification](../specs/features/blueprints.md) describes a future exception to ordinary
+per-edit structural validation. It is not implemented. Full normalized designs are validated
+once at creation; subsequent blueprint-directed structural approval must inspect no more than
+one below and four XY neighbors, intentionally allowing temporarily unsupported intermediate
+states. Ordinary structural rules remain the ones in this document, with a planned logical
+view for extraction outside unfinished blueprint boxes, as described below.
+
+Natural stone and crushed stone are **not structurally interchangeable**. Natural stone is
+an unrestricted foundation; crushed stone has mineral/column/bridge limits. The planned
+general support correction below permits rebar/concrete to rest on valid crushed stone,
+inheriting its mineral counter. Even after that correction, a narrow seven-cell stone column
+becomes an invalid seven-cell crushed run, and a stone support followed by twenty rebar cells
+becomes a twenty-one-level mineral path without another support/reset. Blueprint validation
+must examine the converted arrangement, not certify the original and then replace its bytes.
+Capture converts every included stone to crushed stone without substituting other materials,
+removing occupied cells, adding supports, or raising structural limits to repair the result.
+A narrow seven-cell converted column without an intermediate platform reset rejects blueprint
+creation. The assumed bottom platforms are validation fixtures, not added blueprint blocks.
+The approved first-iteration set is dirt, sand, crushed stone, tree trunk, planks, rebar,
+reinforced concrete, and solid country road. Capture also maps grass/packed dirt to dirt;
+the three earth states retain one blueprint fulfillment identity after normal dirt aging.
+Leaves, geological resources, clay, deeprock, water, snow, and adaptive/custom roads are
+excluded. XY support permits the rebar/concrete pair without making their target materials
+interchangeable.
+
+### Planned blueprint extraction view
+
+Extraction remains forbidden throughout an unfinished blueprint's box, including preexisting
+blocks in nontarget cells. Outside all such boxes, the planned general extraction check sees
+pending miniature targets as if they were completed blocks. It uses the same ordinary
+support rules and fixed windows, with all affected planned cells included as constructions.
+Checking only real construction metadata would miss an instance whose blocks are still
+miniatures.
+
+There is no extra foundation lock. Actual full 3×3×3 platforms are an application requirement;
+later ordinary extraction may remove their cells when the completed logical arrangement
+still has valid support. Collision, mining/item transfers, and cheap blueprint fulfillment
+use real terrain; miniatures cannot be mined and never count as real support for filling
+another target. Replacing a miniature with its required real block leaves the completed
+logical view unchanged, so that operation needs no dependent revalidation.
+
+One-time composed admission and completed-view dependent checks for ordinary placements
+must also reject incompatible compositions, after correcting the support-eligibility rule
+described below. Ordinary target approval still uses physical support. This is necessary
+even with the correction: joining a six-cell crushed-stone blueprint column to an existing
+crushed-stone bridge above creates an illegal seven-cell run. A sand target below constructed
+water/snow is another conflict. The dependent filter must cover those direct dependencies,
+including material classes that cannot themselves be captured in this blueprint iteration.
+
 ## Stable platforms
 
 A stable platform is a completely filled 3x3x3 cube immediately below a candidate block.
@@ -62,7 +113,39 @@ Trunks and planks can rest on structural materials. Crushed stone can rest on na
 crushed stone. Rebar and concrete can rest on natural stone or either reinforced material.
 A stable platform is an additional valid foundation for all these materials. Resting on
 either soil state requires the centered stable platform, rather than just one soil cell.
-An incompatible occupied block underneath cannot be treated as air to bypass the hierarchy.
+The current implementation also rejects an incompatible occupied block underneath even
+when a separate lateral support route could suffice. The planned correction below replaces
+that occupancy veto; it does not make the incompatible block provide support.
+
+### Planned correction: reinforced blocks on crushed stone
+
+Rebar and reinforced concrete will be allowed to rest directly on valid crushed stone,
+without requiring a full stable platform solely for that material pairing. The upper block
+inherits the lower block's mineral-height counter and adds one; the transition does not
+create a fresh foundation. A real qualifying stable platform still resets counters normally.
+The lower crushed stone must satisfy its own support, height, and six-cell column limits.
+
+This is an agreed general rule for ordinary placement, removal/existing-structure checks,
+and blueprint validation/composed admission. It is not implemented yet. It does not expand
+the rebar/concrete XY family or allow crushed stone to rest on isolated reinforced material.
+The separate six-cell crushed-column limit is unchanged in this revision.
+
+### Planned correction: independent support routes
+
+The blueprint iteration must distinguish downward-support eligibility from occupancy.
+Failure of the direct route does not veto another support route already permitted for the
+material. In particular, laterally supported planks may have dirt/packed dirt/grass directly
+below without requiring that earth to form a stable platform. The same independent-route
+principle applies to materials with their own lateral support mechanisms; it grants no new
+lateral mechanism to trunks, soil, sand, or roads.
+
+Keep the actual block below in the reader and test the alternative route, rather than
+globally reporting that cell as air. Preserve footprint, span, height, crushed-column, and
+bridge-side restrictions. Unknown cells remain unknown. A valid lateral route accepts the
+block without treating the unsuitable below material as its foundation; absence of any
+valid route still rejects it. This changes general construction validation, including
+ordinary placement/removal and blueprint certification/composed admission, not just the
+blueprint shortcut. It is planned behavior, not yet implemented.
 
 | Construction group | Maximum height | Horizontal reach from a vertically supported block |
 | --- | --- | --- |
