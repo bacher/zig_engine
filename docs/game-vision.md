@@ -154,7 +154,7 @@ Applying a blueprint also checks its completed composition with the destination 
 
 The initial material set is ordinary construction cubes: dirt, sand, crushed stone, tree trunk, planks, rebar, reinforced concrete, and solid country road. Capture converts every included stone to crushed stone and grass/packed dirt to dirt before validating. Invalid converted designs are rejected without automatically substituting other materials, removing blocks, adding supports, or relaxing limits; a narrow seven-cell crushed-stone column without an intermediate platform reset cannot be saved. Dirt aging preserves blueprint fulfillment. Leaves, geological resources, clay, deeprock, water, snow, and adaptive/custom roads are excluded from this iteration.
 
-The [blueprint specification](../specs/features/blueprints.md) records confirmed behavior, adopted UI defaults, the validation/performance contract, and the implementation measurement plan. Technical memory/work limits must be measured against the supported workload. This section records intended behavior, not an implemented feature.
+The [blueprint specification](../specs/features/blueprints.md) records confirmed behavior, adopted UI defaults, the validation/performance contract, and the implementation measurement plan. Blueprints and unfinished sites use the game's single current logic; incompatible changes raise the supported world-save versions instead of retaining historical rules or migrating individual blueprints. Technical memory/work limits must be measured against the supported workload. This section records intended behavior, not an implemented feature.
 
 ## Production, services, and logistics
 

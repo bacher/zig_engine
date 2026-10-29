@@ -473,7 +473,12 @@ mechanisms without overriding those contracts.
   outside that supported range before payload interpretation. Adding a material advances the
   write version while retaining the minimum if older saves remain readable. Incompatible
   interpretation changes advance the write version and raise the minimum as needed unless
-  explicit legacy decoding is retained. Older engines reject newer-version files.
+  explicit compatible legacy decoding is retained. All accepted encodings use one current
+  gameplay logic; legacy byte decoding does not select old rules. A sufficiently incompatible
+  gameplay change advances the write version and raises the minimum to exclude old worlds,
+  even if record layouts stay unchanged. This gates terrain, blueprint libraries, and active
+  unfinished instances together, without historical gameplay implementations or per-blueprint
+  migration. Older engines reject newer-version files.
 - R50: Initially omit material-enum membership validation during loading, including per-cell
   and per-run membership checks. After supported-version, checksum, and structural validation,
   interpret the complete decoded block buffer directly as `[32][32][32]BlockType`, retaining
@@ -746,8 +751,11 @@ mechanisms without overriding those contracts.
 ## Clarifications
 
 - Q1: Persist generated or only changed chunks?
-  A1: CONFIRMED by the user: changed chunks; preserve generator compatibility. Persist a
-  generator version and retain its implementation or provide an explicit migration.
+  A1: CONFIRMED by the user, with the single-current-logic compatibility policy: changed
+  chunks; persist generator identity/version so supported saves reproduce untouched terrain.
+  Reject incompatible old worlds instead of retaining historical generator implementations
+  or requiring migration. Breaking changes advance the world-save write/minimum-readable
+  versions under R49; unsupported generator descriptors are also rejected explicitly.
 - Q2: Does simulation advance while closed?
   A2: CONFIRMED by the user: freeze offline world time.
 - Q3: Restore exact player movement?
@@ -899,6 +907,10 @@ mechanisms without overriding those contracts.
   saves loadable when their meanings/layout remain supported; incompatible changes raise
   the minimum readable version. Avoid a separate per-block ID validation pass. Check both
   version bounds so an older engine cannot accept a file containing newer material IDs.
+  CONFIRMED single-current-logic policy: all accepted encodings run the same current gameplay
+  rules. A sufficiently incompatible gameplay change raises the write and minimum-readable
+  versions to reject old worlds as a whole; retaining historical rules or migrating blueprint
+  definitions/unfinished instances independently is not required.
   CONFIRMED by the user: initially reinterpret the decoded block buffer as the existing
   exhaustive enum array without material membership checks, trusting correct writers and
   careful format-version compatibility. The user accepts the undefined-behavior risk if
@@ -1056,9 +1068,10 @@ mechanisms without overriding those contracts.
   THEN it loads from the recovered base before generator fallback; empty overrides stay
   empty. During that session, modified state newer than the base remains resident and no
   runtime chunk read requires WAL replay.
-- AC11: GIVEN an older generator version and changed world dimensions WHEN reopening THEN
-  saved settings/version determine untouched terrain, or loading explicitly rejects an
-  unsupported generator/topology instead of silently producing different terrain.
+- AC11: GIVEN an incompatible older generator/world-save version WHEN reopening THEN loading
+  explicitly rejects the unsupported save/descriptor before gameplay instead of selecting a
+  historical generator or silently producing different terrain; supported descriptors retain
+  their saved dimensions/settings and use the current implementation.
 - AC12: GIVEN time spent with the game closed WHEN loading THEN world tick/deadlines do not
   advance, player position/view restore, and movement resumes from a safe reset state.
 - AC13: GIVEN a slow writer/compactor, exhausted reserve, failed sync, or full disk WHEN
@@ -1290,8 +1303,9 @@ mechanisms without overriding those contracts.
 - AC76: GIVEN an engine update that adds a material while preserving prior IDs/layout WHEN
   writing/loading THEN new saves carry the increased write version, older supported saves
   remain readable, and an older engine rejects the newer save at the header version gate.
-- AC77: GIVEN an incompatible material/schema change without retained legacy decoding WHEN
-  the minimum readable version advances THEN older files are rejected without reinterpretation;
+- AC77: GIVEN an incompatible material/schema/gameplay change WHEN the write and minimum
+  readable versions advance to exclude old worlds THEN older files are rejected without
+  reinterpretation or historical-rule execution, even if the byte layout is unchanged;
   reordering enum declarations alone does not change explicitly assigned stored IDs.
 - AC78: GIVEN a valid file emitted by a compatible writer WHEN decoding THEN no per-cell or
   per-run material-membership check is performed. After version, checksum, size/run, codec,
