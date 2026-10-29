@@ -15,6 +15,23 @@ Opening never implicitly creates or replaces a world. Without arguments, the app
 
 Opening takes exclusive ownership through `world.lock`, validates and recovers storage, and uses the saved world dimensions/generator settings. Invalid or incompatible saves report an error with the selected path. Do not delete or edit journals to work around an error: they may contain the only recoverable version. Back up a world while its owning process is closed.
 
+## Save compatibility
+
+The game runs one current gameplay/construction logic. It does not select historical rules
+from a world or blueprint. Compatibility with older file encodings is separate: the current
+implementation writes format 2 and reads formats 1–2, decoding legacy empty inventories into
+the same current player model. The base and WAL readers enforce the supported inclusive
+range through `minimum_readable_version` and `current_write_version`.
+
+For a sufficiently incompatible gameplay or data interpretation change, advance the write
+version and raise the minimum readable version to exclude incompatible older worlds. Raising
+only the write version would leave those old saves readable. This policy applies even when
+the byte layout has not changed, and covers terrain, saved blueprint libraries, and unfinished
+construction sites together. It requires no parallel rulesets or blueprint-specific migration.
+Compatible serialization changes may retain older decoding if all accepted data uses the
+same current game logic. Generator identity/version guards likewise reject unsupported
+algorithms rather than loading a historical generator to preserve old behavior.
+
 ## Saving and exit
 
 Autosave attempts run every 60 seconds and compaction is requested every 10 minutes. Only a durable WAL commit establishes saved progress; the interval is not a maximum loss window. Base compaction allows exact-version dirty chunks to unload and retires covered journals after durable installation.

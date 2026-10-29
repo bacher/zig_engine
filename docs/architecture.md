@@ -141,9 +141,10 @@ Large application admission must also prepare a versioned dependency snapshot an
 resources before atomic publication. Blueprint dialogs block input without pausing gameplay
 time, player gravity/collision, timers, or simulation. These are planned contracts; the
 feature spec records the required measurements and adopted UI defaults.
-Its [deferred compatibility policy](../specs/features/blueprints.md#deferred-compatibility-policy)
-separately tracks saved definitions and unfinished instances after future construction-rule
-changes; choosing that policy does not block the initial blueprint implementation.
+Its [single-ruleset compatibility policy](../specs/features/blueprints.md#single-ruleset-and-world-save-compatibility)
+uses the enclosing world-save version gates for incompatible gameplay changes. There is one
+current game logic; blueprint definitions and unfinished instances do not select historical
+rules or require independent migration. See [save compatibility](persistence.md#save-compatibility).
 
 The voxel app stops the simulation worker, submits any remaining local commands, and destroys the service before destroying its game state and engine. Service shutdown commits already submitted edits, skips pending generation work, and frees unconsumed replies. Persistent worlds drain admitted actions and player checkpoints before final capture. A delayed or failed save keeps the loop responsive and offers wait/retry, cancel exit, and explicit quit without saving. See [persistence](persistence.md) for the storage lifecycle.
 
