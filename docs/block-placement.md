@@ -46,16 +46,32 @@ states. Ordinary structural rules remain the ones in this document, with a plann
 view for extraction outside unfinished blueprint boxes, as described below.
 
 Natural stone and crushed stone are **not structurally interchangeable**. Natural stone is
-an unrestricted foundation; crushed stone has mineral/column/bridge limits. The planned
-general support correction below permits rebar/concrete to rest on valid crushed stone,
-inheriting its mineral counter. Even after that correction, a narrow seven-cell stone column
-becomes an invalid seven-cell crushed run, and a stone support followed by twenty rebar cells
-becomes a twenty-one-level mineral path without another support/reset. Blueprint validation
-must examine the converted arrangement, not certify the original and then replace its bytes.
-Capture converts every included stone to crushed stone without substituting other materials,
-removing occupied cells, adding supports, or raising structural limits to repair the result.
-A narrow seven-cell converted column without an intermediate platform reset rejects blueprint
-creation. The assumed bottom platforms are validation fixtures, not added blueprint blocks.
+an unrestricted foundation; crushed stone has mineral/column/bridge limits and does not
+directly support rebar/concrete outside the existing platform and lateral-support routes.
+The earlier proposed general rule allowing that direct support has been withdrawn.
+Blueprint validation must examine the converted arrangement, not certify the original and
+then replace its bytes.
+
+Capture first converts every included stone to crushed stone and validates. Only a concrete
+fallback for an actual reinforced-on-crushed support conflict is allowed: replace the
+conflicting crushed-stone support with reinforced concrete, continuing down that necessary
+support chain until the new concrete has a legal support route, then fully validate the result.
+The original logical snapshot, including miniature types, must already contain rebar or
+reinforced concrete. Their presence alone does not authorize repairs elsewhere, and a valid
+normalized design needs no fallback. This changes the saved blueprint only, not source
+terrain or general support rules. Other material/geometry repairs, added supports, removed
+occupied cells, and relaxed limits remain excluded. In particular, a seven-cell stone-only
+column without an intermediate platform reset still fails after conversion. The assumed
+bottom platforms are validation fixtures, not added blueprint blocks.
+
+A seven-cell stone support under original rebar may become seven concrete cells and pass;
+an unrelated rebar cell elsewhere cannot authorize that conversion. Replacing support
+materials does not reset mineral height: a reinforced path reaching level 21 without a
+platform reset or other valid route rejects capture with an explicit 20-level-limit error.
+Highlight the lower source cells of that offending support chain, prioritizing replaced
+supports rather than only its uppermost cell. All fallback work happens during capture;
+the five-neighbor fulfillment rule is unchanged.
+
 The approved first-iteration set is dirt, sand, crushed stone, tree trunk, planks, rebar,
 reinforced concrete, and solid country road. Capture also maps grass/packed dirt to dirt;
 the three earth states retain one blueprint fulfillment identity after normal dirt aging.
@@ -116,19 +132,6 @@ either soil state requires the centered stable platform, rather than just one so
 The current implementation also rejects an incompatible occupied block underneath even
 when a separate lateral support route could suffice. The planned correction below replaces
 that occupancy veto; it does not make the incompatible block provide support.
-
-### Planned correction: reinforced blocks on crushed stone
-
-Rebar and reinforced concrete will be allowed to rest directly on valid crushed stone,
-without requiring a full stable platform solely for that material pairing. The upper block
-inherits the lower block's mineral-height counter and adds one; the transition does not
-create a fresh foundation. A real qualifying stable platform still resets counters normally.
-The lower crushed stone must satisfy its own support, height, and six-cell column limits.
-
-This is an agreed general rule for ordinary placement, removal/existing-structure checks,
-and blueprint validation/composed admission. It is not implemented yet. It does not expand
-the rebar/concrete XY family or allow crushed stone to rest on isolated reinforced material.
-The separate six-cell crushed-column limit is unchanged in this revision.
 
 ### Planned correction: independent support routes
 
