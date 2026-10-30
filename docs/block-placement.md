@@ -115,6 +115,31 @@ separate from the physical cache. If the planned-cell index proves no pending ta
 occur in the target validator's conservative read region, physical target approval can be
 reused. This adds no full-design scan or extra checks to five-neighbor blueprint fulfillment.
 
+### Planned blueprint eventual validity
+
+Unfinished construction may temporarily violate ordinary physical construction rules both
+internally and in its surroundings. This includes partially built structures and already
+completed buildings affected by the unfinished work. Finishing one blueprint removes its
+own frame and restrictions; it does not promise ordinary physical validity while nearby
+targets from other sites remain pending. For example, a valid crushed-stone bridge may
+temporarily become a forbidden seventh crushed cell when construction below first fills a
+six-cell column, then become valid again when the surrounding stable platform is finished.
+
+The logical world with all pending targets completed must remain valid through application
+and ordinary/indirect edits. Each fulfillment replaces one planned type with an equivalent
+real type, leaving that logical arrangement unchanged. Once a constructed cell's ordinary
+support window contains no pending target from any active site, physical and completed
+reads coincide and its ordinary physical validity follows. The current window is an
+inclusive cube of ±28 cells on each axis, using shortest wrapped-X displacement; recursive
+support checks do not move its center. For a whole completed building, the sufficient
+condition applies around every constructed cell, not just its origin or former box center.
+
+This is an eventual-validity guarantee, not an extra completion check or repair operation.
+It adds no per-fill search for neighboring sites or persistent stability flag. A new nearby
+site may introduce temporary physical invalidity again, and normal edits still must protect
+the completed logical arrangement. Future cancellation and its remaining structures are
+outside this guarantee and require separate design.
+
 ## Stable platforms
 
 A stable platform is a completely filled 3x3x3 cube immediately below a candidate block.
