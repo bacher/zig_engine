@@ -115,7 +115,15 @@ separate from the physical cache. If the planned-cell index proves no pending ta
 occur in the target validator's conservative read region, physical target approval can be
 reused. This adds no full-design scan or extra checks to five-neighbor blueprint fulfillment.
 
-### Planned blueprint eventual validity
+### Planned blueprint world-mutation invariant
+
+Every gameplay world modification must preserve ordinary structural validity of affected
+real and planned constructions in the resulting logical world where all pending targets
+are completed. This applies to player/NPC actions, blueprint application, simulation,
+timers, debug/service commands, batch edits, and indirect side effects. A modification that
+would invalidate that resulting arrangement must not commit. Preserve ordinary
+generated-terrain exemptions and bounded affected-region checks; this does not require
+scanning the whole world or repeating validation for a proven logical no-op.
 
 Unfinished construction may temporarily violate ordinary physical construction rules both
 internally and in its surroundings. This includes partially built structures and already
@@ -125,20 +133,19 @@ targets from other sites remain pending. For example, a valid crushed-stone brid
 temporarily become a forbidden seventh crushed cell when construction below first fills a
 six-cell column, then become valid again when the surrounding stable platform is finished.
 
-The logical world with all pending targets completed must remain valid through application
-and ordinary/indirect edits. Each fulfillment replaces one planned type with an equivalent
-real type, leaving that logical arrangement unchanged. Once a constructed cell's ordinary
+Each fulfillment replaces one planned type with an equivalent real type, leaving the
+completed logical arrangement unchanged. Once a constructed cell's ordinary
 support window contains no pending target from any active site, physical and completed
 reads coincide and its ordinary physical validity follows. The current window is an
 inclusive cube of ±28 cells on each axis, using shortest wrapped-X displacement; recursive
 support checks do not move its center. For a whole completed building, the sufficient
 condition applies around every constructed cell, not just its origin or former box center.
 
-This is an eventual-validity guarantee, not an extra completion check or repair operation.
-It adds no per-fill search for neighboring sites or persistent stability flag. A new nearby
-site may introduce temporary physical invalidity again, and normal edits still must protect
-the completed logical arrangement. Future cancellation and its remaining structures are
-outside this guarantee and require separate design.
+Eventual physical validity is a consequence of the mutation admission invariant. It adds no
+completion check, repair operation, per-fill search for neighboring sites, or persistent
+stability flag. A new nearby site may introduce temporary physical invalidity again while
+preserving the completed logical arrangement. Future cancellation and its effects on
+remaining or surrounding structures are excluded from this contract and require separate design.
 
 ## Stable platforms
 
