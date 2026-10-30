@@ -79,6 +79,14 @@ Leaves, geological resources, clay, deeprock, water, snow, and adaptive/custom r
 excluded. XY support permits the rebar/concrete pair without making their target materials
 interchangeable.
 
+For cheap fulfillment with air below, an eligible real XY neighbor is a matching logical
+material, either reinforced type for a rebar/concrete target, or natural rock for a
+crushed-stone target. Reuse the ordinary `isNaturalRock()` family: stone, metal_ore,
+limestone, coal, and deeprock; clay is not in that family. This directed support exception
+matches ordinary crushed-bridge routes and prevents a legal foundation removal from
+stranding a crushed miniature between real stone sides. It uses the same four XY reads,
+adds no recursive validation, and does not change the target's required inventory material.
+
 ### Planned blueprint extraction view
 
 Extraction remains forbidden throughout an unfinished blueprint's box, including preexisting
@@ -146,6 +154,23 @@ completion check, repair operation, per-fill search for neighboring sites, or pe
 stability flag. A new nearby site may introduce temporary physical invalidity again while
 preserving the completed logical arrangement. Future cancellation and its effects on
 remaining or surrounding structures are excluded from this contract and require separate design.
+
+### Planned blueprint global completion order
+
+All active sites must remain structurally completable in some shared order. Placements may
+interleave sites: after a legal removal below plank target A, A may rely on a neighboring
+site's plank target B being filled first. Cross-site dependencies are accepted. Independent
+completion of each site is deferred as a potential improvement, with per-instance logical
+readers preferred over the alternative support-component graph for future exploration.
+
+The global guarantee follows from the valid all-sites-completed arrangement and cheap
+support covering ordinary routes. At the lowest pending Z, an occupied below cell is
+already real; lateral plank/reinforced routes lead to a real contact or a pending target
+with such a below cell, while crushed bridges have qualifying real or directly supported
+sides. Thus at least one target can fill; filling it leaves the completed view unchanged,
+and the argument repeats. This assumes materials/data and nonstructural placement
+conditions are available. It adds no scheduler, runtime graph, per-site-view check,
+reachability scan, or final validation pass; the five-neighbor bound remains.
 
 ## Stable platforms
 
