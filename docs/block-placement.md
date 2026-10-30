@@ -95,13 +95,25 @@ use real terrain; miniatures cannot be mined and never count as real support for
 another target. Replacing a miniature with its required real block leaves the completed
 logical view unchanged, so that operation needs no dependent revalidation.
 
-One-time composed admission and completed-view dependent checks for ordinary placements
-must also reject incompatible compositions, after correcting the support-eligibility rule
-described below. Ordinary target approval still uses physical support. This is necessary
-even with the correction: joining a six-cell crushed-stone blueprint column to an existing
-crushed-stone bridge above creates an illegal seven-cell run. A sand target below constructed
-water/snow is another conflict. The dependent filter must cover those direct dependencies,
-including material classes that cannot themselves be captured in this blueprint iteration.
+One-time composed admission and ordinary edits must reject incompatible compositions after
+correcting the support-eligibility rule described below. An ordinary placement first validates
+its new target against physical terrain, then validates that target and affected dependents
+in the completed logical view. Physical approval ensures miniatures supply no real support;
+completed target approval catches conflicts in the new block itself, which dependent checks
+skip. Both views include the same proposed placement.
+
+Joining a six-cell crushed-stone blueprint column to an existing crushed-stone bridge above
+creates an illegal seven-cell run. The reverse order is also forbidden: after applying six
+miniatures, an ordinary bridge above them can be physically supported by stone sides but
+would become the seventh consecutive crushed cell. Completed target validation rejects that
+ordinary placement before mutation. A sand target below constructed water/snow is another
+conflict. The dependent filter must cover those direct dependencies, including material
+classes that cannot themselves be captured in this blueprint iteration.
+
+Share the completed target/dependent validator cache within one ordinary edit, keeping it
+separate from the physical cache. If the planned-cell index proves no pending targets can
+occur in the target validator's conservative read region, physical target approval can be
+reused. This adds no full-design scan or extra checks to five-neighbor blueprint fulfillment.
 
 ## Stable platforms
 
