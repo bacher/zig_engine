@@ -133,7 +133,18 @@ Unconfirmed candidates never enter autosave; once Save is submitted, draft clean
 its owned payload. The [previous service-owned design](../specs/features/blueprints.md#rejected-alternative-worlddataservice-owned-capture)
 is preserved in the feature spec as a rejected alternative, not a second implementation target.
 
-The supported large capture scenario is approximately 100×100×32 cells. Its dense one-byte
+Before capture-specific chunk acquisition, check both inclusive horizontal dimensions against
+`L = min(world_block_size_x, world_block_size_y) - 1` in unwrapped coordinates. Apply the same
+limit to compact definitions in the compiler and Save, and to rotated footprints at application.
+The helper may receive immutable L without source coordinates or live-world access. This O(1)
+precondition prevents distinct local targets from aliasing after X wrapping in every quarter-turn;
+it adds no per-target world-alias set or fulfillment work. Compaction cannot rescue an oversized
+raw selection. Keep ordinary definition well-formedness, seam-aware world lookups, destination
+bounds, platform/composition checks, and other-instance overlap under
+[R54/Q25](../specs/features/blueprints.md#horizontal-size-and-wrapped-target-uniqueness).
+
+The supported large capture scenario is approximately 100×100×32 cells where world dimensions
+permit that workload. Its dense one-byte
 snapshot is about 313 KiB, but compiler caches/diagnostics, source metadata, and render/index
 state need separate budgets. Existing validation cache entries embed full failure diagnostics,
 so reusing one unbounded cache across the whole design is not a small-memory solution.

@@ -45,6 +45,14 @@ one below and four XY neighbors, intentionally allowing temporarily unsupported 
 states. Ordinary structural rules remain the ones in this document, with a planned logical
 view for extraction outside unfinished blueprint boxes, as described below.
 
+Raw capture boxes and compact blueprint definitions have the planned horizontal limit
+`size_x, size_y <= min(world_block_size_x, world_block_size_y) - 1`, using inclusive cell counts.
+Check it before capture-specific chunk acquisition/copy and at Save/application. Quarter-turns
+preserve the limit, so distinct local targets cannot alias after X wrapping. Ordinary seam
+crossings remain supported. Destination bounds, actual platforms, composed structural validation,
+and overlap checks still apply; no extra check is added to five-neighbor fulfillment. See
+[R54/Q25](../specs/features/blueprints.md#horizontal-size-and-wrapped-target-uniqueness).
+
 Natural stone and crushed stone are **not structurally interchangeable**. Natural stone is
 an unrestricted foundation; crushed stone has mineral/column/bridge limits and does not
 directly support rebar/concrete outside the existing platform and lateral-support routes.
