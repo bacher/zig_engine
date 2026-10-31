@@ -31,6 +31,7 @@ The subsystem documents describe the current implementation, extracted from exis
 | Document | Contents |
 | --- | --- |
 | [Game vision](docs/game-vision.md) | Long-term gameplay, world, logistics, construction, progression, simulation direction, and open decisions. Start here for intent. |
+| [Blueprint specification](specs/features/blueprints.md) | Capture/application, isolated and composed validation, five-neighbor assembly, and the 100×100×32 workload; ready for review, not implemented. |
 | [Architecture and review points](docs/architecture.md) | Subsystem map, engine/application boundaries, state ownership, concurrency, startup, and frame order. Start here for implementation. |
 | [Scenes, objects, and input](docs/scenes.md) | Scene contents, transform hierarchy, instance updates, current visibility index, controls, and lifetime. |
 | [Rendering](docs/rendering.md) | Pass sequence, geometry paths, shadows, SSAO, GPU layouts, and current rendering limitations. |

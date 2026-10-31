@@ -15,6 +15,37 @@ Opening never implicitly creates or replaces a world. Without arguments, the app
 
 Opening takes exclusive ownership through `world.lock`, validates and recovers storage, and uses the saved world dimensions/generator settings. Invalid or incompatible saves report an error with the selected path. Do not delete or edit journals to work around an error: they may contain the only recoverable version. Back up a world while its owning process is closed.
 
+## Save compatibility
+
+### Development and release policy
+
+The game has not had its first release. Until then, do not spend development effort
+implementing or maintaining backward compatibility or save migrations between development
+builds. Incompatible development saves may be rejected, and starting a new world is
+acceptable. Existing support for older encodings describes current behavior, not a commitment
+to preserve that support through further development.
+
+After the first release, aim to minimize changes to gameplay logic. Save migrations may be
+needed between released game versions; their policy, supported transitions, and implementation
+will be discussed and designed separately. That future migration scope covers released game
+versions only, not intermediate development builds, including builds between releases.
+
+### Current version gates
+
+The game runs one current gameplay/construction logic. It does not select historical rules
+from a world or blueprint. Compatibility with older file encodings is separate: the current
+implementation writes format 2 and reads formats 1–2, decoding legacy empty inventories into
+the same current player model. The base and WAL readers enforce the supported inclusive
+range through `minimum_readable_version` and `current_write_version`.
+
+Under the current pre-release policy, a sufficiently incompatible gameplay or data
+interpretation change advances the write version and raises the minimum readable version to
+exclude incompatible older worlds. Raising only the write version would leave those old
+saves readable. This applies even when the byte layout has not changed, and covers terrain,
+saved blueprint libraries, and unfinished construction sites together. Generator
+identity/version guards likewise reject unsupported algorithms. All accepted saves use the
+current game logic.
+
 ## Saving and exit
 
 Autosave attempts run every 60 seconds and compaction is requested every 10 minutes. Only a durable WAL commit establishes saved progress; the interval is not a maximum loss window. Base compaction allows exact-version dirty chunks to unload and retires covered journals after durable installation.
