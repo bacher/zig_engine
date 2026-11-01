@@ -24,6 +24,19 @@ const transformations = @import("block_transformations.zig");
 const rules = @import("block_rules.zig");
 const mutation_guard = @import("mutation_guard.zig");
 const standing_space = @import("standing_space.zig");
+const blueprint = @import("blueprint.zig");
+const blueprint_runtime = @import("blueprint_runtime.zig");
+const blueprint_wire = @import("persistence/blueprints.zig");
+const blueprint_admission = @import("blueprint_admission.zig");
+const blueprint_road_updates = @import("blueprint_road_updates.zig");
+pub const BlueprintResult = struct {
+    request_id: u64,
+    kind: enum { save, apply },
+    status: enum { success, invalid, missing_data, resource_exhausted, stale },
+    definition_id: ?u64 = null,
+    instance_id: ?u64 = null,
+    failure: ?rules.Failure = null,
+};
 pub const StandingSpaceRequest = standing_space.Request;
 pub const StandingSpaceError = standing_space.Error || error{ServiceStopped};
 pub const StandingSpaceResponse = struct {
@@ -165,10 +178,13 @@ pub const ChunkResponse = struct {
 /// rebuilding/uploading, so an edit and its neighboring meshes cannot straddle frames.
 pub const ResponsePackage = struct {
     responses: std.ArrayList(ChunkResponse) = .empty,
+    blueprint_changes: std.ArrayList(blueprint_runtime.Change) = .empty,
 
     pub fn deinit(self: *ResponsePackage, allocator: std.mem.Allocator) void {
         for (self.responses.items) |response| response.deinit(allocator);
         self.responses.deinit(allocator);
+        for (self.blueprint_changes.items) |*change| change.deinit(allocator);
+        self.blueprint_changes.deinit(allocator);
     }
 };
 
@@ -181,10 +197,85 @@ const Subscription = struct {
 };
 
 const LoadedChunk = struct { id: u32, revision: u64, result: anyerror!WorldChunk };
+const BlueprintApplyRequest = struct {
+    client: *Client,
+    request_id: u64,
+    owner: u64,
+    definition_id: u64,
+    origin: [3]u32,
+    rotation: u2,
+};
+
+const BlueprintAdmissionTask = struct {
+    service: *WorldDataService,
+    request: BlueprintApplyRequest,
+    snapshot: blueprint_admission.Snapshot,
+    definition: blueprint.Definition,
+    instance: blueprint_runtime.Instance,
+    client_count: usize,
+    response_copies: std.ArrayList(blueprint_runtime.Instance) = .empty,
+    chunk_ids: []ChunkId,
+    cursor: usize = 0,
+    snapshot_bytes: usize = 0,
+    waiting_for_data: bool = false,
+    cancel: std.atomic.Value(bool) = .init(false),
+    future: ?Io.Future(void) = null,
+    result: ?(anyerror!blueprint_admission.Result) = null,
+    retired: std.atomic.Value(bool) = .init(false),
+
+    fn run(task: *BlueprintAdmissionTask) void {
+        task.result = task.prepare();
+        task.service.requests.push(task.service.io, task.service.allocator, .{ .blueprint_prepared = task });
+    }
+
+    fn prepare(task: *BlueprintAdmissionTask) !blueprint_admission.Result {
+        const allocator = task.service.allocator;
+        var result = try blueprint_admission.prepare(allocator, &task.snapshot, task.definition, task.instance, .{ .cancel = &task.cancel });
+        errdefer if (result == .prepared) result.prepared.deinit(allocator);
+        if (result == .prepared) {
+            try task.response_copies.ensureTotalCapacity(allocator, task.client_count);
+            for (0..task.client_count) |_| {
+                if (task.cancel.load(.acquire)) {
+                    result.prepared.deinit(allocator);
+                    return .cancelled;
+                }
+                task.response_copies.appendAssumeCapacity(try result.prepared.publication.instance.clone(allocator));
+            }
+        }
+        return result;
+    }
+
+    fn release(task: *BlueprintAdmissionTask) void {
+        const allocator = task.service.allocator;
+        if (task.result) |result| if (result) |owned| switch (owned) {
+            .prepared => |prepared| {
+                var value = prepared;
+                value.deinit(allocator);
+            },
+            else => {},
+        } else |_| {};
+        for (task.response_copies.items) |*copy| copy.deinit(allocator);
+        task.response_copies.deinit(allocator);
+        task.snapshot.deinit(allocator);
+        task.instance.deinit(allocator);
+        allocator.free(task.chunk_ids);
+        task.retired.store(true, .release);
+    }
+};
 
 const Request = union(enum) {
     register: *Client,
     register_player: format.Player,
+    blueprint_save: struct {
+        client: *Client,
+        request_id: u64,
+        idempotency_key: ?u64 = null,
+        owner: u64,
+        name: []const u8,
+        candidate: blueprint.CertifiedDefinition,
+    },
+    blueprint_apply: BlueprintApplyRequest,
+    blueprint_prepared: *BlueprintAdmissionTask,
     load_chunks: struct {
         client: *Client,
         request_id: u64,
@@ -209,13 +300,28 @@ const Request = union(enum) {
     chunk_loaded: LoadedChunk,
 };
 
+fn requestClient(request: Request) *Client {
+    return switch (request) {
+        .operation => |value| value.client,
+        .blueprint_save => |value| value.client,
+        .blueprint_apply => |value| value.client,
+        else => unreachable,
+    };
+}
+
 /// One endpoint per producer/consumer thread. Endpoints and their queued replies are owned
 /// by the service and remain alive until it is destroyed. Stop all clients' tasks first.
 pub const Client = struct {
+    const BlueprintSaveKey = struct { explicit: bool, value: u64 };
+
     service: *WorldDataService,
     responses: Mailbox(ResponsePackage) = .{},
     /// Value-only query replies never consume chunk packages or create subscriptions.
     space_responses: Mailbox(StandingSpaceResponse) = .{},
+    blueprint_results: Mailbox(BlueprintResult) = .{},
+    /// Worker-owned successful Save identities, scoped to this endpoint's
+    /// lifetime. Automatic transport identities and explicit retry keys differ.
+    blueprint_save_keys: std.AutoHashMapUnmanaged(BlueprintSaveKey, u64) = .empty,
     /// Worker-owned package under construction.
     pending: ResponsePackage = .{},
     next_request_id: u64 = 1,
@@ -237,6 +343,55 @@ pub const Client = struct {
         const id = self.next_request_id;
         self.next_request_id += 1;
         return id;
+    }
+
+    /// The operation owns the checked contents only after successful enqueue.
+    pub fn trySaveBlueprint(self: *Client, owner: u64, name: []const u8, candidate: *blueprint.CertifiedDefinition) !u64 {
+        return self.submitBlueprintSave(owner, name, candidate, null);
+    }
+
+    /// Reusing a key on this endpoint returns the original definition only for
+    /// the same owner, canonical name, and immutable contents.
+    pub fn trySaveBlueprintWithKey(self: *Client, owner: u64, name: []const u8, candidate: *blueprint.CertifiedDefinition, idempotency_key: u64) !u64 {
+        return self.submitBlueprintSave(owner, name, candidate, idempotency_key);
+    }
+
+    fn submitBlueprintSave(self: *Client, owner: u64, name: []const u8, candidate: *blueprint.CertifiedDefinition, idempotency_key: ?u64) !u64 {
+        if (self.service.is_shutting_down.load(.acquire)) return error.ServiceStopped;
+        const canonical = try blueprint_wire.trimmedName(name);
+        const owned_name = try self.service.allocator.dupe(u8, canonical);
+        errdefer self.service.allocator.free(owned_name);
+        const id = self.nextRequestId();
+        try self.service.requests.tryPush(self.service.io, self.service.allocator, .{ .blueprint_save = .{
+            .client = self,
+            .request_id = id,
+            .idempotency_key = idempotency_key,
+            .owner = owner,
+            .name = owned_name,
+            .candidate = candidate.*,
+        } });
+        candidate.* = undefined;
+        self.last_operation_id = id;
+        return id;
+    }
+
+    pub fn tryApplyBlueprint(self: *Client, owner: u64, definition_id: u64, origin: [3]u32, rotation: u2) !u64 {
+        if (self.service.is_shutting_down.load(.acquire)) return error.ServiceStopped;
+        const id = self.nextRequestId();
+        try self.service.requests.tryPush(self.service.io, self.service.allocator, .{ .blueprint_apply = .{
+            .client = self,
+            .request_id = id,
+            .owner = owner,
+            .definition_id = definition_id,
+            .origin = origin,
+            .rotation = rotation,
+        } });
+        self.last_operation_id = id;
+        return id;
+    }
+
+    pub fn takeBlueprintResults(self: *Client, out: *std.ArrayList(BlueprintResult)) void {
+        self.blueprint_results.takeAll(self.service.io, out);
     }
 
     /// Ordered with edits from all clients; searches current authoritative blocks.
@@ -405,6 +560,8 @@ pub const Client = struct {
         for (packages.items) |*package| {
             out.appendSlice(self.service.allocator, package.responses.items) catch @panic("OOM");
             package.responses.deinit(self.service.allocator);
+            for (package.blueprint_changes.items) |*change| change.deinit(self.service.allocator);
+            package.blueprint_changes.deinit(self.service.allocator);
         }
         packages.deinit(self.service.allocator);
     }
@@ -476,6 +633,16 @@ pub const WorldDataService = struct {
     base_revisions: std.AutoHashMapUnmanaged(ChunkId, u64) = .empty,
     players: std.AutoHashMapUnmanaged(u64, format.Player) = .empty,
     restored_players: std.AutoHashMapUnmanaged(u64, format.Player) = .empty,
+    /// Immutable definition views borrow the live library; fulfillment records are values.
+    /// Only the prefix frozen into a successfully committed Job is retired.
+    blueprint_journal: std.ArrayList(blueprint_wire.Op) = .empty,
+    blueprint_journal_bytes: usize = 0,
+    blueprint_library_bytes: usize = 0,
+    captured_blueprint_operations: usize = 0,
+    blueprint_task: ?*BlueprintAdmissionTask = null,
+    blueprint_retired: std.ArrayList(*BlueprintAdmissionTask) = .empty,
+    blueprint_road_queue: blueprint_road_updates.Queue = .{},
+    blueprint_road_waiting: bool = false,
     pending: std.ArrayList(Pending) = .empty,
     next_intent: std.atomic.Value(u64) = .init(1),
     outstanding_operations: std.atomic.Value(usize) = .init(0),
@@ -534,13 +701,14 @@ pub const WorldDataService = struct {
             .io = io,
             .allocator = allocator,
             .worker = undefined,
-            .worker_state = .{ .layout = owned_layout, .generator = prepared, .live_allocator = if (budget) |owned| owned.allocator() else null },
+            .worker_state = .{ .layout = owned_layout, .generator = prepared, .blueprints = .{ .layout = owned_layout }, .live_allocator = if (budget) |owned| owned.allocator() else null },
             .budget = budget,
         };
         // No asynchronous task owns self until initialization is complete.
         errdefer if (self.catalog) |*catalog| catalog.deinit();
         errdefer self.players.deinit(allocator);
         errdefer self.restored_players.deinit(allocator);
+        errdefer self.worker_state.blueprints.deinit(allocator);
         self.store = store;
         self.worker_state.persistence_service = self;
         self.limits = limits;
@@ -565,6 +733,7 @@ pub const WorldDataService = struct {
                 try self.players.put(allocator, player.id, player);
                 try self.restored_players.put(allocator, player.id, player);
             }
+            try self.restoreBlueprints(saved);
         }
         // Start idle background consumers first. If worker startup fails, join
         // every started task before errdefer frees the service and saved catalog.
@@ -647,10 +816,11 @@ pub const WorldDataService = struct {
     fn lifecycleObservations(self: *WorldDataService) save_lifecycle.Observations {
         return .{
             .source_holds = self.source_holds.count(),
-            .pending_commands = self.pending.items.len,
+            .pending_commands = self.pending.items.len + @as(usize, if (self.blueprint_task != null) 1 else 0),
             .pending_reads = self.read_pending.count(),
             .waiting_queries = self.waiting_reads.items.len,
             .compactor_active = self.compactor != null,
+            .derived_work_pending = self.blueprint_road_queue.count != 0,
         };
     }
 
@@ -689,6 +859,11 @@ pub const WorldDataService = struct {
         self.requests.not_empty.signal(self.io);
         self.requests.mutex.unlock(self.io);
         self.worker.await(self.io);
+        for (self.blueprint_retired.items) |task| {
+            if (task.future) |*future| future.await(self.io);
+            self.allocator.destroy(task);
+        }
+        self.blueprint_retired.deinit(self.allocator);
         self.read_requests.close(self.io);
         if (self.reader) |*reader| reader.await(self.io);
         self.requests.close(self.io);
@@ -697,6 +872,8 @@ pub const WorldDataService = struct {
             client.pending.deinit(self.allocator);
             client.responses.deinit(self.allocator);
             client.space_responses.deinit(self.allocator);
+            client.blueprint_results.deinit(self.allocator);
+            client.blueprint_save_keys.deinit(self.allocator);
             client.subscriptions.deinit(self.allocator);
             self.allocator.destroy(client);
         }
@@ -707,7 +884,10 @@ pub const WorldDataService = struct {
         self.base_revisions.deinit(self.allocator);
         self.players.deinit(self.allocator);
         self.restored_players.deinit(self.allocator);
+        self.blueprint_journal.deinit(self.allocator);
+        self.blueprint_road_queue.deinit(self.allocator);
         self.run_write_ids.deinit(self.allocator);
+        self.discardPendingBlueprintSaves();
         self.pending.deinit(self.allocator);
         self.waiting_reads.deinit(self.allocator);
         self.retry_reads.deinit(self.allocator);
@@ -741,15 +921,19 @@ pub const WorldDataService = struct {
                 self.compaction_requested = false;
                 if (self.job) |job| job.cancel();
                 if (self.compactor) |compactor| compactor.cancel();
+                if (self.blueprint_task) |task| {
+                    task.cancel.store(true, .release);
+                    if (task.future == null) self.rejectBlueprintApplication(task, .stale, null);
+                }
             }
             self.async_progress = false;
             self.drainPersistenceEvents();
-            if (self.shutdown_started and self.job == null and self.compactor == null and self.read_pending.count() == 0) {
+            if (self.shutdown_started and self.job == null and self.compactor == null and self.read_pending.count() == 0 and self.blueprint_task == null) {
                 // Producers have stopped. Process the last accepted queue before
                 // ending, including registration and terminal read completions.
                 self.requests.takeAll(self.io, &batch);
                 if (batch.items.len == 0) break;
-            } else if (self.async_progress or (self.next_mesh_load < self.mesh_loads.items.len and !self.is_shutting_down.load(.monotonic))) {
+            } else if (self.async_progress or (self.blueprint_task != null and self.blueprint_task.?.future == null and !self.blueprint_task.?.waiting_for_data) or (self.blueprint_road_queue.count != 0 and !self.blueprint_road_waiting) or (self.next_mesh_load < self.mesh_loads.items.len and !self.is_shutting_down.load(.monotonic))) {
                 self.requests.takeAll(self.io, &batch);
             } else if (!self.waitForWork(&batch)) break;
             self.drainPersistenceEvents();
@@ -758,7 +942,11 @@ pub const WorldDataService = struct {
                 self.publishPersistenceStatus();
             }
             batch.clearRetainingCapacity();
+            self.reapBlueprintRetirements();
             if (self.is_shutting_down.load(.monotonic)) continue;
+            self.advanceBlueprintAdmission();
+            self.worker_state.blueprints.cleanup(self.allocator, 4);
+            self.processBlueprintRoadUpdates();
             self.processTransformations();
 
             // Coalesce every edited mesh in this batch, including face dependencies, then
@@ -840,7 +1028,7 @@ pub const WorldDataService = struct {
                     }) catch continue :clients;
                     sub.boundaries_pending = false;
                 }
-                if (client.pending.responses.items.len == 0) continue;
+                if (client.pending.responses.items.len == 0 and client.pending.blueprint_changes.items.len == 0) continue;
                 client.responses.tryPush(self.io, self.allocator, client.pending) catch continue :clients;
                 client.pending = .{};
             }
@@ -925,7 +1113,8 @@ pub const WorldDataService = struct {
     /// Select the command prefix before restarting reads: progress may resolve an
     /// operation immediately, so the fence must already belong to this attempt.
     fn requestSaveTransition(self: *WorldDataService, id: u64, final: bool) void {
-        if (self.lifecycle.request(.{ .id = id, .final = final }, self.pending.items.len) == .none) return;
+        const commands = self.pending.items.len + @as(usize, if (self.blueprint_task != null) 1 else 0);
+        if (self.lifecycle.request(.{ .id = id, .final = final }, commands) == .none) return;
         self.selectSaveDrain();
         self.retrySaveDrain();
     }
@@ -933,6 +1122,7 @@ pub const WorldDataService = struct {
     /// Every explicit/automatic retry must wake both read queries and mutation
     /// dependency discovery; neither queue can rely on another completion arriving.
     fn retrySaveDrain(self: *WorldDataService) void {
+        self.blueprint_road_waiting = false;
         self.retryReadFailures();
         self.retryWaitingReads();
         self.retryPending();
@@ -978,7 +1168,7 @@ pub const WorldDataService = struct {
 
     fn processRequest(self: *WorldDataService, request: Request) void {
         // Only mutations/checkpoints join the retained FIFO. Reads and completions always progress.
-        const ordered = request == .operation;
+        const ordered = request == .operation or request == .blueprint_save or request == .blueprint_apply;
         if (request == .load_chunks and self.is_shutting_down.load(.acquire)) {
             if (request.load_chunks.counted) _ = self.outstanding_loads.fetchSub(1, .release);
             return;
@@ -994,8 +1184,8 @@ pub const WorldDataService = struct {
         // Discover and prioritize the player's dependencies even behind a FIFO head.
         const dependencies_ready = if (ordered) self.dependenciesReady(request) else true;
         const admission_ready = if (ordered) self.admissible(request) else true;
-        if (ordered and (self.pending.items.len != 0 or !dependencies_ready or !admission_ready)) {
-            if (!request.operation.client.simulation) {
+        if (ordered and (self.blueprint_task != null or self.pending.items.len != 0 or !dependencies_ready or !admission_ready)) {
+            if (!requestClient(request).simulation) {
                 if (self.source_holds.count() != 0) self.status.capture_waited_operations +%= 1 else if (self.read_pending.count() != 0) self.status.dependency_waited_operations +%= 1;
             }
             self.pending.append(self.allocator, .{ .request = request, .since = persistence.now(self.io) }) catch @panic("OOM");
@@ -1006,6 +1196,9 @@ pub const WorldDataService = struct {
 
     fn processAdmitted(self: *WorldDataService, request: Request) void {
         switch (request) {
+            .blueprint_save => |save| self.saveBlueprint(save),
+            .blueprint_apply => |apply| self.beginBlueprintApplication(apply),
+            .blueprint_prepared => |task| self.finishBlueprintApplication(task),
             .register_player => |initial| {
                 if (!self.players.contains(initial.id)) {
                     var player = initial;
@@ -1019,6 +1212,8 @@ pub const WorldDataService = struct {
                 }
             },
             .chunk_loaded => |loaded| {
+                if (self.blueprint_task) |task| task.waiting_for_data = false;
+                self.blueprint_road_waiting = false;
                 _ = self.read_pending.remove(loaded.id);
                 if (loaded.result) |chunk| {
                     const current_revision = self.worker_state.modified_chunks.get(loaded.id);
@@ -1097,7 +1292,10 @@ pub const WorldDataService = struct {
                 search.client.space_responses.push(self.io, self.allocator, .{ .request_id = search.request_id, .result = result });
             },
             .advance_time => |tick| self.worker_state.tick = @max(self.worker_state.tick, tick),
-            .register => |client| self.clients.append(self.allocator, client) catch @panic("OOM"),
+            .register => |client| {
+                self.clients.append(self.allocator, client) catch @panic("OOM");
+                self.publishBlueprintBaseline(client) catch self.failPersistence(error.OutOfMemory);
+            },
             .evict_chunk => |evict| {
                 if (evict.client.subscriptions.get(evict.position)) |sub| {
                     if (sub.id == evict.subscription_id) _ = evict.client.subscriptions.remove(evict.position);
@@ -1136,6 +1334,7 @@ pub const WorldDataService = struct {
                 }
             },
             .operation => |edit| {
+                if (edit.operation.blueprint != null) return self.processBlueprintFulfillment(edit);
                 const coords, const local = world_module.splitBlockCoords(edit.operation.block);
                 const position = self.layout.encodeChunkCoords(coords);
                 self.read_discovered = false;
@@ -1222,6 +1421,628 @@ pub const WorldDataService = struct {
         }
     }
 
+    fn publishBlueprintBaseline(self: *WorldDataService, client: *Client) !void {
+        const state = &self.worker_state.blueprints;
+        try client.pending.blueprint_changes.ensureUnusedCapacity(self.allocator, state.definitions.count() + state.instances.count());
+        var definitions = state.definitions.valueIterator();
+        while (definitions.next()) |definition| {
+            client.pending.blueprint_changes.appendAssumeCapacity(.{ .definition = try definition.clone(self.allocator) });
+        }
+        var instances = state.instances.valueIterator();
+        while (instances.next()) |instance| {
+            if (instance.active) client.pending.blueprint_changes.appendAssumeCapacity(.{ .instance = try instance.clone(self.allocator) });
+        }
+    }
+
+    fn saveBlueprint(self: *WorldDataService, save: anytype) void {
+        self.operation_deferred = false;
+        self.read_discovered = false;
+        self.trySaveBlueprint(save) catch |err| {
+            if (err == error.OutOfMemory or err == error.JournalBackpressure) {
+                // Finalization transferred ownership to this command. Keep its payload
+                // for a retry instead of destroying a checked, finalized design.
+                self.pending.insert(self.allocator, 0, .{ .request = .{ .blueprint_save = save }, .since = self.processing_since orelse persistence.now(self.io) }) catch @panic("OOM retaining blueprint Save");
+                self.operation_deferred = true;
+                self.failPersistence(err);
+                if (err == error.JournalBackpressure) self.drainBlueprintJournal();
+                return;
+            }
+            var candidate = save.candidate;
+            candidate.deinit(self.allocator);
+            self.allocator.free(save.name);
+            save.client.blueprint_results.push(self.io, self.allocator, .{ .request_id = save.request_id, .kind = .save, .status = if (err == error.LibraryCapacity) .resource_exhausted else .invalid });
+            save.client.resolved_request = @max(save.client.resolved_request, save.request_id);
+            self.applyEligibleCheckpoint(save.client);
+        };
+    }
+
+    /// Persist the already accepted prefix without including the retained Save
+    /// payload. Its eventual completion retries that command before a later fence.
+    fn drainBlueprintJournal(self: *WorldDataService) void {
+        if (self.store == null or self.job != null or self.is_shutting_down.load(.acquire)) return;
+        const intent = self.next_intent.fetchAdd(1, .monotonic);
+        self.beginCapture(intent, false) catch |err| self.failPersistence(err);
+    }
+
+    fn discardPendingBlueprintSaves(self: *WorldDataService) void {
+        for (self.pending.items) |pending| if (pending.request == .blueprint_save) {
+            var candidate = pending.request.blueprint_save.candidate;
+            candidate.deinit(self.allocator);
+            self.allocator.free(pending.request.blueprint_save.name);
+        };
+    }
+
+    fn trySaveBlueprint(self: *WorldDataService, save: anytype) !void {
+        const state = &self.worker_state.blueprints;
+        if (!self.players.contains(save.owner)) return error.UnknownPlayer;
+        const definition = save.candidate.definition;
+        const key: Client.BlueprintSaveKey = .{ .explicit = save.idempotency_key != null, .value = save.idempotency_key orelse save.request_id };
+        if (save.client.blueprint_save_keys.get(key)) |existing_id| {
+            const existing = state.definitions.get(existing_id) orelse return error.ConflictingBlueprintSave;
+            if (existing.owner != save.owner or !std.mem.eql(u8, existing.name, save.name) or
+                !std.mem.eql(u32, &existing.definition.size, &definition.size) or
+                existing.definition.target_count != definition.target_count or
+                !std.mem.eql(rules.BlockType, existing.definition.cells, definition.cells)) return error.ConflictingBlueprintSave;
+            var candidate = save.candidate;
+            candidate.deinit(self.allocator);
+            self.allocator.free(save.name);
+            save.client.resolved_request = @max(save.client.resolved_request, save.request_id);
+            save.client.blueprint_results.push(self.io, self.allocator, .{ .request_id = save.request_id, .kind = .save, .status = .success, .definition_id = existing_id });
+            self.applyEligibleCheckpoint(save.client);
+            return;
+        }
+        // The compiler certificate owns immutable contents. Save repeats scalar
+        // dimensions/ownership checks, never source capture or structural validation.
+        const count = try blueprint.checkedVolume(definition.size, blueprint.horizontalLimit(self.layout), blueprint.default_max_cells);
+        if (count != definition.cells.len or definition.target_count == 0) return error.InvalidDefinition;
+        const id = std.math.add(u64, state.max_definition_id, 1) catch return error.LibraryCapacity;
+        const limits: blueprint_wire.Limits = .{};
+        if (save.client.blueprint_save_keys.count() >= limits.max_definitions) return error.LibraryCapacity;
+        const bytes = try std.math.add(usize, definition.cells.len, save.name.len + 128);
+        var retained = self.blueprint_library_bytes;
+        var active = state.instances.valueIterator();
+        while (active.next()) |instance| retained = try std.math.add(usize, retained, instance.fulfilled.len + 128);
+        if (state.definitions.count() >= limits.max_definitions or bytes > limits.max_state_bytes -| retained) return error.LibraryCapacity;
+        if (self.store != null and (self.blueprint_journal.items.len >= limits.max_operations or bytes > limits.max_changes_bytes -| self.blueprint_journal_bytes)) return error.JournalBackpressure;
+        try state.definitions.ensureUnusedCapacity(self.allocator, 1);
+        try save.client.blueprint_save_keys.ensureUnusedCapacity(self.allocator, 1);
+        if (self.store != null) try self.blueprint_journal.ensureUnusedCapacity(self.allocator, 1);
+        const saved: blueprint_runtime.SavedDefinition = .{ .id = id, .owner = save.owner, .name = save.name, .definition = definition };
+        var copies: std.ArrayList(blueprint_runtime.SavedDefinition) = .empty;
+        defer copies.deinit(self.allocator);
+        errdefer for (copies.items) |*copy| copy.deinit(self.allocator);
+        try copies.ensureTotalCapacity(self.allocator, self.clients.items.len);
+        for (self.clients.items) |client| {
+            try client.pending.blueprint_changes.ensureUnusedCapacity(self.allocator, 1);
+            copies.appendAssumeCapacity(try saved.clone(self.allocator));
+        }
+        try state.insertDefinition(self.allocator, saved);
+        save.client.blueprint_save_keys.putAssumeCapacity(key, id);
+        if (self.store != null) {
+            self.blueprint_journal.appendAssumeCapacity(.{ .definition = .{
+                .id = id,
+                .owner = save.owner,
+                .name = saved.name,
+                .size = definition.size,
+                .cells = std.mem.sliceAsBytes(definition.cells),
+                .target_count = definition.target_count,
+            } });
+            self.blueprint_journal_bytes += bytes;
+        }
+        self.blueprint_library_bytes += bytes;
+        for (self.clients.items, copies.items) |client, copy| client.pending.blueprint_changes.appendAssumeCapacity(.{ .definition = copy });
+        copies.clearRetainingCapacity();
+        self.lifecycle.unsaved_work = true;
+        save.client.resolved_request = @max(save.client.resolved_request, save.request_id);
+        save.client.blueprint_results.push(self.io, self.allocator, .{ .request_id = save.request_id, .kind = .save, .status = .success, .definition_id = id });
+        self.applyEligibleCheckpoint(save.client);
+    }
+
+    fn restoreBlueprints(self: *WorldDataService, saved: *storage.Store) !void {
+        const Restore = struct {
+            service: *WorldDataService,
+            store: *storage.Store,
+            blocks: std.AutoHashMapUnmanaged(ChunkId, *[32768]u8) = .empty,
+
+            fn get(context: *@This(), block: [3]u32) !u8 {
+                const coords, const local = world_module.splitBlockCoords(block);
+                const id = context.service.layout.encodeChunkCoords(coords);
+                const data = context.blocks.get(id) orelse blk: {
+                    const owned = try context.service.allocator.create([32768]u8);
+                    errdefer context.service.allocator.destroy(owned);
+                    if (try context.store.readChunk(context.service.allocator, id)) |encoded| {
+                        defer context.service.allocator.free(encoded);
+                        var decoded = try format.decodeChunk(context.service.allocator, context.store.world_uuid, encoded, context.store.dimensions);
+                        defer decoded.deinit(context.service.allocator);
+                        @memcpy(owned, decoded.blocks);
+                    } else {
+                        const generator = ColumnGenerator.init(&context.service.worker_state.generator, .{ coords[0], coords[1] });
+                        const chunk = try generator.tryGenerateChunk(context.service.allocator, coords[2]);
+                        defer chunk.deinit(context.service.allocator);
+                        const raw = chunk.content.toData();
+                        @memcpy(owned, std.mem.asBytes(&raw.blocks));
+                    }
+                    try context.blocks.put(context.service.allocator, id, owned);
+                    break :blk owned;
+                };
+                return data[transformations.index(local)];
+            }
+            fn deinit(context: *@This()) void {
+                var values = context.blocks.valueIterator();
+                while (values.next()) |value| context.service.allocator.destroy(value.*);
+                context.blocks.deinit(context.service.allocator);
+            }
+        };
+        var restore: Restore = .{ .service = self, .store = saved };
+        defer restore.deinit();
+        try saved.blueprints.validateTerrain(&restore, Restore.get, saved.dimensions);
+        const state = &self.worker_state.blueprints;
+        var definitions = saved.blueprints.definitions.valueIterator();
+        while (definitions.next()) |definition| {
+            const name = try self.allocator.dupe(u8, definition.name);
+            errdefer self.allocator.free(name);
+            const cells = try self.allocator.alloc(rules.BlockType, definition.cells.len);
+            errdefer self.allocator.free(cells);
+            @memcpy(std.mem.sliceAsBytes(cells), definition.cells);
+            try state.insertDefinition(self.allocator, .{ .id = definition.id, .owner = definition.owner, .name = name, .definition = .{ .size = definition.size, .cells = cells, .target_count = definition.target_count } });
+            self.blueprint_library_bytes += cells.len + name.len + 128;
+        }
+        var instances = saved.blueprints.instances.valueIterator();
+        while (instances.next()) |instance| {
+            var value = try state.prepareInstance(self.allocator, self.layout, instance.id, instance.definition_id, instance.owner, instance.origin, @intCast(instance.rotation));
+            errdefer value.deinit(self.allocator);
+            if (value.fulfilled.len != instance.fulfilled.len) return error.InvalidBlueprint;
+            @memcpy(value.fulfilled, instance.fulfilled);
+            value.remaining = instance.remaining;
+            try state.insertInstance(self.allocator, self.layout, value);
+        }
+        state.max_definition_id = saved.blueprints.max_definition_id;
+        state.max_instance_id = saved.blueprints.max_instance_id;
+    }
+
+    fn beginBlueprintApplication(self: *WorldDataService, apply: BlueprintApplyRequest) void {
+        self.operation_deferred = false;
+        self.read_discovered = false;
+        self.tryBeginBlueprintApplication(apply) catch |err| {
+            apply.client.blueprint_results.push(self.io, self.allocator, .{
+                .request_id = apply.request_id,
+                .kind = .apply,
+                .status = if (err == error.OutOfMemory or err == error.Capacity or err == error.Busy) .resource_exhausted else .invalid,
+            });
+            apply.client.resolved_request = @max(apply.client.resolved_request, apply.request_id);
+            self.applyEligibleCheckpoint(apply.client);
+        };
+    }
+
+    fn tryBeginBlueprintApplication(self: *WorldDataService, apply: BlueprintApplyRequest) !void {
+        if (self.is_shutting_down.load(.acquire)) return error.ServiceStopped;
+        if (self.blueprint_task != null or self.blueprint_retired.items.len >= 8) return error.Busy;
+        // Every admission owns one retirement slot before it can acquire resources.
+        try self.blueprint_retired.ensureUnusedCapacity(self.allocator, 1);
+        const state = &self.worker_state.blueprints;
+        const saved = state.definitions.get(apply.definition_id) orelse return error.UnknownDefinition;
+        if (saved.owner != apply.owner or !self.players.contains(apply.owner)) return error.WrongOwner;
+        if (!blueprint_runtime.validFootprint(self.layout, apply.origin, saved.definition.size, apply.rotation)) return error.InvalidFootprint;
+        const limits: blueprint_wire.Limits = .{};
+        if (state.instances.count() >= limits.max_instances) return error.Capacity;
+        var retained = self.blueprint_library_bytes;
+        var active = state.instances.valueIterator();
+        while (active.next()) |instance| retained = try std.math.add(usize, retained, instance.fulfilled.len + 128);
+        if ((saved.definition.cells.len + 7) / 8 + 128 > limits.max_state_bytes -| retained) return error.Capacity;
+        const id = try std.math.add(u64, state.max_instance_id, 1);
+        var instance = try state.prepareInstance(self.allocator, self.layout, id, saved.id, apply.owner, apply.origin, apply.rotation);
+        errdefer instance.deinit(self.allocator);
+        if (state.overlaps(self.layout, instance)) return error.Overlap;
+        const size = blueprint.rotatedSize(saved.definition.size, apply.rotation);
+        const halo = 2 * rules.Limits.support_radius;
+        var ids: std.ArrayList(ChunkId) = .empty;
+        errdefer ids.deinit(self.allocator);
+        var unique: std.AutoHashMapUnmanaged(ChunkId, void) = .empty;
+        defer unique.deinit(self.allocator);
+        var z = @divFloor(@as(i64, apply.origin[2]) - halo, CHUNK_SIZE);
+        while (z <= @divFloor(@as(i64, apply.origin[2]) + size[2] - 1 + halo, CHUNK_SIZE)) : (z += 1) {
+            var y = @divFloor(@as(i64, apply.origin[1]) - halo, CHUNK_SIZE);
+            while (y <= @divFloor(@as(i64, apply.origin[1]) + size[1] - 1 + halo, CHUNK_SIZE)) : (y += 1) {
+                var x = @divFloor(@as(i64, apply.origin[0]) - halo, CHUNK_SIZE);
+                while (x <= @divFloor(@as(i64, apply.origin[0]) + size[0] - 1 + halo, CHUNK_SIZE)) : (x += 1) {
+                    const coords = self.layout.normalizeChunkCoords(.{ @intCast(x), @intCast(y), @intCast(z) }) orelse continue;
+                    const chunk_id = self.layout.encodeChunkCoords(coords);
+                    if (unique.contains(chunk_id)) continue;
+                    if (ids.items.len == 1024) return error.Capacity;
+                    try unique.put(self.allocator, chunk_id, {});
+                    try ids.append(self.allocator, chunk_id);
+                }
+            }
+        }
+        const task = try self.allocator.create(BlueprintAdmissionTask);
+        errdefer self.allocator.destroy(task);
+        const chunk_ids = try ids.toOwnedSlice(self.allocator);
+        task.* = .{
+            .service = self,
+            .request = apply,
+            .definition = saved.definition,
+            .instance = instance,
+            .client_count = self.clients.items.len,
+            .chunk_ids = chunk_ids,
+            .snapshot = .{ .layout = self.layout.*, .overlay_revision = state.revision, .playable_y_inset = self.worker_state.generator.playableYInset() },
+        };
+        self.blueprint_task = task;
+        self.async_progress = true;
+    }
+
+    fn currentBlueprintDependency(self: *const WorldDataService, id: ChunkId) u64 {
+        if (self.worker_state.modified_chunks.get(id)) |chunk| return chunk.chunk_revision;
+        return if (self.catalog) |catalog| catalog.revision(id) orelse 0 else 0;
+    }
+
+    fn advanceBlueprintAdmission(self: *WorldDataService) void {
+        self.reapBlueprintRetirements();
+        const task = self.blueprint_task orelse return;
+        if (task.future != null or task.waiting_for_data) return;
+        if (self.worker_state.blueprints.revision != task.snapshot.overlay_revision) {
+            self.rejectBlueprintApplication(task, .stale, null);
+            return;
+        }
+        var copied: usize = 0;
+        while (task.cursor < task.chunk_ids.len and copied < 4) : (copied += 1) {
+            const id = task.chunk_ids[task.cursor];
+            self.blocked_dependency_error = null;
+            if (!self.requireBase(id)) {
+                if (self.blocked_dependency_error != null) self.rejectBlueprintApplication(task, .missing_data, null) else task.waiting_for_data = true;
+                return;
+            }
+            self.copyBlueprintDependency(task, id) catch |err| {
+                self.rejectBlueprintApplication(task, if (err == error.OutOfMemory or err == error.Capacity) .resource_exhausted else .missing_data, null);
+                return;
+            };
+            task.cursor += 1;
+        }
+        if (task.cursor != task.chunk_ids.len) return;
+        task.future = self.io.concurrent(BlueprintAdmissionTask.run, .{task}) catch {
+            self.rejectBlueprintApplication(task, .resource_exhausted, null);
+            return;
+        };
+    }
+
+    fn copyBlueprintDependency(self: *WorldDataService, task: *BlueprintAdmissionTask, id: ChunkId) !void {
+        const coords = self.layout.decodeChunkId(id);
+        const chunk = try self.worker_state.tryLoadAt(self.allocator, coords);
+        defer chunk.deinit(self.allocator);
+        const source_index = self.worker_state.blueprints.chunks.get(id) orelse blueprint_runtime.ChunkIndex{};
+        var immutable: std.ArrayList(transformations.BlockIndex) = .empty;
+        defer immutable.deinit(self.allocator);
+        if (coords[2] == 0) for (0..32768) |index| {
+            const local = transformations.coordinates(@intCast(index));
+            const cell: [3]u32 = .{ @as(u32, @intCast(coords[0])) * CHUNK_SIZE + local[0], @as(u32, @intCast(coords[1])) * CHUNK_SIZE + local[1], local[2] };
+            if (cell[2] < self.worker_state.generator.deeprockThickness(cell[0], cell[1])) try immutable.append(self.allocator, @intCast(index));
+        };
+        const estimate = blueprint_admission.estimatedChunkBytes(chunk.metadata.constructed.items.len, chunk.metadata.roads.items.len, immutable.items.len, source_index);
+        if (estimate > 128 * 1024 * 1024 -| task.snapshot_bytes) return error.Capacity;
+        const blocks = try self.allocator.create(@import("world_chunk_data.zig").WorldChunkData);
+        errdefer self.allocator.destroy(blocks);
+        blocks.* = chunk.content.toData();
+        const constructed = try self.allocator.dupe(transformations.BlockIndex, chunk.metadata.constructed.items);
+        errdefer self.allocator.free(constructed);
+        const road_records = try self.allocator.dupe(@import("road_data.zig").Road, chunk.metadata.roads.items);
+        errdefer self.allocator.free(road_records);
+        const mask = try immutable.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(mask);
+        var index = try source_index.clone(self.allocator);
+        errdefer index.deinit(self.allocator);
+        try task.snapshot.chunks.put(self.allocator, id, .{ .revision = chunk.chunk_revision, .blocks = blocks, .constructed = constructed, .roads = road_records, .immutable = mask, .index = index });
+        task.snapshot_bytes += estimate;
+    }
+
+    fn finishBlueprintApplication(self: *WorldDataService, task: *BlueprintAdmissionTask) void {
+        if (self.blueprint_task != task) return;
+        if (task.future) |*future| future.await(self.io);
+        task.future = null;
+        if (self.is_shutting_down.load(.acquire)) {
+            self.rejectBlueprintApplication(task, .stale, null);
+            return;
+        }
+        const result = task.result.? catch {
+            self.rejectBlueprintApplication(task, .resource_exhausted, null);
+            return;
+        };
+        switch (result) {
+            .cancelled => self.rejectBlueprintApplication(task, .stale, null),
+            .rejected => |failure| self.rejectBlueprintApplication(task, if (failure.code == .missing_data) .missing_data else .invalid, failure.failure),
+            .prepared => {
+                self.commitBlueprintApplication(task) catch |err| {
+                    self.rejectBlueprintApplication(task, if (err == error.StalePreparation or err == error.Overlap) .stale else .resource_exhausted, null);
+                    return;
+                };
+            },
+        }
+    }
+
+    fn commitBlueprintApplication(self: *WorldDataService, task: *BlueprintAdmissionTask) !void {
+        const state = &self.worker_state.blueprints;
+        if (state.revision != task.snapshot.overlay_revision) return error.StalePreparation;
+        if (self.clients.items.len != task.client_count) return error.StalePreparation;
+        var dependencies = task.snapshot.chunks.iterator();
+        while (dependencies.next()) |dependency| if (self.currentBlueprintDependency(dependency.key_ptr.*) != dependency.value_ptr.revision) return error.StalePreparation;
+        const limits: blueprint_wire.Limits = .{};
+        if (self.store != null) {
+            if (self.blueprint_journal.items.len >= limits.max_operations or self.blueprint_journal_bytes + 64 > limits.max_changes_bytes) return error.Capacity;
+            try self.blueprint_journal.ensureUnusedCapacity(self.allocator, 1);
+        }
+        const result = if (task.result.?) |*value| value else |err| return err;
+        const prepared = &result.prepared;
+        try state.reservePublication(self.allocator, self.layout, &prepared.publication);
+        for (self.clients.items) |client| {
+            try client.pending.blueprint_changes.ensureUnusedCapacity(self.allocator, 1);
+        }
+        std.debug.assert(task.response_copies.items.len == self.clients.items.len);
+        const instance = prepared.publication.instance;
+        state.publishPublication(&prepared.publication);
+        if (self.store != null) {
+            self.blueprint_journal.appendAssumeCapacity(.{ .instance = .{ .id = instance.id, .definition_id = instance.definition_id, .owner = instance.owner, .origin = instance.origin, .rotation = instance.rotation } });
+            self.blueprint_journal_bytes += 64;
+        }
+        for (self.clients.items, task.response_copies.items) |client, copy| client.pending.blueprint_changes.appendAssumeCapacity(.{ .instance = copy });
+        task.response_copies.clearRetainingCapacity();
+        self.lifecycle.unsaved_work = true;
+        task.request.client.resolved_request = @max(task.request.client.resolved_request, task.request.request_id);
+        task.request.client.blueprint_results.push(self.io, self.allocator, .{ .request_id = task.request.request_id, .kind = .apply, .status = .success, .definition_id = instance.definition_id, .instance_id = instance.id });
+        self.applyEligibleCheckpoint(task.request.client);
+        self.retireBlueprintTask(task);
+        self.lifecycle.commandResolved();
+        self.retryPending();
+    }
+
+    fn rejectBlueprintApplication(self: *WorldDataService, task: *BlueprintAdmissionTask, status: @FieldType(BlueprintResult, "status"), failure: ?rules.Failure) void {
+        task.request.client.resolved_request = @max(task.request.client.resolved_request, task.request.request_id);
+        task.request.client.blueprint_results.push(self.io, self.allocator, .{ .request_id = task.request.request_id, .kind = .apply, .status = status, .failure = failure });
+        self.applyEligibleCheckpoint(task.request.client);
+        self.retireBlueprintTask(task);
+        self.lifecycle.commandResolved();
+        self.retryPending();
+    }
+
+    fn retireBlueprintTask(self: *WorldDataService, task: *BlueprintAdmissionTask) void {
+        self.blueprint_task = null;
+        self.blueprint_retired.appendAssumeCapacity(task);
+        task.future = self.io.concurrent(BlueprintAdmissionTask.release, .{task}) catch blk: {
+            BlueprintAdmissionTask.release(task);
+            break :blk null;
+        };
+    }
+
+    fn reapBlueprintRetirements(self: *WorldDataService) void {
+        var i: usize = 0;
+        while (i < self.blueprint_retired.items.len) {
+            const task = self.blueprint_retired.items[i];
+            if (!task.retired.load(.acquire)) {
+                i += 1;
+                continue;
+            }
+            if (task.future) |*future| future.await(self.io);
+            _ = self.blueprint_retired.swapRemove(i);
+            self.allocator.destroy(task);
+        }
+    }
+
+    /// A submitted identity selects a separate path before ordinary dependency,
+    /// construction, road, or structural validation work.
+    fn processBlueprintFulfillment(self: *WorldDataService, edit: @FieldType(Request, "operation")) void {
+        self.read_discovered = false;
+        self.operation_deferred = false;
+        const coords, const local = world_module.splitBlockCoords(edit.operation.block);
+        const id = self.layout.encodeChunkCoords(coords);
+        edit.client.pending.responses.ensureUnusedCapacity(self.allocator, 1) catch {
+            self.pending.insert(self.allocator, 0, .{ .request = .{ .operation = edit }, .since = self.processing_since orelse persistence.now(self.io) }) catch @panic("OOM");
+            self.operation_deferred = true;
+            self.failPersistence(error.OutOfMemory);
+            return;
+        };
+        const result = self.tryCommitBlueprintFulfillment(edit.operation) catch |err| blk: {
+            if (err == error.DependencyPending or err == error.CapturePending or err == error.RoadUpdatesFull or err == error.JournalBackpressure) {
+                self.pending.insert(self.allocator, 0, .{ .request = .{ .operation = edit }, .since = self.processing_since orelse persistence.now(self.io) }) catch @panic("OOM");
+                self.operation_deferred = true;
+                if (err == error.JournalBackpressure) self.drainBlueprintJournal();
+                return;
+            }
+            self.failPersistence(err);
+            break :blk WorkerState.BlueprintCommit{ .diagnostics = .{ .status = .resource_exhausted } };
+        };
+        if (result.diagnostics.status == .success) {
+            if (edit.operation.player) |transfer| {
+                self.players.getPtr(transfer.id).?.inventory = null;
+                self.player_generation +%= 1;
+            }
+            self.lifecycle.unsaved_work = true;
+            const fulfillment = edit.operation.blueprint.?;
+            if (self.store != null) {
+                self.blueprint_journal.appendAssumeCapacity(.{ .fulfill = .{ .instance_id = fulfillment.instance_id, .cell_index = fulfillment.cell_index } });
+                self.blueprint_journal_bytes += 13;
+            }
+            for (self.clients.items) |client| client.pending.blueprint_changes.appendAssumeCapacity(.{ .fulfill = fulfillment });
+            self.publishMaterialChange(coords);
+            if (result.changed_below) |below| if (!@reduce(.And, below == coords)) self.publishMaterialChange(below);
+            for (std.enums.values(Side)) |side| {
+                const i = @intFromEnum(side);
+                if (local[i / 2] != (if (i % 2 == 0) @as(u5, 0) else CHUNK_SIZE - 1)) continue;
+                const neighbor = world_module.adjacentChunk(self.layout, coords, side) orelse continue;
+                self.dirty_meshes.putAssumeCapacity(self.layout.encodeChunkCoords(neighbor), {});
+                for (self.clients.items) |client| {
+                    const sub = client.subscriptions.getPtr(self.layout.encodeChunkCoords(neighbor)) orelse continue;
+                    if (sub.mode == .mesh) sub.mesh_pending = true else sub.boundaries_pending = true;
+                }
+            }
+        } else if (edit.client.subscriptions.getPtr(id)) |sub| {
+            // Rejections coalesce an authoritative rebase too, without cloning per attempt.
+            if (sub.mode == .blocks) sub.blocks_pending = true;
+        }
+        if (self.is_shutting_down.load(.monotonic)) {
+            if (edit.counted) _ = self.outstanding_operations.fetchSub(1, .release);
+            edit.client.resolved_request = edit.request_id;
+            return;
+        }
+        var response: ChunkResponse = .{ .coords = coords, .subscription_id = if (edit.client.subscriptions.get(id)) |sub| sub.id else null, .chunk_revision = if (self.worker_state.modified_chunks.get(id)) |chunk| chunk.chunk_revision else 0, .mesh_revision = self.worker_state.meshRevision(coords), .data = .acknowledgement, .operation = .{ .request_id = edit.request_id, .status = result.diagnostics.status, .failure = result.diagnostics.failure, .counted = edit.counted } };
+        if (edit.operation.player) |transfer| {
+            const material = if (self.players.get(transfer.id)) |player| player.inventory else null;
+            response.operation.?.player_inventory = .{ .player_id = transfer.id, .material = if (material) |raw| @enumFromInt(raw) else null };
+        }
+        edit.client.pending.responses.appendAssumeCapacity(response);
+        edit.client.resolved_request = edit.request_id;
+        self.status.confirmed_operations +%= 1;
+        if (!edit.client.simulation) if (self.processing_since) |since| {
+            const waited: u64 = @intCast(@min(std.math.maxInt(u64), @max(0, persistence.now(self.io) - since)));
+            self.status.max_player_wait_ns = @max(self.status.max_player_wait_ns, waited);
+            self.status.total_player_wait_ns +|= waited;
+        };
+        self.applyEligibleCheckpoint(edit.client);
+    }
+
+    fn tryCommitBlueprintFulfillment(self: *WorldDataService, operation: BlockOperation) !WorkerState.BlueprintCommit {
+        // Reserve all outward ownership before terrain, inventory, or progress changes.
+        const limits: blueprint_wire.Limits = .{};
+        if (self.store != null) {
+            if (self.blueprint_journal.items.len >= limits.max_operations or 13 > limits.max_changes_bytes -| self.blueprint_journal_bytes) return error.JournalBackpressure;
+            try self.blueprint_journal.ensureUnusedCapacity(self.allocator, 1);
+        }
+        for (self.clients.items) |client| try client.pending.blueprint_changes.ensureUnusedCapacity(self.allocator, 1);
+        const road_batch = try self.prepareBlueprintRoadUpdates(operation.block);
+        const result = try self.worker_state.tryFulfillBlueprint(self.allocator, operation);
+        if (result.diagnostics.status == .success) self.commitBlueprintRoadUpdates(road_batch);
+        return result;
+    }
+
+    fn prepareBlueprintRoadUpdates(self: *WorldDataService, block: [3]u32) !blueprint_road_updates.Batch {
+        var batch: blueprint_road_updates.Batch = .{};
+        const center: rules.Cell = .{ block[0], block[1], block[2] };
+        const offsets = [_]rules.Cell{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 } };
+        for (0..2) |level| for (offsets) |offset| {
+            const seed = @import("block_coordinates.zig").fromStorage(self.layout, center + offset + rules.Cell{ 0, 0, @intCast(level) }) orelse continue;
+            const coords, _ = world_module.splitBlockCoords(seed);
+            const id = self.layout.encodeChunkCoords(coords);
+            const possible = if (self.worker_state.modified_chunks.get(id)) |chunk|
+                chunk.metadata.roads.items.len != 0
+            else if (self.catalog) |catalog|
+                catalog.revision(id) != null
+            else
+                false;
+            if (possible) batch.add(id);
+        };
+        try self.blueprint_road_queue.reserve(self.allocator, batch);
+        return batch;
+    }
+
+    fn commitBlueprintRoadUpdates(self: *WorldDataService, batch: blueprint_road_updates.Batch) void {
+        self.blueprint_road_queue.commit(batch);
+        if (batch.count != 0) self.blueprint_road_waiting = false;
+    }
+
+    /// One road seed per service turn, independently from the structural fill.
+    fn processBlueprintRoadUpdates(self: *WorldDataService) void {
+        const entry = self.blueprint_road_queue.peek() orelse return;
+        self.blueprint_road_waiting = false;
+        self.read_discovered = false;
+        if (!self.requireBase(entry.id)) {
+            self.blueprint_road_waiting = true;
+            if (self.blocked_dependency_error) |err| self.noteDrainFailure(err);
+            return;
+        }
+        const chunk = self.worker_state.modified_chunks.get(entry.id) orelse {
+            if (self.blueprint_road_queue.finish()) self.retryPending();
+            return;
+        };
+        if (entry.observed_revision) |revision| if (revision != chunk.chunk_revision) {
+            // Ordinary edits can swap-remove/reorder road metadata while a
+            // chunk is queued; restart rather than skip the moved road seed.
+            entry.cursor = 0;
+            entry.dirty_again = false;
+        };
+        entry.observed_revision = chunk.chunk_revision;
+        if (entry.cursor >= chunk.metadata.roads.items.len) {
+            if (self.blueprint_road_queue.finish()) self.retryPending();
+            return;
+        }
+        const road = chunk.metadata.roads.items[entry.cursor];
+        const coords = self.layout.decodeChunkId(entry.id);
+        const local = transformations.coordinates(road.index);
+        const block: [3]u32 = .{
+            @as(u32, @intCast(coords[0])) * CHUNK_SIZE + local[0],
+            @as(u32, @intCast(coords[1])) * CHUNK_SIZE + local[1],
+            @as(u32, @intCast(coords[2])) * CHUNK_SIZE + local[2],
+        };
+        self.tryProcessBlueprintRoadSeed(block, road) catch |err| {
+            self.blueprint_road_waiting = true;
+            if (err != error.DependencyPending and err != error.CapturePending) self.noteDrainFailure(err);
+            return;
+        };
+        // Our own atomic shape updates do not require restarting this pass.
+        entry.observed_revision = self.worker_state.modified_chunks.get(entry.id).?.chunk_revision;
+        self.blueprint_road_queue.advance();
+    }
+
+    fn tryProcessBlueprintRoadSeed(self: *WorldDataService, block: [3]u32, previous: @import("road_data.zig").Road) !void {
+        const roads = @import("roads.zig");
+        var read: ReadContext = .{ .state = &self.worker_state, .allocator = self.allocator };
+        defer read.deinit();
+        self.worker_state.road_changes.clearRetainingCapacity();
+        const context: roads.Context = .{ .allocator = self.allocator, .reader = read.reader(), .chunks = &self.worker_state.modified_chunks, .changed = &self.worker_state.road_changes, .max_plan_changes = self.limits.manifest_entries };
+        var plan = try context.planAfterEdit(.{ .block = block, .action = .{ .put = .custom } }, previous);
+        defer plan.deinit(self.allocator);
+        if (read.failure) |err| return err;
+        if (self.read_discovered) return error.DependencyPending;
+        if (plan.changes.len == 0) return;
+        for (plan.chunk_ids) |id| if (self.source_holds.contains(id)) {
+            if (self.job) |job| job.prioritize(plan.chunk_ids);
+            return error.CapturePending;
+        };
+        const failure = try roads.validateCompletedPlan(self.allocator, read.reader(), &self.worker_state.blueprints, &self.worker_state.modified_chunks, plan, null);
+        if (read.failure) |err| return err;
+        if (self.read_discovered) return error.DependencyPending;
+        // An unsafe candidate stays unformed. The accepted fill already left
+        // the completed logical world unchanged and remains committed.
+        if (failure != null) return;
+        try plan.reserveCommit(context);
+        const additional = std.math.mul(usize, plan.chunk_ids.len, 7) catch return error.Capacity;
+        try self.worker_state.mesh_revisions.ensureUnusedCapacity(self.allocator, @intCast(additional));
+        try self.dirty_meshes.ensureUnusedCapacity(self.allocator, @intCast(additional));
+        const mesh_revision = try std.math.add(u64, self.worker_state.next_mesh_revision, 1);
+        for (plan.chunk_ids) |id| _ = try std.math.add(u64, self.worker_state.modified_chunks.get(id).?.chunk_revision, 1);
+        // All fallible work precedes these metadata/revision/publication writes.
+        plan.applyPrepared(context);
+        self.worker_state.next_mesh_revision = mesh_revision;
+        for (plan.chunk_ids) |id| {
+            self.worker_state.modified_chunks.getPtr(id).?.chunk_revision += 1;
+            self.worker_state.mesh_revisions.putAssumeCapacity(id, mesh_revision);
+            const changed = self.layout.decodeChunkId(id);
+            self.publishMaterialChange(changed);
+            for (std.enums.values(Side)) |side| {
+                const neighbor = world_module.adjacentChunk(self.layout, changed, side) orelse continue;
+                const neighbor_id = self.layout.encodeChunkCoords(neighbor);
+                self.worker_state.mesh_revisions.putAssumeCapacity(neighbor_id, mesh_revision);
+                self.dirty_meshes.putAssumeCapacity(neighbor_id, {});
+                for (self.clients.items) |client| {
+                    const sub = client.subscriptions.getPtr(neighbor_id) orelse continue;
+                    if (sub.mode == .mesh) sub.mesh_pending = true else sub.boundaries_pending = true;
+                }
+            }
+        }
+        self.lifecycle.unsaved_work = true;
+    }
+
+    fn blueprintDependencies(self: *WorldDataService, operation: BlockOperation) Dependencies {
+        var result: Dependencies = .{ .ids = undefined, .count = 0 };
+        const center: rules.Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
+        const offsets = [_]rules.Cell{ .{ 0, 0, 0 }, .{ 0, 0, -1 }, .{ -1, 0, 0 }, .{ 1, 0, 0 }, .{ 0, -1, 0 }, .{ 0, 1, 0 }, .{ 0, 0, 1 } };
+        for (offsets, 0..) |offset, i| {
+            if (i == 6 and (operation.action != .put or operation.action.put != .dirt)) continue;
+            const block = @import("block_coordinates.zig").fromStorage(self.layout, center + offset) orelse continue;
+            const coords, _ = world_module.splitBlockCoords(block);
+            const id = self.layout.encodeChunkCoords(coords);
+            if (std.mem.indexOfScalar(u32, result.ids[0..result.count], id) != null) continue;
+            result.ids[result.count] = id;
+            result.count += 1;
+        }
+        return result;
+    }
+
     fn publishMaterialChange(self: *WorldDataService, coords: ChunkCoords) void {
         const id = self.layout.encodeChunkCoords(coords);
         self.dirty_meshes.put(self.allocator, id, {}) catch @panic("OOM");
@@ -1304,7 +2125,7 @@ pub const WorldDataService = struct {
         }
         self.scheduleWatchdog();
         self.status.overdue = self.lifecycle.overdue;
-        self.status.pending_commands = self.pending.items.len;
+        self.status.pending_commands = self.pending.items.len + @as(usize, if (self.blueprint_task != null) 1 else 0) + self.blueprint_road_queue.count;
         self.status.resident_chunks = self.worker_state.modified_chunks.count();
         self.status.source_count = self.source_holds.count();
         self.status_mutex.lockUncancelable(self.io);
@@ -1316,10 +2137,19 @@ pub const WorldDataService = struct {
     /// are at most twelve cells, their candidate seeds add one, and revelation reaches
     /// one face neighbor. Include all z planes touched by covering/uncovering soil.
     fn admissible(self: *WorldDataService, request: Request) bool {
+        if (self.blueprint_task != null and (request == .operation or request == .blueprint_save or request == .blueprint_apply)) return false;
         if (request != .operation) return true;
         const edit = request.operation;
         if (self.source_holds.count() == 0) return true;
         if (edit.client.simulation) return false;
+        if (edit.operation.blueprint != null) {
+            const small = self.blueprintDependencies(edit.operation);
+            for (small.ids[0..small.count]) |id| if (self.source_holds.contains(id)) {
+                if (self.job) |job| job.prioritize(small.ids[0..small.count]);
+                return false;
+            };
+            return !self.lifecycle.overdue;
+        }
         const ids = self.operationDependencies(edit.operation);
         for (self.run_write_ids.items) |id| if (self.source_holds.contains(id)) {
             if (self.job) |job| job.prioritize(self.run_write_ids.items);
@@ -1364,6 +2194,8 @@ pub const WorldDataService = struct {
             self.processing_since = pending.since;
             self.processAdmitted(pending.request);
             self.processing_since = null;
+            // Apply remains the FIFO head until detached admission publishes or rejects.
+            if (pending.request == .blueprint_apply and self.blueprint_task != null) break;
             if (self.operation_deferred or self.read_discovered) break;
             self.lifecycle.commandResolved();
         }
@@ -1447,6 +2279,7 @@ pub const WorldDataService = struct {
         const store = self.store orelse return;
         if (self.is_shutting_down.load(.acquire)) return error.ServiceStopped;
         std.debug.assert(self.job == null and self.source_holds.count() == 0);
+        const blueprint_change_bytes = try blueprint_wire.encodedOpsSize(self.blueprint_journal.items);
         for (self.clients.items) |client| {
             client.checkpoint_mutex.lockUncancelable(self.io);
             if (client.latest_checkpoint) |latest| {
@@ -1473,6 +2306,7 @@ pub const WorldDataService = struct {
         // Before allocating any capture manifest or growing bookkeeping, reserve
         // a conservative peak including old/new hash-table and ring overlap.
         var preflight_bytes = try std.math.add(usize, self.limits.output_bytes, @sizeOf(persistence.Job));
+        preflight_bytes = try std.math.add(usize, preflight_bytes, blueprint_change_bytes);
         preflight_bytes = try std.math.add(usize, preflight_bytes, scratch_peak);
         preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.mul(usize, self.players.count(), format.player_record_size + @sizeOf(u64)));
         preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.mul(usize, source_count, 2 * @sizeOf(persistence.Source) + 2 + @sizeOf([]u8)));
@@ -1484,6 +2318,11 @@ pub const WorldDataService = struct {
         const hash_peak = try std.math.add(usize, try std.math.add(usize, hold_target, self.source_holds.capacity()), try std.math.add(usize, wal_target, self.wal_revisions.capacity()));
         preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.add(usize, try std.math.mul(usize, hash_peak, @sizeOf(u32) + @sizeOf(u64) + 16), 512));
         if (preflight_bytes > self.limits.working_bytes) return error.WorkingCapacityExceeded;
+        const blueprint_changes = if (blueprint_change_bytes != 0)
+            try blueprint_wire.encodeOps(self.allocator, self.blueprint_journal.items)
+        else
+            @as([]u8, &.{});
+        errdefer self.allocator.free(blueprint_changes);
         var sources: std.ArrayList(persistence.Source) = .empty;
         errdefer sources.deinit(self.allocator);
         try sources.ensureTotalCapacityPrecise(self.allocator, source_count);
@@ -1523,9 +2362,9 @@ pub const WorldDataService = struct {
         const bookkeeping = try std.math.add(usize, try std.math.mul(usize, self.completion_ring.capacity, @sizeOf(persistence.Event)), try std.math.add(usize, try std.math.mul(usize, self.source_holds.capacity(), @sizeOf(u32) + @sizeOf(u64) + 16), try std.math.add(usize, try std.math.mul(usize, sources.capacity, @sizeOf(persistence.Source)), try std.math.add(usize, player_ids.len * @sizeOf(u64), 256))));
         const frozen = try sources.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(frozen);
-        job.* = .{ .allocator = self.allocator, .io = self.io, .store = store, .store_mutex = &self.store_mutex, .limits = self.limits, .notify = .{ .context = self, .send = notifyPersistence }, .epoch = self.capture_epoch, .sequence = try std.math.add(u64, self.status.durable_sequence, 1), .tick = self.worker_state.tick, .final = final, .sources = frozen, .players = players, .player_count = self.players.count() };
+        job.* = .{ .allocator = self.allocator, .io = self.io, .store = store, .store_mutex = &self.store_mutex, .limits = self.limits, .notify = .{ .context = self, .send = notifyPersistence }, .epoch = self.capture_epoch, .sequence = try std.math.add(u64, self.status.durable_sequence, 1), .tick = self.worker_state.tick, .final = final, .sources = frozen, .players = players, .player_count = self.players.count(), .blueprint_changes = blueprint_changes };
         const job_manifest = try std.math.mul(usize, source_count, @sizeOf(persistence.Source) + 2 + @sizeOf([]u8));
-        const job_baseline = try std.math.add(usize, self.limits.output_bytes, try std.math.add(usize, job_manifest, try std.math.add(usize, players.len, try std.math.add(usize, scratch_peak, @sizeOf(persistence.Job)))));
+        const job_baseline = try std.math.add(usize, self.limits.output_bytes, try std.math.add(usize, job_manifest, try std.math.add(usize, players.len + blueprint_changes.len, try std.math.add(usize, scratch_peak, @sizeOf(persistence.Job)))));
         job.extra_working_bytes = @max(bookkeeping, preflight_bytes - job_baseline);
         for (frozen) |source| self.source_holds.putAssumeCapacity(source.id, source.revision);
         errdefer self.source_holds.clearRetainingCapacity();
@@ -1534,6 +2373,7 @@ pub const WorldDataService = struct {
         const started = persistence.now(self.io);
         self.lifecycle.started(.{ .id = intent, .final = final }, job.epoch, started);
         self.captured_player_generation = self.player_generation;
+        self.captured_blueprint_operations = self.blueprint_journal.items.len;
         self.simulation_paused.store(frozen.len != 0, .release);
         self.status.intent_id = intent;
         self.reportAttemptPhase();
@@ -1554,6 +2394,7 @@ pub const WorldDataService = struct {
             .released => |released| {
                 if (released.epoch != job.epoch or self.source_holds.get(released.id) != released.revision) return;
                 _ = self.source_holds.remove(released.id);
+                self.blueprint_road_waiting = false;
                 self.status.progress_generation +%= 1;
                 if (self.source_holds.count() == 0) {
                     self.simulation_paused.store(false, .release);
@@ -1573,7 +2414,20 @@ pub const WorldDataService = struct {
                 self.status.sequence = job.sequence;
                 self.status.wal_committed_ns = committed_at;
                 for (job.sources) |source| self.wal_revisions.putAssumeCapacity(source.id, source.revision);
-                self.lifecycle.unsaved_work = self.player_generation != self.captured_player_generation;
+                const committed_ops = self.captured_blueprint_operations;
+                std.debug.assert(committed_ops <= self.blueprint_journal.items.len);
+                var committed_bytes: usize = 0;
+                for (self.blueprint_journal.items[0..committed_ops]) |operation| committed_bytes += switch (operation) {
+                    .definition => |definition| definition.cells.len + definition.name.len + 128,
+                    .instance => 64,
+                    .fulfill => 13,
+                };
+                const remaining_ops = self.blueprint_journal.items.len - committed_ops;
+                std.mem.copyForwards(blueprint_wire.Op, self.blueprint_journal.items[0..remaining_ops], self.blueprint_journal.items[committed_ops..]);
+                self.blueprint_journal.items.len = remaining_ops;
+                self.blueprint_journal_bytes -|= committed_bytes;
+                self.captured_blueprint_operations = 0;
+                self.lifecycle.unsaved_work = self.player_generation != self.captured_player_generation or remaining_ops != 0;
                 var live = self.worker_state.modified_chunks.iterator();
                 while (live.next()) |entry| if (self.wal_revisions.get(entry.key_ptr.*) != entry.value_ptr.chunk_revision) {
                     self.lifecycle.unsaved_work = true;
@@ -1626,7 +2480,7 @@ pub const WorldDataService = struct {
     }
 
     fn oldestPlayerWait(self: *WorldDataService) ?i96 {
-        for (self.pending.items) |pending| if (!pending.request.operation.client.simulation) return pending.since;
+        for (self.pending.items) |pending| if (!requestClient(pending.request).simulation) return pending.since;
         return null;
     }
 
@@ -1796,6 +2650,11 @@ pub const WorldDataService = struct {
         var ready = true;
         switch (request) {
             .operation => |edit| {
+                if (edit.operation.blueprint != null) {
+                    const small = self.blueprintDependencies(edit.operation);
+                    for (small.ids[0..small.count]) |id| ready = self.requireBase(id) and ready;
+                    return ready;
+                }
                 const center, _ = world_module.splitBlockCoords(edit.operation.block);
                 // Validator rechecks constructed cells within28 and their support within28.
                 for (0..5) |z| for (0..5) |y| for (0..5) |x| {
@@ -1924,6 +2783,7 @@ const ReadContext = struct {
     allocator: std.mem.Allocator,
     chunks: world_module.ChunksHashMap = .empty,
     failure: ?anyerror = null,
+    read_count: u64 = 0,
 
     fn immutableAt(context: *anyopaque, block: [3]u32) bool {
         const self: *ReadContext = @ptrCast(@alignCast(context));
@@ -1942,6 +2802,7 @@ const ReadContext = struct {
 
     fn read(context: *anyopaque, block: [3]u32) ?@import("engine").voxel_chunk.BlockType {
         const self: *ReadContext = @ptrCast(@alignCast(context));
+        self.read_count +%= 1;
         const coords, const local = world_module.splitBlockCoords(block);
         const id = self.state.layout.encodeChunkCoords(coords);
         if (self.state.modified_chunks.getPtr(id)) |chunk| return chunk.content.getBlock(local);
@@ -1975,6 +2836,7 @@ const ReadContext = struct {
 const WorkerState = struct {
     layout: *const WorldLayout,
     generator: PreparedWorldGenerator,
+    blueprints: blueprint_runtime.State = .{},
     /// Committed edits survive cache eviction. Untouched chunks are regenerated on demand.
     modified_chunks: std.AutoHashMapUnmanaged(ChunkId, WorldChunk) = .empty,
     /// Retained independently of mesh allocation/subscription lifetime. Untouched inputs
@@ -1993,6 +2855,10 @@ const WorkerState = struct {
     road_changes: std.ArrayList(ChunkId) = .empty,
     persistence_service: ?*WorldDataService = null,
     live_allocator: ?std.mem.Allocator = null,
+    blueprint_last_support_reads: u8 = 0,
+    blueprint_support_reads: u64 = 0,
+    blueprint_fulfillment_attempts: u64 = 0,
+    ordinary_validation_calls: u64 = 0,
     fn liveAllocator(self: *const WorkerState, fallback: std.mem.Allocator) std.mem.Allocator {
         return self.live_allocator orelse fallback;
     }
@@ -2089,6 +2955,7 @@ const WorkerState = struct {
     }
 
     fn deinit(self: *WorkerState, allocator: std.mem.Allocator) void {
+        self.blueprints.deinit(allocator);
         var iterator = self.modified_chunks.valueIterator();
         while (iterator.next()) |chunk| chunk.deinit(self.liveAllocator(allocator));
         self.modified_chunks.deinit(allocator);
@@ -2132,6 +2999,7 @@ const WorkerState = struct {
     }
 
     fn tryApplyOperation(self: *WorkerState, allocator: std.mem.Allocator, operation: BlockOperation) !ApplyResult {
+        self.ordinary_validation_calls +%= 1;
         const live = self.liveAllocator(allocator);
         self.road_changes.clearRetainingCapacity();
         if (self.persistence_service) |service| if (service.run_gate_failure) |err| return err;
@@ -2139,7 +3007,7 @@ const WorkerState = struct {
         defer allocator.free(cells);
         var context: ReadContext = .{ .state = self, .allocator = allocator };
         defer context.deinit();
-        var diagnostics = world_module.validateEdit(allocator, context.reader(), cells, operation);
+        var diagnostics = world_module.validateCompletedEdit(allocator, context.reader(), &self.blueprints, cells, operation);
         if (context.failure) |err| return err;
         if (self.persistence_service) |service| if (service.read_discovered) return error.DependencyPending;
         const coords, const local = world_module.splitBlockCoords(operation.block);
@@ -2180,6 +3048,10 @@ const WorkerState = struct {
         };
         var road_plan = try road_context.planAfterEdit(operation, previous_road);
         defer road_plan.deinit(allocator);
+        if (try @import("roads.zig").validateCompletedPlan(allocator, context.reader(), &self.blueprints, &self.modified_chunks, road_plan, operation)) |failure| {
+            const rejected: world_module.EditResult = .{ .status = if (failure.reason == .missing_data) .missing_data else .constraint_violation, .failure = failure };
+            return .{ .status = rejected.status, .chunk = try self.modified_chunks.get(position).?.tryClone(allocator), .revealed_neighbors = @splat(null), .changed_below = null, .diagnostics = rejected };
+        }
         if (context.failure) |err| return err;
         if (self.persistence_service) |service| {
             if (service.read_discovered) return error.DependencyPending;
@@ -2320,6 +3192,94 @@ const WorkerState = struct {
         }
         copyPreparedChunk(allocator, target, &reply);
         return .{ .status = .success, .chunk = reply, .revealed_neighbors = revealed, .changed_below = below_coords, .diagnostics = diagnostics };
+    }
+
+    const BlueprintCommit = struct { diagnostics: world_module.EditResult, changed_below: ?ChunkCoords = null };
+
+    fn tryFulfillBlueprint(self: *WorkerState, allocator: std.mem.Allocator, operation: BlockOperation) !BlueprintCommit {
+        var context: ReadContext = .{ .state = self, .allocator = allocator };
+        defer context.deinit();
+        var diagnostics = world_module.validateBlueprintFulfillment(context.reader(), &self.blueprints, operation);
+        const support_reads = context.read_count -| 1; // The separate target occupancy read is not support.
+        std.debug.assert(support_reads <= 5);
+        self.blueprint_last_support_reads = @intCast(support_reads);
+        self.blueprint_support_reads +%= support_reads;
+        self.blueprint_fulfillment_attempts +%= 1;
+        if (context.failure) |err| return err;
+        if (self.persistence_service) |service| if (service.read_discovered) return error.DependencyPending;
+        if (operation.player) |transfer| {
+            const service = self.persistence_service orelse return error.MissingPlayer;
+            const player = service.players.get(transfer.id);
+            if (player == null or operation.action != .put or player.?.inventory != @as(?u8, @intFromEnum(operation.action.put))) diagnostics = .{ .status = .inventory_mismatch };
+        }
+        if (diagnostics.status != .success) return .{ .diagnostics = diagnostics };
+        const live = self.liveAllocator(allocator);
+        const coords, const local = world_module.splitBlockCoords(operation.block);
+        const id = self.layout.encodeChunkCoords(coords);
+        var below_coords: ?ChunkCoords = null;
+        var below_local: [3]u5 = undefined;
+        var below_changed = false;
+        if (operation.block[2] != 0) {
+            var below = operation.block;
+            below[2] -= 1;
+            const material = ReadContext.read(&context, below) orelse return context.failure orelse error.DependencyPending;
+            if (material.isEarth()) {
+                const bc, const bl = world_module.splitBlockCoords(below);
+                below_coords = bc;
+                below_local = bl;
+                below_changed = material != .packed_dirt;
+            }
+        }
+        const covered = if (operation.action.put == .dirt and operation.block[2] + 1 < self.layout.size_in_blocks[2]) blk: {
+            var above = operation.block;
+            above[2] += 1;
+            break :blk (ReadContext.read(&context, above) orelse return context.failure orelse error.DependencyPending) != .none;
+        } else false;
+        if (context.failure) |err| return err;
+        if (self.persistence_service) |service| if (service.read_discovered) return error.DependencyPending;
+        try self.modified_chunks.ensureUnusedCapacity(allocator, 2);
+        try self.ensureResident(allocator, coords);
+        if (below_coords) |below| try self.ensureResident(allocator, below);
+        const target = self.modified_chunks.getPtr(id).?;
+        try target.metadata.reserve(live, 0, 1, if (operation.action.put == .dirt and !covered) 1 else 0);
+        const prepared = try target.prepareApply(live, local, operation.action);
+        if (prepared != .success) return .{ .diagnostics = .{ .status = prepared } };
+        _ = try std.math.add(u64, target.chunk_revision, 1);
+        if (below_coords) |below| {
+            const bid = self.layout.encodeChunkCoords(below);
+            if (bid != id) _ = try std.math.add(u64, self.modified_chunks.get(bid).?.chunk_revision, 1);
+        }
+        const next_mesh = try std.math.add(u64, self.next_mesh_revision, 1);
+        try self.mesh_revisions.ensureUnusedCapacity(allocator, 8);
+        try self.timed_chunks.ensureUnusedCapacity(allocator, 2);
+        if (self.persistence_service) |service| try service.dirty_meshes.ensureUnusedCapacity(allocator, 8);
+        // Earth aging is structurally equivalent and cannot change target identity.
+        // No road planning, dependent enumeration, or ordinary validator is invoked here.
+        std.debug.assert(target.applyPrepared(live, local, operation.action) == .success);
+        target.metadata.appendConstructedKnownEmptyAssumeCapacity(transformations.index(local));
+        if (operation.action.put == .dirt) {
+            if (covered) target.changeType(local, .packed_dirt) else target.metadata.timed.scheduleAssumeCapacity(.{ .block = transformations.index(local), .kind = .compact_dirt, .due_tick = self.tick +| transformations.transformation_delay });
+        }
+        target.chunk_revision += 1;
+        self.next_mesh_revision = next_mesh;
+        self.mesh_revisions.putAssumeCapacity(id, next_mesh);
+        if (target.metadata.timed.events.items.len != 0) self.timed_chunks.putAssumeCapacity(id, {});
+        if (below_coords) |below| {
+            const bid = self.layout.encodeChunkCoords(below);
+            const chunk = self.modified_chunks.getPtr(bid).?;
+            chunk.metadata.timed.cancel(transformations.index(below_local));
+            if (below_changed) chunk.changeType(below_local, .packed_dirt);
+            if (bid != id) chunk.chunk_revision += 1;
+            self.mesh_revisions.putAssumeCapacity(bid, next_mesh);
+            if (chunk.metadata.timed.events.items.len == 0) _ = self.timed_chunks.remove(bid) else self.timed_chunks.putAssumeCapacity(bid, {});
+        }
+        for (std.enums.values(Side)) |side| {
+            const i = @intFromEnum(side);
+            if (local[i / 2] != (if (i % 2 == 0) @as(u5, 0) else CHUNK_SIZE - 1)) continue;
+            if (world_module.adjacentChunk(self.layout, coords, side)) |neighbor| self.mesh_revisions.putAssumeCapacity(self.layout.encodeChunkCoords(neighbor), next_mesh);
+        }
+        std.debug.assert(self.blueprints.fulfill(self.layout, operation.blueprint.?));
+        return .{ .diagnostics = .{ .status = .success }, .changed_below = below_coords };
     }
 
     fn copyPreparedChunk(allocator: std.mem.Allocator, source: *const WorldChunk, target: *WorldChunk) void {
@@ -4929,4 +5889,590 @@ test "natural profile service saves mined starter sand and bottom edits across a
             for (0..CHUNK_SIZE) |z| try std.testing.expectEqual(z < thickness, actual_data.blocks[z][y][x] == .deeprock);
         };
     }
+}
+
+const BlueprintSaveFixture = struct {
+    service: WorldDataService,
+    client: Client,
+
+    fn init(self: *@This()) !void {
+        return self.initWithAllocator(std.testing.allocator);
+    }
+
+    fn initWithAllocator(self: *@This(), a: std.mem.Allocator) !void {
+        self.service = .{ .layout = &test_layout, .io = std.testing.io, .allocator = a, .worker = undefined, .worker_state = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) } };
+        self.client = .{ .service = &self.service };
+        errdefer self.deinit();
+        try self.service.clients.append(a, &self.client);
+        try self.service.players.put(a, 1, .{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+    }
+
+    fn deinit(self: *@This()) void {
+        const a = self.service.allocator;
+        if (self.service.job) |job| {
+            job.cancel();
+            job.deinit();
+        }
+        self.service.discardPendingBlueprintSaves();
+        self.service.pending.deinit(a);
+        self.client.pending.deinit(a);
+        for (self.client.responses.items.items) |*package| package.deinit(a);
+        self.client.responses.deinit(a);
+        self.client.blueprint_results.deinit(a);
+        self.client.blueprint_save_keys.deinit(a);
+        self.service.clients.deinit(a);
+        self.service.players.deinit(a);
+        self.service.blueprint_journal.deinit(a);
+        self.service.completion_ring.deinit(a);
+        self.service.source_holds.deinit(a);
+        self.service.wal_revisions.deinit(a);
+        self.service.base_revisions.deinit(a);
+        self.service.requests.deinit(a);
+        if (self.service.catalog) |*catalog| catalog.deinit();
+        self.service.worker_state.deinit(a);
+    }
+
+    fn request(self: *@This(), id: u64) !@FieldType(Request, "blueprint_save") {
+        const a = self.service.allocator;
+        const result = try blueprint.compile(a, .{ .size = .{ 1, 1, 1 }, .cells = &.{.planks} }, .{ .horizontal_limit = blueprint.horizontalLimit(&test_layout) });
+        if (result != .valid) return error.InvalidTestBlueprint;
+        var candidate = result.valid;
+        errdefer candidate.deinit(a);
+        return .{ .client = &self.client, .owner = 1, .request_id = id, .name = try a.dupe(u8, "Save fixture"), .candidate = candidate };
+    }
+};
+
+test "blueprint Save keys return the original definition and separate automatic identities" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var first = try fixture.request(1);
+    first.idempotency_key = 9;
+    fixture.service.saveBlueprint(first);
+    const revision = fixture.service.worker_state.blueprints.revision;
+    const bytes = fixture.service.blueprint_library_bytes;
+    var retry = try fixture.request(2);
+    retry.idempotency_key = 9;
+    fixture.service.saveBlueprint(retry);
+    try std.testing.expectEqual(@as(u32, 1), fixture.service.worker_state.blueprints.definitions.count());
+    try std.testing.expectEqual(@as(u32, 1), fixture.client.blueprint_save_keys.count());
+    try std.testing.expectEqual(@as(usize, 1), fixture.client.pending.blueprint_changes.items.len);
+    try std.testing.expectEqual(revision, fixture.service.worker_state.blueprints.revision);
+    try std.testing.expectEqual(bytes, fixture.service.blueprint_library_bytes);
+    // An automatic identity with the same numeric value remains a new Save.
+    fixture.service.saveBlueprint(try fixture.request(9));
+    var replies: std.ArrayList(BlueprintResult) = .empty;
+    defer replies.deinit(a);
+    fixture.client.takeBlueprintResults(&replies);
+    try std.testing.expectEqual(@as(usize, 3), replies.items.len);
+    try std.testing.expectEqual(.success, replies.items[0].status);
+    try std.testing.expectEqual(.success, replies.items[1].status);
+    try std.testing.expectEqual(replies.items[0].definition_id, replies.items[1].definition_id);
+    try std.testing.expect(replies.items[2].definition_id != replies.items[0].definition_id);
+    try std.testing.expectEqual(@as(u32, 2), fixture.service.worker_state.blueprints.definitions.count());
+}
+
+test "blueprint Save keys reject changed payloads and owners without taking another identity" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var first = try fixture.request(1);
+    first.idempotency_key = 7;
+    fixture.service.saveBlueprint(first);
+    try fixture.service.players.put(a, 2, .{ .id = 2, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+    for (0..6) |variant| {
+        var conflicting = try fixture.request(2 + variant);
+        conflicting.idempotency_key = 7;
+        switch (variant) {
+            0 => {
+                a.free(conflicting.name);
+                conflicting.name = try a.dupe(u8, "Changed name");
+            },
+            1 => @constCast(conflicting.candidate.definition.cells)[0] = .sand,
+            2 => conflicting.candidate.definition.size = .{ 1, 2, 1 },
+            3 => conflicting.candidate.definition.target_count = 2,
+            4 => conflicting.owner = 2,
+            5 => conflicting.owner = 999,
+            else => unreachable,
+        }
+        fixture.service.saveBlueprint(conflicting);
+    }
+    var replies: std.ArrayList(BlueprintResult) = .empty;
+    defer replies.deinit(a);
+    fixture.client.takeBlueprintResults(&replies);
+    try std.testing.expectEqual(@as(usize, 7), replies.items.len);
+    for (replies.items[1..]) |reply| try std.testing.expectEqual(.invalid, reply.status);
+    try std.testing.expectEqual(@as(u32, 1), fixture.service.worker_state.blueprints.definitions.count());
+    try std.testing.expectEqual(@as(u32, 1), fixture.client.blueprint_save_keys.count());
+    try std.testing.expectEqual(@as(usize, 1), fixture.client.pending.blueprint_changes.items.len);
+}
+
+test "explicit Save retry API preserves caller ownership when enqueue fails" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var request = try fixture.request(1);
+    defer {
+        request.candidate.deinit(a);
+        a.free(request.name);
+    }
+    fixture.service.requests.close(fixture.service.io);
+    try std.testing.expectError(error.ServiceStopped, fixture.client.trySaveBlueprintWithKey(1, "Retry", &request.candidate, 33));
+    try std.testing.expectEqual(rules.BlockType.planks, request.candidate.definition.cells[0]);
+    try std.testing.expectEqual(@as(u32, 0), fixture.client.blueprint_save_keys.count());
+}
+
+fn exerciseBlueprintSavePublication(allocator: std.mem.Allocator) !void {
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.initWithAllocator(allocator);
+    defer fixture.deinit();
+    var request = try fixture.request(1);
+    request.idempotency_key = 12;
+    var owns_request = true;
+    defer if (owns_request) {
+        request.candidate.deinit(allocator);
+        allocator.free(request.name);
+    };
+    // Result delivery has preexisting capacity so injected failures exercise
+    // every fallible publication reservation rather than an infallible mailbox.
+    try fixture.client.blueprint_results.items.ensureUnusedCapacity(allocator, 1);
+    fixture.service.trySaveBlueprint(request) catch |err| {
+        try std.testing.expectEqual(@as(u32, 0), fixture.service.worker_state.blueprints.definitions.count());
+        try std.testing.expectEqual(@as(u32, 0), fixture.client.blueprint_save_keys.count());
+        try std.testing.expectEqual(@as(usize, 0), fixture.client.pending.blueprint_changes.items.len);
+        return err;
+    };
+    owns_request = false;
+    try std.testing.expectEqual(@as(u32, 1), fixture.service.worker_state.blueprints.definitions.count());
+    try std.testing.expectEqual(@as(u32, 1), fixture.client.blueprint_save_keys.count());
+}
+
+test "blueprint Save publication reserves its retry ledger before ownership transfer" {
+    try exerciseBlueprintSavePublication(std.testing.allocator);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseBlueprintSavePublication, .{});
+}
+
+test "permanent blueprint library limits reject terminally and preserve later command progress" {
+    for ([_]bool{ false, true }) |exhausted_ids| {
+        var fixture: BlueprintSaveFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        if (exhausted_ids) fixture.service.worker_state.blueprints.max_definition_id = std.math.maxInt(u64) else fixture.service.blueprint_library_bytes = (blueprint_wire.Limits{}).max_state_bytes;
+        fixture.service.saveBlueprint(try fixture.request(1));
+        try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.items.len);
+        try std.testing.expectEqual(@as(u32, 0), fixture.service.worker_state.blueprints.definitions.count());
+        try std.testing.expectEqual(@as(u64, 1), fixture.client.resolved_request);
+        fixture.service.worker_state.blueprints.max_definition_id = 0;
+        fixture.service.blueprint_library_bytes = 0;
+        fixture.service.saveBlueprint(try fixture.request(2));
+        var results: std.ArrayList(BlueprintResult) = .empty;
+        defer results.deinit(std.testing.allocator);
+        fixture.client.takeBlueprintResults(&results);
+        try std.testing.expectEqual(@as(usize, 2), results.items.len);
+        try std.testing.expectEqual(.resource_exhausted, results.items[0].status);
+        try std.testing.expectEqual(.success, results.items[1].status);
+        try std.testing.expectEqual(@as(usize, 0), fixture.service.blueprint_journal.items.len);
+    }
+}
+
+test "shutdown refuses new blueprint submissions and frees retained unpublished Save payloads" {
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const retained = try fixture.request(1);
+    try fixture.service.pending.append(std.testing.allocator, .{ .request = .{ .blueprint_save = retained }, .since = 0 });
+    fixture.service.is_shutting_down.store(true, .release);
+    var another = try fixture.request(2);
+    defer {
+        another.candidate.deinit(std.testing.allocator);
+        std.testing.allocator.free(another.name);
+    }
+    try std.testing.expectError(error.ServiceStopped, fixture.client.trySaveBlueprint(1, "Stopped", &another.candidate));
+    try std.testing.expectEqual(rules.BlockType.planks, another.candidate.definition.cells[0]);
+    try std.testing.expectError(error.ServiceStopped, fixture.client.tryApplyBlueprint(1, 1, .{ 0, 0, 48 }, 0));
+    try std.testing.expectEqual(@as(usize, 0), fixture.service.requests.items.items.len);
+    // The fixture uses the same retained-payload cleanup as destroy; the testing
+    // allocator verifies ownership is released even without publication or reply.
+}
+
+test "blueprint journal backpressure drains accepted prefix before a queued final Save" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var uuid: [16]u8 = undefined;
+    std.c.arc4random_buf(&uuid, uuid.len);
+    const path = try std.fmt.allocPrintSentinel(a, "/private/tmp/blueprint-backpressure-{x}", .{uuid}, 0);
+    defer a.free(path);
+    defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
+    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ @intCast(test_layout.size_in_chunks[0]), @intCast(test_layout.size_in_chunks[1]), @intCast(test_layout.size_in_chunks[2]) }, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
+    defer a.free(descriptor);
+    const global = format.encodeGlobal(0);
+    var store = try storage.Store.create(a, path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{});
+    defer store.deinit();
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    fixture.service.store = &store;
+    fixture.service.saveBlueprint(try fixture.request(1));
+    try std.testing.expectEqual(@as(usize, 1), fixture.service.blueprint_journal.items.len);
+    const accepted_bytes = fixture.service.blueprint_journal_bytes;
+    // The cap accounting is saturated while retaining a small, real prefix so
+    // the fixture exercises the production writer without a 16 MiB library.
+    fixture.service.blueprint_journal_bytes = (blueprint_wire.Limits{}).max_changes_bytes;
+    fixture.service.saveBlueprint(try fixture.request(2));
+    try std.testing.expect(fixture.service.operation_deferred);
+    try std.testing.expect(fixture.service.job != null);
+    fixture.service.requestSaveTransition(100, true);
+    try std.testing.expectEqual(@as(usize, 1), fixture.service.pending.items.len);
+    // Restore exact accounting before delivering the real commit events. No
+    // writer reads this service counter; only the detached encoded bytes.
+    fixture.service.blueprint_journal_bytes = accepted_bytes;
+    const end = persistence.now(io) + 10 * std.time.ns_per_s;
+    while (persistence.now(io) < end) {
+        fixture.service.drainPersistenceEvents();
+        if (fixture.service.status.intent_id == 100 and !fixture.service.status.active and fixture.service.status.phase == .complete) break;
+        try Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(u64, 100), fixture.service.status.intent_id);
+    try std.testing.expectEqual(persistence.Phase.complete, fixture.service.status.phase);
+    try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.items.len);
+    try std.testing.expectEqual(@as(u32, 2), store.blueprints.definitions.count());
+    try std.testing.expectEqual(@as(usize, 0), fixture.service.blueprint_journal.items.len);
+}
+
+fn installFulfillmentTestSite(state: *WorkerState, allocator: std.mem.Allocator, origin: [3]u32, size: [3]u32, cells: []const rules.BlockType) !void {
+    var count: u32 = 0;
+    for (cells) |material| if (material != .none) {
+        count += 1;
+    };
+    try state.blueprints.insertDefinition(allocator, .{ .id = 1, .owner = 1, .name = try allocator.dupe(u8, "test site"), .definition = .{ .size = size, .cells = try allocator.dupe(rules.BlockType, cells), .target_count = count } });
+    const instance = try state.blueprints.prepareInstance(allocator, state.layout, 1, 1, 1, origin, 0);
+    try state.blueprints.insertInstance(allocator, state.layout, instance);
+}
+
+fn exerciseBlueprintResponsePreparation(allocator: std.mem.Allocator) !void {
+    var service: WorldDataService = undefined;
+    service.allocator = allocator;
+    const id = test_layout.encodeChunkCoords(.{ 0, 0, 0 });
+    const fulfilled = try allocator.dupe(u8, &.{0});
+    const box_chunks = allocator.dupe(ChunkId, &.{id}) catch |err| {
+        allocator.free(fulfilled);
+        return err;
+    };
+    var task: BlueprintAdmissionTask = .{
+        .service = &service,
+        .request = undefined,
+        .snapshot = .{ .layout = test_layout, .overlay_revision = 0 },
+        .definition = .{ .size = .{ 1, 1, 1 }, .cells = &.{.planks}, .target_count = 1 },
+        .instance = .{ .id = 1, .definition_id = 1, .owner = 1, .origin = .{ 10, 10, 4 }, .rotation = 0, .fulfilled = fulfilled, .remaining = 1, .box_chunks = box_chunks },
+        .client_count = 3,
+        .chunk_ids = &.{},
+    };
+    defer task.release();
+    const blocks = try allocator.create(@import("world_chunk_data.zig").WorldChunkData);
+    blocks.* = @import("world_chunk_data.zig").WorldChunkData.initEmpty();
+    for (0..4) |level| @memset(std.mem.asBytes(&blocks.blocks[level]), @intFromEnum(rules.BlockType.stone));
+    task.snapshot.chunks.put(allocator, id, .{ .revision = 0, .blocks = blocks }) catch |err| {
+        allocator.destroy(blocks);
+        return err;
+    };
+    task.result = try task.prepare();
+    const result = try task.result.?;
+    try std.testing.expect(result == .prepared);
+    try std.testing.expectEqual(@as(usize, 3), task.response_copies.items.len);
+    for (task.response_copies.items, 0..) |copy, index| {
+        try std.testing.expect(copy.fulfilled.ptr != task.instance.fulfilled.ptr);
+        try std.testing.expect(copy.fulfilled.ptr != result.prepared.publication.instance.fulfilled.ptr);
+        try std.testing.expect(copy.box_chunks.ptr != result.prepared.publication.instance.box_chunks.ptr);
+        for (task.response_copies.items[0..index]) |previous| try std.testing.expect(previous.fulfilled.ptr != copy.fulfilled.ptr);
+    }
+    task.response_copies.items[0].fulfilled[0] = 1;
+    try std.testing.expectEqual(@as(u8, 0), task.response_copies.items[1].fulfilled[0]);
+}
+
+test "admission helper owns independent client publication copies through allocation failures" {
+    try exerciseBlueprintResponsePreparation(std.testing.allocator);
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseBlueprintResponsePreparation, .{});
+}
+
+test "new client registration invalidates prepared admission before publication" {
+    var service: WorldDataService = .{ .layout = &test_layout, .io = std.testing.io, .allocator = std.testing.allocator, .worker = undefined, .worker_state = .{ .layout = &test_layout, .generator = undefined } };
+    var task: BlueprintAdmissionTask = .{
+        .service = &service,
+        .request = undefined,
+        .snapshot = .{ .layout = test_layout, .overlay_revision = 0 },
+        .definition = undefined,
+        .instance = undefined,
+        .client_count = 1,
+        .chunk_ids = &.{},
+    };
+    try std.testing.expectError(error.StalePreparation, service.commitBlueprintApplication(&task));
+    try std.testing.expectEqual(@as(u32, 0), service.worker_state.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u64, 0), service.worker_state.blueprints.revision);
+}
+
+test "authority blueprint fulfillment probes five real neighbors and never enters ordinary validation" {
+    const a = std.testing.allocator;
+    var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) };
+    defer state.deinit(a);
+    const coords: ChunkCoords = .{ 0, 0, 2 };
+    var chunk = WorldChunk.initEmpty();
+    try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ 10, 10, 5 }, .{ .put = .sand }));
+    try state.modified_chunks.put(a, test_layout.encodeChunkCoords(coords), chunk);
+    const first: [3]u32 = .{ 10, 10, 70 };
+    const second: [3]u32 = .{ 11, 10, 70 };
+    try installFulfillmentTestSite(&state, a, first, .{ 2, 1, 1 }, &.{ .planks, .planks });
+    const original_calls = state.ordinary_validation_calls;
+    const unsupported = try state.tryFulfillBlueprint(a, .{ .block = second, .action = .{ .put = .planks }, .blueprint = .{ .instance_id = 1, .cell_index = 1 } });
+    try std.testing.expectEqual(OperationStatus.constraint_violation, unsupported.diagnostics.status);
+    try std.testing.expectEqual(@as(u8, 5), state.blueprint_last_support_reads);
+    try std.testing.expectEqual(@as(u32, 2), state.blueprints.instances.get(1).?.remaining);
+    const wrong = try state.tryFulfillBlueprint(a, .{ .block = first, .action = .{ .put = .sand }, .blueprint = .{ .instance_id = 1, .cell_index = 0 } });
+    try std.testing.expectEqual(OperationStatus.inventory_mismatch, wrong.diagnostics.status);
+    try std.testing.expectEqual(@as(u8, 0), state.blueprint_last_support_reads);
+    const one = try state.tryFulfillBlueprint(a, .{ .block = first, .action = .{ .put = .planks }, .blueprint = .{ .instance_id = 1, .cell_index = 0 } });
+    try std.testing.expectEqual(OperationStatus.success, one.diagnostics.status);
+    try std.testing.expectEqual(@as(u8, 1), state.blueprint_last_support_reads);
+    const two = try state.tryFulfillBlueprint(a, .{ .block = second, .action = .{ .put = .planks }, .blueprint = .{ .instance_id = 1, .cell_index = 1 } });
+    try std.testing.expectEqual(OperationStatus.success, two.diagnostics.status);
+    try std.testing.expect(state.blueprint_last_support_reads <= 5);
+    try std.testing.expectEqual(original_calls, state.ordinary_validation_calls);
+    try std.testing.expect(!state.blueprints.instances.get(1).?.active);
+    try std.testing.expectEqual(@as(u32, 0), state.blueprints.instances.get(1).?.remaining);
+    try std.testing.expectEqual(@as(usize, 1), state.blueprints.cleanup_queue.items.len);
+    try std.testing.expectEqual(@as(usize, 2), state.modified_chunks.get(test_layout.encodeChunkCoords(coords)).?.metadata.constructed.items.len);
+    const replay = try state.tryFulfillBlueprint(a, .{ .block = first, .action = .{ .put = .planks }, .blueprint = .{ .instance_id = 1, .cell_index = 0 } });
+    try std.testing.expectEqual(OperationStatus.target_changed, replay.diagnostics.status);
+}
+
+test "authority blueprint batch coalesces block payload and couples inventory with progress" {
+    const a = std.testing.allocator;
+    var service: WorldDataService = .{ .layout = &test_layout, .io = std.testing.io, .allocator = a, .worker = undefined, .worker_state = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) } };
+    defer service.worker_state.deinit(a);
+    defer service.clients.deinit(a);
+    defer service.players.deinit(a);
+    defer service.blueprint_journal.deinit(a);
+    defer service.dirty_meshes.deinit(a);
+    var origin: Client = .{ .service = &service };
+    var observer: Client = .{ .service = &service };
+    defer origin.subscriptions.deinit(a);
+    defer observer.subscriptions.deinit(a);
+    defer origin.pending.deinit(a);
+    defer observer.pending.deinit(a);
+    defer origin.responses.deinit(a);
+    defer observer.responses.deinit(a);
+    service.worker_state.persistence_service = &service;
+    try service.clients.appendSlice(a, &.{ &origin, &observer });
+    try service.players.put(a, 1, .{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0, .inventory = @intFromEnum(rules.BlockType.planks) });
+    const coords: ChunkCoords = .{ 0, 0, 2 };
+    const id = test_layout.encodeChunkCoords(coords);
+    var chunk = WorldChunk.initEmpty();
+    try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ 10, 10, 5 }, .{ .put = .sand }));
+    try service.worker_state.modified_chunks.put(a, id, chunk);
+    try origin.subscriptions.put(a, id, .{ .id = 1, .mode = .blocks });
+    try observer.subscriptions.put(a, id, .{ .id = 2, .mode = .blocks });
+    try installFulfillmentTestSite(&service.worker_state, a, .{ 10, 10, 70 }, .{ 2, 1, 1 }, &.{ .planks, .planks });
+    service.processBlueprintFulfillment(.{ .client = &origin, .request_id = 1, .operation = .{ .block = .{ 10, 10, 70 }, .action = .{ .put = .sand }, .player = .{ .id = 1, .expected_sequence = 0 }, .blueprint = .{ .instance_id = 1, .cell_index = 0 } } });
+    try std.testing.expectEqual(OperationStatus.inventory_mismatch, origin.pending.responses.items[0].operation.?.status);
+    try std.testing.expectEqual(@as(?u8, @intFromEnum(rules.BlockType.planks)), service.players.get(1).?.inventory);
+    service.processBlueprintFulfillment(.{ .client = &origin, .request_id = 2, .operation = .{ .block = .{ 10, 10, 70 }, .action = .{ .put = .planks }, .player = .{ .id = 1, .expected_sequence = 0 }, .blueprint = .{ .instance_id = 1, .cell_index = 0 } } });
+    try std.testing.expectEqual(@as(?u8, null), service.players.get(1).?.inventory);
+    service.players.getPtr(1).?.inventory = @intFromEnum(rules.BlockType.planks);
+    service.processBlueprintFulfillment(.{ .client = &origin, .request_id = 3, .operation = .{ .block = .{ 11, 10, 70 }, .action = .{ .put = .planks }, .player = .{ .id = 1, .expected_sequence = 0 }, .blueprint = .{ .instance_id = 1, .cell_index = 1 } } });
+    try std.testing.expectEqual(@as(?u8, null), service.players.get(1).?.inventory);
+    try std.testing.expectEqual(@as(usize, 0), service.blueprint_journal.items.len);
+    try std.testing.expectEqual(@as(usize, 0), service.blueprint_journal_bytes);
+    for (origin.pending.responses.items) |response| try std.testing.expect(response.data == .acknowledgement);
+    try std.testing.expectEqual(@as(usize, 2), origin.pending.blueprint_changes.items.len);
+    try std.testing.expectEqual(@as(u64, 0), service.worker_state.ordinary_validation_calls);
+    service.flushPackages();
+    var packages: std.ArrayList(ResponsePackage) = .empty;
+    defer packages.deinit(a);
+    origin.takePackages(&packages);
+    defer for (packages.items) |*package| package.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), packages.items.len);
+    var payloads: usize = 0;
+    for (packages.items[0].responses.items) |response| if (response.data == .blocks) {
+        payloads += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), payloads);
+    try std.testing.expectEqual(@as(usize, 2), packages.items[0].blueprint_changes.items.len);
+    var observed: std.ArrayList(ResponsePackage) = .empty;
+    observer.takePackages(&observed);
+    defer observed.deinit(a);
+    defer for (observed.items) |*package| package.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), observed.items.len);
+    try std.testing.expectEqual(@as(usize, 2), observed.items[0].blueprint_changes.items.len);
+}
+
+test "interleaved fulfillment across 128 sites keeps bounded support work and coalesces replies" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var service: WorldDataService = .{ .layout = &test_layout, .io = io, .allocator = a, .worker = undefined, .worker_state = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) } };
+    defer service.worker_state.deinit(a);
+    defer service.clients.deinit(a);
+    defer service.blueprint_journal.deinit(a);
+    defer service.blueprint_road_queue.deinit(a);
+    defer service.dirty_meshes.deinit(a);
+    var client: Client = .{ .service = &service };
+    defer client.pending.deinit(a);
+    defer client.subscriptions.deinit(a);
+    defer client.responses.deinit(a);
+    try service.clients.append(a, &client);
+    service.worker_state.persistence_service = &service;
+    for (0..2) |x| {
+        var chunk = WorldChunk.initEmpty();
+        const blocks = try chunk.tryEnsureData(a);
+        for (3..6) |z| @memset(std.mem.asBytes(&blocks.blocks[z]), @intFromEnum(rules.BlockType.stone));
+        const id = test_layout.encodeChunkCoords(.{ @intCast(x), 0, 2 });
+        service.worker_state.modified_chunks.put(a, id, chunk) catch |err| {
+            chunk.deinit(a);
+            return err;
+        };
+        try client.subscriptions.put(a, id, .{ .id = x + 1, .mode = .blocks });
+    }
+    const material = try a.alloc(rules.BlockType, 64);
+    @memset(material, .planks);
+    try service.worker_state.blueprints.insertDefinition(a, .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Many sites"), .definition = .{ .size = .{ 4, 4, 4 }, .cells = material, .target_count = 64 } });
+    for (0..128) |site| {
+        const position: [3]u32 = .{ @intCast((site % 16) * 4), @intCast((site / 16) * 4), 70 };
+        const instance = try service.worker_state.blueprints.prepareInstance(a, &test_layout, site + 1, 1, 1, position, 0);
+        try service.worker_state.blueprints.insertInstance(a, &test_layout, instance);
+    }
+    const start = persistence.now(io);
+    for (0..64) |cell_index| for (0..128) |site| {
+        const position: [3]u32 = .{ @intCast((site % 16) * 4 + cell_index % 4), @intCast((site / 16) * 4 + (cell_index / 4) % 4), @intCast(70 + cell_index / 16) };
+        service.processBlueprintFulfillment(.{ .client = &client, .request_id = cell_index * 128 + site + 1, .operation = .{ .block = position, .action = .{ .put = .planks }, .blueprint = .{ .instance_id = site + 1, .cell_index = @intCast(cell_index) } } });
+        try std.testing.expectEqual(OperationStatus.success, client.pending.responses.items[client.pending.responses.items.len - 1].operation.?.status);
+        try std.testing.expect(service.worker_state.blueprint_last_support_reads <= 5);
+    };
+    const fill_ns = persistence.now(io) - start;
+    try std.testing.expectEqual(@as(u64, 8192), service.worker_state.blueprint_support_reads);
+    try std.testing.expectEqual(@as(u64, 0), service.worker_state.ordinary_validation_calls);
+    try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.count);
+    var instances = service.worker_state.blueprints.instances.valueIterator();
+    while (instances.next()) |instance| try std.testing.expect(!instance.active and instance.remaining == 0);
+    for (client.pending.responses.items) |response| try std.testing.expect(response.data == .acknowledgement);
+    const progress = try a.alloc(blueprint_wire.Op, 8192);
+    defer a.free(progress);
+    for (client.pending.blueprint_changes.items, progress) |change, *operation| operation.* = .{ .fulfill = .{ .instance_id = change.fulfill.instance_id, .cell_index = change.fulfill.cell_index } };
+    const encoded = try blueprint_wire.encodeOps(a, progress);
+    defer a.free(encoded);
+    // The enclosing journal supplies its byte length; each fill is thirteen bytes.
+    try std.testing.expectEqual(@as(usize, 8192 * 13), encoded.len);
+    const flush_start = persistence.now(io);
+    service.flushPackages();
+    const flush_ns = persistence.now(io) - flush_start;
+    var packages: std.ArrayList(ResponsePackage) = .empty;
+    defer packages.deinit(a);
+    client.takePackages(&packages);
+    defer for (packages.items) |*package| package.deinit(a);
+    var snapshots: usize = 0;
+    var acknowledgments: usize = 0;
+    for (packages.items) |package| for (package.responses.items) |response| {
+        if (response.data == .blocks) snapshots += 1;
+        if (response.operation != null) acknowledgments += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 2), snapshots);
+    try std.testing.expectEqual(@as(usize, 8192), acknowledgments);
+    if (@import("builtin").mode == .ReleaseFast) std.debug.print("blueprint interleaved sites=128 fills=8192 fill_ms={d:.3} support_reads=8192 ordinary_calls=0 flush_ms={d:.3} block_snapshots=2 raw_block_bytes=65536 progress_bytes={d}\n", .{ @as(f64, @floatFromInt(fill_ns)) / std.time.ns_per_ms, @as(f64, @floatFromInt(flush_ns)) / std.time.ns_per_ms, encoded.len });
+}
+
+const BlueprintRoadFixture = struct {
+    service: WorldDataService,
+
+    fn init(self: *@This()) !void {
+        const a = std.testing.allocator;
+        self.service = .{ .layout = &test_layout, .io = std.testing.io, .allocator = a, .worker = undefined, .worker_state = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) } };
+        self.service.worker_state.persistence_service = &self.service;
+        var chunk = WorldChunk.initEmpty();
+        errdefer chunk.deinit(a);
+        for (10..15) |x| {
+            try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ @intCast(x), 10, 5 }, .{ .put = .stone }));
+        }
+        try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ 15, 10, 4 }, .{ .put = .stone }));
+        try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ 10, 10, 6 }, .{ .put = .country_road_solid }));
+        for (11..15) |x| try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ @intCast(x), 10, 6 }, .{ .put = .country_road_adaptive }));
+        try self.service.worker_state.modified_chunks.put(a, test_layout.encodeChunkCoords(.{ 0, 0, 2 }), chunk);
+        try installFulfillmentTestSite(&self.service.worker_state, a, .{ 15, 10, 69 }, .{ 1, 1, 1 }, &.{.country_road_solid});
+    }
+
+    fn deinit(self: *@This()) void {
+        const a = std.testing.allocator;
+        self.service.worker_state.deinit(a);
+        self.service.blueprint_road_queue.deinit(a);
+        self.service.source_holds.deinit(a);
+        self.service.blueprint_journal.deinit(a);
+        self.service.dirty_meshes.deinit(a);
+        self.service.pending.deinit(a);
+    }
+
+    fn fill(self: *@This()) !WorkerState.BlueprintCommit {
+        return self.service.tryCommitBlueprintFulfillment(.{ .block = .{ 15, 10, 69 }, .action = .{ .put = .country_road_solid }, .blueprint = .{ .instance_id = 1, .cell_index = 0 } });
+    }
+
+    fn slope(self: *@This()) ?@import("road_data.zig").Slope {
+        return self.service.worker_state.modified_chunks.get(test_layout.encodeChunkCoords(.{ 0, 0, 2 })).?.metadata.road(transformations.index(.{ 11, 10, 6 })).?.slope;
+    }
+};
+
+test "blueprint fulfillment queues adaptive road work and delayed safe plans publish atomically" {
+    var fixture: BlueprintRoadFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const result = try fixture.fill();
+    try std.testing.expectEqual(OperationStatus.success, result.diagnostics.status);
+    try std.testing.expectEqual(@as(u8, 1), fixture.service.worker_state.blueprint_last_support_reads);
+    try std.testing.expectEqual(@as(u64, 0), fixture.service.worker_state.ordinary_validation_calls);
+    try std.testing.expect(fixture.slope() == null);
+    try std.testing.expectEqual(@as(usize, 1), fixture.service.blueprint_road_queue.count);
+    const id = test_layout.encodeChunkCoords(.{ 0, 0, 2 });
+    const before = fixture.service.worker_state.modified_chunks.get(id).?.chunk_revision;
+    fixture.service.processBlueprintRoadUpdates();
+    try std.testing.expect(fixture.slope() != null);
+    try std.testing.expectEqual(before + 1, fixture.service.worker_state.modified_chunks.get(id).?.chunk_revision);
+    try std.testing.expect(fixture.service.dirty_meshes.contains(id));
+    try std.testing.expect(fixture.service.lifecycle.unsaved_work);
+}
+
+test "delayed road plans retain source-held work and cannot invalidate a planned road above" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintRoadFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    try std.testing.expectEqual(OperationStatus.success, (try fixture.fill()).diagnostics.status);
+    const id = test_layout.encodeChunkCoords(.{ 0, 0, 2 });
+    try fixture.service.source_holds.put(a, id, 1);
+    fixture.service.processBlueprintRoadUpdates();
+    try std.testing.expect(fixture.slope() == null);
+    try std.testing.expect(fixture.service.blueprint_road_waiting);
+    try std.testing.expectEqual(@as(usize, 0), fixture.service.blueprint_road_queue.peek().?.cursor);
+    _ = fixture.service.source_holds.remove(id);
+    try fixture.service.worker_state.blueprints.insertDefinition(a, .{ .id = 2, .owner = 1, .name = try a.dupe(u8, "upper road"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(rules.BlockType, &.{.country_road_solid}), .target_count = 1 } });
+    const upper = try fixture.service.worker_state.blueprints.prepareInstance(a, &test_layout, 2, 2, 1, .{ 12, 10, 71 }, 0);
+    try fixture.service.worker_state.blueprints.insertInstance(a, &test_layout, upper);
+    fixture.service.processBlueprintRoadUpdates();
+    try std.testing.expect(fixture.slope() == null);
+    try std.testing.expect(!fixture.service.blueprint_road_waiting);
+    try std.testing.expectEqual(@as(usize, 1), fixture.service.blueprint_road_queue.peek().?.cursor);
+    try std.testing.expect(fixture.service.worker_state.blueprints.targetAt(.{ 12, 10, 71 }) != null);
+}
+
+test "road queue capacity rejects a fill before terrain inventory or progress changes" {
+    var fixture: BlueprintRoadFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    for (0..blueprint_road_updates.capacity) |i| {
+        var batch: blueprint_road_updates.Batch = .{};
+        batch.add(@intCast(1_000_000 + i));
+        try fixture.service.blueprint_road_queue.reserve(std.testing.allocator, batch);
+        fixture.service.blueprint_road_queue.commit(batch);
+    }
+    try std.testing.expectError(error.RoadUpdatesFull, fixture.fill());
+    try std.testing.expectEqual(@as(u32, 1), fixture.service.worker_state.blueprints.instances.get(1).?.remaining);
+    const target = fixture.service.worker_state.modified_chunks.get(test_layout.encodeChunkCoords(.{ 0, 0, 2 })).?;
+    try std.testing.expectEqual(rules.BlockType.none, target.content.getBlock(.{ 15, 10, 5 }));
+    try std.testing.expect(fixture.service.worker_state.blueprints.targetAt(.{ 15, 10, 69 }) != null);
 }

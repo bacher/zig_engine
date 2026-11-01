@@ -77,6 +77,8 @@ pub const Failure = struct {
 
 pub const Reader = struct {
     layout: *const engine.WorldLayout,
+    /// Detached recipes are finite local geometry, even in a wrapped application.
+    periodic_x: bool = engine.WorldLayout.wrap_x,
     context: *anyopaque,
     block_at: *const fn (*anyopaque, [3]u32) ?BlockType,
     custom_shape_at: ?*const fn (*anyopaque, [3]u32) ?engine.voxel_chunk.custom_block.Shape = null,
@@ -87,7 +89,7 @@ pub const Reader = struct {
 
     pub fn normalize(self: Reader, cell: Cell) ?Cell {
         var result = cell;
-        if (comptime engine.WorldLayout.wrap_x) result[0] = @mod(result[0], self.layout.size_in_blocks[0]);
+        if (self.periodic_x) result[0] = @mod(result[0], self.layout.size_in_blocks[0]);
         inline for (0..3) |axis| {
             if (result[axis] < 0 or result[axis] >= self.layout.size_in_blocks[axis]) return null;
         }
@@ -97,6 +99,19 @@ pub const Reader = struct {
     pub fn get(self: Reader, cell: Cell) ?BlockType {
         const normalized = self.normalize(cell) orelse return .none;
         return self.block_at(self.context, .{ @intCast(normalized[0]), @intCast(normalized[1]), @intCast(normalized[2]) });
+    }
+
+    pub fn displacement(self: Reader, cell: Cell, center: Cell) Cell {
+        var delta = cell - center;
+        if (self.periodic_x) {
+            const width: i64 = self.layout.size_in_blocks[0];
+            delta[0] = @mod(delta[0] + @divExact(width, 2), width) - @divExact(width, 2);
+        }
+        return delta;
+    }
+
+    pub fn distance(self: Reader, cell: Cell, center: Cell) u64 {
+        return @reduce(.Max, @abs(self.displacement(cell, center)));
     }
 
     pub fn isImmutable(self: Reader, cell: Cell) bool {
@@ -124,14 +139,14 @@ const ReadBounds = struct {
         self.high = @max(self.high, cell);
     }
 
-    fn fits(self: ReadBounds, layout: *const engine.WorldLayout, center: Cell) bool {
+    fn fits(self: ReadBounds, reader: Reader, center: Cell) bool {
         const radius: i64 = Limits.support_radius;
         inline for (1..3) |axis| {
             if (self.low[axis] < center[axis] - radius or self.high[axis] > center[axis] + radius) return false;
         }
         if (self.low[0] >= center[0] - radius and self.high[0] <= center[0] + radius) return true;
-        if (comptime engine.WorldLayout.wrap_x) {
-            const width: i64 = layout.size_in_blocks[0];
+        if (reader.periodic_x) {
+            const width: i64 = reader.layout.size_in_blocks[0];
             // Require the whole interval to fit one periodic window. Checking just
             // the wrapped endpoints could miss excluded cells between them.
             for ([_]i64{ center[0] - width, center[0] + width }) |wrapped| {
@@ -155,7 +170,9 @@ const Evidence = struct {
     }
 };
 
-const CacheEntry = struct { evaluation: Evaluation, evidence: Evidence, scope: u64 };
+// Successful cells do not retain a 32-coordinate Failure. Rejection details
+// live in a separately bounded pool and are reusable only in their root scope.
+const CacheEntry = struct { state: State, failure_index: ?u32 = null, evidence: Evidence, scope: u64 };
 const Cache = std.AutoHashMapUnmanaged(Cell, CacheEntry);
 const ReadError = error{ MissingData, SupportWindowExceeded };
 
@@ -169,6 +186,11 @@ pub const Validator = struct {
     /// Hypothetical edited contents; validation never mutates the world.
     edit: ?struct { cell: Cell, material: BlockType } = null,
     cache: Cache = .empty,
+    /// A helper may bound retained cache memory independently from recipe size.
+    cache_limit: usize = std.math.maxInt(usize),
+    failures: std.ArrayList(Failure) = .empty,
+    failure_cache_limit: usize = 1024,
+    cancel: ?*const std.atomic.Value(bool) = null,
     allocation_failed: bool = false,
     depth: u16 = 0,
     /// Recursive support searches never recenter on intermediate blocks.
@@ -182,17 +204,28 @@ pub const Validator = struct {
 
     pub fn deinit(self: *Validator) void {
         self.cache.deinit(self.allocator);
+        self.failures.deinit(self.allocator);
+    }
+
+    /// Call whenever detached input changes; entries certify one immutable view.
+    pub fn invalidate(self: *Validator) void {
+        self.cache.clearRetainingCapacity();
+        self.failures.clearRetainingCapacity();
+        self.root = null;
+        self.cache_center = null;
+        self.evidence = null;
     }
 
     fn bound(self: *Validator, cell: Cell, center: Cell) ReadError!void {
-        if (distance(self.reader.layout, cell, center) > Limits.support_radius) {
+        if (self.reader.distance(cell, center) > Limits.support_radius) {
             if (self.outside == null) self.outside = .{ .cell = cell, .center = center };
             return error.SupportWindowExceeded;
         }
     }
 
     fn get(self: *Validator, cell: Cell) ReadError!BlockType {
-        if (self.evidence) |*evidence| evidence.bounds.include(displacement(self.reader.layout, cell, self.cache_center.?));
+        if (self.cancel) |token| if (token.load(.acquire)) return error.MissingData;
+        if (self.evidence) |*evidence| evidence.bounds.include(self.reader.displacement(cell, self.cache_center.?));
         if (self.edit) |edit| self.bound(cell, edit.cell) catch |err| {
             self.markIncomplete();
             return err;
@@ -225,6 +258,7 @@ pub const Validator = struct {
         self.root = cell;
         if (self.cache_center == null) self.cache_center = if (self.edit) |edit| edit.cell else cell;
         self.scope += 1;
+        self.failures.clearRetainingCapacity();
         self.outside = null;
         self.missing = null;
     }
@@ -237,7 +271,7 @@ pub const Validator = struct {
         }
         var result = failure(.support_search_limit, cell, Limits.support_radius + 1, Limits.support_radius);
         if (self.outside) |outside| {
-            result.rejected.actual = @intCast(distance(self.reader.layout, outside.cell, outside.center));
+            result.rejected.actual = @intCast(self.reader.distance(outside.cell, outside.center));
             result.rejected.add(outside.cell);
         }
         return result;
@@ -361,6 +395,12 @@ pub const Validator = struct {
         return if (material == .planks) neighbor == .planks else neighbor.isReinforced();
     }
 
+    fn immediateFoundation(self: *Validator, cell: Cell, material: BlockType) ReadError!bool {
+        const below = try self.get(cell - Cell{ 0, 0, 1 });
+        if (below.isNaturalRock() or (material.isWood() and below.isMineralConstruction())) return true;
+        return below.isStablePlatformMaterial() and try self.stablePlatform(cell);
+    }
+
     fn horizontal(self: *Validator, cell: Cell, material: BlockType, limit: u32) ReadError!Evaluation {
         const Node = struct { cell: Cell, distance: u32 };
         // Search one extra shell to report an exceeded span, rather than a generic failure.
@@ -374,21 +414,15 @@ pub const Validator = struct {
         var unresolved: ?ReadError = null;
         while (cursor < count) : (cursor += 1) {
             const node = nodes[cursor];
-            const source = self.direct(node.cell, material) catch |err| blk: {
+            const immediate = self.immediateFoundation(node.cell, material) catch |err| blk: {
                 rememberError(&unresolved, err);
-                break :blk self.readFailure(err, node.cell);
+                break :blk false;
             };
-            switch (source) {
-                .supported => |state| {
-                    if (node.distance <= limit) {
-                        if (best == null or state.wood + state.mineral < best.?.wood + best.?.mineral) best = state;
-                    } else rejected.rejected.add(node.cell);
-                },
-                .rejected => |reason| {
-                    if (reason.reason == .wood_height or reason.reason == .mineral_height) rejected = source;
-                    if (reason.reason == .missing_data) rememberError(&unresolved, error.MissingData);
-                    if (reason.reason == .support_search_limit) rememberError(&unresolved, error.SupportWindowExceeded);
-                },
+            // Search nearby reset routes before descending a tall direct chain.
+            // This is the same route set and the same minimum height; it avoids
+            // repeatedly exploring clipped lower chains beside a full platform.
+            if (immediate and node.distance <= limit) {
+                return height(node.cell, material, .{});
             }
             if (node.distance >= limit + 1) continue;
             for (0..3) |y| {
@@ -422,6 +456,25 @@ pub const Validator = struct {
                     nodes[count] = .{ .cell = next, .distance = node.distance + 1 };
                     count += 1;
                 }
+            }
+        }
+        for (nodes[0..count]) |node| {
+            const source = self.direct(node.cell, material) catch |err| blk: {
+                rememberError(&unresolved, err);
+                break :blk self.readFailure(err, node.cell);
+            };
+            switch (source) {
+                .supported => |state| {
+                    if (node.distance <= limit) {
+                        if (state.wood + state.mineral == 1) return .{ .supported = state };
+                        if (best == null or state.wood + state.mineral < best.?.wood + best.?.mineral) best = state;
+                    } else rejected.rejected.add(node.cell);
+                },
+                .rejected => |reason| {
+                    if (reason.reason == .wood_height or reason.reason == .mineral_height) rejected = source;
+                    if (reason.reason == .missing_data) rememberError(&unresolved, error.MissingData);
+                    if (reason.reason == .support_search_limit) rememberError(&unresolved, error.SupportWindowExceeded);
+                },
             }
         }
         if (best) |state| return .{ .supported = state };
@@ -487,11 +540,11 @@ pub const Validator = struct {
     fn evaluate(self: *Validator, cell: Cell, material: BlockType) ReadError!Evaluation {
         if (self.cache.get(cell)) |cached| {
             const reusable = cached.scope == self.scope or
-                (cached.evaluation == .supported and cached.evidence.complete and
-                    cached.evidence.bounds.fits(self.reader.layout, displacement(self.reader.layout, self.root.?, self.cache_center.?)));
+                (cached.failure_index == null and cached.evidence.complete and
+                    cached.evidence.bounds.fits(self.reader, self.reader.displacement(self.root.?, self.cache_center.?)));
             if (reusable) {
                 self.mergeEvidence(cached.evidence);
-                return cached.evaluation;
+                return if (cached.failure_index) |index| .{ .rejected = self.failures.items[index] } else .{ .supported = cached.state };
             }
         }
         if (self.depth >= 256) {
@@ -499,7 +552,7 @@ pub const Validator = struct {
             return failure(.missing_foundation, cell, 0, 1);
         }
         const outer_evidence = self.evidence;
-        const relative = displacement(self.reader.layout, cell, self.cache_center.?);
+        const relative = self.reader.displacement(cell, self.cache_center.?);
         self.evidence = .{ .bounds = .{ .low = relative, .high = relative } };
         self.depth += 1;
         defer {
@@ -509,9 +562,24 @@ pub const Validator = struct {
             self.depth -= 1;
         }
         const result = try self.evaluateUncached(cell, material);
-        self.cache.put(self.allocator, cell, .{ .evaluation = result, .evidence = self.evidence.?, .scope = self.scope }) catch {
-            self.allocation_failed = true;
-        };
+        var failure_index: ?u32 = null;
+        if (result == .rejected and self.failures.items.len < self.failure_cache_limit) {
+            if (self.failures.items.len == self.failures.capacity) {
+                self.failures.ensureTotalCapacityPrecise(self.allocator, @min(self.failure_cache_limit, self.failures.capacity * 2 + 8)) catch {
+                    self.allocation_failed = true;
+                };
+            }
+            if (self.failures.items.len < self.failures.capacity) {
+                failure_index = @intCast(self.failures.items.len);
+                self.failures.appendAssumeCapacity(result.rejected);
+            }
+        }
+        if ((result == .supported or failure_index != null) and self.cache_limit > 0) {
+            if (self.cache.count() >= self.cache_limit) self.cache.clearRetainingCapacity();
+            self.cache.put(self.allocator, cell, .{ .state = if (result == .supported) result.supported else .{}, .failure_index = failure_index, .evidence = self.evidence.?, .scope = self.scope }) catch {
+                self.allocation_failed = true;
+            };
+        }
         return result;
     }
 
@@ -556,25 +624,43 @@ pub const Validator = struct {
                 if (platform) break;
             }
         }
-        const below = try self.get(cell - Cell{ 0, 0, 1 });
-        const direct_result = self.direct(cell, material) catch |err| self.readFailure(err, cell);
-        // An incompatible occupied block cannot be treated as air to bypass the hierarchy.
-        if (below != .none) {
-            if (direct_result == .rejected) {
-                const compatible = if (material.isWood()) below.isStructural() and !below.isEarth() else if (material == .crushed_stone) below == .crushed_stone or below.isNaturalRock() else below.isReinforced() or below.isNaturalRock();
-                if (!compatible) return direct_result;
-                const reason = direct_result.rejected.reason;
-                if (reason != .wood_height and reason != .mineral_height and reason != .missing_data and reason != .support_search_limit)
-                    return direct_result;
-            }
+        if (material == .planks or material.isReinforced()) {
+            const lateral = self.horizontal(cell, material, if (material == .planks) Limits.plank_span else Limits.reinforced_span) catch |err| self.readFailure(err, cell);
+            if (lateral == .supported) return lateral;
+            const direct_result = self.direct(cell, material) catch |err| self.readFailure(err, cell);
+            // Keep the useful direct-material diagnostic when no lateral route exists.
+            if (direct_result == .rejected and lateral.rejected.reason == .horizontal_span and
+                direct_result.rejected.reason != .missing_foundation) return direct_result;
+            return lateral;
         }
-        // Height one is already minimal. Otherwise compare all legal routes before caching.
+        const direct_result = self.direct(cell, material) catch |err| self.readFailure(err, cell);
         if (direct_result == .supported and direct_result.supported.wood + direct_result.supported.mineral == 1)
             return direct_result;
-        if (material == .planks) return self.horizontal(cell, material, Limits.plank_span);
-        if (material.isReinforced()) return self.horizontal(cell, material, Limits.reinforced_span);
-        if (material == .crushed_stone and below == .none) return self.crushedBridge(cell);
+        if (material == .crushed_stone) {
+            const bridge = self.crushedBridge(cell) catch |err| self.readFailure(err, cell);
+            if (bridge == .supported) return bridge;
+            const below = try self.get(cell - Cell{ 0, 0, 1 });
+            if (below == .none) return bridge;
+        }
         return direct_result;
+    }
+
+    /// Capture-only normalization can replace this immediate crushed support,
+    /// provided no currently legal platform or independent lateral route exists.
+    /// This query changes neither the material hierarchy nor the input reader.
+    pub fn reinforcedSupportConflict(self: *Validator, cell: Cell) ?Cell {
+        self.beginCheck(cell);
+        const material = self.get(cell) catch return null;
+        if (!material.isReinforced()) return null;
+        const below = cell - Cell{ 0, 0, 1 };
+        if ((self.get(below) catch return null) != .crushed_stone) return null;
+        if (self.stablePlatform(cell) catch return null) return null;
+        if (self.checkExisting(cell) == null) return null;
+        return below;
+    }
+
+    pub fn cacheEntrySize() usize {
+        return @sizeOf(CacheEntry);
     }
 
     pub fn checkExisting(self: *Validator, cell: Cell) ?Failure {
@@ -601,13 +687,17 @@ pub const Validator = struct {
     /// Soil reads only its immediate footprint. Wrapped x distances must follow the seam.
     fn mayDependOnEdit(self: *Validator, cell: Cell) ReadError!bool {
         const edit = self.edit orelse return true;
-        if (distance(self.reader.layout, cell, edit.cell) > Limits.support_radius) return false;
+        if (self.reader.distance(cell, edit.cell) > Limits.support_radius) return false;
         const depth = cell[2] - edit.cell[2];
         if (depth < 0) return false;
         self.beginCheck(cell);
         const material = try self.get(cell);
         if (material.isRoad()) {
-            const delta = displacement(self.reader.layout, cell, edit.cell);
+            const delta = self.reader.displacement(cell, edit.cell);
+            return depth == 1 and delta[0] == 0 and delta[1] == 0;
+        }
+        if (material == .water or material == .snow) {
+            const delta = self.reader.displacement(cell, edit.cell);
             return depth == 1 and delta[0] == 0 and delta[1] == 0;
         }
         const radius: u64 = if (material.isEarth() or material == .sand) blk: {
@@ -617,7 +707,7 @@ pub const Validator = struct {
             @intCast((depth + 1) * (horizontal_search_radius + 1))
         else
             return false;
-        const delta = displacement(self.reader.layout, cell, edit.cell);
+        const delta = self.reader.displacement(cell, edit.cell);
         return @abs(delta[0]) <= radius and @abs(delta[1]) <= radius;
     }
 
@@ -763,6 +853,62 @@ test "soil supports other materials only through the centered three-layer platfo
     }
     try fixture.put(.{ 30, 30, 7 }, .reinforced_concrete);
     try std.testing.expect(fixture.check(.{ 33, 30, 7 }, .tree_trunk) != null);
+}
+
+test "unsuitable occupied support cannot veto a legal independent lateral route" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    for ([_]BlockType{ .dirt, .packed_dirt, .grass, .sand }) |below| {
+        try fixture.raw(.{ 10, 10, 4 }, .tree_trunk);
+        try fixture.raw(.{ 10, 10, 5 }, .planks);
+        try fixture.raw(.{ 11, 10, 4 }, below);
+        try std.testing.expect(fixture.check(.{ 11, 10, 5 }, .planks) == null);
+        try std.testing.expect(fixture.check(.{ 11, 10, 5 }, .tree_trunk) != null);
+        try fixture.raw(.{ 10, 10, 5 }, .none);
+        try std.testing.expect(fixture.check(.{ 11, 10, 5 }, .planks) != null);
+    }
+    try fixture.raw(.{ 10, 10, 4 }, .rebar);
+    try fixture.raw(.{ 10, 10, 5 }, .rebar);
+    try fixture.raw(.{ 11, 10, 4 }, .crushed_stone);
+    try std.testing.expect(fixture.check(.{ 11, 10, 5 }, .reinforced_concrete) == null);
+    try fixture.raw(.{ 10, 10, 5 }, .none);
+    try std.testing.expect(fixture.check(.{ 11, 10, 5 }, .reinforced_concrete) != null);
+    // Missing direct data supplies no support, but cannot hide a fully known
+    // independently supported plank route that does not use that data.
+    try fixture.raw(.{ 10, 10, 5 }, .planks);
+    fixture.missing = .{ 11, 10, 4 };
+    try std.testing.expect(fixture.check(.{ 11, 10, 5 }, .planks) == null);
+    try fixture.raw(.{ 10, 10, 5 }, .none);
+    try std.testing.expectEqual(Reason.missing_data, fixture.check(.{ 11, 10, 5 }, .planks).?.reason);
+}
+
+test "crushed bridges retain their side and consecutive-run requirements over unsuitable support" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    const target: Cell = .{ 20, 20, 12 };
+    try fixture.raw(target - Cell{ 0, 0, 1 }, .tree_trunk);
+    for ([_]i64{ -1, 1 }) |x| {
+        try fixture.raw(target + Cell{ x, 0, 0 }, .stone);
+        try fixture.raw(target + Cell{ x, 0, -1 }, .stone);
+    }
+    try std.testing.expect(fixture.check(target, .crushed_stone) == null);
+    try fixture.raw(target + Cell{ 1, 0, -1 }, .none);
+    try std.testing.expect(fixture.check(target, .crushed_stone) != null);
+    try fixture.raw(target + Cell{ 1, 0, -1 }, .stone);
+    for (1..7) |depth| try fixture.raw(target - Cell{ 0, 0, @intCast(depth) }, .crushed_stone);
+    try std.testing.expectEqual(Reason.crushed_column, fixture.check(target, .crushed_stone).?.reason);
+}
+
+test "water and snow are affected direct dependents when sand is placed beneath them" {
+    for ([_]BlockType{ .water, .snow }) |material| {
+        var fixture: Fixture = .{};
+        defer fixture.deinit();
+        try fixture.put(.{ 10, 10, 5 }, material);
+        const rejected = fixture.check(.{ 10, 10, 4 }, .sand).?;
+        try std.testing.expectEqual(Reason.would_invalidate_structure, rejected.reason);
+        try std.testing.expectEqual(Reason.incompatible_support, rejected.cause.?);
+        try std.testing.expectEqualDeep(Cell{ 10, 10, 5 }, rejected.subject);
+    }
 }
 
 test "wood and reinforced spans count diagonal steps only through filled corners" {
@@ -926,10 +1072,9 @@ test "planks and reinforced blocks inherit the lowest height across vertical and
         const removed = fixture.check(.{ 11, 10, top - 1 }, .none).?;
         try std.testing.expectEqual(Reason.would_remove_support, removed.reason);
         try std.testing.expectEqual(if (construction.material.isWood()) Reason.wood_height else Reason.mineral_height, removed.cause.?);
-        // Even a shorter horizontal route cannot legalize incompatible occupied support.
+        // The sand supplies no support; the independent natural-ledge route remains legal.
         try fixture.raw(.{ 10, 10, top - 1 }, .sand);
-        const incompatible = fixture.check(.{ 10, 10, top }, construction.material).?;
-        try std.testing.expectEqual(if (construction.material.isWood()) Reason.incompatible_support else Reason.missing_foundation, incompatible.reason);
+        try std.testing.expect(fixture.check(.{ 10, 10, top }, construction.material) == null);
     }
 }
 
@@ -1187,28 +1332,29 @@ test "a clipped successful search is recomputed when another root admits a lower
     };
     defer validator.deinit();
     try std.testing.expect(validator.checkExisting(first) == null);
-    try std.testing.expectEqual(19, validator.cache.get(first).?.evaluation.supported.mineral);
+    try std.testing.expectEqual(19, validator.cache.get(first).?.state.mineral);
     try std.testing.expect(!validator.cache.get(first).?.evidence.complete);
     // Reusing the higher, incomplete result would reject this tower at height 21.
     // The shifted root admits the complete platform and proves height 10 instead.
     try std.testing.expect(validator.checkExisting(second) == null);
-    try std.testing.expectEqual(10, validator.cache.get(second).?.evaluation.supported.mineral);
+    try std.testing.expectEqual(10, validator.cache.get(second).?.state.mineral);
     try std.testing.expectEqual(0, fixture.outside_reads);
 }
 
 test "cached read bounds fit whole periodic intervals rather than just their wrapped endpoints" {
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    const reader: Reader = .{ .layout = &layout, .context = undefined, .block_at = Fixture.read };
     const crossing: ReadBounds = .{ .low = .{ -28, 0, 0 }, .high = .{ 0, 0, 0 } };
     // Both endpoints fit, but an intermediate read at x=-4 is 32 cells away.
     try std.testing.expect(distance(&layout, crossing.low, .{ 28, 0, 0 }) <= 28);
     try std.testing.expect(distance(&layout, crossing.high, .{ 28, 0, 0 }) <= 28);
-    try std.testing.expect(!crossing.fits(&layout, .{ 28, 0, 0 }));
+    try std.testing.expect(!crossing.fits(reader, .{ 28, 0, 0 }));
     const left: ReadBounds = .{ .low = .{ -31, -1, -1 }, .high = .{ -29, 1, 1 } };
     const right: ReadBounds = .{ .low = .{ 29, -1, -1 }, .high = .{ 31, 1, 1 } };
-    try std.testing.expect(left.fits(&layout, .{ 28, 0, 0 }));
-    try std.testing.expect(right.fits(&layout, .{ -28, 0, 0 }));
-    try std.testing.expect(!left.fits(&layout, .{ 28, 30, 0 }));
-    try std.testing.expect(!right.fits(&layout, .{ -28, 0, 30 }));
+    try std.testing.expect(left.fits(reader, .{ 28, 0, 0 }));
+    try std.testing.expect(right.fits(reader, .{ -28, 0, 0 }));
+    try std.testing.expect(!left.fits(reader, .{ 28, 30, 0 }));
+    try std.testing.expect(!right.fits(reader, .{ -28, 0, 30 }));
 }
 
 test "sand retains a wrapped nine-cell footprint and rejects nonstructural supports" {

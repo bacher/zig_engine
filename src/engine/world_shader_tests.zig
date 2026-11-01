@@ -363,3 +363,29 @@ test "block outline preserves thick green edges over tilted surfaces and behind 
     try checked;
     try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
 }
+
+test "blueprint instanced textured blocks and hazard rails validate with scene depth" {
+    const allocator = std.testing.allocator;
+    const gpu = try HeadlessDawn.init();
+    defer gpu.deinit();
+    var uncaptured: ValidationResponse = .{};
+    var response: ValidationResponse = .{};
+    gpu.device.setUncapturedErrorCallback(ValidationResponse.callback, &uncaptured);
+    var gctx: zgpu.GraphicsContext = undefined;
+    gctx.device = gpu.device;
+    const pools = .{ "buffer_pool", "bind_group_pool", "bind_group_layout_pool", "pipeline_layout_pool", "render_pipeline_pool" };
+    inline for (pools) |name| @field(gctx, name) = .{ .pool = try @TypeOf(@field(gctx, name).pool).initCapacity(allocator, 16) };
+    defer inline for (pools) |name| @field(gctx, name).pool.deinit();
+    var atlas = @import("bind_group_layouts/regular.zig").RegularBindGroupLayout.init(&gctx, .tvdim_2d);
+    defer atlas.deinit(&gctx);
+    gpu.device.pushErrorScope(.validation);
+    const renderer = @import("blueprint_renderer.zig").Renderer.init(&gctx, atlas.bind_group_layout_handle, .rgba8_unorm);
+    try std.testing.expectEqual(@as(usize, 1024), renderer.allocated_capacity);
+    renderer.deinit(&gctx);
+    _ = gpu.device.popErrorScope(ValidationResponse.callback, &response);
+    try coordinate_readback.waitForCallback(gpu.device, &response.done);
+    try std.testing.expectEqual(@as(usize, 0), response.errors);
+    try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
+    try std.testing.expectEqual(@as(usize, 0), gctx.buffer_pool.pool.liveHandleCount());
+    try std.testing.expectEqual(@as(usize, 0), gctx.render_pipeline_pool.pool.liveHandleCount());
+}

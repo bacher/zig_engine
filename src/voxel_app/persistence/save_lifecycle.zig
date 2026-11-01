@@ -25,6 +25,7 @@ pub const Observations = struct {
     pending_reads: usize = 0,
     waiting_queries: usize = 0,
     compactor_active: bool = false,
+    derived_work_pending: bool = false,
     oldest_player_wait: ?i96 = null,
 };
 pub const Deadlines = struct { capture_wait_ns: u64, player_wait_ns: u64, overdue_ns: u64 };
@@ -67,7 +68,7 @@ pub const Lifecycle = struct {
     pub fn takeReady(self: *Lifecycle, observed: Observations) ?Intent {
         const drain = self.queued orelse return null;
         if (self.active != null or drain.fence_remaining != 0) return null;
-        if (drain.intent.final and (observed.pending_reads != 0 or observed.waiting_queries != 0 or observed.compactor_active)) return null;
+        if (drain.intent.final and (observed.pending_reads != 0 or observed.waiting_queries != 0 or observed.compactor_active or observed.derived_work_pending)) return null;
         self.queued = null;
         return drain.intent;
     }
@@ -201,6 +202,16 @@ pub const Lifecycle = struct {
 
 const testing = std.testing;
 const test_deadlines: Deadlines = .{ .capture_wait_ns = 500, .player_wait_ns = 100, .overdue_ns = 10_000 };
+
+test "final save drains derived road work while ordinary snapshots may proceed" {
+    var lifecycle: Lifecycle = .{};
+    _ = lifecycle.request(.{ .id = 1, .final = false }, 0);
+    try testing.expectEqual(@as(u64, 1), lifecycle.takeReady(.{ .derived_work_pending = true }).?.id);
+    _ = lifecycle.request(.{ .id = 2, .final = true }, 1);
+    lifecycle.commandResolved();
+    try testing.expect(lifecycle.takeReady(.{ .derived_work_pending = true }) == null);
+    try testing.expectEqual(@as(u64, 2), lifecycle.takeReady(.{}).?.id);
+}
 
 test "save drain fences the accepted prefix before retry and coalesces ordinary requests" {
     var lifecycle: Lifecycle = .{};

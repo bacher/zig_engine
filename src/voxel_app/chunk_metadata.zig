@@ -41,6 +41,12 @@ pub const Metadata = struct {
             self.constructed.appendAssumeCapacity(block);
     }
 
+    /// Blueprint fulfillment has already proved the real cell empty. No old
+    /// construction marker can exist, so appending needs no membership scan.
+    pub fn appendConstructedKnownEmptyAssumeCapacity(self: *Metadata, block: BlockIndex) void {
+        self.constructed.appendAssumeCapacity(block);
+    }
+
     pub fn tryMarkConstructed(self: *Metadata, allocator: std.mem.Allocator, block: BlockIndex) !void {
         if (std.mem.indexOfScalar(BlockIndex, self.constructed.items, block) == null) {
             try self.constructed.ensureUnusedCapacity(allocator, 1);

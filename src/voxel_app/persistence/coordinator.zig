@@ -100,6 +100,8 @@ pub const Job = struct {
     sources: []Source,
     players: []u8,
     player_count: u64,
+    /// Owned, already encoded authoritative changes through this capture fence.
+    blueprint_changes: []u8 = &.{},
     canceled: std.atomic.Value(bool) = .init(false),
     mutex: Io.Mutex = .init,
     changed: Io.Condition = .init,
@@ -139,7 +141,7 @@ pub const Job = struct {
             scratch = @max(scratch, try scratchBound(source));
         }
         const manifest = try std.math.mul(usize, self.sources.len, @sizeOf(Source) + 2 + @sizeOf([]u8));
-        self.working_reserved_bytes = try std.math.add(usize, self.limits.output_bytes, try std.math.add(usize, manifest, try std.math.add(usize, self.players.len, scratch + @sizeOf(Job))));
+        self.working_reserved_bytes = try std.math.add(usize, self.limits.output_bytes, try std.math.add(usize, manifest, try std.math.add(usize, self.players.len + self.blueprint_changes.len, scratch + @sizeOf(Job))));
         self.working_reserved_bytes = try std.math.add(usize, self.working_reserved_bytes, self.extra_working_bytes);
         if (self.working_reserved_bytes > self.limits.working_bytes) return error.WorkingCapacityExceeded;
         self.released = try self.allocator.alloc(bool, self.sources.len);
@@ -222,6 +224,7 @@ pub const Job = struct {
         self.allocator.free(self.priority);
         self.allocator.free(self.sources);
         self.allocator.free(self.players);
+        self.allocator.free(self.blueprint_changes);
         self.allocator.destroy(self);
     }
     fn emit(self: *Job, event: Event) void {
@@ -330,7 +333,7 @@ pub const Job = struct {
         self.store_mutex.lockUncancelable(self.io);
         defer self.store_mutex.unlock(self.io);
         const global = format.encodeGlobal(self.tick);
-        try self.store.beginSnapshot(self.sequence, &global, self.players, self.player_count, self.sources.len);
+        try self.store.beginSnapshotWithBlueprints(self.sequence, &global, self.players, self.player_count, self.sources.len, self.blueprint_changes);
         while (true) {
             self.mutex.lockUncancelable(self.io);
             while (self.output_head == self.output.items.len and !self.encoder_finished)

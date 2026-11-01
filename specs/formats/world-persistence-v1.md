@@ -3,7 +3,8 @@
 This is the normative format reference for the
 [world-persistence feature spec](../features/world-persistence.md). It contains the existing
 binary layouts, encoding rules, compatibility policy, checksums, and metadata bounds
-for supported versions 1 and 2. All R/Q identifiers refer to that feature spec;
+for current format 3. Formats 1 and 2 are rejected as incompatible development worlds.
+All R/Q identifiers refer to that feature spec;
 requirement and acceptance-criterion IDs remain there. Runtime ownership, cancellation,
 recovery procedures, and platform durability remain in the feature spec.
 
@@ -54,11 +55,11 @@ range, with actual decoding support for every accepted version. These are distin
 snapshot sequences, world ticks, and generator versions. The minimum is an engine support
 policy; a second per-file version field is not required for this initial design.
 
-For example, adding a material in format 2 can leave the minimum at 1: the updated engine
-reads versions 1 and 2 but writes version 2. An engine supporting only version 1 rejects
-version 2 before interpreting any chunk bytes. An incompatible change in version 3 without
-legacy decoding sets the minimum to 3. A version bump alone does not implement compatibility:
-when layout/defaults change, retain the required old decoding logic or raise the minimum.
+The current writer and minimum reader version are both 3. Development formats 1 and 2
+are rejected before their gameplay records are interpreted. A version bump alone does
+not implement compatibility: incompatible changes must also raise the minimum unless
+the engine supplies every required older decoding path. Pre-release development saves
+have no migration or backward-compatibility commitment.
 
 All accepted file encodings map to the same current gameplay logic. The reader does not
 select a historical ruleset from a save or an individual blueprint. A sufficiently incompatible
@@ -200,11 +201,13 @@ alternative algorithms are follow-up improvements, not prerequisites for this in
 
 ## Binary Container Layouts
 
-The initial save-format version was 1. The current writer uses version 2 and the minimum
-readable version remains 1. Version 2 adds inventory schema 1 below; chunk, descriptor,
-global, and container framing are unchanged. Recovery supports both versions, including
-a version-1 base followed by version-2 journals. Snapshot-zero compaction retains its
-original header version and anchor; later snapshots write version 2. All integer fields are explicitly sized and little-endian; f32/f64 use
+The initial save-format version was 1; version 2 added inventory schema 1 below.
+The current writer and minimum readable version are both 3. Version 3 adds the world's
+private blueprint library and unfinished-instance progress to base and WAL records, and
+uses the current construction semantics. The base and every WAL segment must pass this
+whole-world version gate before their gameplay data is published. No migration or
+historical ruleset dispatch is provided. Fixed base/WAL header sizes remain unchanged.
+All integer fields are explicitly sized and little-endian; f32/f64 use
 their IEEE-754 little-endian bit representation. Serialize fields individually without
 native struct padding. UUIDs are fixed 16-byte sequences carried unchanged between records
 and hash inputs, not text or platform-native UUID structs. Header sizes must match the
@@ -220,6 +223,7 @@ World descriptor
 Global state
 Chunk index
 Player records
+Blueprint-state byte length (u64), followed by blueprint checkpoint bytes
 Chunk records
 Base physical checksum (32 bytes)
 ```
@@ -247,6 +251,10 @@ Sections and records must consume their extents exactly, without overlaps, gaps,
 unaccounted bytes. The index and base chunk records are sorted by chunk ID with no duplicates;
 each index identity and absolute offset must select the matching complete chunk record.
 Player records are sorted by player ID with no duplicates.
+The blueprint length prefix is present even when zero; its bytes are not part of the
+player-record or chunk-record section lengths. Chunk-index absolute offsets account for
+this section. Its declared length is bounded before allocation and must fit the base's
+exact total extent.
 
 Compaction writes a seekable temporary file: reserve the index, stream records, and finalize
 index offsets and header lengths before computing the base physical checksum. Initially use
@@ -363,8 +371,9 @@ filenames, modification times, or numerical adjacency of attempted snapshot sequ
 Verify the header checksum even when no transactions follow. Establish and synchronize the
 header and directory entry under the existing creation/rotation durability contract.
 
-Each transaction consists of header, complete global state, complete player array, changed
-chunk records, and commit footer. The transaction header is exactly 84 bytes:
+Each transaction consists of header, complete global state, complete player array,
+blueprint-operation byte length (u64), blueprint operations, changed chunk records, and
+commit footer. The blueprint prefix is present even when zero. The transaction header is exactly 84 bytes:
 
 | Field, in order | Encoding |
 | --- | --- |
@@ -389,7 +398,7 @@ The commit footer is exactly 56 bytes:
 The changed-chunk count is known at capture, while compressed sizes become known during
 encoding. Put the total transaction size only in the footer, allowing streaming without
 WAL backpatching or retaining all encoded chunks. Release snapshot references under R29.
-Parse the declared global/player sections and exactly the declared number of length-framed
+Parse the declared global/player/blueprint sections and exactly the declared number of length-framed
 chunk records before expecting a footer; never search payload bytes for magic markers.
 Reject duplicate chunk IDs within a transaction. Chunk records use the identical base/WAL
 representation already defined; WAL chunk ordering need not match the sorted base order.
@@ -399,6 +408,69 @@ and its repeated sequence must match the header. Validate all framing, predecess
 checksums, and payload semantics before accepting a recoverable snapshot. A marker alone
 does not establish a commit. Writer success still requires synchronization before
 acknowledgment; partial writes and failure repair remain governed by R23/R30/R55.
+
+### Blueprint definitions and active instances
+
+`persistence/blueprints.zig` implements these records. All fields are serialized in the
+listed order without padding; the enclosing base checksum or WAL digest protects them.
+There is no separate blueprint rules version. Names are canonical UTF-8 with outer Unicode
+whitespace removed, 1–100 Unicode scalar values and at most 400 bytes; line breaks and
+control characters are forbidden. Duplicate names are permitted. Definition IDs and
+instance IDs occupy independent monotonically increasing nonzero u64 spaces. Exhaustion
+rejects new allocations rather than wrapping or reusing an ID.
+
+| Record | Fields in order |
+| --- | --- |
+| Immutable definition | ID u64, owner/player ID u64, name byte length u16, name bytes, compact size [3]u32, occupied target count u32, dense-cell byte length u32, dense logical material bytes |
+| Instance identity/transform | ID u64, definition ID u64, owner/player ID u64, normalized world origin [3]u32, clockwise quarter-turn u8 (0–3) |
+
+Definition cells use x-fast order `index = (z * size_y + y) * size_x + x`. The byte
+length must equal the checked volume. Both horizontal cell counts must be no greater than
+`min(world_blocks_x / 2 - 1, world_blocks_y)`; every dimension is positive and all six
+outer faces contain at least one occupied cell. Accepted logical materials are air 0,
+dirt 2, sand 5, crushed stone 8, tree trunk 9, planks 10, rebar 11, reinforced concrete 12,
+and solid country road 13. Target count equals the number of nonair cells and is nonzero.
+An instance references an existing retained immutable definition and has the same private
+owner. Its rotated box fits finite Y/Z bounds, uses normalized wrapping X, and cannot
+overlap another active box. Rotation maps `(x,y,z)` to `(y,width-1-x,z)` per clockwise turn.
+
+An empty never-used blueprint checkpoint is zero bytes. Otherwise the checkpoint starts
+with maximum allocated definition ID u64, maximum allocated instance ID u64, definition
+count u32, and active-instance count u32. These highwaters survive retirement of completed
+instances. Definitions follow in increasing ID order, then active instances in increasing
+ID order. Each instance record adds remaining target count u32 and exactly
+`ceil(definition_volume / 8)` fulfillment bytes. Bit `index % 8` of byte `index / 8` marks
+that dense definition index fulfilled. Air-cell and unused trailing bits must be zero;
+remaining must equal occupied targets minus set bits and must be positive. Completed
+instances have no checkpoint record. Definitions remain available to every referencing
+instance; there is no deletion operation in this iteration. All derived spatial/render
+indexes are rebuilt rather than serialized.
+
+WAL operations have no native struct framing or per-operation padding. Parse to the exact
+declared operation-section end; reject unknown kinds, truncated fields, invalid references,
+out-of-order/reused IDs, duplicate fulfillment, and progress directed at air/out-of-range
+cells. Definition publication and instance creation can precede fulfillment in one
+transaction.
+
+| Kind u8 | Following payload |
+| --- | --- |
+| 1 | Immutable definition record |
+| 2 | Instance identity/transform record; all targets initially pending |
+| 3 | Instance ID u64, dense definition cell index u32 |
+
+Kind 3 occupies exactly 13 bytes including its kind and updates one bit and the remaining
+counter. Reaching zero retires the instance without a completion scan. Normal fulfillment
+never rewrites its immutable definition or complete bitmap; checkpointing may encode both
+in full. Preflight validates/allocates touched operations before the commit footer and
+publishes all blueprint, terrain, and inventory state together after durable commit.
+Recovery applies only a fully verified committed operation section, with the same atomic
+boundary. Before entering gameplay the authority also checks fulfilled materials against
+real terrain (dirt includes grass/packed dirt) and pending targets against real air.
+
+Limits are resource policy, not historical gameplay versions: defaults permit 1,048,576
+cells per definition, 4,096 definitions and active instances, a 64 MiB checkpoint, and a
+16 MiB/1,048,576-operation WAL section. They are configurable; checked arithmetic and
+declared wire widths still apply. A failure leaves the transaction unpublished/retryable.
 
 ## Snapshot Integrity
 
@@ -427,13 +499,14 @@ byte concatenation, is:
 | Base physical | Base domain prefix `||` every base-file byte preceding its final 32-byte checksum |
 | Snapshot-zero anchor | Initial-anchor domain prefix `||` canonical initial fields listed below |
 
-Transaction coverage includes its header, global state, full player records, chunk records
+Transaction coverage includes its header, global state, full player records, blueprint
+length prefix and operations, chunk records
 with their checksums, and the commit footer's marker, total length, and repeated sequence.
 Only its final digest is excluded. The included segment header binds world, segment, format,
 and segment predecessor; the transaction header binds the immediately previous committed
 sequence/digest. Verify the segment header independently before using it in this input.
 The base physical checksum includes the finalized header, incorporated logical digest,
-descriptor, global state, index, and all player/chunk records with their record checksums.
+descriptor, global state, index, blueprint length/checkpoint, and all player/chunk records with their record checksums.
 
 Use one chained digest per committed snapshot transaction. Validate footer identity/length
 as well as the digest. Append hashing processes the fixed segment header and new transaction
@@ -454,6 +527,7 @@ World descriptor length (u32), followed by descriptor bytes
 Global-state length (u32), followed by global-state bytes
 Player count (u64)
 Player-section length (u64), followed by player records sorted by player ID
+Blueprint-state length (u64), followed by canonical blueprint checkpoint bytes
 Initial override count (u64), followed by chunk records sorted by chunk ID
 ```
 

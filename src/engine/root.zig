@@ -41,3 +41,5 @@ test {
     _ = @import("hierarchy_tests.zig");
     _ = @import("lighting_tests.zig");
 }
+
+pub const blueprint_renderer = @import("blueprint_renderer.zig");

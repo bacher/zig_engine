@@ -10,6 +10,7 @@ pub const minimum_length: u32 = 4;
 pub const maximum_length: u32 = 12;
 pub const Undo = struct { block: [3]u32, slope: ?data.Slope };
 const Change = struct { cell: Cell, slope: ?data.Slope };
+const blueprint_runtime = @import("blueprint_runtime.zig");
 pub const Plan = struct {
     changes: []Change,
     chunk_ids: []u32,
@@ -29,6 +30,114 @@ pub const Plan = struct {
         for (self.changes) |change| commit.set(change.cell, change.slope);
     }
 };
+
+/// Validate the final indirect shape writes together, before publishing any
+/// material or metadata. Existing unfinished physical structures may temporarily
+/// be invalid; all affected constructions must remain valid with targets filled.
+pub fn validateCompletedPlan(allocator: std.mem.Allocator, physical: rules.Reader, state: *const blueprint_runtime.State, chunks: *const world.ChunksHashMap, plan: Plan, operation: ?world.BlockOperation) !?rules.Failure {
+    if (plan.changes.len == 0) return null;
+    const Final = struct {
+        physical: rules.Reader,
+        plan: Plan,
+        operation: ?world.BlockOperation,
+        fn read(context: *anyopaque, block: [3]u32) ?rules.BlockType {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (self.operation) |edit| if (std.mem.eql(u32, &block, &edit.block)) return switch (edit.action) {
+                .remove => .none,
+                .put => |value| if (value == .country_road_adaptive) .custom else value,
+            };
+            return self.physical.block_at(self.physical.context, block);
+        }
+        fn shape(context: *anyopaque, block: [3]u32) ?custom.Shape {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            for (self.plan.changes) |change| if (@reduce(.And, change.cell == Cell{ block[0], block[1], block[2] })) return (data.Road{ .index = 0, .slope = change.slope }).shape();
+            if (self.operation) |edit| if (std.mem.eql(u32, &block, &edit.block)) return switch (edit.action) {
+                .remove => null,
+                .put => |value| if (value == .country_road_adaptive or value == .custom) .adaptive else null,
+            };
+            return if (self.physical.custom_shape_at) |get| get(self.physical.context, block) else null;
+        }
+        fn immutable(context: *anyopaque, block: [3]u32) bool {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            return self.physical.isImmutable(.{ block[0], block[1], block[2] });
+        }
+        fn reader(self: *@This()) rules.Reader {
+            var result = self.physical;
+            result.context = self;
+            result.block_at = read;
+            result.custom_shape_at = shape;
+            result.immutable_at = immutable;
+            return result;
+        }
+    };
+    var final: Final = .{ .physical = physical, .plan = plan, .operation = operation };
+    const final_physical = final.reader();
+    if (operation) |edit| if (edit.action == .put) {
+        var validator: rules.Validator = .{ .allocator = allocator, .reader = final_physical };
+        defer validator.deinit();
+        const failure = validator.checkExisting(.{ edit.block[0], edit.block[1], edit.block[2] });
+        if (validator.allocation_failed) return error.OutOfMemory;
+        if (failure) |reason| return reason;
+    };
+    var completed: blueprint_runtime.CompletedReader = .{ .physical = final_physical, .state = state };
+    var unique: std.AutoHashMapUnmanaged(Cell, void) = .empty;
+    defer unique.deinit(allocator);
+    for (plan.changes) |change| {
+        if (physical.isImmutable(change.cell)) return .{ .reason = .immutable_cell, .subject = change.cell };
+        const block: [3]u32 = .{ @intCast(change.cell[0]), @intCast(change.cell[1]), @intCast(change.cell[2]) };
+        const real = try world.tryCollectConstructed(allocator, physical.layout, chunks, block);
+        defer allocator.free(real);
+        const affected = try state.collectAffected(allocator, physical.layout, block, real);
+        defer allocator.free(affected);
+        for (affected) |cell| try unique.put(allocator, cell, {});
+    }
+    if (operation) |edit| if (edit.action == .put) {
+        try unique.put(allocator, .{ edit.block[0], edit.block[1], edit.block[2] }, {});
+    };
+    var validator: rules.Validator = .{ .allocator = allocator, .reader = completed.reader() };
+    defer validator.deinit();
+    var cells = unique.keyIterator();
+    while (cells.next()) |cell| {
+        const failure = validator.checkExisting(cell.*);
+        if (validator.allocation_failed) return error.OutOfMemory;
+        if (failure) |reason| return reason;
+    }
+    return null;
+}
+
+test "road final-shape validation protects real and miniature road dependents" {
+    const a = std.testing.allocator;
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    var terrain = try world.World.init(a, &layout);
+    defer terrain.deinit();
+    for (0..2) |z| for (0..2) |y| for (0..2) |x| try terrain.insertChunk(.{ @intCast(x), @intCast(y), @intCast(z) }, world.WorldChunk.initEmpty());
+    const chunk = terrain.chunks.getPtr(layout.encodeChunkCoords(.{ 0, 0, 0 })).?;
+    try std.testing.expectEqual(world.OperationStatus.success, try chunk.tryApply(a, .{ 10, 10, 9 }, .{ .put = .stone }));
+    try std.testing.expectEqual(world.OperationStatus.success, try chunk.tryApply(a, .{ 10, 10, 10 }, .{ .put = .country_road_adaptive }));
+    const changes = [_]Change{.{ .cell = .{ 10, 10, 10 }, .slope = .{ .high_endpoint = .{ 9, 10, 10 }, .downhill = .positive_x, .length = 4, .section = 0 } }};
+    const plan: Plan = .{ .changes = @constCast(&changes), .chunk_ids = &.{} };
+    try std.testing.expectEqual(@as(?rules.Failure, null), try validateCompletedPlan(a, terrain.reader(), &terrain.blueprints, &terrain.chunks, plan, null));
+    try std.testing.expectEqual(world.OperationStatus.success, try chunk.tryApply(a, .{ 10, 10, 11 }, .{ .put = .country_road_solid }));
+    try chunk.metadata.tryMarkConstructed(a, @import("block_transformations.zig").index(.{ 10, 10, 11 }));
+    const real = (try validateCompletedPlan(a, terrain.reader(), &terrain.blueprints, &terrain.chunks, plan, null)).?;
+    try std.testing.expectEqual(rules.Reason.road_support, real.reason);
+    try std.testing.expectEqual(world.OperationStatus.success, try chunk.tryApply(a, .{ 10, 10, 11 }, .remove));
+    var saved: blueprint_runtime.SavedDefinition = .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Road"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(rules.BlockType, &.{.country_road_solid}), .target_count = 1 } };
+    terrain.blueprints.insertDefinition(a, saved) catch |err| {
+        saved.deinit(a);
+        return err;
+    };
+    var site = try terrain.blueprints.prepareInstance(a, terrain.layout, 1, 1, 1, .{ 10, 10, 11 }, 0);
+    terrain.blueprints.insertInstance(a, terrain.layout, site) catch |err| {
+        site.deinit(a);
+        return err;
+    };
+    const planned = (try validateCompletedPlan(a, terrain.reader(), &terrain.blueprints, &terrain.chunks, plan, null)).?;
+    try std.testing.expectEqual(rules.Reason.road_support, planned.reason);
+    // Planning/validation never changes the road or publishes a partial formation.
+    try std.testing.expectEqual(@as(?data.Slope, null), chunk.metadata.road(@import("block_transformations.zig").index(.{ 10, 10, 10 })).?.slope);
+    try std.testing.expect(terrain.blueprints.targetAt(.{ 10, 10, 11 }) != null);
+}
 
 pub const Context = struct {
     allocator: std.mem.Allocator,

@@ -3,11 +3,12 @@
 const std = @import("std");
 pub const io = @import("io.zig");
 const format = @import("format.zig");
+pub const blueprint_records = @import("blueprints.zig");
 pub const Uuid = [16]u8;
 pub const Digest = [32]u8;
 pub const SnapshotIdentity = struct { sequence: u64, digest: Digest };
-pub const Limits = struct { max_chunks: usize = 1_000_000, max_segments: usize = 128, max_players_bytes: usize = 16 * 1024 * 1024 };
-pub const Initial = struct { world_uuid: Uuid, descriptor: []const u8, global: []const u8, players: []const u8, player_count: u64, chunks: []const []const u8 = &.{} };
+pub const Limits = struct { max_chunks: usize = 1_000_000, max_segments: usize = 128, max_players_bytes: usize = 16 * 1024 * 1024, blueprints: blueprint_records.Limits = .{} };
+pub const Initial = struct { world_uuid: Uuid, descriptor: []const u8, global: []const u8, players: []const u8, player_count: u64, chunks: []const []const u8 = &.{}, blueprints: []const u8 = &.{} };
 const HeaderSize = 120;
 const MaxRecord = 1_212_501;
 const Location = struct { file: io.File, offset: u64, length: u32, revision: u64 };
@@ -24,6 +25,7 @@ const Transaction = struct {
     cursor: u64,
     hash: std.crypto.hash.Blake3,
     chunks: std.AutoHashMap(u32, Location),
+    blueprint_changes: blueprint_records.Prepared,
 };
 pub const Store = struct {
     allocator: std.mem.Allocator,
@@ -35,6 +37,7 @@ pub const Store = struct {
     global: []u8,
     players: []u8,
     player_count: u64,
+    blueprints: blueprint_records.State = .{ .allocator = std.heap.page_allocator },
     sequence: u64,
     digest: Digest,
     base: io.File,
@@ -72,6 +75,8 @@ pub const Store = struct {
         _ = try format.decodeGlobal(initial.global);
         try format.validatePlayers(initial.players, initial.player_count);
         if (initial.players.len > limits.max_players_bytes) return error.Capacity;
+        var blueprints = try blueprint_records.decodeState(a, initial.blueprints, desc.dimensions, limits.blueprints);
+        errdefer blueprints.deinit();
         var hash = hasher("ZGW-INIT-1\x00");
         hash.update(&initial.world_uuid);
         hashInt(&hash, u32, format.current_write_version);
@@ -83,6 +88,8 @@ pub const Store = struct {
         hashInt(&hash, u64, initial.player_count);
         hashInt(&hash, u64, initial.players.len);
         hash.update(initial.players);
+        hashInt(&hash, u64, initial.blueprints.len);
+        hash.update(initial.blueprints);
         hashInt(&hash, u64, initial.chunks.len);
         if (initial.chunks.len > limits.max_chunks) return error.Capacity;
         var last_id: ?u32 = null;
@@ -102,6 +109,7 @@ pub const Store = struct {
         const players = try a.dupe(u8, initial.players);
         errdefer a.free(players);
         var self: Store = .{ .allocator = a, .directory = dir, .limits = limits, .world_uuid = initial.world_uuid, .dimensions = desc.dimensions, .descriptor = descriptor, .global = global, .players = players, .player_count = initial.player_count, .sequence = 0, .digest = digest, .base = undefined, .base_sequence = 0, .index = std.AutoHashMap(u32, Location).init(a) };
+        self.blueprints = blueprints;
         errdefer {
             self.index.deinit();
             for (self.segments.items) |segment| {
@@ -162,7 +170,13 @@ pub const Store = struct {
         if (descriptor_len > format.maximum_descriptor_size or global_len != 10 or chunk_count > limits.max_chunks or player_len > limits.max_players_bytes) return error.Capacity;
         const index_start = try add(120, try add(descriptor_len, global_len));
         const player_start = try add(index_start, try mul(chunk_count, 12));
-        const chunk_start = try add(player_start, player_len);
+        const blueprint_start = try add(player_start, player_len);
+        if (blueprint_start > size or size - blueprint_start < 8) return error.Corruption;
+        var blueprint_prefix: [8]u8 = undefined;
+        try base.read(&blueprint_prefix, blueprint_start);
+        const blueprint_len = get(u64, &blueprint_prefix, 0);
+        if (blueprint_len > limits.blueprints.max_state_bytes) return error.Capacity;
+        const chunk_start = try add(try add(blueprint_start, 8), blueprint_len);
         if (try add(try add(chunk_start, chunk_len), 32) != size) return error.Corruption;
         const descriptor = try readAlloc(a, base, 120, descriptor_len);
         errdefer if (!owned) a.free(descriptor);
@@ -177,6 +191,9 @@ pub const Store = struct {
         owned = true;
         self.base_format_version = version;
         errdefer self.deinit();
+        const blueprint_bytes = try readAlloc(a, base, blueprint_start + 8, blueprint_len);
+        defer a.free(blueprint_bytes);
+        self.blueprints = try blueprint_records.decodeState(a, blueprint_bytes, desc.dimensions, limits.blueprints);
         var anchor = hasher("ZGW-INIT-1\x00");
         anchor.update(&self.world_uuid);
         hashInt(&anchor, u32, version);
@@ -188,6 +205,8 @@ pub const Store = struct {
         hashInt(&anchor, u64, player_count);
         hashInt(&anchor, u64, player_len);
         anchor.update(players);
+        hashInt(&anchor, u64, blueprint_len);
+        anchor.update(blueprint_bytes);
         hashInt(&anchor, u64, chunk_count);
         var cursor = chunk_start;
         var previous: ?u32 = null;
@@ -230,6 +249,7 @@ pub const Store = struct {
         self.allocator.free(self.descriptor);
         self.allocator.free(self.global);
         self.allocator.free(self.players);
+        self.blueprints.deinit();
         self.* = undefined;
     }
     pub fn snapshotCatalog(self: *const Store) !BaseCatalog {
@@ -272,11 +292,16 @@ pub const Store = struct {
         return bytes;
     }
     pub fn beginSnapshot(self: *Store, sequence: u64, global: []const u8, players: []const u8, player_count: u64, changed_count: u64) !void {
+        return self.beginSnapshotWithBlueprints(sequence, global, players, player_count, changed_count, &.{});
+    }
+    pub fn beginSnapshotWithBlueprints(self: *Store, sequence: u64, global: []const u8, players: []const u8, player_count: u64, changed_count: u64, blueprint_changes: []const u8) !void {
         if (self.phase != .ready or self.transaction != null) return error.WriterBusy;
         if (sequence <= self.sequence) return error.InvalidSequence;
         if (players.len > self.limits.max_players_bytes or changed_count > self.limits.max_chunks) return error.Capacity;
         _ = try format.decodeGlobal(global);
         try format.validatePlayers(players, player_count);
+        var prepared = try self.blueprints.prepare(blueprint_changes, self.dimensions, self.limits.blueprints);
+        errdefer if (self.transaction == null) prepared.deinit();
         if (self.active == null) try self.newSegment();
         const s = &self.segments.items[self.active.?];
         if (!s.established) {
@@ -287,7 +312,7 @@ pub const Store = struct {
         errdefer if (self.transaction == null) self.allocator.free(g);
         const p = try self.allocator.dupe(u8, players);
         errdefer if (self.transaction == null) self.allocator.free(p);
-        var tx: Transaction = .{ .sequence = sequence, .global = g, .players = p, .player_count = player_count, .expected = changed_count, .start = s.end, .cursor = s.end, .hash = hasher("ZGW-WALTX-1\x00"), .chunks = std.AutoHashMap(u32, Location).init(self.allocator) };
+        var tx: Transaction = .{ .sequence = sequence, .global = g, .players = p, .player_count = player_count, .expected = changed_count, .start = s.end, .cursor = s.end, .hash = hasher("ZGW-WALTX-1\x00"), .chunks = std.AutoHashMap(u32, Location).init(self.allocator), .blueprint_changes = prepared };
         tx.hash.update(&s.header);
         var header: [84]u8 = @splat(0);
         @memcpy(header[0..8], "ZGTXBEG1");
@@ -304,6 +329,10 @@ pub const Store = struct {
         try self.append(&header);
         try self.append(global);
         try self.append(players);
+        var blueprint_prefix: [8]u8 = undefined;
+        put(u64, &blueprint_prefix, 0, blueprint_changes.len);
+        try self.append(&blueprint_prefix);
+        try self.append(blueprint_changes);
     }
     pub fn appendChunk(self: *Store, bytes: []const u8) !void {
         if (self.phase != .appending) return error.WriterBusy;
@@ -363,6 +392,8 @@ pub const Store = struct {
         self.global = tx.global;
         self.players = tx.players;
         self.player_count = tx.player_count;
+        self.blueprints.apply(&tx.blueprint_changes);
+        tx.blueprint_changes.deinit();
         tx.chunks.deinit();
         self.transaction = null;
         self.phase = .ready;
@@ -385,6 +416,7 @@ pub const Store = struct {
         if (self.transaction) |*tx| {
             self.allocator.free(tx.global);
             self.allocator.free(tx.players);
+            tx.blueprint_changes.deinit();
             tx.chunks.deinit();
             self.transaction = null;
         }
@@ -456,8 +488,10 @@ pub const Store = struct {
         const players = try a.dupe(u8, self.players);
         errdefer a.free(players);
         var frozen: Store = .{ .allocator = a, .directory = dir, .limits = self.limits, .world_uuid = self.world_uuid, .dimensions = self.dimensions, .descriptor = descriptor, .global = global, .players = players, .player_count = self.player_count, .sequence = self.sequence, .digest = self.digest, .base = base, .base_sequence = self.base_sequence, .index = std.AutoHashMap(u32, Location).init(a) };
+        frozen.blueprints = try self.blueprints.clone(a);
         frozen.base_format_version = self.base_format_version;
         errdefer {
+            frozen.blueprints.deinit();
             frozen.index.deinit();
             for (frozen.segments.items) |segment| {
                 segment.file.close();
@@ -675,11 +709,30 @@ pub const Store = struct {
             defer self.allocator.free(players);
             cursor = try add(cursor, plen);
             try format.validatePlayers(players, pcount);
+            if (size - cursor < 8) {
+                segment.tail = true;
+                break;
+            }
+            var blueprint_prefix: [8]u8 = undefined;
+            try file.read(&blueprint_prefix, cursor);
+            cursor = try add(cursor, 8);
+            const blueprint_len = get(u64, &blueprint_prefix, 0);
+            if (blueprint_len > self.limits.blueprints.max_changes_bytes) return error.Capacity;
+            if (blueprint_len > size - cursor) {
+                segment.tail = true;
+                break;
+            }
+            const blueprint_changes = try readAlloc(self.allocator, file, cursor, blueprint_len);
+            defer self.allocator.free(blueprint_changes);
+            cursor = try add(cursor, blueprint_len);
+            try blueprint_records.validateOps(blueprint_changes, self.dimensions, self.limits.blueprints);
             var hash = hasher("ZGW-WALTX-1\x00");
             hash.update(&segment.header);
             hash.update(&header);
             hash.update(global);
             hash.update(players);
+            hash.update(&blueprint_prefix);
+            hash.update(blueprint_changes);
             var changed = std.AutoHashMap(u32, Location).init(self.allocator);
             defer changed.deinit();
             var n: u64 = 0;
@@ -731,6 +784,9 @@ pub const Store = struct {
                 const new_global = try self.allocator.dupe(u8, global);
                 errdefer self.allocator.free(new_global);
                 const new_players = try self.allocator.dupe(u8, players);
+                errdefer self.allocator.free(new_players);
+                var prepared = try self.blueprints.prepare(blueprint_changes, self.dimensions, self.limits.blueprints);
+                defer prepared.deinit();
                 var it = changed.iterator();
                 while (it.next()) |entry| self.index.putAssumeCapacity(entry.key_ptr.*, entry.value_ptr.*);
                 self.allocator.free(self.global);
@@ -738,6 +794,7 @@ pub const Store = struct {
                 self.global = new_global;
                 self.players = new_players;
                 self.player_count = pcount;
+                self.blueprints.apply(&prepared);
                 self.sequence = sequence;
                 self.digest = digest;
             }
@@ -814,10 +871,18 @@ pub const Store = struct {
         std.mem.sort(u32, ids, {}, std.sort.asc(u32));
         const index_start: u64 = 120 + self.descriptor.len + self.global.len;
         const player_start = try add(index_start, try mul(count, 12));
-        const chunk_start = try add(player_start, self.players.len);
+        const blueprint_bytes = try blueprint_records.encodeState(self.allocator, &self.blueprints);
+        defer self.allocator.free(blueprint_bytes);
+        if (blueprint_bytes.len > self.limits.blueprints.max_state_bytes) return error.Capacity;
+        const blueprint_start = try add(player_start, self.players.len);
+        const chunk_start = try add(try add(blueprint_start, 8), blueprint_bytes.len);
         try output.write(self.descriptor, 120);
         try output.write(self.global, 120 + self.descriptor.len);
         try output.write(self.players, player_start);
+        var blueprint_prefix: [8]u8 = undefined;
+        put(u64, &blueprint_prefix, 0, blueprint_bytes.len);
+        try output.write(&blueprint_prefix, blueprint_start);
+        try output.write(blueprint_bytes, blueprint_start + 8);
         var cursor = chunk_start;
         for (ids, 0..) |id, i| {
             try self.checkpoint();
@@ -1789,7 +1854,7 @@ test "nested creation propagates mkdir namespace and fullflush failures without 
     }
 }
 
-test "legacy v1 snapshot zero and WAL migrate to persistent one-slot inventory" {
+test "incompatible development worlds are rejected by both base and WAL gates" {
     const a = std.testing.allocator;
     var model = io.Model.init(a);
     defer model.deinit();
@@ -1797,53 +1862,152 @@ test "legacy v1 snapshot zero and WAL migrate to persistent one-slot inventory" 
     defer io.test_model = null;
     var f = try Fixture.init();
     defer f.deinit();
-    // Construct the exact v1 player record and snapshot-zero identity. Empty v1
-    // journals are retained to exercise mixed-version recovery and compaction.
-    const current = try format.encodePlayer(.{ .id = 1, .feet = .{ 1, 2, 3 }, .yaw = 0, .pitch = 0 });
-    var legacy = current[0..52].*;
-    put(u32, &legacy, 0, 52);
-    put(u16, &legacy, 46, 0);
-    put(u32, &legacy, 48, 0);
-    a.free(f.store.players);
-    f.store.players = try a.dupe(u8, &legacy);
-    f.store.player_count = 1;
-    f.store.base_format_version = 1;
-    var anchor = hasher("ZGW-INIT-1\x00");
-    anchor.update(&f.store.world_uuid);
-    hashInt(&anchor, u32, 1);
-    hashInt(&anchor, u64, 0);
-    hashInt(&anchor, u32, @intCast(f.store.descriptor.len));
-    anchor.update(f.store.descriptor);
-    hashInt(&anchor, u32, @intCast(f.store.global.len));
-    anchor.update(f.store.global);
-    hashInt(&anchor, u64, 1);
-    hashInt(&anchor, u64, legacy.len);
-    anchor.update(&legacy);
-    hashInt(&anchor, u64, 0);
-    anchor.final(&f.store.digest);
-    try f.store.writeBase(f.store.base);
-    try f.store.base.sync();
-    for (f.store.segments.items) |*segment| {
-        put(u32, &segment.header, 8, 1);
-        @memcpy(segment.header[56..88], &f.store.digest);
-        var header_hash = hasher("ZGW-WALHDR-1\x00");
-        header_hash.update(segment.header[0..88]);
-        header_hash.final(segment.header[88..120]);
-        try segment.file.write(&segment.header, 0);
-        try segment.file.sync();
+    const original_base = try readAlloc(a, f.store.base, 0, try f.store.base.size());
+    defer a.free(original_base);
+    var old_header: [120]u8 = original_base[0..120].*;
+    put(u32, &old_header, 8, 2);
+    try f.store.base.write(&old_header, 0);
+    const wal_name = try a.dupeZ(u8, f.store.segments.items[0].name);
+    defer a.free(wal_name);
+    const original_wal = f.store.segments.items[0].header;
+    f.store.deinit();
+    try std.testing.expectError(error.UnsupportedFormat, Store.open(a, f.path, .{}));
+    {
+        const dir = try io.Directory.open(f.path);
+        defer dir.close();
+        const base = try dir.file("world.base", false);
+        defer base.close();
+        put(u32, &old_header, 8, 1);
+        try base.write(&old_header, 0);
     }
-    f.store.deinit();
+    try std.testing.expectError(error.UnsupportedFormat, Store.open(a, f.path, .{}));
+    {
+        const dir = try io.Directory.open(f.path);
+        defer dir.close();
+        const base = try dir.file("world.base", false);
+        defer base.close();
+        try base.write(original_base, 0);
+        const wal = try dir.file(wal_name, false);
+        defer wal.close();
+        var header = original_wal;
+        put(u32, &header, 8, 2);
+        var h = hasher("ZGW-WALHDR-1\x00");
+        h.update(header[0..88]);
+        h.final(header[88..120]);
+        try wal.write(&header, 0);
+    }
+    try std.testing.expectError(error.Corruption, Store.open(a, f.path, .{}));
+    {
+        const dir = try io.Directory.open(f.path);
+        defer dir.close();
+        const wal = try dir.file(wal_name, false);
+        defer wal.close();
+        try wal.write(&original_wal, 0);
+    }
     f.store = try Store.open(a, f.path, .{});
-    try std.testing.expectEqual(null, (try format.decodePlayer(f.store.players)).inventory);
-    // Reopening must also validate the old snapshot-zero anchor after compaction.
-    f.store.deinit();
-    f.store = try Store.open(a, f.path, .{});
-    const carried = try format.encodePlayer(.{ .id = 1, .feet = .{ 1, 2, 3 }, .yaw = 0, .pitch = 0, .inventory = 8 });
+    try std.testing.expectEqual(@as(u64, 0), f.store.sequence);
+}
+
+test "blueprint publication and fulfillment recover atomically with terrain and inventory after failed sync" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |survives| {
+        var model = io.Model.init(a);
+        defer model.deinit();
+        io.test_model = &model;
+        defer io.test_model = null;
+        var f = try Fixture.init();
+        defer f.deinit();
+        const initial_player = try format.encodePlayer(.{ .id = 7, .feet = .{ 1, 1, 5 }, .yaw = 0, .pitch = 0, .inventory = 2 });
+        const tick = format.encodeGlobal(1);
+        try f.store.beginSnapshot(1, &tick, &initial_player, 1, 0);
+        _ = try f.store.commitSnapshot();
+        const changes = try blueprint_records.encodeOps(a, &.{ .{ .definition = .{ .id = 1, .owner = 7, .name = "Soil", .size = .{ 2, 1, 1 }, .cells = &.{ 2, 2 }, .target_count = 2 } }, .{ .instance = .{ .id = 1, .definition_id = 1, .owner = 7, .origin = .{ 0, 0, 0 }, .rotation = 0 } }, .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } } });
+        defer a.free(changes);
+        var blocks: [32768]u8 = @splat(0);
+        blocks[0] = 2;
+        const metadata = try format.encodeMetadata(a, .{ .construction = &.{0} });
+        defer a.free(metadata);
+        const record = try format.encodeChunk(a, f.store.world_uuid, .{ .id = 0, .revision = 1, .is_unreachable = false, .blocks = &blocks, .metadata = metadata });
+        defer a.free(record);
+        const empty_player = try format.encodePlayer(.{ .id = 7, .feet = .{ 1, 1, 5 }, .yaw = 0, .pitch = 0 });
+        try f.store.beginSnapshotWithBlueprints(2, &tick, &empty_player, 1, 1, changes);
+        try f.store.appendChunk(record);
+        var fault: io.Faults = .{ .operation = .full_sync };
+        f.store.setFaults(&fault);
+        try std.testing.expectError(error.Io, f.store.commitSnapshot());
+        try std.testing.expectEqual(@as(u32, 0), f.store.blueprints.definitions.count());
+        f.store.setFaults(null);
+        try model.crash(if (survives) .survive_unsynced else .lose_unsynced);
+        f.store.deinit();
+        f.store = try Store.open(a, f.path, .{});
+        try std.testing.expectEqual(@as(u64, if (survives) 2 else 1), f.store.sequence);
+        try std.testing.expectEqual(@as(u32, if (survives) 1 else 0), f.store.blueprints.definitions.count());
+        try std.testing.expectEqual(@as(?u8, if (survives) null else 2), (try format.decodePlayer(f.store.players)).inventory);
+        const loaded = try f.store.readChunk(a, 0);
+        defer if (loaded) |bytes| a.free(bytes);
+        try std.testing.expectEqual(survives, loaded != null);
+        if (survives) {
+            const site = f.store.blueprints.instances.get(1).?;
+            try std.testing.expectEqual(@as(u32, 1), site.remaining);
+            try std.testing.expect(site.isFulfilled(0));
+            try std.testing.expect(!site.isFulfilled(1));
+            var chunk = try format.decodeChunk(a, f.store.world_uuid, loaded.?, f.store.dimensions);
+            defer chunk.deinit(a);
+            try std.testing.expectEqualSlices(u8, &blocks, chunk.blocks);
+        }
+    }
+}
+
+test "unfinished progress survives checkpoint racing a final fulfillment and uncommitted tails" {
+    const a = std.testing.allocator;
+    var model = io.Model.init(a);
+    defer model.deinit();
+    io.test_model = &model;
+    defer io.test_model = null;
+    var f = try Fixture.init();
+    defer f.deinit();
+    const changes = try blueprint_records.encodeOps(a, &.{ .{ .definition = .{ .id = 1, .owner = 7, .name = "Soil", .size = .{ 2, 1, 1 }, .cells = &.{ 2, 2 }, .target_count = 2 } }, .{ .instance = .{ .id = 9, .definition_id = 1, .owner = 7, .origin = .{ 0, 0, 0 }, .rotation = 0 } }, .{ .fulfill = .{ .instance_id = 9, .cell_index = 0 } } });
+    defer a.free(changes);
     const tick = format.encodeGlobal(1);
-    try f.store.beginSnapshot(1, &tick, &carried, 1, 0);
+    const carrying = try format.encodePlayer(.{ .id = 7, .feet = .{ 1, 1, 5 }, .yaw = 0, .pitch = 0, .inventory = 2 });
+    var blocks: [32768]u8 = @splat(0);
+    blocks[0] = 3;
+    const first = try format.encodeChunk(a, f.store.world_uuid, .{ .id = 0, .revision = 1, .is_unreachable = false, .blocks = &blocks, .metadata = &.{} });
+    defer a.free(first);
+    try f.store.beginSnapshotWithBlueprints(1, &tick, &carrying, 1, 1, changes);
+    try f.store.appendChunk(first);
     _ = try f.store.commitSnapshot();
+    const final = try blueprint_records.encodeOps(a, &.{.{ .fulfill = .{ .instance_id = 9, .cell_index = 1 } }});
+    defer a.free(final);
+    const empty = try format.encodePlayer(.{ .id = 7, .feet = .{ 1, 1, 5 }, .yaw = 0, .pitch = 0 });
+    blocks[1] = 2;
+    const second = try format.encodeChunk(a, f.store.world_uuid, .{ .id = 0, .revision = 2, .is_unreachable = false, .blocks = &blocks, .metadata = &.{} });
+    defer a.free(second);
+    try f.store.beginSnapshotWithBlueprints(2, &tick, &empty, 1, 1, final);
+    try f.store.appendChunk(second);
+    try model.crash(.survive_unsynced);
     f.store.deinit();
     f.store = try Store.open(a, f.path, .{});
-    try std.testing.expectEqual(@as(?u8, 8), (try format.decodePlayer(f.store.players)).inventory);
-    try std.testing.expectEqual(@as(u64, 1), f.store.sequence);
+    try std.testing.expectEqual(@as(u32, 1), f.store.blueprints.instances.get(9).?.remaining);
+    try std.testing.expectEqual(@as(?u8, 2), (try format.decodePlayer(f.store.players)).inventory);
+    var checkpoint = try f.store.prepareCompaction();
+    defer checkpoint.deinit();
+    try f.store.beginSnapshotWithBlueprints(3, &tick, &empty, 1, 1, final);
+    try f.store.appendChunk(second);
+    _ = try f.store.commitSnapshot();
+    try checkpoint.run();
+    try f.store.installCompaction(&checkpoint);
+    try model.crash(.lose_unsynced);
+    f.store.deinit();
+    f.store = try Store.open(a, f.path, .{});
+    try std.testing.expectEqual(@as(u64, 3), f.store.sequence);
+    try std.testing.expectEqual(@as(u32, 0), f.store.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u64, 9), f.store.blueprints.max_instance_id);
+    try std.testing.expectEqual(@as(u32, 1), f.store.blueprints.definitions.count());
+    try std.testing.expectEqual(@as(?u8, null), (try format.decodePlayer(f.store.players)).inventory);
+    const loaded = (try f.store.readChunk(a, 0)).?;
+    defer a.free(loaded);
+    var chunk = try format.decodeChunk(a, f.store.world_uuid, loaded, f.store.dimensions);
+    defer chunk.deinit(a);
+    try std.testing.expectEqualSlices(u8, &blocks, chunk.blocks);
 }

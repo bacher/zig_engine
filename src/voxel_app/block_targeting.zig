@@ -39,7 +39,7 @@ pub fn withinReach(layout: *const engine.WorldLayout, position: Position, block:
 /// Shared by highlighting and actual actions: find the first occupied cell,
 /// select the edited cube, then apply its four-metre nearest-vertex reach check.
 pub fn findTarget(world: *const World, position: Position, direction: Position, mode: Mode) @import("world.zig").ChunkNotReceivedError!?[3]u32 {
-    const hit = (try cast(world, position, direction)) orelse return null;
+    const hit = (try castInternal(world, position, direction, mode == .putting)) orelse return null;
     const block = switch (mode) {
         .removing => hit.block,
         .putting => hit.placement orelse return null,
@@ -58,6 +58,10 @@ pub const Hit = struct {
 /// stopping at the first occupied cell. Hit distance does not decide tool reach.
 /// Unknown chunks stop the ray rather than allowing edits through unloaded terrain.
 pub fn cast(world: *const World, position: Position, direction: Position) @import("world.zig").ChunkNotReceivedError!?Hit {
+    return castInternal(world, position, direction, false);
+}
+
+fn castInternal(world: *const World, position: Position, direction: Position, planned_targets: bool) @import("world.zig").ChunkNotReceivedError!?Hit {
     const length = @sqrt(@reduce(.Add, direction * direction));
     if (!std.math.isFinite(length) or length == 0) return null;
     inline for (0..3) |axis| if (!std.math.isFinite(position[axis])) return null;
@@ -99,7 +103,12 @@ pub fn cast(world: *const World, position: Position, direction: Position) @impor
         // At an exact boundary, ignore the cell behind a negative-pointing ray.
         if (exit > distance) {
             if (coordinates.fromStorage(world.layout, cell)) |block| {
-                if (try world.isBlockSolid(block)) {
+                // Pending targets use their full logical cube while remaining physically air.
+                const physical_solid = try world.isBlockSolid(block);
+                if (planned_targets and !physical_solid and world.blueprints.targetAt(block) != null) {
+                    return .{ .block = block, .placement = block, .distance = distance };
+                }
+                if (physical_solid) {
                     var hit_distance = distance;
                     var hit_step = entry_step;
                     if (world.customShape(block)) |shape| if (shape == .slope) {

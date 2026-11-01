@@ -36,10 +36,10 @@ resources default to forbidden mining. `mined_type` is optional even on success;
 leaves keeps an empty player slot empty. An occupied slot still rejects all player mining.
 Deeprock has an independent mutation guard covering all direct and indirect writes.
 
-### Planned blueprint normalization
+### Blueprint normalization
 
-The [blueprint specification](../specs/features/blueprints.md) describes planned capture and
-construction behavior; it is not implemented. Captured materials are normalized into supported
+The [blueprint specification](../specs/features/blueprints.md) describes capture and
+construction behavior. Captured materials are normalized into supported
 construction materials, then the completed design is certified under the ordinary rules in this
 document, with assumed stable platforms beneath its globally lowest occupied cells. Source blocks
 outside the box supply no support. Normalization changes only the saved design, not source terrain
@@ -54,7 +54,7 @@ the narrowly gated reinforced-support fallback and height diagnostics in
 [R47/R49/Q21](../specs/features/blueprints.md#conditional-concrete-support-conversion), and
 selection/definition limits in [R54/Q25](../specs/features/blueprints.md#horizontal-size-and-wrapped-target-uniqueness).
 
-### Planned blueprint fulfillment
+### Blueprint fulfillment
 
 Full designs are validated at creation and composed with the destination at application.
 Subsequent blueprint-directed structural approval must inspect no more than the real block
@@ -74,10 +74,15 @@ Miniatures never count as real support. Filling a target and completing the last
 no full-design scan; the detailed structural/performance contract is in
 [R27–R32 and R51](../specs/features/blueprints.md#assembly-and-completion).
 
-### Planned blueprint extraction view
+Blueprint fills queue coalesced adaptive-road work by chunk. Road shapes may update after
+a short delay; their proposed changes use ordinary completed-world validation and unsafe
+changes are rejected. Final saving drains this queue. Road planning does not run inside
+the five-neighbor structural approval path.
+
+### Blueprint extraction view
 
 Extraction remains forbidden throughout an unfinished blueprint's box, including preexisting
-blocks in nontarget cells. Outside all such boxes, the planned general extraction check sees
+blocks in nontarget cells. Outside all such boxes, the general extraction check sees
 pending miniature targets as if they were completed blocks. It uses the same ordinary
 support rules and fixed windows, with all affected planned cells included as constructions.
 Checking only real construction metadata would miss an instance whose blocks are still
@@ -100,7 +105,7 @@ types excluded from capture. [R39/R40](../specs/features/blueprints.md#assembly-
 record composition examples, and the [constraints](../specs/features/blueprints.md#constraints)
 define cache separation and safe approval reuse. These checks add no work to blueprint fulfillment.
 
-### Planned blueprint world-mutation invariant
+### Blueprint world-mutation invariant
 
 Every gameplay world modification must preserve ordinary structural validity of affected
 real and planned constructions in the resulting logical world where all pending targets
@@ -131,7 +136,7 @@ preserving the completed logical arrangement. [R50/Q22](../specs/features/bluepr
 record the invariant and examples. Future cancellation and its effects on remaining or surrounding
 structures are excluded from this contract and require separate design.
 
-### Planned blueprint global completion order
+### Blueprint global completion order
 
 All active sites must remain structurally completable in some shared order. Placements may
 interleave sites: after a legal removal below plank target A, A may rely on a neighboring
@@ -169,13 +174,12 @@ Trunks and planks can rest on structural materials. Crushed stone can rest on na
 crushed stone. Rebar and concrete can rest on natural stone or either reinforced material.
 A stable platform is an additional valid foundation for all these materials. Resting on
 either soil state requires the centered stable platform, rather than just one soil cell.
-The current implementation also rejects an incompatible occupied block underneath even
-when a separate lateral support route could suffice. The planned correction below replaces
-that occupancy veto; it does not make the incompatible block provide support.
+An incompatible occupied block underneath supplies no direct support; an independently
+valid lateral route can still support the target.
 
-### Planned correction: independent support routes
+### Independent support routes
 
-The blueprint iteration must distinguish downward-support eligibility from occupancy.
+Downward-support eligibility is distinct from occupancy.
 Failure of the direct route does not veto another support route already permitted for the
 material. In particular, laterally supported planks may have dirt/packed dirt/grass directly
 below without requiring that earth to form a stable platform. The same independent-route
@@ -188,7 +192,7 @@ bridge-side restrictions. Unknown cells remain unknown. A valid lateral route ac
 block without treating the unsuitable below material as its foundation; absence of any
 valid route still rejects it. This changes general construction validation, including
 ordinary placement/removal and blueprint certification/composed admission, not just the
-blueprint shortcut. It is planned behavior, not yet implemented.
+blueprint shortcut.
 
 | Construction group | Maximum height | Horizontal reach from a vertically supported block |
 | --- | --- | --- |

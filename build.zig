@@ -221,6 +221,67 @@ pub fn build(b: *std.Build) void {
     world_unit_tests.root_module.addImport("zmath", zmath.module("root"));
     b.step("test-world", "Run chunk, road, timer, and optimistic world tests without the application lifecycle").dependOn(&b.addRunArtifact(world_unit_tests).step);
 
+    const blueprint_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/blueprint.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    blueprint_unit_tests.root_module.linkLibrary(voxel_engine_lib);
+    blueprint_unit_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
+    b.step("test-blueprint", "Run isolated blueprint compilation and bounded fulfillment tests").dependOn(&b.addRunArtifact(blueprint_unit_tests).step);
+
+    const blueprint_ui_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/blueprint_capture.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    blueprint_ui_tests.root_module.linkLibrary(voxel_engine_lib);
+    blueprint_ui_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
+    b.step("test-blueprint-ui", "Run blueprint selection, input, and capture worker lifecycle tests").dependOn(&b.addRunArtifact(blueprint_ui_tests).step);
+
+    const blueprint_admission_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/blueprint_admission.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    blueprint_admission_tests.root_module.linkLibrary(voxel_engine_lib);
+    blueprint_admission_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
+    b.step("test-blueprint-admission", "Run detached blueprint destination admission and publication tests").dependOn(&b.addRunArtifact(blueprint_admission_tests).step);
+
+    const blueprint_service_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/blueprint_service_tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    blueprint_service_tests.root_module.linkLibrary(voxel_engine_lib);
+    blueprint_service_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
+    blueprint_service_tests.root_module.addImport("zmath", zmath.module("root"));
+    const run_blueprint_service_tests = b.addRunArtifact(blueprint_service_tests);
+    b.step("test-blueprint-service", "Run blueprint authority, inventory, transaction, and restart tests").dependOn(&run_blueprint_service_tests.step);
+
+    const blueprint_benchmark = b.addExecutable(.{
+        .name = "blueprint-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/blueprint_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    blueprint_benchmark.root_module.linkLibrary(voxel_engine_lib);
+    blueprint_benchmark.root_module.addImport("engine", voxel_engine_lib.root_module);
+    const blueprint_benchmark_run = b.addRunArtifact(blueprint_benchmark);
+    if (b.args) |args| blueprint_benchmark_run.addArgs(args);
+    b.step("bench-blueprint", "Measure detached blueprint compilation and working allocations").dependOn(&blueprint_benchmark_run.step);
+
     const capture_unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/voxel_app/persistence_capture_tests.zig"),
@@ -303,6 +364,7 @@ pub fn build(b: *std.Build) void {
     const run_slot_buffer_manager_unit_tests = b.addRunArtifact(slot_buffer_manager_unit_tests);
 
     const test_step = b.step("test", "Run unit tests for both application wrapping modes");
+    test_step.dependOn(&run_blueprint_service_tests.step);
     const generation_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/voxel_app/generation_tests.zig"),
