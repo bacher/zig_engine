@@ -46,11 +46,15 @@ states. Ordinary structural rules remain the ones in this document, with a plann
 view for extraction outside unfinished blueprint boxes, as described below.
 
 Raw capture boxes and compact blueprint definitions have the planned horizontal limit
-`size_x, size_y <= min(world_block_size_x, world_block_size_y) - 1`, using inclusive cell counts.
-Check it before capture-specific chunk acquisition/copy and at Save/application. Quarter-turns
-preserve the limit, so distinct local targets cannot alias after X wrapping. Ordinary seam
-crossings remain supported. Destination bounds, actual platforms, composed structural validation,
-and overlap checks still apply; no extra check is added to five-neighbor fulfillment. See
+`size_x, size_y <= min(world_block_size_x / 2 - 1, world_block_size_y)`, using inclusive cell counts.
+Check it before capture-specific chunk acquisition/copy and at Save/application. Capture chooses
+the unique shorter wrapped X interval after the raw-hit 30-metre check, rejecting half-period ties;
+the selected interval then stays in signed local coordinates. Quarter-turns preserve the limit,
+so target-pair shortest wrapped X displacements equal their local displacements. At the minimum
+X period 64, the complementary arc between opposite end cells is at least 34 cells, beyond the
+root support radius 28. External blocks, common supports, and other sites can still interact;
+ordinary wrapped reads and destination/platform/composition/overlap checks remain required. No
+extra check is added to five-neighbor fulfillment. See
 [R54/Q25](../specs/features/blueprints.md#horizontal-size-and-wrapped-target-uniqueness).
 
 Natural stone and crushed stone are **not structurally interchangeable**. Natural stone is
