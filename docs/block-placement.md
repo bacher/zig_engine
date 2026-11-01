@@ -38,58 +38,29 @@ Deeprock has an independent mutation guard covering all direct and indirect writ
 
 ### Planned blueprint normalization
 
-The [blueprint specification](../specs/features/blueprints.md) describes a future exception to ordinary
-per-edit structural validation. It is not implemented. Full normalized designs are validated
-once at creation; subsequent blueprint-directed structural approval must inspect no more than
-one below and four XY neighbors, intentionally allowing temporarily unsupported intermediate
-states. Ordinary structural rules remain the ones in this document, with a planned logical
-view for extraction outside unfinished blueprint boxes, as described below.
-
-Raw capture boxes and compact blueprint definitions have the planned horizontal limit
-`size_x, size_y <= min(world_block_size_x / 2 - 1, world_block_size_y)`, using inclusive cell counts.
-Check it before capture-specific chunk acquisition/copy and at Save/application. Capture chooses
-the unique shorter wrapped X interval after the raw-hit 30-metre check, rejecting half-period ties;
-the selected interval then stays in signed local coordinates. Quarter-turns preserve the limit,
-so target-pair shortest wrapped X displacements equal their local displacements. At the minimum
-X period 64, the complementary arc between opposite end cells is at least 34 cells, beyond the
-root support radius 28. External blocks, common supports, and other sites can still interact;
-ordinary wrapped reads and destination/platform/composition/overlap checks remain required. No
-extra check is added to five-neighbor fulfillment. See
-[R54/Q25](../specs/features/blueprints.md#horizontal-size-and-wrapped-target-uniqueness).
+The [blueprint specification](../specs/features/blueprints.md) describes planned capture and
+construction behavior; it is not implemented. Captured materials are normalized into supported
+construction materials, then the completed design is certified under the ordinary rules in this
+document, with assumed stable platforms beneath its globally lowest occupied cells. Source blocks
+outside the box supply no support. Normalization changes only the saved design, not source terrain
+or general construction rules.
 
 Natural stone and crushed stone are **not structurally interchangeable**. Natural stone is
 an unrestricted foundation; crushed stone has mineral/column/bridge limits and does not
 directly support rebar/concrete outside the existing platform and lateral-support routes.
-The earlier proposed general rule allowing that direct support has been withdrawn.
-Blueprint validation must examine the converted arrangement, not certify the original and
-then replace its bytes.
+Blueprint validation must examine the converted arrangement. The feature spec defines the
+material allowlist and initial conversions in [R19](../specs/features/blueprints.md#full-validation-and-portability),
+the narrowly gated reinforced-support fallback and height diagnostics in
+[R47/R49/Q21](../specs/features/blueprints.md#conditional-concrete-support-conversion), and
+selection/definition limits in [R54/Q25](../specs/features/blueprints.md#horizontal-size-and-wrapped-target-uniqueness).
 
-Capture first converts every included stone to crushed stone and validates. Only a concrete
-fallback for an actual reinforced-on-crushed support conflict is allowed: replace the
-conflicting crushed-stone support with reinforced concrete, continuing down that necessary
-support chain until the new concrete has a legal support route, then fully validate the result.
-The original logical snapshot, including miniature types, must already contain rebar or
-reinforced concrete. Their presence alone does not authorize repairs elsewhere, and a valid
-normalized design needs no fallback. This changes the saved blueprint only, not source
-terrain or general support rules. Other material/geometry repairs, added supports, removed
-occupied cells, and relaxed limits remain excluded. In particular, a seven-cell stone-only
-column without an intermediate platform reset still fails after conversion. The assumed
-bottom platforms are validation fixtures, not added blueprint blocks.
+### Planned blueprint fulfillment
 
-A seven-cell stone support under original rebar may become seven concrete cells and pass;
-an unrelated rebar cell elsewhere cannot authorize that conversion. Replacing support
-materials does not reset mineral height: a reinforced path reaching level 21 without a
-platform reset or other valid route rejects capture with an explicit 20-level-limit error.
-Highlight the lower source cells of that offending support chain, prioritizing replaced
-supports rather than only its uppermost cell. All fallback work happens during capture;
-the five-neighbor fulfillment rule is unchanged.
-
-The approved first-iteration set is dirt, sand, crushed stone, tree trunk, planks, rebar,
-reinforced concrete, and solid country road. Capture also maps grass/packed dirt to dirt;
-the three earth states retain one blueprint fulfillment identity after normal dirt aging.
-Leaves, geological resources, clay, deeprock, water, snow, and adaptive/custom roads are
-excluded. XY support permits the rebar/concrete pair without making their target materials
-interchangeable.
+Full designs are validated at creation and composed with the destination at application.
+Subsequent blueprint-directed structural approval must inspect no more than the real block
+directly below and four immediate XY neighbors. Any real block below passes this cheap rule;
+with air below, an eligible real XY neighbor is required. This deliberately permits temporarily
+unsupported intermediate states without repeating ordinary height/span or dependent searches.
 
 For cheap fulfillment with air below, an eligible real XY neighbor is a matching logical
 material, either reinforced type for a rebar/concrete target, or natural rock for a
@@ -98,6 +69,10 @@ limestone, coal, and deeprock; clay is not in that family. This directed support
 matches ordinary crushed-bridge routes and prevents a legal foundation removal from
 stranding a crushed miniature between real stone sides. It uses the same four XY reads,
 adds no recursive validation, and does not change the target's required inventory material.
+Normal dirt aging preserves its blueprint fulfillment identity across dirt, packed dirt, and grass.
+Miniatures never count as real support. Filling a target and completing the last target require
+no full-design scan; the detailed structural/performance contract is in
+[R27–R32 and R51](../specs/features/blueprints.md#assembly-and-completion).
 
 ### Planned blueprint extraction view
 
@@ -115,25 +90,15 @@ use real terrain; miniatures cannot be mined and never count as real support for
 another target. Replacing a miniature with its required real block leaves the completed
 logical view unchanged, so that operation needs no dependent revalidation.
 
-One-time composed admission and ordinary edits must reject incompatible compositions after
-correcting the support-eligibility rule described below. An ordinary placement first validates
-its new target against physical terrain, then validates that target and affected dependents
-in the completed logical view. Physical approval ensures miniatures supply no real support;
-completed target approval catches conflicts in the new block itself, which dependent checks
-skip. Both views include the same proposed placement.
-
-Joining a six-cell crushed-stone blueprint column to an existing crushed-stone bridge above
-creates an illegal seven-cell run. The reverse order is also forbidden: after applying six
-miniatures, an ordinary bridge above them can be physically supported by stone sides but
-would become the seventh consecutive crushed cell. Completed target validation rejects that
-ordinary placement before mutation. A sand target below constructed water/snow is another
-conflict. The dependent filter must cover those direct dependencies, including material
-classes that cannot themselves be captured in this blueprint iteration.
-
-Share the completed target/dependent validator cache within one ordinary edit, keeping it
-separate from the physical cache. If the planned-cell index proves no pending targets can
-occur in the target validator's conservative read region, physical target approval can be
-reused. This adds no full-design scan or extra checks to five-neighbor blueprint fulfillment.
+Application checks the completed design's composition with the destination and affected
+constructions. An ordinary placement first validates its new target against physical terrain,
+then validates that target and affected dependents in the completed logical view. Physical
+approval ensures miniatures supply no real support; completed target approval catches conflicts
+in the new block itself, which dependent checks skip. Both views include the proposed placement.
+Affected-dependent discovery must cover every world material, including water/snow and other
+types excluded from capture. [R39/R40](../specs/features/blueprints.md#assembly-and-completion)
+record composition examples, and the [constraints](../specs/features/blueprints.md#constraints)
+define cache separation and safe approval reuse. These checks add no work to blueprint fulfillment.
 
 ### Planned blueprint world-mutation invariant
 
@@ -149,9 +114,7 @@ Unfinished construction may temporarily violate ordinary physical construction r
 internally and in its surroundings. This includes partially built structures and already
 completed buildings affected by the unfinished work. Finishing one blueprint removes its
 own frame and restrictions; it does not promise ordinary physical validity while nearby
-targets from other sites remain pending. For example, a valid crushed-stone bridge may
-temporarily become a forbidden seventh crushed cell when construction below first fills a
-six-cell column, then become valid again when the surrounding stable platform is finished.
+targets from other sites remain pending.
 
 Each fulfillment replaces one planned type with an equivalent real type, leaving the
 completed logical arrangement unchanged. Once a constructed cell's ordinary
@@ -164,25 +127,21 @@ condition applies around every constructed cell, not just its origin or former b
 Eventual physical validity is a consequence of the mutation admission invariant. It adds no
 completion check, repair operation, per-fill search for neighboring sites, or persistent
 stability flag. A new nearby site may introduce temporary physical invalidity again while
-preserving the completed logical arrangement. Future cancellation and its effects on
-remaining or surrounding structures are excluded from this contract and require separate design.
+preserving the completed logical arrangement. [R50/Q22](../specs/features/blueprints.md#world-mutation-invariant-and-eventual-physical-validity)
+record the invariant and examples. Future cancellation and its effects on remaining or surrounding
+structures are excluded from this contract and require separate design.
 
 ### Planned blueprint global completion order
 
 All active sites must remain structurally completable in some shared order. Placements may
 interleave sites: after a legal removal below plank target A, A may rely on a neighboring
 site's plank target B being filled first. Cross-site dependencies are accepted. Independent
-completion of each site is deferred as a potential improvement, with per-instance logical
-readers preferred over the alternative support-component graph for future exploration.
-
-The global guarantee follows from the valid all-sites-completed arrangement and cheap
-support covering ordinary routes. At the lowest pending Z, an occupied below cell is
-already real; lateral plank/reinforced routes lead to a real contact or a pending target
-with such a below cell, while crushed bridges have qualifying real or directly supported
-sides. Thus at least one target can fill; filling it leaves the completed view unchanged,
-and the argument repeats. This assumes materials/data and nonstructural placement
-conditions are available. It adds no scheduler, runtime graph, per-site-view check,
-reachability scan, or final validation pass; the five-neighbor bound remains.
+completion of each site is deferred as a potential improvement. This is a structural guarantee;
+materials, data, access, and scheduling are separate conditions. The spec contains the
+[completion-order argument](../specs/features/blueprints.md#global-completion-order-argument)
+and the preferred deferred [per-instance-reader alternative](../specs/features/blueprints.md#deferred-preferred-alternative-per-instance-logical-readers)
+to a support-component graph. The current guarantee adds no runtime graph, reachability scan,
+or final validation pass; the five-neighbor bound remains.
 
 ## Stable platforms
 

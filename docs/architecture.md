@@ -118,44 +118,29 @@ Future world gameplay simulation will use a configurable fixed step around 20 or
 
 GPU operations run on the application thread. The service generates data and face records without accessing GPU resources. Each producer/consumer thread uses its own client endpoint; a client's request-ID counter is not a shared multi-thread API. Service mailboxes use short mutex-protected sections, and an allocator used by the service must support concurrent allocation.
 
-The [blueprint specification](../specs/features/blueprints.md#plan) specifies a future client-side
-capture workflow, not yet implemented. The client pins/promotes selected chunks through ordinary
-full-block subscriptions, then copies the player's current predicted real+planned view on the main
-thread into owned immutable data. A bounded helper validates those detached contents in isolation,
-without live world pointers or source coordinates. The client retains the checked candidate until
-name confirmation transfers it to WorldDataService for saving. Capture includes effective pending
-edits; later authority rejection, source changes, or prediction rebases do not alter that snapshot.
-It needs no authoritative source-operation fence or source-version barrier. Loading can span frames;
-measure the initial single-pass copy separately from heavy helper validation. Release capture pins
-after copying, preserve other subscription users, and never use persistence mutation-freezing holds.
-Selection generations, bounded memory/work, and cancellation/shutdown cleanup remain required.
-Unconfirmed candidates never enter autosave; once Save is submitted, draft cleanup cannot destroy
-its owned payload. The [previous service-owned design](../specs/features/blueprints.md#rejected-alternative-worlddataservice-owned-capture)
-is preserved in the feature spec as a rejected alternative, not a second implementation target.
+The planned blueprint capture workflow follows these ownership boundaries:
 
-After checking the raw ray intersection's 30-metre range, choose the shorter wrapped X interval
-between the endpoint cells; reject half-period ties and represent the interval in signed local
-coordinates. Before capture-specific chunk acquisition, check both inclusive horizontal dimensions
-against `L = min(world_block_size_x / 2 - 1, world_block_size_y)`. Apply the same limit to compact
-definitions in the compiler and Save, and to rotated footprints at application. The helper may
-receive immutable L without source coordinates or live-world access. This O(1) precondition keeps
-target-pair shortest wrapped X displacements equal to local displacements in every quarter-turn.
-Their complementary end-to-end arc exceeds the current root support window; external-world
-dependencies still require composed/affected validation. It adds no per-target world-alias set or
-fulfillment work. Compaction or refolding cannot rescue an already formed oversized raw selection.
-Keep ordinary definition well-formedness, seam-aware world lookups, destination bounds,
-platform/composition checks, and other-instance overlap under
+- The main thread owns selection/UI state and captures the player's predicted real+planned view,
+  including effective pending edits, into detached immutable data. Later source changes or
+  prediction rebases do not alter it.
+- A bounded helper validates detached contents in isolation, without live world pointers or
+  source coordinates. The client owns the checked candidate until Save is submitted.
+- WorldDataService receives the checked definition for persistence. A submitted operation owns
+  its payload independently of UI cleanup; unconfirmed candidates never enter autosave.
+
+Capture uses ordinary full-block subscriptions rather than persistence mutation-freezing holds.
+Jobs, memory, source retention, and cancellation/shutdown cleanup must remain bounded, and stale
+results must not affect a newer draft. Large application admission prepares a versioned dependency
+snapshot and resources before atomic publication. Blueprint dialogs block controls while simulation
+and service processing continue. These are planned responsibilities, not implemented behavior.
+
+The [feature plan](../specs/features/blueprints.md#plan) defines the detailed capture/helper/Save
+protocol and retains the rejected service-owned capture alternative. Selection geometry and
+horizontal limits belong to the [capture rules](../specs/features/blueprints.md#capture-and-input) and
 [R54/Q25](../specs/features/blueprints.md#horizontal-size-and-wrapped-target-uniqueness).
+The [resource accounting](../specs/features/blueprints.md#reference-workload-and-resource-accounting)
+defines the supported workload, memory considerations, and required measurements.
 
-The supported large capture scenario is approximately 100×100×32 cells where world dimensions
-permit that workload. Its dense one-byte snapshot is about 313 KiB, but compiler caches/diagnostics,
-source metadata, and render/index
-state need separate budgets. Existing validation cache entries embed full failure diagnostics,
-so reusing one unbounded cache across the whole design is not a small-memory solution.
-Large application admission must also prepare a versioned dependency snapshot and prebuild
-resources before atomic publication. Blueprint dialogs block input without pausing gameplay
-time, player gravity/collision, timers, or simulation. These are planned contracts; the
-feature spec records the required measurements and adopted UI defaults.
 The general [save compatibility policy](persistence.md#save-compatibility) applies to the
 whole world, including blueprints. There is one current game logic; blueprint definitions
 and unfinished instances do not select historical rules. Before the first release,
