@@ -6040,7 +6040,7 @@ test "blueprint dialogs hide the crosshair and chooser has a DPI-scaled width fl
     }
 }
 
-test "same-height blueprint XY uses distant adjacent placement and a continuous height transition" {
+test "same-height blueprint XY uses distant adjacent placement then absolute height" {
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
@@ -6082,13 +6082,20 @@ test "same-height blueprint XY uses distant adjacent placement and a continuous 
     try std.testing.expectEqualDeep(last_valid, game.blueprint_selection.bounds.?);
     try std.testing.expect(!game.blueprint_selection.confirmExtent());
 
-    game.world.?.setBlockUnchecked(first_backing, .stone);
+    const elevated_backing = coordinates.fromWorld(&test_layout, .{ 0, 20, 3 }).?;
+    game.world.?.setBlockUnchecked(elevated_backing, .stone);
+    game.player.?.pitch = @floatCast(std.math.atan((3.5 - fixture.camera.position[2]) / (20 - fixture.camera.position[1])));
+    game.player.?.applyCamera(&fixture.camera);
+    game.updateBlueprintRay();
+    try std.testing.expect(game.blueprint_selection.target_valid);
+    try std.testing.expectEqual(@as(u32, 1), game.blueprint_selection.bounds.?.size()[2]);
     game.confirmBlueprintTool();
     try std.testing.expectEqual(blueprint_capture.Stage.height, game.blueprint_selection.stage);
     game.updateBlueprintRay();
     try std.testing.expect(game.blueprint_selection.target_valid);
-    try std.testing.expectEqual(@as(u32, 1), game.blueprint_selection.bounds.?.size()[2]);
-    game.player.?.pitch = 0.1;
+    try std.testing.expectEqual(@as(i64, anchor[2]) + 2, game.blueprint_selection.bounds.?.max[2]);
+    try std.testing.expectEqual(@as(u32, 3), game.blueprint_selection.bounds.?.size()[2]);
+    game.player.?.pitch = 0.2;
     game.player.?.applyCamera(&fixture.camera);
     game.updateBlueprintRay();
     try std.testing.expect(game.blueprint_selection.target_valid);

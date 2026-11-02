@@ -4,7 +4,7 @@ This report accompanies the implementation of [the blueprint specification](../s
 
 ## Implemented paths
 
-- Client selection uses three fresh presses, a fixed XY plane outside the anchor-height camera slab and physical-hit adjacent-cell targeting inside that slab, then a frozen exact-contact/yaw vertical plane with relative height. The fallback skips miniatures and uses the 30-metre raw-contact range from current player feet rather than ordinary four-metre reach. Both paths preserve shortest wrapped X intervals and the world-dependent horizontal cap. Full-block source subscriptions are retained only through the single predicted-view copy. One reusable helper validates detached contents; cancellation generations prevent stale results from owning newer UI.
+- Client selection uses three fresh presses, a fixed XY plane outside the anchor-height camera slab and physical-hit adjacent-cell targeting inside that slab, then a frozen exact-contact/yaw vertical plane using absolute world/grid Z. XY stays one cell high; entering height selection may immediately jump to the actual contact height, and out-of-bounds absolute heights reject confirmation. The fallback skips miniatures and uses the 30-metre raw-contact range from current player feet rather than ordinary four-metre reach. Both paths preserve shortest wrapped X intervals and the world-dependent horizontal cap. Full-block source subscriptions are retained only through the single predicted-view copy. One reusable helper validates detached contents; cancellation generations prevent stale results from owning newer UI.
 - The compiler normalizes materials, compacts the definition, applies only the narrowly eligible concrete-support cascade, and checks ordinary validity and cheap-rule assemblability. Successful cache entries no longer retain full failure diagnostics.
 - Application copies versioned destination dependencies in bounded service turns, validates/prepares indexes on a helper, and publishes only after dependency/overlay checks. Occupied targets, inadequate real platforms, overlapping active boxes, and incompatible completed-world composition are rejected atomically.
 - Dedicated client and authority fulfillment reads at most five physical support cells. It does not call ordinary structural/dependent validation or road planning. Target removal, bit/counter updates, and known-empty construction insertion are incremental; completion does not scan the site.
@@ -42,7 +42,7 @@ Executed successfully during implementation:
 - `zig build test-world`, `test-blueprint-service`, `test-capture`, and `test-persistence`.
 - `zig build` and `zig build test-gpu`; GPU tests exercise the instanced shader in wrapping and nonwrapping modes.
 
-Final-source ReleaseFast verification passed **70/70 build steps and 1,799 tests**, with eight existing tests skipped:
+Earlier full-suite ReleaseFast verification passed **70/70 build steps and 1,799 tests**, with eight existing tests skipped:
 
 ```sh
 zig build install test test-blueprint-ui test-blueprint-admission \
@@ -51,7 +51,7 @@ zig build install test test-blueprint-ui test-blueprint-admission \
 
 This includes the AC52 replay/conflict/ownership tests, cross-site completion-order regression, quick-input edges, pending-target preview identity, application save fences, and GPU shader tests. The service target passed 423 tests, the capture/helper target 66, admission 61, storage lifecycle 60, and GPU targets 47 each. Counts include tests imported into more than one runner. `zig fmt` and `git diff --check` also pass. Automated successes do not claim every manual acceptance scenario has been exercised.
 
-The same-height XY fallback and relative-height update add regression cases under AC96–AC101 for camera-slab boundaries, adjacent placement cells versus backing blocks/contact flooring, miniature exclusion, extended reach and raw-contact range, relative Z changes, seam images, and invalid-hit recovery. `zig build install test test-blueprint-ui -Doptimize=ReleaseFast --summary all` passed 58/58 steps and 1,621 tests, with eight existing skips. This includes an application-level distant-target-to-height transition and valid relative heights whose raw plane contact lies beyond the world's Z bounds. The recorded manual walkthrough predates this update and does not verify it.
+The same-height XY fallback and absolute-height update use AC96–AC101 for camera-slab boundaries, adjacent placement cells versus backing blocks/contact flooring, miniature exclusion, extended reach and raw-contact range, absolute world/grid Z with accepted stage-entry jumps, seam images, and invalid-hit recovery. `zig build install test test-blueprint-ui -Doptimize=ReleaseFast --summary all` passed 58/58 steps and 1,621 tests, with eight existing skips. The current run covers the immediate height jump after targeting an elevated physical block, absolute height changes across the X seam, and rejection of raw height-plane hits outside world Z bounds. The recorded manual walkthrough predates this update and does not verify it.
 
 ## Measurements
 

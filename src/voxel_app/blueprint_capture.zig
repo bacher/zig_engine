@@ -54,7 +54,6 @@ pub const Selection = struct {
     target_valid: bool = false,
     target_error: ?TargetError = .no_target,
     /// Exact accepted XY reference in the anchor's chosen periodic frame.
-    /// Its Z establishes the relative height baseline for placement targeting.
     plane_point: ?Position = null,
     plane_normal: Position = .{ 0, 1, 0 },
     current_hit: ?Position = null,
@@ -149,7 +148,7 @@ pub const Selection = struct {
             return;
         }
         if (hit[1] < 0 or hit[1] >= @as(f64, @floatFromInt(layout.size_in_blocks[1])) or
-            (self.stage == .xy and (hit[2] < 0 or hit[2] >= @as(f64, @floatFromInt(layout.size_in_blocks[2])))) or
+            hit[2] < 0 or hit[2] >= @as(f64, @floatFromInt(layout.size_in_blocks[2])) or
             @abs(hit[0]) >= @as(f64, @floatFromInt(std.math.maxInt(i64) / 2)))
         {
             self.target_error = .out_of_bounds;
@@ -169,17 +168,10 @@ pub const Selection = struct {
             endpoint[0] = anchor[0] + dx;
             endpoint[1] = if (placement_cell) |cell| cell[1] else @intFromFloat(@floor(hit[1]));
             accepted_hit[0] += @as(f64, @floatFromInt(endpoint[0] - raw_x));
-            // Keep the ordinary horizontal-plane path at exactly zero height offset.
+            // Preserve the exact horizontal plane Z.
             if (placement_cell == null) accepted_hit[2] = @as(f64, @floatFromInt(anchor[2])) + 0.5;
         } else {
-            // Placement references can be at another elevation. Preserve the
-            // confirmed anchor height until the player moves the ray vertically.
-            const mapped_z = hit[2] + (@as(f64, @floatFromInt(anchor[2])) + 0.5 - self.plane_point.?[2]);
-            if (!std.math.isFinite(mapped_z) or mapped_z < 0 or mapped_z >= @as(f64, @floatFromInt(layout.size_in_blocks[2]))) {
-                self.target_error = .out_of_bounds;
-                return;
-            }
-            endpoint[2] = @intFromFloat(@floor(mapped_z));
+            endpoint[2] = @intFromFloat(@floor(hit[2]));
         }
         var proposed = if (self.stage == .height) self.bounds.? else Box{ .min = @min(anchor, endpoint), .max = @max(anchor, endpoint) };
         if (self.stage == .height) {
@@ -383,7 +375,7 @@ test "XY placement fallback uses precisely the anchor camera-height slab" {
     try std.testing.expect(!selection.usesPlacementTarget(&layout, worldPosition(&layout, camera)));
 }
 
-test "placement XY uses the adjacent cube and height changes relative to its fractional contact" {
+test "placement XY uses the adjacent cube and height immediately follows absolute contact Z" {
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } });
     var selection: Selection = .{};
     const camera: Position = .{ 103.2, 103.2, 100.25 };
@@ -403,11 +395,14 @@ test "placement XY uses the adjacent cube and height changes relative to its fra
     try std.testing.expectEqual(Position{ 0, 1, 0 }, selection.plane_normal);
     aim(&selection, &layout, feet, camera, contact, .{ 1, 0, 0 });
     try std.testing.expect(selection.target_valid);
-    try std.testing.expectEqual([3]u32{ 6, 5, 1 }, selection.bounds.?.size());
-    aim(&selection, &layout, feet, camera, contact + Position{ 0, 0, 2.2 }, .{ 1, 0, 0 });
+    try std.testing.expectEqual([3]u32{ 6, 5, 6 }, selection.bounds.?.size());
+    aim(&selection, &layout, feet, camera, contact + Position{ 0, 0, 2.25 }, .{ 1, 0, 0 });
     try std.testing.expect(selection.target_valid);
-    try std.testing.expectEqual(@as(i64, 102), selection.bounds.?.max[2]);
+    try std.testing.expectEqual(@as(i64, 108), selection.bounds.?.max[2]);
     aim(&selection, &layout, feet, camera, contact - Position{ 0, 0, 2.2 }, .{ 1, 0, 0 });
+    try std.testing.expect(selection.target_valid);
+    try std.testing.expectEqual(@as(i64, 103), selection.bounds.?.max[2]);
+    aim(&selection, &layout, feet, camera, .{ contact[0], contact[1], 98.8 }, .{ 1, 0, 0 });
     try std.testing.expect(selection.target_valid);
     try std.testing.expectEqual(@as(i64, 98), selection.bounds.?.min[2]);
     try std.testing.expectEqual(Position{ 0, 1, 0 }, selection.plane_normal);
@@ -462,7 +457,7 @@ test "invalid placement targets preserve the last bounds and raw reach precedes 
     try std.testing.expectEqualDeep(single, selection.bounds.?);
 }
 
-test "placement contact and relative height preserve the chosen frame across the X seam" {
+test "placement contact and absolute height preserve the chosen frame across the X seam" {
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } });
     var selection: Selection = .{};
     selection.setAnchor(&layout, .{ 254, 100, 100 }, worldPosition(&layout, .{ 254.25, 100.25, 100.25 }));
@@ -477,15 +472,15 @@ test "placement contact and relative height preserve the chosen frame across the
     const plane = selection.plane_point.?;
     aim(&selection, &layout, feet, camera, contact, .{ 0, 1, 0 });
     try std.testing.expect(selection.target_valid);
-    try std.testing.expectEqual([3]u32{ 4, 3, 1 }, selection.bounds.?.size());
+    try std.testing.expectEqual([3]u32{ 4, 3, 7 }, selection.bounds.?.size());
     aim(&selection, &layout, feet + Position{ 256, 0, 0 }, camera + Position{ 256, 0, 0 }, contact + Position{ 256, 0, 3.2 }, .{ 0, 1, 0 });
     try std.testing.expect(selection.target_valid);
-    try std.testing.expectEqual([3]u32{ 4, 3, 4 }, selection.bounds.?.size());
+    try std.testing.expectEqual([3]u32{ 4, 3, 10 }, selection.bounds.?.size());
     try std.testing.expectEqual(plane, selection.plane_point.?);
     try std.testing.expectEqual(@as(i64, 257), selection.bounds.?.max[0]);
 }
 
-test "relative height validates raw reach and both mapped world boundaries" {
+test "absolute height accepts in-bounds hits near either world boundary and validates raw reach" {
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } });
     for ([_]struct { anchor_z: u32, contact_z: f64, change: f64 }{
         .{ .anchor_z = 0, .contact_z = 10.25, .change = -1 },
@@ -500,8 +495,12 @@ test "relative height validates raw reach and both mapped world boundaries" {
         try std.testing.expect(selection.confirmExtent());
         const accepted = selection.bounds.?;
         aim(&selection, &layout, camera, camera, contact + Position{ 0, 0, case.change }, .{ 0, 1, 0 });
-        try std.testing.expectEqual(TargetError.out_of_bounds, selection.target_error.?);
-        try std.testing.expectEqualDeep(accepted, selection.bounds.?);
+        try std.testing.expect(selection.target_valid);
+        const endpoint: i64 = @intFromFloat(@floor(case.contact_z + case.change));
+        try std.testing.expectEqual(@min(@as(i64, case.anchor_z), endpoint), selection.bounds.?.min[2]);
+        try std.testing.expectEqual(@max(@as(i64, case.anchor_z), endpoint), selection.bounds.?.max[2]);
+        try std.testing.expectEqual(accepted.min[0], selection.bounds.?.min[0]);
+        try std.testing.expectEqual(accepted.max[1], selection.bounds.?.max[1]);
     }
     var selection: Selection = .{};
     const camera: Position = .{ 100, 100, 100.25 };
@@ -510,17 +509,17 @@ test "relative height validates raw reach and both mapped world boundaries" {
     selection.updatePlacementTarget(&layout, worldPosition(&layout, camera), worldPosition(&layout, camera), .{ 0, 1, 0 }, .{ .cell = .{ 100, 109, 119 }, .hit = worldPosition(&layout, contact) });
     try std.testing.expect(selection.confirmExtent());
     const accepted = selection.bounds.?;
-    // The mapped point is near the feet, but the actual plane contact is beyond 30 m.
+    // The actual plane contact remains subject to the thirty-metre range.
     aim(&selection, &layout, camera, camera, contact + Position{ 0, 0, 15 }, .{ 0, 1, 0 });
     try std.testing.expectEqual(TargetError.out_of_range, selection.target_error.?);
     try std.testing.expectEqualDeep(accepted, selection.bounds.?);
 }
 
-test "relative height can map raw intersections beyond world Z into valid endpoints" {
+test "absolute height rejects plane intersections beyond world Z without applying an offset" {
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } });
-    for ([_]struct { anchor_z: u32, contact_z: f64, raw_z: f64, endpoint_z: i64 }{
-        .{ .anchor_z = 240, .contact_z = 254, .raw_z = 256, .endpoint_z = 242 },
-        .{ .anchor_z = 15, .contact_z = 1, .raw_z = -1, .endpoint_z = 13 },
+    for ([_]struct { anchor_z: u32, contact_z: f64, raw_z: f64 }{
+        .{ .anchor_z = 240, .contact_z = 254, .raw_z = 256 },
+        .{ .anchor_z = 15, .contact_z = 1, .raw_z = -1 },
     }) |case| {
         var selection: Selection = .{};
         const camera: Position = .{ 100.25, 100.25, @as(f64, @floatFromInt(case.anchor_z)) + 0.25 };
@@ -532,10 +531,11 @@ test "relative height can map raw intersections beyond world Z into valid endpoi
             .hit = worldPosition(&layout, contact),
         });
         try std.testing.expect(selection.confirmExtent());
+        const accepted = selection.bounds.?;
         aim(&selection, &layout, feet, camera, .{ contact[0], contact[1], case.raw_z }, .{ 0, 1, 0 });
-        try std.testing.expect(selection.target_valid);
-        try std.testing.expectEqual(@min(@as(i64, case.anchor_z), case.endpoint_z), selection.bounds.?.min[2]);
-        try std.testing.expectEqual(@max(@as(i64, case.anchor_z), case.endpoint_z), selection.bounds.?.max[2]);
+        try std.testing.expectEqual(TargetError.out_of_bounds, selection.target_error.?);
+        try std.testing.expectEqualDeep(accepted, selection.bounds.?);
+        try std.testing.expect(!selection.confirmExtent());
     }
 }
 
