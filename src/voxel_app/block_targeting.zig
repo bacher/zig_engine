@@ -9,11 +9,6 @@ const Cell = coordinates.Cell;
 pub const reach: f64 = 4;
 pub const Mode = enum { putting, removing };
 
-// A hit on either the occupied cube or its face-adjacent placement cube cannot
-// be farther than one cube diagonal from a reachable vertex. This bounds the
-// traversal without rejecting a candidate by its hit-face distance.
-const ray_limit = reach + @sqrt(@as(f64, 3));
-
 fn storagePosition(layout: *const engine.WorldLayout, position: Position) Position {
     var start = position + @as(Position, @floatFromInt(layout.origin_chunk)) * @as(Position, @splat(engine.chunk_utils.CHUNK_SIZE));
     start[0] = @mod(start[0], @as(f64, @floatFromInt(layout.size_in_blocks[0])));
@@ -23,6 +18,12 @@ fn storagePosition(layout: *const engine.WorldLayout, position: Position) Positi
 /// Measure the candidate cube's nearest vertex, independently of the aimed face.
 /// Wrapped x uses the nearest copy of the cube, even after repeated world trips.
 pub fn withinReach(layout: *const engine.WorldLayout, position: Position, block: [3]u32) bool {
+    return withinReachWithLimit(layout, position, block, reach);
+}
+
+/// Apply the same nearest-vertex rule with an explicit finite, nonnegative limit.
+pub fn withinReachWithLimit(layout: *const engine.WorldLayout, position: Position, block: [3]u32, max_reach: f64) bool {
+    if (!std.math.isFinite(max_reach) or max_reach < 0) return false;
     inline for (0..3) |axis| if (!std.math.isFinite(position[axis])) return false;
     const start = storagePosition(layout, position);
     var delta = @as(Position, @floatFromInt(@as(@Vector(3, u32), block))) - start;
@@ -32,19 +33,25 @@ pub fn withinReach(layout: *const engine.WorldLayout, position: Position, block:
     const corner = @min(@abs(delta), @abs(delta + @as(Position, @splat(1))));
     const distance_squared = @reduce(.Add, corner * corner);
     // Allow only floating-point rounding at the storage-coordinate scale.
-    const tolerance = 8 * std.math.floatEps(f64) * @max(reach, @reduce(.Max, @abs(start)));
-    return std.math.isFinite(distance_squared) and distance_squared <= (reach + tolerance) * (reach + tolerance);
+    const tolerance = 8 * std.math.floatEps(f64) * @max(max_reach, @reduce(.Max, @abs(start)));
+    return std.math.isFinite(distance_squared) and distance_squared <= (max_reach + tolerance) * (max_reach + tolerance);
 }
 
 /// Shared by highlighting and actual actions: find the first occupied cell,
 /// select the edited cube, then apply its four-metre nearest-vertex reach check.
 pub fn findTarget(world: *const World, position: Position, direction: Position, mode: Mode) @import("world.zig").ChunkNotReceivedError!?[3]u32 {
-    const hit = (try castInternal(world, position, direction, mode == .putting)) orelse return null;
+    return findTargetWithReach(world, position, direction, mode, reach);
+}
+
+/// Select the same edited cube as ordinary targeting with a caller-supplied reach.
+/// Invalid reach limits produce no target and do not traverse the world.
+pub fn findTargetWithReach(world: *const World, position: Position, direction: Position, mode: Mode, max_reach: f64) @import("world.zig").ChunkNotReceivedError!?[3]u32 {
+    const hit = (try castInternal(world, position, direction, mode == .putting, max_reach)) orelse return null;
     const block = switch (mode) {
         .removing => hit.block,
         .putting => hit.placement orelse return null,
     };
-    return if (withinReach(world.layout, position, block)) block else null;
+    return if (withinReachWithLimit(world.layout, position, block, max_reach)) block else null;
 }
 
 pub const Hit = struct {
@@ -58,10 +65,20 @@ pub const Hit = struct {
 /// stopping at the first occupied cell. Hit distance does not decide tool reach.
 /// Unknown chunks stop the ray rather than allowing edits through unloaded terrain.
 pub fn cast(world: *const World, position: Position, direction: Position) @import("world.zig").ChunkNotReceivedError!?Hit {
-    return castInternal(world, position, direction, false);
+    return castWithReach(world, position, direction, reach);
 }
 
-fn castInternal(world: *const World, position: Position, direction: Position, planned_targets: bool) @import("world.zig").ChunkNotReceivedError!?Hit {
+/// Cast against physical blocks with an explicit reach and no planned targets.
+/// The returned hit still needs the edited cube's nearest-vertex reach check.
+pub fn castWithReach(world: *const World, position: Position, direction: Position, max_reach: f64) @import("world.zig").ChunkNotReceivedError!?Hit {
+    return castInternal(world, position, direction, false, max_reach);
+}
+
+fn castInternal(world: *const World, position: Position, direction: Position, planned_targets: bool, max_reach: f64) @import("world.zig").ChunkNotReceivedError!?Hit {
+    if (!std.math.isFinite(max_reach) or max_reach < 0) return null;
+    // A hit on the occupied or face-adjacent placement cube is at most one cube
+    // diagonal beyond a reachable vertex, regardless of the aimed face.
+    const ray_limit = max_reach + @sqrt(@as(f64, 3));
     const length = @sqrt(@reduce(.Add, direction * direction));
     if (!std.math.isFinite(length) or length == 0) return null;
     inline for (0..3) |axis| if (!std.math.isFinite(position[axis])) return null;
@@ -420,4 +437,130 @@ test "an occupied out-of-reach cube occludes further targets and unknown data st
     try std.testing.expectEqual(null, try findTarget(&fixture.world, .{ 0, 0.5, 0.5 }, .{ 1, 0, 0 }, .removing));
     fixture.world.removeChunk(fixture.world.layout.getChunkCoords(.{ 0.5, 0.5, 0.5 }));
     try std.testing.expectError(error.ChunkNotReceived, findTarget(&fixture.world, .{ 0, 0.5, 0.5 }, .{ 1, 0, 0 }, .putting));
+}
+
+test "extended placement reaches thirty metres while ordinary targeting stays at four" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ 31, 0, 0 }, .stone);
+    const placement = coordinates.fromWorld(fixture.world.layout, .{ 30, 0, 0 }).?;
+    const position: Position = .{ 0, 0, 0 };
+    const direction: Position = .{ 1, 0, 0 };
+    try std.testing.expectEqual(null, try findTarget(&fixture.world, position, direction, .putting));
+    try std.testing.expectEqual(null, try cast(&fixture.world, position, direction));
+    const hit = (try castWithReach(&fixture.world, position, direction, 30)).?;
+    try std.testing.expectEqual(coordinates.fromWorld(fixture.world.layout, .{ 31, 0, 0 }).?, hit.block);
+    try std.testing.expectEqual(placement, hit.placement.?);
+    try std.testing.expectApproxEqAbs(@as(f64, 31), hit.distance, 0.00000001);
+    try std.testing.expectEqual(placement, (try findTargetWithReach(&fixture.world, position, direction, .putting, 30)).?);
+    try std.testing.expectEqual(null, try findTargetWithReach(&fixture.world, .{ -0.000001, 0, 0 }, direction, .putting, 30));
+    // Reach belongs to the edited cube: its backing cube is beyond thirty metres.
+    try std.testing.expectEqual(null, try findTargetWithReach(&fixture.world, position, direction, .removing, 30));
+    fixture.set(.{ 20, 0, 0 }, .stone);
+    const nearer = coordinates.fromWorld(fixture.world.layout, .{ 20, 0, 0 }).?;
+    try std.testing.expectEqual(nearer, (try findTargetWithReach(&fixture.world, position, direction, .removing, 30)).?);
+    try std.testing.expectEqual(coordinates.fromWorld(fixture.world.layout, .{ 19, 0, 0 }).?, (try findTargetWithReach(&fixture.world, position, direction, .putting, 30)).?);
+}
+
+test "extended nearest-vertex reach includes thirty metres at every cube vertex" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const layout = fixture.world.layout;
+    const block = coordinates.fromWorld(layout, .{ 0, 0, 0 }).?;
+    inline for (0..8) |vertex| {
+        const corner: Position = .{ vertex & 1, (vertex >> 1) & 1, (vertex >> 2) & 1 };
+        const outward = (corner * @as(Position, @splat(2)) - @as(Position, @splat(1))) / @as(Position, @splat(@sqrt(@as(f64, 3))));
+        try std.testing.expect(withinReachWithLimit(layout, corner + outward * @as(Position, @splat(30)), block, 30));
+        try std.testing.expect(!withinReachWithLimit(layout, corner + outward * @as(Position, @splat(30.000001)), block, 30));
+    }
+    try std.testing.expect(withinReachWithLimit(layout, .{ 0, 0, 0 }, block, 0));
+    try std.testing.expect(!withinReachWithLimit(layout, .{ 0.5, 0.5, 0.5 }, block, 0));
+}
+
+test "extended placement keeps the full reach-plus-diagonal traversal allowance" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ 1, 0, 0 }, .stone);
+    const position: Position = @splat(-30 / @sqrt(@as(f64, 3)));
+    const direction = @as(Position, .{ 1, 1 - 0.000001, 1 - 0.000001 }) - position;
+    const placement = coordinates.fromWorld(fixture.world.layout, .{ 0, 0, 0 }).?;
+    try std.testing.expectEqual(placement, (try findTargetWithReach(&fixture.world, position, direction, .putting, 30)).?);
+    try std.testing.expectEqual(null, try findTargetWithReach(&fixture.world, position, direction, .removing, 30));
+}
+
+test "extended targeting respects nearer occluders and unloaded chunks" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ 33, 0, 0 }, .stone);
+    const position: Position = .{ 4, 0.5, 0.5 };
+    const direction: Position = .{ 1, 0, 0 };
+    const placement = coordinates.fromWorld(fixture.world.layout, .{ 32, 0, 0 }).?;
+    try std.testing.expectEqual(placement, (try findTargetWithReach(&fixture.world, position, direction, .putting, 30)).?);
+    fixture.set(.{ 15, 0, 0 }, .stone);
+    const occluder_placement = coordinates.fromWorld(fixture.world.layout, .{ 14, 0, 0 }).?;
+    try std.testing.expectEqual(occluder_placement, (try findTargetWithReach(&fixture.world, position, direction, .putting, 30)).?);
+    fixture.set(.{ 15, 0, 0 }, .none);
+    fixture.world.removeChunk(fixture.world.layout.getChunkCoords(.{ 32.5, 0.5, 0.5 }));
+    try std.testing.expectError(error.ChunkNotReceived, findTargetWithReach(&fixture.world, position, direction, .putting, 30));
+}
+
+test "extended targeting wraps x after repeated world trips" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ -50, 0, 0 }, .stone);
+    const placement = coordinates.fromWorld(fixture.world.layout, .{ -51, 0, 0 }).?;
+    for ([_]f64{ 0, 128, -256, 128 * 10000000000.0 }) |trip| {
+        const position: Position = .{ 60.5 + trip, 0.5, 0.5 };
+        try std.testing.expectEqual(placement, (try findTargetWithReach(&fixture.world, position, .{ 1, 0, 0 }, .putting, 30)).?);
+        try std.testing.expectEqual(null, try findTarget(&fixture.world, position, .{ 1, 0, 0 }, .putting));
+    }
+}
+
+test "invalid reach limits reject targeting before entering an unloaded chunk" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const position: Position = .{ 0.5, 0.5, 0.5 };
+    const block = coordinates.fromWorld(fixture.world.layout, .{ 0, 0, 0 }).?;
+    fixture.world.removeChunk(fixture.world.layout.getChunkCoords(position));
+    for ([_]f64{ -1, std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64) }) |max_reach| {
+        try std.testing.expectEqual(null, try findTargetWithReach(&fixture.world, position, .{ 1, 0, 0 }, .putting, max_reach));
+        try std.testing.expectEqual(null, try castWithReach(&fixture.world, position, .{ 1, 0, 0 }, max_reach));
+        try std.testing.expect(!withinReachWithLimit(fixture.world.layout, position, block, max_reach));
+    }
+}
+
+test "physical casts skip planned targets while placement retains them at either reach" {
+    for ([_]i64{ 2, 20 }) |distance| {
+        var fixture = try Fixture.init();
+        defer fixture.deinit();
+        const world = &fixture.world;
+        const allocator = world.allocator;
+        const planned = coordinates.fromWorld(world.layout, .{ distance, 0, 0 }).?;
+        const runtime = @import("blueprint_runtime.zig");
+        var saved: runtime.SavedDefinition = .{
+            .id = 1,
+            .owner = 1,
+            .name = try allocator.dupe(u8, "Target"),
+            .definition = .{ .size = .{ 1, 1, 1 }, .cells = try allocator.dupe(engine.voxel_chunk.BlockType, &.{.stone}), .target_count = 1 },
+        };
+        world.blueprints.insertDefinition(allocator, saved) catch |err| {
+            saved.deinit(allocator);
+            return err;
+        };
+        var instance = try world.blueprints.prepareInstance(allocator, world.layout, 1, 1, 1, planned, 0);
+        world.blueprints.insertInstance(allocator, world.layout, instance) catch |err| {
+            instance.deinit(allocator);
+            return err;
+        };
+        const backing: Cell = .{ distance + 5, 0, 0 };
+        fixture.set(backing, .stone);
+        const position: Position = .{ 0.5, 0.5, 0.5 };
+        const direction: Position = .{ 1, 0, 0 };
+        const max_reach: f64 = if (distance < 4) reach else 30;
+        try std.testing.expectEqual(planned, (try findTargetWithReach(world, position, direction, .putting, max_reach)).?);
+        if (max_reach == reach) try std.testing.expectEqual(planned, (try findTarget(world, position, direction, .putting)).?);
+        const hit = (try castWithReach(world, position, direction, 30)).?;
+        try std.testing.expectEqual(coordinates.fromWorld(world.layout, backing).?, hit.block);
+        try std.testing.expectEqual(coordinates.fromWorld(world.layout, .{ distance + 4, 0, 0 }).?, hit.placement.?);
+    }
 }

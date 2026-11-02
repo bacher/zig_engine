@@ -241,7 +241,28 @@ const Game = struct {
     fn updateBlueprintRay(game: *Game) void {
         const scene = game.engine.active_scene orelse return;
         const player = game.player orelse return;
-        game.blueprint_selection.updateRay(game.layout(), player.position, scene.camera.position, scene.camera.forwardDirection(), .{ -@sin(player.yaw), @cos(player.yaw), 0 });
+        const selection = &game.blueprint_selection;
+        const camera = scene.camera;
+        const direction = camera.forwardDirection();
+        const heading: Position = .{ -@sin(player.yaw), @cos(player.yaw), 0 };
+        if (selection.usesPlacementTarget(game.layout(), camera.position)) {
+            var target: ?blueprint_capture.PlacementTarget = null;
+            if (game.world) |*world| {
+                const length = @sqrt(@reduce(.Add, direction * direction));
+                if (std.math.isFinite(length) and length > 0) {
+                    const eye_offset = camera.position - player.position;
+                    // Traverse far enough for every hit within 30 m of the feet;
+                    // selection validates the raw hit before projecting to anchor Z.
+                    const query_reach = @sqrt(blueprint_capture.range_squared) + @sqrt(@reduce(.Add, eye_offset * eye_offset));
+                    if (block_targeting.castWithReach(world, camera.position, direction, query_reach) catch null) |hit| if (hit.placement) |cell| {
+                        target = .{ .cell = cell, .hit = camera.position + direction * @as(Position, @splat(hit.distance / length)) };
+                    };
+                }
+            }
+            selection.updatePlacementTarget(game.layout(), player.position, camera.position, heading, target);
+        } else {
+            selection.updateRay(game.layout(), player.position, camera.position, direction, heading);
+        }
     }
 
     fn prepareBlueprintSource(game: *Game) void {
@@ -509,7 +530,7 @@ const Game = struct {
                 zgui.textUnformatted("Blueprint capture");
                 zgui.textUnformatted(switch (game.blueprint_selection.stage) {
                     .anchor => "Mouse1 / E: select anchor",
-                    .xy => "Mouse1 / E: confirm XY extent",
+                    .xy => if (game.engine.active_scene != null and game.blueprint_selection.usesPlacementTarget(game.layout(), game.engine.active_scene.?.camera.position)) "Mouse1 / E: confirm XY (aim next to a block, 30 m)" else "Mouse1 / E: confirm XY extent",
                     .height => "Mouse1 / E: confirm height",
                     .loading => "Loading selected blocks...",
                     .validating => if (game.blueprint_save != null) "Saving..." else "Validating frozen snapshot...",
@@ -6017,4 +6038,59 @@ test "blueprint dialogs hide the crosshair and chooser has a DPI-scaled width fl
             }
         }
     }
+}
+
+test "same-height blueprint XY uses distant adjacent placement and a continuous height transition" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const coordinates = @import("block_coordinates.zig");
+    try game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
+    try game.world.?.insertChunk(test_layout.origin_chunk + ChunkCoords{ 0, 1, 0 }, WorldChunk.initEmpty());
+    game.player = PlayerController.init(std.testing.allocator, .{ 0.25, 0.25, 0 });
+    game.player.?.applyCamera(&fixture.camera);
+    game.enterBlueprintCapture();
+    const anchor = coordinates.fromWorld(&test_layout, .{ 0, 0, 1 }).?;
+    game.blueprint_selection.setAnchor(&test_layout, anchor, fixture.camera.position);
+    const first_backing = coordinates.fromWorld(&test_layout, .{ 0, 20, 1 }).?;
+    game.world.?.setBlockUnchecked(first_backing, .stone);
+    game.updateBlueprintRay();
+    try std.testing.expect(game.blueprint_selection.target_valid);
+    try std.testing.expectEqual([3]u32{ 1, 20, 1 }, game.blueprint_selection.bounds.?.size());
+    try std.testing.expectEqual(null, try block_targeting.findTarget(&game.world.?, fixture.camera.position, fixture.camera.forwardDirection(), .putting));
+
+    game.world.?.setBlockUnchecked(first_backing, .none);
+    const distant_backing = coordinates.fromWorld(&test_layout, .{ 0, 30, 1 }).?;
+    game.world.?.setBlockUnchecked(distant_backing, .stone);
+    game.updateBlueprintRay();
+    try std.testing.expect(game.blueprint_selection.target_valid);
+    try std.testing.expectEqual([3]u32{ 1, 30, 1 }, game.blueprint_selection.bounds.?.size());
+    const last_valid = game.blueprint_selection.bounds.?;
+
+    game.world.?.setBlockUnchecked(distant_backing, .none);
+    const too_far = coordinates.fromWorld(&test_layout, .{ 0, 31, 1 }).?;
+    game.world.?.setBlockUnchecked(too_far, .stone);
+    game.updateBlueprintRay();
+    try std.testing.expectEqual(blueprint_capture.TargetError.out_of_range, game.blueprint_selection.target_error.?);
+    try std.testing.expectEqualDeep(last_valid, game.blueprint_selection.bounds.?);
+    try std.testing.expect(!game.blueprint_selection.confirmExtent());
+
+    game.world.?.setBlockUnchecked(too_far, .none);
+    game.updateBlueprintRay();
+    try std.testing.expectEqual(blueprint_capture.TargetError.no_placement_target, game.blueprint_selection.target_error.?);
+    try std.testing.expectEqualDeep(last_valid, game.blueprint_selection.bounds.?);
+    try std.testing.expect(!game.blueprint_selection.confirmExtent());
+
+    game.world.?.setBlockUnchecked(first_backing, .stone);
+    game.confirmBlueprintTool();
+    try std.testing.expectEqual(blueprint_capture.Stage.height, game.blueprint_selection.stage);
+    game.updateBlueprintRay();
+    try std.testing.expect(game.blueprint_selection.target_valid);
+    try std.testing.expectEqual(@as(u32, 1), game.blueprint_selection.bounds.?.size()[2]);
+    game.player.?.pitch = 0.1;
+    game.player.?.applyCamera(&fixture.camera);
+    game.updateBlueprintRay();
+    try std.testing.expect(game.blueprint_selection.target_valid);
+    try std.testing.expect(game.blueprint_selection.bounds.?.max[2] > anchor[2]);
 }
