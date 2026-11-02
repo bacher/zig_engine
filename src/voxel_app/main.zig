@@ -133,6 +133,7 @@ const Game = struct {
     blueprint_name_focus: bool = false,
     blueprint_error: ?[]const u8 = null,
     blueprint_status: ?[]const u8 = null,
+    blueprint_status_expires_at: f64 = 0,
     blueprint_copy_ns: u64 = 0,
     blueprint_snapshot_bytes: usize = 0,
     blueprint_source_peak: usize = 0,
@@ -162,6 +163,16 @@ const Game = struct {
 
     fn blueprintControlsBlocked(game: *const Game) bool {
         return game.blueprint_mode == .chooser or (game.blueprint_mode == .capture and game.blueprint_selection.stage == .naming);
+    }
+
+    fn setBlueprintStatus(game: *Game, message: []const u8, duration: f64) void {
+        game.blueprint_status = message;
+        game.blueprint_status_expires_at = game.engine.real_time + duration;
+    }
+
+    fn blueprintStatusMessage(game: *const Game) ?[]const u8 {
+        if (game.engine.real_time >= game.blueprint_status_expires_at) return null;
+        return game.blueprint_status;
     }
 
     fn clearToolInputs(game: *Game) void {
@@ -406,22 +417,22 @@ const Game = struct {
         if (result.kind == .save) {
             if (game.blueprint_save) |save| if (save.request_id == result.request_id) {
                 game.blueprint_save = null;
-                game.blueprint_status = if (result.status == .success)
-                    (if (game.persistence_store == null) "Blueprint saved for this session only." else "Blueprint accepted in memory; world storage is pending.")
+                game.setBlueprintStatus(if (result.status == .success)
+                    (if (game.persistence_store == null) "Blueprint added for this session only." else "Blueprint added to your library. Included in the next world save.")
                 else if (result.status == .resource_exhausted)
                     "Blueprint library capacity was reached; this blueprint was not saved."
                 else
-                    "Blueprint save was rejected; no blueprint was published.";
+                    "Blueprint save was rejected; no blueprint was published.", block_messages.action_error_duration);
                 if (result.status == .success and game.blueprint_mode == .capture and game.blueprint_selection.generation == save.generation) game.discardBlueprintDraft();
             };
         } else if (game.blueprint_apply) |apply| if (apply.request_id == result.request_id) {
             game.blueprint_apply = null;
-            game.blueprint_status = if (result.status == .success) "Blueprint site created." else switch (result.status) {
+            game.setBlueprintStatus(if (result.status == .success) "Blueprint site created." else switch (result.status) {
                 .missing_data => "Blueprint application needs loaded destination data. Try again.",
                 .resource_exhausted => "Blueprint application exceeded its resource budget.",
                 .stale => "The destination changed during admission. Try again.",
                 else => "Blueprint application rejected: check foundations, occupancy, and nearby structures.",
-            };
+            }, block_messages.action_error_duration);
             if (game.blueprint_mode == .preview and game.blueprint_preview != null and game.blueprint_preview.?.generation == apply.generation) {
                 if (result.status == .success) game.leaveBlueprintTool() else game.blueprint_error = game.blueprint_status;
             }
@@ -457,7 +468,7 @@ const Game = struct {
             };
             game.blueprint_apply = .{ .request_id = request_id, .generation = preview.generation };
             game.blueprint_error = null;
-            game.blueprint_status = "Checking blueprint destination...";
+            game.setBlueprintStatus("Checking blueprint destination...", math.inf(f64));
         }
     }
 
@@ -482,7 +493,7 @@ const Game = struct {
         };
         game.blueprint_candidate = null;
         game.blueprint_save = .{ .request_id = request_id, .generation = game.blueprint_selection.generation };
-        game.blueprint_status = "Saving blueprint...";
+        game.setBlueprintStatus("Saving blueprint...", math.inf(f64));
         game.blueprint_selection.stage = .validating;
         game.blueprint_error = null;
         game.updateBlueprintInputBlock();
@@ -490,9 +501,10 @@ const Game = struct {
 
     fn drawBlueprintUI(game: *Game) void {
         const screen = zgui.io.getDisplaySize();
-        if (game.blueprint_mode == .capture or game.blueprint_mode == .preview or game.blueprint_status != null) {
+        const status = game.blueprintStatusMessage();
+        if (game.blueprint_mode == .capture or game.blueprint_mode == .preview or status != null) {
             zgui.setNextWindowPos(.{ .x = screen[0] - 16, .y = 16, .pivot_x = 1 });
-            _ = zgui.begin("Blueprint status", .{ .flags = .{ .always_auto_resize = true, .no_title_bar = true, .no_collapse = true, .no_saved_settings = true, .no_focus_on_appearing = true } });
+            _ = zgui.begin("Blueprint status", .{ .flags = .{ .always_auto_resize = true, .no_title_bar = true, .no_collapse = true, .no_saved_settings = true, .no_focus_on_appearing = true, .no_mouse_inputs = true, .no_nav_inputs = true, .no_nav_focus = true } });
             if (game.blueprint_mode == .capture) {
                 zgui.textUnformatted("Blueprint capture");
                 zgui.textUnformatted(switch (game.blueprint_selection.stage) {
@@ -518,15 +530,15 @@ const Game = struct {
                 zgui.textUnformatted(if (game.blueprint_apply != null) "Checking destination..." else "R: rotate   Mouse1 / E: apply   F / Escape: cancel");
             }
             if (game.blueprint_error) |message| zgui.textUnformatted(message);
-            if (game.blueprint_status) |status| {
-                zgui.textUnformatted(status);
-                if (zgui.button("Dismiss status", .{})) game.blueprint_status = null;
-            }
+            if (status) |message| zgui.textUnformatted(message);
             zgui.end();
         }
         if (game.blueprint_mode == .chooser) {
             zgui.setNextWindowPos(.{ .x = screen[0] / 2, .y = screen[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
             _ = zgui.begin("Choose a blueprint", .{ .flags = .{ .always_auto_resize = true, .no_collapse = true, .no_saved_settings = true } });
+            // Auto-sized windows ignore WindowMinSize; reserve the content width instead.
+            const style = zgui.getStyle();
+            zgui.dummy(.{ .w = @max(0, 300 * style.font_scale_dpi - 2 * style.window_padding[0]), .h = 0 });
             if (game.world) |*world| {
                 var definitions = world.blueprints.definitions.valueIterator();
                 while (definitions.next()) |saved| {
@@ -2125,7 +2137,8 @@ fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
 }
 
 fn handleKeyPress(game: *Game, key_params: KeyParams) void {
-    if (game.exit_requested or game.engine.gameplay_input_blocked or game.blueprint_mode != .none) return;
+    if (game.exit_requested or game.engine.gameplay_input_blocked) return;
+    if (game.blueprint_mode != .none and key_params.key != .space) return;
     switch (key_params.key) {
         .x => if (game.control_mode == .spectator) game.queueBlockAction(.remove),
         .e => if (!key_params.mods.control) {
@@ -2231,7 +2244,7 @@ fn onRenderOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque:
 
 fn onRender(engine: *Engine, _: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
-    if (game.overlay == .none) {
+    if (game.overlay == .none and !engine.gameplay_input_blocked) {
         block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
         drawCrosshair();
         if (game.control_mode == .player) if (game.block_interaction.holding) |hold| {
@@ -5680,6 +5693,44 @@ test "return from spectator waits for a legal player pose above the finite floor
     try std.testing.expectEqual(terrain_collision.Overlap.clear, query.overlap(fixture.game.player.?.position, false));
 }
 
+test "blueprint capture preserves normal quick-tap and held Space jumps" {
+    const coordinates = @import("block_coordinates.zig");
+    for ([_]bool{ false, true }) |capture| {
+        for ([_]bool{ false, true }) |held| {
+            var fixture: StreamingTest = .{};
+            fixture.init();
+            defer fixture.deinit();
+            const game = &fixture.game;
+            try game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
+            try game.world.?.insertChunk(test_layout.origin_chunk - ChunkCoords{ 0, 0, 1 }, WorldChunk.initEmpty());
+            game.world.?.setBlockUnchecked(coordinates.fromWorld(&test_layout, .{ 0, 0, -1 }).?, .stone);
+            game.player = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
+            if (capture) game.enterBlueprintCapture();
+            try std.testing.expect(!handleUIKeyPress(game, .{ .key = .space, .mods = .{} }));
+            handleKeyPress(game, .{ .key = .space, .mods = .{} });
+            if (held) {
+                try fixture.input.pressed_keys.put(.space, {});
+            } else {
+                // A press and release between frames must still jump once.
+                handleKeyRelease(game, .{ .key = .space, .mods = .{} });
+            }
+            fixture.engine.frame_delta = 0.1;
+            fixture.engine.time = fixture.engine.frame_delta;
+            game.updateGameplay(false);
+            try std.testing.expectApproxEqAbs(player_module.jump_speed * 0.1 - 0.5 * player_module.gravity * 0.1 * 0.1, game.player.?.position[2], 0.000001);
+            try std.testing.expectApproxEqAbs(player_module.jump_speed - player_module.gravity * 0.1, game.player.?.vertical_velocity, 0.000001);
+            try std.testing.expect(!game.jump_requested);
+            for (0..20) |_| {
+                fixture.engine.time += fixture.engine.frame_delta;
+                game.updateGameplay(false);
+            }
+            try std.testing.expect(game.player.?.grounded);
+            try std.testing.expectApproxEqAbs(@as(f64, 0), game.player.?.position[2], 0.000001);
+            try std.testing.expectEqual(@as(f64, 0), game.player.?.vertical_velocity);
+        }
+    }
+}
+
 test "blueprint foreground routing owns capture reset, text, map, and held inputs" {
     var fixture: StreamingTest = .{};
     fixture.init();
@@ -5708,7 +5759,7 @@ test "blueprint foreground routing owns capture reset, text, map, and held input
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
     try std.testing.expectEqual(blueprint_capture.Stage.naming, game.blueprint_selection.stage);
     try std.testing.expect(fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
-    inline for (.{ zglfw.Key.m, .z, .f, .q, .b, .r, .e }) |key| {
+    inline for (.{ zglfw.Key.m, .z, .f, .q, .b, .r, .e, .space }) |key| {
         try std.testing.expect(handleUIKeyPress(game, .{ .key = key, .mods = .{} }));
         try std.testing.expectEqual(blueprint_capture.Stage.naming, game.blueprint_selection.stage);
         try std.testing.expectEqual(.capture, game.blueprint_mode);
@@ -5894,4 +5945,76 @@ test "pending target placement preview uses the dedicated fulfillment identity" 
     game.updateBlockFocus();
     try std.testing.expectEqual(world_module.OperationStatus.inventory_mismatch, game.current_placement_preview.?.result.status);
     try std.testing.expectEqual(@as(usize, 0), ordinary_calls);
+}
+
+test "blueprint results expire in real time while pending operations keep their status" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    game.enterBlueprintCapture();
+    game.blueprint_save = .{ .request_id = 77, .generation = game.blueprint_selection.generation };
+    game.setBlueprintStatus("Saving blueprint...", math.inf(f64));
+    fixture.engine.real_time = 100;
+    try std.testing.expectEqualStrings("Saving blueprint...", game.blueprintStatusMessage().?);
+
+    game.acceptBlueprintResult(.{ .request_id = 77, .kind = .save, .status = .success });
+    try std.testing.expectEqualStrings("Blueprint added for this session only.", game.blueprintStatusMessage().?);
+    try std.testing.expectEqual(null, game.blueprint_save);
+    fixture.engine.real_time += block_messages.action_error_duration - 0.01;
+    try std.testing.expect(game.blueprintStatusMessage() != null);
+    fixture.engine.real_time = 100 + block_messages.action_error_duration;
+    try std.testing.expectEqual(null, game.blueprintStatusMessage());
+
+    game.blueprint_apply = .{ .request_id = 78, .generation = 1 };
+    game.blueprint_mode = .preview;
+    game.blueprint_preview = .{ .definition_id = 1, .generation = 1 };
+    game.acceptBlueprintResult(.{ .request_id = 78, .kind = .apply, .status = .stale });
+    try std.testing.expect(game.blueprintStatusMessage() != null);
+    fixture.engine.real_time += block_messages.action_error_duration;
+    try std.testing.expectEqual(null, game.blueprintStatusMessage());
+    // A rejected destination still explains the required retry in the active tool.
+    try std.testing.expectEqualStrings("The destination changed during admission. Try again.", game.blueprint_error.?);
+    try std.testing.expectEqual(.preview, game.blueprint_mode);
+}
+
+test "blueprint dialogs hide the crosshair and chooser has a DPI-scaled width floor" {
+    zgui.init(std.testing.allocator);
+    defer zgui.deinit();
+    zgui.io.setIniFilename(null);
+    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
+    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
+    var dpi = zgui_utils.DpiScaling.init();
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+
+    for ([_]f32{ 1, 2 }) |scale| {
+        dpi.update(.{ scale, scale });
+        zgui.io.setDisplaySize(1280 * scale, 720 * scale);
+        for ([_]struct { mode: @FieldType(Game, "blueprint_mode"), naming: bool = false }{
+            .{ .mode = .capture, .naming = true },
+            .{ .mode = .chooser },
+            .{ .mode = .capture },
+            .{ .mode = .preview },
+            .{ .mode = .none },
+        }) |state| {
+            game.blueprint_mode = state.mode;
+            game.blueprint_selection.stage = if (state.naming) .naming else .anchor;
+            game.updateBlueprintInputBlock();
+            // Auto-sized windows settle after their first content measurement.
+            for (0..2) |frame| {
+                zgui.newFrame();
+                onRender(&fixture.engine, undefined, game);
+                try std.testing.expectEqual(!game.blueprintControlsBlocked(), zgui.getForegroundDrawList().getVertexBuffer().len > 0);
+                if (state.mode == .chooser and frame > 0) {
+                    _ = zgui.begin("Choose a blueprint", .{});
+                    try std.testing.expect(zgui.getWindowSize()[0] >= 300 * scale);
+                    zgui.end();
+                }
+                zgui.render();
+            }
+        }
+    }
 }
