@@ -475,10 +475,12 @@ pub fn validateBlueprintFulfillment(physical: block_rules.Reader, state: *const 
     return .{ .status = .success };
 }
 
-/// Ordinary mutations preserve the world with every pending target completed.
-/// Physical target approval remains independent so miniatures grant no support.
+/// Shared client/authority dispatch: without sites, validate the physical world once.
+/// Otherwise preserve the world with every pending target completed, while keeping
+/// physical target approval independent so miniatures grant no support.
 pub fn validateCompletedEdit(allocator: std.mem.Allocator, physical: block_rules.Reader, state: *const blueprint_runtime.State, constructed: []const block_rules.Cell, operation: BlockOperation) EditResult {
     if (operation.blueprint != null) return validateBlueprintFulfillment(physical, state, operation);
+    if (state.instances.count() == 0) return validateEdit(allocator, physical, constructed, operation);
     if (state.targetAt(operation.block) != null) return .{ .status = .target_changed };
     const cell: block_rules.Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
     if (operation.action == .remove and state.boxAt(physical.layout, operation.block) != null) return .{ .status = .constraint_violation, .failure = .{ .reason = .would_remove_support, .subject = cell } };
@@ -1006,7 +1008,7 @@ pub const World = struct {
         };
         const cells = tryCollectConstructed(self.allocator, self.layout, &self.chunks, operation.block) catch return .{ .status = .resource_exhausted };
         defer self.allocator.free(cells);
-        const result = if (self.blueprints.instances.count() == 0) validateEdit(self.allocator, self.reader(), cells, operation) else validateCompletedEdit(self.allocator, self.reader(), &self.blueprints, cells, operation);
+        const result = validateCompletedEdit(self.allocator, self.reader(), &self.blueprints, cells, operation);
         if (result.status != .success) return result;
         const coords, const local = splitBlockCoords(operation.block);
         const chunk = self.chunks.get(self.layout.encodeChunkCoords(coords)) orelse return .{ .status = .missing_data };
@@ -2217,4 +2219,60 @@ fn blueprintPackageAllocationScenario(a: std.mem.Allocator) !void {
 }
 test "client blueprint package preflight is atomic across all allocation failures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, blueprintPackageAllocationScenario, .{});
+}
+
+test "ordinary completed validation matches physical validation work without instances" {
+    const a = std.testing.allocator;
+    var world = try World.init(a, &test_layout);
+    defer world.deinit();
+    try setTestPhysical(&world, .{ 10, 10, 8 }, .stone);
+    for (9..13) |z| try setTestPhysical(&world, .{ 10, 10, @intCast(z) }, .planks);
+    try setTestPhysical(&world, .{ 11, 10, 11 }, .planks);
+    const constructed = [_]block_rules.Cell{
+        .{ 10, 10, 9 }, .{ 10, 10, 10 }, .{ 10, 10, 11 }, .{ 11, 10, 11 }, .{ 10, 10, 12 },
+    };
+    const cases = [_]struct { operation: BlockOperation, status: OperationStatus }{
+        .{ .operation = .{ .block = .{ 11, 10, 10 }, .action = .{ .put = .planks } }, .status = .success },
+        .{ .operation = .{ .block = .{ 10, 10, 9 }, .action = .remove }, .status = .constraint_violation },
+        .{ .operation = .{ .block = .{ 11, 10, 11 }, .action = .remove }, .status = .success },
+    };
+    var reads: usize = 0;
+    world.physical_read_counter = &reads;
+    for ([_]bool{ false, true }) |library_only| {
+        if (library_only) {
+            var saved: blueprint_runtime.SavedDefinition = .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Unused"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(BlockType, &.{.planks}), .target_count = 1 } };
+            defer saved.deinit(a);
+            try world.applyBlueprintChanges(&.{.{ .definition = saved }});
+        }
+        for (cases) |case| {
+            reads = 0;
+            var ordinary = std.testing.FailingAllocator.init(a, .{});
+            const expected = validateEdit(ordinary.allocator(), world.reader(), &constructed, case.operation);
+            try std.testing.expectEqual(case.status, expected.status);
+            const ordinary_reads = reads;
+            try std.testing.expect(ordinary_reads > 2);
+            try std.testing.expect(ordinary.allocations > 0);
+            reads = 0;
+            var shared = std.testing.FailingAllocator.init(a, .{});
+            const actual = validateCompletedEdit(shared.allocator(), world.reader(), &world.blueprints, &constructed, case.operation);
+            try std.testing.expectEqualDeep(expected, actual);
+            try std.testing.expectEqual(ordinary_reads, reads);
+            try std.testing.expectEqual(ordinary.allocations, shared.allocations);
+            try std.testing.expectEqual(ordinary.allocated_bytes, shared.allocated_bytes);
+        }
+    }
+}
+
+test "orphan blueprint identity rejects before ordinary work in an empty world" {
+    var world = try World.init(std.testing.allocator, &test_layout);
+    defer world.deinit();
+    var reads: usize = 0;
+    world.physical_read_counter = &reads;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const operation: BlockOperation = .{ .block = .{ 10, 10, 10 }, .action = .{ .put = .planks }, .blueprint = .{ .instance_id = 1, .cell_index = 0 } };
+    const result = validateCompletedEdit(failing.allocator(), world.reader(), &world.blueprints, &.{}, operation);
+    try std.testing.expectEqual(OperationStatus.target_changed, result.status);
+    try std.testing.expectEqual(@as(usize, 0), reads);
+    try std.testing.expectEqual(@as(usize, 0), failing.allocations);
+    try std.testing.expect(!failing.has_induced_failure);
 }
