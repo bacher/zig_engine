@@ -139,6 +139,7 @@ const Game = struct {
     blueprint_source_peak: usize = 0,
     blueprint_renderer: ?blueprint_renderer.Renderer = null,
     blueprint_render_instances: std.ArrayList(blueprint_renderer.Instance) = .empty,
+    blueprint_selection_frame_start: ?u32 = null,
     fractional_ticks: f64 = 0,
     /// Active subscriptions, including loads still in flight. Kept until cache eviction.
     chunk_subscriptions: std.AutoHashMapUnmanaged(u32, u64) = .empty,
@@ -602,10 +603,11 @@ const Game = struct {
     }
 
     fn buildBlueprintRenderInstances(game: *Game) void {
-        const scene = game.engine.active_scene orelse return;
-        const world = if (game.world) |*world| world else return;
+        game.blueprint_selection_frame_start = null;
         const list = &game.blueprint_render_instances;
         list.clearRetainingCapacity();
+        const scene = game.engine.active_scene orelse return;
+        const world = if (game.world) |*world| world else return;
         var visible_frames: std.AutoHashMapUnmanaged(u64, void) = .empty;
         defer visible_frames.deinit(game.allocator);
         var chunks = game.loaded_chunk_ids.keyIterator();
@@ -633,10 +635,12 @@ const Game = struct {
                 if (game.blueprintAnchorTarget()) |target| {
                     if (list.items.len > blueprint_renderer.capacity - 12) return game.blueprintRenderLimit();
                     blueprint_renderer.appendFrame(list, game.allocator, scene.camera, .{ target[0], target[1], target[2] }, .{ 1, 1, 1 }) catch return game.blueprintRenderLimit();
+                    game.blueprint_selection_frame_start = @intCast(list.items.len - blueprint_renderer.frame_instance_count);
                 }
             } else if (game.blueprint_selection.bounds) |box| {
                 if (list.items.len > blueprint_renderer.capacity - 12) return game.blueprintRenderLimit();
                 blueprint_renderer.appendFrame(list, game.allocator, scene.camera, box.min, box.size()) catch return game.blueprintRenderLimit();
+                game.blueprint_selection_frame_start = @intCast(list.items.len - blueprint_renderer.frame_instance_count);
                 if (game.blueprint_diagnostics) |diagnostics| for (diagnostics.highlightedCells()) |local| {
                     if (list.items.len >= blueprint_renderer.capacity) return game.blueprintRenderLimit();
                     const cell = box.min + blueprint_capture.Cell{ local[0], local[1], local[2] };
@@ -2259,7 +2263,7 @@ fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
 
 fn onRenderWorldOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
-    if (game.blueprint_renderer) |*renderer| if (engine.active_scene) |scene| renderer.draw(engine.gctx, pass, engine.bind_group_minecraft_texture.wgpu_bind_group, scene.camera, game.blueprint_render_instances.items);
+    if (game.blueprint_renderer) |*renderer| if (engine.active_scene) |scene| renderer.draw(engine.gctx, pass, engine.bind_group_minecraft_texture.wgpu_bind_group, scene.camera, game.blueprint_render_instances.items, game.blueprint_selection_frame_start);
 }
 
 fn onRenderOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
@@ -6169,6 +6173,43 @@ test "blueprint dialogs hide the crosshair and chooser has a DPI-scaled width fl
     }
 }
 
+test "occluded capture frame selects only its own rails among site and preview instances" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    fixture.camera.updatePosition(.{ 0, 0, 0 });
+    try game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
+    try game.loaded_chunk_ids.put(std.testing.allocator, test_layout.encodeChunkCoords(test_layout.origin_chunk), {});
+    const runtime = @import("blueprint_runtime.zig");
+    const coordinates = @import("block_coordinates.zig");
+    var saved: runtime.SavedDefinition = .{ .id = 1, .owner = game.player_id, .name = try std.testing.allocator.dupe(u8, "Frame"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try std.testing.allocator.dupe(voxel_chunk_module.BlockType, &.{.dirt}), .target_count = 1 } };
+    defer saved.deinit(std.testing.allocator);
+    try game.world.?.applyBlueprintChanges(&.{.{ .definition = saved }});
+    const origin = coordinates.fromWorld(&test_layout, .{ 8, 8, 1 }).?;
+    var site = try game.world.?.blueprints.prepareInstance(std.testing.allocator, game.layout(), 1, 1, game.player_id, origin, 0);
+    defer site.deinit(std.testing.allocator);
+    try game.world.?.applyBlueprintChanges(&.{.{ .instance = site }});
+
+    game.enterBlueprintCapture();
+    game.blueprint_selection.setAnchor(game.layout(), coordinates.fromWorld(&test_layout, .{ 0, 0, 1 }).?, fixture.camera.position);
+    game.buildBlueprintRenderInstances();
+    // A miniature and its site's twelve rails precede the capture's twelve rails.
+    try std.testing.expectEqual(@as(usize, 25), game.blueprint_render_instances.items.len);
+    try std.testing.expectEqual(@as(?u32, 13), game.blueprint_selection_frame_start);
+    for (game.blueprint_render_instances.items[13..]) |rail| try std.testing.expectEqual(@as(u32, 1), rail.material[1]);
+
+    game.leaveBlueprintTool();
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 13), game.blueprint_render_instances.items.len);
+    try std.testing.expectEqual(null, game.blueprint_selection_frame_start);
+    game.blueprint_mode = .preview;
+    game.blueprint_preview = .{ .definition_id = saved.id, .origin = origin, .generation = 1 };
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 26), game.blueprint_render_instances.items.len);
+    try std.testing.expectEqual(null, game.blueprint_selection_frame_start);
+}
+
 test "capture previews an unconfirmed anchor at thirty metres and rechecks it on click" {
     var fixture: StreamingTest = .{};
     fixture.init();
@@ -6186,6 +6227,7 @@ test "capture previews an unconfirmed anchor at thirty metres and rechecks it on
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .z, .mods = .{} }));
     game.buildBlueprintRenderInstances();
     try std.testing.expectEqual(@as(usize, 12), game.blueprint_render_instances.items.len);
+    try std.testing.expectEqual(@as(?u32, 0), game.blueprint_selection_frame_start);
     // The frame surrounds the adjacent placement cell, not its backing block.
     try std.testing.expectApproxEqAbs(@as(f32, 30.0 - 0.035 / 2.0), game.blueprint_render_instances.items[0].position[1], 0.00001);
     try std.testing.expectEqual(.anchor, game.blueprint_selection.stage);
@@ -6201,6 +6243,7 @@ test "capture previews an unconfirmed anchor at thirty metres and rechecks it on
     try std.testing.expectEqual(null, try block_targeting.findTargetWithReach(&game.world.?, fixture.camera.position, fixture.camera.forwardDirection(), .putting, 30));
     game.buildBlueprintRenderInstances();
     try std.testing.expectEqual(@as(usize, 0), game.blueprint_render_instances.items.len);
+    try std.testing.expectEqual(null, game.blueprint_selection_frame_start);
     game.confirmBlueprintTool();
     try std.testing.expectEqual(.anchor, game.blueprint_selection.stage);
     fixture.camera.updatePosition(.{ 0, 0, 0 });

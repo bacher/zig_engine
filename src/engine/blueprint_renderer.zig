@@ -8,6 +8,7 @@ const BlockType = @import("voxel/voxel_chunk.zig").BlockType;
 const chunks = @import("chunk_utils.zig");
 const shader = @embedFile("shaders/voxel/block_geometry.wgsl") ++ @embedFile("shaders/voxel/adaptive_geometry.wgsl") ++ @embedFile("shaders/voxel/material_color.wgsl") ++ @embedFile("shaders/blueprint.wgsl");
 pub const capacity = 1_100_000;
+pub const frame_instance_count: u32 = 12;
 pub const Cell = @Vector(3, i64);
 pub const Instance = extern struct {
     position: [4]f32,
@@ -50,6 +51,7 @@ pub const Renderer = struct {
     instances: zgpu.BufferHandle,
     binding: zgpu.BindGroupHandle,
     pipeline: zgpu.RenderPipelineHandle,
+    occluded_pipeline: zgpu.RenderPipelineHandle,
     allocated_capacity: usize = 1024,
     pub fn init(gctx: *zgpu.GraphicsContext, atlas_layout: zgpu.BindGroupLayoutHandle, format: wgpu.TextureFormat) Renderer {
         const layout = gctx.createBindGroupLayout(&.{ zgpu.bufferEntry(0, .{ .vertex = true }, .uniform, false, @sizeOf(zmath.Mat)), zgpu.bufferEntry(1, .{ .vertex = true }, .read_only_storage, false, @sizeOf(Instance)) });
@@ -62,17 +64,35 @@ pub const Renderer = struct {
         defer module.release();
         const targets = [_]wgpu.ColorTargetState{.{ .format = format }};
         const pipeline = gctx.createRenderPipeline(pipeline_layout, .{ .label = "blueprints", .primitive = .{ .topology = .triangle_list, .front_face = .ccw, .cull_mode = .back }, .depth_stencil = &.{ .format = .depth32_float, .depth_write_enabled = true, .depth_compare = .less_equal }, .vertex = .{ .module = module, .entry_point = "vs" }, .fragment = &.{ .module = module, .entry_point = "fs", .targets = &targets, .target_count = targets.len } });
-        return .{ .layout = layout, .uniform = uniform, .instances = instances, .binding = binding, .pipeline = pipeline };
+        const occluded_targets = [_]wgpu.ColorTargetState{.{ .format = format, .blend = &.{
+            .color = .{ .src_factor = .src_alpha, .dst_factor = .one_minus_src_alpha, .operation = .add },
+            .alpha = .{ .src_factor = .one, .dst_factor = .one_minus_src_alpha, .operation = .add },
+        } }};
+        const occluded_pipeline = gctx.createRenderPipeline(pipeline_layout, .{
+            .label = "occluded capture frame",
+            .primitive = .{ .topology = .triangle_list, .front_face = .ccw, .cull_mode = .back },
+            .depth_stencil = &.{ .format = .depth32_float, .depth_write_enabled = false, .depth_compare = .greater },
+            .vertex = .{ .module = module, .entry_point = "vs" },
+            .fragment = &.{ .module = module, .entry_point = "fs_occluded", .targets = &occluded_targets, .target_count = occluded_targets.len },
+        });
+        return .{ .layout = layout, .uniform = uniform, .instances = instances, .binding = binding, .pipeline = pipeline, .occluded_pipeline = occluded_pipeline };
     }
     pub fn deinit(self: Renderer, gctx: *zgpu.GraphicsContext) void {
+        gctx.releaseResource(self.occluded_pipeline);
         gctx.releaseResource(self.pipeline);
         gctx.releaseResource(self.binding);
         gctx.releaseResource(self.instances);
         gctx.releaseResource(self.uniform);
         gctx.releaseResource(self.layout);
     }
-    pub fn draw(self: *Renderer, gctx: *zgpu.GraphicsContext, pass: wgpu.RenderPassEncoder, atlas: wgpu.BindGroup, camera: *const Camera, instances: []const Instance) void {
+    /// The optional start selects exactly one complete frame in the shared instance buffer.
+    /// Its faint occluded rails draw before the ordinary opaque batch, using the same upload.
+    pub fn draw(self: *Renderer, gctx: *zgpu.GraphicsContext, pass: wgpu.RenderPassEncoder, atlas: wgpu.BindGroup, camera: *const Camera, instances: []const Instance, selection_frame_start: ?u32) void {
         std.debug.assert(instances.len <= capacity);
+        if (selection_frame_start) |start| {
+            std.debug.assert(@as(usize, start) + frame_instance_count <= instances.len);
+            for (instances[start..][0..frame_instance_count]) |rail| std.debug.assert(rail.material[1] == 1);
+        }
         if (instances.len == 0) return;
         if (instances.len > self.allocated_capacity) {
             const next_capacity = @min(capacity, std.math.ceilPowerOfTwoAssert(usize, instances.len));
@@ -84,9 +104,13 @@ pub const Renderer = struct {
         }
         gctx.queue.writeBuffer(gctx.lookupResource(self.uniform).?, 0, zmath.Mat, &.{camera.clip_from_world_chunked});
         gctx.queue.writeBuffer(gctx.lookupResource(self.instances).?, 0, Instance, instances);
-        pass.setPipeline(gctx.lookupResource(self.pipeline).?);
         pass.setBindGroup(0, gctx.lookupResource(self.binding).?, null);
         pass.setBindGroup(1, atlas, null);
+        if (selection_frame_start) |start| {
+            pass.setPipeline(gctx.lookupResource(self.occluded_pipeline).?);
+            pass.draw(36, frame_instance_count, 0, start);
+        }
+        pass.setPipeline(gctx.lookupResource(self.pipeline).?);
         pass.draw(36, @intCast(instances.len), 0, 0);
     }
 };

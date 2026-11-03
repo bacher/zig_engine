@@ -17,14 +17,21 @@ struct Vertex {
     let position = instance.position.xyz + vertex.position.xyz * instance.scale.xyz;
     return Vertex(clip_from_chunk * vec4f(position, 1), vertex.uv, vertex.normal, vertex.material_and_side, instance.material.y, position);
 }
+fn surfaceLight(normal: vec3f) -> f32 {
+    return 0.6 + 0.4 * max(dot(normal, normalize(vec3f(-0.4, -0.3, 0.8))), 0.0);
+}
+fn frameColor(input: Vertex) -> vec3f {
+    let stripe = fract((input.stripe_position.x + input.stripe_position.y + input.stripe_position.z) * 3.0);
+    let color = select(vec3f(0.025), vec3f(1, 0.82, 0.02), stripe < 0.5);
+    return color * surfaceLight(input.normal);
+}
+@fragment fn fs_occluded(input: Vertex) -> @location(0) vec4f {
+    return vec4f(frameColor(input), 0.25);
+}
 @fragment fn fs(input: Vertex) -> @location(0) vec4f {
     let sampled = textureSample(atlas, atlas_sampler, input.uv);
-    let light = 0.6 + 0.4 * max(dot(input.normal, normalize(vec3f(-0.4, -0.3, 0.8))), 0.0);
-    if input.mode == 1u {
-        let stripe = fract((input.stripe_position.x + input.stripe_position.y + input.stripe_position.z) * 3.0);
-        let color = select(vec3f(0.025), vec3f(1, 0.82, 0.02), stripe < 0.5);
-        return vec4f(color * light, 1);
-    }
+    let light = surfaceLight(input.normal);
+    if input.mode == 1u { return vec4f(frameColor(input), 1); }
     if input.mode == 2u { return vec4f(1, 0.08, 0.06, 1); }
     let color = materialColor(input.material_side, sampled);
     if color.a < 0.25 { discard; }
