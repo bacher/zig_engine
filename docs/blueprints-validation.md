@@ -4,6 +4,7 @@ This report accompanies the implementation of [the blueprint specification](../s
 
 ## Implemented paths
 
+- Escape while capture awaits its first anchor leaves the tool and opens the ordinary game menu; Resume returns to ordinary play. After anchor selection, Escape discards the whole draft and stays in capture awaiting an anchor, where the next fresh Escape opens the menu.
 - B opens the saved-blueprint chooser or dismisses chooser/placement preview, Z controls capture, and Enter opens the validated capture name dialog; Enter in that dialog confirms the name and saves. B is ignored during capture outside name entry. Ctrl+B toggles SSAO blur during ordinary play, capture outside name entry, and placement preview while modal/map input blocking remains in force. Bare B does not toggle blur, and F has no blueprint-tool binding.
 - Client selection uses three fresh presses, a fixed XY plane outside the anchor-height camera slab and physical-hit adjacent-cell targeting inside that slab, then a frozen exact-contact/yaw vertical plane using absolute world/grid Z. XY stays one cell high; entering height selection may immediately jump to the actual contact height, and out-of-bounds absolute heights reject confirmation. The fallback skips miniatures and uses the 30-metre raw-contact range from current player feet rather than ordinary four-metre reach. Both paths preserve shortest wrapped X intervals and the world-dependent horizontal cap. Full-block source subscriptions are retained only through the single predicted-view copy. One reusable helper validates detached contents; cancellation generations prevent stale results from owning newer UI.
 - The compiler normalizes materials, compacts the definition, applies only the narrowly eligible concrete-support cascade, and checks ordinary validity and cheap-rule assemblability. Successful cache entries no longer retain full failure diagnostics.
@@ -36,6 +37,8 @@ The independent horizontal limit remains `min(world_block_size_x / 2 - 1, world_
 ## Automated coverage
 
 Focused targets cover compiler normalization and cascades, 20/21-level diagnostics, allocation failures and cancellation, exact-hit selection geometry and wrapped images, names, physical support-read bounds, destination composition, target identity, optimistic reconciliation, package preflight, ownership, inventory atomicity, transactions, restart, save fences, and delayed road validation.
+
+The unanchored-capture Escape update passed `zig build install test -Doptimize=ReleaseFast --summary all`: 55/55 steps succeeded, 1,551 tests passed, and eight existing tests were skipped. The new regression covers Escape before anchor selection and after discarding an XY selection, with pausing and nonpausing menu policies. `zig fmt --check` passed. The older runs and historical walkthrough below predate this behavior.
 
 The B/Enter/Ctrl+B update passed `zig build install test test-blueprint-ui -Doptimize=ReleaseFast --summary all`: 58/58 steps succeeded, 1,622 tests passed, and eight existing tests were skipped. Coverage includes chooser/capture/preview routing, Ctrl+B versus bare B, modal debug blocking, and held main/keypad Enter opening name entry without accidental submission; a separate Enter submits normally. `zig fmt --check` and `git diff --check` pass. The runs and manual walkthrough below predate this binding update.
 

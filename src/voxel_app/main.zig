@@ -2102,7 +2102,12 @@ fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
                 return true;
             },
             .escape => {
-                if (game.blueprint_mode == .capture) game.discardBlueprintDraft() else game.leaveBlueprintTool();
+                if (game.blueprint_mode == .capture) {
+                    if (game.blueprint_selection.stage == .anchor) {
+                        game.leaveBlueprintTool();
+                        game.setOverlay(.menu);
+                    } else game.discardBlueprintDraft();
+                } else game.leaveBlueprintTool();
                 return true;
             },
             .b => if (!key_params.mods.control) {
@@ -5833,6 +5838,40 @@ test "blueprint foreground routing owns capture reset, text, map, and held input
     try std.testing.expectEqual(.preview, game.blueprint_mode);
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
     try std.testing.expectEqual(.none, game.blueprint_mode);
+}
+
+test "Escape opens the game menu before capture starts and after discarding a selection" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    inline for (.{ true, false }) |menu_pauses_game| {
+        game.menu_pauses_game = menu_pauses_game;
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .z, .mods = .{} }));
+        game.blueprint_press.press(.key);
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+        try std.testing.expectEqual(.menu, game.overlay);
+        try std.testing.expectEqual(.none, game.blueprint_mode);
+        try std.testing.expectEqual(null, game.blueprint_press.requested);
+        try std.testing.expect(fixture.engine.gameplay_input_blocked);
+        try std.testing.expectEqual(menu_pauses_game, fixture.engine.paused);
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+        try std.testing.expectEqual(.none, game.overlay);
+        try std.testing.expect(!fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .z, .mods = .{} }));
+        game.blueprint_selection.setAnchor(game.layout(), StreamingTest.toolTarget(), fixture.camera.position);
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+        try std.testing.expectEqual(.capture, game.blueprint_mode);
+        try std.testing.expectEqual(.anchor, game.blueprint_selection.stage);
+        try std.testing.expectEqual(null, game.blueprint_selection.bounds);
+        try std.testing.expectEqual(.none, game.overlay);
+        try std.testing.expect(!fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+        try std.testing.expectEqual(.menu, game.overlay);
+        try std.testing.expectEqual(.none, game.blueprint_mode);
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    }
 }
 
 test "opening blueprint name entry with held Enter waits for release before accepting another Enter" {
