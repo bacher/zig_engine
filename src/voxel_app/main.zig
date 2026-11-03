@@ -473,7 +473,16 @@ const Game = struct {
                     "Blueprint library capacity was reached; this blueprint was not saved."
                 else
                     "Blueprint save was rejected; no blueprint was published.", block_messages.action_error_duration);
-                if (result.status == .success and game.blueprint_mode == .capture and game.blueprint_selection.generation == save.generation) game.discardBlueprintDraft();
+                if (game.blueprint_mode == .capture and game.blueprint_selection.generation == save.generation) {
+                    if (result.status == .success) {
+                        game.discardBlueprintDraft();
+                    } else {
+                        // The service consumed the candidate; this draft has no job
+                        // left to validate. Keep the rejection until an explicit reset.
+                        game.blueprint_selection.stage = .invalid;
+                        game.blueprint_error = game.blueprint_status;
+                    }
+                }
             };
         } else if (game.blueprint_apply) |apply| if (apply.request_id == result.request_id) {
             game.blueprint_apply = null;
@@ -6063,6 +6072,98 @@ test "late blueprint save and apply results cannot reset a newer tool or close m
     try std.testing.expectEqual(.none, game.blueprint_mode);
     try std.testing.expectEqual(null, game.blueprint_apply);
     try std.testing.expect(game.blueprint_status != null);
+}
+
+test "terminal blueprint save rejection retains its error and allows capture restart" {
+    for ([_]@FieldType(world_data_service.BlueprintResult, "status"){ .resource_exhausted, .invalid }) |status| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        const game = &fixture.game;
+        game.enterBlueprintCapture();
+        game.blueprint_selection.anchor = .{ 1, 1, 5 };
+        game.blueprint_selection.bounds = .{ .min = .{ 1, 1, 5 }, .max = .{ 2, 1, 5 } };
+        // Successful submission has transferred the candidate and left no helper job.
+        game.blueprint_selection.stage = .validating;
+        const selection = game.blueprint_selection;
+        game.blueprint_save = .{ .request_id = 77, .generation = selection.generation };
+        game.setBlueprintStatus("Saving blueprint...", math.inf(f64));
+        // An unrelated response must not end the tracked save or change its draft.
+        game.acceptBlueprintResult(.{ .request_id = 76, .kind = .save, .status = status });
+        try std.testing.expectEqual(@as(u64, 77), game.blueprint_save.?.request_id);
+        try std.testing.expectEqualDeep(selection, game.blueprint_selection);
+        try std.testing.expectEqual(null, game.blueprint_error);
+        try game.blueprint_results.append(std.testing.allocator, .{ .request_id = 77, .kind = .save, .status = status });
+        game.resolveBlueprintResults();
+        const message = if (status == .resource_exhausted) "Blueprint library capacity was reached; this blueprint was not saved." else "Blueprint save was rejected; no blueprint was published.";
+        try std.testing.expectEqual(@as(usize, 0), game.blueprint_results.items.len);
+        try std.testing.expectEqual(null, game.blueprint_save);
+        try std.testing.expectEqual(null, game.blueprint_candidate);
+        try std.testing.expectEqual(null, game.blueprint_helper);
+        try std.testing.expectEqual(blueprint_capture.Stage.invalid, game.blueprint_selection.stage);
+        try std.testing.expectEqual(selection.generation, game.blueprint_selection.generation);
+        try std.testing.expectEqualDeep(selection.bounds, game.blueprint_selection.bounds);
+        try std.testing.expectEqual(.capture, game.blueprint_mode);
+        try std.testing.expectEqualStrings(message, game.blueprint_error.?);
+        try std.testing.expect(!fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+        fixture.engine.real_time += block_messages.action_error_duration;
+        try std.testing.expectEqual(null, game.blueprintStatusMessage());
+        game.updateBlueprintTool();
+        try std.testing.expectEqual(blueprint_capture.Stage.invalid, game.blueprint_selection.stage);
+        try std.testing.expectEqualStrings(message, game.blueprint_error.?);
+        // A duplicate completion cannot erase the persistent failure or reset the tool.
+        game.acceptBlueprintResult(.{ .request_id = 77, .kind = .save, .status = .success });
+        try std.testing.expectEqual(blueprint_capture.Stage.invalid, game.blueprint_selection.stage);
+        try std.testing.expectEqualStrings(message, game.blueprint_error.?);
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+        try std.testing.expectEqual(.capture, game.blueprint_mode);
+        try std.testing.expectEqual(.none, game.overlay);
+        try std.testing.expectEqual(blueprint_capture.Stage.anchor, game.blueprint_selection.stage);
+        try std.testing.expect(game.blueprint_selection.generation != selection.generation);
+        try std.testing.expectEqual(null, game.blueprint_selection.anchor);
+        try std.testing.expectEqual(null, game.blueprint_selection.bounds);
+        try std.testing.expectEqual(null, game.blueprint_error);
+    }
+}
+
+test "late rejected blueprint saves preserve a newer name dialog and unrelated overlays" {
+    for ([_]@FieldType(world_data_service.BlueprintResult, "status"){ .resource_exhausted, .invalid }) |status| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        const game = &fixture.game;
+        game.enterBlueprintCapture();
+        game.blueprint_save = .{ .request_id = 77, .generation = game.blueprint_selection.generation };
+        game.discardBlueprintDraft();
+        const compiled = try blueprint.compile(std.testing.allocator, .{ .size = .{ 1, 1, 1 }, .cells = &.{.dirt} }, .{ .horizontal_limit = blueprint.horizontalLimit(game.layout()) });
+        game.blueprint_candidate = compiled.valid;
+        game.blueprint_selection.stage = .naming;
+        @memcpy(game.blueprint_name[0..9], "New draft");
+        game.blueprint_error = "Keep this dialog error.";
+        game.updateBlueprintInputBlock();
+        const selection = game.blueprint_selection;
+        const name = game.blueprint_name;
+        const cells = game.blueprint_candidate.?.definition.cells.ptr;
+        game.acceptBlueprintResult(.{ .request_id = 77, .kind = .save, .status = status });
+        try std.testing.expectEqual(null, game.blueprint_save);
+        try std.testing.expectEqualDeep(selection, game.blueprint_selection);
+        try std.testing.expectEqual(.capture, game.blueprint_mode);
+        try std.testing.expectEqualSlices(u8, &name, &game.blueprint_name);
+        try std.testing.expectEqual(cells, game.blueprint_candidate.?.definition.cells.ptr);
+        try std.testing.expectEqualStrings("Keep this dialog error.", game.blueprint_error.?);
+        try std.testing.expect(fixture.engine.gameplay_input_blocked);
+
+        game.blueprint_save = .{ .request_id = 78, .generation = selection.generation };
+        game.leaveBlueprintTool();
+        game.setOverlay(.world_map);
+        game.acceptBlueprintResult(.{ .request_id = 78, .kind = .save, .status = status });
+        try std.testing.expectEqual(null, game.blueprint_save);
+        try std.testing.expectEqual(.none, game.blueprint_mode);
+        try std.testing.expectEqual(.world_map, game.overlay);
+        try std.testing.expectEqual(blueprint_capture.Stage.anchor, game.blueprint_selection.stage);
+        try std.testing.expectEqual(null, game.blueprint_error);
+        try std.testing.expect(fixture.engine.gameplay_input_blocked);
+    }
 }
 
 test "client capture pins full source chunks and freezes optimistic view before helper" {

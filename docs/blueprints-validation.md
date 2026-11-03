@@ -14,7 +14,7 @@ This report accompanies the implementation of [the blueprint specification](../s
 - Dedicated client and authority fulfillment reads at most five physical support cells. It does not call ordinary structural/dependent validation or road planning. Target removal, bit/counter updates, and known-empty construction insertion are incremental; completion does not scan the site.
 - Ordinary edits protect real and indexed planned dependents in the completed logical world. Adaptive-road effects from fills use a bounded coalesced queue and independently validated final shapes. Final saving drains this derived queue.
 - Definitions, site progress, terrain, and inventory share world transactions. A fulfillment journal record is 13 bytes; progress does not clone the definition or full bitmap per fill. Authoritative acknowledgments remain individual while block snapshots coalesce within each service batch.
-- Save supports explicit idempotency keys for the lifetime of a client endpoint. Identical retries return the same definition ID; conflicting payloads/owners are rejected. Automatic fresh saves have a separate key namespace. No reconnect or cross-session request-key protocol is part of this iteration.
+- Save supports explicit idempotency keys for the lifetime of a client endpoint. Identical retries return the same definition ID; conflicting payloads/owners are rejected. Automatic fresh saves have a separate key namespace. A terminal rejection puts its still-current capture into the invalid state with a persistent reason and Escape restart guidance; a late reply cannot change a newer draft. Retryable persistence failures retain the service-owned payload. No reconnect or cross-session request-key protocol is part of this iteration.
 
 ## Budgets
 
@@ -39,6 +39,8 @@ The independent horizontal limit remains `min(world_block_size_x / 2 - 1, world_
 ## Automated coverage
 
 Focused targets cover compiler normalization and cascades, 20/21-level diagnostics, allocation failures and cancellation, exact-hit selection geometry and wrapped images, names, physical support-read bounds, destination composition, target identity, optimistic reconciliation, package preflight, ownership, inventory atomicity, transactions, restart, save fences, and delayed road validation.
+
+The terminal Save rejection fix passed `zig build install test -Doptimize=ReleaseFast --summary all`: 55/55 steps succeeded, 1,568 tests passed, and eight existing tests were skipped. Regressions cover library-capacity and generic terminal rejection, persistent error feedback after the timed status expires, Escape recovery, ignored unrelated/duplicate replies, and preservation of a newer name dialog or unrelated map overlay. `zig fmt --check` and `git diff --check` pass.
 
 The transaction quota regression passed `zig build test-persistence test-blueprint-service -Doptimize=ReleaseFast --summary all`: 18/18 steps succeeded and 488 tests passed. Final fulfillment releases an active-instance slot immediately during transaction preparation, including for sites created earlier in the same batch; encoded-size accounting also excludes completed sites. Tests use a one-site quota and an exact final-state byte limit, check that partial completion or invalid operation order still rejects atomically, and verify replacement recovery from WAL and a compacted base. `zig fmt --check` and `git diff --check` pass.
 
