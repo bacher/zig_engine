@@ -117,7 +117,8 @@ const Game = struct {
     current_placement_preview: ?placement_preview.Preview = null,
     block_action_error: block_messages.TimedError = .{},
     blueprint_budgets: blueprint_capture.Budgets = .{},
-    blueprint_mode: enum { none, capture, chooser, preview } = .none,
+    blueprint_mode: enum { none, capture, preview } = .none,
+    blueprint_chooser_open: bool = false,
     blueprint_selection: blueprint_capture.Selection = .{},
     blueprint_press: player_interaction.Interaction = .{},
     blueprint_helper: ?*blueprint_capture.Helper = null,
@@ -163,7 +164,7 @@ const Game = struct {
     saved_game_object_groups: std.StringHashMapUnmanaged(*GameObjectGroup) = .empty,
 
     fn blueprintControlsBlocked(game: *const Game) bool {
-        return game.blueprint_mode == .chooser or (game.blueprint_mode == .capture and game.blueprint_selection.stage == .naming);
+        return game.blueprint_chooser_open or (game.blueprint_mode == .capture and game.blueprint_selection.stage == .naming);
     }
 
     fn setBlueprintStatus(game: *Game, message: []const u8, duration: f64) void {
@@ -205,6 +206,7 @@ const Game = struct {
     }
 
     fn leaveBlueprintTool(game: *Game) void {
+        game.blueprint_chooser_open = false;
         game.blueprint_mode = .none;
         game.blueprint_preview = null;
         game.discardBlueprintDraft();
@@ -224,6 +226,8 @@ const Game = struct {
     }
 
     fn openBlueprintChooser(game: *Game) void {
+        if (game.blueprint_chooser_open or game.overlay != .none or game.blueprint_mode == .preview) return;
+        if (game.blueprint_mode == .capture and game.blueprint_selection.stage != .anchor) return;
         if (game.control_mode != .player) {
             game.block_action_error.show("Blueprint tools require player control.", game.engine.time);
             return;
@@ -232,11 +236,28 @@ const Game = struct {
         var definitions = world.blueprints.definitions.valueIterator();
         while (definitions.next()) |saved| {
             if (saved.owner != game.player_id) continue;
-            game.blueprint_mode = .chooser;
+            game.blueprint_chooser_open = true;
             game.updateBlueprintInputBlock();
             return;
         }
         game.block_action_error.show("You do not have any blueprints yet.", game.engine.time);
+    }
+
+    fn cancelBlueprintChooser(game: *Game) void {
+        game.blueprint_chooser_open = false;
+        game.updateBlueprintInputBlock();
+    }
+
+    fn selectBlueprint(game: *Game, definition_id: u64) void {
+        if (!game.blueprint_chooser_open) return;
+        const world = if (game.world) |*world| world else return;
+        const saved = world.blueprints.definitions.get(definition_id) orelse return;
+        if (saved.owner != game.player_id) return;
+        game.blueprint_chooser_open = false;
+        game.blueprint_mode = .preview;
+        game.blueprint_preview_generation +%= 1;
+        game.blueprint_preview = .{ .definition_id = definition_id, .generation = game.blueprint_preview_generation };
+        game.discardBlueprintDraft();
     }
 
     fn blueprintAnchorTarget(game: *Game) ?[3]u32 {
@@ -469,6 +490,7 @@ const Game = struct {
     }
 
     fn confirmBlueprintTool(game: *Game) void {
+        if (game.blueprint_chooser_open) return;
         if (game.blueprint_mode == .capture) {
             const selection = &game.blueprint_selection;
             if (selection.stage == .anchor) {
@@ -561,7 +583,7 @@ const Game = struct {
             if (status) |message| zgui.textUnformatted(message);
             zgui.end();
         }
-        if (game.blueprint_mode == .chooser) {
+        if (game.blueprint_chooser_open) {
             zgui.setNextWindowPos(.{ .x = screen[0] / 2, .y = screen[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
             _ = zgui.begin("Choose a blueprint", .{ .flags = .{ .always_auto_resize = true, .no_collapse = true, .no_saved_settings = true } });
             // Auto-sized windows ignore WindowMinSize; reserve the content width instead.
@@ -573,16 +595,10 @@ const Game = struct {
                     if (saved.owner != game.player_id) continue;
                     var label_buffer: [460]u8 = undefined;
                     const label = std.fmt.bufPrintZ(&label_buffer, "{s}##{d}", .{ saved.name, saved.id }) catch continue;
-                    if (zgui.button(label, .{})) {
-                        game.blueprint_mode = .preview;
-                        game.blueprint_preview_generation +%= 1;
-                        game.blueprint_preview = .{ .definition_id = saved.id, .generation = game.blueprint_preview_generation };
-                        game.blueprint_error = null;
-                        game.updateBlueprintInputBlock();
-                    }
+                    if (zgui.button(label, .{})) game.selectBlueprint(saved.id);
                 }
             }
-            if (zgui.button("Cancel", .{})) game.leaveBlueprintTool();
+            if (zgui.button("Cancel", .{})) game.cancelBlueprintChooser();
             zgui.end();
         } else if (game.blueprint_mode == .capture and game.blueprint_selection.stage == .naming) {
             zgui.setNextWindowPos(.{ .x = screen[0] / 2, .y = screen[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
@@ -667,7 +683,7 @@ const Game = struct {
 
     fn setOverlay(game: *Game, overlay: Overlay) void {
         if (game.exit_requested or overlay == game.overlay) return;
-        if (game.blueprint_mode != .none and overlay != .none) return;
+        if ((game.blueprint_chooser_open or game.blueprint_mode != .none) and overlay != .none) return;
         if (game.overlay == .world_map and game.map_teleport != null) return;
         if (game.overlay == .world_map) game.cancelMapTeleport();
         game.overlay = overlay;
@@ -2103,6 +2119,18 @@ fn onUIKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque)
 
 fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
     if (game.exit_requested) return true;
+    if (game.blueprint_chooser_open) {
+        switch (key_params.key) {
+            .escape => game.cancelBlueprintChooser(),
+            .b => if (!key_params.mods.control) game.cancelBlueprintChooser(),
+            .q => {
+                game.leaveBlueprintTool();
+                game.toggleControlMode();
+            },
+            else => {},
+        }
+        return true;
+    }
     if (game.blueprint_mode == .capture and game.blueprint_selection.stage == .naming) {
         if (key_params.key == .escape) game.discardBlueprintDraft();
         // ImGui receives text independently; every gameplay/debug shortcut is consumed.
@@ -2126,7 +2154,9 @@ fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
                 return true;
             },
             .b => if (!key_params.mods.control) {
-                if (game.blueprint_mode != .capture) game.leaveBlueprintTool();
+                if (game.blueprint_mode == .capture) {
+                    if (game.blueprint_selection.stage == .anchor) game.openBlueprintChooser();
+                } else game.leaveBlueprintTool();
                 return true;
             },
             .enter, .kp_enter => if (game.blueprint_mode == .capture) {
@@ -5841,9 +5871,11 @@ test "blueprint foreground routing owns capture reset, text, map, and held input
     defer saved.deinit(std.testing.allocator);
     try game.world.?.applyBlueprintChanges(&.{.{ .definition = saved }});
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
-    try std.testing.expectEqual(.chooser, game.blueprint_mode);
+    try std.testing.expect(game.blueprint_chooser_open);
+    try std.testing.expectEqual(.none, game.blueprint_mode);
     try std.testing.expect(fixture.engine.gameplay_input_blocked);
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expect(!game.blueprint_chooser_open);
     try std.testing.expectEqual(.none, game.blueprint_mode);
     game.blueprint_mode = .preview;
     game.updateBlueprintInputBlock();
@@ -5852,6 +5884,79 @@ test "blueprint foreground routing owns capture reset, text, map, and held input
     try std.testing.expect(!handleUIKeyPress(game, .{ .key = .f, .mods = .{} }));
     try std.testing.expectEqual(.preview, game.blueprint_mode);
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.blueprint_mode);
+}
+
+test "blueprint chooser preserves unanchored capture until a definition is selected" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    const game = &fixture.game;
+    game.control_mode = .player;
+    game.enterBlueprintCapture();
+    const generation = game.blueprint_selection.generation;
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expect(!game.blueprint_chooser_open);
+    try std.testing.expectEqual(.capture, game.blueprint_mode);
+    try std.testing.expectEqual(generation, game.blueprint_selection.generation);
+    try std.testing.expectEqualStrings("You do not have any blueprints yet.", game.block_action_error.message(0).?);
+
+    const runtime = @import("blueprint_runtime.zig");
+    var saved: runtime.SavedDefinition = .{ .id = 1, .owner = game.player_id, .name = try std.testing.allocator.dupe(u8, "Chooser"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try std.testing.allocator.dupe(voxel_chunk_module.BlockType, &.{.dirt}), .target_count = 1 } };
+    defer saved.deinit(std.testing.allocator);
+    try game.world.?.applyBlueprintChanges(&.{.{ .definition = saved }});
+    const Dismissal = enum { button, escape, hotkey };
+    for ([_]Dismissal{ .button, .escape, .hotkey }) |dismissal| {
+        game.jump_requested = true;
+        game.blueprint_press.press(.key);
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+        try std.testing.expect(game.blueprint_chooser_open);
+        try std.testing.expectEqual(.capture, game.blueprint_mode);
+        try std.testing.expectEqual(generation, game.blueprint_selection.generation);
+        try std.testing.expect(fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+        try std.testing.expect(!game.jump_requested);
+        try std.testing.expectEqual(null, game.blueprint_press.requested);
+        inline for (.{ zglfw.Key.m, .z, .enter, .e, .space }) |key| try std.testing.expect(handleUIKeyPress(game, .{ .key = key, .mods = .{} }));
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{ .control = true } }));
+        handleMouseButtonPress(game, .{ .button = .left, .mods = .{} });
+        game.confirmBlueprintTool();
+        game.setOverlay(.world_map);
+        try std.testing.expectEqual(.none, game.overlay);
+        try std.testing.expectEqual(.anchor, game.blueprint_selection.stage);
+        try std.testing.expectEqual(null, game.blueprint_selection.bounds);
+        try std.testing.expectEqual(null, game.blueprint_press.requested);
+        switch (dismissal) {
+            .button => game.cancelBlueprintChooser(), // Same action as the dialog's Cancel.
+            .escape => try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} })),
+            .hotkey => try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} })),
+        }
+        try std.testing.expect(!game.blueprint_chooser_open);
+        try std.testing.expectEqual(.capture, game.blueprint_mode);
+        try std.testing.expectEqual(.player, game.control_mode);
+        try std.testing.expectEqual(generation, game.blueprint_selection.generation);
+        try std.testing.expect(!fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+    }
+    game.confirmBlueprintTool();
+    try std.testing.expectEqual(.xy, game.blueprint_selection.stage);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expect(!game.blueprint_chooser_open);
+    try std.testing.expectEqual(.xy, game.blueprint_selection.stage);
+    game.discardBlueprintDraft();
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    game.selectBlueprint(saved.id);
+    try std.testing.expect(!game.blueprint_chooser_open);
+    try std.testing.expectEqual(.preview, game.blueprint_mode);
+    try std.testing.expectEqual(.player, game.control_mode);
+    try std.testing.expectEqual(saved.id, game.blueprint_preview.?.definition_id);
+    try std.testing.expect(game.blueprint_preview.?.generation > 0);
+    try std.testing.expect(!fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+    game.updateBlueprintTool();
+    try std.testing.expect(game.blueprint_preview.?.origin != null);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.blueprint_mode);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    game.cancelBlueprintChooser();
     try std.testing.expectEqual(.none, game.blueprint_mode);
 }
 
@@ -6147,14 +6252,16 @@ test "blueprint dialogs hide the crosshair and chooser has a DPI-scaled width fl
     for ([_]f32{ 1, 2 }) |scale| {
         dpi.update(.{ scale, scale });
         zgui.io.setDisplaySize(1280 * scale, 720 * scale);
-        for ([_]struct { mode: @FieldType(Game, "blueprint_mode"), naming: bool = false }{
+        for ([_]struct { mode: @FieldType(Game, "blueprint_mode"), naming: bool = false, chooser: bool = false }{
             .{ .mode = .capture, .naming = true },
-            .{ .mode = .chooser },
+            .{ .mode = .none, .chooser = true },
+            .{ .mode = .capture, .chooser = true },
             .{ .mode = .capture },
             .{ .mode = .preview },
             .{ .mode = .none },
         }) |state| {
             game.blueprint_mode = state.mode;
+            game.blueprint_chooser_open = state.chooser;
             game.blueprint_selection.stage = if (state.naming) .naming else .anchor;
             game.updateBlueprintInputBlock();
             // Auto-sized windows settle after their first content measurement.
@@ -6162,7 +6269,7 @@ test "blueprint dialogs hide the crosshair and chooser has a DPI-scaled width fl
                 zgui.newFrame();
                 onRender(&fixture.engine, undefined, game);
                 try std.testing.expectEqual(!game.blueprintControlsBlocked(), zgui.getForegroundDrawList().getVertexBuffer().len > 0);
-                if (state.mode == .chooser and frame > 0) {
+                if (state.chooser and frame > 0) {
                     _ = zgui.begin("Choose a blueprint", .{});
                     try std.testing.expect(zgui.getWindowSize()[0] >= 300 * scale);
                     zgui.end();
