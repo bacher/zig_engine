@@ -140,6 +140,7 @@ const Game = struct {
     blueprint_source_peak: usize = 0,
     blueprint_renderer: ?blueprint_renderer.Renderer = null,
     blueprint_render_instances: std.ArrayList(blueprint_renderer.Instance) = .empty,
+    blueprint_render_preview: ?blueprint_renderer.Preview = null,
     blueprint_selection_frame_start: ?u32 = null,
     fractional_ticks: f64 = 0,
     /// Active subscriptions, including loads still in flight. Kept until cache eviction.
@@ -209,6 +210,7 @@ const Game = struct {
         game.blueprint_chooser_open = false;
         game.blueprint_mode = .none;
         game.blueprint_preview = null;
+        game.blueprint_render_preview = null;
         game.discardBlueprintDraft();
     }
 
@@ -630,6 +632,7 @@ const Game = struct {
 
     fn buildBlueprintRenderInstances(game: *Game) void {
         game.blueprint_selection_frame_start = null;
+        game.blueprint_render_preview = null;
         const list = &game.blueprint_render_instances;
         list.clearRetainingCapacity();
         const scene = game.engine.active_scene orelse return;
@@ -674,16 +677,25 @@ const Game = struct {
                 };
             }
         }
-        if (game.blueprint_mode == .preview) if (game.blueprint_preview) |preview| if (preview.origin) |origin| {
+        if (game.blueprint_mode == .preview) if (game.blueprint_preview) |preview| {
             const saved = world.blueprints.definitions.get(preview.definition_id) orelse return;
-            for (saved.definition.cells, 0..) |material, index| {
-                if (material == .none) continue;
-                if (list.items.len >= blueprint_renderer.capacity - 12) return game.blueprintRenderLimit();
-                const local = blueprint.rotatedCell(saved.definition.size, blueprint.cellAtIndex(saved.definition.size, index), preview.rotation);
-                const cell = blueprint_capture.Cell{ origin[0], origin[1], origin[2] } + blueprint_capture.Cell{ local[0], local[1], local[2] };
-                list.append(game.allocator, blueprint_renderer.blockInstance(scene.camera, cell, material, false, false)) catch return game.blueprintRenderLimit();
+            if (preview.origin) |origin| {
+                // The cached draw shares the existing total visible-instance budget.
+                if (list.items.len > blueprint_renderer.capacity - blueprint_renderer.frame_instance_count or
+                    saved.definition.target_count > blueprint_renderer.capacity - blueprint_renderer.frame_instance_count - list.items.len) return game.blueprintRenderLimit();
+                blueprint_renderer.appendFrame(list, game.allocator, scene.camera, .{ origin[0], origin[1], origin[2] }, blueprint.rotatedSize(saved.definition.size, preview.rotation)) catch return game.blueprintRenderLimit();
             }
-            blueprint_renderer.appendFrame(list, game.allocator, scene.camera, .{ origin[0], origin[1], origin[2] }, blueprint.rotatedSize(saved.definition.size, preview.rotation)) catch return game.blueprintRenderLimit();
+            // Borrow immutable source data only until this frame's renderer upload.
+            // Missing targeting hides the draw without invalidating its GPU cache.
+            game.blueprint_render_preview = .{
+                .definition_id = saved.id,
+                .generation = preview.generation,
+                .size = saved.definition.size,
+                .cells = saved.definition.cells,
+                .target_count = saved.definition.target_count,
+                .origin = preview.origin,
+                .rotation = preview.rotation,
+            };
         };
     }
 
@@ -2303,7 +2315,7 @@ fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
 
 fn onRenderWorldOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
-    if (game.blueprint_renderer) |*renderer| if (engine.active_scene) |scene| renderer.draw(engine.gctx, pass, engine.bind_group_minecraft_texture.wgpu_bind_group, scene.camera, game.blueprint_render_instances.items, game.blueprint_selection_frame_start);
+    if (game.blueprint_renderer) |*renderer| if (engine.active_scene) |scene| renderer.drawWithPreview(engine.gctx, pass, engine.bind_group_minecraft_texture.wgpu_bind_group, scene.camera, game.blueprint_render_instances.items, game.blueprint_selection_frame_start, game.allocator, game.blueprint_render_preview) catch game.blueprintRenderLimit();
 }
 
 fn onRenderOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
@@ -6415,8 +6427,53 @@ test "occluded capture frame selects only its own rails among site and preview i
     game.blueprint_mode = .preview;
     game.blueprint_preview = .{ .definition_id = saved.id, .origin = origin, .generation = 1 };
     game.buildBlueprintRenderInstances();
-    try std.testing.expectEqual(@as(usize, 26), game.blueprint_render_instances.items.len);
+    try std.testing.expectEqual(@as(usize, 25), game.blueprint_render_instances.items.len);
+    try std.testing.expectEqual(saved.id, game.blueprint_render_preview.?.definition_id);
     try std.testing.expectEqual(null, game.blueprint_selection_frame_start);
+}
+
+test "large blueprint preview collection borrows local geometry and keeps only dynamic rails" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const allocator = std.testing.allocator;
+    var saved: @import("blueprint_runtime.zig").SavedDefinition = .{
+        .id = 1,
+        .owner = game.player_id,
+        .name = try allocator.dupe(u8, "Dense preview"),
+        .definition = .{ .size = .{ 100, 100, 32 }, .cells = try allocator.alloc(voxel_chunk_module.BlockType, 320_000), .target_count = 320_000 },
+    };
+    defer saved.deinit(allocator);
+    @memset(@constCast(saved.definition.cells), .planks);
+    try game.world.?.applyBlueprintChanges(&.{.{ .definition = saved }});
+    const cells = game.world.?.blueprints.definitions.get(saved.id).?.definition.cells;
+    game.blueprint_mode = .preview;
+    game.blueprint_preview = .{ .definition_id = saved.id, .origin = .{ 31, 31, 31 }, .generation = 7 };
+    for (0..4) |rotation| {
+        game.blueprint_preview.?.rotation = @intCast(rotation);
+        game.blueprint_preview.?.origin = .{ @as(u32, @intCast(rotation)) + 31, 31, 31 };
+        fixture.camera.updatePosition(.{ @as(f64, @floatFromInt(rotation)) * 32, 0, 0 });
+        game.buildBlueprintRenderInstances();
+        const source = game.blueprint_render_preview.?;
+        try std.testing.expectEqual(@as(usize, 12), game.blueprint_render_instances.items.len);
+        try std.testing.expectEqual(cells.ptr, source.cells.ptr);
+        try std.testing.expectEqual(@as(u32, 320_000), source.target_count);
+        try std.testing.expectEqual(@as(u64, 7), source.generation);
+        try std.testing.expectEqual(rotation, source.rotation);
+        try std.testing.expectEqualDeep(game.blueprint_preview.?.origin, source.origin);
+        try std.testing.expectEqual(null, game.blueprint_selection_frame_start);
+    }
+    game.blueprint_preview.?.origin = null;
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 0), game.blueprint_render_instances.items.len);
+    try std.testing.expectEqual(null, game.blueprint_render_preview.?.origin);
+    try std.testing.expectEqual(cells.ptr, game.blueprint_render_preview.?.cells.ptr);
+    game.leaveBlueprintTool();
+    try std.testing.expectEqual(null, game.blueprint_render_preview);
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(null, game.blueprint_render_preview);
+    try std.testing.expectEqual(@as(usize, 0), game.blueprint_render_instances.items.len);
 }
 
 test "capture previews an unconfirmed anchor at thirty metres and rechecks it on click" {

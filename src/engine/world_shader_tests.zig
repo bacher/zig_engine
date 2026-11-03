@@ -364,7 +364,7 @@ test "block outline preserves thick green edges over tilted surfaces and behind 
     try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
 }
 
-test "blueprint capture ghosts only selected hidden rails without changing visible color or scene depth" {
+test "blueprint cached preview matches dynamic rendering and capture ghosts preserve scene depth" {
     var uncaptured: ValidationResponse = .{};
     var response: ValidationResponse = .{};
     var mapping: coordinate_readback.MapResponse = .{};
