@@ -238,6 +238,13 @@ const Game = struct {
         game.block_action_error.show("You do not have any blueprints yet.", game.engine.time);
     }
 
+    fn blueprintAnchorTarget(game: *Game) ?[3]u32 {
+        const scene = game.engine.active_scene orelse return null;
+        const world = if (game.world) |*world| world else return null;
+        const camera = scene.camera;
+        return block_targeting.findTargetWithReach(world, camera.position, camera.forwardDirection(), .putting, @sqrt(blueprint_capture.range_squared)) catch null;
+    }
+
     fn updateBlueprintRay(game: *Game) void {
         const scene = game.engine.active_scene orelse return;
         const player = game.player orelse return;
@@ -464,9 +471,8 @@ const Game = struct {
         if (game.blueprint_mode == .capture) {
             const selection = &game.blueprint_selection;
             if (selection.stage == .anchor) {
-                const world = if (game.world) |*world| world else return;
+                const target = game.blueprintAnchorTarget() orelse return;
                 const camera = game.engine.active_scene.?.camera;
-                const target = (block_targeting.findTarget(world, camera.position, camera.forwardDirection(), .putting) catch null) orelse return;
                 selection.setAnchor(game.layout(), target, camera.position);
                 game.updateBlueprintRay();
             } else {
@@ -529,7 +535,7 @@ const Game = struct {
             if (game.blueprint_mode == .capture) {
                 zgui.textUnformatted("Blueprint capture");
                 zgui.textUnformatted(switch (game.blueprint_selection.stage) {
-                    .anchor => "Mouse1 / E: select anchor",
+                    .anchor => "Mouse1 / E: select anchor (30 m)",
                     .xy => if (game.engine.active_scene != null and game.blueprint_selection.usesPlacementTarget(game.layout(), game.engine.active_scene.?.camera.position)) "Mouse1 / E: confirm XY (aim next to a block, 30 m)" else "Mouse1 / E: confirm XY extent",
                     .height => "Mouse1 / E: confirm height",
                     .loading => "Loading selected blocks...",
@@ -623,7 +629,12 @@ const Game = struct {
             }
         }
         if (game.blueprint_mode == .capture) {
-            if (game.blueprint_selection.bounds) |box| {
+            if (game.blueprint_selection.stage == .anchor) {
+                if (game.blueprintAnchorTarget()) |target| {
+                    if (list.items.len > blueprint_renderer.capacity - 12) return game.blueprintRenderLimit();
+                    blueprint_renderer.appendFrame(list, game.allocator, scene.camera, .{ target[0], target[1], target[2] }, .{ 1, 1, 1 }) catch return game.blueprintRenderLimit();
+                }
+            } else if (game.blueprint_selection.bounds) |box| {
                 if (list.items.len > blueprint_renderer.capacity - 12) return game.blueprintRenderLimit();
                 blueprint_renderer.appendFrame(list, game.allocator, scene.camera, box.min, box.size()) catch return game.blueprintRenderLimit();
                 if (game.blueprint_diagnostics) |diagnostics| for (diagnostics.highlightedCells()) |local| {
@@ -6156,6 +6167,64 @@ test "blueprint dialogs hide the crosshair and chooser has a DPI-scaled width fl
             }
         }
     }
+}
+
+test "capture previews an unconfirmed anchor at thirty metres and rechecks it on click" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const coordinates = @import("block_coordinates.zig");
+    try game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
+    try game.world.?.insertChunk(test_layout.origin_chunk - ChunkCoords{ 0, 1, 0 }, WorldChunk.initEmpty());
+    try game.world.?.insertChunk(test_layout.origin_chunk + ChunkCoords{ 0, 1, 0 }, WorldChunk.initEmpty());
+    fixture.camera.updatePosition(.{ 0, 0, 0 });
+    const backing = coordinates.fromWorld(&test_layout, .{ 0, 31, 0 }).?;
+    const target = coordinates.fromWorld(&test_layout, .{ 0, 30, 0 }).?;
+    game.world.?.setBlockUnchecked(backing, .stone);
+    try std.testing.expectEqual(null, try block_targeting.findTarget(&game.world.?, fixture.camera.position, fixture.camera.forwardDirection(), .putting));
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .z, .mods = .{} }));
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 12), game.blueprint_render_instances.items.len);
+    // The frame surrounds the adjacent placement cell, not its backing block.
+    try std.testing.expectApproxEqAbs(@as(f32, 30.0 - 0.035 / 2.0), game.blueprint_render_instances.items[0].position[1], 0.00001);
+    try std.testing.expectEqual(.anchor, game.blueprint_selection.stage);
+    try std.testing.expectEqual(null, game.blueprint_selection.anchor);
+    try std.testing.expectEqual(null, game.blueprint_selection.bounds);
+    // Hovering has not started a selection: Escape still opens the menu.
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expectEqual(.menu, game.overlay);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    game.enterBlueprintCapture();
+
+    fixture.camera.updatePosition(.{ 0, -0.000001, 0 });
+    try std.testing.expectEqual(null, try block_targeting.findTargetWithReach(&game.world.?, fixture.camera.position, fixture.camera.forwardDirection(), .putting, 30));
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 0), game.blueprint_render_instances.items.len);
+    game.confirmBlueprintTool();
+    try std.testing.expectEqual(.anchor, game.blueprint_selection.stage);
+    fixture.camera.updatePosition(.{ 0, 0, 0 });
+    game.confirmBlueprintTool();
+    try std.testing.expectEqual(.xy, game.blueprint_selection.stage);
+    try std.testing.expectEqualDeep(blueprint_capture.Cell{ target[0], target[1], target[2] }, game.blueprint_selection.anchor.?);
+    try std.testing.expectEqual([3]u32{ 1, 1, 1 }, game.blueprint_selection.bounds.?.size());
+
+    game.discardBlueprintDraft();
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 12), game.blueprint_render_instances.items.len);
+    game.world.?.setBlockUnchecked(backing, .none);
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 0), game.blueprint_render_instances.items.len);
+    game.confirmBlueprintTool();
+    try std.testing.expectEqual(.anchor, game.blueprint_selection.stage);
+    game.world.?.setBlockUnchecked(backing, .stone);
+    game.buildBlueprintRenderInstances();
+    const nearer_backing = coordinates.fromWorld(&test_layout, .{ 0, 20, 0 }).?;
+    const nearer_target = coordinates.fromWorld(&test_layout, .{ 0, 19, 0 }).?;
+    game.world.?.setBlockUnchecked(nearer_backing, .stone);
+    // Click before another render must use the new nearest target, not old preview.
+    game.confirmBlueprintTool();
+    try std.testing.expectEqualDeep(blueprint_capture.Cell{ nearer_target[0], nearer_target[1], nearer_target[2] }, game.blueprint_selection.anchor.?);
 }
 
 test "same-height blueprint XY uses distant adjacent placement then absolute height" {
