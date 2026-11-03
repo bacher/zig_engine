@@ -578,7 +578,8 @@ const Game = struct {
                 });
                 if (game.blueprint_selection.target_error) |reason| if (game.blueprint_selection.stage == .xy or game.blueprint_selection.stage == .height) zgui.textUnformatted(blueprint_capture.targetMessage(reason));
                 if (game.blueprint_diagnostics) |diagnostics| {
-                    if (diagnostics.actual > 0 and diagnostics.limit > 0) zgui.text("Blueprint mineral height {d} exceeds the limit of {d}.", .{ diagnostics.actual, diagnostics.limit }) else zgui.text("Blueprint rejected: {s}.", .{@tagName(diagnostics.code)});
+                    const mineral_height_failure = if (diagnostics.failure) |failure| failure.reason == .mineral_height else false;
+                    if (mineral_height_failure and diagnostics.actual > 0 and diagnostics.limit > 0) zgui.text("Blueprint mineral height {d} exceeds the limit of {d}.", .{ diagnostics.actual, diagnostics.limit }) else zgui.text("Blueprint rejected: {s}.", .{@tagName(diagnostics.code)});
                     if (diagnostics.failure) |failure| {
                         var buffer: [block_diagnostics.message_capacity]u8 = undefined;
                         if (block_diagnostics.errorMessageForResult(.{ .status = .constraint_violation, .failure = failure }, &buffer)) |message| zgui.textUnformatted(message);
