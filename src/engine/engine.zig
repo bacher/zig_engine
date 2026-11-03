@@ -534,7 +534,7 @@ pub const Engine = struct {
                 }
                 std.debug.print("Debug SSAO = {}\n", .{engine.state.debug_ssao_enabled});
             },
-            .b => {
+            .b => if (key_params.mods.control) {
                 engine.state.ssao_blur_enabled = !engine.state.ssao_blur_enabled;
                 std.debug.print("SSAO Blur = {}\n", .{engine.state.ssao_blur_enabled});
             },
@@ -1897,6 +1897,14 @@ test "input blocking releases the cursor, filters gameplay, and still delivers U
     try std.testing.expectEqual(2, probe.presses);
     engine.setGameplayInputBlocked(false);
     try std.testing.expectEqual(2, probe.input_changes);
+    const blur_enabled = engine.state.ssao_blur_enabled;
+    Engine.onKeyPress(&engine, .{ .key = .b, .mods = .{} });
+    try std.testing.expectEqual(blur_enabled, engine.state.ssao_blur_enabled);
+    Engine.onKeyPress(&engine, .{ .key = .b, .mods = .{ .control = true } });
+    try std.testing.expectEqual(!blur_enabled, engine.state.ssao_blur_enabled);
+    engine.setGameplayInputBlocked(true);
+    Engine.onKeyPress(&engine, .{ .key = .b, .mods = .{ .control = true } });
+    try std.testing.expectEqual(!blur_enabled, engine.state.ssao_blur_enabled);
 }
 
 test "pausing freezes gameplay time independently of input and drops the resumed interval" {

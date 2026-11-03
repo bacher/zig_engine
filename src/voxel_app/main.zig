@@ -534,7 +534,7 @@ const Game = struct {
                     .height => "Mouse1 / E: confirm height",
                     .loading => "Loading selected blocks...",
                     .validating => if (game.blueprint_save != null) "Saving..." else "Validating frozen snapshot...",
-                    .ready => "Press B to create a blueprint.",
+                    .ready => "Press Enter to create a blueprint.",
                     .naming => "Enter a blueprint name.",
                     .invalid => "Blueprint rejected. Escape: start again",
                 });
@@ -548,7 +548,7 @@ const Game = struct {
                 }
             } else if (game.blueprint_mode == .preview) {
                 zgui.textUnformatted("Blueprint placement");
-                zgui.textUnformatted(if (game.blueprint_apply != null) "Checking destination..." else "R: rotate   Mouse1 / E: apply   F / Escape: cancel");
+                zgui.textUnformatted(if (game.blueprint_apply != null) "Checking destination..." else "R: rotate   Mouse1 / E: apply   B / Escape: cancel");
             }
             if (game.blueprint_error) |message| zgui.textUnformatted(message);
             if (status) |message| zgui.textUnformatted(message);
@@ -580,12 +580,15 @@ const Game = struct {
         } else if (game.blueprint_mode == .capture and game.blueprint_selection.stage == .naming) {
             zgui.setNextWindowPos(.{ .x = screen[0] / 2, .y = screen[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
             _ = zgui.begin("Name blueprint", .{ .flags = .{ .always_auto_resize = true, .no_collapse = true, .no_saved_settings = true } });
-            if (game.blueprint_name_focus) {
+            const opening = game.blueprint_name_focus;
+            // Wait for the opening key's release so ImGui cannot also submit or
+            // deactivate the new field with that same press (including repeats).
+            if (opening and !zgui.isKeyDown(.enter) and !zgui.isKeyDown(.keypad_enter)) {
                 zgui.setKeyboardFocusHere(0);
                 game.blueprint_name_focus = false;
             }
             const enter = zgui.inputText("Name", .{ .buf = &game.blueprint_name, .flags = .{ .enter_returns_true = true } });
-            if (zgui.button("Save", .{}) or enter) game.submitBlueprintName();
+            if (zgui.button("Save", .{}) or (enter and !opening)) game.submitBlueprintName();
             zgui.sameLine(.{});
             if (zgui.button("Cancel capture", .{})) game.discardBlueprintDraft();
             zgui.end();
@@ -2091,7 +2094,7 @@ fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
         return true;
     }
     if (game.overlay != .none) {
-        if (key_params.key == .z or key_params.key == .f) return true;
+        if (key_params.key == .z or (key_params.key == .b and !key_params.mods.control)) return true;
     } else if (game.blueprint_mode != .none) {
         switch (key_params.key) {
             .m, .z => {
@@ -2102,11 +2105,11 @@ fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
                 if (game.blueprint_mode == .capture) game.discardBlueprintDraft() else game.leaveBlueprintTool();
                 return true;
             },
-            .f => {
+            .b => if (!key_params.mods.control) {
                 if (game.blueprint_mode != .capture) game.leaveBlueprintTool();
                 return true;
             },
-            .b => if (game.blueprint_mode == .capture) {
+            .enter, .kp_enter => if (game.blueprint_mode == .capture) {
                 if (game.blueprint_selection.stage == .ready and game.blueprint_candidate != null) {
                     game.blueprint_selection.stage = .naming;
                     game.blueprint_name = @splat(0);
@@ -2138,7 +2141,7 @@ fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
             game.enterBlueprintCapture();
             return true;
         },
-        .f => {
+        .b => if (!key_params.mods.control) {
             game.openBlueprintChooser();
             return true;
         },
@@ -5774,13 +5777,18 @@ test "blueprint foreground routing owns capture reset, text, map, and held input
     try std.testing.expectEqual(.none, game.overlay);
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
     try std.testing.expectEqual(blueprint_capture.Stage.anchor, game.blueprint_selection.stage);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .enter, .mods = .{} }));
+    try std.testing.expectEqual(blueprint_capture.Stage.anchor, game.blueprint_selection.stage);
+    try std.testing.expect(!handleUIKeyPress(game, .{ .key = .b, .mods = .{ .control = true } }));
     const compiled = try blueprint.compile(std.testing.allocator, .{ .size = .{ 1, 1, 1 }, .cells = &.{.dirt} }, .{ .horizontal_limit = blueprint.horizontalLimit(game.layout()) });
     game.blueprint_candidate = compiled.valid;
     game.blueprint_selection.stage = .ready;
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expectEqual(blueprint_capture.Stage.ready, game.blueprint_selection.stage);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .enter, .mods = .{} }));
     try std.testing.expectEqual(blueprint_capture.Stage.naming, game.blueprint_selection.stage);
     try std.testing.expect(fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
-    inline for (.{ zglfw.Key.m, .z, .f, .q, .b, .r, .e, .space }) |key| {
+    inline for (.{ zglfw.Key.m, .z, .f, .q, .b, .enter, .kp_enter, .r, .e, .space }) |key| {
         try std.testing.expect(handleUIKeyPress(game, .{ .key = key, .mods = .{} }));
         try std.testing.expectEqual(blueprint_capture.Stage.naming, game.blueprint_selection.stage);
         try std.testing.expectEqual(.capture, game.blueprint_mode);
@@ -5797,10 +5805,81 @@ test "blueprint foreground routing owns capture reset, text, map, and held input
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
     try std.testing.expectEqual(.world_map, game.overlay);
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .z, .mods = .{} }));
-    try std.testing.expect(handleUIKeyPress(game, .{ .key = .f, .mods = .{} }));
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
     try std.testing.expectEqual(.none, game.blueprint_mode);
     try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
     try std.testing.expectEqual(.none, game.overlay);
+    try std.testing.expect(!handleUIKeyPress(game, .{ .key = .f, .mods = .{} }));
+    try std.testing.expect(!handleUIKeyPress(game, .{ .key = .enter, .mods = .{} }));
+    try std.testing.expect(!handleUIKeyPress(game, .{ .key = .b, .mods = .{ .control = true } }));
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.blueprint_mode);
+    try std.testing.expectEqualStrings("You do not have any blueprints yet.", game.block_action_error.message(0).?);
+
+    const runtime = @import("blueprint_runtime.zig");
+    var saved: runtime.SavedDefinition = .{ .id = 1, .owner = game.player_id, .name = try std.testing.allocator.dupe(u8, "Hotkeys"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try std.testing.allocator.dupe(voxel_chunk_module.BlockType, &.{.dirt}), .target_count = 1 } };
+    defer saved.deinit(std.testing.allocator);
+    try game.world.?.applyBlueprintChanges(&.{.{ .definition = saved }});
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expectEqual(.chooser, game.blueprint_mode);
+    try std.testing.expect(fixture.engine.gameplay_input_blocked);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.blueprint_mode);
+    game.blueprint_mode = .preview;
+    game.updateBlueprintInputBlock();
+    try std.testing.expect(!handleUIKeyPress(game, .{ .key = .b, .mods = .{ .control = true } }));
+    try std.testing.expectEqual(.preview, game.blueprint_mode);
+    try std.testing.expect(!handleUIKeyPress(game, .{ .key = .f, .mods = .{} }));
+    try std.testing.expectEqual(.preview, game.blueprint_mode);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.blueprint_mode);
+}
+
+test "opening blueprint name entry with held Enter waits for release before accepting another Enter" {
+    zgui.init(std.testing.allocator);
+    defer zgui.deinit();
+    zgui.io.setIniFilename(null);
+    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
+    zgui.io.setDisplaySize(1280, 720);
+    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    inline for (.{ zglfw.Key.enter, .kp_enter }) |key| {
+        const gui_key: zgui.Key = if (key == .enter) .enter else .keypad_enter;
+        game.enterBlueprintCapture();
+        const compiled = try blueprint.compile(std.testing.allocator, .{ .size = .{ 1, 1, 1 }, .cells = &.{.dirt} }, .{ .horizontal_limit = blueprint.horizontalLimit(game.layout()) });
+        game.blueprint_candidate = compiled.valid;
+        game.blueprint_selection.stage = .ready;
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = key, .mods = .{} }));
+        zgui.io.addKeyEvent(gui_key, true);
+        // Holding the opening press beyond ImGui's repeat delay must not submit.
+        for (0..30) |_| {
+            zgui.newFrame();
+            game.drawBlueprintUI();
+            zgui.render();
+            try std.testing.expectEqual(blueprint_capture.Stage.naming, game.blueprint_selection.stage);
+            try std.testing.expectEqual(null, game.blueprint_error);
+        }
+        zgui.io.addKeyEvent(gui_key, false);
+        for (0..2) |_| {
+            zgui.newFrame();
+            game.drawBlueprintUI();
+            zgui.render();
+        }
+        try std.testing.expect(!game.blueprint_name_focus);
+        zgui.io.addKeyEvent(gui_key, true);
+        zgui.newFrame();
+        game.drawBlueprintUI();
+        zgui.render();
+        // A separate Enter now submits the name through the dialog normally.
+        try std.testing.expectEqualStrings("Enter a nonempty blueprint name.", game.blueprint_error.?);
+        zgui.io.addKeyEvent(gui_key, false);
+        game.leaveBlueprintTool();
+        zgui.newFrame();
+        zgui.render();
+    }
 }
 
 test "late blueprint save and apply results cannot reset a newer tool or close map" {
