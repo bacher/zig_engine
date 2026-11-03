@@ -7,6 +7,7 @@ const Allocator = std.mem.Allocator;
 pub const Limits = struct {
     max_cells: usize = 1_048_576,
     max_definitions: usize = 4096,
+    /// Active sites; final fulfillment releases a slot within the transaction.
     max_instances: usize = 4096,
     max_state_bytes: usize = 64 * 1024 * 1024,
     max_changes_bytes: usize = 16 * 1024 * 1024,
@@ -202,6 +203,9 @@ pub const State = struct {
         out.max_definition_id = self.max_definition_id;
         out.max_instance_id = self.max_instance_id;
         out.owned_bytes = self.owned_bytes;
+        // Prepared maps retain completed sites until apply replays their ops.
+        // Quotas and final wire size count only sites still active at this point.
+        var live_instances: usize = self.instances.count();
         var r: wire.Reader = .{ .bytes = changes };
         while (r.pos < r.bytes.len) {
             if (out.ops.items.len >= limits.max_operations) return error.Capacity;
@@ -236,7 +240,7 @@ pub const State = struct {
                         const other = out.definitions.get(site.definition_id) orelse self.definitions.get(site.definition_id).?;
                         if (boxesOverlap(view, d.view(), site.view(), other.view(), dimensions)) return error.InvalidBlueprint;
                     }
-                    if (view.id <= out.max_instance_id or self.instances.count() + out.instances.count() >= limits.max_instances) return error.InvalidBlueprint;
+                    if (view.id <= out.max_instance_id or live_instances >= limits.max_instances) return error.InvalidBlueprint;
                     const bit_len = (d.cells.len + 7) / 8;
                     out.owned_bytes = try std.math.add(usize, out.owned_bytes, bit_len);
                     if (out.owned_bytes > limits.max_state_bytes) return error.Capacity;
@@ -246,6 +250,7 @@ pub const State = struct {
                     @memset(bits, 0);
                     out.instances.putAssumeCapacity(view.id, .{ .id = view.id, .definition_id = view.definition_id, .owner = view.owner, .origin = view.origin, .rotation = view.rotation, .fulfilled = bits, .remaining = d.target_count });
                     out.max_instance_id = view.id;
+                    live_instances += 1;
                     out.ops.appendAssumeCapacity(.{ .instance = view.id });
                 },
                 3 => {
@@ -260,7 +265,10 @@ pub const State = struct {
                     if (!counter.found_existing) counter.value_ptr.* = instance.remaining;
                     if (counter.value_ptr.* == 0) return error.InvalidBlueprint;
                     counter.value_ptr.* -= 1;
-                    if (counter.value_ptr.* == 0) out.owned_bytes -= instance.fulfilled.len;
+                    if (counter.value_ptr.* == 0) {
+                        out.owned_bytes -= instance.fulfilled.len;
+                        live_instances -= 1;
+                    }
                     try out.ops.append(self.allocator, .{ .fulfill = f });
                 },
                 else => return error.InvalidBlueprint,
@@ -268,7 +276,7 @@ pub const State = struct {
         }
         try self.definitions.ensureUnusedCapacity(self.allocator, out.definitions.count());
         try self.instances.ensureUnusedCapacity(self.allocator, out.instances.count());
-        const maximum_encoded = try std.math.add(usize, out.owned_bytes, try std.math.add(usize, 24 + 38 * (self.definitions.count() + out.definitions.count()), 41 * (self.instances.count() + out.instances.count())));
+        const maximum_encoded = try std.math.add(usize, out.owned_bytes, try std.math.add(usize, 24 + 38 * (self.definitions.count() + out.definitions.count()), 41 * live_instances));
         if (maximum_encoded > limits.max_state_bytes) return error.Capacity;
         return out;
     }
@@ -529,6 +537,83 @@ test "incremental fulfillment preflight is atomic, checkpoints retain progress a
     try std.testing.expectEqual(@as(u32, 0), restored.instances.count());
     try std.testing.expectEqual(@as(u64, 8), restored.max_instance_id);
     try std.testing.expectEqual(@as(u32, 1), restored.definitions.count());
+}
+
+fn completedSiteQuotaScenario(a: Allocator, persisted: bool) !void {
+    var state = State.init(a);
+    defer state.deinit();
+    const dimensions: [3]u32 = .{ 4, 4, 4 };
+    const definition: Op = .{ .definition = .{ .id = 1, .owner = 9, .name = "Beam", .size = .{ 2, 1, 1 }, .cells = &.{ 10, 10 }, .target_count = 2 } };
+    const first: Op = .{ .instance = .{ .id = 1, .definition_id = 1, .owner = 9, .origin = .{ 1, 1, 5 }, .rotation = 0 } };
+    const replacement: Op = .{ .instance = .{ .id = 2, .definition_id = 1, .owner = 9, .origin = .{ 4, 1, 5 }, .rotation = 0 } };
+    const fill_first: Op = .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } };
+    const fill_last: Op = .{ .fulfill = .{ .instance_id = 1, .cell_index = 1 } };
+    // Exactly one definition and one active site's bitmap and wire metadata fit.
+    const final_size = 24 + 38 + definition.definition.name.len + definition.definition.cells.len + 41 + 1;
+    const limits: Limits = .{ .max_instances = 1, .max_state_bytes = final_size };
+    const initial = try encodeOps(a, if (persisted) &.{ definition, first, fill_first } else &.{definition});
+    defer a.free(initial);
+    var seed = try state.prepare(initial, dimensions, limits);
+    defer seed.deinit();
+    state.apply(&seed);
+    const before = try encodeState(a, &state);
+    defer a.free(before);
+    const changes = try encodeOps(a, if (persisted) &.{ fill_last, replacement } else &.{ first, fill_first, fill_last, replacement });
+    defer a.free(changes);
+    var prepared = try state.prepare(changes, dimensions, limits);
+    defer prepared.deinit();
+    const uncommitted = try encodeState(a, &state);
+    defer a.free(uncommitted);
+    try std.testing.expectEqualSlices(u8, before, uncommitted);
+    state.apply(&prepared);
+    try std.testing.expectEqual(@as(u32, 1), state.instances.count());
+    try std.testing.expect(!state.instances.contains(1));
+    try std.testing.expectEqual(@as(u32, 2), state.instances.get(2).?.remaining);
+    try std.testing.expectEqual(@as(u64, 2), state.max_instance_id);
+    try std.testing.expectEqual(definition.definition.name.len + definition.definition.cells.len + 1, state.owned_bytes);
+    const encoded = try encodeState(a, &state);
+    defer a.free(encoded);
+    try std.testing.expectEqual(final_size, encoded.len);
+    var restored = try decodeState(a, encoded, dimensions, limits);
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(u32, 1), restored.instances.count());
+    try std.testing.expectEqual(@as(u64, 2), restored.max_instance_id);
+    try std.testing.expectEqual(@as(u32, 2), restored.instances.get(2).?.remaining);
+}
+
+test "persisted completion releases transaction instance quota and encoded metadata" {
+    try completedSiteQuotaScenario(std.testing.allocator, true);
+}
+
+test "same-batch completion releases transaction instance quota and encoded metadata" {
+    try completedSiteQuotaScenario(std.testing.allocator, false);
+}
+
+test "instance quota remains enforced until final fulfillment without publishing failed changes" {
+    const a = std.testing.allocator;
+    var state = State.init(a);
+    defer state.deinit();
+    const dimensions: [3]u32 = .{ 4, 4, 4 };
+    const limits: Limits = .{ .max_instances = 1 };
+    const first: Op = .{ .instance = .{ .id = 1, .definition_id = 1, .owner = 9, .origin = .{ 1, 1, 5 }, .rotation = 0 } };
+    const replacement: Op = .{ .instance = .{ .id = 2, .definition_id = 1, .owner = 9, .origin = .{ 4, 1, 5 }, .rotation = 0 } };
+    const fill_first: Op = .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } };
+    const fill_last: Op = .{ .fulfill = .{ .instance_id = 1, .cell_index = 1 } };
+    const initial = try encodeOps(a, &.{ .{ .definition = .{ .id = 1, .owner = 9, .name = "Beam", .size = .{ 2, 1, 1 }, .cells = &.{ 10, 10 }, .target_count = 2 } }, first });
+    defer a.free(initial);
+    var seed = try state.prepare(initial, dimensions, limits);
+    defer seed.deinit();
+    state.apply(&seed);
+    const before = try encodeState(a, &state);
+    defer a.free(before);
+    for ([_][]const Op{ &.{replacement}, &.{ fill_first, replacement }, &.{ replacement, fill_first, fill_last }, &.{ fill_first, fill_last, replacement, fill_last } }) |ops| {
+        const changes = try encodeOps(a, ops);
+        defer a.free(changes);
+        try std.testing.expectError(error.InvalidBlueprint, state.prepare(changes, dimensions, limits));
+        const after = try encodeState(a, &state);
+        defer a.free(after);
+        try std.testing.expectEqualSlices(u8, before, after);
+    }
 }
 
 fn allocationScenario(a: Allocator) !void {

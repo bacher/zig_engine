@@ -1958,6 +1958,48 @@ test "blueprint publication and fulfillment recover atomically with terrain and 
     }
 }
 
+test "completed blueprint site frees quota for a same-batch replacement across WAL and compaction recovery" {
+    const a = std.testing.allocator;
+    var f = try Fixture.init();
+    defer f.deinit();
+    const definition: blueprint_records.DefinitionView = .{ .id = 1, .owner = 7, .name = "Soil", .size = .{ 1, 1, 1 }, .cells = &.{2}, .target_count = 1 };
+    const state_bytes = 24 + 38 + definition.name.len + definition.cells.len + 41 + 1;
+    const limits: Limits = .{ .blueprints = .{ .max_instances = 1, .max_state_bytes = state_bytes } };
+    f.store.limits = limits;
+    const initial = try blueprint_records.encodeOps(a, &.{ .{ .definition = definition }, .{ .instance = .{ .id = 1, .definition_id = 1, .owner = 7, .origin = .{ 0, 0, 0 }, .rotation = 0 } } });
+    defer a.free(initial);
+    const tick = format.encodeGlobal(1);
+    try f.store.beginSnapshotWithBlueprints(1, &tick, &.{}, 0, 0, initial);
+    _ = try f.store.commitSnapshot();
+    const replacement = try blueprint_records.encodeOps(a, &.{ .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } }, .{ .instance = .{ .id = 2, .definition_id = 1, .owner = 7, .origin = .{ 1, 0, 0 }, .rotation = 0 } } });
+    defer a.free(replacement);
+    var blocks: [32768]u8 = @splat(0);
+    blocks[0] = 2;
+    const record = try format.encodeChunk(a, f.store.world_uuid, .{ .id = 0, .revision = 1, .is_unreachable = false, .blocks = &blocks, .metadata = &.{} });
+    defer a.free(record);
+    try f.store.beginSnapshotWithBlueprints(2, &tick, &.{}, 0, 1, replacement);
+    try f.store.appendChunk(record);
+    _ = try f.store.commitSnapshot();
+    // Recover first from WAL, then from the compacted base under the same limits.
+    for ([_]bool{ false, true }) |compact| {
+        if (compact) try f.store.compact();
+        f.store.deinit();
+        f.store = try Store.open(a, f.path, limits);
+        try std.testing.expectEqual(@as(u64, 2), f.store.sequence);
+        try std.testing.expectEqual(@as(u32, 1), f.store.blueprints.definitions.count());
+        try std.testing.expectEqual(@as(u32, 1), f.store.blueprints.instances.count());
+        try std.testing.expect(!f.store.blueprints.instances.contains(1));
+        const site = f.store.blueprints.instances.get(2).?;
+        try std.testing.expectEqual(@as(u32, 1), site.remaining);
+        try std.testing.expectEqual([3]u32{ 1, 0, 0 }, site.origin);
+        try std.testing.expectEqual(@as(u64, 2), f.store.blueprints.max_instance_id);
+        try std.testing.expectEqual(@as(u64, 3), try f.store.blueprints.nextInstanceId());
+        const encoded = try blueprint_records.encodeState(a, &f.store.blueprints);
+        defer a.free(encoded);
+        try std.testing.expectEqual(state_bytes, encoded.len);
+    }
+}
+
 test "unfinished progress survives checkpoint racing a final fulfillment and uncommitted tails" {
     const a = std.testing.allocator;
     var model = io.Model.init(a);
