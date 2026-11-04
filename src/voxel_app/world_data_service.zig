@@ -1118,9 +1118,16 @@ pub const WorldDataService = struct {
     fn requestSaveTransition(self: *WorldDataService, id: u64, final: bool) void {
         const commands = self.pending.items.len + @as(usize, if (self.blueprint_task != null) 1 else 0);
         if (self.lifecycle.request(.{ .id = id, .final = final }, commands) == .none) {
-            // Keep the original intent/fence, but let an ordinary retry wake a
-            // stranded Apply. Active writers and unrelated queues stay untouched.
-            self.retryWaitingBlueprintApplication();
+            // Keep the original intent/fence. A running writer owns the next
+            // wake; an idle drain may retain FIFO work without an Apply.
+            if (self.job != null) return;
+            if (self.lifecycle.queued.?.fence_remaining == 0) {
+                self.retryPending();
+            } else if (self.blueprint_task != null) {
+                self.retryWaitingBlueprintApplication();
+            } else if (self.pending.items.len != 0) {
+                self.retryPending();
+            }
             return;
         }
         self.selectSaveDrain();
@@ -2567,6 +2574,9 @@ pub const WorldDataService = struct {
                 job.writer.await(self.io);
                 self.status.output_peak_bytes = job.peak_bytes;
                 self.status.output_bytes = 0;
+                // Only a processed commit retires the journal prefix. A later
+                // finalization failure still leaves that durable progress valid.
+                const committed = self.lifecycle.active.?.stage == .finalizing;
                 self.job = null;
                 const completion = self.lifecycle.finished(finished.epoch, finished.failure).?;
                 job.deinit();
@@ -2579,12 +2589,15 @@ pub const WorldDataService = struct {
                 if (self.compaction_requested) self.beginCompaction() catch |err| self.failPersistence(err);
                 switch (completion.outcome) {
                     .complete => self.status.phase = .complete,
-                    .canceled => |err| self.failPersistence(err),
-                    .failed => |err| self.failPersistence(err),
+                    .canceled, .failed => |err| if (committed) self.failPersistence(err) else self.noteDrainFailure(err),
                 }
                 self.status.progress_generation +%= 1;
-                self.retryWaitingBlueprintApplication();
-                self.retryPending();
+                // An uncommitted failure cannot free journal space. Retrying
+                // here would immediately start another failing prefix writer.
+                if (committed) {
+                    self.retryWaitingBlueprintApplication();
+                    self.retryPending();
+                }
             },
         }
     }
@@ -7286,4 +7299,261 @@ test "coalesced ordinary Save retries a prepared blueprint without widening its 
     try std.testing.expectEqual(@as(u64, 3), results.items[2].request_id);
     try std.testing.expectEqual(.success, results.items[2].status);
     try f.reopen(1, true);
+}
+
+const AsyncBlueprintPrefixTest = struct {
+    const RearmedWriteFailure = struct {
+        armed: std.atomic.Value(bool) = .init(true),
+        injected: std.atomic.Value(u32) = .init(0),
+        remaining: u8 = 4,
+        faults: @import("persistence/io.zig").Faults = .{ .operation = .write, .enabled = false },
+
+        fn hook(context: ?*anyopaque, operation: @import("persistence/io.zig").Operation) void {
+            const self: *@This() = @ptrCast(@alignCast(context.?));
+            if (operation != .write) return;
+            self.faults.enabled = false;
+            if (!self.armed.load(.acquire) or self.remaining == 0) return;
+            self.remaining -= 1;
+            _ = self.injected.fetchAdd(1, .acq_rel);
+            // Faults normally disables itself after one failure. Rearm only
+            // from its writer-thread hook and keep the script bounded.
+            self.faults.observed = 0;
+            self.faults.after = 0;
+            self.faults.enabled = true;
+        }
+    };
+
+    const Completion = struct { failure: ?anyerror, committed: bool };
+
+    fn finishOne(service: *WorldDataService) !Completion {
+        const job = service.job orelse return error.MissingPrefixWriter;
+        const epoch = job.epoch;
+        job.writer.await(service.io);
+        var committed = false;
+        // Process exactly this writer's terminal event. A broken completion
+        // policy may start a replacement; the assertion can catch it without
+        // following a restart loop or depending on thread scheduling.
+        for (0..8) |_| {
+            service.requests.mutex.lockUncancelable(service.io);
+            if (service.completion_count == 0) {
+                service.requests.mutex.unlock(service.io);
+                return error.MissingPrefixCompletion;
+            }
+            const event = service.completion_ring.items[service.completion_head];
+            service.completion_head = (service.completion_head + 1) % service.completion_ring.items.len;
+            service.completion_count -= 1;
+            service.requests.mutex.unlock(service.io);
+            if (event == .committed and event.committed == epoch) committed = true;
+            service.persistenceEvent(event);
+            if (event == .finished and event.finished.epoch == epoch) return .{ .failure = event.finished.failure, .committed = committed };
+        }
+        return error.MissingPrefixCompletion;
+    }
+
+    fn expectSleeping(f: *PreparedBlueprintDrainTest) !void {
+        const epoch = f.fixture.service.capture_epoch;
+        try f.expectNoOrdinaryRetry();
+        try std.testing.expect(f.fixture.service.job == null);
+        try std.testing.expectEqual(epoch, f.fixture.service.capture_epoch);
+    }
+};
+
+test "failed ordinary and canceled final blueprint prefixes wait for explicit Save retry" {
+    for ([_]bool{ false, true }) |cancel_prefix| {
+        var f: PreparedBlueprintDrainTest = undefined;
+        try f.init();
+        defer f.deinit();
+        const service = &f.fixture.service;
+        const task = try f.prepare();
+        const blocks = task.snapshot.chunks.get(PreparedBlueprintDrainTest.chunk_id).?.blocks;
+        const fulfilled = (try task.result.?).prepared.publication.instance.fulfilled.ptr;
+        var failure: AsyncBlueprintPrefixTest.RearmedWriteFailure = .{};
+        failure.faults.context = &failure;
+        failure.faults.hook = AsyncBlueprintPrefixTest.RearmedWriteFailure.hook;
+        var gate: ServiceWriteGate = .{};
+        var cancellation_faults: @import("persistence/io.zig").Faults = .{ .enabled = false, .context = &gate, .hook = ServiceWriteGate.hook };
+        f.store.setFaults(if (cancel_prefix) &cancellation_faults else &failure.faults);
+        defer gate.released.set(std.testing.io);
+        service.finishBlueprintApplication(task);
+        if (cancel_prefix) service.processRequest(.{ .blueprint_save = try f.fixture.request(3) });
+        service.requestSaveTransition(100, cancel_prefix);
+        // The ordinary case excludes a later command; the canceled final Save
+        // already includes both commands in its original fence.
+        if (!cancel_prefix) service.processRequest(.{ .blueprint_save = try f.fixture.request(3) });
+        if (cancel_prefix) {
+            try gate.entered.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+            // The single source fits the queue. Complete encoding first so the
+            // cancellation deterministically fails footer authorization.
+            service.job.?.encoder.await(std.testing.io);
+            service.job.?.cancel();
+            gate.released.set(std.testing.io);
+        }
+        const epoch = service.capture_epoch;
+        const next = service.next_intent.load(.monotonic);
+        const completion = try AsyncBlueprintPrefixTest.finishOne(service);
+        try std.testing.expect(!completion.committed);
+        try std.testing.expectEqual(if (cancel_prefix) error.Cancelled else error.Io, completion.failure.?);
+        try f.expectWaiting(task, 100, if (cancel_prefix) 2 else 1, completion.failure.?, false);
+        try std.testing.expectEqual(epoch, service.capture_epoch);
+        try std.testing.expectEqual(next, service.next_intent.load(.monotonic));
+        try std.testing.expectEqual(@as(u64, 0), f.store.sequence);
+        try std.testing.expect(service.lifecycle.queued.?.retry == .available);
+        try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
+        try std.testing.expectEqual(blocks, task.snapshot.chunks.get(PreparedBlueprintDrainTest.chunk_id).?.blocks);
+        try std.testing.expectEqual(fulfilled, (try task.result.?).prepared.publication.instance.fulfilled.ptr);
+        try AsyncBlueprintPrefixTest.expectSleeping(&f);
+        failure.armed.store(false, .release);
+        f.store.setFaults(null);
+        service.requestSaveTransition(101, false);
+        try std.testing.expect(service.job != null);
+        try std.testing.expectEqual(@as(u64, 100), service.lifecycle.queued.?.intent.id);
+        try f.waitSave(100);
+        try std.testing.expectEqual(@as(u32, if (cancel_prefix) 2 else 1), f.store.blueprints.definitions.count());
+        try std.testing.expectEqual(@as(u32, 2), service.worker_state.blueprints.definitions.count());
+        try std.testing.expectEqual(@as(u64, 3), f.fixture.client.resolved_request);
+        try f.reopen(if (cancel_prefix) 2 else 1, true);
+    }
+}
+
+test "asynchronous blueprint prefix Io consumes one delayed final retry without restarting a loop" {
+    for ([_]bool{ false, true }) |repeat_failure| {
+        var f: PreparedBlueprintDrainTest = undefined;
+        try f.init();
+        defer f.deinit();
+        const service = &f.fixture.service;
+        const task = try f.prepare();
+        const blocks = task.snapshot.chunks.get(PreparedBlueprintDrainTest.chunk_id).?.blocks;
+        const fulfilled = (try task.result.?).prepared.publication.instance.fulfilled.ptr;
+        var failure: AsyncBlueprintPrefixTest.RearmedWriteFailure = .{};
+        failure.faults.context = &failure;
+        failure.faults.hook = AsyncBlueprintPrefixTest.RearmedWriteFailure.hook;
+        f.store.setFaults(&failure.faults);
+        service.finishBlueprintApplication(task);
+        service.processRequest(.{ .blueprint_save = try f.fixture.request(3) });
+        service.requestSaveTransition(100, true);
+        const epoch = service.capture_epoch;
+        const next = service.next_intent.load(.monotonic);
+        const initial = try AsyncBlueprintPrefixTest.finishOne(service);
+        try std.testing.expect(!initial.committed);
+        try std.testing.expectEqual(error.Io, initial.failure.?);
+        try f.expectWaiting(task, 100, 2, error.Io, true);
+        try std.testing.expect(service.lifecycle.queued.?.retry == .scheduled);
+        try std.testing.expectEqual(epoch, service.capture_epoch);
+        try std.testing.expectEqual(next, service.next_intent.load(.monotonic));
+        try std.testing.expectEqual(@as(u32, 1), failure.injected.load(.acquire));
+        try AsyncBlueprintPrefixTest.expectSleeping(&f);
+        if (!repeat_failure) {
+            failure.armed.store(false, .release);
+            f.store.setFaults(null);
+        }
+        service.lifecycle.queued.?.retry = .{ .scheduled = persistence.now(std.testing.io) - 1 };
+        service.checkWatchdog();
+        try std.testing.expect(service.job != null);
+        try std.testing.expect(service.lifecycle.queued.?.retry == .exhausted);
+        try std.testing.expectEqual(epoch + 1, service.capture_epoch);
+        try std.testing.expectEqual(next + 1, service.next_intent.load(.monotonic));
+        if (repeat_failure) {
+            const retried = try AsyncBlueprintPrefixTest.finishOne(service);
+            try std.testing.expect(!retried.committed);
+            try std.testing.expectEqual(error.Io, retried.failure.?);
+            try f.expectWaiting(task, 100, 2, error.Io, false);
+            try std.testing.expect(service.lifecycle.queued.?.retry == .exhausted);
+            try std.testing.expectEqual(@as(u32, 2), failure.injected.load(.acquire));
+            try std.testing.expectEqual(epoch + 1, service.capture_epoch);
+            try std.testing.expectEqual(next + 1, service.next_intent.load(.monotonic));
+            try std.testing.expectEqual(@as(u64, 0), f.store.sequence);
+            try std.testing.expectEqual(blocks, task.snapshot.chunks.get(PreparedBlueprintDrainTest.chunk_id).?.blocks);
+            try std.testing.expectEqual(fulfilled, (try task.result.?).prepared.publication.instance.fulfilled.ptr);
+            try AsyncBlueprintPrefixTest.expectSleeping(&f);
+            failure.armed.store(false, .release);
+            f.store.setFaults(null);
+            // An ordinary explicit retry keeps the final intent and its spent
+            // retry budget while restarting the same prepared application.
+            service.requestSaveTransition(101, false);
+            try std.testing.expectEqual(@as(u64, 100), service.lifecycle.queued.?.intent.id);
+            try std.testing.expect(service.lifecycle.queued.?.retry == .exhausted);
+        }
+        try f.waitSave(100);
+        try std.testing.expectEqual(@as(u64, 3), f.fixture.client.resolved_request);
+        try f.reopen(2, true);
+    }
+}
+
+test "blueprint prefix committed before compaction failure still wakes its prepared Apply" {
+    var f: PreparedBlueprintDrainTest = undefined;
+    try f.init();
+    defer f.deinit();
+    const service = &f.fixture.service;
+    const task = try f.prepare();
+    var faults: @import("persistence/io.zig").Faults = .{ .operation = .read };
+    f.store.setFaults(&faults);
+    // The real final writer commits the full journal, then reads it during
+    // compaction. A later compaction error does not undo that durable progress.
+    try service.beginCapture(200, true);
+    service.finishBlueprintApplication(task);
+    service.requestSaveTransition(100, true);
+    const completion = try AsyncBlueprintPrefixTest.finishOne(service);
+    try std.testing.expect(completion.committed);
+    try std.testing.expectEqual(error.Io, completion.failure.?);
+    try std.testing.expect(service.blueprint_task == null);
+    try std.testing.expectEqual(@as(u64, 2), f.fixture.client.resolved_request);
+    try f.waitSave(100);
+    f.store.setFaults(null);
+    try std.testing.expectEqual(@as(u64, 2), f.store.sequence);
+    try f.reopen(1, true);
+}
+
+test "coalesced ordinary Save recovers idle FIFO work and a ready drain before a later Apply" {
+    const Case = enum { ready, retained_save, later_apply };
+    for ([_]Case{ .ready, .retained_save, .later_apply }) |case| {
+        const retained_save = case == .retained_save;
+        var f: PreparedBlueprintDrainTest = undefined;
+        try f.init();
+        defer f.deinit();
+        const service = &f.fixture.service;
+        var faults: @import("persistence/io.zig").Faults = .{ .operation = .write };
+        f.store.setFaults(&faults);
+        if (retained_save) {
+            service.saveBlueprint(try f.fixture.request(2));
+        } else {
+            try service.beginCapture(200, false);
+        }
+        service.requestSaveTransition(100, false);
+        const completion = try AsyncBlueprintPrefixTest.finishOne(service);
+        try std.testing.expectEqual(error.Io, completion.failure.?);
+        try std.testing.expect(!completion.committed);
+        try std.testing.expect(service.job == null);
+        try std.testing.expect(service.blueprint_task == null);
+        try std.testing.expectEqual(@as(u64, 100), service.status.intent_id);
+        try std.testing.expectEqual(@as(u64, 0), service.status.target_sequence);
+        try std.testing.expectEqual(persistence.Phase.failed, service.status.phase);
+        try std.testing.expect(!service.status.active);
+        try std.testing.expectEqual(@as(usize, if (retained_save) 1 else 0), service.lifecycle.queued.?.fence_remaining);
+        const epoch = service.capture_epoch;
+        const progress = service.status.progress_generation;
+        for (0..4) |_| service.checkWatchdog();
+        try std.testing.expectEqual(epoch, service.capture_epoch);
+        try std.testing.expectEqual(progress, service.status.progress_generation);
+        f.store.setFaults(null);
+        // The coalesced request must also resume a ready save or retained Save
+        // payload. A later Apply still preparing must not block a ready fence.
+        const later_task = if (case == .later_apply) try f.prepare() else null;
+        service.requestSaveTransition(101, false);
+        try std.testing.expect(service.job != null);
+        if (retained_save) {
+            try std.testing.expectEqual(@as(u64, 100), service.lifecycle.queued.?.intent.id);
+            try std.testing.expectEqual(@as(usize, 1), service.lifecycle.queued.?.fence_remaining);
+        } else {
+            try std.testing.expectEqual(@as(u64, 100), service.lifecycle.active.?.intent.id);
+        }
+        if (later_task) |task| service.finishBlueprintApplication(task);
+        try f.waitSave(100);
+        try std.testing.expectEqual(@as(u32, if (retained_save) 2 else 1), f.store.blueprints.definitions.count());
+        try std.testing.expectEqual(@as(u64, if (retained_save) 2 else 1), f.store.sequence);
+        try std.testing.expectEqual(@as(u64, if (retained_save or later_task != null) 2 else 1), f.fixture.client.resolved_request);
+        if (later_task != null) {
+            try std.testing.expectEqual(@as(u32, 0), f.store.blueprints.instances.count());
+            try std.testing.expectEqual(@as(u32, 1), service.worker_state.blueprints.instances.count());
+        }
+    }
 }
