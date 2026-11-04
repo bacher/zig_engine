@@ -1117,7 +1117,12 @@ pub const WorldDataService = struct {
     /// operation immediately, so the fence must already belong to this attempt.
     fn requestSaveTransition(self: *WorldDataService, id: u64, final: bool) void {
         const commands = self.pending.items.len + @as(usize, if (self.blueprint_task != null) 1 else 0);
-        if (self.lifecycle.request(.{ .id = id, .final = final }, commands) == .none) return;
+        if (self.lifecycle.request(.{ .id = id, .final = final }, commands) == .none) {
+            // Keep the original intent/fence, but let an ordinary retry wake a
+            // stranded Apply. Active writers and unrelated queues stay untouched.
+            self.retryWaitingBlueprintApplication();
+            return;
+        }
         self.selectSaveDrain();
         self.retrySaveDrain();
     }
@@ -7020,7 +7025,7 @@ const PreparedBlueprintDrainTest = struct {
         try std.testing.expectEqual(fence, service.lifecycle.queued.?.fence_remaining);
     }
 
-    fn waitFinal(self: *@This(), intent: u64) !void {
+    fn waitSave(self: *@This(), intent: u64) !void {
         const service = &self.fixture.service;
         const end = persistence.now(std.testing.io) + 10 * std.time.ns_per_s;
         while (persistence.now(std.testing.io) < end) {
@@ -7084,7 +7089,7 @@ test "prepared blueprint Apply retries synchronous journal drain failure before 
     try std.testing.expect(service.status.intent_id != 101);
     try std.testing.expectEqual(@as(u64, 101), service.lifecycle.queued.?.intent.id);
     try std.testing.expect(!service.lifecycle.active.?.intent.final);
-    try f.waitFinal(101);
+    try f.waitSave(101);
     var results: std.ArrayList(BlueprintResult) = .empty;
     defer results.deinit(std.testing.allocator);
     f.fixture.client.takeBlueprintResults(&results);
@@ -7138,7 +7143,7 @@ test "prepared blueprint Apply uses one bounded watchdog retry for synchronous j
             service.requestSaveTransition(101, true);
         }
         try std.testing.expect(service.job != null);
-        try f.waitFinal(if (repeat_failure) 101 else 100);
+        try f.waitSave(if (repeat_failure) 101 else 100);
         try std.testing.expectEqual(@as(u32, 1), service.worker_state.blueprints.instances.count());
         try std.testing.expectEqual(@as(u64, 2), f.fixture.client.resolved_request);
         try f.reopen(1, true);
@@ -7161,7 +7166,7 @@ test "prepared blueprint Apply revalidates dependencies after synchronous journa
     try std.testing.expect(service.blueprint_task == null);
     try std.testing.expectEqual(@as(u32, 0), service.worker_state.blueprints.instances.count());
     try std.testing.expectEqual(@as(u64, 2), f.fixture.client.resolved_request);
-    try f.waitFinal(101);
+    try f.waitSave(101);
     var results: std.ArrayList(BlueprintResult) = .empty;
     defer results.deinit(std.testing.allocator);
     f.fixture.client.takeBlueprintResults(&results);
@@ -7169,4 +7174,116 @@ test "prepared blueprint Apply revalidates dependencies after synchronous journa
     try std.testing.expectEqual(@as(u64, 2), results.items[1].request_id);
     try std.testing.expectEqual(.stale, results.items[1].status);
     try f.reopen(1, false);
+}
+
+test "coalesced ordinary Save retries a prepared blueprint without widening its original fence" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const Submit = struct {
+        fn ordinary(service: *WorldDataService) !u64 {
+            const id = service.requestSave(false);
+            var requests: std.ArrayList(Request) = .empty;
+            defer requests.deinit(std.testing.allocator);
+            service.requests.takeAll(service.io, &requests);
+            try std.testing.expectEqual(@as(usize, 1), requests.items.len);
+            try std.testing.expectEqual(id, requests.items[0].save.id);
+            try std.testing.expect(!requests.items[0].save.final);
+            service.processRequest(requests.items[0]);
+            return id;
+        }
+    };
+    var f: PreparedBlueprintDrainTest = undefined;
+    try f.init();
+    defer f.deinit();
+    const service = &f.fixture.service;
+    defer service.read_failed.deinit(a);
+    const task = try f.prepare();
+    const prepared_blocks = task.snapshot.chunks.get(PreparedBlueprintDrainTest.chunk_id).?.blocks;
+    const prepared_fulfilled = (try task.result.?).prepared.publication.instance.fulfilled.ptr;
+    service.limits.manifest_entries = 0;
+    service.finishBlueprintApplication(task);
+    const original = try Submit.ordinary(service);
+    try f.expectWaiting(task, original, 1, error.ManifestCapacityExceeded, false);
+    try std.testing.expect(!service.lifecycle.queued.?.intent.final);
+    // This command arrived after the ordinary Save selected its prefix. A
+    // coalesced retry must wake Apply without moving this later command into it.
+    service.processRequest(.{ .blueprint_save = try f.fixture.request(3) });
+    for (0..3) |_| {
+        const next = service.next_intent.load(.monotonic);
+        const progress = service.status.progress_generation;
+        const retry = try Submit.ordinary(service);
+        try std.testing.expect(retry != original);
+        // One public request identity and one attempted internal prefix writer.
+        try std.testing.expectEqual(next + 2, service.next_intent.load(.monotonic));
+        try std.testing.expectEqual(progress + 1, service.status.progress_generation);
+        try f.expectWaiting(task, original, 1, error.ManifestCapacityExceeded, false);
+        try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
+        try std.testing.expectEqual(@as(u64, 3), service.pending.items[0].request.blueprint_save.request_id);
+        try std.testing.expectEqual(prepared_blocks, task.snapshot.chunks.get(PreparedBlueprintDrainTest.chunk_id).?.blocks);
+        try std.testing.expectEqual(prepared_fulfilled, (try task.result.?).prepared.publication.instance.fulfilled.ptr);
+        try std.testing.expect(service.lifecycle.queued.?.retry == .available);
+    }
+    try f.expectNoOrdinaryRetry();
+    var gate: ServiceWriteGate = .{};
+    var faults: @import("persistence/io.zig").Faults = .{ .enabled = false, .context = &gate, .hook = ServiceWriteGate.hook };
+    f.store.setFaults(&faults);
+    // This defer precedes fixture cleanup even when an assertion fails while
+    // the real writer is blocked in its fault hook.
+    defer gate.released.set(io);
+    service.limits.manifest_entries = 65536;
+    const recovering = try Submit.ordinary(service);
+    try std.testing.expect(recovering != original);
+    try std.testing.expect(service.job != null);
+    try gate.entered.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    const writer = service.job.?;
+    const epoch = writer.epoch;
+    const active_intent = service.status.intent_id;
+    const next = service.next_intent.load(.monotonic);
+    const progress = service.status.progress_generation;
+    try std.testing.expect(active_intent != original);
+    try std.testing.expectEqual(original, service.lifecycle.queued.?.intent.id);
+    try std.testing.expectEqual(@as(usize, 1), service.lifecycle.queued.?.fence_remaining);
+    // With a writer already active, coalescing is an allocation-free guard.
+    // Retained dependency state must not be swept by the general retry path.
+    try service.read_failed.put(a, PreparedBlueprintDrainTest.chunk_id, error.OutOfMemory);
+    {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+        service.allocator = failing.allocator();
+        defer service.allocator = a;
+        for (0..4) |index| service.requestSaveTransition(900 + index, false);
+        try std.testing.expect(!failing.has_induced_failure);
+        try std.testing.expect(service.job == writer);
+        try std.testing.expectEqual(epoch, service.job.?.epoch);
+        try std.testing.expectEqual(active_intent, service.status.intent_id);
+        try std.testing.expectEqual(next, service.next_intent.load(.monotonic));
+        try std.testing.expectEqual(progress, service.status.progress_generation);
+        try std.testing.expectEqual(original, service.lifecycle.queued.?.intent.id);
+        try std.testing.expectEqual(@as(usize, 1), service.lifecycle.queued.?.fence_remaining);
+        try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
+        try std.testing.expect(service.read_failed.contains(PreparedBlueprintDrainTest.chunk_id));
+        try std.testing.expect(service.blueprint_task == task);
+        try std.testing.expect(task.waiting_for_journal);
+    }
+    service.read_failed.clearRetainingCapacity();
+    gate.released.set(io);
+    try f.waitSave(original);
+    f.store.setFaults(null);
+    // The original Save persisted Apply's instance. The later Save command was
+    // accepted only afterward and still belongs to the unsaved journal suffix.
+    try std.testing.expectEqual(@as(u64, 2), f.store.sequence);
+    try std.testing.expectEqual(@as(u32, 1), f.store.blueprints.definitions.count());
+    try std.testing.expectEqual(@as(u32, 1), f.store.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u32, 2), service.worker_state.blueprints.definitions.count());
+    try std.testing.expectEqual(@as(usize, 1), service.blueprint_journal.items.len);
+    try std.testing.expectEqual(@as(u64, 2), service.blueprint_journal.items[0].definition.id);
+    try std.testing.expectEqual(@as(u64, 3), f.fixture.client.resolved_request);
+    var results: std.ArrayList(BlueprintResult) = .empty;
+    defer results.deinit(a);
+    f.fixture.client.takeBlueprintResults(&results);
+    try std.testing.expectEqual(@as(usize, 3), results.items.len);
+    try std.testing.expectEqual(@as(u64, 2), results.items[1].request_id);
+    try std.testing.expectEqual(.success, results.items[1].status);
+    try std.testing.expectEqual(@as(u64, 3), results.items[2].request_id);
+    try std.testing.expectEqual(.success, results.items[2].status);
+    try f.reopen(1, true);
 }
