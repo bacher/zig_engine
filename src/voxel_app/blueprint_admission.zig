@@ -227,7 +227,7 @@ pub fn prepare(allocator: std.mem.Allocator, snapshot: *const Snapshot, definiti
         }
     }
     var owned_instance = try instance.clone(allocator);
-    var publication = runtime.buildPublication(allocator, &snapshot.layout, definition, owned_instance, &source) catch |err| {
+    var publication = runtime.buildPublication(allocator, &snapshot.layout, definition, owned_instance, &source, null) catch |err| {
         owned_instance.deinit(allocator);
         return err;
     };

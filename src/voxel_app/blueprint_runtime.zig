@@ -71,6 +71,14 @@ pub const ChunkIndex = struct {
     lookup: std.AutoHashMapUnmanaged(Cell, Target) = .empty,
     instances: std.ArrayList(u64) = .empty,
 
+    /// Swap-remove one target and repair its replacement's slot without allocation.
+    pub fn removeTarget(self: *ChunkIndex, cell: Cell) ?Target {
+        const target = self.lookup.fetchRemove(cell) orelse return null;
+        _ = self.targets.swapRemove(target.value.chunk_slot);
+        if (target.value.chunk_slot < self.targets.items.len) self.lookup.getPtr(self.targets.items[target.value.chunk_slot]).?.chunk_slot = target.value.chunk_slot;
+        return target.value;
+    }
+
     pub fn deinit(self: *ChunkIndex, allocator: std.mem.Allocator) void {
         self.targets.deinit(allocator);
         self.lookup.deinit(allocator);
@@ -112,9 +120,10 @@ pub const PreparedPublication = struct {
     }
 };
 
-/// Takes instance ownership on success. Source indexes must be detached from
-/// mutable State; only footprint chunks are cloned and extended.
-pub fn buildPublication(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, definition: blueprint.Definition, instance: Instance, source: *const std.AutoHashMapUnmanaged(ChunkId, ChunkIndex)) !PreparedPublication {
+/// Takes instance ownership on success. Source indexes stay unchanged during
+/// preparation; only footprint chunks are cloned and extended. Client callers
+/// may supply preceding fulfillments to filter from these owned clones.
+pub fn buildPublication(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, definition: blueprint.Definition, instance: Instance, source: *const std.AutoHashMapUnmanaged(ChunkId, ChunkIndex), fulfillments: ?*const FulfillmentSet) !PreparedPublication {
     var result: PreparedPublication = .{ .instance = instance };
     errdefer {
         var iterator = result.chunks.valueIterator();
@@ -125,6 +134,18 @@ pub fn buildPublication(allocator: std.mem.Allocator, layout: *const engine.Worl
     for (instance.box_chunks) |id| {
         var index = if (source.get(id)) |existing| try existing.clone(allocator) else ChunkIndex{};
         errdefer index.deinit(allocator);
+        // Source entries may borrow an earlier publication. Filter only this
+        // owned clone, preserving both rollback and its original commit point.
+        if (fulfillments) |removed| if (removed.count() != 0) {
+            var slot: usize = 0;
+            while (slot < index.targets.items.len) {
+                const cell = index.targets.items[slot];
+                const target = index.lookup.get(cell).?;
+                if (removed.contains(.{ .instance_id = target.instance_id, .cell_index = target.cell_index })) {
+                    _ = index.removeTarget(cell).?;
+                } else slot += 1;
+            }
+        };
         try index.instances.append(allocator, instance.id);
         result.chunks.putAssumeCapacity(id, index);
     }
@@ -141,6 +162,7 @@ pub fn buildPublication(allocator: std.mem.Allocator, layout: *const engine.Worl
 }
 
 pub const Fulfill = struct { instance_id: u64, cell_index: u32 };
+pub const FulfillmentSet = std.AutoHashMapUnmanaged(Fulfill, void);
 pub const Change = union(enum) {
     definition: SavedDefinition,
     instance: Instance,
@@ -381,9 +403,7 @@ pub const State = struct {
         if (value.cell_index >= saved.definition.cells.len or saved.definition.cells[value.cell_index] == .none or instance.isFulfilled(value.cell_index)) return false;
         const cell = worldCell(layout, instance.origin, saved.definition.size, instance.rotation, blueprint.cellAtIndex(saved.definition.size, value.cell_index)) orelse return false;
         const chunk = self.chunks.getPtr(chunkId(layout, cell)).?;
-        const target = chunk.lookup.fetchRemove(cell) orelse return false;
-        _ = chunk.targets.swapRemove(target.value.chunk_slot);
-        if (target.value.chunk_slot < chunk.targets.items.len) chunk.lookup.getPtr(chunk.targets.items[target.value.chunk_slot]).?.chunk_slot = target.value.chunk_slot;
+        _ = chunk.removeTarget(cell) orelse return false;
         instance.fulfilled[value.cell_index / 8] |= @as(u8, 1) << @as(u3, @intCast(value.cell_index % 8));
         instance.remaining -= 1;
         if (instance.remaining == 0) {
