@@ -1122,12 +1122,13 @@ pub const WorldDataService = struct {
         self.retrySaveDrain();
     }
 
-    /// Every explicit/automatic retry must wake both read queries and mutation
-    /// dependency discovery; neither queue can rely on another completion arriving.
+    /// Wake reads, mutation dependencies, and prepared applications. A journal
+    /// capture can fail before creating a Job, so no completion may arrive.
     fn retrySaveDrain(self: *WorldDataService) void {
         self.blueprint_road_waiting = false;
         self.retryReadFailures();
         self.retryWaitingReads();
+        self.retryWaitingBlueprintApplication();
         self.retryPending();
     }
 
@@ -1151,6 +1152,12 @@ pub const WorldDataService = struct {
 
     fn noteDrainFailure(self: *WorldDataService, err: anyerror) void {
         self.selectSaveDrain();
+        if (self.job == null) if (self.lifecycle.queued) |drain| {
+            // A failed internal prefix capture may have overwritten the public
+            // intent even though the queued drain was already selected.
+            self.status.intent_id = drain.intent.id;
+            self.status.target_sequence = 0;
+        };
         self.failPersistence(err);
         if (self.lifecycle.dependencyFailed(err, persistence.now(self.io))) self.status.active = true;
     }
@@ -1464,7 +1471,17 @@ pub const WorldDataService = struct {
     fn drainBlueprintJournal(self: *WorldDataService) void {
         if (self.store == null or self.job != null or self.is_shutting_down.load(.acquire)) return;
         const intent = self.next_intent.fetchAdd(1, .monotonic);
-        self.beginCapture(intent, false) catch |err| self.failPersistence(err);
+        self.beginCapture(intent, false) catch |err| self.noteDrainFailure(err);
+    }
+
+    fn retryWaitingBlueprintApplication(self: *WorldDataService) void {
+        if (self.job != null) return;
+        const task = self.blueprint_task orelse return;
+        if (!task.waiting_for_journal) return;
+        // Reuse the prepared result and recheck dependencies before publication.
+        // Another drain-start failure leaves it waiting for the next save retry.
+        task.waiting_for_journal = false;
+        self.finishBlueprintApplication(task);
     }
 
     fn addBlueprintSummary(self: *WorldDataService, summary: *blueprint_wire.PrepareSummary, operation: blueprint_wire.Op) !void {
@@ -2561,10 +2578,7 @@ pub const WorldDataService = struct {
                     .failed => |err| self.failPersistence(err),
                 }
                 self.status.progress_generation +%= 1;
-                if (self.blueprint_task) |task| if (task.waiting_for_journal) {
-                    task.waiting_for_journal = false;
-                    self.finishBlueprintApplication(task);
-                };
+                self.retryWaitingBlueprintApplication();
                 self.retryPending();
             },
         }
@@ -6868,4 +6882,291 @@ test "budgeted blueprint writer drains prefixes retries fills and restores an at
     var restored = try format.decodeChunk(a, store.world_uuid, encoded, dimensions);
     defer restored.deinit(a);
     for (10..13) |x| try std.testing.expectEqual(@intFromEnum(rules.BlockType.planks), restored.blocks[transformations.index(.{ @intCast(x), 10, 6 })]);
+}
+
+const PreparedBlueprintDrainTest = struct {
+    const chunk_id = test_layout.encodeChunkCoords(.{ 0, 0, 2 });
+    const dimensions: [3]u32 = .{ @intCast(test_layout.size_in_chunks[0]), @intCast(test_layout.size_in_chunks[1]), @intCast(test_layout.size_in_chunks[2]) };
+    path: [:0]u8,
+    store: storage.Store,
+    store_open: bool = false,
+    fixture: BlueprintSaveFixture,
+    fixture_open: bool = false,
+
+    fn init(self: *@This()) !void {
+        const a = std.testing.allocator;
+        var uuid: [16]u8 = undefined;
+        std.c.arc4random_buf(&uuid, uuid.len);
+        self.path = try std.fmt.allocPrintSentinel(a, "/private/tmp/blueprint-prepared-drain-{x}", .{uuid}, 0);
+        errdefer a.free(self.path);
+        errdefer std.Io.Dir.cwd().deleteTree(std.testing.io, self.path) catch {};
+        const descriptor = try format.encodeDescriptor(a, .{ .dimensions = dimensions, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
+        defer a.free(descriptor);
+        const global = format.encodeGlobal(0);
+        self.store = try storage.Store.create(a, self.path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{ .blueprints = .{ .max_operations = 1 } });
+        self.store_open = true;
+        errdefer self.store.deinit();
+        try self.fixture.init();
+        self.fixture_open = true;
+        errdefer self.cleanupFixture();
+        self.fixture.service.store = &self.store;
+        self.fixture.service.worker_state.persistence_service = &self.fixture.service;
+        // Keep these tests small while retaining the real encoder and writer.
+        self.fixture.service.limits.output_bytes = 64 * 1024;
+        self.fixture.service.saveBlueprint(try self.fixture.request(1));
+    }
+
+    fn cleanupFixture(self: *@This()) void {
+        if (!self.fixture_open) return;
+        const service = &self.fixture.service;
+        const a = std.testing.allocator;
+        service.allocator = a;
+        if (service.blueprint_task) |task| {
+            service.blueprint_task = null;
+            if (task.future) |*future| future.await(service.io);
+            if (!task.retired.load(.acquire)) task.release();
+            a.destroy(task);
+        }
+        for (service.blueprint_retired.items) |task| {
+            if (task.future) |*future| future.await(service.io);
+            if (!task.retired.load(.acquire)) task.release();
+            a.destroy(task);
+        }
+        service.blueprint_retired.deinit(a);
+        BlueprintJournalBudgetTest.cleanup(&self.fixture);
+        self.fixture_open = false;
+    }
+
+    fn deinit(self: *@This()) void {
+        self.cleanupFixture();
+        if (self.store_open) self.store.deinit();
+        std.Io.Dir.cwd().deleteTree(std.testing.io, self.path) catch {};
+        std.testing.allocator.free(self.path);
+    }
+
+    fn prepare(self: *@This()) !*BlueprintAdmissionTask {
+        const a = std.testing.allocator;
+        const service = &self.fixture.service;
+        var chunk = WorldChunk.initEmpty();
+        var owns_chunk = true;
+        defer if (owns_chunk) chunk.deinit(a);
+        const data = try chunk.tryEnsureData(a);
+        for (0..6) |z| @memset(std.mem.asBytes(&data.blocks[z]), @intFromEnum(rules.BlockType.stone));
+        chunk.chunk_revision = 1;
+        try service.worker_state.modified_chunks.put(a, chunk_id, chunk);
+        owns_chunk = false;
+        const state = &service.worker_state.blueprints;
+        var instance = try state.prepareInstance(a, &test_layout, 1, 1, 1, .{ 10, 10, 70 }, 0);
+        var owns_instance = true;
+        defer if (owns_instance) instance.deinit(a);
+        const task = try a.create(BlueprintAdmissionTask);
+        errdefer a.destroy(task);
+        const ids = try a.dupe(ChunkId, &.{chunk_id});
+        task.* = .{
+            .service = service,
+            .request = .{ .client = &self.fixture.client, .request_id = 2, .owner = 1, .definition_id = 1, .origin = .{ 10, 10, 70 }, .rotation = 0 },
+            .snapshot = .{ .layout = test_layout, .overlay_revision = state.revision, .playable_y_inset = service.worker_state.generator.playableYInset() },
+            .definition = state.definitions.get(1).?.definition,
+            .instance = instance,
+            .client_count = service.clients.items.len,
+            .chunk_ids = ids,
+            .cursor = ids.len,
+        };
+        owns_instance = false;
+        errdefer task.release();
+        try service.copyBlueprintDependency(task, chunk_id);
+        task.result = try task.prepare();
+        try std.testing.expect((try task.result.?) == .prepared);
+        try service.blueprint_retired.ensureUnusedCapacity(a, 1);
+        service.blueprint_task = task;
+        return task;
+    }
+
+    fn expectWaiting(self: *@This(), task: *BlueprintAdmissionTask, intent: u64, fence: usize, err: anyerror, automatic_retry: bool) !void {
+        const service = &self.fixture.service;
+        try std.testing.expect(service.blueprint_task == task);
+        try std.testing.expect(task.waiting_for_journal);
+        try std.testing.expect(service.job == null);
+        try std.testing.expect(service.lifecycle.active == null);
+        try std.testing.expectEqual(intent, service.lifecycle.queued.?.intent.id);
+        try std.testing.expectEqual(intent, service.status.intent_id);
+        try std.testing.expectEqual(@as(u64, 0), service.status.target_sequence);
+        try std.testing.expectEqual(persistence.Phase.failed, service.status.phase);
+        try std.testing.expectEqualStrings(@errorName(err), service.status.error_name.?);
+        try std.testing.expectEqual(automatic_retry, service.status.active);
+        try std.testing.expectEqual(fence, service.lifecycle.queued.?.fence_remaining);
+        try std.testing.expectEqual(@as(u32, 0), service.worker_state.blueprints.instances.count());
+        try std.testing.expectEqual(@as(u64, 0), service.worker_state.blueprints.max_instance_id);
+        try std.testing.expectEqual(@as(u64, 1), self.fixture.client.resolved_request);
+        try std.testing.expectEqual(@as(usize, 1), service.blueprint_journal.items.len);
+        try std.testing.expectEqual(@as(u64, 0), service.worker_state.blueprint_fulfillment_attempts);
+        try std.testing.expectEqual(rules.BlockType.none, service.worker_state.modified_chunks.get(chunk_id).?.content.getBlock(.{ 10, 10, 6 }));
+        try std.testing.expectEqual(@as(?u8, null), service.players.get(1).?.inventory);
+        try std.testing.expectEqual(@as(usize, 1), self.fixture.client.blueprint_results.items.items.len);
+    }
+
+    fn expectNoOrdinaryRetry(self: *@This()) !void {
+        const service = &self.fixture.service;
+        const next = service.next_intent.load(.monotonic);
+        const progress = service.status.progress_generation;
+        const fence = service.lifecycle.queued.?.fence_remaining;
+        for (0..4) |_| {
+            service.advanceBlueprintAdmission();
+            service.retryPending();
+            service.checkWatchdog();
+        }
+        try std.testing.expectEqual(next, service.next_intent.load(.monotonic));
+        try std.testing.expectEqual(progress, service.status.progress_generation);
+        try std.testing.expectEqual(fence, service.lifecycle.queued.?.fence_remaining);
+    }
+
+    fn waitFinal(self: *@This(), intent: u64) !void {
+        const service = &self.fixture.service;
+        const end = persistence.now(std.testing.io) + 10 * std.time.ns_per_s;
+        while (persistence.now(std.testing.io) < end) {
+            service.drainPersistenceEvents();
+            if (service.status.intent_id == intent and !service.status.active and service.status.phase == .complete) break;
+            try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(service.blueprint_task == null);
+        try std.testing.expect(service.job == null);
+        try std.testing.expect(service.lifecycle.active == null);
+        try std.testing.expect(service.lifecycle.queued == null);
+        try std.testing.expectEqual(intent, service.status.intent_id);
+        try std.testing.expectEqual(persistence.Phase.complete, service.status.phase);
+        try std.testing.expect(!service.status.active);
+        try std.testing.expectEqual(@as(usize, 0), service.pending.items.len);
+    }
+
+    fn reopen(self: *@This(), definitions: u32, instance: bool) !void {
+        self.cleanupFixture();
+        self.store.deinit();
+        self.store_open = false;
+        self.store = try storage.Store.open(std.testing.allocator, self.path, .{});
+        self.store_open = true;
+        try std.testing.expectEqual(definitions, self.store.blueprints.definitions.count());
+        try std.testing.expectEqual(@as(u32, if (instance) 1 else 0), self.store.blueprints.instances.count());
+        if (instance) {
+            const restored_instance = self.store.blueprints.instances.get(1).?;
+            try std.testing.expectEqual(@as(u64, 1), restored_instance.definition_id);
+            try std.testing.expectEqual(@as(u32, 1), restored_instance.remaining);
+        }
+        const bytes = (try self.store.readChunk(std.testing.allocator, chunk_id)).?;
+        defer std.testing.allocator.free(bytes);
+        var restored = try format.decodeChunk(std.testing.allocator, self.store.world_uuid, bytes, dimensions);
+        defer restored.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@intFromEnum(rules.BlockType.stone), restored.blocks[transformations.index(.{ 10, 10, 5 })]);
+        try std.testing.expectEqual(@intFromEnum(rules.BlockType.none), restored.blocks[transformations.index(.{ 10, 10, 6 })]);
+    }
+};
+
+test "prepared blueprint Apply retries synchronous journal drain failure before its final Save fence" {
+    var f: PreparedBlueprintDrainTest = undefined;
+    try f.init();
+    defer f.deinit();
+    const service = &f.fixture.service;
+    const task = try f.prepare();
+    service.limits.manifest_entries = 0;
+    service.finishBlueprintApplication(task);
+    try std.testing.expect(task.waiting_for_journal);
+    // This later owned command must stay behind Apply, including through a
+    // failed prefix writer and the final Save's two-command fence.
+    service.processRequest(.{ .blueprint_save = try f.fixture.request(3) });
+    service.requestSaveTransition(100, true);
+    try f.expectWaiting(task, 100, 2, error.ManifestCapacityExceeded, false);
+    try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
+    try std.testing.expectEqual(@as(u32, 1), service.worker_state.blueprints.definitions.count());
+    try std.testing.expect(service.lifecycle.queued.?.retry == .available);
+    try f.expectNoOrdinaryRetry();
+    service.limits.manifest_entries = 65536;
+    service.requestSaveTransition(101, true);
+    try std.testing.expect(service.job != null);
+    try std.testing.expect(service.status.intent_id != 101);
+    try std.testing.expectEqual(@as(u64, 101), service.lifecycle.queued.?.intent.id);
+    try std.testing.expect(!service.lifecycle.active.?.intent.final);
+    try f.waitFinal(101);
+    var results: std.ArrayList(BlueprintResult) = .empty;
+    defer results.deinit(std.testing.allocator);
+    f.fixture.client.takeBlueprintResults(&results);
+    try std.testing.expectEqual(@as(usize, 3), results.items.len);
+    try std.testing.expectEqual(@as(u64, 2), results.items[1].request_id);
+    try std.testing.expectEqual(.apply, results.items[1].kind);
+    try std.testing.expectEqual(.success, results.items[1].status);
+    try std.testing.expectEqual(@as(u64, 3), results.items[2].request_id);
+    try std.testing.expectEqual(.save, results.items[2].kind);
+    try std.testing.expectEqual(.success, results.items[2].status);
+    try std.testing.expectEqual(@as(u64, 3), f.fixture.client.resolved_request);
+    try f.reopen(2, true);
+}
+
+test "prepared blueprint Apply uses one bounded watchdog retry for synchronous journal OOM" {
+    for ([_]bool{ false, true }) |repeat_failure| {
+        var f: PreparedBlueprintDrainTest = undefined;
+        try f.init();
+        defer f.deinit();
+        const service = &f.fixture.service;
+        const task = try f.prepare();
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        service.allocator = failing.allocator();
+        defer service.allocator = std.testing.allocator;
+        service.finishBlueprintApplication(task);
+        service.requestSaveTransition(100, true);
+        try std.testing.expect(failing.has_induced_failure);
+        try f.expectWaiting(task, 100, 1, error.OutOfMemory, true);
+        try std.testing.expect(service.lifecycle.queued.?.retry == .scheduled);
+        const deadline = service.lifecycle.queued.?.retry.scheduled;
+        const prepared_blocks = task.snapshot.chunks.get(PreparedBlueprintDrainTest.chunk_id).?.blocks;
+        const prepared_fulfilled = (try task.result.?).prepared.publication.instance.fulfilled.ptr;
+        // Repeated dependency failures share the original deadline.
+        service.retrySaveDrain();
+        try std.testing.expectEqual(deadline, service.lifecycle.queued.?.retry.scheduled);
+        try std.testing.expectEqual(prepared_blocks, task.snapshot.chunks.get(PreparedBlueprintDrainTest.chunk_id).?.blocks);
+        try std.testing.expectEqual(prepared_fulfilled, (try task.result.?).prepared.publication.instance.fulfilled.ptr);
+        try f.expectNoOrdinaryRetry();
+        service.lifecycle.queued.?.retry = .{ .scheduled = persistence.now(std.testing.io) - 1 };
+        if (!repeat_failure) service.allocator = std.testing.allocator;
+        service.checkWatchdog();
+        if (repeat_failure) {
+            try f.expectWaiting(task, 100, 1, error.OutOfMemory, false);
+            try std.testing.expect(service.lifecycle.queued.?.retry == .exhausted);
+            // Neither another OOM nor ordinary watchdog progress replenishes
+            // the consumed automatic retry. Explicit Save can still recover.
+            service.retrySaveDrain();
+            try std.testing.expect(service.lifecycle.queued.?.retry == .exhausted);
+            try f.expectNoOrdinaryRetry();
+            service.allocator = std.testing.allocator;
+            service.requestSaveTransition(101, true);
+        }
+        try std.testing.expect(service.job != null);
+        try f.waitFinal(if (repeat_failure) 101 else 100);
+        try std.testing.expectEqual(@as(u32, 1), service.worker_state.blueprints.instances.count());
+        try std.testing.expectEqual(@as(u64, 2), f.fixture.client.resolved_request);
+        try f.reopen(1, true);
+    }
+}
+
+test "prepared blueprint Apply revalidates dependencies after synchronous journal drain failure" {
+    var f: PreparedBlueprintDrainTest = undefined;
+    try f.init();
+    defer f.deinit();
+    const service = &f.fixture.service;
+    const task = try f.prepare();
+    service.limits.manifest_entries = 0;
+    service.finishBlueprintApplication(task);
+    service.requestSaveTransition(100, true);
+    try f.expectWaiting(task, 100, 1, error.ManifestCapacityExceeded, false);
+    service.worker_state.modified_chunks.getPtr(PreparedBlueprintDrainTest.chunk_id).?.chunk_revision += 1;
+    service.limits.manifest_entries = 65536;
+    service.requestSaveTransition(101, true);
+    try std.testing.expect(service.blueprint_task == null);
+    try std.testing.expectEqual(@as(u32, 0), service.worker_state.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u64, 2), f.fixture.client.resolved_request);
+    try f.waitFinal(101);
+    var results: std.ArrayList(BlueprintResult) = .empty;
+    defer results.deinit(std.testing.allocator);
+    f.fixture.client.takeBlueprintResults(&results);
+    try std.testing.expectEqual(@as(usize, 2), results.items.len);
+    try std.testing.expectEqual(@as(u64, 2), results.items[1].request_id);
+    try std.testing.expectEqual(.stale, results.items[1].status);
+    try f.reopen(1, false);
 }
