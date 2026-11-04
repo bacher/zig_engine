@@ -186,7 +186,7 @@ const preview_scenes = [_]PreviewScene{
     .{ .origin = .{ 128, 128, 128 }, .camera_chunk = .{ 4, 4, std.math.minInt(i32) }, .depth_axis = 2 },
     .{ .origin = .{ 128, 128, 128 }, .camera_chunk = .{ 4, 4, std.math.maxInt(i32) }, .depth_axis = 2 },
 };
-const preview_pair_count = preview_scenes.len * 4 + 4;
+const preview_pair_count = preview_scenes.len * 4 + 6;
 
 /// Submit before the next draw can overwrite renderer uniforms or dynamic instances.
 const PreviewTarget = struct {
@@ -312,6 +312,46 @@ fn appendPreviewReference(list: *std.ArrayList(blueprint.Instance), allocator: s
     }
 }
 
+fn checkLongFrameEnd(gctx: *zgpu.GraphicsContext, renderer: *blueprint.Renderer, atlas: wgpu.BindGroup, target: PreviewTarget, pair_index: *usize) !void {
+    const allocator = std.testing.allocator;
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } });
+    var camera = Camera.init(&layout, 1);
+    camera.chunk = .{ 5, 4, 4 }; // Storage X160: the box ends nearby at X158.
+    camera.clip_from_world_chunked = zmath.identity();
+    camera.clip_from_world_chunked[0][0] = 0.5;
+    camera.clip_from_world_chunked[1][1] = 0.5;
+    camera.clip_from_world_chunked[2] = .{ 0.12, 0.08, -0.08, 0 };
+    camera.clip_from_world_chunked[3] = .{ 1.4, -0.5, 0.75, 1 };
+    var actual: std.ArrayList(blueprint.Instance) = .empty;
+    defer actual.deinit(allocator);
+    var expected: std.ArrayList(blueprint.Instance) = .empty;
+    defer expected.deinit(allocator);
+    const miniature = blueprint.blockInstance(&camera, .{ 157, 128, 128 }, .planks, true, false);
+    try std.testing.expectEqual(@as(f32, -3 + 0.375), miniature.position[0]);
+    try std.testing.expectEqual(@as(f32, -2), blueprint.blockInstance(&camera, .{ 158, 128, 128 }, .planks, false, false).position[0]);
+    try actual.append(allocator, miniature);
+    try blueprint.appendFrame(&actual, allocator, &camera, .{ 159, 129, 128 }, .{ 1, 1, 1 });
+    try expected.appendSlice(allocator, actual.items);
+    const selected_start: u32 = @intCast(actual.items.len);
+    const size: [3]u32 = .{ 127, 2, 1 };
+    try blueprint.appendFrame(&actual, allocator, &camera, .{ 31, 128, 128 }, size);
+    // Construct the same continuous box at zero, then explicitly translate its
+    // minimum to 31 - 160 = -129. Only the supported nearby end is in view.
+    var zero_camera = Camera.init(&layout, 1);
+    zero_camera.chunk = @splat(0);
+    try blueprint.appendFrame(&expected, allocator, &zero_camera, .{ 0, 0, 0 }, size);
+    for (expected.items[selected_start..]) |*rail| rail.position[0] -= 129;
+    try std.testing.expectEqual(@as(u32, 12), blueprint.frame_instance_count);
+    try std.testing.expectEqual(@as(u32, 13), selected_start);
+    try std.testing.expectEqual(@as(usize, 12), actual.items.len - selected_start);
+    try std.testing.expectEqual(actual.items.len, expected.items.len);
+    for ([_]f32{ 1, 0.25 }) |clear_depth| {
+        try target.draw(gctx, renderer, atlas, &camera, expected.items, selected_start, null, false, allocator, clear_depth, pair_index.* * 2);
+        try target.draw(gctx, renderer, atlas, &camera, actual.items, selected_start, null, false, allocator, clear_depth, pair_index.* * 2 + 1);
+        pair_index.* += 1;
+    }
+}
+
 fn checkCachedPreview(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse) !void {
     const allocator = std.testing.allocator;
     const device = gctx.device;
@@ -376,6 +416,8 @@ fn checkCachedPreview(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapRespon
             pair_index += 1;
         }
     }
+
+    try checkLongFrameEnd(gctx, &reference, atlas_binding, target, &pair_index);
 
     const camera = previewCamera(&layout, preview_scenes[0]);
     preview.origin = preview_scenes[0].origin;
@@ -465,6 +507,6 @@ fn checkCachedPreview(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapRespon
             changed += 1;
         };
         try std.testing.expect(changed > 20);
-        if (index == preview_pair_count - 3) for (actual.depths) |depth| try std.testing.expectEqual(@as(f32, 0.25), depth);
+        if (index == preview_scenes.len * 4 + 1 or index == preview_pair_count - 3) for (actual.depths) |depth| try std.testing.expectEqual(@as(f32, 0.25), depth);
     }
 }

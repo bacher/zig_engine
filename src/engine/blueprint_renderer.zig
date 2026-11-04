@@ -32,7 +32,12 @@ pub fn blockInstance(camera: *const Camera, cell: Cell, material: BlockType, min
     return .{ .position = .{ position[0], position[1], position[2], 0 }, .scale = .{ scale, scale, scale, 0 }, .material = .{ @intFromEnum(material), if (invalid) 2 else 0, 0, 0 } };
 }
 pub fn appendFrame(list: *std.ArrayList(Instance), allocator: std.mem.Allocator, camera: *const Camera, minimum: Cell, size: [3]u32) !void {
-    const base = relativePosition(camera, minimum);
+    // Pick one periodic image from the middle cell, rather than a potentially
+    // distant minimum corner. Keep the twelve rails continuous. Reuse the one
+    // existing coordinate conversion; the nonwrapping offset compiles to zero.
+    const center_offset: i64 = if (WorldLayout.wrap_x) size[0] / 2 else 0;
+    const base = relativePosition(camera, minimum + Cell{ center_offset, 0, 0 }) -
+        @Vector(3, f32){ @floatFromInt(center_offset), 0, 0 };
     const thickness: f32 = 0.035;
     inline for (0..3) |axis| {
         const other_a = (axis + 1) % 3;
@@ -311,6 +316,43 @@ test "frame consists of twelve square section rails" {
     const miniature = blockInstance(&camera, .{ 128, 128, 128 }, .planks, true, false);
     try std.testing.expectEqual(@as(f32, 0.25), miniature.scale[0]);
     try std.testing.expectApproxEqAbs(@as(f32, 0.375), miniature.position[0], 0.00001);
+}
+
+test "frame anchors its continuous interval by the middle cell near half a world" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } });
+    var camera = Camera.init(&layout, 1);
+    camera.chunk = .{ 5, 4, 4 };
+    var list: std.ArrayList(Instance) = .empty;
+    defer list.deinit(std.testing.allocator);
+    try list.ensureTotalCapacityPrecise(std.testing.allocator, frame_instance_count);
+    // Warm frame construction needs no allocation, including after the image
+    // change. A failing allocator also prevents extra geometry from hiding here.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const half_thickness: f32 = 0.035 / 2.0;
+    for ([_]i64{ -225, 31, 287 }) |minimum_x| {
+        list.clearRetainingCapacity();
+        try appendFrame(&list, failing.allocator(), &camera, .{ minimum_x, 128, 128 }, .{ 127, 5, 7 });
+        try std.testing.expectEqual(frame_instance_count, list.items.len);
+        const expected_x: f32 = if (WorldLayout.wrap_x) -129 else @floatFromInt(minimum_x - 160);
+        try std.testing.expectApproxEqAbs(expected_x, list.items[0].position[0] + half_thickness, 0.00002);
+        try std.testing.expectApproxEqAbs(expected_x + 127, list.items[6].position[0] + half_thickness, 0.00002);
+        try std.testing.expectApproxEqAbs(@as(f32, 0), list.items[0].position[1] + half_thickness, 0.00002);
+        try std.testing.expectApproxEqAbs(@as(f32, 0), list.items[0].position[2] + half_thickness, 0.00002);
+        try std.testing.expectApproxEqAbs(@as(f32, 127.035), list.items[0].scale[0], 0.00002);
+        try std.testing.expectApproxEqAbs(@as(f32, 5.035), list.items[4].scale[1], 0.00002);
+        try std.testing.expectApproxEqAbs(@as(f32, 7.035), list.items[8].scale[2], 0.00002);
+    }
+    if (comptime WorldLayout.wrap_x) {
+        // The nearby last cell lies just inside the corrected far face at -2.
+        const last = blockInstance(&camera, .{ 157, 128, 128 }, .planks, true, false);
+        try std.testing.expectEqual(@as(f32, -2.625), last.position[0]);
+    }
+    list.clearRetainingCapacity();
+    try appendFrame(&list, failing.allocator(), &camera, .{ 31, 128, 128 }, .{ 1, 1, 1 });
+    try std.testing.expectEqual(frame_instance_count, list.items.len);
+    const original = relativePosition(&camera, .{ 31, 128, 128 });
+    try std.testing.expectApproxEqAbs(original[0], list.items[0].position[0] + half_thickness, 0.00002);
+    try std.testing.expect(!failing.has_induced_failure);
 }
 
 // Integer operations and conversion order used by vs_preview, kept independent
