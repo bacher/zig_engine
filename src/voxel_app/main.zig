@@ -927,6 +927,8 @@ const Game = struct {
         game.updateMapTeleport();
         game.updateChunksAroundCamera(false);
         const has_new_chunks = game.receiveChunks();
+        // Retire client metadata even on empty-package frames, outside fulfillment.
+        game.world.?.blueprints.cleanup(game.allocator, 4);
         // Synchronize blocks first, then resolve local movement against that cache.
         // Player input remains independent of mesh work and GPU upload capacity.
         game.updateGameplay(has_new_chunks);
@@ -6596,4 +6598,148 @@ test "same-height blueprint XY uses distant adjacent placement then absolute hei
     game.updateBlueprintRay();
     try std.testing.expect(game.blueprint_selection.target_valid);
     try std.testing.expect(game.blueprint_selection.bounds.?.max[2] > anchor[2]);
+}
+
+const BlueprintCleanupFrameTest = struct {
+    streaming: StreamingTest = .{},
+    service: WorldDataService = undefined,
+    client: world_data_service.Client = undefined,
+
+    fn init(self: *@This()) !void {
+        const a = std.testing.allocator;
+        self.streaming.init();
+        self.service = .{ .layout = &test_layout, .io = std.testing.io, .allocator = a, .worker = undefined, .worker_state = undefined };
+        self.client = .{ .service = &self.service };
+        errdefer self.deinit();
+        self.streaming.game.world_client = &self.client;
+        self.streaming.game.render_radius = 0;
+        self.streaming.engine.paused = true;
+        self.streaming.engine.gameplay_input_blocked = true;
+        // Match GPU preflight's occupied-grid guard: actual updateWorld must
+        // finish before touching the fixture's undefined graphics device.
+        for (0..64) |_| _ = try self.streaming.grid.gpu_block_buffer_manager.occupyBlock(.{ .size_exponent = 6 });
+        var mesh: voxel_chunk_module.ChunkSideData = .{};
+        try mesh.blocks_grouped_by_side[0].append(a, .{ .coords = .{ 8, 8, 8 }, .block_type = .stone });
+        self.streaming.grid.appendChunk(.{ .chunk_coords = .{ 0, 0, 0 }, .chunk_side_data = mesh });
+    }
+
+    fn deinit(self: *@This()) void {
+        self.streaming.deinit();
+        self.service.requests.items.deinit(std.testing.allocator);
+        self.client.responses.items.deinit(std.testing.allocator);
+        self.client.blueprint_results.items.deinit(std.testing.allocator);
+    }
+
+    fn frame(self: *@This()) !void {
+        try std.testing.expectEqual(@as(usize, 0), self.client.responses.items.items.len);
+        try std.testing.expectEqual(@as(usize, 0), self.streaming.game.chunk_packages.items.len);
+        self.streaming.game.updateWorld();
+        try std.testing.expectEqual(@as(usize, 0), self.client.responses.items.items.len);
+        try std.testing.expectEqual(@as(usize, 0), self.streaming.game.chunk_packages.items.len);
+    }
+};
+
+test "world update retires a completed client site without packages and ignores late replay" {
+    const a = std.testing.allocator;
+    const runtime = @import("blueprint_runtime.zig");
+    var f: BlueprintCleanupFrameTest = .{};
+    try f.init();
+    defer f.deinit();
+    const world = &f.streaming.game.world.?;
+    var saved: runtime.SavedDefinition = .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Completed"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(voxel_chunk_module.BlockType, &.{.planks}), .target_count = 1 } };
+    defer saved.deinit(a);
+    try world.applyBlueprintChanges(&.{.{ .definition = saved }});
+    var site = try world.blueprints.prepareInstance(a, &test_layout, 17, 1, 1, .{ 10, 10, 10 }, 0);
+    defer site.deinit(a);
+    try world.applyBlueprintChanges(&.{.{ .instance = site }});
+    try world.applyBlueprintChanges(&.{.{ .fulfill = .{ .instance_id = 17, .cell_index = 0 } }});
+    try std.testing.expect(!world.blueprints.instances.get(17).?.active);
+    try std.testing.expectEqual(@as(usize, 1), world.blueprints.cleanup_queue.items.len);
+    try std.testing.expectEqual(@as(u32, 1), world.blueprints.chunks.count());
+    try f.frame();
+    try std.testing.expectEqual(@as(u32, 0), world.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u32, 0), world.blueprints.chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), world.blueprints.cleanup_queue.items.len);
+    try std.testing.expectEqual(@as(usize, 0), world.blueprints.cleanup_head);
+    try std.testing.expectEqual(@as(u64, 17), world.blueprints.max_instance_id);
+    try std.testing.expectEqual(@as(u32, 1), world.blueprints.definitions.count());
+    const retired_revision = world.blueprints.revision;
+    try world.applyBlueprintChanges(&.{ .{ .instance = site }, .{ .fulfill = .{ .instance_id = 17, .cell_index = 0 } } });
+    try f.frame();
+    try std.testing.expectEqual(retired_revision, world.blueprints.revision);
+    try std.testing.expectEqual(@as(u32, 0), world.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u32, 0), world.blueprints.chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), world.blueprints.cleanup_queue.items.len);
+
+    // A retained library alone must return ordinary edits to exactly the
+    // physical-world validation path after the last site is reclaimed.
+    try world.insertChunk(.{ 0, 0, 0 }, WorldChunk.initEmpty());
+    const data = try world.chunks.getPtr(test_layout.encodeChunkCoords(.{ 0, 0, 0 })).?.tryEnsureData(a);
+    for (0..4) |z| @memset(std.mem.asBytes(&data.blocks[z]), @intFromEnum(voxel_chunk_module.BlockType.stone));
+    const operation: world_module.BlockOperation = .{ .block = .{ 10, 10, 4 }, .action = .{ .put = .planks } };
+    var reads: usize = 0;
+    world.physical_read_counter = &reads;
+    var ordinary = std.testing.FailingAllocator.init(a, .{});
+    const expected = world_module.validateEdit(ordinary.allocator(), world.reader(), &.{}, operation);
+    const ordinary_reads = reads;
+    try std.testing.expectEqual(world_module.OperationStatus.success, expected.status);
+    try std.testing.expect(ordinary_reads > 1);
+    reads = 0;
+    var completed = std.testing.FailingAllocator.init(a, .{});
+    const actual = world_module.validateCompletedEdit(completed.allocator(), world.reader(), &world.blueprints, &.{}, operation);
+    try std.testing.expectEqualDeep(expected, actual);
+    try std.testing.expectEqual(ordinary_reads, reads);
+    try std.testing.expectEqual(ordinary.allocations, completed.allocations);
+    try std.testing.expectEqual(ordinary.allocated_bytes, completed.allocated_bytes);
+}
+
+test "world update retires at most four footprint chunks while preserving a shared live site" {
+    const a = std.testing.allocator;
+    const runtime = @import("blueprint_runtime.zig");
+    var f: BlueprintCleanupFrameTest = .{};
+    try f.init();
+    defer f.deinit();
+    const world = &f.streaming.game.world.?;
+    const cells = try a.alloc(voxel_chunk_module.BlockType, 129);
+    @memset(cells, .none);
+    cells[0] = .planks;
+    cells[128] = .planks;
+    var wide: runtime.SavedDefinition = .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Five chunks"), .definition = .{ .size = .{ 129, 1, 1 }, .cells = cells, .target_count = 2 } };
+    defer wide.deinit(a);
+    var small: runtime.SavedDefinition = .{ .id = 2, .owner = 1, .name = try a.dupe(u8, "Still live"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(voxel_chunk_module.BlockType, &.{.planks}), .target_count = 1 } };
+    defer small.deinit(a);
+    try world.applyBlueprintChanges(&.{ .{ .definition = wide }, .{ .definition = small } });
+    var retired = try world.blueprints.prepareInstance(a, &test_layout, 1, 1, 1, .{ 31, 10, 10 }, 0);
+    defer retired.deinit(a);
+    var live = try world.blueprints.prepareInstance(a, &test_layout, 2, 2, 1, .{ 30, 10, 10 }, 0);
+    defer live.deinit(a);
+    try std.testing.expectEqual(@as(usize, 5), retired.box_chunks.len);
+    try world.applyBlueprintChanges(&.{ .{ .instance = retired }, .{ .instance = live } });
+    try world.applyBlueprintChanges(&.{ .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } }, .{ .fulfill = .{ .instance_id = 1, .cell_index = 128 } } });
+    const revision = world.blueprints.revision;
+    try f.frame();
+    try std.testing.expectEqual(revision + 4, world.blueprints.revision);
+    try std.testing.expectEqual(@as(usize, 4), world.blueprints.instances.get(1).?.cleanup_cursor);
+    try std.testing.expectEqual(@as(u32, 2), world.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u32, 2), world.blueprints.chunks.count());
+    const shared = world.blueprints.chunks.get(live.box_chunks[0]).?;
+    try std.testing.expectEqualSlices(u64, &.{2}, shared.instances.items);
+    try std.testing.expectEqual(@as(usize, 1), shared.targets.items.len);
+    try std.testing.expectEqual(@as(u64, 2), world.blueprints.targetAt(live.origin).?.instance_id);
+    try std.testing.expect(world.blueprints.instances.get(2).?.active);
+    try f.frame();
+    try std.testing.expectEqual(revision + 5, world.blueprints.revision);
+    try std.testing.expect(world.blueprints.instances.get(1) == null);
+    try std.testing.expectEqual(@as(u32, 1), world.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u32, 1), world.blueprints.chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), world.blueprints.cleanup_queue.items.len);
+    try std.testing.expectEqual(@as(u64, 2), world.blueprints.targetAt(live.origin).?.instance_id);
+    try world.applyBlueprintChanges(&.{.{ .fulfill = .{ .instance_id = 2, .cell_index = 0 } }});
+    try f.frame();
+    try std.testing.expectEqual(@as(u32, 0), world.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u32, 0), world.blueprints.chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), world.blueprints.cleanup_queue.items.len);
+    try std.testing.expectEqual(@as(usize, 0), world.blueprints.cleanup_head);
+    try std.testing.expectEqual(@as(u64, 2), world.blueprints.max_instance_id);
+    try std.testing.expectEqual(@as(u32, 2), world.blueprints.definitions.count());
 }
