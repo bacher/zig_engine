@@ -1146,6 +1146,10 @@ pub const WorldDataService = struct {
 
     fn selectSaveDrain(self: *WorldDataService) void {
         const save = self.lifecycle.selectDrain() orelse return;
+        self.reportSaveDrain(save);
+    }
+
+    fn reportSaveDrain(self: *WorldDataService, save: save_lifecycle.Intent) void {
         self.status.intent_id = save.id;
         self.status.target_sequence = 0;
         self.status.phase = .capturing;
@@ -2275,13 +2279,19 @@ pub const WorldDataService = struct {
         return result;
     }
 
+    /// Advance a queued save without retrying retained mutations. An older
+    /// writer's failure must not restart a journal-blocked FIFO head here.
+    fn advanceSaveDrain(self: *WorldDataService) void {
+        self.selectSaveDrain();
+        // A preceding writer may have been the last source of wakes.
+        // Revisit retained query failures when this drain takes over.
+        if (self.lifecycle.needsQueryRecheck(self.lifecycleObservations())) self.retryWaitingReads();
+        if (self.lifecycle.takeReady(self.lifecycleObservations())) |save| self.beginCapture(save.id, save.final) catch |err| self.failPersistence(err);
+    }
+
     fn retryPending(self: *WorldDataService) void {
         while (true) {
-            self.selectSaveDrain();
-            // A preceding writer may have been the last source of wakes.
-            // Revisit retained query failures when this drain takes over.
-            if (self.lifecycle.needsQueryRecheck(self.lifecycleObservations())) self.retryWaitingReads();
-            if (self.lifecycle.takeReady(self.lifecycleObservations())) |save| self.beginCapture(save.id, save.final) catch |err| self.failPersistence(err);
+            self.advanceSaveDrain();
             if (self.pending.items.len == 0) break;
             self.blocked_dependency_error = null;
             if (!self.dependenciesReady(self.pending.items[0].request)) {
@@ -2587,16 +2597,22 @@ pub const WorldDataService = struct {
                     if (entry.value_ptr.chunk_revision != 0 and self.base_revisions.get(entry.key_ptr.*) != entry.value_ptr.chunk_revision) self.status.retained_base_mismatch_chunks += 1;
                 }
                 if (self.compaction_requested) self.beginCompaction() catch |err| self.failPersistence(err);
+                const handoff = !committed and self.lifecycle.queued != null and self.lifecycle.queued.?.fence_remaining == 0;
                 switch (completion.outcome) {
                     .complete => self.status.phase = .complete,
-                    .canceled, .failed => |err| if (committed) self.failPersistence(err) else self.noteDrainFailure(err),
+                    .canceled, .failed => |err| if (committed or handoff) self.failPersistence(err) else self.noteDrainFailure(err),
                 }
                 self.status.progress_generation +%= 1;
                 // An uncommitted failure cannot free journal space. Retrying
-                // here would immediately start another failing prefix writer.
+                // blocked mutations would start another failing prefix writer.
                 if (committed) {
                     self.retryWaitingBlueprintApplication();
                     self.retryPending();
+                } else if (handoff) {
+                    // This queued intent owns its first capture, independently
+                    // of the old failure. Preserve its remaining readiness gates.
+                    self.reportSaveDrain(self.lifecycle.queued.?.intent);
+                    self.advanceSaveDrain();
                 }
             },
         }
@@ -7503,7 +7519,7 @@ test "blueprint prefix committed before compaction failure still wakes its prepa
     try f.reopen(1, true);
 }
 
-test "coalesced ordinary Save recovers idle FIFO work and a ready drain before a later Apply" {
+test "ordinary Save handoff and explicit FIFO retry preserve idle drain ordering" {
     const Case = enum { ready, retained_save, later_apply };
     for ([_]Case{ .ready, .retained_save, .later_apply }) |case| {
         const retained_save = case == .retained_save;
@@ -7519,35 +7535,37 @@ test "coalesced ordinary Save recovers idle FIFO work and a ready drain before a
             try service.beginCapture(200, false);
         }
         service.requestSaveTransition(100, false);
+        const later_task = if (case == .later_apply) try f.prepare() else null;
         const completion = try AsyncBlueprintPrefixTest.finishOne(service);
         try std.testing.expectEqual(error.Io, completion.failure.?);
         try std.testing.expect(!completion.committed);
-        try std.testing.expect(service.job == null);
-        try std.testing.expect(service.blueprint_task == null);
-        try std.testing.expectEqual(@as(u64, 100), service.status.intent_id);
-        try std.testing.expectEqual(@as(u64, 0), service.status.target_sequence);
-        try std.testing.expectEqual(persistence.Phase.failed, service.status.phase);
-        try std.testing.expect(!service.status.active);
-        try std.testing.expectEqual(@as(usize, if (retained_save) 1 else 0), service.lifecycle.queued.?.fence_remaining);
-        const epoch = service.capture_epoch;
-        const progress = service.status.progress_generation;
-        for (0..4) |_| service.checkWatchdog();
-        try std.testing.expectEqual(epoch, service.capture_epoch);
-        try std.testing.expectEqual(progress, service.status.progress_generation);
-        f.store.setFaults(null);
-        // The coalesced request must also resume a ready save or retained Save
-        // payload. A later Apply still preparing must not block a ready fence.
-        const later_task = if (case == .later_apply) try f.prepare() else null;
-        service.requestSaveTransition(101, false);
-        try std.testing.expect(service.job != null);
         if (retained_save) {
+            try std.testing.expect(service.job == null);
+            try std.testing.expect(service.blueprint_task == null);
+            try std.testing.expectEqual(@as(u64, 100), service.status.intent_id);
+            try std.testing.expectEqual(@as(u64, 0), service.status.target_sequence);
+            try std.testing.expectEqual(persistence.Phase.failed, service.status.phase);
+            try std.testing.expect(!service.status.active);
+            try std.testing.expectEqual(@as(usize, 1), service.lifecycle.queued.?.fence_remaining);
+            const epoch = service.capture_epoch;
+            const progress = service.status.progress_generation;
+            for (0..4) |_| service.checkWatchdog();
+            try std.testing.expectEqual(epoch, service.capture_epoch);
+            try std.testing.expectEqual(progress, service.status.progress_generation);
+            // Journal-blocked work still needs an explicit coalesced request.
+            service.requestSaveTransition(101, false);
             try std.testing.expectEqual(@as(u64, 100), service.lifecycle.queued.?.intent.id);
             try std.testing.expectEqual(@as(usize, 1), service.lifecycle.queued.?.fence_remaining);
         } else {
+            // A ready successor takes over automatically, even when a later
+            // Apply is preparing. This is its first attempt, not a prefix retry.
             try std.testing.expectEqual(@as(u64, 100), service.lifecycle.active.?.intent.id);
+            try std.testing.expect(service.status.error_name == null);
         }
+        try std.testing.expect(service.job != null);
         if (later_task) |task| service.finishBlueprintApplication(task);
         try f.waitSave(100);
+        f.store.setFaults(null);
         try std.testing.expectEqual(@as(u32, if (retained_save) 2 else 1), f.store.blueprints.definitions.count());
         try std.testing.expectEqual(@as(u64, if (retained_save) 2 else 1), f.store.sequence);
         try std.testing.expectEqual(@as(u64, if (retained_save or later_task != null) 2 else 1), f.fixture.client.resolved_request);
@@ -7555,5 +7573,153 @@ test "coalesced ordinary Save recovers idle FIFO work and a ready drain before a
             try std.testing.expectEqual(@as(u32, 0), f.store.blueprints.instances.count());
             try std.testing.expectEqual(@as(u32, 1), service.worker_state.blueprints.instances.count());
         }
+    }
+}
+
+fn exerciseReadySaveAfterOlderCaptureFailure(mode: enum { watchdog_cancel, io_failure }, queued_final: bool) !void {
+    const io = std.testing.io;
+    const f = try PersistenceFixture.init(.{
+        .output_bytes = if (mode == .watchdog_cancel) 33000 else 256 * 1024,
+        .capture_wait_ns = if (mode == .watchdog_cancel) 200 * std.time.ns_per_ms else 60 * std.time.ns_per_s,
+        .player_wait_ns = 60 * std.time.ns_per_s,
+        .overdue_ns = 60 * std.time.ns_per_s,
+    });
+    defer f.deinit();
+    const client = try f.service.createClient();
+    for ([_]u32{ 10, 42, 74, 106 }) |x| try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = .{ x, 10, 48 }, .action = .{ .put = .snow } }));
+    var gate: ServiceWriteGate = .{};
+    var faults: @import("persistence/io.zig").Faults = .{ .enabled = mode == .io_failure, .operation = .write, .context = &gate, .hook = ServiceWriteGate.hook };
+    f.store.setFaults(&faults);
+    // Release before fixture cleanup awaits the writer on any failed assertion.
+    defer gate.released.set(io);
+    const older = f.service.requestSave(false);
+    try gate.entered.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    if (mode == .watchdog_cancel) _ = try waitServiceSources(f.service, false);
+    const queued = f.service.requestSave(queued_final);
+    try std.testing.expect(queued != older);
+    // A value-only invalid query follows the public Save in the same mailbox.
+    // Its reply proves the queued intent was processed while the old writer
+    // remained gated, without adding mutations or persistence dependencies.
+    const barrier = client.requestStandingSpace(.{ .preferred_xy = .{ 0, 0 }, .clearance_size = .{ 0, 0, 0 }, .support_size = .{ 0, 0 } });
+    const barrier_deadline = persistence.now(io) + 5 * std.time.ns_per_s;
+    var barrier_seen = false;
+    while (persistence.now(io) < barrier_deadline) {
+        if (client.pollStandingSpace(barrier)) |reply| {
+            try std.testing.expectError(error.InvalidSearch, reply.result);
+            barrier_seen = true;
+            break;
+        }
+        try Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(barrier_seen);
+    // The small watchdog-case output queue cannot encode all four sources
+    // while the writer is gated. Their release proves real watchdog cancellation;
+    // its terminal event must hand off the already ready queued Save afterward.
+    const released = try waitServiceSources(f.service, true);
+    try std.testing.expectEqual(older, released.intent_id);
+    try std.testing.expect(released.active);
+    try std.testing.expectEqual(@as(usize, 0), released.pending_commands);
+    try std.testing.expectEqual(@as(u64, 0), released.durable_sequence);
+    gate.released.set(io);
+    const handoff_deadline = persistence.now(io) + 5 * std.time.ns_per_s;
+    var handed_off: ?persistence.Status = null;
+    while (persistence.now(io) < handoff_deadline) {
+        const status = f.service.persistenceStatus();
+        if (status.intent_id == queued) {
+            handed_off = status;
+            break;
+        }
+        try Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(handed_off != null);
+    // The older capture's error must not become the visible outcome of the
+    // queued Save before that Save has attempted its own healthy capture.
+    try std.testing.expect(handed_off.?.error_name == null);
+    try std.testing.expect(handed_off.?.phase != .failed);
+    const done = try f.waitSave(queued);
+    try std.testing.expectEqual(persistence.Phase.complete, done.phase);
+    try std.testing.expectEqual(queued, done.intent_id);
+    try std.testing.expectEqual(@as(u64, 1), done.target_sequence);
+    try std.testing.expectEqual(@as(u64, 1), done.durable_sequence);
+    try std.testing.expectEqual(@as(usize, 0), done.pending_commands);
+    f.store.setFaults(null);
+    try std.testing.expectEqual(@as(u64, 1), f.store.sequence);
+    try std.testing.expectEqual(@as(u64, if (queued_final) 1 else 0), f.store.base_sequence);
+    try std.testing.expectEqual(@as(u32, 4), f.store.index.count());
+    for (0..4) |x| {
+        const id = f.layout.encodeChunkCoords(.{ @intCast(x), 0, 1 });
+        const location = f.store.index.get(id).?;
+        var read: storage.BaseRead = .{ .file = try location.file.duplicate(), .offset = location.offset, .length = location.length, .revision = location.revision, .id = id, .world_uuid = f.store.world_uuid, .dimensions = f.store.dimensions };
+        defer read.deinit();
+        const bytes = try read.read(std.testing.allocator);
+        defer std.testing.allocator.free(bytes);
+        var restored = try format.decodeChunk(std.testing.allocator, f.store.world_uuid, bytes, f.store.dimensions);
+        defer restored.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@intFromEnum(rules.BlockType.snow), restored.blocks[transformations.index(.{ 10, 10, 16 })]);
+    }
+}
+
+test "public ready queued Save takes over an autosave canceled by the real watchdog" {
+    for ([_]bool{ false, true }) |final| try exerciseReadySaveAfterOlderCaptureFailure(.watchdog_cancel, final);
+}
+
+test "public ready queued Save takes over an older Io failure without inheriting its outcome" {
+    for ([_]bool{ false, true }) |final| try exerciseReadySaveAfterOlderCaptureFailure(.io_failure, final);
+}
+
+test "queued Save handoff respects read and road gates without retrying later journal work" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |road_gate| {
+        var f: PreparedBlueprintDrainTest = undefined;
+        try f.init();
+        defer f.deinit();
+        const service = &f.fixture.service;
+        defer service.read_pending.deinit(a);
+        var faults: @import("persistence/io.zig").Faults = .{ .operation = .write };
+        f.store.setFaults(&faults);
+        try service.beginCapture(200, false);
+        service.requestSaveTransition(100, true);
+        // This later Save is outside the final fence. Its full journal must
+        // not trigger another prefix writer while other readiness gates wait.
+        service.processRequest(.{ .blueprint_save = try f.fixture.request(2) });
+        const id = PreparedBlueprintDrainTest.chunk_id;
+        if (road_gate) {
+            var batch: blueprint_road_updates.Batch = .{};
+            batch.add(id);
+            try service.blueprint_road_queue.reserve(a, batch);
+            service.blueprint_road_queue.commit(batch);
+        } else {
+            try service.read_pending.put(a, id, 0);
+        }
+        const epoch = service.capture_epoch;
+        const next = service.next_intent.load(.monotonic);
+        const completion = try AsyncBlueprintPrefixTest.finishOne(service);
+        try std.testing.expectEqual(error.Io, completion.failure.?);
+        try std.testing.expect(!completion.committed);
+        try std.testing.expect(service.job == null);
+        try std.testing.expectEqual(@as(u64, 100), service.status.intent_id);
+        try std.testing.expectEqual(@as(u64, 0), service.status.target_sequence);
+        try std.testing.expectEqual(persistence.Phase.capturing, service.status.phase);
+        try std.testing.expect(service.status.active);
+        try std.testing.expect(service.status.error_name == null);
+        try std.testing.expect(service.lifecycle.queued.?.retry == .available);
+        try std.testing.expectEqual(@as(usize, 0), service.lifecycle.queued.?.fence_remaining);
+        try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
+        try std.testing.expectEqual(epoch, service.capture_epoch);
+        try std.testing.expectEqual(next, service.next_intent.load(.monotonic));
+        // Releasing the remaining gate uses the existing save-readiness path.
+        if (road_gate) {
+            service.processBlueprintRoadUpdates();
+        } else {
+            try std.testing.expect(service.read_pending.remove(id));
+            service.retryPending();
+        }
+        try f.waitSave(100);
+        f.store.setFaults(null);
+        try std.testing.expectEqual(@as(u64, 1), f.store.sequence);
+        try std.testing.expectEqual(@as(u32, 1), f.store.blueprints.definitions.count());
+        try std.testing.expectEqual(@as(u32, 2), service.worker_state.blueprints.definitions.count());
+        try std.testing.expectEqual(@as(usize, 1), service.blueprint_journal.items.len);
+        try std.testing.expectEqual(@as(u64, 2), service.blueprint_journal.items[0].definition.id);
     }
 }
