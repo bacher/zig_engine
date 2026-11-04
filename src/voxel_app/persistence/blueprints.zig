@@ -17,6 +17,107 @@ pub const DefinitionView = struct { id: u64, owner: u64, name: []const u8, size:
 pub const InstanceView = struct { id: u64, definition_id: u64, owner: u64, origin: [3]u32, rotation: u8 };
 pub const Fulfill = struct { instance_id: u64, cell_index: u32 };
 pub const Op = union(enum) { definition: DefinitionView, instance: InstanceView, fulfill: Fulfill };
+/// Allocation-free journal accounting shared by admission and capture. The
+/// encoded journal is accounted separately from prepareMemoryBound's scratch.
+pub const PrepareSummary = struct {
+    operation_count: usize = 0,
+    definition_count: usize = 0,
+    instance_count: usize = 0,
+    fulfillment_count: usize = 0,
+    encoded_bytes: usize = 0,
+    definition_payload_bytes: usize = 0,
+    new_instance_bitmap_bytes: usize = 0,
+
+    /// definition_cells is needed only for a new instance. Other operations
+    /// pass zero. Commit the summary only after every checked addition succeeds.
+    pub fn addOperation(self: *PrepareSummary, op: Op, definition_cells: usize) !void {
+        var next = self.*;
+        next.operation_count = try std.math.add(usize, next.operation_count, 1);
+        next.encoded_bytes = try std.math.add(usize, next.encoded_bytes, try encodedOpsSize(&.{op}));
+        switch (op) {
+            .definition => |d| {
+                next.definition_count = try std.math.add(usize, next.definition_count, 1);
+                next.definition_payload_bytes = try std.math.add(usize, next.definition_payload_bytes, try std.math.add(usize, d.name.len, d.cells.len));
+            },
+            .instance => {
+                next.instance_count = try std.math.add(usize, next.instance_count, 1);
+                next.new_instance_bitmap_bytes = try std.math.add(usize, next.new_instance_bitmap_bytes, bitmapLength(definition_cells));
+            },
+            .fulfill => next.fulfillment_count = try std.math.add(usize, next.fulfillment_count, 1),
+        }
+        self.* = next;
+    }
+};
+
+fn bitmapLength(cells: usize) usize {
+    return cells / 8 + @intFromBool(cells % 8 != 0);
+}
+
+/// Parse operation framing without borrowing State. New-instance bitmap sizes
+/// use max_cells, a safe bound when the referenced definition is not available.
+/// Capture may supply an exact summary from its already validated journal.
+pub fn summarizeEncoded(changes: []const u8, limits: Limits) !PrepareSummary {
+    return summarizeFraming(changes, limits, limits.max_cells);
+}
+fn summarizeFraming(changes: []const u8, limits: Limits, instance_cells: usize) !PrepareSummary {
+    if (changes.len > limits.max_changes_bytes) return error.Capacity;
+    var result: PrepareSummary = .{};
+    var r: wire.Reader = .{ .bytes = changes };
+    while (r.pos < changes.len) {
+        if (result.operation_count >= limits.max_operations) return error.Capacity;
+        const op: Op = switch (try r.int(u8)) {
+            1 => .{ .definition = try readDefinition(&r) },
+            2 => .{ .instance = try readInstance(&r) },
+            3 => .{ .fulfill = .{ .instance_id = try r.int(u64), .cell_index = try r.int(u32) } },
+            else => return error.InvalidBlueprint,
+        };
+        try result.addOperation(op, instance_cells);
+    }
+    std.debug.assert(result.encoded_bytes == changes.len);
+    return result;
+}
+
+fn tableCapacity(count: usize) !usize {
+    if (count == 0) return 0;
+    // Match AutoHashMapUnmanaged's 80% load factor and minimum capacity, with
+    // checked arithmetic before its internal u32 sizing assumptions apply.
+    const scaled = try std.math.add(usize, try std.math.mul(usize, count, 100) / 80, 1);
+    const capacity = @max(@as(usize, 8), try std.math.ceilPowerOfTwo(usize, scaled));
+    if (capacity > std.math.maxInt(u32)) return error.Overflow;
+    return capacity;
+}
+fn alignedSize(size: usize, alignment: usize) !usize {
+    return (try std.math.add(usize, size, alignment - 1)) & ~(alignment - 1);
+}
+fn tableBytes(comptime Key: type, comptime Value: type, count: usize) !usize {
+    const capacity = try tableCapacity(count);
+    if (capacity == 0) return 0;
+    const Header = struct { values: [*]Value, keys: [*]Key, capacity: u32 };
+    const keys_start = try alignedSize(try std.math.add(usize, @sizeOf(Header), capacity), @alignOf(Key));
+    const keys_end = try std.math.add(usize, keys_start, try std.math.mul(usize, capacity, @sizeOf(Key)));
+    const values_start = try alignedSize(keys_end, @alignOf(Value));
+    const values_end = try std.math.add(usize, values_start, try std.math.mul(usize, capacity, @sizeOf(Value)));
+    return alignedSize(values_end, @max(@alignOf(Header), @alignOf(Key), @alignOf(Value)));
+}
+
+/// Additional peak allocations for preparation. Existing State payloads and the
+/// encoded journal are retained by their owners and charged by capture itself.
+/// State hash growth includes old/new table overlap, using the validated active
+/// quotas as a baseline so admission never reads the writer's mutable State.
+pub fn prepareMemoryBound(summary: PrepareSummary, limits: Limits) !usize {
+    var bytes = try std.math.mul(usize, summary.operation_count, @sizeOf(PreparedOp));
+    bytes = try std.math.add(usize, bytes, summary.definition_payload_bytes);
+    bytes = try std.math.add(usize, bytes, summary.new_instance_bitmap_bytes);
+    bytes = try std.math.add(usize, bytes, try std.math.mul(usize, summary.fulfillment_count, @sizeOf(u32)));
+    const touched = @min(summary.fulfillment_count, try std.math.add(usize, limits.max_instances, summary.instance_count));
+    bytes = try std.math.add(usize, bytes, try tableBytes(u64, TouchedSite, touched));
+    bytes = try std.math.add(usize, bytes, try tableBytes(u64, Definition, summary.definition_count));
+    bytes = try std.math.add(usize, bytes, try tableBytes(u64, Instance, summary.instance_count));
+    if (summary.definition_count != 0) bytes = try std.math.add(usize, bytes, try std.math.mul(usize, 2, try tableBytes(u64, Definition, limits.max_definitions)));
+    if (summary.instance_count != 0) bytes = try std.math.add(usize, bytes, try std.math.mul(usize, 2, try tableBytes(u64, Instance, limits.max_instances)));
+    return bytes;
+}
+
 pub const Definition = struct {
     id: u64,
     owner: u64,
@@ -197,32 +298,62 @@ pub const State = struct {
         }
     }
     pub fn prepare(self: *State, changes: []const u8, dimensions: [3]u32, limits: Limits) !Prepared {
-        if (changes.len > limits.max_changes_bytes) return error.Capacity;
+        // Replay uses actual definition sizes below, never the conservative
+        // capture-only max_cells bound for unknown instance references.
+        var summary = try summarizeFraming(changes, limits, 0);
         var out = Prepared.init(self.allocator);
         errdefer out.deinit();
         out.max_definition_id = self.max_definition_id;
         out.max_instance_id = self.max_instance_id;
         out.owned_bytes = self.owned_bytes;
+        // Allocate every operation once. Fulfillment-heavy transactions no
+        // longer grow 24-byte tagged unions or a u128 hash set per filled cell.
+        try out.ops.ensureTotalCapacityPrecise(self.allocator, summary.operation_count);
+        _ = try tableCapacity(summary.definition_count);
+        _ = try tableCapacity(summary.instance_count);
+        try out.definitions.ensureTotalCapacity(self.allocator, @intCast(summary.definition_count));
+        try out.instances.ensureTotalCapacity(self.allocator, @intCast(summary.instance_count));
+        const touched_bound = @min(summary.fulfillment_count, try std.math.add(usize, self.instances.count(), summary.instance_count));
+        _ = try tableCapacity(touched_bound);
+        try out.touched.ensureTotalCapacity(self.allocator, @intCast(touched_bound));
+        // Count fulfills per site before choosing a dense bitmap or an exact
+        // sparse u32 array. Sparse batches never allocate a whole large bitmap.
+        var scan: wire.Reader = .{ .bytes = changes };
+        while (scan.pos < changes.len) switch (try scan.int(u8)) {
+            1 => _ = try readDefinition(&scan),
+            2 => _ = try readInstance(&scan),
+            3 => {
+                const id = try scan.int(u64);
+                _ = try scan.int(u32);
+                if (out.touched.getPtr(id)) |site| {
+                    site.count = try std.math.add(u32, site.count, 1);
+                } else {
+                    // Invalid IDs must not exhaust an assume-capacity table
+                    // before ordered reference validation can reject them.
+                    if (out.touched.count() >= touched_bound) return error.InvalidBlueprint;
+                    out.touched.putAssumeCapacity(id, .{ .count = 1 });
+                }
+            },
+            else => unreachable,
+        };
         // Prepared maps retain completed sites until apply replays their ops.
         // Quotas and final wire size count only sites still active at this point.
         var live_instances: usize = self.instances.count();
+        var maximum_live_instances = live_instances;
         var r: wire.Reader = .{ .bytes = changes };
         while (r.pos < r.bytes.len) {
-            if (out.ops.items.len >= limits.max_operations) return error.Capacity;
             const kind = try r.int(u8);
             switch (kind) {
                 1 => {
                     const view = try readDefinition(&r);
                     try validateDefinition(view, dimensions, limits);
                     if (view.id <= out.max_definition_id or self.definitions.count() + out.definitions.count() >= limits.max_definitions) return error.InvalidBlueprint;
-                    out.owned_bytes = try std.math.add(usize, out.owned_bytes, view.name.len + view.cells.len);
+                    out.owned_bytes = try std.math.add(usize, out.owned_bytes, try std.math.add(usize, view.name.len, view.cells.len));
                     if (out.owned_bytes > limits.max_state_bytes) return error.Capacity;
-                    try out.definitions.ensureUnusedCapacity(self.allocator, 1);
-                    try out.ops.ensureUnusedCapacity(self.allocator, 1);
                     const definition = try copyDefinition(self.allocator, view);
                     out.definitions.putAssumeCapacity(view.id, definition);
                     out.max_definition_id = view.id;
-                    out.ops.appendAssumeCapacity(.{ .definition = view.id });
+                    out.ops.appendAssumeCapacity(.{ .kind = .definition, .id = view.id });
                 },
                 2 => {
                     const view = try readInstance(&r);
@@ -230,94 +361,162 @@ pub const State = struct {
                     try validateInstance(view, d.view(), dimensions);
                     var existing = self.instances.valueIterator();
                     while (existing.next()) |site| {
-                        if ((out.remaining.get(site.id) orelse site.remaining) == 0) continue;
+                        if (out.remainingFor(site.*) == 0) continue;
                         const other = self.definitions.get(site.definition_id).?;
                         if (boxesOverlap(view, d.view(), site.view(), other.view(), dimensions)) return error.InvalidBlueprint;
                     }
                     existing = out.instances.valueIterator();
                     while (existing.next()) |site| {
-                        if ((out.remaining.get(site.id) orelse site.remaining) == 0) continue;
+                        if (out.remainingFor(site.*) == 0) continue;
                         const other = out.definitions.get(site.definition_id) orelse self.definitions.get(site.definition_id).?;
                         if (boxesOverlap(view, d.view(), site.view(), other.view(), dimensions)) return error.InvalidBlueprint;
                     }
                     if (view.id <= out.max_instance_id or live_instances >= limits.max_instances) return error.InvalidBlueprint;
-                    const bit_len = (d.cells.len + 7) / 8;
+                    const bit_len = bitmapLength(d.cells.len);
+                    summary.new_instance_bitmap_bytes = try std.math.add(usize, summary.new_instance_bitmap_bytes, bit_len);
                     out.owned_bytes = try std.math.add(usize, out.owned_bytes, bit_len);
                     if (out.owned_bytes > limits.max_state_bytes) return error.Capacity;
-                    try out.instances.ensureUnusedCapacity(self.allocator, 1);
-                    try out.ops.ensureUnusedCapacity(self.allocator, 1);
                     const bits = try self.allocator.alloc(u8, bit_len);
                     @memset(bits, 0);
                     out.instances.putAssumeCapacity(view.id, .{ .id = view.id, .definition_id = view.definition_id, .owner = view.owner, .origin = view.origin, .rotation = view.rotation, .fulfilled = bits, .remaining = d.target_count });
                     out.max_instance_id = view.id;
                     live_instances += 1;
-                    out.ops.appendAssumeCapacity(.{ .instance = view.id });
+                    maximum_live_instances = @max(maximum_live_instances, live_instances);
+                    out.ops.appendAssumeCapacity(.{ .kind = .instance, .id = view.id });
                 },
                 3 => {
                     const f: Fulfill = .{ .instance_id = try r.int(u64), .cell_index = try r.int(u32) };
                     const instance = out.instances.get(f.instance_id) orelse self.instances.get(f.instance_id) orelse return error.InvalidBlueprint;
                     const d = out.definitions.get(instance.definition_id) orelse self.definitions.get(instance.definition_id) orelse return error.InvalidBlueprint;
                     if (f.cell_index >= d.cells.len or d.cells[f.cell_index] == 0 or instance.isFulfilled(f.cell_index)) return error.InvalidBlueprint;
-                    const key: u128 = (@as(u128, f.instance_id) << 32) | f.cell_index;
-                    const marked = try out.marks.getOrPut(self.allocator, key);
-                    if (marked.found_existing) return error.InvalidBlueprint;
-                    const counter = try out.remaining.getOrPut(self.allocator, f.instance_id);
-                    if (!counter.found_existing) counter.value_ptr.* = instance.remaining;
-                    if (counter.value_ptr.* == 0) return error.InvalidBlueprint;
-                    counter.value_ptr.* -= 1;
-                    if (counter.value_ptr.* == 0) {
+                    const touched = out.touched.getPtr(f.instance_id).?;
+                    if (touched.marks == .none) try touched.start(self.allocator, d.cells.len, instance.remaining);
+                    if (touched.remaining == 0) return error.InvalidBlueprint;
+                    try touched.mark(f.cell_index);
+                    touched.remaining -= 1;
+                    if (touched.remaining == 0) {
                         out.owned_bytes -= instance.fulfilled.len;
                         live_instances -= 1;
                     }
-                    try out.ops.append(self.allocator, .{ .fulfill = f });
+                    out.ops.appendAssumeCapacity(.{ .kind = .fulfill, .id = f.instance_id, .cell_index = f.cell_index });
                 },
-                else => return error.InvalidBlueprint,
+                else => unreachable,
             }
         }
-        try self.definitions.ensureUnusedCapacity(self.allocator, out.definitions.count());
-        try self.instances.ensureUnusedCapacity(self.allocator, out.instances.count());
-        const maximum_encoded = try std.math.add(usize, out.owned_bytes, try std.math.add(usize, 24 + 38 * (self.definitions.count() + out.definitions.count()), 41 * live_instances));
+        var touched = out.touched.valueIterator();
+        while (touched.next()) |site| try site.checkDuplicates();
+        const definition_metadata = try std.math.mul(usize, 38, try std.math.add(usize, self.definitions.count(), out.definitions.count()));
+        const instance_metadata = try std.math.mul(usize, 41, live_instances);
+        const maximum_encoded = try std.math.add(usize, out.owned_bytes, try std.math.add(usize, 24, try std.math.add(usize, definition_metadata, instance_metadata)));
         if (maximum_encoded > limits.max_state_bytes) return error.Capacity;
+        try self.definitions.ensureUnusedCapacity(self.allocator, out.definitions.count());
+        // Ordered completion frees slots before replacement creates consume them.
+        // Reserving total created sites would retain an arbitrarily oversized map.
+        _ = try tableCapacity(maximum_live_instances);
+        try self.instances.ensureTotalCapacity(self.allocator, @intCast(maximum_live_instances));
+        std.debug.assert(out.ops.items.len == summary.operation_count);
+        out.releaseScratch();
         return out;
     }
+
     /// All allocations and checks occur in prepare, before the WAL commit footer.
     pub fn apply(self: *State, prepared: *Prepared) void {
-        for (prepared.ops.items) |op| switch (op) {
-            .definition => |id| {
-                const d = prepared.definitions.fetchRemove(id).?.value;
-                self.definitions.putAssumeCapacity(id, d);
+        for (prepared.ops.items) |op| switch (op.kind) {
+            .definition => {
+                const d = prepared.definitions.fetchRemove(op.id).?.value;
+                self.definitions.putAssumeCapacity(op.id, d);
             },
-            .instance => |id| {
-                const i = prepared.instances.fetchRemove(id).?.value;
-                self.instances.putAssumeCapacity(id, i);
+            .instance => {
+                const i = prepared.instances.fetchRemove(op.id).?.value;
+                self.instances.putAssumeCapacity(op.id, i);
             },
-            .fulfill => |f| {
-                const i = self.instances.getPtr(f.instance_id).?;
-                i.mark(f.cell_index);
+            .fulfill => {
+                const i = self.instances.getPtr(op.id).?;
+                i.mark(op.cell_index);
                 if (i.remaining == 0) {
-                    const removed = self.instances.fetchRemove(f.instance_id).?.value;
+                    const removed = self.instances.fetchRemove(op.id).?.value;
                     self.allocator.free(removed.fulfilled);
                 }
             },
         };
+
         self.max_definition_id = prepared.max_definition_id;
         self.max_instance_id = prepared.max_instance_id;
         self.owned_bytes = prepared.owned_bytes;
     }
 };
-const PreparedOp = union(enum) { definition: u64, instance: u64, fulfill: Fulfill };
+const PreparedOp = extern struct {
+    id: u64,
+    cell_index: u32 = 0,
+    kind: enum(u8) { definition, instance, fulfill },
+    reserved: [3]u8 = .{ 0, 0, 0 },
+};
+const TouchedSite = struct {
+    count: u32 = 0,
+    used: u32 = 0,
+    remaining: u32 = 0,
+    marks: union(enum) { none, sparse: []u32, bitmap: []u8 } = .none,
+
+    fn start(self: *TouchedSite, a: Allocator, cells: usize, remaining: u32) !void {
+        const dense_bytes = bitmapLength(cells);
+        const sparse_bytes = try std.math.mul(usize, self.count, @sizeOf(u32));
+        if (dense_bytes <= sparse_bytes) {
+            const bits = try a.alloc(u8, dense_bytes);
+            @memset(bits, 0);
+            self.marks = .{ .bitmap = bits };
+        } else {
+            self.marks = .{ .sparse = try a.alloc(u32, self.count) };
+        }
+        self.remaining = remaining;
+    }
+    fn mark(self: *TouchedSite, index: u32) !void {
+        switch (self.marks) {
+            .none => unreachable,
+            .sparse => |indices| indices[self.used] = index,
+            .bitmap => |bits| {
+                const mask = @as(u8, 1) << @intCast(index % 8);
+                if (bits[index / 8] & mask != 0) return error.InvalidBlueprint;
+                bits[index / 8] |= mask;
+            },
+        }
+        self.used += 1;
+    }
+    fn checkDuplicates(self: *TouchedSite) !void {
+        if (self.marks == .sparse) {
+            const indices = self.marks.sparse[0..self.used];
+            std.mem.sort(u32, indices, {}, std.sort.asc(u32));
+            for (indices[1..], indices[0 .. indices.len - 1]) |a, b| if (a == b) return error.InvalidBlueprint;
+        }
+    }
+    fn deinit(self: *TouchedSite, a: Allocator) void {
+        switch (self.marks) {
+            .none => {},
+            .sparse => |indices| a.free(indices),
+            .bitmap => |bits| a.free(bits),
+        }
+    }
+};
 pub const Prepared = struct {
     allocator: Allocator,
     definitions: std.AutoHashMapUnmanaged(u64, Definition) = .empty,
     instances: std.AutoHashMapUnmanaged(u64, Instance) = .empty,
-    marks: std.AutoHashMapUnmanaged(u128, void) = .empty,
-    remaining: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    touched: std.AutoHashMapUnmanaged(u64, TouchedSite) = .empty,
     ops: std.ArrayList(PreparedOp) = .empty,
     max_definition_id: u64 = 0,
     max_instance_id: u64 = 0,
     owned_bytes: usize = 0,
     fn init(a: Allocator) Prepared {
         return .{ .allocator = a };
+    }
+    fn remainingFor(self: *const Prepared, instance: Instance) u32 {
+        if (self.touched.get(instance.id)) |site| if (site.marks != .none) return site.remaining;
+        return instance.remaining;
+    }
+    fn releaseScratch(self: *Prepared) void {
+        var touched = self.touched.valueIterator();
+        while (touched.next()) |site| site.deinit(self.allocator);
+        self.touched.deinit(self.allocator);
+        self.touched = .empty;
     }
     pub fn deinit(self: *Prepared) void {
         var defs = self.definitions.valueIterator();
@@ -326,8 +525,7 @@ pub const Prepared = struct {
         while (sites.next()) |i| self.allocator.free(i.fulfilled);
         self.definitions.deinit(self.allocator);
         self.instances.deinit(self.allocator);
-        self.marks.deinit(self.allocator);
-        self.remaining.deinit(self.allocator);
+        self.releaseScratch();
         self.ops.deinit(self.allocator);
     }
 };
@@ -695,4 +893,95 @@ test "restored progress requires real terrain agreement including dirt aging and
     try state.validateTerrain(Terrain{ .actual = 7 }, Terrain.get, dimensions);
     try std.testing.expectError(error.BlueprintTerrainMismatch, state.validateTerrain(Terrain{ .actual = 10 }, Terrain.get, dimensions));
     try std.testing.expectError(error.BlueprintTerrainMismatch, state.validateTerrain(Terrain{ .pending = 2 }, Terrain.get, dimensions));
+}
+
+test "prepare summary matches encoded journal and charges bounded scratch" {
+    const a = std.testing.allocator;
+    const definition: Op = .{ .definition = .{ .id = 1, .owner = 7, .name = "Accounting", .size = .{ 3, 1, 1 }, .cells = &.{ 10, 0, 10 }, .target_count = 2 } };
+    const instance: Op = .{ .instance = .{ .id = 1, .definition_id = 1, .owner = 7, .origin = .{ 1, 1, 1 }, .rotation = 0 } };
+    const fulfillment: Op = .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } };
+    var exact: PrepareSummary = .{};
+    try exact.addOperation(definition, 0);
+    try exact.addOperation(instance, definition.definition.cells.len);
+    try exact.addOperation(fulfillment, 0);
+    const encoded = try encodeOps(a, &.{ definition, instance, fulfillment });
+    defer a.free(encoded);
+    const parsed = try summarizeEncoded(encoded, .{ .max_cells = 3 });
+    try std.testing.expectEqualDeep(exact, parsed);
+    try std.testing.expectEqual(encoded.len, exact.encoded_bytes);
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(PreparedOp));
+    try std.testing.expectEqual(@as(usize, 1), exact.new_instance_bitmap_bytes);
+    try std.testing.expectEqual(@as(usize, 13), exact.definition_payload_bytes);
+    try std.testing.expectEqual(@as(usize, 0), try prepareMemoryBound(.{}, .{}));
+    try std.testing.expect((try prepareMemoryBound(exact, .{})) > exact.definition_payload_bytes);
+    try std.testing.expectError(error.Capacity, summarizeEncoded(encoded, .{ .max_operations = 2 }));
+    try std.testing.expectError(error.Capacity, summarizeEncoded(encoded, .{ .max_changes_bytes = encoded.len - 1 }));
+    try std.testing.expectError(error.InvalidFormat, summarizeEncoded(encoded[0 .. encoded.len - 1], .{}));
+}
+
+test "prepare summary overflow cannot partially mutate admission accounting" {
+    var summary: PrepareSummary = .{ .encoded_bytes = std.math.maxInt(usize) };
+    const before = summary;
+    try std.testing.expectError(error.Overflow, summary.addOperation(.{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } }, 0));
+    try std.testing.expectEqualDeep(before, summary);
+    try std.testing.expectError(error.Overflow, prepareMemoryBound(.{ .operation_count = std.math.maxInt(usize) }, .{}));
+    try std.testing.expectError(error.Overflow, prepareMemoryBound(.{ .fulfillment_count = std.math.maxInt(usize) }, .{}));
+    try std.testing.expectError(error.Overflow, prepareMemoryBound(.{ .instance_count = 1 }, .{ .max_instances = std.math.maxInt(usize) }));
+}
+
+test "malformed fulfillment IDs cannot exhaust bounded scratch maps" {
+    const a = std.testing.allocator;
+    var state = State.init(a);
+    defer state.deinit();
+    const invalid = try encodeOps(a, &.{.{ .fulfill = .{ .instance_id = 99, .cell_index = 0 } }});
+    defer a.free(invalid);
+    try std.testing.expectError(error.InvalidBlueprint, state.prepare(invalid, .{ 4, 4, 4 }, .{}));
+    try std.testing.expectEqual(@as(u32, 0), state.instances.count());
+}
+
+test "ordered replacement reserves live State slots instead of total created sites" {
+    const a = std.testing.allocator;
+    var state = State.init(a);
+    defer state.deinit();
+    const dimensions: [3]u32 = .{ 4, 4, 4 };
+    var journal: std.ArrayList(Op) = .empty;
+    defer journal.deinit(a);
+    try journal.append(a, .{ .definition = .{ .id = 1, .owner = 1, .name = "Replacement", .size = .{ 1, 1, 1 }, .cells = &.{10}, .target_count = 1 } });
+    for (1..65) |id| {
+        try journal.append(a, .{ .instance = .{ .id = id, .definition_id = 1, .owner = 1, .origin = .{ 1, 1, 1 }, .rotation = 0 } });
+        try journal.append(a, .{ .fulfill = .{ .instance_id = id, .cell_index = 0 } });
+    }
+    const changes = try encodeOps(a, journal.items);
+    defer a.free(changes);
+    var prepared = try state.prepare(changes, dimensions, .{ .max_instances = 1 });
+    defer prepared.deinit();
+    try std.testing.expectEqual(@as(u32, 8), state.instances.capacity());
+    state.apply(&prepared);
+    try std.testing.expectEqual(@as(u32, 0), state.instances.count());
+    try std.testing.expectEqual(@as(u64, 64), state.max_instance_id);
+    try std.testing.expectEqual(@as(u32, 8), state.instances.capacity());
+}
+
+test "replay preparation uses actual bitmap sizes instead of capture fallback bounds" {
+    const a = std.testing.allocator;
+    var state = State.init(a);
+    defer state.deinit();
+    const dimensions: [3]u32 = .{ 4, 4, 4 };
+    var journal: std.ArrayList(Op) = .empty;
+    defer journal.deinit(a);
+    try journal.append(a, .{ .definition = .{ .id = 1, .owner = 1, .name = "Replay", .size = .{ 1, 1, 1 }, .cells = &.{10}, .target_count = 1 } });
+    for (1..17) |id| {
+        try journal.append(a, .{ .instance = .{ .id = id, .definition_id = 1, .owner = 1, .origin = .{ 1, 1, 1 }, .rotation = 0 } });
+        try journal.append(a, .{ .fulfill = .{ .instance_id = id, .cell_index = 0 } });
+    }
+    const changes = try encodeOps(a, journal.items);
+    defer a.free(changes);
+    const limits: Limits = .{ .max_instances = 1, .max_cells = std.math.maxInt(usize) };
+    // The stateless capture fallback cannot know that these are one-byte maps.
+    try std.testing.expectError(error.Overflow, summarizeEncoded(changes, limits));
+    var prepared = try state.prepare(changes, dimensions, limits);
+    defer prepared.deinit();
+    state.apply(&prepared);
+    try std.testing.expectEqual(@as(u32, 0), state.instances.count());
+    try std.testing.expectEqual(@as(u64, 16), state.max_instance_id);
 }

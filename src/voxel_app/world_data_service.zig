@@ -218,6 +218,7 @@ const BlueprintAdmissionTask = struct {
     cursor: usize = 0,
     snapshot_bytes: usize = 0,
     waiting_for_data: bool = false,
+    waiting_for_journal: bool = false,
     cancel: std.atomic.Value(bool) = .init(false),
     future: ?Io.Future(void) = null,
     result: ?(anyerror!blueprint_admission.Result) = null,
@@ -637,8 +638,10 @@ pub const WorldDataService = struct {
     /// Only the prefix frozen into a successfully committed Job is retired.
     blueprint_journal: std.ArrayList(blueprint_wire.Op) = .empty,
     blueprint_journal_bytes: usize = 0,
+    blueprint_journal_summary: blueprint_wire.PrepareSummary = .{},
     blueprint_library_bytes: usize = 0,
     captured_blueprint_operations: usize = 0,
+    captured_blueprint_summary: blueprint_wire.PrepareSummary = .{},
     blueprint_task: ?*BlueprintAdmissionTask = null,
     blueprint_retired: std.ArrayList(*BlueprintAdmissionTask) = .empty,
     blueprint_road_queue: blueprint_road_updates.Queue = .{},
@@ -933,7 +936,7 @@ pub const WorldDataService = struct {
                 // ending, including registration and terminal read completions.
                 self.requests.takeAll(self.io, &batch);
                 if (batch.items.len == 0) break;
-            } else if (self.async_progress or (self.blueprint_task != null and self.blueprint_task.?.future == null and !self.blueprint_task.?.waiting_for_data) or (self.blueprint_road_queue.count != 0 and !self.blueprint_road_waiting) or (self.next_mesh_load < self.mesh_loads.items.len and !self.is_shutting_down.load(.monotonic))) {
+            } else if (self.async_progress or (self.blueprint_task != null and self.blueprint_task.?.future == null and !self.blueprint_task.?.waiting_for_data and !self.blueprint_task.?.waiting_for_journal) or (self.blueprint_road_queue.count != 0 and !self.blueprint_road_waiting) or (self.next_mesh_load < self.mesh_loads.items.len and !self.is_shutting_down.load(.monotonic))) {
                 self.requests.takeAll(self.io, &batch);
             } else if (!self.waitForWork(&batch)) break;
             self.drainPersistenceEvents();
@@ -1450,7 +1453,7 @@ pub const WorldDataService = struct {
             var candidate = save.candidate;
             candidate.deinit(self.allocator);
             self.allocator.free(save.name);
-            save.client.blueprint_results.push(self.io, self.allocator, .{ .request_id = save.request_id, .kind = .save, .status = if (err == error.LibraryCapacity) .resource_exhausted else .invalid });
+            save.client.blueprint_results.push(self.io, self.allocator, .{ .request_id = save.request_id, .kind = .save, .status = if (err == error.LibraryCapacity or err == error.Capacity) .resource_exhausted else .invalid });
             save.client.resolved_request = @max(save.client.resolved_request, save.request_id);
             self.applyEligibleCheckpoint(save.client);
         };
@@ -1462,6 +1465,79 @@ pub const WorldDataService = struct {
         if (self.store == null or self.job != null or self.is_shutting_down.load(.acquire)) return;
         const intent = self.next_intent.fetchAdd(1, .monotonic);
         self.beginCapture(intent, false) catch |err| self.failPersistence(err);
+    }
+
+    fn addBlueprintSummary(self: *WorldDataService, summary: *blueprint_wire.PrepareSummary, operation: blueprint_wire.Op) !void {
+        const cells = switch (operation) {
+            .instance => |instance| (self.worker_state.blueprints.definitions.get(instance.definition_id) orelse return error.InvalidBlueprint).definition.cells.len,
+            else => 0,
+        };
+        try summary.addOperation(operation, cells);
+    }
+
+    fn blueprintJournalMemory(self: *const WorldDataService, summary: blueprint_wire.PrepareSummary, capacity: usize) !usize {
+        const limits = if (self.store) |store| store.limits.blueprints else blueprint_wire.Limits{};
+        return std.math.add(usize, try blueprint_wire.prepareMemoryBound(summary, limits), try std.math.add(usize, summary.encoded_bytes, try std.math.mul(usize, capacity, @sizeOf(blueprint_wire.Op))));
+    }
+
+    fn captureWorkingOverhead(self: *const WorldDataService, source_count: usize, scratch: usize) !usize {
+        var bytes = try std.math.add(usize, @sizeOf(persistence.Job), scratch);
+        bytes = try std.math.add(usize, bytes, try std.math.mul(usize, self.players.count(), format.player_record_size + @sizeOf(u64)));
+        bytes = try std.math.add(usize, bytes, try std.math.mul(usize, source_count, 2 * @sizeOf(persistence.Source) + 2 + @sizeOf([]u8)));
+        const ring_target = try std.math.add(usize, source_count, 4);
+        const ring_peak = try std.math.add(usize, self.completion_ring.capacity, @max(self.completion_ring.capacity, ring_target));
+        bytes = try std.math.add(usize, bytes, try std.math.mul(usize, ring_peak, @sizeOf(persistence.Event)));
+        const hold_target = @max(@as(usize, self.source_holds.capacity()), try std.math.mul(usize, source_count, 4));
+        const wal_target = @max(@as(usize, self.wal_revisions.capacity()), try std.math.mul(usize, try std.math.add(usize, self.wal_revisions.count(), source_count), 4));
+        const hash_peak = try std.math.add(usize, try std.math.add(usize, hold_target, self.source_holds.capacity()), try std.math.add(usize, wal_target, self.wal_revisions.capacity()));
+        return std.math.add(usize, bytes, try std.math.add(usize, try std.math.mul(usize, hash_peak, @sizeOf(u32) + @sizeOf(u64) + 16), 512));
+    }
+
+    /// Count every resident modified chunk as potentially dirty and reserve the
+    /// largest legal metadata scratch. A fill can additionally dirty its target
+    /// chunk and the chunk below. No chunk or journal scan is needed here.
+    fn blueprintJournalAllowance(self: *const WorldDataService) !usize {
+        const sources = @min(self.limits.manifest_entries, try std.math.add(usize, self.worker_state.modified_chunks.count(), 2));
+        const overhead = try self.captureWorkingOverhead(sources, persistence.maximumScratchBound());
+        return self.limits.working_bytes -| self.limits.output_bytes -| overhead;
+    }
+
+    /// Constant-time journal admission precedes terrain/inventory changes. Never
+    /// inspect writer-owned persisted state or rescan the journal on a fill.
+    fn reserveBlueprintJournal(self: *WorldDataService, operation: blueprint_wire.Op) !void {
+        if (self.store == null) return;
+        const limits = self.store.?.limits.blueprints;
+        var one: blueprint_wire.PrepareSummary = .{};
+        try self.addBlueprintSummary(&one, operation);
+        const allowance = try self.blueprintJournalAllowance();
+        const initial_capacity = std.ArrayList(blueprint_wire.Op).growCapacity(1);
+        if (one.operation_count > limits.max_operations or one.encoded_bytes > limits.max_changes_bytes or
+            (operation == .definition and operation.definition.cells.len > limits.max_cells) or
+            try self.blueprintJournalMemory(one, initial_capacity) > allowance) return error.Capacity;
+        var next = self.blueprint_journal_summary;
+        try self.addBlueprintSummary(&next, operation);
+        if (next.operation_count > limits.max_operations or next.encoded_bytes > limits.max_changes_bytes) return error.JournalBackpressure;
+        const current_capacity = self.blueprint_journal.capacity;
+        const next_capacity = if (current_capacity >= next.operation_count) current_capacity else std.ArrayList(blueprint_wire.Op).growCapacity(next.operation_count);
+        const growth_peak = try std.math.mul(usize, try std.math.add(usize, next_capacity, if (next_capacity > current_capacity) current_capacity else 0), @sizeOf(blueprint_wire.Op));
+        if (@max(try self.blueprintJournalMemory(next, next_capacity), growth_peak) > allowance) return error.JournalBackpressure;
+        if (self.job) |job| {
+            // The committed prefix's encoded/prepared storage lives until the
+            // writer finishes. Replace only its journal-capacity reservation.
+            const in_flight = try std.math.add(usize, job.working_reserved_bytes - job.blueprint_journal_reserved_bytes, growth_peak);
+            if (in_flight > self.limits.working_bytes) return error.JournalBackpressure;
+        }
+        try self.blueprint_journal.ensureTotalCapacityPrecise(self.allocator, next_capacity);
+    }
+
+    fn appendBlueprintJournal(self: *WorldDataService, operation: blueprint_wire.Op) void {
+        self.addBlueprintSummary(&self.blueprint_journal_summary, operation) catch unreachable;
+        self.blueprint_journal.appendAssumeCapacity(operation);
+        self.blueprint_journal_bytes += switch (operation) {
+            .definition => |definition| definition.cells.len + definition.name.len + 128,
+            .instance => 64,
+            .fulfill => 13,
+        };
     }
 
     fn discardPendingBlueprintSaves(self: *WorldDataService) void {
@@ -1496,17 +1572,16 @@ pub const WorldDataService = struct {
         const count = try blueprint.checkedVolume(definition.size, blueprint.horizontalLimit(self.layout), blueprint.default_max_cells);
         if (count != definition.cells.len or definition.target_count == 0) return error.InvalidDefinition;
         const id = std.math.add(u64, state.max_definition_id, 1) catch return error.LibraryCapacity;
-        const limits: blueprint_wire.Limits = .{};
+        const limits = if (self.store) |store| store.limits.blueprints else blueprint_wire.Limits{};
         if (save.client.blueprint_save_keys.count() >= limits.max_definitions) return error.LibraryCapacity;
         const bytes = try std.math.add(usize, definition.cells.len, save.name.len + 128);
         var retained = self.blueprint_library_bytes;
         var active = state.instances.valueIterator();
         while (active.next()) |instance| retained = try std.math.add(usize, retained, instance.fulfilled.len + 128);
         if (state.definitions.count() >= limits.max_definitions or bytes > limits.max_state_bytes -| retained) return error.LibraryCapacity;
-        if (self.store != null and (self.blueprint_journal.items.len >= limits.max_operations or bytes > limits.max_changes_bytes -| self.blueprint_journal_bytes)) return error.JournalBackpressure;
+        try self.reserveBlueprintJournal(.{ .definition = .{ .id = id, .owner = save.owner, .name = save.name, .size = definition.size, .cells = std.mem.sliceAsBytes(definition.cells), .target_count = definition.target_count } });
         try state.definitions.ensureUnusedCapacity(self.allocator, 1);
         try save.client.blueprint_save_keys.ensureUnusedCapacity(self.allocator, 1);
-        if (self.store != null) try self.blueprint_journal.ensureUnusedCapacity(self.allocator, 1);
         const saved: blueprint_runtime.SavedDefinition = .{ .id = id, .owner = save.owner, .name = save.name, .definition = definition };
         var copies: std.ArrayList(blueprint_runtime.SavedDefinition) = .empty;
         defer copies.deinit(self.allocator);
@@ -1519,7 +1594,7 @@ pub const WorldDataService = struct {
         try state.insertDefinition(self.allocator, saved);
         save.client.blueprint_save_keys.putAssumeCapacity(key, id);
         if (self.store != null) {
-            self.blueprint_journal.appendAssumeCapacity(.{ .definition = .{
+            self.appendBlueprintJournal(.{ .definition = .{
                 .id = id,
                 .owner = save.owner,
                 .name = saved.name,
@@ -1527,7 +1602,6 @@ pub const WorldDataService = struct {
                 .cells = std.mem.sliceAsBytes(definition.cells),
                 .target_count = definition.target_count,
             } });
-            self.blueprint_journal_bytes += bytes;
         }
         self.blueprint_library_bytes += bytes;
         for (self.clients.items, copies.items) |client, copy| client.pending.blueprint_changes.appendAssumeCapacity(.{ .definition = copy });
@@ -1623,7 +1697,7 @@ pub const WorldDataService = struct {
         const saved = state.definitions.get(apply.definition_id) orelse return error.UnknownDefinition;
         if (saved.owner != apply.owner or !self.players.contains(apply.owner)) return error.WrongOwner;
         if (!blueprint_runtime.validFootprint(self.layout, apply.origin, saved.definition.size, apply.rotation)) return error.InvalidFootprint;
-        const limits: blueprint_wire.Limits = .{};
+        const limits = if (self.store) |store| store.limits.blueprints else blueprint_wire.Limits{};
         if (state.instances.count() >= limits.max_instances) return error.Capacity;
         var retained = self.blueprint_library_bytes;
         var active = state.instances.valueIterator();
@@ -1678,7 +1752,7 @@ pub const WorldDataService = struct {
     fn advanceBlueprintAdmission(self: *WorldDataService) void {
         self.reapBlueprintRetirements();
         const task = self.blueprint_task orelse return;
-        if (task.future != null or task.waiting_for_data) return;
+        if (task.future != null or task.waiting_for_data or task.waiting_for_journal) return;
         if (self.worker_state.blueprints.revision != task.snapshot.overlay_revision) {
             self.rejectBlueprintApplication(task, .stale, null);
             return;
@@ -1750,6 +1824,11 @@ pub const WorldDataService = struct {
             .rejected => |failure| self.rejectBlueprintApplication(task, if (failure.code == .missing_data) .missing_data else .invalid, failure.failure),
             .prepared => {
                 self.commitBlueprintApplication(task) catch |err| {
+                    if (err == error.JournalBackpressure) {
+                        task.waiting_for_journal = true;
+                        self.drainBlueprintJournal();
+                        return;
+                    }
                     self.rejectBlueprintApplication(task, if (err == error.StalePreparation or err == error.Overlap) .stale else .resource_exhausted, null);
                     return;
                 };
@@ -1763,13 +1842,10 @@ pub const WorldDataService = struct {
         if (self.clients.items.len != task.client_count) return error.StalePreparation;
         var dependencies = task.snapshot.chunks.iterator();
         while (dependencies.next()) |dependency| if (self.currentBlueprintDependency(dependency.key_ptr.*) != dependency.value_ptr.revision) return error.StalePreparation;
-        const limits: blueprint_wire.Limits = .{};
-        if (self.store != null) {
-            if (self.blueprint_journal.items.len >= limits.max_operations or self.blueprint_journal_bytes + 64 > limits.max_changes_bytes) return error.Capacity;
-            try self.blueprint_journal.ensureUnusedCapacity(self.allocator, 1);
-        }
         const result = if (task.result.?) |*value| value else |err| return err;
         const prepared = &result.prepared;
+        const proposed = prepared.publication.instance;
+        try self.reserveBlueprintJournal(.{ .instance = .{ .id = proposed.id, .definition_id = proposed.definition_id, .owner = proposed.owner, .origin = proposed.origin, .rotation = proposed.rotation } });
         try state.reservePublication(self.allocator, self.layout, &prepared.publication);
         for (self.clients.items) |client| {
             try client.pending.blueprint_changes.ensureUnusedCapacity(self.allocator, 1);
@@ -1778,8 +1854,7 @@ pub const WorldDataService = struct {
         const instance = prepared.publication.instance;
         state.publishPublication(&prepared.publication);
         if (self.store != null) {
-            self.blueprint_journal.appendAssumeCapacity(.{ .instance = .{ .id = instance.id, .definition_id = instance.definition_id, .owner = instance.owner, .origin = instance.origin, .rotation = instance.rotation } });
-            self.blueprint_journal_bytes += 64;
+            self.appendBlueprintJournal(.{ .instance = .{ .id = instance.id, .definition_id = instance.definition_id, .owner = instance.owner, .origin = instance.origin, .rotation = instance.rotation } });
         }
         for (self.clients.items, task.response_copies.items) |client, copy| client.pending.blueprint_changes.appendAssumeCapacity(.{ .instance = copy });
         task.response_copies.clearRetainingCapacity();
@@ -1855,8 +1930,7 @@ pub const WorldDataService = struct {
             self.lifecycle.unsaved_work = true;
             const fulfillment = edit.operation.blueprint.?;
             if (self.store != null) {
-                self.blueprint_journal.appendAssumeCapacity(.{ .fulfill = .{ .instance_id = fulfillment.instance_id, .cell_index = fulfillment.cell_index } });
-                self.blueprint_journal_bytes += 13;
+                self.appendBlueprintJournal(.{ .fulfill = .{ .instance_id = fulfillment.instance_id, .cell_index = fulfillment.cell_index } });
             }
             for (self.clients.items) |client| client.pending.blueprint_changes.appendAssumeCapacity(.{ .fulfill = fulfillment });
             self.publishMaterialChange(coords);
@@ -1898,11 +1972,7 @@ pub const WorldDataService = struct {
 
     fn tryCommitBlueprintFulfillment(self: *WorldDataService, operation: BlockOperation) !WorkerState.BlueprintCommit {
         // Reserve all outward ownership before terrain, inventory, or progress changes.
-        const limits: blueprint_wire.Limits = .{};
-        if (self.store != null) {
-            if (self.blueprint_journal.items.len >= limits.max_operations or 13 > limits.max_changes_bytes -| self.blueprint_journal_bytes) return error.JournalBackpressure;
-            try self.blueprint_journal.ensureUnusedCapacity(self.allocator, 1);
-        }
+        if (operation.blueprint) |target| try self.reserveBlueprintJournal(.{ .fulfill = .{ .instance_id = target.instance_id, .cell_index = target.cell_index } });
         for (self.clients.items) |client| try client.pending.blueprint_changes.ensureUnusedCapacity(self.allocator, 1);
         const road_batch = try self.prepareBlueprintRoadUpdates(operation.block);
         const result = try self.worker_state.tryFulfillBlueprint(self.allocator, operation);
@@ -2280,6 +2350,12 @@ pub const WorldDataService = struct {
         if (self.is_shutting_down.load(.acquire)) return error.ServiceStopped;
         std.debug.assert(self.job == null and self.source_holds.count() == 0);
         const blueprint_change_bytes = try blueprint_wire.encodedOpsSize(self.blueprint_journal.items);
+        // Rebuild once at the capture boundary, never on each fulfillment.
+        var blueprint_summary: blueprint_wire.PrepareSummary = .{};
+        for (self.blueprint_journal.items) |operation| try self.addBlueprintSummary(&blueprint_summary, operation);
+        self.blueprint_journal_summary = blueprint_summary;
+        const blueprint_prepare_bytes = try blueprint_wire.prepareMemoryBound(blueprint_summary, store.limits.blueprints);
+        const journal_capacity_bytes = try std.math.mul(usize, self.blueprint_journal.capacity, @sizeOf(blueprint_wire.Op));
         for (self.clients.items) |client| {
             client.checkpoint_mutex.lockUncancelable(self.io);
             if (client.latest_checkpoint) |latest| {
@@ -2294,6 +2370,7 @@ pub const WorldDataService = struct {
         }
         var source_count: usize = 0;
         var scratch_peak: usize = 0;
+        var largest_output: usize = 0;
         var preflight_chunks = self.worker_state.modified_chunks.iterator();
         while (preflight_chunks.next()) |entry| {
             if (entry.value_ptr.chunk_revision == 0 or self.wal_revisions.get(entry.key_ptr.*) == entry.value_ptr.chunk_revision) continue;
@@ -2301,23 +2378,24 @@ pub const WorldDataService = struct {
             if (source_count > self.limits.manifest_entries) return error.ManifestCapacityExceeded;
             const source = persistence.Source.freeze(entry.key_ptr.*, 0, entry.value_ptr);
             scratch_peak = @max(scratch_peak, try persistence.scratchBound(source));
+            largest_output = @max(largest_output, try persistence.outputBound(source));
             if (try persistence.outputBound(source) > self.limits.output_bytes) return error.OutputCapacityTooSmall;
         }
         // Before allocating any capture manifest or growing bookkeeping, reserve
         // a conservative peak including old/new hash-table and ring overlap.
-        var preflight_bytes = try std.math.add(usize, self.limits.output_bytes, @sizeOf(persistence.Job));
+        var preflight_bytes = try std.math.add(usize, self.limits.output_bytes, try self.captureWorkingOverhead(source_count, scratch_peak));
         preflight_bytes = try std.math.add(usize, preflight_bytes, blueprint_change_bytes);
-        preflight_bytes = try std.math.add(usize, preflight_bytes, scratch_peak);
-        preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.mul(usize, self.players.count(), format.player_record_size + @sizeOf(u64)));
-        preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.mul(usize, source_count, 2 * @sizeOf(persistence.Source) + 2 + @sizeOf([]u8)));
-        const ring_target = try std.math.add(usize, source_count, 4);
-        const ring_peak = try std.math.add(usize, self.completion_ring.capacity, @max(self.completion_ring.capacity, ring_target));
-        preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.mul(usize, ring_peak, @sizeOf(persistence.Event)));
-        const hold_target = @max(@as(usize, self.source_holds.capacity()), try std.math.mul(usize, source_count, 4));
-        const wal_target = @max(@as(usize, self.wal_revisions.capacity()), try std.math.mul(usize, try std.math.add(usize, self.wal_revisions.count(), source_count), 4));
-        const hash_peak = try std.math.add(usize, try std.math.add(usize, hold_target, self.source_holds.capacity()), try std.math.add(usize, wal_target, self.wal_revisions.capacity()));
-        preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.add(usize, try std.math.mul(usize, hash_peak, @sizeOf(u32) + @sizeOf(u64) + 16), 512));
-        if (preflight_bytes > self.limits.working_bytes) return error.WorkingCapacityExceeded;
+        preflight_bytes = try std.math.add(usize, preflight_bytes, blueprint_prepare_bytes);
+        preflight_bytes = try std.math.add(usize, preflight_bytes, journal_capacity_bytes);
+        // A bounded smaller queue lets an admitted journal drain without
+        // dropping operations or separating blueprint progress from terrain.
+        var job_limits = self.limits;
+        if (preflight_bytes > self.limits.working_bytes) {
+            const excess = preflight_bytes - self.limits.working_bytes;
+            if (excess > job_limits.output_bytes -| largest_output) return error.WorkingCapacityExceeded;
+            job_limits.output_bytes -= excess;
+            preflight_bytes -= excess;
+        }
         const blueprint_changes = if (blueprint_change_bytes != 0)
             try blueprint_wire.encodeOps(self.allocator, self.blueprint_journal.items)
         else
@@ -2362,9 +2440,9 @@ pub const WorldDataService = struct {
         const bookkeeping = try std.math.add(usize, try std.math.mul(usize, self.completion_ring.capacity, @sizeOf(persistence.Event)), try std.math.add(usize, try std.math.mul(usize, self.source_holds.capacity(), @sizeOf(u32) + @sizeOf(u64) + 16), try std.math.add(usize, try std.math.mul(usize, sources.capacity, @sizeOf(persistence.Source)), try std.math.add(usize, player_ids.len * @sizeOf(u64), 256))));
         const frozen = try sources.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(frozen);
-        job.* = .{ .allocator = self.allocator, .io = self.io, .store = store, .store_mutex = &self.store_mutex, .limits = self.limits, .notify = .{ .context = self, .send = notifyPersistence }, .epoch = self.capture_epoch, .sequence = try std.math.add(u64, self.status.durable_sequence, 1), .tick = self.worker_state.tick, .final = final, .sources = frozen, .players = players, .player_count = self.players.count(), .blueprint_changes = blueprint_changes };
+        job.* = .{ .allocator = self.allocator, .io = self.io, .store = store, .store_mutex = &self.store_mutex, .limits = job_limits, .notify = .{ .context = self, .send = notifyPersistence }, .epoch = self.capture_epoch, .sequence = try std.math.add(u64, self.status.durable_sequence, 1), .tick = self.worker_state.tick, .final = final, .sources = frozen, .players = players, .player_count = self.players.count(), .blueprint_changes = blueprint_changes, .blueprint_summary = blueprint_summary, .blueprint_journal_reserved_bytes = journal_capacity_bytes };
         const job_manifest = try std.math.mul(usize, source_count, @sizeOf(persistence.Source) + 2 + @sizeOf([]u8));
-        const job_baseline = try std.math.add(usize, self.limits.output_bytes, try std.math.add(usize, job_manifest, try std.math.add(usize, players.len + blueprint_changes.len, try std.math.add(usize, scratch_peak, @sizeOf(persistence.Job)))));
+        const job_baseline = try std.math.add(usize, blueprint_prepare_bytes, try std.math.add(usize, job_limits.output_bytes, try std.math.add(usize, job_manifest, try std.math.add(usize, players.len + blueprint_changes.len, try std.math.add(usize, scratch_peak, @sizeOf(persistence.Job))))));
         job.extra_working_bytes = @max(bookkeeping, preflight_bytes - job_baseline);
         for (frozen) |source| self.source_holds.putAssumeCapacity(source.id, source.revision);
         errdefer self.source_holds.clearRetainingCapacity();
@@ -2374,6 +2452,7 @@ pub const WorldDataService = struct {
         self.lifecycle.started(.{ .id = intent, .final = final }, job.epoch, started);
         self.captured_player_generation = self.player_generation;
         self.captured_blueprint_operations = self.blueprint_journal.items.len;
+        self.captured_blueprint_summary = blueprint_summary;
         self.simulation_paused.store(frozen.len != 0, .release);
         self.status.intent_id = intent;
         self.reportAttemptPhase();
@@ -2426,7 +2505,15 @@ pub const WorldDataService = struct {
                 std.mem.copyForwards(blueprint_wire.Op, self.blueprint_journal.items[0..remaining_ops], self.blueprint_journal.items[committed_ops..]);
                 self.blueprint_journal.items.len = remaining_ops;
                 self.blueprint_journal_bytes -|= committed_bytes;
+                inline for (std.meta.fields(blueprint_wire.PrepareSummary)) |field| {
+                    @field(self.blueprint_journal_summary, field.name) -= @field(self.captured_blueprint_summary, field.name);
+                }
+                self.captured_blueprint_summary = .{};
                 self.captured_blueprint_operations = 0;
+                if (remaining_ops == 0) {
+                    self.blueprint_journal.deinit(self.allocator);
+                    self.blueprint_journal = .empty;
+                }
                 self.lifecycle.unsaved_work = self.player_generation != self.captured_player_generation or remaining_ops != 0;
                 var live = self.worker_state.modified_chunks.iterator();
                 while (live.next()) |entry| if (self.wal_revisions.get(entry.key_ptr.*) != entry.value_ptr.chunk_revision) {
@@ -2474,6 +2561,10 @@ pub const WorldDataService = struct {
                     .failed => |err| self.failPersistence(err),
                 }
                 self.status.progress_generation +%= 1;
+                if (self.blueprint_task) |task| if (task.waiting_for_journal) {
+                    task.waiting_for_journal = false;
+                    self.finishBlueprintApplication(task);
+                };
                 self.retryPending();
             },
         }
@@ -6117,18 +6208,13 @@ test "blueprint journal backpressure drains accepted prefix before a queued fina
     fixture.service.store = &store;
     fixture.service.saveBlueprint(try fixture.request(1));
     try std.testing.expectEqual(@as(usize, 1), fixture.service.blueprint_journal.items.len);
-    const accepted_bytes = fixture.service.blueprint_journal_bytes;
-    // The cap accounting is saturated while retaining a small, real prefix so
-    // the fixture exercises the production writer without a 16 MiB library.
-    fixture.service.blueprint_journal_bytes = (blueprint_wire.Limits{}).max_changes_bytes;
+    // One real operation per transaction forces a drain before the next Save.
+    store.limits.blueprints.max_operations = 1;
     fixture.service.saveBlueprint(try fixture.request(2));
     try std.testing.expect(fixture.service.operation_deferred);
     try std.testing.expect(fixture.service.job != null);
     fixture.service.requestSaveTransition(100, true);
     try std.testing.expectEqual(@as(usize, 1), fixture.service.pending.items.len);
-    // Restore exact accounting before delivering the real commit events. No
-    // writer reads this service counter; only the detached encoded bytes.
-    fixture.service.blueprint_journal_bytes = accepted_bytes;
     const end = persistence.now(io) + 10 * std.time.ns_per_s;
     while (persistence.now(io) < end) {
         fixture.service.drainPersistenceEvents();
@@ -6475,4 +6561,311 @@ test "road queue capacity rejects a fill before terrain inventory or progress ch
     const target = fixture.service.worker_state.modified_chunks.get(test_layout.encodeChunkCoords(.{ 0, 0, 2 })).?;
     try std.testing.expectEqual(rules.BlockType.none, target.content.getBlock(.{ 15, 10, 5 }));
     try std.testing.expect(fixture.service.worker_state.blueprints.targetAt(.{ 15, 10, 69 }) != null);
+}
+
+test "blueprint singleton journal limits reject before publication or an empty drain" {
+    for ([_]blueprint_wire.Limits{ .{ .max_operations = 0 }, .{ .max_changes_bytes = 12 }, .{ .max_cells = 0 } }) |limits| {
+        var fixture: BlueprintSaveFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        var store: storage.Store = undefined;
+        store.limits = .{ .blueprints = limits };
+        fixture.service.store = &store;
+        fixture.service.saveBlueprint(try fixture.request(1));
+        var replies: std.ArrayList(BlueprintResult) = .empty;
+        defer replies.deinit(std.testing.allocator);
+        fixture.client.takeBlueprintResults(&replies);
+        try std.testing.expectEqual(@as(usize, 1), replies.items.len);
+        try std.testing.expectEqual(.resource_exhausted, replies.items[0].status);
+        try std.testing.expectEqual(@as(u32, 0), fixture.service.worker_state.blueprints.definitions.count());
+        try std.testing.expectEqual(@as(usize, 0), fixture.service.blueprint_journal.items.len);
+        try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.items.len);
+        try std.testing.expectEqual(null, fixture.service.job);
+    }
+}
+
+test "small encoder queues retain journal admission when working memory is available" {
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var store: storage.Store = undefined;
+    store.limits = .{};
+    fixture.service.store = &store;
+    fixture.service.limits.output_bytes = 33_000;
+    fixture.service.saveBlueprint(try fixture.request(1));
+    try std.testing.expectEqual(@as(u32, 1), fixture.service.worker_state.blueprints.definitions.count());
+    try std.testing.expectEqual(@as(usize, 1), fixture.service.blueprint_journal.items.len);
+    try std.testing.expectEqual(@as(usize, 1), fixture.service.blueprint_journal_summary.operation_count);
+    try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.items.len);
+}
+
+const BlueprintJournalBudgetTest = struct {
+    fn allowance(service: *WorldDataService, wanted: usize) !void {
+        // Choose the smallest configured budget admitting this much journal
+        // space; the production overhead calculation remains the oracle.
+        var low: usize = 0;
+        var high: usize = 64 * 1024 * 1024;
+        service.limits.working_bytes = high;
+        if (try service.blueprintJournalAllowance() < wanted) return error.TestBudgetTooLarge;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            service.limits.working_bytes = middle;
+            if (try service.blueprintJournalAllowance() >= wanted) high = middle else low = middle + 1;
+        }
+        service.limits.working_bytes = low;
+        try std.testing.expectEqual(wanted, try service.blueprintJournalAllowance());
+    }
+
+    fn seed(fixture: *BlueprintSaveFixture) !void {
+        const a = fixture.service.allocator;
+        const service = &fixture.service;
+        service.worker_state.persistence_service = service;
+        var chunk = WorldChunk.initEmpty();
+        var owns_chunk = true;
+        errdefer if (owns_chunk) chunk.deinit(a);
+        for (10..13) |x| try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ @intCast(x), 10, 5 }, .{ .put = .stone }));
+        try service.worker_state.modified_chunks.put(a, test_layout.encodeChunkCoords(.{ 0, 0, 2 }), chunk);
+        owns_chunk = false;
+        try installFulfillmentTestSite(&service.worker_state, a, .{ 10, 10, 70 }, .{ 3, 1, 1 }, &.{ .planks, .planks, .planks });
+        const definition = service.worker_state.blueprints.definitions.get(1).?;
+        const instance = service.worker_state.blueprints.instances.get(1).?;
+        const operations = [_]blueprint_wire.Op{
+            .{ .definition = .{ .id = definition.id, .owner = definition.owner, .name = definition.name, .size = definition.definition.size, .cells = std.mem.sliceAsBytes(definition.definition.cells), .target_count = definition.definition.target_count } },
+            .{ .instance = .{ .id = instance.id, .definition_id = instance.definition_id, .owner = instance.owner, .origin = instance.origin, .rotation = instance.rotation } },
+        };
+        for (operations) |operation| {
+            try service.reserveBlueprintJournal(operation);
+            service.appendBlueprintJournal(operation);
+        }
+        service.blueprint_library_bytes = definition.name.len + definition.definition.cells.len + 128;
+        service.players.getPtr(1).?.inventory = @intFromEnum(rules.BlockType.planks);
+    }
+
+    fn fill(fixture: *BlueprintSaveFixture, request_id: u64, index: u32, material: rules.BlockType) void {
+        fixture.service.processBlueprintFulfillment(.{ .client = &fixture.client, .request_id = request_id, .operation = .{
+            .block = .{ 10 + index, 10, 70 },
+            .action = .{ .put = material },
+            .player = .{ .id = 1, .expected_sequence = 0 },
+            .blueprint = .{ .instance_id = 1, .cell_index = index },
+        } });
+    }
+
+    fn waitJob(service: *WorldDataService) !void {
+        const io = std.testing.io;
+        const deadline = persistence.now(io) + 10 * std.time.ns_per_s;
+        while (service.job != null and persistence.now(io) < deadline) {
+            service.drainPersistenceEvents();
+            if (service.job != null) try Io.sleep(io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(service.job == null);
+        try std.testing.expectEqual(persistence.Phase.complete, service.status.phase);
+    }
+
+    fn cleanup(fixture: *BlueprintSaveFixture) void {
+        fixture.service.dirty_meshes.deinit(fixture.service.allocator);
+        fixture.service.blueprint_road_queue.deinit(fixture.service.allocator);
+        fixture.deinit();
+    }
+};
+
+test "blueprint journal fulfillment accounting never rescans its accepted prefix" {
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var store: storage.Store = undefined;
+    store.limits = .{};
+    fixture.service.store = &store;
+    fixture.service.saveBlueprint(try fixture.request(1));
+    try std.testing.expectEqual(@as(usize, 1), fixture.service.blueprint_journal.items.len);
+    const original_name = fixture.service.blueprint_journal.items[0].definition.name;
+    // A full prefix scan would reject this name. The immutable saved definition
+    // remains valid; only this borrowed journal view is poisoned for the probe.
+    fixture.service.blueprint_journal.items[0].definition.name = &.{0xff};
+    defer fixture.service.blueprint_journal.items[0].definition.name = original_name;
+    const operation: blueprint_wire.Op = .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } };
+    var expected = fixture.service.blueprint_journal_summary;
+    try expected.addOperation(operation, 0);
+    try fixture.service.reserveBlueprintJournal(operation);
+    fixture.service.appendBlueprintJournal(operation);
+    try std.testing.expectEqualDeep(expected, fixture.service.blueprint_journal_summary);
+    try std.testing.expectEqual(@as(usize, 2), fixture.service.blueprint_journal.items.len);
+}
+
+test "blueprint journal memory backpressure preserves physical inventory and progress before retry" {
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer BlueprintJournalBudgetTest.cleanup(&fixture);
+    var store: storage.Store = undefined;
+    store.limits = .{};
+    fixture.service.store = &store;
+    try BlueprintJournalBudgetTest.seed(&fixture);
+    const before = fixture.service.blueprint_journal_summary;
+    const operation: blueprint_wire.Op = .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } };
+    var one: blueprint_wire.PrepareSummary = .{};
+    try one.addOperation(operation, 0);
+    const one_bytes = try fixture.service.blueprintJournalMemory(one, std.ArrayList(blueprint_wire.Op).growCapacity(1));
+    try BlueprintJournalBudgetTest.allowance(&fixture.service, one_bytes + 128);
+    // An existing writer makes the deferred command wait instead of starting
+    // I/O against this deliberately minimal Store fixture.
+    var job: persistence.Job = undefined;
+    fixture.service.job = &job;
+    defer fixture.service.job = null;
+    BlueprintJournalBudgetTest.fill(&fixture, 1, 0, .planks);
+    try std.testing.expect(fixture.service.operation_deferred);
+    try std.testing.expectEqual(@as(usize, 1), fixture.service.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 0), fixture.client.pending.responses.items.len);
+    try std.testing.expectEqualDeep(before, fixture.service.blueprint_journal_summary);
+    try std.testing.expectEqual(@as(u32, 3), fixture.service.worker_state.blueprints.instances.get(1).?.remaining);
+    try std.testing.expectEqual(@as(?u8, @intFromEnum(rules.BlockType.planks)), fixture.service.players.get(1).?.inventory);
+    const chunk = fixture.service.worker_state.modified_chunks.get(test_layout.encodeChunkCoords(.{ 0, 0, 2 })).?;
+    try std.testing.expectEqual(rules.BlockType.none, chunk.content.getBlock(.{ 10, 10, 6 }));
+    try std.testing.expectEqual(@as(u64, 0), fixture.service.worker_state.blueprint_fulfillment_attempts);
+}
+
+test "blueprint journal reservations include old new growth and the in flight encoded prefix" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    var store: storage.Store = undefined;
+    store.limits = .{};
+    fixture.service.store = &store;
+    const capacity = 32 * 1024;
+    try fixture.service.blueprint_journal.ensureTotalCapacityPrecise(a, capacity);
+    for (0..capacity) |index| fixture.service.appendBlueprintJournal(.{ .fulfill = .{ .instance_id = 1, .cell_index = @intCast(index) } });
+    const operation: blueprint_wire.Op = .{ .fulfill = .{ .instance_id = 1, .cell_index = capacity } };
+    var next = fixture.service.blueprint_journal_summary;
+    try next.addOperation(operation, 0);
+    const next_capacity = std.ArrayList(blueprint_wire.Op).growCapacity(capacity + 1);
+    const growth_peak = (capacity + next_capacity) * @sizeOf(blueprint_wire.Op);
+    try std.testing.expect(growth_peak > try fixture.service.blueprintJournalMemory(next, next_capacity));
+    try BlueprintJournalBudgetTest.allowance(&fixture.service, growth_peak - 1);
+    try std.testing.expectError(error.JournalBackpressure, fixture.service.reserveBlueprintJournal(operation));
+    try std.testing.expectEqual(@as(usize, capacity), fixture.service.blueprint_journal.capacity);
+    try std.testing.expectEqual(@as(usize, capacity), fixture.service.blueprint_journal.items.len);
+    try BlueprintJournalBudgetTest.allowance(&fixture.service, growth_peak);
+    try fixture.service.reserveBlueprintJournal(operation);
+    fixture.service.appendBlueprintJournal(operation);
+    try std.testing.expectEqual(next_capacity, fixture.service.blueprint_journal.capacity);
+    fixture.service.limits.working_bytes = 64 * 1024 * 1024;
+    const current_bytes = next_capacity * @sizeOf(blueprint_wire.Op);
+    var job: persistence.Job = undefined;
+    job.blueprint_journal_reserved_bytes = capacity * @sizeOf(blueprint_wire.Op);
+    job.working_reserved_bytes = fixture.service.limits.working_bytes - current_bytes + job.blueprint_journal_reserved_bytes + 1;
+    fixture.service.job = &job;
+    defer fixture.service.job = null;
+    const before = fixture.service.blueprint_journal_summary;
+    try std.testing.expectError(error.JournalBackpressure, fixture.service.reserveBlueprintJournal(operation));
+    try std.testing.expectEqualDeep(before, fixture.service.blueprint_journal_summary);
+    // At equality the retained encoded/prepared prefix remains charged, while
+    // the old shared journal charge is replaced exactly once.
+    job.working_reserved_bytes -= 1;
+    try fixture.service.reserveBlueprintJournal(operation);
+    fixture.service.appendBlueprintJournal(operation);
+    try std.testing.expectEqual(before.operation_count + 1, fixture.service.blueprint_journal_summary.operation_count);
+}
+
+test "budgeted blueprint writer drains prefixes retries fills and restores an atomic suffix" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var uuid: [16]u8 = undefined;
+    std.c.arc4random_buf(&uuid, uuid.len);
+    const path = try std.fmt.allocPrintSentinel(a, "/private/tmp/blueprint-memory-drain-{x}", .{uuid}, 0);
+    defer a.free(path);
+    defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
+    const dimensions: [3]u32 = .{ @intCast(test_layout.size_in_chunks[0]), @intCast(test_layout.size_in_chunks[1]), @intCast(test_layout.size_in_chunks[2]) };
+    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = dimensions, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
+    defer a.free(descriptor);
+    const global = format.encodeGlobal(0);
+    var store = try storage.Store.create(a, path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{});
+    var store_open = true;
+    defer if (store_open) store.deinit();
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    var fixture_open = true;
+    defer if (fixture_open) BlueprintJournalBudgetTest.cleanup(&fixture);
+    fixture.service.store = &store;
+    fixture.service.limits.output_bytes = 64 * 1024;
+    try BlueprintJournalBudgetTest.seed(&fixture);
+    try fixture.service.blueprint_journal.ensureTotalCapacityPrecise(a, 16);
+    BlueprintJournalBudgetTest.fill(&fixture, 1, 0, .planks);
+    try std.testing.expectEqual(OperationStatus.success, fixture.client.pending.responses.items[0].operation.?.status);
+    const prefix = fixture.service.blueprint_journal_summary;
+    const source = persistence.Source.freeze(test_layout.encodeChunkCoords(.{ 0, 0, 2 }), 0, fixture.service.worker_state.modified_chunks.getPtr(test_layout.encodeChunkCoords(.{ 0, 0, 2 })).?);
+    const full_capture = fixture.service.limits.output_bytes + try fixture.service.captureWorkingOverhead(1, try persistence.scratchBound(source)) + prefix.encoded_bytes + try blueprint_wire.prepareMemoryBound(prefix, store.limits.blueprints) + fixture.service.blueprint_journal.capacity * @sizeOf(blueprint_wire.Op);
+    // Simulate a tighter capture budget after admission. The queue can shrink
+    // by one byte while the complete atomic blueprint prefix remains intact.
+    fixture.service.limits.working_bytes = full_capture - 1;
+    var gate: ServiceWriteGate = .{};
+    var faults: @import("persistence/io.zig").Faults = .{ .enabled = false, .context = &gate, .hook = ServiceWriteGate.hook };
+    store.setFaults(&faults);
+    defer gate.released.set(io);
+    try fixture.service.beginCapture(101, false);
+    try std.testing.expectEqual(fixture.service.limits.output_bytes - 1, fixture.service.job.?.limits.output_bytes);
+    try std.testing.expect(fixture.service.job.?.working_reserved_bytes <= fixture.service.limits.working_bytes);
+    try gate.entered.waitTimeout(io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    const released_deadline = persistence.now(io) + 5 * std.time.ns_per_s;
+    while (fixture.service.source_holds.count() != 0 and persistence.now(io) < released_deadline) {
+        fixture.service.drainPersistenceEvents();
+        try Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(@as(u32, 0), fixture.service.source_holds.count());
+    fixture.service.limits.working_bytes = 64 * 1024 * 1024;
+    fixture.service.players.getPtr(1).?.inventory = @intFromEnum(rules.BlockType.planks);
+    BlueprintJournalBudgetTest.fill(&fixture, 2, 1, .planks);
+    try std.testing.expectEqual(OperationStatus.success, fixture.client.pending.responses.items[1].operation.?.status);
+    fixture.service.players.getPtr(1).?.inventory = @intFromEnum(rules.BlockType.planks);
+    const accepted_suffix = fixture.service.blueprint_journal_summary;
+    BlueprintJournalBudgetTest.fill(&fixture, 3, 2, .sand);
+    try std.testing.expectEqual(OperationStatus.inventory_mismatch, fixture.client.pending.responses.items[2].operation.?.status);
+    try std.testing.expectEqualDeep(accepted_suffix, fixture.service.blueprint_journal_summary);
+    const fill_last: blueprint_wire.Op = .{ .fulfill = .{ .instance_id = 1, .cell_index = 2 } };
+    var one: blueprint_wire.PrepareSummary = .{};
+    try one.addOperation(fill_last, 0);
+    try BlueprintJournalBudgetTest.allowance(&fixture.service, (try fixture.service.blueprintJournalMemory(one, std.ArrayList(blueprint_wire.Op).growCapacity(1))) + 128);
+    BlueprintJournalBudgetTest.fill(&fixture, 4, 2, .planks);
+    try std.testing.expect(fixture.service.operation_deferred);
+    try std.testing.expectEqual(@as(usize, 1), fixture.service.pending.items.len);
+    try std.testing.expectEqualDeep(accepted_suffix, fixture.service.blueprint_journal_summary);
+    try std.testing.expectEqual(@as(u32, 1), fixture.service.worker_state.blueprints.instances.get(1).?.remaining);
+    try std.testing.expectEqual(@as(?u8, @intFromEnum(rules.BlockType.planks)), fixture.service.players.get(1).?.inventory);
+    try std.testing.expectEqual(rules.BlockType.none, fixture.service.worker_state.modified_chunks.get(source.id).?.content.getBlock(.{ 12, 10, 6 }));
+    fixture.service.limits.working_bytes = 64 * 1024 * 1024;
+    gate.released.set(io);
+    try BlueprintJournalBudgetTest.waitJob(&fixture.service);
+    try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.items.len);
+    try std.testing.expectEqual(OperationStatus.success, fixture.client.pending.responses.items[3].operation.?.status);
+    try std.testing.expectEqual(@as(u32, 2), store.blueprints.instances.get(1).?.remaining);
+    try std.testing.expectEqual(@as(u32, 0), fixture.service.worker_state.blueprints.instances.get(1).?.remaining);
+    var suffix: blueprint_wire.PrepareSummary = .{};
+    try suffix.addOperation(.{ .fulfill = .{ .instance_id = 1, .cell_index = 1 } }, 0);
+    try suffix.addOperation(fill_last, 0);
+    try std.testing.expectEqualDeep(suffix, fixture.service.blueprint_journal_summary);
+    try std.testing.expectEqual(@as(usize, 2), fixture.service.blueprint_journal.items.len);
+    try std.testing.expect(fixture.service.blueprint_journal.capacity >= 16);
+    try fixture.service.beginCapture(102, true);
+    try BlueprintJournalBudgetTest.waitJob(&fixture.service);
+    try std.testing.expectEqualDeep(blueprint_wire.PrepareSummary{}, fixture.service.blueprint_journal_summary);
+    try std.testing.expectEqual(@as(usize, 0), fixture.service.blueprint_journal.items.len);
+    try std.testing.expectEqual(@as(usize, 0), fixture.service.blueprint_journal.capacity);
+    try std.testing.expectEqual(@as(u32, 0), store.blueprints.instances.count());
+    try std.testing.expectEqual(@as(?u8, null), fixture.service.players.get(1).?.inventory);
+    store.setFaults(null);
+    BlueprintJournalBudgetTest.cleanup(&fixture);
+    fixture_open = false;
+    store.deinit();
+    store_open = false;
+    store = try storage.Store.open(a, path, .{});
+    store_open = true;
+    try std.testing.expectEqual(@as(u64, 2), store.sequence);
+    try std.testing.expectEqual(@as(u32, 1), store.blueprints.definitions.count());
+    try std.testing.expectEqual(@as(u32, 0), store.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u64, 1), store.blueprints.max_instance_id);
+    const player = try format.decodePlayer(store.players);
+    try std.testing.expectEqual(@as(?u8, null), player.inventory);
+    const encoded = (try store.readChunk(a, source.id)).?;
+    defer a.free(encoded);
+    var restored = try format.decodeChunk(a, store.world_uuid, encoded, dimensions);
+    defer restored.deinit(a);
+    for (10..13) |x| try std.testing.expectEqual(@intFromEnum(rules.BlockType.planks), restored.blocks[transformations.index(.{ @intCast(x), 10, 6 })]);
 }
