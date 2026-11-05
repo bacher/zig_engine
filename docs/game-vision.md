@@ -280,6 +280,12 @@ Travel time must not depend on whether a player sees the courier. Observation mu
 
 We do not need to update a precise rendered pose for every unseen courier. We do need efficient queries for couriers present in selected chunks at the current simulation time, so nearby activity can be displayed without scanning the whole population.
 
+### NPC movement and visual separation
+
+In the first version, NPCs do not collide with or block each other and do not generate traffic congestion in the simulation. Two couriers can use a narrow passage in opposite directions without waiting for each other. Other NPCs do not change a delivery's route, duration, or food cost; terrain and roads still determine traversability and travel costs.
+
+Visualization will likely separate displayed movement to reduce overlap between NPCs. This is purely a presentation effect: it cannot change authoritative positions or progress, schedules, resource costs, or production and delivery outcomes. The simulation behaves the same whether this visual effect is present or absent, and regardless of who observes the NPCs. No visual separation algorithm is chosen here.
+
 ### Accepting a delivery and paying for it
 
 A courier plans a route when accepting a task from A to B. The simplest payment model takes the required food from a dispenser in A; if it is unavailable, the task does not start.

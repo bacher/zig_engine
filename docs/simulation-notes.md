@@ -56,6 +56,12 @@ Visualization may adjust the NPC's motion to fit current terrain, for example to
 
 The [travel policy](game-vision.md#responding-to-world-changes-during-travel) applies this simplification to active deliveries; updated routing information serves new deliveries. Stopping a destination preserves already accepted deliveries, and ordinary player dismantling cannot remove it while those obligations remain. Explicit order cancellation and exceptional failures are separate questions whose cargo and task outcomes remain unspecified; they do not introduce route checks in the first version.
 
+## NPC movement does not create congestion
+
+In the first version, NPCs do not collide with or block one another in the simulation. Opposing couriers on a narrow bridge and crowds near a warehouse do not create traffic queues or change travel duration or food costs. Terrain and road properties still matter for route planning.
+
+Movement separation will likely be added as a visual effect to reduce overlap between displayed NPCs. It must not change authoritative routes, progress, arrival times, resource costs, or work outcomes. No visual avoidance algorithm is selected, and the simulation must behave identically without this visual effect or when different players observe the activity.
+
 ## Architecture ideas to revisit later
 
 The author has not chosen a simulation architecture. Candidates include:

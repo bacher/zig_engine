@@ -55,6 +55,8 @@ Opening a world must allow simulation to resume in every area with active event 
 
 Rendered motion may be reconstructed when needed. Observation must not change authoritative schedules or outcomes, including when several players watch the same activity. These are design requirements for the upcoming simulation; they do not select a scheduler or require every subsystem to use the same update mechanism.
 
+In the first version, NPCs do not collide with or block one another in the simulation and do not create traffic congestion. Terrain and roads still determine traversability and travel costs. Movement separation may be added purely in visualization, without changing authoritative routes, progress, timing, costs, or work outcomes. The presence or absence of that visual adjustment must have no simulation effect.
+
 ## Keep accepted plans stable
 
 Assigning workers, choosing suppliers, and planning routes can cost more than executing the resulting plans. A newly available better option does not by itself require reconsidering active work. Favor sufficiently good decisions that remain useful over continuous optimization.
