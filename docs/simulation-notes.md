@@ -36,9 +36,26 @@ The world-data service and simulation will remain together in one server process
 
 The simulation needs its own index and may also maintain state distinct from the data currently stored in chunks. Opening a world must resume simulation in all areas containing active event emitters without scanning the whole world. The index, stored state, and recovery mechanism have not been designed.
 
+## Consistency of condition checks
+
+Not every condition check requires a coherent world snapshot. For explicitly discussed cases, recent observations obtained at different moments may be sufficient, even when their combination describes a state that never existed simultaneously. A block already checked need not be checked again merely because it changed before the rest of the validation finished.
+
+This permission must be evaluated for each check during feature design and implementation. A 1–2 second interval of inconsistency is an acceptable starting range for suitable checks, not a blanket tolerance for every rule. The relevant age runs from the observations through use of the result, including any queue delay. Each policy still needs to specify its time basis (real or simulation time), allowed age, and what happens if that age is exceeded.
+
+Two examples establish the boundary:
+
+- **Room recognition needs stricter consistency.** Accepting a room from a mixed observation of roof and walls is unacceptable if a broken roof leaves the room permanently classified as valid. Room validity must account for relevant world changes; a short reading window does not justify an enduring important rule violation. No validation or invalidation mechanism is selected here.
+- **Blueprint surroundings may allow relaxed checks.** Suitability for applying a construction blueprint can be checked against recent mixed observations, accepting that concurrent changes to nearby blocks may violate ordinary construction rules. The exact checks and deviations must be discussed in that feature's design and implementation. This is a permitted direction for simplification, not a change to existing blueprint behavior or its specification.
+
+Resource accounting remains consistent. Two operations cannot both spend the same last unit of food, and two deliveries cannot both claim the same cargo because a preliminary check saw it available. Permission for mixed observations applies to eligible condition checks, not to resource consumption or ownership changes.
+
+Logical inconsistency also does not permit memory races, torn reads of compound state, or access to freed data. Avoiding a lock across an entire validation may be useful, but safe reading and writing still need to be established. No lock-free architecture is selected by these rules.
+
 ## Consume resources at start
 
 All inputs and operating resources required for an operation or delivery are consumed in full at its successful start. For production, this includes the recipe ingredients and the full food cost. For delivery, the full food cost and any other required operating consumables are paid at departure. If the necessary resources are unavailable, the work cannot start.
+
+Consumption and cargo transfers must remain consistent under concurrent work and player actions. A recent positive condition check does not entitle a task to resources that have already been spent or transferred elsewhere. The relaxed validation policy above does not permit double spending, duplicate cargo ownership, or partial accounting that starts unpaid work.
 
 Started work does not reserve these resources for later consumption, consume them gradually, or pay again at completion. Later depletion of the dispenser cannot interrupt already paid work. Food already consumed as payment can no longer spoil and invalidate that payment. This does not change spoilage rules for food still stored or carried as cargo.
 
@@ -51,6 +68,8 @@ Every simulation action has prerequisites. Producing a concrete block at a works
 - An empty output slot, or a guarantee that it will be free by completion.
 - Delivered inputs: cement, crushed stone, sand, and water.
 - Coverage by a food dispenser with enough food to pay for the operation.
+
+Whether to require guaranteed destination capacity before starting every delivery remains deferred for later discussion. The output-slot condition above records the workstation example; it does not establish a universal capacity-reservation policy for all work and deliveries.
 
 Relevant changes, such as input delivery or food arriving at the dispenser, must cause the prerequisites to be reconsidered. When all conditions are met and the workstation is enabled, production can start, consuming all recipe inputs and the full food cost at that moment. This describes the triggering behavior without selecting how checks are scheduled or combined.
 

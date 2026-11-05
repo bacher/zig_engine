@@ -272,6 +272,8 @@ This section preserves technical ideas that help explain the vision. It does not
 
 The [simulation notes](simulation-notes.md) preserve the author's 2026-11-05 clarification of the automated-world goal, player/service/simulation boundaries, startup without a full-world scan, workstation prerequisites, and separate production and delivery jobs. They also retain architecture alternatives for later consideration without selecting one.
 
+The [condition-check policy](simulation-notes.md#consistency-of-condition-checks) permits recent mixed observations only for individually discussed checks. Room recognition requires stronger consistency; blueprint-surroundings checks may be simplified with explicit accepted deviations. Resource consumption and transfers remain consistent. These permissions do not select a synchronization mechanism or change existing feature implementations.
+
 The initial performance target is 100,000 simultaneous work and delivery tasks, represented in gameplay by active NPCs, on a mid-range gaming PC with 4–8 CPU cores and 32 GB of system RAM, ideally also supporting a 16 GB machine. This measures simulated activity, not persistent characters or simultaneously rendered models. It is a target for the upcoming simulation, not an implemented or measured capacity. The [design principles](../DESIGN_PRINCIPLES.md#make-scale-measurable-from-the-first-simulation-prototype) define the remaining workload and resource budget choices.
 
 ### Persistent work independent of observation
