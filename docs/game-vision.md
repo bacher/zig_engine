@@ -207,6 +207,8 @@ Food spoils over time. It also pays for work and transport: for example, produci
 
 A delivery starts only when enough food is available from the configured supply source. Longer deliveries require more food, including the cost of transporting that food itself. This can impose a practical delivery radius: roads permit longer journeys by reducing travel time and food cost, while off-road travel supports shorter ones. Better preservation technologies extend reach by keeping food usable for longer.
 
+All required inputs and operating resources are consumed in full when an operation or delivery starts. Production consumes its recipe ingredients and full food cost at launch; a delivery pays its full operating cost at departure. There is no progressive consumption or additional charge at completion. Later food shortages cannot interrupt work already paid for, and food consumed as payment no longer has a spoilage lifecycle. Goods being transported remain cargo, separate from the resources consumed to transport them. See the [resource consumption rule](simulation-notes.md#consume-resources-at-start).
+
 The player can set a food-consumption rate limit for a dispenser. The proposed operating loop is:
 
 1. If work exists within its service area, the dispenser requests food from its assigned source.
@@ -274,7 +276,7 @@ The initial performance target is 100,000 simultaneously active NPCs on a mid-ra
 
 ### Persistent work independent of observation
 
-Couriers are stateful agents moving goods through the world. Saving and loading must preserve enough state to resume their work, including active tasks, cargo, paid or reserved food, and travel progress. A saved world must represent the ongoing economy, not just its terrain and buildings.
+Couriers are stateful agents moving goods through the world. Saving and loading must preserve enough state to resume their work, including active tasks, cargo, the fact that required resources were already consumed at departure, and travel progress. Resuming started work must not charge those resources again. A saved world must represent the ongoing economy, not just its terrain and buildings.
 
 Travel time must not depend on whether a player sees the courier. Observation must have no effects that modify authoritative world state. Rendering may adapt the visual movement to be plausible, but cannot change production, delivery outcomes, or the underlying schedule. The same principle applies when several players observe the same activity.
 
@@ -297,7 +299,7 @@ A more flexible route configuration could choose one of four policies:
 - Prefer A, falling back to B.
 - Prefer B, falling back to A.
 
-Payment from the destination raises an open choice: reserve food there, ensuring it remains usable until arrival, or deduct it immediately as part of accepting the task. Expiry and reservations must be accounted for consistently. Once food is successfully secured under the selected model, the delivery becomes active.
+Whichever supply source is selected, including payment from the destination, consume the full food cost when the delivery starts. The food must be available and usable at that point; it is not reserved for consumption on arrival. The choice of source policy remains open, but the time of consumption is fixed at departure.
 
 Calculate travel duration when transport starts. Its accepted food cost and travel duration remain fixed in simulation time despite subsequent changes along the route. The first version does not recheck or replan active routes. Stopping a destination preserves accepted deliveries, and dismantling must wait until its outstanding obligations finish, as described in the [object lifecycle](#stopping-reactivating-and-dismantling-objects).
 
@@ -369,7 +371,7 @@ Before committing to related features, the main open design choices are:
 | Area | Decision still needed |
 | --- | --- |
 | Economy and power | Food-only energy versus separate fuel/electricity; which progression stages earn their complexity. |
-| Logistics | Push/pull balance, supply radii, food payment and reservation, priorities, replenishment controls, the scope of accepted obligations when stopping, and stored materials during dismantling. |
+| Logistics | Push/pull balance, supply radii, food payment source, allocation between competing jobs, priorities, replenishment controls, the scope of accepted obligations when stopping, and stored materials during dismantling. All required resources are consumed at the start of an operation or delivery. |
 | Routing | Mixed terrain versus road-centered travel; route representation; visual adaptation to changed terrain; cargo/task outcomes for explicit order cancellation and exceptional failures. Active routes are not rechecked in the first version; destinations cannot be dismantled while deliveries remain outstanding. |
 | Settlements | Building recognition, service coverage, population growth, and needs at each technology level. |
 | Construction | Long-term weight/span rules, large-scale concrete workflows, and blueprint validity during incomplete construction. |

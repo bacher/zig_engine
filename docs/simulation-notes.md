@@ -26,6 +26,14 @@ The world-data service and simulation will remain together in one server process
 
 The simulation needs its own index and may also maintain state distinct from the data currently stored in chunks. Opening a world must resume simulation in all areas containing active event emitters without scanning the whole world. The index, stored state, and recovery mechanism have not been designed.
 
+## Consume resources at start
+
+All inputs and operating resources required for an operation or delivery are consumed in full at its successful start. For production, this includes the recipe ingredients and the full food cost. For delivery, the full food cost and any other required operating consumables are paid at departure. If the necessary resources are unavailable, the work cannot start.
+
+Started work does not reserve these resources for later consumption, consume them gradually, or pay again at completion. Later depletion of the dispenser cannot interrupt already paid work. Food already consumed as payment can no longer spoil and invalidate that payment. This does not change spoilage rules for food still stored or carried as cargo.
+
+Transported goods remain cargo: at departure they leave available source stock and belong to the delivery until handed over. They are distinct from resources consumed to perform transport. Saving and loading must preserve started work and its paid status without charging those resources again. This is a gameplay and persistence requirement; no resource coordination mechanism is selected here.
+
 ## Workstation example
 
 Every simulation action has prerequisites. Producing a concrete block at a workstation requires:
@@ -34,7 +42,7 @@ Every simulation action has prerequisites. Producing a concrete block at a works
 - Delivered inputs: cement, crushed stone, sand, and water.
 - Coverage by a food dispenser with enough food to pay for the operation.
 
-Relevant changes, such as input delivery or food arriving at the dispenser, must cause the prerequisites to be reconsidered. When all conditions are met and the workstation is enabled, production can start. This describes the triggering behavior without selecting how checks are scheduled or combined.
+Relevant changes, such as input delivery or food arriving at the dispenser, must cause the prerequisites to be reconsidered. When all conditions are met and the workstation is enabled, production can start, consuming all recipe inputs and the full food cost at that moment. This describes the triggering behavior without selecting how checks are scheduled or combined.
 
 A player may stop a workstation. It stops accepting new work, finishes already accepted operations and deliveries, and then stays inactive until explicitly enabled again. Materials arriving for accepted deliveries do not automatically restart production while it is stopped. An operation already in progress completes normally.
 
@@ -48,7 +56,7 @@ These are gameplay rules, not a selected lifecycle implementation. The exact sco
 
 ## Production and outbound delivery are separate jobs
 
-Moving a produced block to storage is a separate task from producing it. Once the block has been produced, a storage destination is sought. A courier starts transporting it when sufficient food is available from the dispenser to pay for that operation.
+Moving a produced block to storage is a separate task from producing it. Once the block has been produced, a storage destination is sought. A courier starts transporting it when the required resources are available, consuming the full food cost and any other operating consumables at departure. The produced block itself becomes the delivery's cargo.
 
 In the first version, calculate travel duration when the delivery starts and do not recheck or replan its route afterward. Its accepted food cost and travel duration are not recalculated in response to world changes along the route. This is a deliberate performance simplification. The fixed duration is measured in simulation time; coordinated slowdown under overload changes how quickly that time advances in real time.
 
