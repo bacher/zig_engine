@@ -1,5 +1,7 @@
 # Game vision
 
+Use the [design principles](../DESIGN_PRINCIPLES.md) alongside this vision when designing or integrating features. They establish the priorities for simulation scale, throughput, eventual consistency, and deliberate simplification.
+
 This is the long-term creative and technical direction for the game, based on the author's ideas as of 2026-10-21. It describes the experience we want to work toward and gives context for decisions made along the way. It is a living document, not a final requirements specification, a release commitment, or a description of everything currently implemented.
 
 Reaching this vision will take many iterations and milestones. Early versions can explore a small part of it. Use the vision to keep that groundwork focused, while allowing experiments to change the details. Numerical values below are starting points for design and balancing unless a feature specification explicitly adopts them.
@@ -23,9 +25,9 @@ Several ideas guide the experience:
 
 ## Vocabulary and simulation scope
 
-“People,” “minions,” “NPCs,” and “workers” generally mean the same thing here: NPC creatures represented by the simulation that can carry out player-directed work. A **courier** is an NPC performing a transport task.
+“People,” “minions,” “NPCs,” and “workers” describe the characters used to visualize work. A **courier** represents a transport task. The simulation uses a local workforce model: work may begin automatically when its prerequisites, including resources and food, are satisfied, without allocating a persistent individual NPC or simulating their approach and return.
 
-This does not imply that every person visible in a settlement needs an individually simulated domestic life. Houses support the settlement and improve nearby NPC efficiency. People shown inside houses can be a visual effect only; those decorative inhabitants are not additional simulation agents. Active workers and couriers do have the state needed to perform their jobs.
+The simulation retains active operations, cargo, schedules, and progress. Client-side NPC models illustrate that activity and need not persist between jobs. Houses support the settlement and improve nearby work efficiency; inhabitants shown inside them may also be purely visual. Neither domestic routines nor a separate finite pool of available individual workers is required by this model. See the [local workforce notes](simulation-notes.md#local-workforce-and-client-side-npcs).
 
 ## World and geography
 
@@ -82,7 +84,7 @@ Rivers and lakes would support fishing, scenery, and water-powered industry. Sim
 
 The eventual multiplayer target is up to 32 simultaneous players. Early versions will be single-player, but the player model and interaction with the world should remain compatible with a later move to a client-server architecture. This is a reason to preserve useful boundaries now, not a requirement to implement the full networking stack immediately.
 
-Progression connects settlement growth, production, research, and transport. NPCs need housing, production buildings, food, and potentially clothing; their needs grow as technology advances. The current clothing idea applies to cold biomes rather than requiring it everywhere. Houses enable population growth and improve the efficiency of NPCs nearby, without requiring simulated household routines.
+Progression connects settlement growth, production, research, and transport. Housing, production buildings, food, and potentially clothing support local work; requirements grow as technology advances. The current clothing idea applies to cold biomes rather than requiring it everywhere. Houses support settlement growth and improve nearby work efficiency. Exact settlement progression remains open; it does not require tracking individual residents or finding a free NPC before a task can start.
 
 Better materials enable more efficient buildings and larger structures. Research provides blueprints and new capabilities, while operating a larger economy creates the need for better transport and power sources.
 
@@ -191,11 +193,21 @@ The initial material-flow idea is demand-driven:
 
 This combines pull requests for inputs with an explicit delivery request for outputs. The overall choice between push, pull, or a hybrid economy is still open; this sequence captures the current idea rather than prescribing a complete scheduling system.
 
+### Stopping, reactivating, and dismantling objects
+
+Stopping and dismantling are separate actions. A player can stop a simulation object without destroying it. It then accepts no new work, but already accepted operations and deliveries complete normally. A workstation finishes its current operation; a warehouse continues receiving deliveries already committed to it. These completions do not automatically enable new work on the stopped object.
+
+After its outstanding obligations finish, the object remains intact and inactive until the player explicitly enables it again. The player may instead dismantle it once it has stopped and all outstanding operations and deliveries are complete. Stopping does not request or trigger automatic deletion.
+
+This lets players take even a continuously busy object out of service while preserving accepted work. The precise scope of outstanding obligations and handling of stored materials during dismantling remain to be specified. The [simulation notes](simulation-notes.md#stopping-is-separate-from-dismantling) preserve these boundaries without selecting an implementation.
+
 ### Food as the cost of labor and delivery
 
 Food spoils over time. It also pays for work and transport: for example, producing one unit at a workstation consumes food, and a courier consumes food to move goods. Food deliveries have higher priority than ordinary goods.
 
 A delivery starts only when enough food is available from the configured supply source. Longer deliveries require more food, including the cost of transporting that food itself. This can impose a practical delivery radius: roads permit longer journeys by reducing travel time and food cost, while off-road travel supports shorter ones. Better preservation technologies extend reach by keeping food usable for longer.
+
+All required inputs and operating resources are consumed in full when an operation or delivery starts. Production consumes its recipe ingredients and full food cost at launch; a delivery pays its full operating cost at departure. There is no progressive consumption or additional charge at completion. Later food shortages cannot interrupt work already paid for, and food consumed as payment no longer has a spoilage lifecycle. Goods being transported remain cargo, separate from the resources consumed to transport them. See the [resource consumption rule](simulation-notes.md#consume-resources-at-start).
 
 The player can set a food-consumption rate limit for a dispenser. The proposed operating loop is:
 
@@ -258,17 +270,31 @@ Near the end of progression, internet connectivity and drone or robot stations e
 
 This section preserves technical ideas that help explain the vision. It does not choose a final scheduler, route representation, cache, threading model, or persistence format.
 
+The [simulation notes](simulation-notes.md) preserve the author's 2026-11-05 clarification of the automated-world goal, player/service/simulation boundaries, startup without a full-world scan, workstation prerequisites, and separate production and delivery jobs. They also retain architecture alternatives for later consideration without selecting one.
+
+The [condition-check policy](simulation-notes.md#consistency-of-condition-checks) permits recent mixed observations only for individually discussed checks. Room recognition requires stronger consistency; blueprint-surroundings checks may be simplified with explicit accepted deviations. Resource consumption and transfers remain consistent. These permissions do not select a synchronization mechanism or change existing feature implementations.
+
+The initial performance target is 100,000 simultaneous work and delivery tasks, represented in gameplay by active NPCs, on a mid-range gaming PC with 4–8 CPU cores and 32 GB of system RAM, ideally also supporting a 16 GB machine. This measures simulated activity, not persistent characters or simultaneously rendered models. It is a target for the upcoming simulation, not an implemented or measured capacity. The [design principles](../DESIGN_PRINCIPLES.md#make-scale-measurable-from-the-first-simulation-prototype) define the remaining workload and resource budget choices.
+
 ### Persistent work independent of observation
 
-Couriers are stateful agents moving goods through the world. Saving and loading must preserve enough state to resume their work, including active tasks, cargo, paid or reserved food, and travel progress. A saved world must represent the ongoing economy, not just its terrain and buildings.
+Deliveries have persistent task state that moves goods through the world; they do not require persistent individual couriers between jobs. Saving and loading must preserve enough state to resume work, including active tasks, cargo, the fact that required resources were already consumed at departure, and travel progress. Resuming started work must not charge those resources again. A saved world must represent the ongoing economy, not just its terrain and buildings.
 
 Travel time must not depend on whether a player sees the courier. Observation must have no effects that modify authoritative world state. Rendering may adapt the visual movement to be plausible, but cannot change production, delivery outcomes, or the underlying schedule. The same principle applies when several players observe the same activity.
 
-We do not need to update a precise rendered pose for every unseen courier. We do need efficient queries for couriers present in selected chunks at the current simulation time, so nearby activity can be displayed without scanning the whole population.
+We do not need to update a precise rendered pose for every unseen courier. We do need efficient queries for active deliveries and work in selected chunks at the current simulation time, so nearby activity can be displayed without scanning all tasks.
+
+A client may keep one visible worker at a continuously operating workstation across multiple jobs. A delivery's model may appear and visually approach the pickup point; after arrival it may walk away and disappear or be reused for another nearby delivery. These animations and reuse choices must not delay task starts or completion, add resource costs, or create simulated approach and return journeys. Work does not wait for a model to appear or become available, and clients may choose different visuals for the same authoritative task.
+
+### NPC movement and visual separation
+
+In the first version, NPCs do not collide with or block each other and do not generate traffic congestion in the simulation. Two couriers can use a narrow passage in opposite directions without waiting for each other. Other NPCs do not change a delivery's route, duration, or food cost; terrain and roads still determine traversability and travel costs.
+
+Visualization will likely separate displayed movement to reduce overlap between NPCs. This is purely a presentation effect: it cannot change authoritative positions or progress, schedules, resource costs, or production and delivery outcomes. The simulation behaves the same whether this visual effect is present or absent, and regardless of who observes the NPCs. No visual separation algorithm is chosen here.
 
 ### Accepting a delivery and paying for it
 
-A courier plans a route when accepting a task from A to B. The simplest payment model takes the required food from a dispenser in A; if it is unavailable, the task does not start.
+A delivery from A to B requires a planned route and its start prerequisites. No existing courier has to be found or brought to A. The simplest payment model takes the required food from a dispenser in A; if it is unavailable, the task does not start.
 
 A more flexible route configuration could choose one of four policies:
 
@@ -277,7 +303,9 @@ A more flexible route configuration could choose one of four policies:
 - Prefer A, falling back to B.
 - Prefer B, falling back to A.
 
-Payment from the destination raises an open choice: reserve food there, ensuring it remains usable until arrival, or deduct it immediately as part of accepting the task. Expiry and reservations must be accounted for consistently. Once food is successfully secured under the selected model, the delivery becomes active.
+Whichever supply source is selected, including payment from the destination, consume the full food cost when the delivery starts. The food must be available and usable at that point; it is not reserved for consumption on arrival. The choice of source policy remains open, but the time of consumption is fixed at departure.
+
+Calculate travel duration when transport starts. Its accepted food cost and travel duration remain fixed in simulation time despite subsequent changes along the route. The first version does not recheck or replan active routes. Stopping a destination preserves accepted deliveries, and dismantling must wait until its outstanding obligations finish, as described in the [object lifecycle](#stopping-reactivating-and-dismantling-objects).
 
 ### Planned journeys and visual reconstruction
 
@@ -287,7 +315,7 @@ The initial idea is to calculate a journey in advance, including when the courie
 [{ timestamp, chunk_id }, ...]
 ```
 
-This schedule allows the current chunk to be found from elapsed time, including by a simple scan initially. It is a per-courier representation idea; an efficient query for all couriers in selected chunks may need an additional index.
+This schedule allows the current chunk to be found from elapsed time, including by a simple scan initially. It is a per-delivery representation idea; an efficient query for all active deliveries in selected chunks may need an additional index.
 
 Two ways of representing finer movement are under consideration:
 
@@ -296,9 +324,17 @@ Two ways of representing finer movement are under consideration:
 | Compressed full route | Store intervals of movement in the same direction, splitting them at chunk boundaries so each chunk's entry point is easy to locate. Avoid storing every individual step. |
 | Chunk itinerary with local reconstruction | Store the chunk sequence, timing, and enough entry/exit information to recreate visible movement within a chunk using its current geometry. This reduces stored detail but may produce movement different from the originally planned path. |
 
-In the reconstruction approach, geometry may have changed since the journey was planned. A simplified visual path could permit movements normally disallowed during route planning, so the courier still reaches its scheduled exit or destination on time. The intent is to fit the animation to the journey's authoritative data while making it as plausible as possible to the observer. How to handle severe changes, blocked destinations, or deliberate route disruption still needs a gameplay policy; these cases must not acquire different outcomes merely because someone is watching.
+In the reconstruction approach, geometry may have changed since the journey was planned. A simplified visual path could permit movements normally disallowed during route planning, so the courier still reaches its scheduled exit or destination on time. The intent is to fit the animation to the journey's authoritative data while making it as plausible as possible to the observer. The policy below governs whether a world change affects an active journey; these cases must not acquire different outcomes merely because someone is watching.
 
 Reconstructing the exact original route from historical chunk snapshots was considered, but retaining arbitrary-time snapshots appears impractical. Planning all couriers against a retained common snapshot is another possibility, with its own costs. Even an exact historical path could conflict with today's geometry, so snapshots would not remove the need to adapt visible movement. No snapshot-based solution is selected here.
+
+### Responding to world changes during travel
+
+In the first version, an active delivery's route is not rechecked or replanned after departure. Its duration is calculated when the delivery starts and remains fixed in simulation time. Changes along the route, including removal of a bridge or creation of a better path, do not change that schedule or the accepted food cost. Updated routing data affects new deliveries.
+
+Visualization may adapt the displayed motion to current terrain, for example to keep an NPC from walking through the air where a bridge used to be. These adjustments are purely visual: they must not change authoritative world state, travel progress, arrival time, food costs, or delivery outcomes. They must not make the simulation depend on whether, or by how many players, the courier is observed.
+
+Completing an accepted journey despite route changes is an intended gameplay rule; its acceptability does not depend on those changes being rare. Stopping a destination does not cancel its accepted deliveries, and ordinary player dismantling cannot remove it while they remain outstanding. Explicit order cancellation and exceptional failures still need cargo and task policies; they do not introduce route revalidation in the first version. These choices guide the upcoming simulation and do not describe implemented courier behavior.
 
 ### Routing across roads and terrain
 
@@ -336,12 +372,14 @@ These questions favor preserving useful foundations, not implementing every end-
 
 Before committing to related features, the main open design choices are:
 
+The [simulation open questions](simulation-open-questions.md) turn the simulation-related choices into a decision list with stable IDs. Warehouse questions, including guaranteed destination capacity, are deferred to the separately developed warehouse specification in the next PR.
+
 | Area | Decision still needed |
 | --- | --- |
 | Economy and power | Food-only energy versus separate fuel/electricity; which progression stages earn their complexity. |
-| Logistics | Push/pull balance, supply radii, food payment and reservation, priorities, and replenishment controls. |
-| Routing | Mixed terrain versus road-centered travel; route representation; behavior when the world changes during a journey. |
-| Settlements | Building recognition, service coverage, population growth, and needs at each technology level. |
+| Logistics | Push/pull balance, supply radii, food payment source, allocation between competing jobs, priorities, replenishment controls, the scope of accepted obligations when stopping, and stored materials during dismantling. All required resources are consumed at the start of an operation or delivery. |
+| Routing | Mixed terrain versus road-centered travel; route representation; visual adaptation to changed terrain; cargo/task outcomes for explicit order cancellation and exceptional failures. Active routes are not rechecked in the first version; destinations cannot be dismantled while deliveries remain outstanding. |
+| Settlements | Building recognition, service coverage, settlement growth, and needs at each technology level, using local workforce rather than persistent individual NPCs. |
 | Construction | Long-term weight/span rules, large-scale concrete workflows, and blueprint validity during incomplete construction. |
 | Storage | Spoilage, preservation, permafrost, and food-crate stack behavior. |
 | Geography | Biome overlap, a separate fertile-soil category, and eventual rivers/lakes. |

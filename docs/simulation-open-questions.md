@@ -1,0 +1,71 @@
+# Questions before implementing the simulation
+
+This is the open decision list from the 2026-11-05 discussion. It accompanies the [design principles](../DESIGN_PRINCIPLES.md), [game vision](game-vision.md), and [simulation notes](simulation-notes.md). It records questions, not proposed answers or a selected architecture.
+
+Resolve the core questions before committing to the corresponding simulation implementation. Focused experiments may supply evidence for those answers. Warehouse questions belong to the separately developed warehouse specification in the next PR; they are deliberately deferred here. Feature-specific questions only need answers when that feature enters the implementation scope.
+
+Keep the IDs stable when discussing these items. When resolved, mark the item complete and link the decision in the relevant specification or design document. A scoped deferral should identify the excluded behavior and when the question must be revisited. This list does not require deciding every long-term feature before the first simulation prototype.
+
+## Agreed constraints to preserve
+
+These decisions are already recorded and are not open questions:
+
+- Optimize for an automated world, initially targeting 100,000 concurrent work and delivery tasks on a 4–8-core gaming PC with 32 GB RAM, ideally 16 GB.
+- Tasks start from their prerequisites; persistent individual NPCs, worker assignment, approach journeys, and return journeys are unnecessary. NPC models and movement separation are client-side presentation.
+- Consume required resources in full at task start, with consistent accounting. Delivery cargo remains cargo. First-version deliveries have fixed simulation-time duration and no route revalidation after departure.
+- Stopping rejects new work, completes accepted obligations, and leaves the object intact. Reactivation and dismantling are separate actions; dismantling waits for obligations to finish.
+- Simulation edits win concurrent conflicts with player edits. Eligible condition checks may use recent mixed observations only after individual discussion; resource accounting and memory safety remain strict.
+- Support activity throughout the world and startup without a full-world scan. Sustained overload may slow simulation time coherently and must be visible to players.
+
+## Core scope and performance
+
+- [ ] **SIM-01 — First implementation scope.** Which complete production/delivery/construction sequence is the first supported scenario? Which mechanics are explicitly excluded or represented by temporary test fixtures, and what must work end to end before expanding scope?
+- [ ] **SIM-02 — Representative load.** What mix of production, extraction, construction, and delivery tasks makes up the 100,000-task target? What task durations, starts/completions per second, travel distances, spatial concentrations, and player-edit rates should the workload exercise? Concurrent task count alone does not define throughput.
+- [ ] **SIM-03 — Resource and acceptance budgets.** Which reference CPU models represent the 4- and 8-core ends? How much CPU time and memory may simulation use alongside rendering, world data, streaming, persistence, and the OS? Which sustained throughput, backlog, startup, and memory measurements demonstrate acceptable operation on 32 GB and, ideally, 16 GB machines? Which assertions and failure scenarios must the headless prototype check?
+
+## Time, scheduling, and overload
+
+- [ ] **SIM-04 — Meaning of simulation time.** What is the normal relationship between real and simulation time? What precision and ordering are required for equal-time or dependent events? What happens during pause, save/load, server downtime, or a long processing stall? Is offline catch-up supported in the first version?
+- [ ] **SIM-05 — Delayed processing and causality.** If a completion is processed late, when can dependent work start and which timestamp determines its duration and cost? How is coordinated slowdown applied so industries retain their relative rates and already accepted deliveries retain their simulation-time schedules?
+- [ ] **SIM-06 — Bounded work and fairness.** What are the limits for pending events, task admission, routing requests, and other deferred work? Which notifications can be combined, and what must be retained? How are work budgets and priorities chosen without indefinitely starving regions or making economic outcomes depend on observation?
+- [ ] **SIM-07 — Overload feedback.** What sustained shortage triggers a warning? How is effective simulation speed measured, over which interval, and how is recovery reported? What information should a player receive when a new operation is delayed by system capacity rather than missing gameplay prerequisites?
+
+## State ownership and consistency
+
+- [ ] **SIM-08 — Execution and ownership model.** Which state belongs to the simulation and which belongs to the world-data service? Which of the [unselected architecture ideas](simulation-notes.md#architecture-ideas-to-revisit-later) should be evaluated, and what evidence selects the initial model? How will readers access valid data while it is modified, published, or unloaded? If direct mutation of distant chunks is pursued, how are exclusive access and player approach handled?
+- [ ] **SIM-09 — Starting and completing work consistently.** What is the boundary between discovering eligible work, accepting an obligation, and starting it? How are input consumption, food payment, cargo ownership, and task creation kept consistent when multiple tasks or players contend, including across chunks? How are repeated start/completion requests or partial failures handled without double spending, duplicate outputs, or unpaid work? Destination-capacity semantics depend on **WH-01**.
+- [ ] **SIM-10 — Simulation priority over player edits.** What defines concurrent conflict and the scope and duration of the simulation's guarantee? What happens to a conflicting player action: rejection, deferral, or another explicit outcome? How does the client reconcile its optimistic view while the simulation avoids rollback caused by losing to a player? How do stop requests participate in this ordering?
+- [ ] **SIM-11 — Consistency policy per check.** Which checks in the first implementation require coherent state, and which explicitly permit mixed observations? For each relaxed check, what deviations are acceptable, are its limits measured in real or simulation time, and what happens when observation age exceeds the limit before result use? How are important derived states, such as room validity, invalidated or refreshed so they cannot remain wrong indefinitely?
+
+## Events, persistence, and task lifecycle
+
+- [ ] **SIM-12 — Discovering and waking work.** Which changes can make each action eligible, and how are the affected tasks found without scanning the world or all waiting work? How are missed, repeated, or combined notifications handled? What wakes work after a failed prerequisite becomes satisfied, without continuous polling of unchanged conditions?
+- [ ] **SIM-13 — Saving and recovering active simulation.** What task state and active-emitter index must be persisted, and how are they kept coherent with world edits, resource accounting, and the existing [persistence system](persistence.md)? How are active work and stopped objects restored without a full-world scan, duplicate outputs, or repeat payment? How are older saves without simulation state handled?
+- [ ] **SIM-14 — Data availability beyond loaded regions.** How does distant work access the world data it needs when no client subscribes to those chunks? What data must stay resident, what may be loaded on demand or reconstructed, and what happens under memory pressure while tasks retain references to it?
+- [ ] **SIM-15 — Boundary of accepted obligations.** What exactly must finish before an object is fully stopped? Does completion of an already accepted production job include a later output-delivery task, or can the object stop with output still present? What happens if it is enabled again before outstanding work finishes? Warehouse-specific inventory and dismantling rules belong to **WH-04**.
+- [ ] **SIM-16 — Cancellation and exceptional failure.** Is explicit cancellation of accepted or started work supported in the first version, or only stopping future work? For supported exceptional failures, what happens to already consumed resources, cargo, task status, and outstanding obligations? How does an object avoid remaining permanently stuck while stopping? These answers must preserve the no-route-revalidation rule for active deliveries.
+
+## Routing and client presentation
+
+- [ ] **SIM-17 — Planning a new delivery.** Is routing mixed road/off-road travel or primarily road-based? What route quality is sufficient, how are time and cost calculated across terrain and the wrapped world, and what limits apply to route search? What itinerary or other progress data must be retained for completion, persistence, and visualization? Active journeys are not revalidated; only new planning consumes updated connectivity.
+- [ ] **SIM-18 — Food and perishable cargo.** What happens when food being transported as cargo spoils in transit, and what expiration information travels with it? How are spoilage events scheduled efficiently? Food already consumed as payment is outside this question. Stored-food behavior and inventory effects must align with **WH-05**.
+- [ ] **SIM-19 — Observing active work.** What authoritative task and progress information must clients receive to visualize selected areas without scanning all tasks? How are subscription changes, late updates, joining clients, and save/load reflected without changing the simulation? What timing freedom does purely visual approach, departure, terrain adaptation, or model reuse have while staying consistent with fixed authoritative task times?
+
+## Deferred to the warehouse specification in the next PR
+
+These questions are intentionally parked here. The forthcoming warehouse specification should supply the decisions and become the linked reference for simulation integration. Do not treat any suggested answer from the discussion as adopted. In particular, the workstation output-slot example does not establish a universal destination-capacity policy.
+
+- [ ] **WH-01 — Capacity at start and arrival.** Must destination space be guaranteed before a delivery starts? May space be occupied now but guaranteed free on arrival, and what makes that guarantee meaningful? If capacity is not guaranteed, what is the cargo/task outcome at arrival? What restrictions, if any, apply to other deliveries and player edits while goods are in transit?
+- [ ] **WH-02 — Inventory and destination representation.** How are warehouse bounds, usable storage locations, item types, quantities, and loading/unloading points defined? How do physical stored goods relate to the data the simulation uses to select a source and destination?
+- [ ] **WH-03 — Demand and allocation.** How are requests created, aggregated, matched to suppliers, and prioritized? Which push/pull rules, supply areas, food-payment sources, and replenishment controls apply? How is scarce stock shared between competing requests without overcommitting it?
+- [ ] **WH-04 — Stopping and dismantling warehouses.** Which obligations remain while stopping, and what happens to existing stock, pending requests, and incoming/outgoing deliveries? What must happen to stored materials before or during dismantling? How do these rules connect to **SIM-15** without introducing automatic deletion?
+- [ ] **WH-05 — Perishability and inventory changes.** How do spoilage, storage conditions, partial quantities, and food-crate disappearance or movement change inventory and wake dependent work? What is the handoff to delivery cargo and its expiration rules in **SIM-18**?
+
+## Feature decisions when those features enter scope
+
+These are relevant to the game vision but do not all block the initial simulation. **SIM-01** determines which need answers now. Record concrete rules in their feature specifications rather than deciding them indirectly in core infrastructure.
+
+- [ ] **FEATURE-01 — Production and local services.** What operations, recipes, durations, output slots, and service-coverage rules are initially supported? What happens when coverage or facility validity changes during already paid work? Are food-dispenser rate limits admission limits, and what does each limit mean over time?
+- [ ] **FEATURE-02 — Construction and extraction.** How are construction sites and deposits divided into tasks, and what makes the next task eligible? Which support or blueprint checks can use mixed observations, with exactly what accepted deviations? How are finite deposits accounted for consistently when extraction tasks compete?
+- [ ] **FEATURE-03 — Further operating resources and transport.** Which clothing, tools, vehicles, fuels, or power mechanics are in scope? What is consumed, what is reusable, and what becomes unavailable to other tasks during use? Any consumable cost must respect the agreed payment-at-start rule; vehicle state must not silently reintroduce a persistent-worker requirement.
+- [ ] **FEATURE-04 — Local progression and hazards.** How do housing, service quality, climate, or hazards affect task prerequisites, costs, and outcomes under the local-workforce model? Which proposed interactions require their own decisions about already accepted work and fixed delivery schedules? NPC model presence cannot decide these outcomes.
