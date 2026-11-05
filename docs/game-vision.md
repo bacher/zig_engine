@@ -372,6 +372,8 @@ These questions favor preserving useful foundations, not implementing every end-
 
 Before committing to related features, the main open design choices are:
 
+The [simulation open questions](simulation-open-questions.md) turn the simulation-related choices into a decision list with stable IDs. Warehouse questions, including guaranteed destination capacity, are deferred to the separately developed warehouse specification in the next PR.
+
 | Area | Decision still needed |
 | --- | --- |
 | Economy and power | Food-only energy versus separate fuel/electricity; which progression stages earn their complexity. |

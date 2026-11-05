@@ -2,6 +2,8 @@
 
 These notes capture the author's gameplay intent, constraints, and architecture ideas from 2026-11-05 for the upcoming simulation. They accompany the [game vision](game-vision.md) and [design principles](../DESIGN_PRINCIPLES.md). They are not an implementation design or a description of implemented behavior. Architecture alternatives below remain unselected.
 
+The [open questions](simulation-open-questions.md) track decisions needed before implementation. Warehouse rules will be developed in a separate specification in the next PR; their questions are explicitly deferred there.
+
 ## Primary scenario and player intervention
 
 The long-term goal is fully automated extraction and resource processing, production of construction materials and tools, logistics, and construction of large numbers of buildings and structures worldwide, including megastructures. Players can participate directly in building and carrying resources, but this becomes of little practical value as the economy develops. Optimize for the automated scenario, prioritizing throughput over latency wherever practical.
@@ -69,7 +71,7 @@ Every simulation action has prerequisites. Producing a concrete block at a works
 - Delivered inputs: cement, crushed stone, sand, and water.
 - Coverage by a food dispenser with enough food to pay for the operation.
 
-Whether to require guaranteed destination capacity before starting every delivery remains deferred for later discussion. The output-slot condition above records the workstation example; it does not establish a universal capacity-reservation policy for all work and deliveries.
+Whether to require guaranteed destination capacity before starting every delivery is deferred to the warehouse specification in the next PR; see **WH-01** in the [warehouse questions](simulation-open-questions.md#deferred-to-the-warehouse-specification-in-the-next-pr). The output-slot condition above records the workstation example; it does not establish a universal capacity-reservation policy for all work and deliveries.
 
 Relevant changes, such as input delivery or food arriving at the dispenser, must cause the prerequisites to be reconsidered. When all conditions are met and the workstation is enabled, production can start, consuming all recipe inputs and the full food cost at that moment. This describes the triggering behavior without selecting how checks are scheduled or combined.
 
