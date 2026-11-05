@@ -78,12 +78,8 @@ pub const Options = struct {
     }
 };
 
-pub const RejectCode = enum { invalid_definition, bounds, overlap, occupied, immutable, missing_data, foundation, composition, budget_exceeded };
-pub const Rejection = struct {
-    code: RejectCode,
-    cell: ?Cell = null,
-    failure: ?rules.Failure = null,
-};
+pub const RejectCode = @import("blueprint_result.zig").RejectCode;
+pub const Rejection = @import("blueprint_result.zig").Rejection;
 pub const Prepared = struct {
     publication: runtime.PreparedPublication,
     foundation_reads: usize = 0,

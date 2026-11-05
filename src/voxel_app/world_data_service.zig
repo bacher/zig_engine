@@ -30,15 +30,8 @@ const blueprint_wire = @import("persistence/blueprints.zig");
 const deferred_work = @import("deferred_world_work.zig");
 const blueprint_admission = @import("blueprint_admission.zig");
 const blueprint_road_updates = @import("blueprint_road_updates.zig");
-pub const BlueprintRejection = blueprint_admission.Rejection;
-pub const BlueprintResult = struct {
-    request_id: u64,
-    kind: enum { save, apply },
-    status: enum { success, invalid, missing_data, resource_exhausted, stale },
-    definition_id: ?u64 = null,
-    instance_id: ?u64 = null,
-    rejection: ?BlueprintRejection = null,
-};
+pub const BlueprintRejection = @import("blueprint_result.zig").Rejection;
+pub const BlueprintResult = @import("blueprint_result.zig").Result;
 pub const StandingSpaceRequest = standing_space.Request;
 pub const StandingSpaceError = standing_space.Error || error{ServiceStopped};
 pub const StandingSpaceResponse = struct {

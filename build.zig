@@ -234,14 +234,14 @@ pub fn build(b: *std.Build) void {
 
     const blueprint_ui_tests = b.addTest(.{
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/voxel_app/blueprint_capture.zig"),
+            .root_source_file = b.path("src/voxel_app/blueprint_tool.zig"),
             .target = target,
             .optimize = optimize,
         }),
     });
     blueprint_ui_tests.root_module.linkLibrary(voxel_engine_lib);
     blueprint_ui_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
-    b.step("test-blueprint-ui", "Run blueprint selection, input, and capture worker lifecycle tests").dependOn(&b.addRunArtifact(blueprint_ui_tests).step);
+    b.step("test-blueprint-ui", "Run blueprint controller, selection, input, and capture worker lifecycle tests").dependOn(&b.addRunArtifact(blueprint_ui_tests).step);
 
     const blueprint_admission_tests = b.addTest(.{
         .root_module = b.createModule(.{
