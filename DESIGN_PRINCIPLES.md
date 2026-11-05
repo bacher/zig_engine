@@ -8,7 +8,7 @@ These principles guide feature design, implementation, and integration. The [gam
 
 The primary scenario is a worldwide economy with automated extraction, resource processing, construction-material and tool production, logistics, and construction up to megastructures. Players can build and carry goods themselves, but direct labor becomes marginal as automation grows. Optimize the ordinary simulation path for this mature economy.
 
-When players are not intervening, simulation work should not incur synchronization overhead specifically to coordinate with player actions. Handle intervention where it matters; simulation actions may take precedence when they conflict with player actions. This permits such conflict policies without prescribing a universal winner or a synchronization mechanism.
+When players are not intervening, simulation work should not incur synchronization overhead specifically to coordinate with player actions. When a player and the simulation concurrently make conflicting edits to the same blocks, simulation edits always take precedence. Establish this guarantee so simulation logic does not need to roll back its work because it lost a conflict with a player edit. This requirement does not select a coordination mechanism or remove handling for unrelated failures or conflicts within the simulation.
 
 Player interaction must remain compatible with asynchronous messages from future network clients and cannot depend on shared in-process synchronization with those clients. The world-data service and simulation will remain in the same server process and may use in-process synchronization with each other. These boundaries do not select their threads or require them to communicate only through messages. The [simulation notes](docs/simulation-notes.md) preserve the requirements and unselected architecture ideas.
 
@@ -78,6 +78,8 @@ Distinguish delayed knowledge of an event from a deliberate delay to the event i
 For each subsystem, account for the state retained for jobs, routes, notifications, and deferred changes, including how that state grows with world activity. Queues must have a capacity or admission policy that prevents unbounded growth under sustained overload.
 
 Repeated requests to recompute the same state may be combined; accepted deliveries and their cargo need a policy that preserves their meaning. Under temporary overload, first defer new assignments and replanning while preserving the meaning of accepted work. Under sustained overload, coordinated slowdown of simulation time is acceptable while camera and interface interaction remain responsive. Individual industries must not accidentally run at different relative speeds because their queues lag differently. The mechanism and thresholds remain to be designed; a queue alone does not solve a throughput deficit.
+
+Simulation must support activity throughout the world, including areas far from players. Resource limits may require throttling and prioritizing work; these policies must remain consistent with observation-independent outcomes and explicit simulation-time semantics. Notify the player when resource shortages are sustained. Ideally, also show the current effective simulation speed relative to the normal pace, so the player can understand the extent of the slowdown. Thresholds, measurement windows, and presentation remain to be defined.
 
 ## Make scale measurable from the first simulation prototype
 

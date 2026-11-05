@@ -6,7 +6,9 @@ These notes capture the author's gameplay intent, constraints, and architecture 
 
 The long-term goal is fully automated extraction and resource processing, production of construction materials and tools, logistics, and construction of large numbers of buildings and structures worldwide, including megastructures. Players can participate directly in building and carrying resources, but this becomes of little practical value as the economy develops. Optimize for the automated scenario, prioritizing throughput over latency wherever practical.
 
-Without player intervention, the simulation should not pay synchronization overhead specifically for coordinating with player actions. When actions conflict, it is acceptable to give simulation actions precedence. Exact conflict rules remain open.
+Without player intervention, the simulation should not pay synchronization overhead specifically for coordinating with player actions. When a player and the simulation concurrently make conflicting edits to the same blocks, simulation edits always win. This strengthens the earlier allowance to favor the simulation into a required guarantee for these conflicts.
+
+Simulation logic should benefit from that guarantee: it must not need rollback handling for losing an edit conflict to a player. The guarantee must be established by the future coordination model, rather than assumed while conflicts remain possible. Handling player edits, conflicts between simulation workers, and unrelated failures still needs design; this rule does not imply that every simulation action is infallible.
 
 ## Participants and process boundaries
 
@@ -54,3 +56,15 @@ The author has not chosen a simulation architecture. Candidates include:
 - Another approach if it better serves the requirements.
 
 One possible structural simplification is to ensure that only one simulation worker can modify a particular chunk at a time, reducing synchronization with other simulation workers and ideally with the world-data service. This is an exploratory idea. No chunk ownership, partitioning, worker topology, or cross-chunk coordination scheme has been selected.
+
+### Direct mutation of distant chunks
+
+Another candidate is to let a simulation thread update world-data service data directly, avoiding asynchronous communication for each edit. The service could grant an exclusive mutability lock on a chunk so the simulation thread can perform multiple edits without per-edit coordination while holding it. In this proposal, such access is allowed only for chunks sufficiently far from all current players.
+
+This remains an architecture idea, not a selected mechanism. Acquiring and releasing exclusive access still requires coordination; distance alone does not establish safe exclusive access. The distance threshold, behavior when a player approaches, and interaction with other service users remain open. The idea aims to reduce coordination cost without prescribing how ownership or publication works.
+
+## Whole-world operation and visible overload
+
+Simulation must support active work across the entire world, including distant areas. When system resources are insufficient, processing may be throttled and prioritized according to a policy still to be designed. This must preserve the [principles for time, observation, and overload](../DESIGN_PRINCIPLES.md#budget-memory-and-define-overload-behavior), including coordinated slowdown under sustained overload.
+
+Persistent resource shortages must be communicated to the player. Ideally the game should also report how much the simulation is currently slowed, expressed relative to its normal pace. Exact notification thresholds, measurement windows, and UI are not selected.
