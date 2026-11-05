@@ -260,6 +260,8 @@ Near the end of progression, internet connectivity and drone or robot stations e
 
 This section preserves technical ideas that help explain the vision. It does not choose a final scheduler, route representation, cache, threading model, or persistence format.
 
+The initial performance target is 100,000 simultaneously active NPCs on a mid-range gaming PC with 4–8 CPU cores and 32 GB of system RAM, ideally also supporting a 16 GB machine. This is a target for the upcoming simulation, not an implemented or measured capacity. The [design principles](../DESIGN_PRINCIPLES.md#make-scale-measurable-from-the-first-simulation-prototype) define what counts toward the target and which workload and resource budgets still need to be established.
+
 ### Persistent work independent of observation
 
 Couriers are stateful agents moving goods through the world. Saving and loading must preserve enough state to resume their work, including active tasks, cargo, paid or reserved food, and travel progress. A saved world must represent the ongoing economy, not just its terrain and buildings.

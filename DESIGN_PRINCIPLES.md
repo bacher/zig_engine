@@ -71,6 +71,10 @@ Repeated requests to recompute the same state may be combined; accepted deliveri
 
 ## Make scale measurable from the first simulation prototype
 
-Define a representative target workload with simultaneous active NPCs, production jobs, deliveries, and construction sites, along with reference hardware and the intended rate of simulation time. Initial targets may be revised using prototype measurements; the concrete numbers remain to be selected.
+The initial scale target is **100,000 simultaneously active NPCs** in a developed world, working in production, extraction, construction, and logistics. This counts agents doing work or traveling, rather than decorative inhabitants or merely registered idle entities. It is a design and benchmarking target for the upcoming simulation, not a measured capability of the current game, and may be revised using prototype results.
+
+Target a mid-range gaming PC with **4–8 CPU cores and 32 GB of system RAM**, with operation on **16 GB of system RAM** as a desirable goal. These are whole-machine resources, not a budget reserved for simulation. Leave CPU time and memory for rendering, world data, streaming, persistence, and the operating system. Measure against the lower CPU end as well as the upper end; exact reference CPU models and subsystem budgets remain to be selected.
+
+Define a representative workload around this target, including the mix of NPC roles, simultaneous production jobs, deliveries, construction sites, and world edits. The intended simulation-time rate and acceptable processing delays also remain to be selected. NPC count alone is insufficient to define or demonstrate capacity.
 
 The first simulation prototype should support running without graphics. Measure sustained useful work, memory consumption, queue growth, and whether the economy maintains its intended pace. Include changes that disrupt ongoing work, not just a steady world with no edits. Use these measurements to evaluate design choices before committing to a threading model, scheduler, or other implementation architecture.
