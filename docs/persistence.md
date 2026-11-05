@@ -34,7 +34,7 @@ versions only, not intermediate development builds, including builds between rel
 
 The game runs one current gameplay/construction logic. It does not select historical rules
 from a world or blueprint. Compatibility with older file encodings is separate: the current
-implementation writes and reads format 3. Formats 1 and 2 are incompatible development
+implementation writes and reads format 4. Formats 1–3 are incompatible development
 saves and are rejected as whole worlds. The base and WAL readers enforce the supported inclusive
 range through `minimum_readable_version` and `current_write_version`.
 
@@ -64,9 +64,26 @@ When the uncommitted journal fills, the service retains the submitted definition
 the already accepted prefix, and retries publication after that writer finishes. Ephemeral
 worlds allocate no persistence journal.
 
-Every durable capture waits for delayed adaptive-road work from accepted blueprint fills to drain, including ordinary/autosave, overdue, final, and internal journal-prefix captures. Once a public save has resolved its selected command fence, or an internal prefix needs capture, and no older writer is active, the service holds later ordered mutations and timed transformations and pauses NPC simulation. Reads, completions, and budgeted road processing continue, initially at most 16 work units per service turn counting seed processing and entry completion or requeue; dependency, source-hold, or error waits yield the batch immediately. This gives the drain a finite producer boundary while keeping road planning outside fulfillment; save latency depends on the queued work and planner cost. An older writer retains normal admission rules.
+Every durable capture saves the complete set of unfinished world-work obligations with
+terrain, blueprint progress, inventory, and global state. The initial kind is road-shape
+reconciliation, keyed by chunk; the queue deduplicates at most 4,096 keys. This replaces
+the former requirement to drain every adaptive-road update before ordinary/autosave,
+overdue, final, or internal journal-prefix capture. Saving no longer holds later mutations
+solely to finish the road queue. Selected command prefixes and normal source holds remain.
 
-A drain failure or cancellation releases this additional hold while preserving snapshot source-hold rules and the empty-road capture gate. Explicit retries and the existing bounded final-save retry can re-arm the drain; road completion alone cannot restart a failed prefix. Road results are saved as terrain/metadata in the same transaction as fulfillment; the volatile queue needs no persisted representation or recovery-format change.
+A fill reserves its road-work marks before committing material, inventory, and progress.
+A completed pass clears its key only when no coalesced repeat remains. Marks and clears
+are captured with the corresponding world state, and membership-only changes remain dirty
+until their captured generation is committed. Each save owns one canonical full key set;
+newer changes remain unsaved after an older writer completes.
+
+Saved road shapes and ownership remain chunk metadata. Runtime cursors, revision
+observations, and repeat flags are discarded on restart. The service restores fresh queue
+entries directly from saved keys before it is ready, then reconciles current world state
+without a whole-world scan or preload. Repeated work preserves valid ownership and current
+edits. Processing keeps the 16-work-unit budget, counting seeds and completion/requeue,
+with fair repeat passes and immediate yield on dependency, source-hold, or error waits.
+See [unfinished world work](../specs/features/deferred-world-work.md).
 
 Simulation and block timers pause while snapshot sources are held. The encoder releases sources as independent records become available, allowing gameplay to resume before disk synchronization. Conflicting player edits remain pending. Ordinary waits can cancel capture safely; saving that falls sufficiently behind can prioritize completion with visible status. UI/rendering continue, but world-changing actions may wait. Actual disk errors cannot be solved by prioritization; unsaved state stays dirty for retry.
 
@@ -76,7 +93,7 @@ The exit drain includes submitted blueprint applications while their detached ad
 pending, and preserves their order with later mutations. A failed application resolves its
 command fence without publishing an instance.
 
-Saved player state includes identity, feet position, yaw, pitch, and the material in the one-slot inventory. Inventory changes belong to authoritative terrain transfers and are captured in the same snapshot. Movement checkpoints preserve the service-owned inventory. Velocity, climbing state, partial interaction holds, pending client predictions, and transient movement history are reset on startup. Format 3 uses inventory schema 1. Restored collision is checked against authoritative terrain before gameplay starts.
+Saved player state includes identity, feet position, yaw, pitch, and the material in the one-slot inventory. Inventory changes belong to authoritative terrain transfers and are captured in the same snapshot. Movement checkpoints preserve the service-owned inventory. Velocity, climbing state, partial interaction holds, pending client predictions, and transient movement history are reset on startup. Format 4 uses inventory schema 1. Restored collision is checked against authoritative terrain before gameplay starts.
 
 ## Storage and ownership
 
@@ -94,7 +111,7 @@ prefix; changes accepted while it was writing remain dirty for the next transact
 
 `save_lifecycle.zig` owns save policy on the service thread: the active attempt, a queued drain's command fence and retry allowance, cancellation policy, and watchdog deadlines. An older attempt can still be writing while a newer request drains. The service supplies observations of its source holds, pending reads, queries, and compactor, then executes the lifecycle's decisions. The lifecycle allocates no buffers, starts no workers, and performs no I/O.
 
-The service retains chunk ownership, dependency discovery, revision bookkeeping, and status metrics. Source release resumes simulation independently of durable completion. The encoder/writer still arbitrates cancellation against commit authorization; only its result establishes whether an attempt was cancelled. Application exit retains its existing wait, retry, cancel-exit, and quit choices. This boundary defines no future NPC state, scheduling, or simulation-persistence interface.
+The service retains chunk ownership, dependency discovery, revision bookkeeping, and status metrics. Source release resumes simulation independently of durable completion. The encoder/writer still arbitrates cancellation against commit authorization; only its result establishes whether an attempt was cancelled. Application exit retains its existing wait, retry, cancel-exit, and quit choices. The shared typed work-key representation supplies the initial road obligation only; future NPC state and scheduling need their own semantics and handlers.
 
 The durability contract is local APFS on macOS. Network filesystems, other platforms/filesystems, and devices that lie about synchronization are outside that contract. Fault-model tests check the required barrier semantics; native tests exercise the actual adapter. Neither substitutes for a physical power-cut campaign.
 

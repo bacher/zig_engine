@@ -27,6 +27,7 @@ const standing_space = @import("standing_space.zig");
 const blueprint = @import("blueprint.zig");
 const blueprint_runtime = @import("blueprint_runtime.zig");
 const blueprint_wire = @import("persistence/blueprints.zig");
+const deferred_work = @import("deferred_world_work.zig");
 const blueprint_admission = @import("blueprint_admission.zig");
 const blueprint_road_updates = @import("blueprint_road_updates.zig");
 pub const BlueprintResult = struct {
@@ -596,6 +597,8 @@ pub const WorldDataService = struct {
     read_requests: Mailbox(storage.BaseRead) = .{},
     reader: ?Io.Future(void) = null,
     read_pending: std.AutoHashMapUnmanaged(u32, u64) = .empty,
+    /// Only reads without a foreground consumer; these never gate final saves.
+    deferred_reads: std.AutoHashMapUnmanaged(u32, void) = .empty,
     read_failed: std.AutoHashMapUnmanaged(u32, anyerror) = .empty,
     loaded_ring: std.ArrayList(LoadedChunk) = .empty,
     loaded_head: usize = 0,
@@ -646,12 +649,10 @@ pub const WorldDataService = struct {
     blueprint_retired: std.ArrayList(*BlueprintAdmissionTask) = .empty,
     blueprint_road_queue: blueprint_road_updates.Queue = .{},
     blueprint_road_waiting: bool = false,
-    /// An internal journal prefix needs a capture once its road work drains.
-    blueprint_road_capture_pending: bool = false,
-    /// A failed drain releases the additional gameplay hold until a save retry.
-    /// Capture readiness and existing encoder source holds remain mandatory.
-    blueprint_road_capture_suspended: bool = false,
-    blueprint_road_resume_mutations: bool = false,
+    /// Failed journal-prefix captures sleep until an explicit/bounded retry.
+    internal_capture_suspended: bool = false,
+    captured_work_generation: u64 = 0,
+    processing_deferred_work: bool = false,
     pending: std.ArrayList(Pending) = .empty,
     next_intent: std.atomic.Value(u64) = .init(1),
     outstanding_operations: std.atomic.Value(usize) = .init(0),
@@ -718,6 +719,7 @@ pub const WorldDataService = struct {
         errdefer self.players.deinit(allocator);
         errdefer self.restored_players.deinit(allocator);
         errdefer self.worker_state.blueprints.deinit(allocator);
+        errdefer self.blueprint_road_queue.deinit(allocator);
         self.store = store;
         self.worker_state.persistence_service = self;
         self.limits = limits;
@@ -743,6 +745,7 @@ pub const WorldDataService = struct {
                 try self.restored_players.put(allocator, player.id, player);
             }
             try self.restoreBlueprints(saved);
+            try self.restoreDeferredWork(saved);
         }
         // Start idle background consumers first. If worker startup fails, join
         // every started task before errdefer frees the service and saved catalog.
@@ -826,10 +829,9 @@ pub const WorldDataService = struct {
         return .{
             .source_holds = self.source_holds.count(),
             .pending_commands = self.pending.items.len + @as(usize, if (self.blueprint_task != null) 1 else 0),
-            .pending_reads = self.read_pending.count(),
+            .pending_reads = self.read_pending.count() - self.deferred_reads.count(),
             .waiting_queries = self.waiting_reads.items.len,
             .compactor_active = self.compactor != null,
-            .derived_work_pending = self.blueprint_road_queue.count != 0,
         };
     }
 
@@ -901,6 +903,7 @@ pub const WorldDataService = struct {
         self.waiting_reads.deinit(self.allocator);
         self.retry_reads.deinit(self.allocator);
         self.read_pending.deinit(self.allocator);
+        self.deferred_reads.deinit(self.allocator);
         self.read_failed.deinit(self.allocator);
         self.loaded_ring.deinit(self.allocator);
         self.read_requests.deinit(self.allocator);
@@ -951,7 +954,6 @@ pub const WorldDataService = struct {
                 self.publishPersistenceStatus();
             }
             batch.clearRetainingCapacity();
-            self.resumeRoadCaptureMutations();
             self.reapBlueprintRetirements();
             if (self.is_shutting_down.load(.monotonic)) continue;
             self.advanceBlueprintAdmission();
@@ -1129,7 +1131,7 @@ pub const WorldDataService = struct {
             // Keep the original intent/fence. A running writer owns the next
             // wake; an idle drain may retain FIFO work without an Apply.
             if (self.job != null) return;
-            if (self.blueprint_road_queue.count != 0 or self.blueprint_road_capture_pending or self.blueprint_road_capture_suspended) {
+            if (self.internal_capture_suspended) {
                 self.retrySaveDrain();
             } else if (self.lifecycle.queued.?.fence_remaining == 0) {
                 self.retryPending();
@@ -1148,7 +1150,7 @@ pub const WorldDataService = struct {
     /// capture can fail before creating a Job, so no completion may arrive.
     fn retrySaveDrain(self: *WorldDataService) void {
         defer self.updateSimulationPause();
-        self.blueprint_road_capture_suspended = false;
+        self.internal_capture_suspended = false;
         self.blueprint_road_waiting = false;
         self.retryReadFailures();
         self.retryWaitingReads();
@@ -1162,7 +1164,7 @@ pub const WorldDataService = struct {
     }
 
     fn reportSaveDrain(self: *WorldDataService, save: save_lifecycle.Intent) void {
-        self.blueprint_road_capture_suspended = false;
+        self.internal_capture_suspended = false;
         self.status.intent_id = save.id;
         self.status.target_sequence = 0;
         self.status.phase = .capturing;
@@ -1180,7 +1182,6 @@ pub const WorldDataService = struct {
     }
 
     fn noteDrainFailure(self: *WorldDataService, err: anyerror) void {
-        const release_road_boundary = self.roadCaptureBlocked();
         self.selectSaveDrain();
         if (self.job == null) if (self.lifecycle.queued) |drain| {
             // A failed internal prefix capture may have overwritten the public
@@ -1190,20 +1191,14 @@ pub const WorldDataService = struct {
         };
         self.failPersistence(err);
         if (self.lifecycle.dependencyFailed(err, persistence.now(self.io))) self.status.active = true;
-        // A failed road read or capture must not leave gameplay paused forever.
-        // Do not recreate a failed prefix from a later road-completion wake.
-        self.blueprint_road_capture_pending = false;
-        self.blueprint_road_capture_suspended = true;
-        if (release_road_boundary) self.blueprint_road_resume_mutations = true;
+        self.internal_capture_suspended = true;
         self.updateSimulationPause();
     }
 
-    /// A failure can occur inside dependency discovery/FIFO processing. Resume
-    /// released commands once at the outer worker boundary, never recursively.
-    fn resumeRoadCaptureMutations(self: *WorldDataService) void {
-        if (!self.blueprint_road_resume_mutations) return;
-        self.blueprint_road_resume_mutations = false;
-        self.retryPending();
+    fn noteDeferredWorkFailure(self: *WorldDataService, err: anyerror) void {
+        // A saved obligation makes background failure independent of save success.
+        self.status.deferred_work_error_name = @errorName(err);
+        self.status.progress_generation +%= 1;
     }
 
     fn retryReadFailures(self: *WorldDataService) void {
@@ -1269,6 +1264,7 @@ pub const WorldDataService = struct {
                 if (self.blueprint_task) |task| task.waiting_for_data = false;
                 self.blueprint_road_waiting = false;
                 _ = self.read_pending.remove(loaded.id);
+                const deferred_only = self.deferred_reads.remove(loaded.id);
                 if (loaded.result) |chunk| {
                     const current_revision = self.worker_state.modified_chunks.get(loaded.id);
                     if (current_revision != null or (self.catalog.?.revision(loaded.id) orelse 0) != loaded.revision) {
@@ -1277,18 +1273,21 @@ pub const WorldDataService = struct {
                         self.installLoaded(loaded.id, loaded.revision, chunk) catch |err| {
                             chunk.deinit(self.worker_state.liveAllocator(self.allocator));
                             self.read_failed.put(self.allocator, loaded.id, err) catch {};
-                            self.noteDrainFailure(err);
+                            self.noteDeferredWorkFailure(err);
                         };
                     }
                 } else |err| {
                     self.read_failed.put(self.allocator, loaded.id, err) catch {};
-                    self.noteDrainFailure(err);
+                    self.noteDeferredWorkFailure(err);
                 }
-                const loaded_coords = self.layout.decodeChunkId(loaded.id);
-                self.dirty_meshes.put(self.allocator, loaded.id, {}) catch self.failPersistence(error.OutOfMemory);
-                for (std.enums.values(Side)) |side| if (world_module.adjacentChunk(self.layout, loaded_coords, side)) |neighbor| {
-                    self.dirty_meshes.put(self.allocator, self.layout.encodeChunkCoords(neighbor), {}) catch self.failPersistence(error.OutOfMemory);
-                };
+                // Background dependency loads have no foreground publication to wake.
+                if (!deferred_only) {
+                    const loaded_coords = self.layout.decodeChunkId(loaded.id);
+                    self.dirty_meshes.put(self.allocator, loaded.id, {}) catch self.failPersistence(error.OutOfMemory);
+                    for (std.enums.values(Side)) |side| if (world_module.adjacentChunk(self.layout, loaded_coords, side)) |neighbor| {
+                        self.dirty_meshes.put(self.allocator, self.layout.encodeChunkCoords(neighbor), {}) catch self.failPersistence(error.OutOfMemory);
+                    };
+                }
                 self.retryPending();
                 self.retryWaitingReads();
             },
@@ -1302,9 +1301,7 @@ pub const WorldDataService = struct {
             },
             .save => |save| self.requestSaveTransition(save.id, save.final),
             .cancel_save => |id| {
-                const release_road_boundary = self.roadCaptureBlocked();
                 if (self.lifecycle.cancel(id)) if (self.job) |job| job.cancel();
-                if (release_road_boundary and !self.roadCaptureBlocked()) self.retryPending();
                 self.updateSimulationPause();
             },
             .compact => {
@@ -1517,24 +1514,16 @@ pub const WorldDataService = struct {
     /// payload. Its eventual completion retries that command before a later fence.
     fn drainBlueprintJournal(self: *WorldDataService) void {
         if (self.store == null or self.job != null or self.is_shutting_down.load(.acquire)) return;
-        self.blueprint_road_capture_suspended = false;
-        self.blueprint_road_capture_pending = true;
-        self.advanceRoadCapture();
-        self.updateSimulationPause();
-    }
-
-    /// Road completion wakes the capture directly, including a prepared Apply
-    /// with no FIFO commands. A ready public save owns the next capture first.
-    fn advanceRoadCapture(self: *WorldDataService) void {
-        // Do not retry unrelated retained queries on every road seed. Capture
-        // cannot start until this separately budgeted queue has fully drained.
-        if (self.blueprint_road_queue.count != 0) return;
-        self.advanceSaveDrain();
-        if (self.job != null or self.blueprint_road_capture_suspended or
-            !self.blueprint_road_capture_pending) return;
-        if (self.lifecycle.queued) |drain| if (drain.fence_remaining == 0) return;
+        self.internal_capture_suspended = false;
         const intent = self.next_intent.fetchAdd(1, .monotonic);
         self.beginCapture(intent, false) catch |err| self.noteDrainFailure(err);
+    }
+
+    fn restoreDeferredWork(self: *WorldDataService, saved: *const storage.Store) !void {
+        const keys = try deferred_work.decode(self.allocator, saved.pending_work, saved.dimensions, @min(saved.limits.max_pending_work, blueprint_road_updates.capacity));
+        defer self.allocator.free(keys);
+        try self.blueprint_road_queue.restore(self.allocator, keys);
+        self.captured_work_generation = self.blueprint_road_queue.generation;
     }
 
     fn retryWaitingBlueprintApplication(self: *WorldDataService) void {
@@ -1562,6 +1551,9 @@ pub const WorldDataService = struct {
 
     fn captureWorkingOverhead(self: *const WorldDataService, source_count: usize, scratch: usize) !usize {
         var bytes = try std.math.add(usize, @sizeOf(persistence.Job), scratch);
+        const work_count = @min(blueprint_road_updates.capacity, self.blueprint_road_queue.count + 10);
+        bytes = try std.math.add(usize, bytes, try persistence.pendingWorkMemoryBound(try deferred_work.encodedSize(work_count)));
+        bytes = try std.math.add(usize, bytes, try std.math.mul(usize, work_count, @sizeOf(deferred_work.Key)));
         bytes = try std.math.add(usize, bytes, try std.math.mul(usize, self.players.count(), format.player_record_size + @sizeOf(u64)));
         bytes = try std.math.add(usize, bytes, try std.math.mul(usize, source_count, 2 * @sizeOf(persistence.Source) + 2 + @sizeOf([]u8)));
         const ring_target = try std.math.add(usize, source_count, 4);
@@ -2076,12 +2068,15 @@ pub const WorldDataService = struct {
                 false;
             if (possible) batch.add(id);
         };
-        try self.blueprint_road_queue.reserve(self.allocator, batch);
+        const limit = if (self.store) |saved| saved.limits.max_pending_work else blueprint_road_updates.capacity;
+        try self.blueprint_road_queue.reserveWithLimit(self.allocator, batch, limit);
         return batch;
     }
 
     fn commitBlueprintRoadUpdates(self: *WorldDataService, batch: blueprint_road_updates.Batch) void {
+        const generation = self.blueprint_road_queue.generation;
         self.blueprint_road_queue.commit(batch);
+        if (self.blueprint_road_queue.generation != generation) self.lifecycle.unsaved_work = true;
         if (batch.count != 0) self.blueprint_road_waiting = false;
     }
 
@@ -2094,9 +2089,9 @@ pub const WorldDataService = struct {
     }
 
     fn processBlueprintRoadUpdatesWithBudget(self: *WorldDataService, budget: usize) usize {
+        const generation = self.blueprint_road_queue.generation;
         defer {
-            self.resumeRoadCaptureMutations();
-            self.advanceRoadCapture();
+            if (self.blueprint_road_queue.generation != generation) self.lifecycle.unsaved_work = true;
             self.updateSimulationPause();
         }
         var processed: usize = 0;
@@ -2108,20 +2103,31 @@ pub const WorldDataService = struct {
     /// coalesced next pass instead of repeatedly restarting the current cursor.
     fn processBlueprintRoadUpdate(self: *WorldDataService) bool {
         const entry = self.blueprint_road_queue.peek() orelse return false;
+        self.processing_deferred_work = true;
+        defer self.processing_deferred_work = false;
         self.blueprint_road_waiting = false;
         self.read_discovered = false;
+        self.blocked_dependency_error = null;
         if (!self.requireBase(entry.id)) {
             self.blueprint_road_waiting = true;
-            if (self.blocked_dependency_error) |err| self.noteDrainFailure(err);
+            if (self.blocked_dependency_error) |err| self.noteDeferredWorkFailure(err);
             return false;
         }
         const chunk = self.worker_state.modified_chunks.get(entry.id) orelse {
-            if (self.blueprint_road_queue.finish()) self.retryPending();
+            self.status.deferred_work_error_name = null;
+            if (self.blueprint_road_queue.finish()) {
+                self.processing_deferred_work = false;
+                self.retryPending();
+            }
             return true;
         };
         self.blueprint_road_queue.observeRevision(chunk.chunk_revision);
         if (entry.cursor >= chunk.metadata.roads.items.len) {
-            if (self.blueprint_road_queue.finish()) self.retryPending();
+            self.status.deferred_work_error_name = null;
+            if (self.blueprint_road_queue.finish()) {
+                self.processing_deferred_work = false;
+                self.retryPending();
+            }
             return true;
         }
         const road = chunk.metadata.roads.items[entry.cursor];
@@ -2134,11 +2140,12 @@ pub const WorldDataService = struct {
         };
         self.tryProcessBlueprintRoadSeed(block, road) catch |err| {
             self.blueprint_road_waiting = true;
-            if (err != error.DependencyPending and err != error.CapturePending) self.noteDrainFailure(err);
+            if (err != error.DependencyPending and err != error.CapturePending) self.noteDeferredWorkFailure(err);
             return false;
         };
         // Our own atomic shape updates do not require restarting this pass.
         entry.observed_revision = self.worker_state.modified_chunks.get(entry.id).?.chunk_revision;
+        self.status.deferred_work_error_name = null;
         self.blueprint_road_queue.advance();
         return true;
     }
@@ -2299,19 +2306,8 @@ pub const WorldDataService = struct {
         self.status_mutex.unlock(self.io);
     }
 
-    /// Stop accepting later mutations once a capture's accepted prefix is ready.
-    /// The bounded coalesced road queue can then finish despite continuous fills.
-    /// Continue normal admission while an older writer runs; reads/completions
-    /// and the separately budgeted road processor always remain able to progress.
-    fn roadCaptureBlocked(self: *const WorldDataService) bool {
-        if (self.job != null or self.blueprint_road_capture_suspended) return false;
-        if (self.blueprint_road_capture_pending) return true;
-        const drain = self.lifecycle.queued orelse return false;
-        return drain.fence_remaining == 0 and self.blueprint_road_queue.count != 0;
-    }
-
     fn updateSimulationPause(self: *WorldDataService) void {
-        self.simulation_paused.store(self.source_holds.count() != 0 or self.roadCaptureBlocked(), .release);
+        self.simulation_paused.store(self.source_holds.count() != 0, .release);
     }
 
     /// Conservative bounded superset of every write performed by afterEdit: road runs
@@ -2319,7 +2315,7 @@ pub const WorldDataService = struct {
     /// one face neighbor. Include all z planes touched by covering/uncovering soil.
     fn admissible(self: *WorldDataService, request: Request) bool {
         if (request == .operation or request == .blueprint_save or request == .blueprint_apply) {
-            if (self.blueprint_task != null or self.roadCaptureBlocked()) return false;
+            if (self.blueprint_task != null) return false;
         }
         if (request != .operation) return true;
         const edit = request.operation;
@@ -2373,7 +2369,7 @@ pub const WorldDataService = struct {
         while (true) {
             self.advanceSaveDrain();
             if (self.pending.items.len == 0) break;
-            if (self.blueprint_road_capture_suspended and self.pending.items[0].waiting_for_journal) break;
+            if (self.internal_capture_suspended and self.pending.items[0].waiting_for_journal) break;
             self.blocked_dependency_error = null;
             if (!self.dependenciesReady(self.pending.items[0].request)) {
                 if (self.blocked_dependency_error) |err| self.noteDrainFailure(err);
@@ -2463,10 +2459,7 @@ pub const WorldDataService = struct {
     }
 
     fn beginCapture(self: *WorldDataService, intent: u64, final: bool) !void {
-        // All durable entry points share this invariant. Pending road work is
-        // volatile and must never be left behind an otherwise successful save.
-        if (self.blueprint_road_queue.count != 0) return error.RoadUpdatesPending;
-        self.blueprint_road_capture_pending = false;
+        // Freeze pending obligations with the same terrain/progress prefix.
         defer self.updateSimulationPause();
         self.status.intent_id = intent;
         self.status.target_sequence = 0;
@@ -2526,6 +2519,8 @@ pub const WorldDataService = struct {
         else
             @as([]u8, &.{});
         errdefer self.allocator.free(blueprint_changes);
+        const pending_work = try self.blueprint_road_queue.snapshotEncoded(self.allocator, store.dimensions, store.limits.max_pending_work);
+        errdefer self.allocator.free(pending_work);
         var sources: std.ArrayList(persistence.Source) = .empty;
         errdefer sources.deinit(self.allocator);
         try sources.ensureTotalCapacityPrecise(self.allocator, source_count);
@@ -2565,9 +2560,9 @@ pub const WorldDataService = struct {
         const bookkeeping = try std.math.add(usize, try std.math.mul(usize, self.completion_ring.capacity, @sizeOf(persistence.Event)), try std.math.add(usize, try std.math.mul(usize, self.source_holds.capacity(), @sizeOf(u32) + @sizeOf(u64) + 16), try std.math.add(usize, try std.math.mul(usize, sources.capacity, @sizeOf(persistence.Source)), try std.math.add(usize, player_ids.len * @sizeOf(u64), 256))));
         const frozen = try sources.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(frozen);
-        job.* = .{ .allocator = self.allocator, .io = self.io, .store = store, .store_mutex = &self.store_mutex, .limits = job_limits, .notify = .{ .context = self, .send = notifyPersistence }, .epoch = self.capture_epoch, .sequence = try std.math.add(u64, self.status.durable_sequence, 1), .tick = self.worker_state.tick, .final = final, .sources = frozen, .players = players, .player_count = self.players.count(), .blueprint_changes = blueprint_changes, .blueprint_summary = blueprint_summary, .blueprint_journal_reserved_bytes = journal_capacity_bytes };
+        job.* = .{ .allocator = self.allocator, .io = self.io, .store = store, .store_mutex = &self.store_mutex, .limits = job_limits, .notify = .{ .context = self, .send = notifyPersistence }, .epoch = self.capture_epoch, .sequence = try std.math.add(u64, self.status.durable_sequence, 1), .tick = self.worker_state.tick, .final = final, .sources = frozen, .players = players, .player_count = self.players.count(), .blueprint_changes = blueprint_changes, .blueprint_summary = blueprint_summary, .blueprint_journal_reserved_bytes = journal_capacity_bytes, .pending_work = pending_work };
         const job_manifest = try std.math.mul(usize, source_count, @sizeOf(persistence.Source) + 2 + @sizeOf([]u8));
-        const job_baseline = try std.math.add(usize, blueprint_prepare_bytes, try std.math.add(usize, job_limits.output_bytes, try std.math.add(usize, job_manifest, try std.math.add(usize, players.len + blueprint_changes.len, try std.math.add(usize, scratch_peak, @sizeOf(persistence.Job))))));
+        const job_baseline = try std.math.add(usize, try std.math.add(usize, blueprint_prepare_bytes, try persistence.pendingWorkMemoryBound(pending_work.len)), try std.math.add(usize, job_limits.output_bytes, try std.math.add(usize, job_manifest, try std.math.add(usize, players.len + blueprint_changes.len, try std.math.add(usize, scratch_peak, @sizeOf(persistence.Job))))));
         job.extra_working_bytes = @max(bookkeeping, preflight_bytes - job_baseline);
         for (frozen) |source| self.source_holds.putAssumeCapacity(source.id, source.revision);
         errdefer self.source_holds.clearRetainingCapacity();
@@ -2576,6 +2571,7 @@ pub const WorldDataService = struct {
         const started = persistence.now(self.io);
         self.lifecycle.started(.{ .id = intent, .final = final }, job.epoch, started);
         self.captured_player_generation = self.player_generation;
+        self.captured_work_generation = self.blueprint_road_queue.generation;
         self.captured_blueprint_operations = self.blueprint_journal.items.len;
         self.captured_blueprint_summary = blueprint_summary;
         self.status.intent_id = intent;
@@ -2638,7 +2634,7 @@ pub const WorldDataService = struct {
                     self.blueprint_journal.deinit(self.allocator);
                     self.blueprint_journal = .empty;
                 }
-                self.lifecycle.unsaved_work = self.player_generation != self.captured_player_generation or remaining_ops != 0;
+                self.lifecycle.unsaved_work = self.player_generation != self.captured_player_generation or remaining_ops != 0 or self.blueprint_road_queue.generation != self.captured_work_generation;
                 var live = self.worker_state.modified_chunks.iterator();
                 while (live.next()) |entry| if (self.wal_revisions.get(entry.key_ptr.*) != entry.value_ptr.chunk_revision) {
                     self.lifecycle.unsaved_work = true;
@@ -2788,6 +2784,9 @@ pub const WorldDataService = struct {
         const capture_spare: usize = if (self.job) |job| job.sources.len else 0;
         try self.wal_revisions.ensureUnusedCapacity(self.allocator, @intCast(capture_spare + 1));
         try self.worker_state.timed_chunks.ensureUnusedCapacity(self.allocator, 1);
+        // Persistence canonicalizes road order without changing chunk revision.
+        // A resident cursor cannot be carried across that array replacement.
+        self.blueprint_road_queue.restartAfterLoad(id);
         self.worker_state.modified_chunks.putAssumeCapacity(id, chunk);
         self.base_revisions.putAssumeCapacity(id, revision);
         self.wal_revisions.putAssumeCapacity(id, revision);
@@ -2796,13 +2795,15 @@ pub const WorldDataService = struct {
 
     fn failDependencyRead(self: *WorldDataService, err: anyerror) void {
         self.blocked_dependency_error = err;
-        self.noteDrainFailure(err);
+        if (self.processing_deferred_work) self.noteDeferredWorkFailure(err) else self.noteDrainFailure(err);
     }
 
     fn requireBase(self: *WorldDataService, id: u32) bool {
         if (self.worker_state.modified_chunks.contains(id)) return true;
         const catalog = if (self.catalog) |*value| value else return true;
         if (catalog.revision(id) == null) return true;
+        // A foreground consumer promotes a shared dependency into its save fence.
+        if (!self.processing_deferred_work and self.deferred_reads.count() != 0) _ = self.deferred_reads.remove(id);
         self.read_discovered = true;
         if (self.read_failed.get(id)) |err| {
             self.terminal_read_failure = true;
@@ -2826,13 +2827,20 @@ pub const WorldDataService = struct {
                 return false;
             };
             if (read) |*handle| {
+                if (self.processing_deferred_work) self.deferred_reads.ensureUnusedCapacity(self.allocator, 1) catch {
+                    handle.deinit();
+                    self.failDependencyRead(error.OutOfMemory);
+                    return false;
+                };
                 self.read_pending.put(self.allocator, id, handle.revision) catch {
                     handle.deinit();
                     self.failDependencyRead(error.OutOfMemory);
                     return false;
                 };
+                if (self.processing_deferred_work) self.deferred_reads.putAssumeCapacity(id, {});
                 self.read_requests.tryPush(self.io, self.allocator, handle.*) catch |err| {
                     _ = self.read_pending.remove(id);
+                    _ = self.deferred_reads.remove(id);
                     handle.deinit();
                     self.failDependencyRead(err);
                     return false;
@@ -2938,7 +2946,7 @@ pub const WorldDataService = struct {
     }
 
     fn processTransformations(self: *WorldDataService) void {
-        if (self.source_holds.count() != 0 or self.roadCaptureBlocked()) return;
+        if (self.source_holds.count() != 0) return;
         const cutoff = self.worker_state.tick;
         // Fixed-size fair selection; loads cannot join this pass after its boundary.
         var due: [16]u32 = undefined;
@@ -7922,61 +7930,49 @@ test "public ready queued Save takes over an older Io failure without inheriting
     for ([_]bool{ false, true }) |final| try exerciseReadySaveAfterOlderCaptureFailure(.io_failure, final);
 }
 
-test "queued Save handoff respects read and road gates without retrying later journal work" {
+test "queued Save handoff respects read gates without retrying later journal work" {
     const a = std.testing.allocator;
-    for ([_]bool{ false, true }) |road_gate| {
-        var f: PreparedBlueprintDrainTest = undefined;
-        try f.init();
-        defer f.deinit();
-        const service = &f.fixture.service;
-        defer service.read_pending.deinit(a);
-        var faults: @import("persistence/io.zig").Faults = .{ .operation = .write };
-        f.store.setFaults(&faults);
-        try service.beginCapture(200, false);
-        service.requestSaveTransition(100, true);
-        // This later Save is outside the final fence. Its full journal must
-        // not trigger another prefix writer while other readiness gates wait.
-        service.processRequest(.{ .blueprint_save = try f.fixture.request(2) });
-        const id = PreparedBlueprintDrainTest.chunk_id;
-        if (road_gate) {
-            var batch: blueprint_road_updates.Batch = .{};
-            batch.add(id);
-            try service.blueprint_road_queue.reserve(a, batch);
-            service.blueprint_road_queue.commit(batch);
-        } else {
-            try service.read_pending.put(a, id, 0);
-        }
-        const epoch = service.capture_epoch;
-        const next = service.next_intent.load(.monotonic);
-        const completion = try AsyncBlueprintPrefixTest.finishOne(service);
-        try std.testing.expectEqual(error.Io, completion.failure.?);
-        try std.testing.expect(!completion.committed);
-        try std.testing.expect(service.job == null);
-        try std.testing.expectEqual(@as(u64, 100), service.status.intent_id);
-        try std.testing.expectEqual(@as(u64, 0), service.status.target_sequence);
-        try std.testing.expectEqual(persistence.Phase.capturing, service.status.phase);
-        try std.testing.expect(service.status.active);
-        try std.testing.expect(service.status.error_name == null);
-        try std.testing.expect(service.lifecycle.queued.?.retry == .available);
-        try std.testing.expectEqual(@as(usize, 0), service.lifecycle.queued.?.fence_remaining);
-        try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
-        try std.testing.expectEqual(epoch, service.capture_epoch);
-        try std.testing.expectEqual(next, service.next_intent.load(.monotonic));
-        // Releasing the remaining gate uses the existing save-readiness path.
-        if (road_gate) {
-            _ = service.processBlueprintRoadUpdatesWithBudget(1);
-        } else {
-            try std.testing.expect(service.read_pending.remove(id));
-            service.retryPending();
-        }
-        try f.waitSave(100);
-        f.store.setFaults(null);
-        try std.testing.expectEqual(@as(u64, 1), f.store.sequence);
-        try std.testing.expectEqual(@as(u32, 1), f.store.blueprints.definitions.count());
-        try std.testing.expectEqual(@as(u32, 2), service.worker_state.blueprints.definitions.count());
-        try std.testing.expectEqual(@as(usize, 1), service.blueprint_journal.items.len);
-        try std.testing.expectEqual(@as(u64, 2), service.blueprint_journal.items[0].definition.id);
-    }
+    var f: PreparedBlueprintDrainTest = undefined;
+    try f.init();
+    defer f.deinit();
+    const service = &f.fixture.service;
+    defer service.read_pending.deinit(a);
+    defer service.deferred_reads.deinit(a);
+    var faults: @import("persistence/io.zig").Faults = .{ .operation = .write };
+    f.store.setFaults(&faults);
+    try service.beginCapture(200, false);
+    service.requestSaveTransition(100, true);
+    // This later Save is outside the final fence. Its full journal must
+    // not trigger another prefix writer while other readiness gates wait.
+    service.processRequest(.{ .blueprint_save = try f.fixture.request(2) });
+    const id = PreparedBlueprintDrainTest.chunk_id;
+    try service.read_pending.put(a, id, 0);
+    const epoch = service.capture_epoch;
+    const next = service.next_intent.load(.monotonic);
+    const completion = try AsyncBlueprintPrefixTest.finishOne(service);
+    try std.testing.expectEqual(error.Io, completion.failure.?);
+    try std.testing.expect(!completion.committed);
+    try std.testing.expect(service.job == null);
+    try std.testing.expectEqual(@as(u64, 100), service.status.intent_id);
+    try std.testing.expectEqual(@as(u64, 0), service.status.target_sequence);
+    try std.testing.expectEqual(persistence.Phase.capturing, service.status.phase);
+    try std.testing.expect(service.status.active);
+    try std.testing.expect(service.status.error_name == null);
+    try std.testing.expect(service.lifecycle.queued.?.retry == .available);
+    try std.testing.expectEqual(@as(usize, 0), service.lifecycle.queued.?.fence_remaining);
+    try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
+    try std.testing.expectEqual(epoch, service.capture_epoch);
+    try std.testing.expectEqual(next, service.next_intent.load(.monotonic));
+    // Releasing the remaining gate uses the existing save-readiness path.
+    try std.testing.expect(service.read_pending.remove(id));
+    service.retryPending();
+    try f.waitSave(100);
+    f.store.setFaults(null);
+    try std.testing.expectEqual(@as(u64, 1), f.store.sequence);
+    try std.testing.expectEqual(@as(u32, 1), f.store.blueprints.definitions.count());
+    try std.testing.expectEqual(@as(u32, 2), service.worker_state.blueprints.definitions.count());
+    try std.testing.expectEqual(@as(usize, 1), service.blueprint_journal.items.len);
+    try std.testing.expectEqual(@as(u64, 2), service.blueprint_journal.items[0].definition.id);
 }
 
 const BlueprintRoadSaveTest = struct {
@@ -8040,161 +8036,11 @@ const BlueprintRoadSaveTest = struct {
     }
 };
 
-test "ordinary Save preserves queued blueprint road formation across a fresh reopen" {
-    const a = std.testing.allocator;
-    const io = std.testing.io;
-    var reference: BlueprintRoadFixture = undefined;
-    try reference.init();
-    defer reference.deinit();
-    try std.testing.expectEqual(OperationStatus.success, (try reference.fill()).diagnostics.status);
-    _ = reference.service.processBlueprintRoadUpdatesWithBudget(1);
-    const expected = reference.service.worker_state.modified_chunks.get(BlueprintRoadSaveTest.chunk_id).?.metadata.roads.items;
-    try std.testing.expectEqual(@as(usize, 4), expected.len);
-    for (expected) |road| try std.testing.expect(road.slope != null);
-
-    var uuid: [16]u8 = undefined;
-    std.c.arc4random_buf(&uuid, uuid.len);
-    const path = try std.fmt.allocPrintSentinel(a, "/private/tmp/blueprint-road-save-{x}", .{uuid}, 0);
-    defer a.free(path);
-    defer std.Io.Dir.cwd().deleteTree(io, path) catch {};
-    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = BlueprintRoadSaveTest.dimensions, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
-    defer a.free(descriptor);
-    const global = format.encodeGlobal(0);
-    var store = try storage.Store.create(a, path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{});
-    var store_open = true;
-    defer if (store_open) store.deinit();
-    var fixture: BlueprintSaveFixture = undefined;
-    try BlueprintRoadSaveTest.initFixture(&fixture, &store);
-    var fixture_open = true;
-    defer if (fixture_open) BlueprintJournalBudgetTest.cleanup(&fixture);
-    const service = &fixture.service;
-    service.processBlueprintFulfillment(.{ .client = &fixture.client, .request_id = 1, .operation = .{
-        .block = .{ 15, 10, 69 },
-        .action = .{ .put = .country_road_solid },
-        .blueprint = .{ .instance_id = 1, .cell_index = 0 },
-    } });
-    try std.testing.expectEqual(OperationStatus.success, fixture.client.pending.responses.items[0].operation.?.status);
-    try std.testing.expectEqual(@as(u8, 1), service.worker_state.blueprint_last_support_reads);
-    try std.testing.expectEqual(@as(u64, 0), service.worker_state.ordinary_validation_calls);
-    try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
-    try std.testing.expect(service.worker_state.modified_chunks.get(BlueprintRoadSaveTest.chunk_id).?.metadata.road(transformations.index(.{ 11, 10, 6 })).?.slope == null);
-    try std.testing.expectEqual(@as(usize, 3), service.blueprint_journal.items.len);
-    service.requestSaveTransition(100, false);
-    for (0..16) |_| {
-        // Let a writer that already started finish before running queued road
-        // work. A capture fence can instead finish road turns before starting.
-        if (service.job != null) {
-            const completion = try AsyncBlueprintPrefixTest.finishOne(service);
-            try std.testing.expect(completion.committed);
-            try std.testing.expect(completion.failure == null);
-        }
-        if (service.status.intent_id == 100 and !service.status.active and service.status.phase == .complete) break;
-        _ = service.processBlueprintRoadUpdatesWithBudget(1);
-        service.retryPending();
-    }
-    try std.testing.expectEqual(@as(u64, 100), service.status.intent_id);
-    try std.testing.expectEqual(persistence.Phase.complete, service.status.phase);
-    try std.testing.expect(service.job == null);
-    try std.testing.expectEqual(@as(u64, 1), store.sequence);
-    // Drop all volatile service state, including any unprocessed road queue.
-    BlueprintJournalBudgetTest.cleanup(&fixture);
-    fixture_open = false;
-    store.deinit();
-    store_open = false;
-    store = try storage.Store.open(a, path, .{});
-    store_open = true;
-    try std.testing.expectEqual(@as(u64, 1), store.blueprints.max_instance_id);
-    try std.testing.expectEqual(@as(u32, 0), store.blueprints.instances.count());
-    const restored_service = try WorldDataService.createPersistent(io, a, &test_layout, .flat, &store, .{});
-    defer restored_service.destroy();
-    const client = try restored_service.createClient();
-    const initial = try BlueprintRoadSaveTest.load(client);
-    defer initial.deinit(a);
-    try std.testing.expectEqual(rules.BlockType.country_road_solid, initial.content.getBlock(.{ 15, 10, 5 }));
-    // A recovery-based implementation may finish durable road work after load.
-    try BlueprintRoadSaveTest.settle(restored_service);
-    const restored = try BlueprintRoadSaveTest.load(client);
-    defer restored.deinit(a);
-    try std.testing.expectEqual(rules.BlockType.country_road_solid, restored.content.getBlock(.{ 15, 10, 5 }));
-    for (expected) |road| try std.testing.expectEqualDeep(road, restored.metadata.road(road.index).?);
-}
-
 fn queueBlueprintSaveTestRoadGate(service: *WorldDataService) !void {
     var batch: blueprint_road_updates.Batch = .{};
     batch.add(PreparedBlueprintDrainTest.chunk_id);
     try service.blueprint_road_queue.reserve(std.testing.allocator, batch);
     service.blueprint_road_queue.commit(batch);
-}
-
-test "road drain wakes deferred blueprint prefixes without losing prepared or FIFO Save fences" {
-    const Case = enum { prepared_only, prepared_and_fifo, fifo_only };
-    for ([_]Case{ .prepared_only, .prepared_and_fifo, .fifo_only }) |case| {
-        var f: PreparedBlueprintDrainTest = undefined;
-        try f.init();
-        defer f.deinit();
-        const service = &f.fixture.service;
-        const task = if (case != .fifo_only) try f.prepare() else null;
-        try queueBlueprintSaveTestRoadGate(service);
-        const epoch = service.capture_epoch;
-        if (task) |prepared| {
-            service.finishBlueprintApplication(prepared);
-            try std.testing.expect(prepared.waiting_for_journal);
-            try std.testing.expect(service.blueprint_task == prepared);
-        } else {
-            service.saveBlueprint(try f.fixture.request(2));
-            try std.testing.expect(service.operation_deferred);
-        }
-        if (case == .prepared_and_fifo) service.processRequest(.{ .blueprint_save = try f.fixture.request(3) });
-        service.requestSaveTransition(100, true);
-        const fence: usize = if (case == .prepared_and_fifo) 2 else 1;
-        try std.testing.expect(service.job == null);
-        try std.testing.expectEqual(epoch, service.capture_epoch);
-        try std.testing.expectEqual(@as(u64, 100), service.lifecycle.queued.?.intent.id);
-        try std.testing.expectEqual(fence, service.lifecycle.queued.?.fence_remaining);
-        try std.testing.expectEqual(@as(usize, if (case == .prepared_only) 0 else 1), service.pending.items.len);
-        try std.testing.expectEqual(@as(u64, 0), f.store.sequence);
-        // This resident fixture chunk has no road seeds. Releasing its gate is
-        // one bounded turn and must also wake a prepared Apply with no FIFO.
-        _ = service.processBlueprintRoadUpdatesWithBudget(1);
-        try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.count);
-        try std.testing.expect(service.job != null);
-        try std.testing.expectEqual(epoch + 1, service.capture_epoch);
-        try std.testing.expectEqual(@as(u64, 100), service.lifecycle.queued.?.intent.id);
-        try std.testing.expectEqual(fence, service.lifecycle.queued.?.fence_remaining);
-        try f.waitSave(100);
-        try std.testing.expectEqual(@as(u32, if (case == .prepared_only) 1 else 2), f.store.blueprints.definitions.count());
-        try std.testing.expectEqual(@as(u32, if (case == .fifo_only) 0 else 1), f.store.blueprints.instances.count());
-        try std.testing.expectEqual(@as(u64, if (case == .prepared_and_fifo) 3 else 2), f.fixture.client.resolved_request);
-    }
-}
-
-test "coalesced ordinary Save retries clear failed road dependencies without widening its fence" {
-    const a = std.testing.allocator;
-    var f: PreparedBlueprintDrainTest = undefined;
-    try f.init();
-    defer f.deinit();
-    const service = &f.fixture.service;
-    defer service.read_failed.deinit(a);
-    try queueBlueprintSaveTestRoadGate(service);
-    service.requestSaveTransition(100, false);
-    try std.testing.expect(service.job == null);
-    service.processRequest(.{ .blueprint_save = try f.fixture.request(2) });
-    try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
-    try service.read_failed.put(a, PreparedBlueprintDrainTest.chunk_id, error.Io);
-    service.blueprint_road_waiting = true;
-    service.noteDrainFailure(error.Io);
-    service.requestSaveTransition(101, false);
-    try std.testing.expect(!service.read_failed.contains(PreparedBlueprintDrainTest.chunk_id));
-    try std.testing.expect(!service.blueprint_road_waiting);
-    try std.testing.expect(service.job == null);
-    try std.testing.expectEqual(@as(u64, 100), service.lifecycle.queued.?.intent.id);
-    try std.testing.expectEqual(@as(usize, 0), service.lifecycle.queued.?.fence_remaining);
-    try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
-    _ = service.processBlueprintRoadUpdatesWithBudget(1);
-    try f.waitSave(100);
-    try std.testing.expectEqual(@as(u32, 1), f.store.blueprints.definitions.count());
-    try std.testing.expectEqual(@as(u32, 2), service.worker_state.blueprints.definitions.count());
-    try std.testing.expectEqual(@as(usize, 1), service.blueprint_journal.items.len);
 }
 
 test "road completion cannot restart a blueprint prefix after an uncommitted older writer fails" {
@@ -8231,254 +8077,6 @@ test "road completion cannot restart a blueprint prefix after an uncommitted old
     try std.testing.expectEqual(@as(u32, 1), f.store.blueprints.instances.count());
 }
 
-test "ordinary road drain admits its selected prefix and holds later mutations at the boundary" {
-    for ([_]bool{ false, true }) |pre_fence_command| {
-        var f: PreparedBlueprintDrainTest = undefined;
-        try f.init();
-        defer f.deinit();
-        const service = &f.fixture.service;
-        f.store.limits.blueprints.max_operations = 16;
-        try queueBlueprintSaveTestRoadGate(service);
-        if (pre_fence_command) try service.pending.append(std.testing.allocator, .{ .request = .{ .blueprint_save = try f.fixture.request(2) }, .since = persistence.now(std.testing.io) });
-        service.requestSaveTransition(100, false);
-        try std.testing.expect(service.job == null);
-        try std.testing.expectEqual(@as(usize, 0), service.lifecycle.queued.?.fence_remaining);
-        const accepted: u32 = if (pre_fence_command) 2 else 1;
-        try std.testing.expectEqual(accepted, service.worker_state.blueprints.definitions.count());
-        const later: u64 = accepted + 1;
-        service.processRequest(.{ .blueprint_save = try f.fixture.request(later) });
-        try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
-        try std.testing.expectEqual(accepted, service.worker_state.blueprints.definitions.count());
-        try std.testing.expectEqual(@as(u64, 100), service.lifecycle.queued.?.intent.id);
-        _ = service.processBlueprintRoadUpdatesWithBudget(1);
-        try f.waitSave(100);
-        // The finite capture includes its accepted prefix. The later command
-        // progresses afterward and remains outside this durable transaction.
-        try std.testing.expectEqual(accepted, f.store.blueprints.definitions.count());
-        try std.testing.expectEqual(accepted + 1, service.worker_state.blueprints.definitions.count());
-        try std.testing.expectEqual(@as(usize, 1), service.blueprint_journal.items.len);
-        try std.testing.expectEqual(later, service.blueprint_journal.items[0].definition.id);
-    }
-}
-
-test "overdue snapshots wait for bounded road draining before starting a writer" {
-    var f: PreparedBlueprintDrainTest = undefined;
-    try f.init();
-    defer f.deinit();
-    const service = &f.fixture.service;
-    try queueBlueprintSaveTestRoadGate(service);
-    service.lifecycle.unsaved_work = true;
-    service.lifecycle.last_success_ns = persistence.now(std.testing.io) - service.limits.overdue_ns - 1;
-    const epoch = service.capture_epoch;
-    service.checkWatchdog();
-    try std.testing.expect(service.lifecycle.overdue);
-    try std.testing.expect(service.job == null);
-    try std.testing.expectEqual(epoch, service.capture_epoch);
-    const intent = service.lifecycle.queued.?.intent.id;
-    const next = service.next_intent.load(.monotonic);
-    for (0..3) |_| service.checkWatchdog();
-    try std.testing.expect(service.job == null);
-    try std.testing.expectEqual(epoch, service.capture_epoch);
-    try std.testing.expectEqual(next, service.next_intent.load(.monotonic));
-    try std.testing.expectEqual(intent, service.lifecycle.queued.?.intent.id);
-    _ = service.processBlueprintRoadUpdatesWithBudget(1);
-    try std.testing.expect(service.job != null);
-    try f.waitSave(intent);
-    try std.testing.expectEqual(@as(u32, 1), f.store.blueprints.definitions.count());
-}
-
-test "failed road capture releases retained mutations and simulation while preserving queued work" {
-    var f: PreparedBlueprintDrainTest = undefined;
-    try f.init();
-    defer f.deinit();
-    const service = &f.fixture.service;
-    f.store.limits.blueprints.max_operations = 16;
-    try queueBlueprintSaveTestRoadGate(service);
-    service.requestSaveTransition(100, false);
-    service.publishPersistenceStatus();
-    try std.testing.expect(service.simulationPaused());
-    service.processRequest(.{ .blueprint_save = try f.fixture.request(2) });
-    try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
-    service.noteDrainFailure(error.Io);
-    service.resumeRoadCaptureMutations();
-    service.publishPersistenceStatus();
-    try std.testing.expect(!service.simulationPaused());
-    try std.testing.expect(service.job == null);
-    try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
-    try std.testing.expectEqual(@as(usize, 0), service.pending.items.len);
-    try std.testing.expectEqual(@as(u32, 2), service.worker_state.blueprints.definitions.count());
-    try std.testing.expectEqual(@as(u64, 100), service.lifecycle.queued.?.intent.id);
-    try std.testing.expectEqual(@as(u64, 0), f.store.sequence);
-}
-
-test "canceling the queued public Save releases its road boundary and simulation pause" {
-    for ([_]bool{ false, true }) |final| {
-        var f: PreparedBlueprintDrainTest = undefined;
-        try f.init();
-        defer f.deinit();
-        const service = &f.fixture.service;
-        f.store.limits.blueprints.max_operations = 16;
-        try queueBlueprintSaveTestRoadGate(service);
-        service.requestSaveTransition(100, final);
-        service.processRequest(.{ .blueprint_save = try f.fixture.request(2) });
-        service.processRequest(.{ .cancel_save = 99 });
-        service.publishPersistenceStatus();
-        try std.testing.expect(service.simulationPaused());
-        try std.testing.expectEqual(@as(u64, 100), service.lifecycle.queued.?.intent.id);
-        try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
-        service.processRequest(.{ .cancel_save = 100 });
-        service.publishPersistenceStatus();
-        try std.testing.expect(service.lifecycle.queued == null);
-        try std.testing.expect(service.job == null);
-        try std.testing.expect(!service.simulationPaused());
-        try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
-        try std.testing.expectEqual(@as(usize, 0), service.pending.items.len);
-        try std.testing.expectEqual(@as(u32, 2), service.worker_state.blueprints.definitions.count());
-        try std.testing.expectEqual(@as(u64, 0), f.store.sequence);
-    }
-}
-
-test "suspended road boundary preserves mandatory source holds for player and simulation edits" {
-    const a = std.testing.allocator;
-    var f: PreparedBlueprintDrainTest = undefined;
-    try f.init();
-    defer f.deinit();
-    const service = &f.fixture.service;
-    try queueBlueprintSaveTestRoadGate(service);
-    service.requestSaveTransition(100, false);
-    service.noteDrainFailure(error.Io);
-    try service.source_holds.put(a, PreparedBlueprintDrainTest.chunk_id, 1);
-    var simulation: Client = .{ .service = service, .simulation = true };
-    const affected: Request = .{ .operation = .{ .client = &f.fixture.client, .request_id = 2, .operation = .{ .block = .{ 10, 10, 70 }, .action = .{ .put = .planks } } } };
-    const npc: Request = .{ .operation = .{ .client = &simulation, .request_id = 1, .operation = affected.operation.operation } };
-    const unrelated: Request = .{ .operation = .{ .client = &f.fixture.client, .request_id = 3, .operation = .{ .block = .{ 400, 400, 70 }, .action = .{ .put = .planks } } } };
-    try std.testing.expect(!service.admissible(affected));
-    try std.testing.expect(!service.admissible(npc));
-    try std.testing.expect(service.admissible(unrelated));
-    service.publishPersistenceStatus();
-    try std.testing.expect(service.simulationPaused());
-    try std.testing.expect(service.source_holds.remove(PreparedBlueprintDrainTest.chunk_id));
-    service.publishPersistenceStatus();
-    try std.testing.expect(!service.simulationPaused());
-    try std.testing.expect(service.admissible(affected));
-    try std.testing.expect(service.admissible(npc));
-    try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
-    try std.testing.expect(service.job == null);
-}
-
-test "ready road capture defers due timer writes until its public Save is canceled" {
-    const a = std.testing.allocator;
-    var f: PreparedBlueprintDrainTest = undefined;
-    try f.init();
-    defer f.deinit();
-    const service = &f.fixture.service;
-    const id = PreparedBlueprintDrainTest.chunk_id;
-    var chunk = WorldChunk.initEmpty();
-    var owns_chunk = true;
-    defer if (owns_chunk) chunk.deinit(a);
-    try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ 10, 10, 6 }, .{ .put = .dirt }));
-    const event: transformations.Event = .{ .block = transformations.index(.{ 10, 10, 6 }), .kind = .compact_dirt, .due_tick = 1 };
-    try chunk.metadata.timed.trySchedule(a, event);
-    chunk.chunk_revision = 7;
-    try service.worker_state.modified_chunks.put(a, id, chunk);
-    owns_chunk = false;
-    try service.worker_state.timed_chunks.put(a, id, {});
-    service.worker_state.tick = event.due_tick + transformations.transformation_delay;
-    try queueBlueprintSaveTestRoadGate(service);
-    service.requestSaveTransition(100, false);
-    const cursor = service.timer_cursor;
-    for (0..3) |_| service.processTransformations();
-    const held = service.worker_state.modified_chunks.get(id).?;
-    try std.testing.expectEqual(rules.BlockType.dirt, held.content.getBlock(.{ 10, 10, 6 }));
-    try std.testing.expectEqual(@as(u64, 7), held.chunk_revision);
-    try std.testing.expectEqualSlices(transformations.Event, &.{event}, held.metadata.timed.events.items);
-    try std.testing.expectEqual(cursor, service.timer_cursor);
-    try std.testing.expect(service.worker_state.timed_chunks.contains(id));
-    try std.testing.expect(!service.dirty_meshes.contains(id));
-    try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
-    try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.peek().?.cursor);
-    service.processRequest(.{ .cancel_save = 100 });
-    service.processTransformations();
-    const resumed = service.worker_state.modified_chunks.get(id).?;
-    try std.testing.expectEqual(rules.BlockType.grass, resumed.content.getBlock(.{ 10, 10, 6 }));
-    try std.testing.expectEqual(@as(u64, 8), resumed.chunk_revision);
-    try std.testing.expectEqual(@as(usize, 0), resumed.metadata.timed.events.items.len);
-    try std.testing.expect(!service.worker_state.timed_chunks.contains(id));
-    try std.testing.expect(service.dirty_meshes.contains(id));
-    try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
-    try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.peek().?.cursor);
-    try std.testing.expect(service.job == null);
-}
-
-test "road capture retains ordinary player and simulation operations until cancellation" {
-    const a = std.testing.allocator;
-    var f: PreparedBlueprintDrainTest = undefined;
-    try f.init();
-    defer f.deinit();
-    const service = &f.fixture.service;
-    const id = PreparedBlueprintDrainTest.chunk_id;
-    var chunk = WorldChunk.initEmpty();
-    var owns_chunk = true;
-    defer if (owns_chunk) chunk.deinit(a);
-    try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ 10, 10, 5 }, .{ .put = .stone }));
-    try service.worker_state.modified_chunks.put(a, id, chunk);
-    owns_chunk = false;
-    var simulation: Client = .{ .service = service, .simulation = true };
-    defer simulation.pending.deinit(a);
-    const player: Request = .{ .operation = .{ .client = &f.fixture.client, .request_id = 2, .operation = .{ .block = .{ 10, 10, 70 }, .action = .{ .put = .planks } } } };
-    const npc: Request = .{ .operation = .{ .client = &simulation, .request_id = 1, .operation = .{ .block = .{ 11, 10, 70 }, .action = .{ .put = .planks } } } };
-    try queueBlueprintSaveTestRoadGate(service);
-    service.requestSaveTransition(100, false);
-    try std.testing.expect(!service.admissible(player));
-    try std.testing.expect(!service.admissible(npc));
-    service.processRequest(player);
-    service.processRequest(npc);
-    try std.testing.expectEqual(@as(usize, 2), service.pending.items.len);
-    try std.testing.expectEqual(@as(usize, 0), f.fixture.client.pending.responses.items.len);
-    try std.testing.expectEqual(@as(usize, 0), simulation.pending.responses.items.len);
-    try std.testing.expectEqual(rules.BlockType.none, service.worker_state.modified_chunks.get(id).?.content.getBlock(.{ 10, 10, 6 }));
-    service.processRequest(.{ .cancel_save = 100 });
-    try std.testing.expectEqual(@as(usize, 0), service.pending.items.len);
-    try std.testing.expectEqual(OperationStatus.success, f.fixture.client.pending.responses.items[0].operation.?.status);
-    try std.testing.expectEqual(OperationStatus.success, simulation.pending.responses.items[0].operation.?.status);
-    const resumed = service.worker_state.modified_chunks.get(id).?;
-    try std.testing.expectEqual(rules.BlockType.planks, resumed.content.getBlock(.{ 10, 10, 6 }));
-    try std.testing.expectEqual(rules.BlockType.planks, resumed.content.getBlock(.{ 11, 10, 6 }));
-    try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
-    try std.testing.expect(service.job == null);
-}
-
-test "road processor failure wakes an unrelated ordinary edit without a manual FIFO retry" {
-    const a = std.testing.allocator;
-    var fixture: BlueprintRoadFixture = undefined;
-    try fixture.init();
-    defer fixture.deinit();
-    const service = &fixture.service;
-    var client: Client = .{ .service = service };
-    defer client.pending.deinit(a);
-    const id = test_layout.encodeChunkCoords(.{ 0, 0, 2 });
-    try std.testing.expectEqual(OperationStatus.success, try service.worker_state.modified_chunks.getPtr(id).?.tryApply(a, .{ 25, 20, 5 }, .{ .put = .stone }));
-    try std.testing.expectEqual(OperationStatus.success, (try fixture.fill()).diagnostics.status);
-    service.requestSaveTransition(100, false);
-    const unrelated: Request = .{ .operation = .{ .client = &client, .request_id = 1, .operation = .{ .block = .{ 25, 20, 70 }, .action = .{ .put = .planks } } } };
-    service.processRequest(unrelated);
-    try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
-    try std.testing.expectEqual(@as(usize, 0), client.pending.responses.items.len);
-    service.limits.manifest_entries = 0;
-    _ = service.processBlueprintRoadUpdatesWithBudget(1);
-    try std.testing.expectEqualStrings("Capacity", service.status.error_name.?);
-    try std.testing.expect(service.blueprint_road_waiting);
-    try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
-    try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.peek().?.cursor);
-    try std.testing.expect(fixture.slope() == null);
-    try std.testing.expectEqual(@as(usize, 0), service.pending.items.len);
-    try std.testing.expectEqual(@as(usize, 1), client.pending.responses.items.len);
-    try std.testing.expectEqual(OperationStatus.success, client.pending.responses.items[0].operation.?.status);
-    try std.testing.expectEqual(rules.BlockType.planks, service.worker_state.modified_chunks.get(id).?.content.getBlock(.{ 25, 20, 6 }));
-    try std.testing.expect(!service.simulationPaused());
-    try std.testing.expect(service.job == null);
-}
-
 test "freeing road queue capacity resumes a retained fill while capture is suspended" {
     const a = std.testing.allocator;
     var fixture: BlueprintRoadFixture = undefined;
@@ -8503,7 +8101,7 @@ test "freeing road queue capacity resumes a retained fill while capture is suspe
     try std.testing.expectEqual(@as(usize, 0), client.pending.responses.items.len);
     try std.testing.expectEqual(@as(u32, 1), service.worker_state.blueprints.instances.get(1).?.remaining);
     service.noteDrainFailure(error.Io);
-    try std.testing.expect(service.blueprint_road_capture_suspended);
+    try std.testing.expect(service.internal_capture_suspended);
     // The head has no resident roads, so one real processor turn frees a slot
     // and must wake the capacity-blocked fill despite the suspended capture.
     _ = service.processBlueprintRoadUpdatesWithBudget(1);
@@ -8743,11 +8341,11 @@ test "a blocked road batch yields without spending its remaining seed budget" {
         try std.testing.expectEqual(revision, f.service.worker_state.modified_chunks.get(id).?.chunk_revision);
         try std.testing.expect(f.slope() == null);
         if (capture_hold) {
-            try std.testing.expect(!f.service.blueprint_road_capture_suspended);
+            try std.testing.expect(!f.service.internal_capture_suspended);
             try std.testing.expect(f.service.source_holds.remove(id));
         } else {
-            try std.testing.expectEqualStrings("Capacity", f.service.status.error_name.?);
-            try std.testing.expect(f.service.blueprint_road_capture_suspended);
+            try std.testing.expectEqualStrings("Capacity", f.service.status.deferred_work_error_name.?);
+            try std.testing.expect(!f.service.internal_capture_suspended);
             f.service.limits.manifest_entries = 65536;
         }
         try std.testing.expectEqual(@as(usize, 5), f.service.processBlueprintRoadUpdatesWithBudget(16));
@@ -8777,6 +8375,7 @@ test "road batches yield once for an asynchronous base read and resume after its
     defer service.base_revisions.deinit(a);
     defer service.wal_revisions.deinit(a);
     defer service.read_pending.deinit(a);
+    defer service.deferred_reads.deinit(a);
     defer service.read_failed.deinit(a);
     defer service.loaded_ring.deinit(a);
     defer {
@@ -8819,4 +8418,419 @@ test "road batches yield once for an asynchronous base read and resume after its
     try std.testing.expectEqual(@as(usize, 6), service.processBlueprintRoadUpdatesWithBudget(16));
     try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.count);
     try std.testing.expect(service.worker_state.modified_chunks.get(quiet).?.metadata.roads.items[0].slope != null);
+}
+
+// These tests deliberately drive writer completions without road turns so a
+// successful save must retain obligations, rather than accidentally drain them.
+fn initDeferredRoadSaveTest(f: *PreparedBlueprintDrainTest) !void {
+    try f.init();
+    errdefer f.deinit();
+    f.cleanupFixture();
+    f.store.limits.blueprints.max_operations = 16;
+    try BlueprintRoadSaveTest.initFixture(&f.fixture, &f.store);
+    f.fixture_open = true;
+}
+
+fn fillDeferredRoadSaveTest(f: *PreparedBlueprintDrainTest) !void {
+    f.fixture.service.processBlueprintFulfillment(.{ .client = &f.fixture.client, .request_id = 1, .operation = .{
+        .block = .{ 15, 10, 69 },
+        .action = .{ .put = .country_road_solid },
+        .blueprint = .{ .instance_id = 1, .cell_index = 0 },
+    } });
+    try std.testing.expectEqual(OperationStatus.success, f.fixture.client.pending.responses.items[0].operation.?.status);
+    try std.testing.expectEqual(@as(usize, 1), f.fixture.service.blueprint_road_queue.count);
+}
+
+test "ordinary and final Save preserve unfinished road shapes across loss of every volatile owner" {
+    const a = std.testing.allocator;
+    var reference: BlueprintRoadFixture = undefined;
+    try reference.init();
+    defer reference.deinit();
+    try std.testing.expectEqual(OperationStatus.success, (try reference.fill()).diagnostics.status);
+    _ = reference.service.processBlueprintRoadUpdatesWithBudget(16);
+    const expected = reference.service.worker_state.modified_chunks.get(BlueprintRoadSaveTest.chunk_id).?.metadata.roads.items;
+    for (expected) |road| try std.testing.expect(road.slope != null);
+    for ([_]bool{ false, true }) |final| {
+        var f: PreparedBlueprintDrainTest = undefined;
+        try initDeferredRoadSaveTest(&f);
+        defer f.deinit();
+        try fillDeferredRoadSaveTest(&f);
+        const service = &f.fixture.service;
+        // Runtime pass state must not become part of durable identity.
+        service.blueprint_road_queue.advance();
+        try queueBlueprintSaveTestRoadGate(service);
+        try std.testing.expect(service.blueprint_road_queue.peek().?.dirty_again);
+        try std.testing.expect(service.worker_state.modified_chunks.get(BlueprintRoadSaveTest.chunk_id).?.metadata.road(transformations.index(.{ 11, 10, 6 })).?.slope == null);
+        service.requestSaveTransition(100, final);
+        try std.testing.expect(service.job != null);
+        try f.waitSave(100);
+        try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
+        const saved_keys = try @import("deferred_world_work.zig").decode(a, f.store.pending_work, f.store.dimensions, 4096);
+        defer a.free(saved_keys);
+        try std.testing.expectEqual(@as(usize, 1), saved_keys.len);
+        try std.testing.expectEqual(BlueprintRoadSaveTest.chunk_id, saved_keys[0].chunk_id);
+        f.cleanupFixture();
+        f.store.deinit();
+        f.store_open = false;
+        f.store = try storage.Store.open(a, f.path, .{});
+        f.store_open = true;
+        try std.testing.expectEqual(@as(u32, 0), f.store.blueprints.instances.count());
+        const restored_service = try WorldDataService.createPersistent(std.testing.io, a, &test_layout, .flat, &f.store, .{});
+        defer restored_service.destroy();
+        const client = try restored_service.createClient();
+        const deadline = persistence.now(std.testing.io) + 10 * std.time.ns_per_s;
+        var formed = false;
+        while (persistence.now(std.testing.io) < deadline) {
+            const chunk = try BlueprintRoadSaveTest.load(client);
+            defer chunk.deinit(a);
+            try std.testing.expectEqual(rules.BlockType.country_road_solid, chunk.content.getBlock(.{ 15, 10, 5 }));
+            formed = true;
+            for (expected) |road| {
+                const actual = chunk.metadata.road(road.index) orelse {
+                    formed = false;
+                    break;
+                };
+                if (!std.meta.eql(road, actual)) {
+                    formed = false;
+                    break;
+                }
+            }
+            if (formed) break;
+            try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expect(formed);
+        try BlueprintRoadSaveTest.settle(restored_service);
+        try std.testing.expectEqual(@as(usize, 0), f.store.pending_work.len);
+    }
+}
+
+test "a no-op road pass marks its durable removal unsaved and the next Save clears it" {
+    var f: PreparedBlueprintDrainTest = undefined;
+    try f.init();
+    defer f.deinit();
+    const service = &f.fixture.service;
+    try queueBlueprintSaveTestRoadGate(service);
+    service.requestSaveTransition(100, false);
+    try f.waitSave(100);
+    try std.testing.expect(f.store.pending_work.len != 0);
+    try std.testing.expect(!service.lifecycle.unsaved_work);
+    try std.testing.expectEqual(@as(usize, 1), service.processBlueprintRoadUpdatesWithBudget(1));
+    try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.count);
+    try std.testing.expect(service.lifecycle.unsaved_work);
+    service.requestSaveTransition(101, true);
+    try f.waitSave(101);
+    try std.testing.expectEqual(@as(usize, 0), f.store.pending_work.len);
+    try std.testing.expect(!service.lifecycle.unsaved_work);
+}
+
+test "in-flight obligation snapshot stays immutable while clean completion and new work remain unsaved" {
+    const a = std.testing.allocator;
+    var f: PreparedBlueprintDrainTest = undefined;
+    try f.init();
+    defer f.deinit();
+    const service = &f.fixture.service;
+    try queueBlueprintSaveTestRoadGate(service);
+    var gate: ServiceWriteGate = .{};
+    var faults: @import("persistence/io.zig").Faults = .{ .enabled = false, .context = &gate, .hook = ServiceWriteGate.hook };
+    f.store.setFaults(&faults);
+    defer gate.released.set(std.testing.io);
+    try service.beginCapture(100, false);
+    try gate.entered.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+    const captured_generation = service.blueprint_road_queue.generation;
+    try std.testing.expectEqual(@as(usize, 1), service.processBlueprintRoadUpdatesWithBudget(1));
+    var later: blueprint_road_updates.Batch = .{};
+    later.add(PreparedBlueprintDrainTest.chunk_id + 1);
+    try service.blueprint_road_queue.reserve(a, later);
+    service.blueprint_road_queue.commit(later);
+    try std.testing.expect(captured_generation != service.blueprint_road_queue.generation);
+    const frozen = try @import("deferred_world_work.zig").decode(a, service.job.?.pending_work, f.store.dimensions, 4096);
+    defer a.free(frozen);
+    try std.testing.expectEqual(PreparedBlueprintDrainTest.chunk_id, frozen[0].chunk_id);
+    gate.released.set(std.testing.io);
+    const completion = try AsyncBlueprintPrefixTest.finishOne(service);
+    try std.testing.expect(completion.committed);
+    try std.testing.expect(completion.failure == null);
+    f.store.setFaults(null);
+    try std.testing.expect(service.lifecycle.unsaved_work);
+    try std.testing.expectEqual(PreparedBlueprintDrainTest.chunk_id + 1, service.blueprint_road_queue.peek().?.id);
+    const saved = try @import("deferred_world_work.zig").decode(a, f.store.pending_work, f.store.dimensions, 4096);
+    defer a.free(saved);
+    try std.testing.expectEqualSlices(@import("deferred_world_work.zig").Key, frozen, saved);
+}
+
+test "failed and canceled captures retain pending road identity without publishing an empty replacement" {
+    for ([_]bool{ false, true }) |cancel| {
+        var f: PreparedBlueprintDrainTest = undefined;
+        try f.init();
+        defer f.deinit();
+        const service = &f.fixture.service;
+        try queueBlueprintSaveTestRoadGate(service);
+        const generation = service.blueprint_road_queue.generation;
+        var gate: ServiceWriteGate = .{};
+        var faults: @import("persistence/io.zig").Faults = if (cancel)
+            .{ .enabled = false, .context = &gate, .hook = ServiceWriteGate.hook }
+        else
+            .{ .operation = .write };
+        f.store.setFaults(&faults);
+        defer gate.released.set(std.testing.io);
+        try service.beginCapture(100, false);
+        if (cancel) {
+            try gate.entered.waitTimeout(std.testing.io, .{ .duration = .{ .raw = .fromSeconds(5), .clock = .awake } });
+            service.processRequest(.{ .cancel_save = 100 });
+            gate.released.set(std.testing.io);
+        }
+        const completion = try AsyncBlueprintPrefixTest.finishOne(service);
+        try std.testing.expect(!completion.committed);
+        try std.testing.expect(completion.failure != null);
+        f.store.setFaults(null);
+        try std.testing.expectEqual(@as(u64, 0), f.store.sequence);
+        try std.testing.expectEqual(generation, service.blueprint_road_queue.generation);
+        try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
+        service.requestSaveTransition(101, true);
+        try f.waitSave(101);
+        try std.testing.expect(f.store.pending_work.len != 0);
+    }
+}
+
+test "internal prefix overdue and final captures all start while road work remains pending" {
+    const Mode = enum { prefix, overdue, final };
+    for ([_]Mode{ .prefix, .overdue, .final }) |mode| {
+        var f: PreparedBlueprintDrainTest = undefined;
+        try f.init();
+        defer f.deinit();
+        const service = &f.fixture.service;
+        try queueBlueprintSaveTestRoadGate(service);
+        switch (mode) {
+            .prefix => service.drainBlueprintJournal(),
+            .overdue => {
+                service.lifecycle.unsaved_work = true;
+                service.lifecycle.last_success_ns = persistence.now(std.testing.io) - service.limits.overdue_ns - 1;
+                service.checkWatchdog();
+            },
+            .final => service.requestSaveTransition(100, true),
+        }
+        try std.testing.expect(service.job != null);
+        const intent = service.status.intent_id;
+        try f.waitSave(intent);
+        try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
+        try std.testing.expect(f.store.pending_work.len != 0);
+    }
+}
+
+test "pending roads allow player NPC and timer progress while source holds still protect captures" {
+    const a = std.testing.allocator;
+    var f: PreparedBlueprintDrainTest = undefined;
+    try f.init();
+    defer f.deinit();
+    const service = &f.fixture.service;
+    const id = PreparedBlueprintDrainTest.chunk_id;
+    var chunk = WorldChunk.initEmpty();
+    var owns_chunk = true;
+    defer if (owns_chunk) chunk.deinit(a);
+    for ([_]u5{ 10, 11 }) |x| try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ x, 10, 5 }, .{ .put = .stone }));
+    try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ 20, 20, 6 }, .{ .put = .dirt }));
+    const event: transformations.Event = .{ .block = transformations.index(.{ 20, 20, 6 }), .kind = .compact_dirt, .due_tick = 1 };
+    try chunk.metadata.timed.trySchedule(a, event);
+    chunk.chunk_revision = 7;
+    try service.worker_state.modified_chunks.put(a, id, chunk);
+    owns_chunk = false;
+    try service.worker_state.timed_chunks.put(a, id, {});
+    service.worker_state.tick = event.due_tick + transformations.transformation_delay;
+    try queueBlueprintSaveTestRoadGate(service);
+    var simulation: Client = .{ .service = service, .simulation = true };
+    defer simulation.pending.deinit(a);
+    const player: Request = .{ .operation = .{ .client = &f.fixture.client, .request_id = 2, .operation = .{ .block = .{ 10, 10, 70 }, .action = .{ .put = .planks } } } };
+    const npc: Request = .{ .operation = .{ .client = &simulation, .request_id = 1, .operation = .{ .block = .{ 11, 10, 70 }, .action = .{ .put = .planks } } } };
+    try service.source_holds.put(a, id, 7);
+    try std.testing.expect(!service.admissible(player));
+    try std.testing.expect(!service.admissible(npc));
+    service.processTransformations();
+    try std.testing.expectEqual(@as(u64, 7), service.worker_state.modified_chunks.get(id).?.chunk_revision);
+    try std.testing.expect(service.source_holds.remove(id));
+    service.publishPersistenceStatus();
+    try std.testing.expect(!service.simulationPaused());
+    try std.testing.expect(service.admissible(player));
+    try std.testing.expect(service.admissible(npc));
+    service.processRequest(player);
+    service.processRequest(npc);
+    try std.testing.expectEqual(@as(usize, 0), service.pending.items.len);
+    try std.testing.expectEqual(OperationStatus.success, f.fixture.client.pending.responses.items[0].operation.?.status);
+    try std.testing.expectEqual(OperationStatus.success, simulation.pending.responses.items[0].operation.?.status);
+    service.processTransformations();
+    try std.testing.expectEqual(rules.BlockType.grass, service.worker_state.modified_chunks.get(id).?.content.getBlock(.{ 20, 20, 6 }));
+    try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
+    try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.peek().?.cursor);
+}
+
+test "final Save excludes background road reads until a foreground consumer shares them" {
+    const a = std.testing.allocator;
+    const saved = try savedDependencyFixture();
+    defer saved.deinit();
+    var service: WorldDataService = .{
+        .layout = &saved.layout,
+        .io = std.testing.io,
+        .allocator = a,
+        .worker = undefined,
+        .worker_state = .{ .layout = &saved.layout, .generator = try WorldGenerator.prepare(.flat, a, &saved.layout) },
+        .catalog = try saved.store.snapshotCatalog(),
+    };
+    service.worker_state.persistence_service = &service;
+    defer service.worker_state.deinit(a);
+    defer service.catalog.?.deinit();
+    defer service.blueprint_road_queue.deinit(a);
+    defer service.read_pending.deinit(a);
+    defer service.deferred_reads.deinit(a);
+    defer service.read_failed.deinit(a);
+    defer service.loaded_ring.deinit(a);
+    defer {
+        for (service.read_requests.items.items) |*read| read.deinit();
+        service.read_requests.deinit(a);
+    }
+    const id = saved.layout.encodeChunkCoords(.{ 0, 0, 1 });
+    var batch: blueprint_road_updates.Batch = .{};
+    batch.add(id);
+    try service.blueprint_road_queue.reserve(a, batch);
+    service.blueprint_road_queue.commit(batch);
+    try std.testing.expectEqual(@as(usize, 0), service.processBlueprintRoadUpdatesWithBudget(1));
+    try std.testing.expectEqual(@as(u32, 1), service.read_pending.count());
+    try std.testing.expect(service.deferred_reads.contains(id));
+    // The real asynchronous request remains unanswered. Its durable marker
+    // lets the final save's readiness gate proceed without the read consumer.
+    var lifecycle: save_lifecycle.Lifecycle = .{};
+    _ = lifecycle.request(.{ .id = 100, .final = true }, 0);
+    try std.testing.expectEqual(@as(u64, 100), lifecycle.takeReady(service.lifecycleObservations()).?.id);
+    // Foreground reuse of the same in-flight I/O must promote it into the
+    // ordinary final-read fence, without issuing a duplicate request.
+    try std.testing.expect(!service.requireBase(id));
+    try std.testing.expect(!service.deferred_reads.contains(id));
+    try std.testing.expectEqual(@as(usize, 1), service.read_requests.items.items.len);
+    _ = lifecycle.request(.{ .id = 101, .final = true }, 0);
+    try std.testing.expect(lifecycle.takeReady(service.lifecycleObservations()) == null);
+}
+
+test "cold background read failure preserves an independent successful Save" {
+    const a = std.testing.allocator;
+    var f: PreparedBlueprintDrainTest = undefined;
+    try initDeferredRoadSaveTest(&f);
+    defer f.deinit();
+    try fillDeferredRoadSaveTest(&f);
+    const service = &f.fixture.service;
+    defer service.read_pending.deinit(a);
+    defer service.deferred_reads.deinit(a);
+    defer service.read_failed.deinit(a);
+    defer service.loaded_ring.deinit(a);
+    defer {
+        for (service.read_requests.items.items) |*read| read.deinit();
+        service.read_requests.deinit(a);
+    }
+    service.requestSaveTransition(100, true);
+    try f.waitSave(100);
+    const id = BlueprintRoadSaveTest.chunk_id;
+    try std.testing.expect(!service.worker_state.modified_chunks.contains(id));
+    try std.testing.expectEqual(@as(usize, 0), service.processBlueprintRoadUpdatesWithBudget(1));
+    try std.testing.expect(service.deferred_reads.contains(id));
+    const read = service.read_requests.items.items[0];
+    service.requestSaveTransition(101, true);
+    try f.waitSave(101);
+    const sequence = f.store.sequence;
+    service.dirty_meshes.clearRetainingCapacity();
+    service.processRequest(.{ .chunk_loaded = .{ .id = read.id, .revision = read.revision, .result = error.Io } });
+    try std.testing.expectEqual(persistence.Phase.complete, service.status.phase);
+    try std.testing.expect(service.status.error_name == null);
+    try std.testing.expectEqualStrings("Io", service.status.deferred_work_error_name.?);
+    try std.testing.expectEqual(sequence, f.store.sequence);
+    try std.testing.expectEqual(@as(u32, 0), service.dirty_meshes.count());
+    try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
+}
+
+test "a successful no-op road pass clears the recovered background diagnostic" {
+    var f: PreparedBlueprintDrainTest = undefined;
+    try f.init();
+    defer f.deinit();
+    const service = &f.fixture.service;
+    try queueBlueprintSaveTestRoadGate(service);
+    service.noteDeferredWorkFailure(error.Io);
+    try std.testing.expectEqual(@as(usize, 1), service.processBlueprintRoadUpdatesWithBudget(1));
+    try std.testing.expect(service.status.deferred_work_error_name == null);
+    try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.count);
+}
+
+test "a partially processed road Save preserves formed history when durable passes restart" {
+    const a = std.testing.allocator;
+    var f: PreparedBlueprintDrainTest = undefined;
+    try initDeferredRoadSaveTest(&f);
+    defer f.deinit();
+    try fillDeferredRoadSaveTest(&f);
+    const service = &f.fixture.service;
+    const id = BlueprintRoadSaveTest.chunk_id;
+    try std.testing.expectEqual(@as(usize, 1), service.processBlueprintRoadUpdatesWithBudget(1));
+    const expected = try a.dupe(@import("road_data.zig").Road, service.worker_state.modified_chunks.get(id).?.metadata.roads.items);
+    defer a.free(expected);
+    for (expected) |road| try std.testing.expect(road.slope != null);
+    try queueBlueprintSaveTestRoadGate(service);
+    try std.testing.expect(service.blueprint_road_queue.peek().?.dirty_again);
+    service.requestSaveTransition(100, false);
+    try f.waitSave(100);
+    const location = f.store.index.get(id).?;
+    var read: storage.BaseRead = .{ .file = try location.file.duplicate(), .offset = location.offset, .length = location.length, .revision = location.revision, .id = id, .world_uuid = f.store.world_uuid, .dimensions = f.store.dimensions };
+    defer read.deinit();
+    const reloaded = try service.readPersisted(&read);
+    defer reloaded.deinit(a);
+    for (expected) |road| try std.testing.expectEqualDeep(road, reloaded.metadata.road(road.index).?);
+    service.blueprint_road_queue.deinit(a);
+    service.blueprint_road_queue = .{};
+    try service.restoreDeferredWork(&f.store);
+    try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.peek().?.cursor);
+    try std.testing.expect(!service.blueprint_road_queue.peek().?.dirty_again);
+    const revision = service.worker_state.modified_chunks.get(id).?.chunk_revision;
+    _ = service.processBlueprintRoadUpdatesWithBudget(16);
+    try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.count);
+    try std.testing.expectEqual(revision, service.worker_state.modified_chunks.get(id).?.chunk_revision);
+    for (expected) |road| try std.testing.expectEqualDeep(road, service.worker_state.modified_chunks.get(id).?.metadata.road(road.index).?);
+}
+
+test "same-revision reload revisits road seeds reordered behind a partially processed cursor" {
+    const a = std.testing.allocator;
+    var f: PreparedBlueprintDrainTest = undefined;
+    try f.init();
+    defer f.deinit();
+    const service = &f.fixture.service;
+    const id = PreparedBlueprintDrainTest.chunk_id;
+    var chunk = try BlueprintRoadSchedulingTest.makeChunk(2);
+    var owns_chunk = true;
+    defer if (owns_chunk) chunk.deinit(a);
+    // Visit the higher row first. Persistence sorts roads by block index,
+    // which moves every unvisited seed for the lower row behind this cursor.
+    try std.testing.expectEqual(@as(usize, 8), chunk.metadata.roads.items.len);
+    for (0..4) |index| std.mem.swap(@import("road_data.zig").Road, &chunk.metadata.roads.items[index], &chunk.metadata.roads.items[index + 4]);
+    try service.worker_state.modified_chunks.put(a, id, chunk);
+    owns_chunk = false;
+    try queueBlueprintSaveTestRoadGate(service);
+    try std.testing.expectEqual(@as(usize, 4), service.processBlueprintRoadUpdatesWithBudget(4));
+    try std.testing.expectEqual(@as(usize, 4), service.blueprint_road_queue.peek().?.cursor);
+    const before = service.worker_state.modified_chunks.get(id).?;
+    const high = before.metadata.road(transformations.index(.{ 11, 7, 6 })).?;
+    try std.testing.expect(high.slope != null);
+    try std.testing.expect(before.metadata.road(transformations.index(.{ 11, 2, 6 })).?.slope == null);
+    const revision = before.chunk_revision;
+    service.requestSaveTransition(100, true);
+    try f.waitSave(100);
+    try std.testing.expect(!service.worker_state.modified_chunks.contains(id));
+    var catalog = try f.store.snapshotCatalog();
+    defer catalog.deinit();
+    var read = (try catalog.prepareRead(id)).?;
+    defer read.deinit();
+    const reloaded = try service.readPersisted(&read);
+    var owns_reload = true;
+    defer if (owns_reload) reloaded.deinit(a);
+    try std.testing.expectEqual(revision, reloaded.chunk_revision);
+    try std.testing.expectEqual(transformations.index(.{ 11, 2, 6 }), reloaded.metadata.roads.items[0].index);
+    try service.installLoaded(id, revision, reloaded);
+    owns_reload = false;
+    try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.peek().?.cursor);
+    _ = service.processBlueprintRoadUpdatesWithBudget(16);
+    try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.count);
+    const after = service.worker_state.modified_chunks.get(id).?;
+    try std.testing.expect(after.metadata.road(transformations.index(.{ 11, 2, 6 })).?.slope != null);
+    try std.testing.expectEqualDeep(high, after.metadata.road(high.index).?);
 }

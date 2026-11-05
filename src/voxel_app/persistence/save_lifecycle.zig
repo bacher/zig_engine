@@ -25,7 +25,6 @@ pub const Observations = struct {
     pending_reads: usize = 0,
     waiting_queries: usize = 0,
     compactor_active: bool = false,
-    derived_work_pending: bool = false,
     oldest_player_wait: ?i96 = null,
 };
 pub const Deadlines = struct { capture_wait_ns: u64, player_wait_ns: u64, overdue_ns: u64 };
@@ -68,7 +67,6 @@ pub const Lifecycle = struct {
     pub fn takeReady(self: *Lifecycle, observed: Observations) ?Intent {
         const drain = self.queued orelse return null;
         if (self.active != null or drain.fence_remaining != 0) return null;
-        if (observed.derived_work_pending) return null;
         if (drain.intent.final and (observed.pending_reads != 0 or observed.waiting_queries != 0 or observed.compactor_active)) return null;
         self.queued = null;
         return drain.intent;
@@ -204,14 +202,15 @@ pub const Lifecycle = struct {
 const testing = std.testing;
 const test_deadlines: Deadlines = .{ .capture_wait_ns = 500, .player_wait_ns = 100, .overdue_ns = 10_000 };
 
-test "every save drains derived road work before capture" {
+test "ordinary and final saves capture obligations once their command fence resolves" {
     var lifecycle: Lifecycle = .{};
     _ = lifecycle.request(.{ .id = 1, .final = false }, 0);
-    try testing.expect(lifecycle.takeReady(.{ .derived_work_pending = true }) == null);
+    // Deferred world work belongs to the captured state and is independent of
+    // readiness. The lifecycle only waits for the accepted command prefix.
     try testing.expectEqual(@as(u64, 1), lifecycle.takeReady(.{}).?.id);
     _ = lifecycle.request(.{ .id = 2, .final = true }, 1);
+    try testing.expect(lifecycle.takeReady(.{}) == null);
     lifecycle.commandResolved();
-    try testing.expect(lifecycle.takeReady(.{ .derived_work_pending = true }) == null);
     try testing.expectEqual(@as(u64, 2), lifecycle.takeReady(.{}).?.id);
 }
 

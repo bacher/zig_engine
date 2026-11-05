@@ -71,8 +71,11 @@ pass and three shadow cascades. Their geometry stays outside chunk meshes.
 
 Formation and reversion update every affected chunk's revision and travel in the service's
 atomic response packages. Saved orientations survive subscription eviction in service
-memory. Optimistic edits pin affected road chunks, preserve undo metadata for rejected
-commands, and replay after snapshots. Disk persistence remains unimplemented.
+memory and disk persistence. Optimistic edits pin affected road chunks, preserve undo
+metadata for rejected commands, and replay after snapshots. Saves also retain unfinished
+road-shape obligations by chunk, so a save can finish before those updates do. After load,
+each saved obligation begins a fresh pass over current metadata; saved slope ownership
+survives and unrelated chunks are not preloaded.
 
 Before an accepted snapshot replaces any chunk, pending changes are undone in reverse order
 across all their edited cells and affected road sections. Each edited cell retains a sparse

@@ -3,7 +3,7 @@
 This is the normative format reference for the
 [world-persistence feature spec](../features/world-persistence.md). It contains the existing
 binary layouts, encoding rules, compatibility policy, checksums, and metadata bounds
-for current format 3. Formats 1 and 2 are rejected as incompatible development worlds.
+for current format 4. Formats 1–3 are rejected as incompatible development worlds.
 All R/Q identifiers refer to that feature spec;
 requirement and acceptance-criterion IDs remain there. Runtime ownership, cancellation,
 recovery procedures, and platform durability remain in the feature spec.
@@ -55,7 +55,7 @@ range, with actual decoding support for every accepted version. These are distin
 snapshot sequences, world ticks, and generator versions. The minimum is an engine support
 policy; a second per-file version field is not required for this initial design.
 
-The current writer and minimum reader version are both 3. Development formats 1 and 2
+The current writer and minimum reader version are both 4. Development formats 1–3
 are rejected before their gameplay records are interpreted. A version bump alone does
 not implement compatibility: incompatible changes must also raise the minimum unless
 the engine supplies every required older decoding path. Pre-release development saves
@@ -202,9 +202,10 @@ alternative algorithms are follow-up improvements, not prerequisites for this in
 ## Binary Container Layouts
 
 The initial save-format version was 1; version 2 added inventory schema 1 below.
-The current writer and minimum readable version are both 3. Version 3 adds the world's
-private blueprint library and unfinished-instance progress to base and WAL records, and
-uses the current construction semantics. The base and every WAL segment must pass this
+Version 3 added the world's private blueprint library and unfinished-instance progress.
+The current writer and minimum readable version are both 4. Version 4 additionally stores
+unfinished world-work keys with each base and WAL snapshot, using current construction
+semantics. The base and every WAL segment must pass this
 whole-world version gate before their gameplay data is published. No migration or
 historical ruleset dispatch is provided. Fixed base/WAL header sizes remain unchanged.
 All integer fields are explicitly sized and little-endian; f32/f64 use
@@ -224,6 +225,7 @@ Global state
 Chunk index
 Player records
 Blueprint-state byte length (u64), followed by blueprint checkpoint bytes
+Pending-work byte length (u64), followed by canonical pending-work keys
 Chunk records
 Base physical checksum (32 bytes)
 ```
@@ -251,10 +253,10 @@ Sections and records must consume their extents exactly, without overlaps, gaps,
 unaccounted bytes. The index and base chunk records are sorted by chunk ID with no duplicates;
 each index identity and absolute offset must select the matching complete chunk record.
 Player records are sorted by player ID with no duplicates.
-The blueprint length prefix is present even when zero; its bytes are not part of the
-player-record or chunk-record section lengths. Chunk-index absolute offsets account for
-this section. Its declared length is bounded before allocation and must fit the base's
-exact total extent.
+The blueprint and pending-work length prefixes are present even when zero; their bytes
+are not part of the player-record or chunk-record section lengths. Chunk-index absolute
+offsets account for both sections. Their declared lengths are bounded before allocation
+and must fit the base's exact total extent.
 
 Compaction writes a seekable temporary file: reserve the index, stream records, and finalize
 index offsets and header lengths before computing the base physical checksum. Initially use
@@ -343,7 +345,8 @@ checksum: its container's physical checksum or transaction digest covers it.
 
 Persist all known players, including offline players, sorted by unique player ID. A
 simultaneous-player target does not limit historical records. Each WAL transaction
-contains complete global state and the complete player array, plus only changed chunks.
+contains complete global state, the complete player array, and the complete pending-work
+set, plus only changed chunks and ordered blueprint operations.
 Player eligibility still follows R42; client/session command dependency watermarks are
 resolved before capture and are not serialized as persistent session counters. Validate
 record counts and exact section consumption before publishing recovered state.
@@ -372,8 +375,9 @@ Verify the header checksum even when no transactions follow. Establish and synch
 header and directory entry under the existing creation/rotation durability contract.
 
 Each transaction consists of header, complete global state, complete player array,
-blueprint-operation byte length (u64), blueprint operations, changed chunk records, and
-commit footer. The blueprint prefix is present even when zero. The transaction header is exactly 84 bytes:
+blueprint-operation byte length (u64), blueprint operations, pending-work byte length
+(u64), canonical pending-work keys, changed chunk records, and commit footer. Both length
+prefixes are present even when zero. The transaction header is exactly 84 bytes:
 
 | Field, in order | Encoding |
 | --- | --- |
@@ -398,7 +402,7 @@ The commit footer is exactly 56 bytes:
 The changed-chunk count is known at capture, while compressed sizes become known during
 encoding. Put the total transaction size only in the footer, allowing streaming without
 WAL backpatching or retaining all encoded chunks. Release snapshot references under R29.
-Parse the declared global/player/blueprint sections and exactly the declared number of length-framed
+Parse the declared global/player/blueprint/pending-work sections and exactly the declared number of length-framed
 chunk records before expecting a footer; never search payload bytes for magic markers.
 Reject duplicate chunk IDs within a transaction. Chunk records use the identical base/WAL
 representation already defined; WAL chunk ordering need not match the sorted base order.
@@ -408,6 +412,39 @@ and its repeated sequence must match the header. Validate all framing, predecess
 checksums, and payload semantics before accepting a recoverable snapshot. A marker alone
 does not establish a commit. Writer success still requires synchronization before
 acknowledgment; partial writes and failure repair remain governed by R23/R30/R55.
+
+### Unfinished world-work keys
+
+`deferred_world_work.zig` defines a finite typed reconciliation obligation. The enclosing
+base/WAL section starts with its byte length as u64, followed by zero or more five-byte
+records without a per-record header or native padding:
+
+| Field, in order | Encoding |
+| --- | --- |
+| Work kind | u8; 1 = road-shape reconciliation, all other values unsupported |
+| Chunk ID | u32 |
+
+Sort strictly by numeric kind, then numeric chunk ID; duplicates and out-of-order keys
+are invalid. Require the byte length to be divisible by five, at most 4,096 entries
+(20,480 payload bytes), and every chunk ID to lie within the saved world's dimensions.
+Bound section bytes before reading/allocating them; validate the complete set before
+allocating runtime keys or publishing state. A zero-byte payload denotes an empty set.
+Every committed snapshot replaces the complete prior set, including when empty;
+this section is not an operation journal.
+
+Marking an obligation accompanies accepted world effects in the same snapshot. Clearing
+an obligation accompanies its completed current-world result. A snapshot may retain a key
+alongside already committed partial reconciliation effects; restart repeats the whole pass.
+Road shape and ownership remain ordinary chunk metadata. Runtime cursors, revision
+observations, repeat flags, and dependency waits are not serialized. Restore scheduling
+directly from saved keys before readiness and load dependencies on demand. Existing
+source ownership and selected-command-prefix rules still apply; a nonempty work set does
+not itself block any save kind. Future work kinds require explicit shared schemas/handlers
+and the enclosing world-version compatibility policy.
+
+The capture owns an immutable encoded set; storage owns the last committed encoded set.
+Base compaction copies its frozen set and preserves any newer live committed membership.
+See [persisted unfinished world work](../features/deferred-world-work.md).
 
 ### Blueprint definitions and active instances
 
@@ -500,13 +537,14 @@ byte concatenation, is:
 | Snapshot-zero anchor | Initial-anchor domain prefix `||` canonical initial fields listed below |
 
 Transaction coverage includes its header, global state, full player records, blueprint
-length prefix and operations, chunk records
+length prefix and operations, pending-work length prefix and keys, chunk records
 with their checksums, and the commit footer's marker, total length, and repeated sequence.
 Only its final digest is excluded. The included segment header binds world, segment, format,
 and segment predecessor; the transaction header binds the immediately previous committed
 sequence/digest. Verify the segment header independently before using it in this input.
 The base physical checksum includes the finalized header, incorporated logical digest,
-descriptor, global state, index, blueprint length/checkpoint, and all player/chunk records with their record checksums.
+descriptor, global state, index, blueprint length/checkpoint, pending-work length/keys, and
+all player/chunk records with their record checksums.
 
 Use one chained digest per committed snapshot transaction. Validate footer identity/length
 as well as the digest. Append hashing processes the fixed segment header and new transaction
@@ -528,6 +566,7 @@ Global-state length (u32), followed by global-state bytes
 Player count (u64)
 Player-section length (u64), followed by player records sorted by player ID
 Blueprint-state length (u64), followed by canonical blueprint checkpoint bytes
+Pending-work length (u64), followed by canonical pending-work keys
 Initial override count (u64), followed by chunk records sorted by chunk ID
 ```
 

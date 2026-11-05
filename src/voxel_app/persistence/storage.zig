@@ -4,11 +4,12 @@ const std = @import("std");
 pub const io = @import("io.zig");
 const format = @import("format.zig");
 pub const blueprint_records = @import("blueprints.zig");
+const deferred_work = @import("../deferred_world_work.zig");
 pub const Uuid = [16]u8;
 pub const Digest = [32]u8;
 pub const SnapshotIdentity = struct { sequence: u64, digest: Digest };
-pub const Limits = struct { max_chunks: usize = 1_000_000, max_segments: usize = 128, max_players_bytes: usize = 16 * 1024 * 1024, blueprints: blueprint_records.Limits = .{} };
-pub const Initial = struct { world_uuid: Uuid, descriptor: []const u8, global: []const u8, players: []const u8, player_count: u64, chunks: []const []const u8 = &.{}, blueprints: []const u8 = &.{} };
+pub const Limits = struct { max_chunks: usize = 1_000_000, max_segments: usize = 128, max_players_bytes: usize = 16 * 1024 * 1024, max_pending_work: usize = 4096, blueprints: blueprint_records.Limits = .{} };
+pub const Initial = struct { world_uuid: Uuid, descriptor: []const u8, global: []const u8, players: []const u8, player_count: u64, chunks: []const []const u8 = &.{}, blueprints: []const u8 = &.{}, pending_work: []const u8 = &.{} };
 const HeaderSize = 120;
 const MaxRecord = 1_212_501;
 const Location = struct { file: io.File, offset: u64, length: u32, revision: u64 };
@@ -26,6 +27,7 @@ const Transaction = struct {
     hash: std.crypto.hash.Blake3,
     chunks: std.AutoHashMap(u32, Location),
     blueprint_changes: blueprint_records.Prepared,
+    pending_work: []u8,
 };
 pub const Store = struct {
     allocator: std.mem.Allocator,
@@ -38,11 +40,13 @@ pub const Store = struct {
     players: []u8,
     player_count: u64,
     blueprints: blueprint_records.State = .{ .allocator = std.heap.page_allocator },
+    /// Canonical complete set belonging to the latest durable snapshot.
+    pending_work: []u8 = &.{},
     sequence: u64,
     digest: Digest,
     base: io.File,
     base_sequence: u64,
-    /// Preserve the snapshot-zero anchor's format version when compacting v1 saves.
+    /// Preserve the snapshot-zero anchor's format version during compaction.
     base_format_version: u32 = format.current_write_version,
     index: std.AutoHashMap(u32, Location),
     segments: std.ArrayList(Segment) = .empty,
@@ -75,6 +79,7 @@ pub const Store = struct {
         _ = try format.decodeGlobal(initial.global);
         try format.validatePlayers(initial.players, initial.player_count);
         if (initial.players.len > limits.max_players_bytes) return error.Capacity;
+        try deferred_work.validate(initial.pending_work, desc.dimensions, limits.max_pending_work);
         var blueprints = try blueprint_records.decodeState(a, initial.blueprints, desc.dimensions, limits.blueprints);
         errdefer blueprints.deinit();
         var hash = hasher("ZGW-INIT-1\x00");
@@ -90,6 +95,8 @@ pub const Store = struct {
         hash.update(initial.players);
         hashInt(&hash, u64, initial.blueprints.len);
         hash.update(initial.blueprints);
+        hashInt(&hash, u64, initial.pending_work.len);
+        hash.update(initial.pending_work);
         hashInt(&hash, u64, initial.chunks.len);
         if (initial.chunks.len > limits.max_chunks) return error.Capacity;
         var last_id: ?u32 = null;
@@ -109,6 +116,9 @@ pub const Store = struct {
         const players = try a.dupe(u8, initial.players);
         errdefer a.free(players);
         var self: Store = .{ .allocator = a, .directory = dir, .limits = limits, .world_uuid = initial.world_uuid, .dimensions = desc.dimensions, .descriptor = descriptor, .global = global, .players = players, .player_count = initial.player_count, .sequence = 0, .digest = digest, .base = undefined, .base_sequence = 0, .index = std.AutoHashMap(u32, Location).init(a) };
+        const pending_work = try a.dupe(u8, initial.pending_work);
+        errdefer a.free(pending_work);
+        self.pending_work = pending_work;
         self.blueprints = blueprints;
         errdefer {
             self.index.deinit();
@@ -176,7 +186,13 @@ pub const Store = struct {
         try base.read(&blueprint_prefix, blueprint_start);
         const blueprint_len = get(u64, &blueprint_prefix, 0);
         if (blueprint_len > limits.blueprints.max_state_bytes) return error.Capacity;
-        const chunk_start = try add(try add(blueprint_start, 8), blueprint_len);
+        const work_start = try add(try add(blueprint_start, 8), blueprint_len);
+        if (work_start > size or size - work_start < 8) return error.Corruption;
+        var work_prefix: [8]u8 = undefined;
+        try base.read(&work_prefix, work_start);
+        const work_len = get(u64, &work_prefix, 0);
+        if (work_len > try deferred_work.encodedSize(limits.max_pending_work)) return error.Capacity;
+        const chunk_start = try add(try add(work_start, 8), work_len);
         if (try add(try add(chunk_start, chunk_len), 32) != size) return error.Corruption;
         const descriptor = try readAlloc(a, base, 120, descriptor_len);
         errdefer if (!owned) a.free(descriptor);
@@ -194,6 +210,8 @@ pub const Store = struct {
         const blueprint_bytes = try readAlloc(a, base, blueprint_start + 8, blueprint_len);
         defer a.free(blueprint_bytes);
         self.blueprints = try blueprint_records.decodeState(a, blueprint_bytes, desc.dimensions, limits.blueprints);
+        self.pending_work = try readAlloc(a, base, work_start + 8, work_len);
+        try deferred_work.validate(self.pending_work, desc.dimensions, limits.max_pending_work);
         var anchor = hasher("ZGW-INIT-1\x00");
         anchor.update(&self.world_uuid);
         hashInt(&anchor, u32, version);
@@ -207,6 +225,8 @@ pub const Store = struct {
         anchor.update(players);
         hashInt(&anchor, u64, blueprint_len);
         anchor.update(blueprint_bytes);
+        hashInt(&anchor, u64, work_len);
+        anchor.update(self.pending_work);
         hashInt(&anchor, u64, chunk_count);
         var cursor = chunk_start;
         var previous: ?u32 = null;
@@ -250,6 +270,7 @@ pub const Store = struct {
         self.allocator.free(self.global);
         self.allocator.free(self.players);
         self.blueprints.deinit();
+        self.allocator.free(self.pending_work);
         self.* = undefined;
     }
     pub fn snapshotCatalog(self: *const Store) !BaseCatalog {
@@ -295,11 +316,17 @@ pub const Store = struct {
         return self.beginSnapshotWithBlueprints(sequence, global, players, player_count, changed_count, &.{});
     }
     pub fn beginSnapshotWithBlueprints(self: *Store, sequence: u64, global: []const u8, players: []const u8, player_count: u64, changed_count: u64, blueprint_changes: []const u8) !void {
+        return self.beginSnapshotWithState(sequence, global, players, player_count, changed_count, blueprint_changes, self.pending_work);
+    }
+    /// Replaces the complete pending-work set in the same transaction as its terrain.
+    /// Older wrappers retain the current set; callers pass an empty set here to clear it.
+    pub fn beginSnapshotWithState(self: *Store, sequence: u64, global: []const u8, players: []const u8, player_count: u64, changed_count: u64, blueprint_changes: []const u8, pending_work: []const u8) !void {
         if (self.phase != .ready or self.transaction != null) return error.WriterBusy;
         if (sequence <= self.sequence) return error.InvalidSequence;
         if (players.len > self.limits.max_players_bytes or changed_count > self.limits.max_chunks) return error.Capacity;
         _ = try format.decodeGlobal(global);
         try format.validatePlayers(players, player_count);
+        try deferred_work.validate(pending_work, self.dimensions, self.limits.max_pending_work);
         var prepared = try self.blueprints.prepare(blueprint_changes, self.dimensions, self.limits.blueprints);
         errdefer if (self.transaction == null) prepared.deinit();
         if (self.active == null) try self.newSegment();
@@ -312,7 +339,9 @@ pub const Store = struct {
         errdefer if (self.transaction == null) self.allocator.free(g);
         const p = try self.allocator.dupe(u8, players);
         errdefer if (self.transaction == null) self.allocator.free(p);
-        var tx: Transaction = .{ .sequence = sequence, .global = g, .players = p, .player_count = player_count, .expected = changed_count, .start = s.end, .cursor = s.end, .hash = hasher("ZGW-WALTX-1\x00"), .chunks = std.AutoHashMap(u32, Location).init(self.allocator), .blueprint_changes = prepared };
+        const work = try self.allocator.dupe(u8, pending_work);
+        errdefer if (self.transaction == null) self.allocator.free(work);
+        var tx: Transaction = .{ .sequence = sequence, .global = g, .players = p, .player_count = player_count, .expected = changed_count, .start = s.end, .cursor = s.end, .hash = hasher("ZGW-WALTX-1\x00"), .chunks = std.AutoHashMap(u32, Location).init(self.allocator), .blueprint_changes = prepared, .pending_work = work };
         tx.hash.update(&s.header);
         var header: [84]u8 = @splat(0);
         @memcpy(header[0..8], "ZGTXBEG1");
@@ -333,6 +362,10 @@ pub const Store = struct {
         put(u64, &blueprint_prefix, 0, blueprint_changes.len);
         try self.append(&blueprint_prefix);
         try self.append(blueprint_changes);
+        var work_prefix: [8]u8 = undefined;
+        put(u64, &work_prefix, 0, pending_work.len);
+        try self.append(&work_prefix);
+        try self.append(pending_work);
     }
     pub fn appendChunk(self: *Store, bytes: []const u8) !void {
         if (self.phase != .appending) return error.WriterBusy;
@@ -393,6 +426,8 @@ pub const Store = struct {
         self.players = tx.players;
         self.player_count = tx.player_count;
         self.blueprints.apply(&tx.blueprint_changes);
+        self.allocator.free(self.pending_work);
+        self.pending_work = tx.pending_work;
         tx.blueprint_changes.deinit();
         tx.chunks.deinit();
         self.transaction = null;
@@ -417,6 +452,7 @@ pub const Store = struct {
             self.allocator.free(tx.global);
             self.allocator.free(tx.players);
             tx.blueprint_changes.deinit();
+            self.allocator.free(tx.pending_work);
             tx.chunks.deinit();
             self.transaction = null;
         }
@@ -487,7 +523,10 @@ pub const Store = struct {
         errdefer a.free(global);
         const players = try a.dupe(u8, self.players);
         errdefer a.free(players);
+        const pending_work = try a.dupe(u8, self.pending_work);
+        errdefer a.free(pending_work);
         var frozen: Store = .{ .allocator = a, .directory = dir, .limits = self.limits, .world_uuid = self.world_uuid, .dimensions = self.dimensions, .descriptor = descriptor, .global = global, .players = players, .player_count = self.player_count, .sequence = self.sequence, .digest = self.digest, .base = base, .base_sequence = self.base_sequence, .index = std.AutoHashMap(u32, Location).init(a) };
+        frozen.pending_work = pending_work;
         frozen.blueprints = try self.blueprints.clone(a);
         frozen.base_format_version = self.base_format_version;
         errdefer {
@@ -726,6 +765,23 @@ pub const Store = struct {
             defer self.allocator.free(blueprint_changes);
             cursor = try add(cursor, blueprint_len);
             try blueprint_records.validateOps(blueprint_changes, self.dimensions, self.limits.blueprints);
+            if (size - cursor < 8) {
+                segment.tail = true;
+                break;
+            }
+            var work_prefix: [8]u8 = undefined;
+            try file.read(&work_prefix, cursor);
+            cursor = try add(cursor, 8);
+            const work_len = get(u64, &work_prefix, 0);
+            if (work_len > try deferred_work.encodedSize(self.limits.max_pending_work)) return error.Capacity;
+            if (work_len > size - cursor) {
+                segment.tail = true;
+                break;
+            }
+            const pending_work = try readAlloc(self.allocator, file, cursor, work_len);
+            defer self.allocator.free(pending_work);
+            cursor = try add(cursor, work_len);
+            try deferred_work.validate(pending_work, self.dimensions, self.limits.max_pending_work);
             var hash = hasher("ZGW-WALTX-1\x00");
             hash.update(&segment.header);
             hash.update(&header);
@@ -733,6 +789,8 @@ pub const Store = struct {
             hash.update(players);
             hash.update(&blueprint_prefix);
             hash.update(blueprint_changes);
+            hash.update(&work_prefix);
+            hash.update(pending_work);
             var changed = std.AutoHashMap(u32, Location).init(self.allocator);
             defer changed.deinit();
             var n: u64 = 0;
@@ -785,6 +843,8 @@ pub const Store = struct {
                 errdefer self.allocator.free(new_global);
                 const new_players = try self.allocator.dupe(u8, players);
                 errdefer self.allocator.free(new_players);
+                const new_work = try self.allocator.dupe(u8, pending_work);
+                errdefer self.allocator.free(new_work);
                 var prepared = try self.blueprints.prepare(blueprint_changes, self.dimensions, self.limits.blueprints);
                 defer prepared.deinit();
                 var it = changed.iterator();
@@ -795,6 +855,8 @@ pub const Store = struct {
                 self.players = new_players;
                 self.player_count = pcount;
                 self.blueprints.apply(&prepared);
+                self.allocator.free(self.pending_work);
+                self.pending_work = new_work;
                 self.sequence = sequence;
                 self.digest = digest;
             }
@@ -875,7 +937,8 @@ pub const Store = struct {
         defer self.allocator.free(blueprint_bytes);
         if (blueprint_bytes.len > self.limits.blueprints.max_state_bytes) return error.Capacity;
         const blueprint_start = try add(player_start, self.players.len);
-        const chunk_start = try add(try add(blueprint_start, 8), blueprint_bytes.len);
+        const work_start = try add(try add(blueprint_start, 8), blueprint_bytes.len);
+        const chunk_start = try add(try add(work_start, 8), self.pending_work.len);
         try output.write(self.descriptor, 120);
         try output.write(self.global, 120 + self.descriptor.len);
         try output.write(self.players, player_start);
@@ -883,6 +946,10 @@ pub const Store = struct {
         put(u64, &blueprint_prefix, 0, blueprint_bytes.len);
         try output.write(&blueprint_prefix, blueprint_start);
         try output.write(blueprint_bytes, blueprint_start + 8);
+        var work_prefix: [8]u8 = undefined;
+        put(u64, &work_prefix, 0, self.pending_work.len);
+        try output.write(&work_prefix, work_start);
+        try output.write(self.pending_work, work_start + 8);
         var cursor = chunk_start;
         for (ids, 0..) |id, i| {
             try self.checkpoint();
@@ -1865,7 +1932,7 @@ test "incompatible development worlds are rejected by both base and WAL gates" {
     const original_base = try readAlloc(a, f.store.base, 0, try f.store.base.size());
     defer a.free(original_base);
     var old_header: [120]u8 = original_base[0..120].*;
-    put(u32, &old_header, 8, 2);
+    put(u32, &old_header, 8, 3);
     try f.store.base.write(&old_header, 0);
     const wal_name = try a.dupeZ(u8, f.store.segments.items[0].name);
     defer a.free(wal_name);
@@ -1890,7 +1957,7 @@ test "incompatible development worlds are rejected by both base and WAL gates" {
         const wal = try dir.file(wal_name, false);
         defer wal.close();
         var header = original_wal;
-        put(u32, &header, 8, 2);
+        put(u32, &header, 8, 3);
         var h = hasher("ZGW-WALHDR-1\x00");
         h.update(header[0..88]);
         h.final(header[88..120]);
@@ -2052,4 +2119,203 @@ test "unfinished progress survives checkpoint racing a final fulfillment and unc
     var chunk = try format.decodeChunk(a, f.store.world_uuid, loaded, f.store.dimensions);
     defer chunk.deinit(a);
     try std.testing.expectEqualSlices(u8, &blocks, chunk.blocks);
+}
+
+test "pending work replaces and clears with road terrain across concurrent compaction" {
+    const a = std.testing.allocator;
+    var f = try Fixture.init();
+    defer f.deinit();
+    const pending = [_]u8{ 1, 2, 0, 0, 0 };
+    const tick = format.encodeGlobal(1);
+    var blocks: [32768]u8 = @splat(0);
+    blocks[0] = 255;
+    const unfinished_metadata = try format.encodeMetadata(a, .{ .roads = &.{.{}} });
+    defer a.free(unfinished_metadata);
+    const unfinished = try format.encodeChunk(a, f.store.world_uuid, .{ .id = 2, .revision = 1, .is_unreachable = false, .blocks = &blocks, .metadata = unfinished_metadata });
+    defer a.free(unfinished);
+    try f.store.beginSnapshotWithState(1, &tick, &.{}, 0, 1, &.{}, &pending);
+    try f.store.appendChunk(unfinished);
+    _ = try f.store.commitSnapshot();
+    try std.testing.expectEqualSlices(u8, &pending, f.store.pending_work);
+    // Callers without a complete set preserve it.
+    try f.store.beginSnapshot(2, &tick, &.{}, 0, 0);
+    _ = try f.store.commitSnapshot();
+    var compaction = try f.store.prepareCompaction();
+    var compaction_alive = true;
+    defer if (compaction_alive) compaction.deinit();
+    try std.testing.expectEqualSlices(u8, &pending, compaction.store.pending_work);
+    const formed_metadata = try format.encodeMetadata(a, .{ .roads = &.{.{ .formation = .{ .high_endpoint = .{ 64, 0, 0 }, .direction = 1, .length = 3, .section = 1 } }} });
+    defer a.free(formed_metadata);
+    const formed = try format.encodeChunk(a, f.store.world_uuid, .{ .id = 2, .revision = 2, .is_unreachable = false, .blocks = &blocks, .metadata = formed_metadata });
+    defer a.free(formed);
+    try f.store.beginSnapshotWithState(3, &tick, &.{}, 0, 1, &.{}, &.{});
+    try f.store.appendChunk(formed);
+    _ = try f.store.commitSnapshot();
+    try compaction.run();
+    try f.store.installCompaction(&compaction);
+    try std.testing.expectEqual(@as(u64, 2), f.store.base_sequence);
+    try std.testing.expectEqual(@as(usize, 0), f.store.pending_work.len);
+    try std.testing.expectEqualSlices(u8, &pending, compaction.store.pending_work);
+    compaction.deinit();
+    compaction_alive = false;
+    try f.reopen();
+    try std.testing.expectEqual(@as(u64, 3), f.store.sequence);
+    try std.testing.expectEqual(@as(usize, 0), f.store.pending_work.len);
+    const restored = (try f.store.readChunk(a, 2)).?;
+    defer a.free(restored);
+    try std.testing.expectEqualSlices(u8, formed, restored);
+    // An outstanding set is retained by an ordinary compact/reopen too.
+    const another = [_]u8{ 1, 3, 0, 0, 0 };
+    try f.store.beginSnapshotWithState(4, &tick, &.{}, 0, 0, &.{}, &another);
+    _ = try f.store.commitSnapshot();
+    try f.store.compact();
+    try f.reopen();
+    try std.testing.expectEqualSlices(u8, &another, f.store.pending_work);
+}
+
+test "modeled uncertain commit keeps road result and work clear atomic" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |survives| {
+        var model = io.Model.init(a);
+        defer model.deinit();
+        io.test_model = &model;
+        defer io.test_model = null;
+        var f = try Fixture.init();
+        defer f.deinit();
+        const pending = [_]u8{ 1, 0, 0, 0, 0 };
+        const tick = format.encodeGlobal(1);
+        var blocks: [32768]u8 = @splat(0);
+        blocks[0] = 255;
+        const unfinished_metadata = try format.encodeMetadata(a, .{ .roads = &.{.{}} });
+        defer a.free(unfinished_metadata);
+        const unfinished = try format.encodeChunk(a, f.store.world_uuid, .{ .id = 0, .revision = 1, .is_unreachable = false, .blocks = &blocks, .metadata = unfinished_metadata });
+        defer a.free(unfinished);
+        try f.store.beginSnapshotWithState(1, &tick, &.{}, 0, 1, &.{}, &pending);
+        try f.store.appendChunk(unfinished);
+        _ = try f.store.commitSnapshot();
+        const formed_metadata = try format.encodeMetadata(a, .{ .roads = &.{.{ .formation = .{ .high_endpoint = .{ 0, 0, 0 }, .direction = 0, .length = 1, .section = 0 } }} });
+        defer a.free(formed_metadata);
+        const formed = try format.encodeChunk(a, f.store.world_uuid, .{ .id = 0, .revision = 2, .is_unreachable = false, .blocks = &blocks, .metadata = formed_metadata });
+        defer a.free(formed);
+        try f.store.beginSnapshotWithState(2, &tick, &.{}, 0, 1, &.{}, &.{});
+        try f.store.appendChunk(formed);
+        model.failed_sync_survives = survives;
+        var fault: io.Faults = .{ .operation = .full_sync, .after = 0 };
+        f.store.setFaults(&fault);
+        try std.testing.expectError(error.Io, f.store.commitSnapshot());
+        f.store.setFaults(null);
+        try model.crash(.lose_unsynced);
+        try f.reopen();
+        try std.testing.expectEqual(@as(u64, if (survives) 2 else 1), f.store.sequence);
+        try std.testing.expectEqualSlices(u8, if (survives) &.{} else &pending, f.store.pending_work);
+        const restored = (try f.store.readChunk(a, 0)).?;
+        defer a.free(restored);
+        try std.testing.expectEqualSlices(u8, if (survives) formed else unfinished, restored);
+    }
+}
+
+test "snapshot zero pending work and torn replacements survive model recovery" {
+    const a = std.testing.allocator;
+    var model = io.Model.init(a);
+    defer model.deinit();
+    io.test_model = &model;
+    defer io.test_model = null;
+    const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
+    defer a.free(descriptor);
+    const tick = format.encodeGlobal(0);
+    const pending = [_]u8{ 1, 2, 0, 0, 0 };
+    var store = try Store.create(a, "model", .{ .world_uuid = @splat(4), .descriptor = descriptor, .global = &tick, .players = &.{}, .player_count = 0, .pending_work = &pending }, .{});
+    const digest = store.digest;
+    store.deinit();
+    store = try Store.open(a, "model", .{});
+    try std.testing.expectEqualSlices(u8, &pending, store.pending_work);
+    try std.testing.expectEqualSlices(u8, &digest, &store.digest);
+    // A valid replacement without its required changed chunk/footer is discarded.
+    try store.beginSnapshotWithState(1, &tick, &.{}, 0, 1, &.{}, &.{});
+    try model.crash(.survive_unsynced);
+    store.deinit();
+    store = try Store.open(a, "model", .{});
+    defer store.deinit();
+    try std.testing.expectEqual(@as(u64, 0), store.sequence);
+    try std.testing.expectEqualSlices(u8, &pending, store.pending_work);
+}
+
+test "pending work preflight rejects invalid and over-capacity sets before WAL mutation" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    const tick = format.encodeGlobal(0);
+    const invalid = [_]u8{ 2, 0, 0, 0, 0 };
+    const before = try f.store.segments.items[f.store.active.?].file.size();
+    try std.testing.expectError(error.InvalidDeferredWork, f.store.beginSnapshotWithState(1, &tick, &.{}, 0, 0, &.{}, &invalid));
+    f.store.limits.max_pending_work = 0;
+    try std.testing.expectError(error.Capacity, f.store.beginSnapshotWithState(1, &tick, &.{}, 0, 0, &.{}, &.{ 1, 0, 0, 0, 0 }));
+    try std.testing.expectEqual(Phase.ready, f.store.phase);
+    try std.testing.expectEqual(before, try f.store.segments.items[f.store.active.?].file.size());
+}
+
+test "modeled torn pending-work length and keys cannot publish a partial snapshot" {
+    const a = std.testing.allocator;
+    const pending = [_]u8{ 1, 2, 0, 0, 0 };
+    for (0..8 + pending.len + 1) |cut| {
+        var model = io.Model.init(a);
+        defer model.deinit();
+        io.test_model = &model;
+        defer io.test_model = null;
+        var f = try Fixture.init();
+        defer f.deinit();
+        const tick = format.encodeGlobal(1);
+        try f.store.beginSnapshotWithState(1, &tick, &.{}, 0, 1, &.{}, &pending);
+        const tx = &f.store.transaction.?;
+        const file = f.store.segments.items[f.store.active.?].file;
+        try file.truncate(tx.cursor - pending.len - 8 + cut);
+        try file.sync();
+        try model.crash(.lose_unsynced);
+        try f.reopen();
+        try std.testing.expectEqual(@as(u64, 0), f.store.sequence);
+        try std.testing.expectEqual(@as(usize, 0), f.store.pending_work.len);
+    }
+}
+
+test "checksummed unknown pending-work kinds are rejected from base and WAL" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |from_wal| {
+        var model = io.Model.init(a);
+        defer model.deinit();
+        io.test_model = &model;
+        defer io.test_model = null;
+        const descriptor = try format.encodeDescriptor(a, .{ .dimensions = .{ 4, 4, 4 }, .generator_id = 2, .seed = 0, .settings = &format.flat_settings });
+        defer a.free(descriptor);
+        const tick = format.encodeGlobal(0);
+        const pending = [_]u8{ 1, 2, 0, 0, 0 };
+        var store = try Store.create(a, "model", .{ .world_uuid = @splat(5), .descriptor = descriptor, .global = &tick, .players = &.{}, .player_count = 0, .pending_work = if (from_wal) &.{} else &pending }, .{});
+        if (from_wal) {
+            try store.beginSnapshotWithState(1, &tick, &.{}, 0, 0, &.{}, &pending);
+            _ = try store.commitSnapshot();
+        }
+        const file = try (if (from_wal) store.segments.items[store.active.?].file else store.base).duplicate();
+        defer file.close();
+        const original = try readAlloc(a, file, 0, try file.size());
+        defer a.free(original);
+        const corrupted = try a.dupe(u8, original);
+        defer a.free(corrupted);
+        const work_offset = if (from_wal) original.len - 56 - pending.len else offset: {
+            const blueprint_start = 120 + descriptor.len + tick.len;
+            break :offset blueprint_start + 8 + get(u64, original, blueprint_start) + 8;
+        };
+        corrupted[@intCast(work_offset)] = 2;
+        const digest = format.hash(if (from_wal) "ZGW-WALTX-1\x00" else "ZGW-BASE-1\x00", &.{corrupted[0 .. corrupted.len - 32]});
+        @memcpy(corrupted[corrupted.len - 32 ..], &digest);
+        try file.write(corrupted, 0);
+        try file.sync();
+        store.deinit();
+        try std.testing.expectError(error.InvalidDeferredWork, Store.open(a, "model", .{}));
+        const retained = try readAlloc(a, file, 0, original.len);
+        defer a.free(retained);
+        try std.testing.expectEqualSlices(u8, corrupted, retained);
+        try file.write(original, 0);
+        try file.sync();
+        store = try Store.open(a, "model", .{});
+        defer store.deinit();
+        try std.testing.expectEqualSlices(u8, &pending, store.pending_work);
+    }
 }

@@ -148,7 +148,7 @@ incompatible development saves are rejected through world-save version gates rat
 preserved through compatibility work. Any future migration policy between released game
 versions will be designed separately.
 
-The voxel app stops the simulation worker, submits any remaining local commands, and destroys the service before destroying its game state and engine. Service shutdown commits already submitted edits, skips pending generation work, and frees unconsumed replies. Persistent worlds drain admitted actions and player checkpoints before final capture. A delayed or failed save keeps the loop responsive and offers wait/retry, cancel exit, and explicit quit without saving. See [persistence](persistence.md) for the storage lifecycle.
+The voxel app stops the simulation worker, submits any remaining local commands, and destroys the service before destroying its game state and engine. Service shutdown commits already submitted edits, skips pending generation work, and frees unconsumed replies. Persistent worlds drain admitted actions and player checkpoints before final capture, while unfinished road work is saved as typed chunk obligations and resumes after loading. A delayed or failed save keeps the loop responsive and offers wait/retry, cancel exit, and explicit quit without saving. See [persistence](persistence.md) for the storage lifecycle.
 
 ## Read next
 

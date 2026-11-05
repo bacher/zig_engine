@@ -17,13 +17,13 @@ This report accompanies the implementation of [the blueprint specification](../s
 - Mixed-package staging uses expected O(1) hash lookups for staged instance IDs and preceding valid fulfillment identities, with scratch proportional to package instances and preceding valid fills. Publications clone only their footprint indexes and filter matching target identities in those owned clones. A nonempty fulfillment set adds one membership lookup per existing target in each cloned index; fills after the last instance add no overlay entries. Fulfillment-only packages remain allocation-free, with no whole-world/library copy or bitmap copy per fill. The five-neighbor structural path and O(1) completion are unchanged.
 - Dedicated client and authority fulfillment reads at most five physical support cells. It does not call ordinary structural/dependent validation or road planning. Target removal, bit/counter updates, and known-empty construction insertion are incremental; completion does not scan the site.
 - Completed-site retirement runs on every client world update after incoming chunk/blueprint-package reconciliation, including empty incoming queues, before gameplay/render work or GPU-capacity early returns; the service also retires metadata each normal worker turn. Each call visits at most four footprint chunks. Idle calls are allocation-free O(1); active work includes the existing per-chunk instance-ID search. Cleanup removes completed instance records and frees their bitmaps/footprints and unused chunk indexes while retaining library definitions and the replay ID high-water mark. An empty instance map restores ordinary validation's no-site fast path without adding fulfillment work.
-- Ordinary edits protect real and indexed planned dependents in the completed logical world. Client and authority share a dispatch that uses the ordinary physical-world validator when the instance map is empty, avoiding duplicate placement support searches and affected-cell collection. Retired sites awaiting cleanup conservatively keep the completed-world path. Adaptive-road effects from fills use a bounded coalesced queue and independently validated final shapes. Shape-only validation reads the complete final plan through `CompletedReader` and checks each changed road and any real/planned road directly above it with the existing local road-support rules and disabled validator caches. It performs no recursive support search or broad affected-construction scan; ordinary material edits retain that broad validation. In-progress queue cursors survive metadata revisions, and completed dirty passes move to the tail for another pass so quiet entries progress. Every durable capture waits for this derived queue to empty, including ordinary/autosave, overdue, final, and internal journal-prefix captures.
-- At a ready public command fence or pending internal prefix, with no older writer, constant-time admission holds later ordered mutations and timed transformations and pauses NPC simulation. Reads, completions, and bounded road batches continue so continuous producers cannot prolong the drain. The initial budget is 16 work units per service turn, counting each processed seed and each entry completion or requeue; dependency, source-hold, and error waits yield the batch immediately. An older writer retains normal admission rules. Road completion directly advances the deferred internal capture, including a prepared Apply with no FIFO work. Failure or cancellation releases this additional hold while preserving source holds, the empty-road capture gate, and existing explicit/bounded retry policy; a road-completion wake cannot restart a failed prefix. The queue remains volatile, and the recovery format is unchanged.
+- Ordinary edits protect real and indexed planned dependents in the completed logical world. Client and authority share a dispatch that uses the ordinary physical-world validator when the instance map is empty, avoiding duplicate placement support searches and affected-cell collection. Retired sites awaiting cleanup conservatively keep the completed-world path. Adaptive-road effects from fills use a bounded coalesced queue and independently validated final shapes. Shape-only validation reads the complete final plan through `CompletedReader` and checks each changed road and any real/planned road directly above it with the existing local road-support rules and disabled validator caches. It performs no recursive support search or broad affected-construction scan; ordinary material edits retain that broad validation. In-progress queue cursors survive metadata revisions, and completed dirty passes move to the tail for another pass so quiet entries progress. Every durable capture persists unfinished typed chunk keys with current world state, including ordinary/autosave, overdue, final, and internal journal-prefix captures; it does not require this queue to empty.
+- The road queue owns deduplicated membership and a membership generation. A fill reserves keys before publication; completed work clears a key only after any coalesced repeat. Each capture owns one full canonical set, bounded to 4,096 five-byte keys. Marks, partial road results, and clears commit with world state. Load restores fresh cursor-zero entries directly from these keys before readiness, without scanning or preloading the world. Saved road state/ownership persists; cursor, observed revision, and repeat bookkeeping do not. The initial budget remains 16 seed/completion/requeue units per service turn, yielding on dependency/source/error waits. Saving adds no global road-drain hold; normal source gates and selected command prefixes still apply.
 - Definitions, site progress, terrain, and inventory share world transactions. A fulfillment journal record is 13 bytes; progress does not clone the definition or full bitmap per fill. Authoritative acknowledgments remain individual while block snapshots coalesce within each service batch.
 - Persistence preparation preallocates 16-byte ordered operations. Duplicate tracking uses the smaller of a touched site's bitmap and exact sparse indices, and releases this scratch after validation. Shared checked memory estimates cover payloads, containers, and state-table growth. Save preflight and constant-time journal admission also count the retained journal capacity and encoded changes. Backpressure drains accepted terrain/progress together before retrying new work; an in-flight job retains its encoded/prepared reservation until it finishes. A prepared application can wait for this drain and rechecks its dependencies before publication.
 - A prepared application also survives a synchronous journal-capture startup failure. Explicit save retries, including coalesced ordinary requests from Retry or autosave, and the existing bounded final-save transient retry revisit it even when no writer was created, using the same publication/dependency checks as writer completion. Coalescing preserves the queued save's identity, original command fence, and automatic retry allowance. The wake check returns in constant time without allocations or unrelated queue scans when a writer is active. With no writer or application, it can resume the ready queued save or retained FIFO work; it adds no polling or per-block work.
 - After a processed commit, writer termination wakes retained work through the existing path, including when later compaction fails. Uncommitted termination does not immediately retry journal-blocked applications/FIFO work or its drain. For journal-blocked work and nonzero command fences, the existing drain-failure policy retains one delayed final-save transient retry; ordinary saves, cancellation, and exhausted retries wait for an explicit request. The gate reads the lifecycle's existing finalizing stage before teardown.
-- A distinct queued ordinary or final save with command fence zero can make its first capture attempt after an older writer fails or is canceled before commit. Its own queued status is published without inheriting the older error. The shared queued-drain helper performs the guarded existing query recheck and lifecycle readiness checks for pending reads, waiting queries, compaction, and road work before capture; this uncommitted branch does not retry Apply/FIFO work. The handoff uses existing state and constant-time gating, with no new retry metadata, timers, polling, or per-block work.
+- A distinct queued ordinary or final save with command fence zero can make its first capture attempt after an older writer fails or is canceled before commit. Its own queued status is published without inheriting the older error. The shared queued-drain helper performs the guarded existing query recheck and lifecycle readiness checks for pending reads, waiting queries, and compaction before capture; this uncommitted branch does not retry Apply/FIFO work. The handoff uses existing state and constant-time gating, with no new retry metadata, timers, polling, or per-block work.
 - Save supports explicit idempotency keys for the lifetime of a client endpoint. Identical retries return the same definition ID; conflicting payloads/owners are rejected. Automatic fresh saves have a separate key namespace. A terminal rejection puts its still-current capture into the invalid state with a persistent reason and Escape restart guidance; a late reply cannot change a newer draft. Retryable persistence failures retain the service-owned payload. No reconnect or cross-session request-key protocol is part of this iteration.
 
 ## Budgets
@@ -40,7 +40,7 @@ These are technical budgets rather than additional material/geometry rules. Reso
 | Service snapshot copy slice | Four chunks per turn |
 | Concurrent application preparation | One service task, at most eight retiring tasks |
 | Completed-site cleanup | At most four footprint chunks per client world update and normal service turn; idle calls are allocation-free O(1), active calls retain per-chunk ID-search cost |
-| Deferred road work | 4,096 deduplicated chunk entries; initially 16 seed/completion/requeue work units per service turn, yielding on dependency/source/error waits |
+| Deferred road work | 4,096 deduplicated typed chunk keys, five wire bytes each per capture; initially 16 seed/completion/requeue work units per service turn, yielding on dependency/source/error waits |
 | Library/active-instance wire budgets | 4,096 definitions, 4,096 instances, 64 MiB durable state |
 | Pending blueprint journal | 16 MiB, at most 1,048,576 operations; backpressure drains earlier accepted work |
 | Save working memory | 64 MiB by default; includes journal capacity/growth, encoded changes, preparation, source encoding, and capture bookkeeping. Admission may drain before the wire/count limits. |
@@ -53,6 +53,72 @@ The independent horizontal limit remains `min(world_block_size_x / 2 - 1, world_
 For a dense 100×100×32 placement preview, packed source storage/upload is 5,120,000 bytes once per selection, replacing 15,360,000 bytes of full-size dynamic instances rebuilt/uploaded per frame. Warm draws update a 128-byte preview transform; dynamic rails and miniatures retain their separate uploads. These are representation/upload calculations, not measured FPS improvements. Each preview cube still submits 36 vertices; exposed-face culling remains deferred.
 
 ## Automated coverage
+
+### Persisted unfinished-work verification and measurements
+
+`zig build test -Doptimize=Debug --summary all` passed all 47 build steps with
+1,768 tests passed and one existing skip. Formatting and `git diff --check` passed.
+Source review and focused regressions cover background-read/error isolation with foreground
+promotion and same-revision metadata-reordered reload restart. All required verification
+for the unfinished-work feature is complete; broader blueprint interactive checks below
+retain their existing scope and status.
+
+`zig build install test -Doptimize=ReleaseFast --summary all` passed all 55 build steps:
+1,761 tests passed and eight existing tests skipped. This includes 508/508 service,
+324/324 world, and 72/72 persistence tests; both applications built successfully.
+
+The final focused Debug service target passed 508/508 tests. Its new regressions exercise
+ordinary/final save and fresh reopen with outstanding work, partial formed-history
+restart, dirty-repeat restart, clear-only dirty tracking, immutable in-flight membership,
+failed/canceled attempts, internal-prefix/overdue/final admission, normal source gates,
+background read/error independence, foreground read promotion, recovered diagnostics, and
+same-revision metadata-reordered reload. The shared queue/codec and standalone lifecycle
+checks each passed 13/13 tests. These totals are separate targets with overlapping imports;
+they must not be summed as independent scenarios.
+
+The [unfinished-work spec](../specs/features/deferred-world-work.md) replaces the global
+road-drain barrier with saved typed chunk obligations. Background road-only reads do not
+hold final saving or make an unrelated save fail; a foreground consumer promotes a shared
+read and retains normal final-read readiness. A loaded queued chunk restarts its runtime
+pass because serialization may reorder road metadata without changing its revision.
+
+Isolated ReleaseFast copies compared baseline `6c1d74c` with the current implementation.
+The throughput fixture was byte-identical, used actual `processRequest` fills and the
+production 16-unit road processor, and ran once during each build plus three alternating
+warm executable runs. Medians of those three warm runs on Apple M4 Max are:
+
+| Resident workload | Variant | Fill time | Road processing | Road-only delay to later edits | Processor turns |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 128 sites in eight chunks | Baseline `6c1d74c` | 7.328 ms | 3.639 ms | 3.646 ms | 33 |
+| 128 sites in eight chunks | Persisted work | 6.970 ms | 3.593 ms | 0.000 ms | 33 |
+| 128 sites in 128 chunks | Baseline `6c1d74c` | 7.984 ms | 3.893 ms | 3.896 ms | 40 |
+| 128 sites in 128 chunks | Persisted work | 7.951 ms | 3.927 ms | 0.000 ms | 40 |
+
+Every run verifies 8,192 fills, exactly 8,192 physical support reads, zero ordinary
+validation calls, 512 road seeds, identical resulting slopes, and 520/640 work units for
+the dense/spread cases. Thread-CPU medians closely match elapsed time. Fill/road timing
+differences are small and noisy; the observed scheduling change is removal of the
+road-only admission hold. Zero here means the fixture admits later edits immediately;
+it does not measure zero end-to-end edit latency. The fixture uses `store=null` and omits
+storage, source capture, the outer mesh/package loop, and frame timing.
+
+A separate production `snapshotEncoded` benchmark used 4,096 reverse-inserted keys to
+exercise canonical sorting. Three warm runs of 1,000 captures each averaged
+39.396/39.255/39.796 microseconds, with a median of 39.396 microseconds per capture.
+Each capture allocates a 32,768-byte temporary key array and 20,480 encoded bytes: two
+allocations, 53,248 peak requested bytes, then 20,480 bytes retained by its caller.
+This excludes queue setup, allocator backing pages, the Store's later replacement copy,
+and I/O. These are isolated per-capture costs, never per-fill work.
+[Raw runs, medians, source hashes, and allocation counts](benchmarks/deferred-world-work-2026-11-05/results.json)
+preserve the workload and scope; they establish no disk-latency or whole-game FPS claim.
+
+### Historical global-drain results
+
+The AC114/AC115 reports and timing comparisons below describe the previous global-drain
+implementation. The [persisted unfinished-work contract](../specs/features/deferred-world-work.md)
+supersedes their empty-queue capture requirement and road-drain-only admission holds;
+the recorded runs remain evidence for their stated revisions, not measurements of the
+new save behavior. Current verification for persisted work is recorded separately.
 
 AC115/T26 coverage includes a 24-case differential against broad material-edit validation, allocation-free local success/rejection with failing allocators, whole-plan stacked shape changes, real/planned roads above changed roads, missing/immutable data, wrapped/chunk/top boundaries, unsafe-plan atomic rejection, and retained broad validation for ordinary material edits. Queue/service checks cover progress through 11 real unrelated revisions, one coalesced repeat after edits stop, real metadata swap-removal before/after the cursor, busy-to-quiet fairness, singleton/full-ring/wrapped entries and ID mappings, the actual 16-unit default including seed/completion/requeue work, source/error yield, and asynchronous persisted-base read/resume without duplicate reads. Independent read-only audits found no actionable issue in rule locality, final-plan overlays, pointer lifetime, queue rotation, or capture/failure wake ordering. `zig build test -Doptimize=Debug --summary all` passed 47/47 steps with 1,721 tests passed and one existing skip. `zig build install test -Doptimize=ReleaseFast --summary all` passed 55/55 steps with 1,714 tests passed and eight existing skips, including all 493 service tests; the game built successfully.
 
@@ -159,4 +225,4 @@ The disposable pitched walkthrough binary includes the quick-input fix but preda
 
 ## Compatibility
 
-The world format writes version 3 and requires minimum readable version 3. Earlier development saves are rejected. No migration or historical gameplay-rules dispatch is implemented; see [save compatibility](persistence.md#save-compatibility).
+The world format writes version 4 and requires minimum readable version 4. Earlier development saves are rejected. No migration or historical gameplay-rules dispatch is implemented; see [save compatibility](persistence.md#save-compatibility).

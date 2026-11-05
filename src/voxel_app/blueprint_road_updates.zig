@@ -1,6 +1,7 @@
 //! Coalesced road work caused by real blueprint fulfillment. Queue publication
 //! is separate from planning and structural validation, keeping fills constant work.
 const std = @import("std");
+const deferred_work = @import("deferred_world_work.zig");
 pub const capacity: usize = 4096;
 pub const Batch = struct {
     ids: [10]u32 = undefined,
@@ -19,6 +20,8 @@ pub const Queue = struct {
     slots: std.AutoHashMapUnmanaged(u32, usize) = .empty,
     head: usize = 0,
     count: usize = 0,
+    /// Changes only when durable membership changes, never for cursor progress.
+    generation: u64 = 0,
 
     pub fn deinit(self: *Queue, allocator: std.mem.Allocator) void {
         self.slots.deinit(allocator);
@@ -26,11 +29,17 @@ pub const Queue = struct {
 
     /// No semantic queue change on failure. Call before the fill mutates terrain.
     pub fn reserve(self: *Queue, allocator: std.mem.Allocator, batch: Batch) !void {
+        return self.reserveWithLimit(allocator, batch, capacity);
+    }
+
+    /// Share the membership lookup with durable storage admission. Existing
+    /// keys remain coalescible at the limit without allocation or extra probes.
+    pub fn reserveWithLimit(self: *Queue, allocator: std.mem.Allocator, batch: Batch, limit: usize) !void {
         var additional: usize = 0;
         for (batch.ids[0..batch.count]) |id| if (!self.slots.contains(id)) {
             additional += 1;
         };
-        if (additional > capacity - self.count) return error.RoadUpdatesFull;
+        if (additional > @min(capacity, limit) -| self.count) return error.RoadUpdatesFull;
         if (additional != 0) try self.slots.ensureUnusedCapacity(allocator, @intCast(additional));
     }
 
@@ -46,7 +55,53 @@ pub const Queue = struct {
             self.entries[slot] = .{ .id = id };
             self.slots.putAssumeCapacity(id, slot);
             self.count += 1;
+            self.generation +%= 1;
         }
+    }
+
+    /// Owned immutable capture, independent of later progress or invalidation.
+    pub fn snapshotKeys(self: *const Queue, allocator: std.mem.Allocator) ![]deferred_work.Key {
+        const keys = try allocator.alloc(deferred_work.Key, self.count);
+        for (keys, 0..) |*key, offset| key.* = .{
+            .kind = .road_shape,
+            .chunk_id = self.entries[(self.head + offset) % capacity].id,
+        };
+        std.mem.sort(deferred_work.Key, keys, {}, deferred_work.lessThan);
+        return keys;
+    }
+
+    pub fn snapshotEncoded(self: *const Queue, allocator: std.mem.Allocator, dimensions: [3]u32, max_entries: usize) ![]u8 {
+        if (self.count > max_entries) return error.Capacity;
+        const keys = try self.snapshotKeys(allocator);
+        defer allocator.free(keys);
+        return deferred_work.encode(allocator, keys, dimensions, max_entries);
+    }
+
+    /// Recreate scheduling from durable keys without loading any world data.
+    /// Validation and allocation complete before membership changes. Runtime
+    /// cursors/repasses intentionally restart; restored state is already saved.
+    pub fn restore(self: *Queue, allocator: std.mem.Allocator, keys: []const deferred_work.Key) !void {
+        if (self.count != 0) return error.RoadUpdatesNotEmpty;
+        if (keys.len > capacity) return error.RoadUpdatesFull;
+        for (keys, 0..) |key, index| {
+            if (key.kind != .road_shape) return error.UnsupportedWorkKind;
+            if (index != 0 and !deferred_work.lessThan({}, keys[index - 1], key)) return error.InvalidDeferredWork;
+        }
+        try self.slots.ensureUnusedCapacity(allocator, @intCast(keys.len));
+        self.head = 0;
+        for (keys, 0..) |key, slot| {
+            self.entries[slot] = .{ .id = key.chunk_id };
+            self.slots.putAssumeCapacity(key.chunk_id, slot);
+        }
+        self.count = keys.len;
+        self.generation = 0;
+    }
+
+    /// Encoding canonicalizes metadata order even at the same chunk revision.
+    /// Restart its pass when resident data is replaced by a persisted version.
+    pub fn restartAfterLoad(self: *Queue, id: u32) void {
+        const slot = self.slots.get(id) orelse return;
+        self.entries[slot] = .{ .id = id };
     }
 
     pub fn peek(self: *Queue) ?*Entry {
@@ -84,6 +139,7 @@ pub const Queue = struct {
         _ = self.slots.remove(entry.id);
         self.head = (self.head + 1) % capacity;
         self.count -= 1;
+        self.generation +%= 1;
         return true;
     }
 };
@@ -250,4 +306,141 @@ test "road repass revisits metadata swap-removed behind the cursor after quiet w
     for (0..road_count) |_| queue.advance();
     try std.testing.expect(queue.finish());
     try std.testing.expect(queue.peek() == null);
+}
+
+test "durable road capture remains immutable across completion and new invalidation" {
+    const a = std.testing.allocator;
+    var queue: Queue = .{};
+    defer queue.deinit(a);
+    try addTestChunk(&queue, 7);
+    try addTestChunk(&queue, 2);
+    const generation = queue.generation;
+    const snapshot = try queue.snapshotKeys(a);
+    defer a.free(snapshot);
+    try std.testing.expectEqual(@as(u32, 2), snapshot[0].chunk_id);
+    try std.testing.expectEqual(@as(u32, 7), snapshot[1].chunk_id);
+    queue.advance();
+    try addTestChunk(&queue, 7);
+    try std.testing.expectEqual(generation, queue.generation);
+    try std.testing.expect(!queue.finish());
+    try std.testing.expectEqual(generation, queue.generation);
+    // Clean completion changes membership. A later invalidation reintroduces
+    // the key with another generation, so the older save cannot clear it.
+    try std.testing.expect(queue.finish());
+    try std.testing.expect(queue.finish());
+    try addTestChunk(&queue, 7);
+    try std.testing.expect(queue.generation != generation);
+    try std.testing.expectEqual(@as(usize, 2), snapshot.len);
+    try std.testing.expectEqual(@as(u32, 7), snapshot[1].chunk_id);
+    try std.testing.expectEqual(@as(usize, 1), queue.count);
+}
+
+test "durable road restore starts fresh passes and preserves capture without world data" {
+    const a = std.testing.allocator;
+    var queue: Queue = .{};
+    defer queue.deinit(a);
+    const keys = [_]deferred_work.Key{
+        .{ .kind = .road_shape, .chunk_id = 1 },
+        .{ .kind = .road_shape, .chunk_id = 5 },
+    };
+    try queue.restore(a, &keys);
+    try std.testing.expectEqual(@as(u64, 0), queue.generation);
+    try expectQueueSlots(&queue);
+    try std.testing.expectEqual(@as(usize, 0), queue.peek().?.cursor);
+    try std.testing.expect(!queue.peek().?.dirty_again);
+    const bytes = try queue.snapshotEncoded(a, .{ 2, 2, 2 }, capacity);
+    defer a.free(bytes);
+    const decoded = try deferred_work.decode(a, bytes, .{ 2, 2, 2 }, capacity);
+    defer a.free(decoded);
+    try std.testing.expectEqualSlices(deferred_work.Key, &keys, decoded);
+    try std.testing.expectError(error.RoadUpdatesNotEmpty, queue.restore(a, &keys));
+}
+
+test "failed durable road captures and restores leave queue membership and progress intact" {
+    const a = std.testing.allocator;
+    var queue: Queue = .{};
+    defer queue.deinit(a);
+    try addTestChunk(&queue, 3);
+    queue.observeRevision(10);
+    queue.advance();
+    const generation = queue.generation;
+    // Both allocation boundaries of the convenience capture leave live work.
+    for (0..2) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index });
+        try std.testing.expectError(error.OutOfMemory, queue.snapshotEncoded(failing.allocator(), .{ 2, 2, 2 }, capacity));
+        try std.testing.expectEqual(generation, queue.generation);
+        try std.testing.expectEqual(@as(usize, 1), queue.count);
+        try std.testing.expectEqual(@as(usize, 1), queue.peek().?.cursor);
+    }
+    var restored: Queue = .{};
+    defer restored.deinit(a);
+    const keys = [_]deferred_work.Key{.{ .kind = .road_shape, .chunk_id = 3 }};
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, restored.restore(failing.allocator(), &keys));
+    try std.testing.expectEqual(@as(usize, 0), restored.count);
+    try std.testing.expectEqual(@as(usize, 0), restored.slots.count());
+    try std.testing.expectEqual(@as(u64, 0), restored.generation);
+    const duplicate = [_]deferred_work.Key{ keys[0], keys[0] };
+    try std.testing.expectError(error.InvalidDeferredWork, restored.restore(a, &duplicate));
+    try std.testing.expectEqual(@as(usize, 0), restored.count);
+}
+
+test "durable road admission honors custom limits before mutation and coalesces existing work" {
+    const a = std.testing.allocator;
+    var queue: Queue = .{};
+    defer queue.deinit(a);
+    var batch: Batch = .{};
+    batch.add(1);
+    batch.add(2);
+    try queue.reserveWithLimit(a, batch, 2);
+    queue.commit(batch);
+    queue.advance();
+    const generation = queue.generation;
+    var extra: Batch = .{};
+    extra.add(1);
+    extra.add(3);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    try std.testing.expectError(error.RoadUpdatesFull, queue.reserveWithLimit(failing.allocator(), extra, 2));
+    try std.testing.expectEqual(@as(usize, 2), queue.count);
+    try std.testing.expectEqual(generation, queue.generation);
+    try std.testing.expectEqual(@as(usize, 1), queue.peek().?.cursor);
+    try std.testing.expect(!queue.peek().?.dirty_again);
+    var repeated: Batch = .{};
+    repeated.add(1);
+    try queue.reserveWithLimit(failing.allocator(), repeated, 2);
+    queue.commit(repeated);
+    try std.testing.expect(queue.peek().?.dirty_again);
+    try std.testing.expectEqual(generation, queue.generation);
+    try std.testing.expectEqual(@as(usize, 0), failing.allocations);
+    try std.testing.expect(!failing.has_induced_failure);
+    try expectQueueSlots(&queue);
+    var empty: Queue = .{};
+    defer empty.deinit(a);
+    try std.testing.expectError(error.RoadUpdatesFull, empty.reserveWithLimit(a, repeated, 0));
+    try std.testing.expectEqual(@as(usize, 0), empty.count);
+    try std.testing.expectEqual(@as(usize, 0), empty.slots.count());
+}
+
+test "same-revision reload restarts a queued pass without changing identity or fairness" {
+    const a = std.testing.allocator;
+    var queue: Queue = .{};
+    defer queue.deinit(a);
+    try addTestChunk(&queue, 1);
+    try addTestChunk(&queue, 2);
+    queue.observeRevision(10);
+    queue.advance();
+    try addTestChunk(&queue, 1);
+    try std.testing.expect(queue.peek().?.dirty_again);
+    const generation = queue.generation;
+    queue.restartAfterLoad(1);
+    try std.testing.expectEqual(@as(u32, 1), queue.peek().?.id);
+    try std.testing.expectEqual(@as(usize, 0), queue.peek().?.cursor);
+    try std.testing.expect(!queue.peek().?.dirty_again);
+    try std.testing.expectEqual(@as(?u64, null), queue.peek().?.observed_revision);
+    queue.restartAfterLoad(99);
+    try std.testing.expectEqual(generation, queue.generation);
+    try std.testing.expectEqual(@as(usize, 2), queue.count);
+    try expectQueueSlots(&queue);
+    try std.testing.expect(queue.finish());
+    try std.testing.expectEqual(@as(u32, 2), queue.peek().?.id);
 }
