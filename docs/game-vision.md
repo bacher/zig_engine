@@ -260,6 +260,8 @@ Near the end of progression, internet connectivity and drone or robot stations e
 
 This section preserves technical ideas that help explain the vision. It does not choose a final scheduler, route representation, cache, threading model, or persistence format.
 
+The [simulation notes](simulation-notes.md) preserve the author's 2026-11-05 clarification of the automated-world goal, player/service/simulation boundaries, startup without a full-world scan, workstation prerequisites, and separate production and delivery jobs. They also retain architecture alternatives for later consideration without selecting one.
+
 The initial performance target is 100,000 simultaneously active NPCs on a mid-range gaming PC with 4–8 CPU cores and 32 GB of system RAM, ideally also supporting a 16 GB machine. This is a target for the upcoming simulation, not an implemented or measured capacity. The [design principles](../DESIGN_PRINCIPLES.md#make-scale-measurable-from-the-first-simulation-prototype) define what counts toward the target and which workload and resource budgets still need to be established.
 
 ### Persistent work independent of observation
@@ -282,6 +284,8 @@ A more flexible route configuration could choose one of four policies:
 - Prefer B, falling back to A.
 
 Payment from the destination raises an open choice: reserve food there, ensuring it remains usable until arrival, or deduct it immediately as part of accepting the task. Expiry and reservations must be accounted for consistently. Once food is successfully secured under the selected model, the delivery becomes active.
+
+Once transport starts, its accepted food cost and travel duration remain fixed in simulation time despite subsequent changes along the route. This deliberately avoids recalculating costs and timing for active deliveries. Exceptional interactions with route checks and disappearing destinations remain open as described in the [simulation notes](simulation-notes.md#production-and-outbound-delivery-are-separate-jobs).
 
 ### Planned journeys and visual reconstruction
 

@@ -4,6 +4,14 @@ The game's primary goal is to sustain a massive world simulation. NPCs act as wo
 
 These principles guide feature design, implementation, and integration. The [game vision](docs/game-vision.md) describes the experience we are building toward; this document defines the priorities for choosing how to build it. Feature specifications should make the resulting tradeoffs explicit.
 
+## Optimize for an automated world
+
+The primary scenario is a worldwide economy with automated extraction, resource processing, construction-material and tool production, logistics, and construction up to megastructures. Players can build and carry goods themselves, but direct labor becomes marginal as automation grows. Optimize the ordinary simulation path for this mature economy.
+
+When players are not intervening, simulation work should not incur synchronization overhead specifically to coordinate with player actions. Handle intervention where it matters; simulation actions may take precedence when they conflict with player actions. This permits such conflict policies without prescribing a universal winner or a synchronization mechanism.
+
+Player interaction must remain compatible with asynchronous messages from future network clients and cannot depend on shared in-process synchronization with those clients. The world-data service and simulation will remain in the same server process and may use in-process synchronization with each other. These boundaries do not select their threads or require them to communicate only through messages. The [simulation notes](docs/simulation-notes.md) preserve the requirements and unselected architecture ideas.
+
 ## Prioritize throughput over latency
 
 Optimize for the amount of useful simulation work the game can sustain as the world grows. Immediate propagation of every world change is not a default requirement. Prefer batching, asynchronous processing, deferred updates, and reuse of computed results when they substantially increase throughput.
@@ -43,6 +51,8 @@ Use measurements where available and label estimates as estimates. Revisit a tra
 
 Simulation cost should primarily follow changes that can affect outcomes. A production job with a known completion time need not recompute its progress continuously. An idle worker need not repeatedly search for work when no relevant opportunity has appeared. Identify what can change a result and what processing those changes require.
 
+Opening a world must allow simulation to resume in every area with active event emitters without scanning the entire world. The simulation needs its own index, and potentially additional state beyond chunk data; its representation remains an implementation decision.
+
 Rendered motion may be reconstructed when needed. Observation must not change authoritative schedules or outcomes, including when several players watch the same activity. These are design requirements for the upcoming simulation; they do not select a scheduler or require every subsystem to use the same update mechanism.
 
 ## Keep accepted plans stable
@@ -67,7 +77,7 @@ Distinguish delayed knowledge of an event from a deliberate delay to the event i
 
 For each subsystem, account for the state retained for jobs, routes, notifications, and deferred changes, including how that state grows with world activity. Queues must have a capacity or admission policy that prevents unbounded growth under sustained overload.
 
-Repeated requests to recompute the same state may be combined; accepted deliveries and their cargo need a policy that preserves their meaning. Choose explicitly whether overload delays new assignments, reduces computational detail, slows simulation time, or uses another justified response. A queue alone does not solve a throughput deficit.
+Repeated requests to recompute the same state may be combined; accepted deliveries and their cargo need a policy that preserves their meaning. Under temporary overload, first defer new assignments and replanning while preserving the meaning of accepted work. Under sustained overload, coordinated slowdown of simulation time is acceptable while camera and interface interaction remain responsive. Individual industries must not accidentally run at different relative speeds because their queues lag differently. The mechanism and thresholds remain to be designed; a queue alone does not solve a throughput deficit.
 
 ## Make scale measurable from the first simulation prototype
 
@@ -75,6 +85,6 @@ The initial scale target is **100,000 simultaneously active NPCs** in a develope
 
 Target a mid-range gaming PC with **4–8 CPU cores and 32 GB of system RAM**, with operation on **16 GB of system RAM** as a desirable goal. These are whole-machine resources, not a budget reserved for simulation. Leave CPU time and memory for rendering, world data, streaming, persistence, and the operating system. Measure against the lower CPU end as well as the upper end; exact reference CPU models and subsystem budgets remain to be selected.
 
-Define a representative workload around this target, including the mix of NPC roles, simultaneous production jobs, deliveries, construction sites, and world edits. The intended simulation-time rate and acceptable processing delays also remain to be selected. NPC count alone is insufficient to define or demonstrate capacity.
+Define a representative workload around this target, including the mix of NPC roles, simultaneous production jobs, deliveries, construction sites, and world edits. The goal is to sustain the game's normal simulation pace at the target workload; slowdown is a fallback when capacity is exceeded. The concrete time scale and acceptable processing delays remain to be selected. NPC count alone is insufficient to define or demonstrate capacity.
 
 The first simulation prototype should support running without graphics. Measure sustained useful work, memory consumption, queue growth, and whether the economy maintains its intended pace. Include changes that disrupt ongoing work, not just a steady world with no edits. Use these measurements to evaluate design choices before committing to a threading model, scheduler, or other implementation architecture.

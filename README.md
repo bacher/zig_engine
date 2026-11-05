@@ -34,6 +34,7 @@ The subsystem documents describe the current implementation, extracted from exis
 | --- | --- |
 | [Design principles](DESIGN_PRINCIPLES.md) | Shared priorities and tradeoffs for feature design and integration, including consistency and acceptable loopholes. |
 | [Game vision](docs/game-vision.md) | Long-term gameplay, world, logistics, construction, progression, simulation direction, and open decisions. Start here for intent. |
+| [Simulation notes](docs/simulation-notes.md) | Author's intent and constraints for the upcoming simulation, gameplay examples, and unselected architecture ideas. |
 | [Architecture and review points](docs/architecture.md) | Subsystem map, engine/application boundaries, state ownership, concurrency, startup, and frame order. Start here for implementation. |
 | [Scenes, objects, and input](docs/scenes.md) | Scene contents, transform hierarchy, instance updates, current visibility index, controls, and lifetime. |
 | [Rendering](docs/rendering.md) | Pass sequence, geometry paths, shadows, SSAO, GPU layouts, and current rendering limitations. |
