@@ -1,5 +1,7 @@
 # Game vision
 
+Use the [design principles](../DESIGN_PRINCIPLES.md) alongside this vision when designing or integrating features. They establish the priorities for simulation scale, throughput, eventual consistency, and deliberate simplification.
+
 This is the long-term creative and technical direction for the game, based on the author's ideas as of 2026-10-21. It describes the experience we want to work toward and gives context for decisions made along the way. It is a living document, not a final requirements specification, a release commitment, or a description of everything currently implemented.
 
 Reaching this vision will take many iterations and milestones. Early versions can explore a small part of it. Use the vision to keep that groundwork focused, while allowing experiments to change the details. Numerical values below are starting points for design and balancing unless a feature specification explicitly adopts them.
