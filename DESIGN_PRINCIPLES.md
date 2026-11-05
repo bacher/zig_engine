@@ -61,6 +61,8 @@ Assigning workers, choosing suppliers, and planning routes can cost more than ex
 
 Define which changes invalidate a plan and when they are checked. For deliveries in the first version, calculate travel duration at the start and do not recheck or replan the route after departure. Changes along the route do not change the accepted food cost or duration in simulation time; new deliveries account for the changed world through updated routing data. Visual movement may adapt to current terrain, but cannot change authoritative simulation state, timing, or outcomes. The [game vision](docs/game-vision.md#responding-to-world-changes-during-travel) records this policy and the remaining choices about cargo and task outcomes.
 
+Stopping an object and dismantling it are separate player actions. Stopping prevents new work from being accepted while already accepted operations and deliveries finish. The object then remains in the world, inactive until explicitly enabled again; stopping never automatically deletes it. Dismantling is allowed only after the object has stopped and its outstanding obligations have completed. This preserves accepted work and lets players withdraw an object from the simulation without destroying it. See the [object lifecycle](docs/game-vision.md#stopping-reactivating-and-dismantling-objects).
+
 ## Bound the work caused by ordinary changes
 
 An ordinary local change should cause a limited amount of work. Placing a block should not by default replan every courier's route; creating a job should not search the entire worker population; changing one warehouse should not reconsider the whole economy.

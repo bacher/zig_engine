@@ -193,6 +193,14 @@ The initial material-flow idea is demand-driven:
 
 This combines pull requests for inputs with an explicit delivery request for outputs. The overall choice between push, pull, or a hybrid economy is still open; this sequence captures the current idea rather than prescribing a complete scheduling system.
 
+### Stopping, reactivating, and dismantling objects
+
+Stopping and dismantling are separate actions. A player can stop a simulation object without destroying it. It then accepts no new work, but already accepted operations and deliveries complete normally. A workstation finishes its current operation; a warehouse continues receiving deliveries already committed to it. These completions do not automatically enable new work on the stopped object.
+
+After its outstanding obligations finish, the object remains intact and inactive until the player explicitly enables it again. The player may instead dismantle it once it has stopped and all outstanding operations and deliveries are complete. Stopping does not request or trigger automatic deletion.
+
+This lets players take even a continuously busy object out of service while preserving accepted work. The precise scope of outstanding obligations and handling of stored materials during dismantling remain to be specified. The [simulation notes](simulation-notes.md#stopping-is-separate-from-dismantling) preserve these boundaries without selecting an implementation.
+
 ### Food as the cost of labor and delivery
 
 Food spoils over time. It also pays for work and transport: for example, producing one unit at a workstation consumes food, and a courier consumes food to move goods. Food deliveries have higher priority than ordinary goods.
@@ -285,7 +293,7 @@ A more flexible route configuration could choose one of four policies:
 
 Payment from the destination raises an open choice: reserve food there, ensuring it remains usable until arrival, or deduct it immediately as part of accepting the task. Expiry and reservations must be accounted for consistently. Once food is successfully secured under the selected model, the delivery becomes active.
 
-Calculate travel duration when transport starts. Its accepted food cost and travel duration remain fixed in simulation time despite subsequent changes along the route. The first version does not recheck or replan active routes. Cargo and task outcomes for disappearing destinations remain open as described in the [simulation notes](simulation-notes.md#production-and-outbound-delivery-are-separate-jobs).
+Calculate travel duration when transport starts. Its accepted food cost and travel duration remain fixed in simulation time despite subsequent changes along the route. The first version does not recheck or replan active routes. Stopping a destination preserves accepted deliveries, and dismantling must wait until its outstanding obligations finish, as described in the [object lifecycle](#stopping-reactivating-and-dismantling-objects).
 
 ### Planned journeys and visual reconstruction
 
@@ -314,7 +322,7 @@ In the first version, an active delivery's route is not rechecked or replanned a
 
 Visualization may adapt the displayed motion to current terrain, for example to keep an NPC from walking through the air where a bridge used to be. These adjustments are purely visual: they must not change authoritative world state, travel progress, arrival time, food costs, or delivery outcomes. They must not make the simulation depend on whether, or by how many players, the courier is observed.
 
-Completing an accepted journey despite route changes is an intended gameplay rule; its acceptability does not depend on those changes being rare. Handling a removed destination, canceled order, or unavailable recipient still requires an explicit outcome for the cargo and task. Those lifecycle decisions remain open and do not introduce route revalidation in the first version. These choices guide the upcoming simulation and do not describe implemented courier behavior.
+Completing an accepted journey despite route changes is an intended gameplay rule; its acceptability does not depend on those changes being rare. Stopping a destination does not cancel its accepted deliveries, and ordinary player dismantling cannot remove it while they remain outstanding. Explicit order cancellation and exceptional failures still need cargo and task policies; they do not introduce route revalidation in the first version. These choices guide the upcoming simulation and do not describe implemented courier behavior.
 
 ### Routing across roads and terrain
 
@@ -355,8 +363,8 @@ Before committing to related features, the main open design choices are:
 | Area | Decision still needed |
 | --- | --- |
 | Economy and power | Food-only energy versus separate fuel/electricity; which progression stages earn their complexity. |
-| Logistics | Push/pull balance, supply radii, food payment and reservation, priorities, and replenishment controls. |
-| Routing | Mixed terrain versus road-centered travel; route representation; visual adaptation to changed terrain; cargo/task outcomes when a destination or order disappears. Active routes are not rechecked in the first version. |
+| Logistics | Push/pull balance, supply radii, food payment and reservation, priorities, replenishment controls, the scope of accepted obligations when stopping, and stored materials during dismantling. |
+| Routing | Mixed terrain versus road-centered travel; route representation; visual adaptation to changed terrain; cargo/task outcomes for explicit order cancellation and exceptional failures. Active routes are not rechecked in the first version; destinations cannot be dismantled while deliveries remain outstanding. |
 | Settlements | Building recognition, service coverage, population growth, and needs at each technology level. |
 | Construction | Long-term weight/span rules, large-scale concrete workflows, and blueprint validity during incomplete construction. |
 | Storage | Spoilage, preservation, permafrost, and food-crate stack behavior. |

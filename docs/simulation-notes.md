@@ -36,7 +36,15 @@ Every simulation action has prerequisites. Producing a concrete block at a works
 
 Relevant changes, such as input delivery or food arriving at the dispenser, must cause the prerequisites to be reconsidered. When all conditions are met and the workstation is enabled, production can start. This describes the triggering behavior without selecting how checks are scheduled or combined.
 
-A player may disable a workstation. It then stops automatically starting work and stays disabled until the player enables it again. The effect of disabling it on an operation already in progress remains unspecified.
+A player may stop a workstation. It stops accepting new work, finishes already accepted operations and deliveries, and then stays inactive until explicitly enabled again. Materials arriving for accepted deliveries do not automatically restart production while it is stopped. An operation already in progress completes normally.
+
+## Stopping is separate from dismantling
+
+Players must be able to withdraw an object from active simulation without destroying it. Stopping closes it to new work while preserving its participation in outstanding obligations until they finish. For example, a stopped warehouse still receives deliveries it has already accepted, but accepts no new ones. Stopping does not cancel accepted work or remove its destination.
+
+Once outstanding operations and deliveries finish, the object remains intact and inactive. The player can later enable it again or explicitly dismantle it. Stopping does not queue automatic deletion, and dismantling is allowed only after the object has stopped and its outstanding obligations are complete. This avoids requiring a continuously busy object to become idle by chance before it can be taken out of service.
+
+These are gameplay rules, not a selected lifecycle implementation. The exact scope of an accepted obligation, including follow-up work for an operation's output, and the handling of stored materials during dismantling still need specification. The [game vision](game-vision.md#stopping-reactivating-and-dismantling-objects) records the same lifecycle.
 
 ## Production and outbound delivery are separate jobs
 
@@ -46,7 +54,7 @@ In the first version, calculate travel duration when the delivery starts and do 
 
 Visualization may adjust the NPC's motion to fit current terrain, for example to avoid walking through the air after terrain changes. This is purely visual and must not feed changes back into simulation state, travel timing, food costs, or delivery outcomes. It does not introduce simulation route checks, including when the NPC is observed by several players.
 
-The [travel policy](game-vision.md#responding-to-world-changes-during-travel) applies this simplification to active deliveries; updated routing information serves new deliveries. A removed destination, canceled order, or unavailable recipient still needs an explicit cargo and task outcome. Those are separate task-lifecycle questions, not permission to recheck the route in the first version. These notes do not choose those outcomes.
+The [travel policy](game-vision.md#responding-to-world-changes-during-travel) applies this simplification to active deliveries; updated routing information serves new deliveries. Stopping a destination preserves already accepted deliveries, and ordinary player dismantling cannot remove it while those obligations remain. Explicit order cancellation and exceptional failures are separate questions whose cargo and task outcomes remain unspecified; they do not introduce route checks in the first version.
 
 ## Architecture ideas to revisit later
 
