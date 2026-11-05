@@ -128,7 +128,7 @@ const Game = struct {
     blueprint_results: std.ArrayList(world_data_service.BlueprintResult) = .empty,
     blueprint_save: ?struct { request_id: u64, generation: u64 } = null,
     blueprint_apply: ?struct { request_id: u64, generation: u64 } = null,
-    blueprint_preview: ?struct { definition_id: u64, rotation: u2 = 0, origin: ?[3]u32 = null, generation: u64 } = null,
+    blueprint_preview: ?struct { definition_id: u64, rotation: u2 = 0, origin: ?[3]u32 = null, generation: u64, rejection: ?world_data_service.BlueprintRejection = null } = null,
     blueprint_preview_generation: u64 = 0,
     blueprint_name: [404:0]u8 = @splat(0),
     blueprint_name_focus: bool = false,
@@ -422,7 +422,7 @@ const Game = struct {
         if (game.blueprint_mode == .preview and game.blueprint_preview != null and (game.blueprint_apply == null or game.blueprint_apply.?.generation != game.blueprint_preview.?.generation)) {
             const world = if (game.world) |*world| world else return;
             const camera = game.engine.active_scene.?.camera;
-            game.blueprint_preview.?.origin = block_targeting.findTarget(world, camera.position, camera.forwardDirection(), .putting) catch null;
+            game.updateBlueprintPreviewOrigin(block_targeting.findTarget(world, camera.position, camera.forwardDirection(), .putting) catch null);
         }
         const input = game.engine.input_controller;
         if (!input.focused or input.focus_changed) {
@@ -433,6 +433,42 @@ const Game = struct {
             game.blueprint_press.requested = null;
             game.confirmBlueprintTool();
         }
+    }
+
+    fn clearBlueprintPreviewRejection(game: *Game) void {
+        if (game.blueprint_preview) |*preview| {
+            if (preview.rejection == null) return;
+            preview.rejection = null;
+            game.blueprint_error = null;
+        }
+    }
+
+    fn updateBlueprintPreviewOrigin(game: *Game, origin: ?[3]u32) void {
+        if (game.blueprint_preview) |*preview| {
+            if (!std.meta.eql(preview.origin, origin)) game.clearBlueprintPreviewRejection();
+            preview.origin = origin;
+        }
+    }
+
+    fn blueprintApplicationMessage(result: world_data_service.BlueprintResult) []const u8 {
+        if (result.status == .success) return "Blueprint site created.";
+        if (result.rejection) |rejection| return switch (rejection.code) {
+            .invalid_definition => "This blueprint is unavailable or invalid. Select it again.",
+            .bounds => "The blueprint extends beyond the buildable world bounds.",
+            .overlap => "The blueprint overlaps an unfinished construction site.",
+            .occupied => "A required blueprint cell is already occupied. Clear it or move the blueprint.",
+            .immutable => "A required blueprint cell cannot be changed.",
+            .missing_data => "Blueprint application needs loaded destination data. Try again.",
+            .foundation => "The blueprint needs a stable 3x3x3 platform beneath each bottom-layer block.",
+            .composition => "The blueprint conflicts with construction rules at this destination.",
+            .budget_exceeded => "Blueprint destination checking exceeded its resource budget.",
+        };
+        return switch (result.status) {
+            .missing_data => "Blueprint application needs loaded destination data. Try again.",
+            .resource_exhausted => "Blueprint application exceeded its resource budget.",
+            .stale => "The destination changed during admission. Try again.",
+            else => "Blueprint application was rejected. Try another destination.",
+        };
     }
 
     fn blueprintResultReady(game: *const Game, result: world_data_service.BlueprintResult) bool {
@@ -488,14 +524,14 @@ const Game = struct {
             };
         } else if (game.blueprint_apply) |apply| if (apply.request_id == result.request_id) {
             game.blueprint_apply = null;
-            game.setBlueprintStatus(if (result.status == .success) "Blueprint site created." else switch (result.status) {
-                .missing_data => "Blueprint application needs loaded destination data. Try again.",
-                .resource_exhausted => "Blueprint application exceeded its resource budget.",
-                .stale => "The destination changed during admission. Try again.",
-                else => "Blueprint application rejected: check foundations, occupancy, and nearby structures.",
-            }, block_messages.action_error_duration);
+            game.setBlueprintStatus(blueprintApplicationMessage(result), block_messages.action_error_duration);
             if (game.blueprint_mode == .preview and game.blueprint_preview != null and game.blueprint_preview.?.generation == apply.generation) {
-                if (result.status == .success) game.leaveBlueprintTool() else game.blueprint_error = game.blueprint_status;
+                if (result.status == .success) {
+                    game.leaveBlueprintTool();
+                } else {
+                    game.blueprint_preview.?.rejection = result.rejection;
+                    game.blueprint_error = game.blueprint_status;
+                }
             }
         };
     }
@@ -528,6 +564,7 @@ const Game = struct {
                 return;
             };
             game.blueprint_apply = .{ .request_id = request_id, .generation = preview.generation };
+            game.clearBlueprintPreviewRejection();
             game.blueprint_error = null;
             game.setBlueprintStatus("Checking blueprint destination...", math.inf(f64));
         }
@@ -611,6 +648,10 @@ const Game = struct {
             } else if (game.blueprint_mode == .preview) {
                 zgui.textUnformatted("Blueprint placement");
                 zgui.textUnformatted(if (game.blueprint_apply != null) "Checking destination..." else "R: rotate   Mouse1 / E: apply   B / Escape: cancel");
+                if (game.blueprint_preview) |preview| if (preview.rejection) |rejection| if (rejection.failure) |failure| {
+                    var buffer: [block_diagnostics.message_capacity]u8 = undefined;
+                    if (block_diagnostics.errorMessageForResult(.{ .status = .constraint_violation, .failure = failure }, &buffer)) |message| zgui.textUnformatted(message);
+                };
             }
             if (game.blueprint_error) |message| zgui.textUnformatted(message);
             if (status) |message| zgui.textUnformatted(message);
@@ -704,6 +745,17 @@ const Game = struct {
                     saved.definition.target_count > blueprint_renderer.capacity - blueprint_renderer.frame_instance_count - list.items.len) return game.blueprintRenderLimit();
                 blueprint_renderer.appendFrame(list, game.allocator, scene.camera, .{ origin[0], origin[1], origin[2] }, blueprint.rotatedSize(saved.definition.size, preview.rotation)) catch return game.blueprintRenderLimit();
             }
+            if (preview.rejection) |rejection| if (rejection.cell) |cell| {
+                if (list.items.len >= blueprint_renderer.capacity - saved.definition.target_count) return game.blueprintRenderLimit();
+                var marker = blueprint_renderer.blockInstance(scene.camera, .{ cell[0], cell[1], cell[2] }, .dirt, false, true);
+                // Extend past the preview and existing block faces so their
+                // later equal-depth draw cannot hide the diagnostic.
+                inline for (0..3) |axis| {
+                    marker.position[axis] -= 0.01;
+                    marker.scale[axis] += 0.02;
+                }
+                list.append(game.allocator, marker) catch return game.blueprintRenderLimit();
+            };
             // Borrow immutable source data only until this frame's renderer upload.
             // Missing targeting hides the draw without invalidating its GPU cache.
             game.blueprint_render_preview = .{
@@ -2215,6 +2267,7 @@ fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
             .r => if (!key_params.mods.control and game.blueprint_mode == .preview) {
                 if (game.blueprint_apply == null or (game.blueprint_preview != null and game.blueprint_apply.?.generation != game.blueprint_preview.?.generation)) {
                     if (game.blueprint_preview) |*preview| preview.rotation +%= 1;
+                    game.clearBlueprintPreviewRejection();
                 }
                 return true;
             },
@@ -6370,6 +6423,83 @@ test "blueprint results expire in real time while pending operations keep their 
     // A rejected destination still explains the required retry in the active tool.
     try std.testing.expectEqualStrings("The destination changed during admission. Try again.", game.blueprint_error.?);
     try std.testing.expectEqual(.preview, game.blueprint_mode);
+}
+
+test "blueprint rejection highlights the failed destination and clears on retarget or rotation" {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const runtime = @import("blueprint_runtime.zig");
+    const origin = @import("block_coordinates.zig").fromWorld(&test_layout, .{ 8, 8, 1 }).?;
+    var saved: runtime.SavedDefinition = .{ .id = 1, .owner = game.player_id, .name = try a.dupe(u8, "Rejected"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(voxel_chunk_module.BlockType, &.{.planks}), .target_count = 1 } };
+    defer saved.deinit(a);
+    try game.world.?.applyBlueprintChanges(&.{.{ .definition = saved }});
+    game.blueprint_mode = .preview;
+    game.blueprint_preview = .{ .definition_id = 1, .generation = 10, .origin = origin };
+    game.blueprint_apply = .{ .request_id = 77, .generation = 10 };
+    const rejection: world_data_service.BlueprintRejection = .{ .code = .occupied, .cell = origin };
+    game.acceptBlueprintResult(.{ .request_id = 77, .kind = .apply, .status = .invalid, .rejection = rejection });
+    try std.testing.expectEqual(null, game.blueprint_apply);
+    try std.testing.expectEqualDeep(rejection, game.blueprint_preview.?.rejection.?);
+    try std.testing.expectEqualStrings("A required blueprint cell is already occupied. Clear it or move the blueprint.", game.blueprint_error.?);
+    fixture.engine.real_time += block_messages.action_error_duration;
+    try std.testing.expectEqual(null, game.blueprintStatusMessage());
+    try std.testing.expect(game.blueprint_error != null);
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 13), game.blueprint_render_instances.items.len);
+    const marker = game.blueprint_render_instances.items[12];
+    const block = blueprint_renderer.blockInstance(&fixture.camera, .{ origin[0], origin[1], origin[2] }, .planks, false, false);
+    try std.testing.expectEqual(@as(u32, 2), marker.material[1]);
+    inline for (0..3) |axis| {
+        try std.testing.expect(marker.position[axis] < block.position[axis]);
+        try std.testing.expect(marker.position[axis] + marker.scale[axis] > block.position[axis] + block.scale[axis]);
+    }
+    game.updateBlueprintPreviewOrigin(origin);
+    try std.testing.expect(game.blueprint_preview.?.rejection != null);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .r, .mods = .{} }));
+    try std.testing.expectEqual(@as(u2, 1), game.blueprint_preview.?.rotation);
+    try std.testing.expectEqual(null, game.blueprint_preview.?.rejection);
+    try std.testing.expectEqual(null, game.blueprint_error);
+    game.blueprint_preview.?.rejection = rejection;
+    game.updateBlueprintPreviewOrigin(null);
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(null, game.blueprint_preview.?.rejection);
+    try std.testing.expectEqual(@as(usize, 0), game.blueprint_render_instances.items.len);
+}
+
+test "blueprint composition diagnostics survive late replies without leaking to another preview" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const rejection: world_data_service.BlueprintRejection = .{ .code = .composition, .cell = .{ 8, 8, 70 }, .failure = .{
+        .reason = .would_invalidate_structure,
+        .cause = .horizontal_span,
+        .subject = .{ 8, 8, 70 },
+        .actual = 8,
+        .limit = 6,
+    } };
+    const result: world_data_service.BlueprintResult = .{ .request_id = 77, .kind = .apply, .status = .invalid, .rejection = rejection };
+    game.blueprint_mode = .preview;
+    game.blueprint_preview = .{ .definition_id = 1, .generation = 10 };
+    game.blueprint_apply = .{ .request_id = 77, .generation = 10 };
+    game.acceptBlueprintResult(result);
+    try std.testing.expectEqualDeep(rejection, game.blueprint_preview.?.rejection.?);
+    try std.testing.expectEqualStrings("The blueprint conflicts with construction rules at this destination.", game.blueprint_error.?);
+    game.blueprint_apply = .{ .request_id = 77, .generation = 10 };
+    game.blueprint_preview = .{ .definition_id = 2, .generation = 11 };
+    game.blueprint_error = "New preview message";
+    game.acceptBlueprintResult(result);
+    try std.testing.expectEqual(null, game.blueprint_preview.?.rejection);
+    try std.testing.expectEqualStrings("New preview message", game.blueprint_error.?);
+    game.leaveBlueprintTool();
+    game.blueprint_apply = .{ .request_id = 77, .generation = 10 };
+    game.acceptBlueprintResult(result);
+    try std.testing.expectEqual(.none, game.blueprint_mode);
+    try std.testing.expectEqual(null, game.blueprint_preview);
+    try std.testing.expectEqual(null, game.blueprint_error);
 }
 
 test "blueprint dialogs hide the crosshair and chooser has a DPI-scaled width floor" {

@@ -30,13 +30,14 @@ const blueprint_wire = @import("persistence/blueprints.zig");
 const deferred_work = @import("deferred_world_work.zig");
 const blueprint_admission = @import("blueprint_admission.zig");
 const blueprint_road_updates = @import("blueprint_road_updates.zig");
+pub const BlueprintRejection = blueprint_admission.Rejection;
 pub const BlueprintResult = struct {
     request_id: u64,
     kind: enum { save, apply },
     status: enum { success, invalid, missing_data, resource_exhausted, stale },
     definition_id: ?u64 = null,
     instance_id: ?u64 = null,
-    failure: ?rules.Failure = null,
+    rejection: ?BlueprintRejection = null,
 };
 pub const StandingSpaceRequest = standing_space.Request;
 pub const StandingSpaceError = standing_space.Error || error{ServiceStopped};
@@ -1754,6 +1755,12 @@ pub const WorldDataService = struct {
                 .request_id = apply.request_id,
                 .kind = .apply,
                 .status = if (err == error.OutOfMemory or err == error.Capacity or err == error.Busy) .resource_exhausted else .invalid,
+                .rejection = switch (err) {
+                    error.InvalidFootprint => .{ .code = .bounds },
+                    error.Overlap => .{ .code = .overlap },
+                    error.UnknownDefinition, error.WrongOwner => .{ .code = .invalid_definition },
+                    else => null,
+                },
             });
             apply.client.resolved_request = @max(apply.client.resolved_request, apply.request_id);
             self.applyEligibleCheckpoint(apply.client);
@@ -1893,7 +1900,11 @@ pub const WorldDataService = struct {
         };
         switch (result) {
             .cancelled => self.rejectBlueprintApplication(task, .stale, null),
-            .rejected => |failure| self.rejectBlueprintApplication(task, if (failure.code == .missing_data) .missing_data else .invalid, failure.failure),
+            .rejected => |rejection| self.rejectBlueprintApplication(task, switch (rejection.code) {
+                .missing_data => .missing_data,
+                .budget_exceeded => .resource_exhausted,
+                else => .invalid,
+            }, rejection),
             .prepared => {
                 self.commitBlueprintApplication(task) catch |err| {
                     if (err == error.JournalBackpressure) {
@@ -1939,9 +1950,9 @@ pub const WorldDataService = struct {
         self.retryPending();
     }
 
-    fn rejectBlueprintApplication(self: *WorldDataService, task: *BlueprintAdmissionTask, status: @FieldType(BlueprintResult, "status"), failure: ?rules.Failure) void {
+    fn rejectBlueprintApplication(self: *WorldDataService, task: *BlueprintAdmissionTask, status: @FieldType(BlueprintResult, "status"), rejection: ?BlueprintRejection) void {
         task.request.client.resolved_request = @max(task.request.client.resolved_request, task.request.request_id);
-        task.request.client.blueprint_results.push(self.io, self.allocator, .{ .request_id = task.request.request_id, .kind = .apply, .status = status, .failure = failure });
+        task.request.client.blueprint_results.push(self.io, self.allocator, .{ .request_id = task.request.request_id, .kind = .apply, .status = status, .rejection = rejection });
         self.applyEligibleCheckpoint(task.request.client);
         self.retireBlueprintTask(task);
         self.lifecycle.commandResolved();
@@ -6174,6 +6185,80 @@ const BlueprintSaveFixture = struct {
         return .{ .client = &self.client, .owner = 1, .request_id = id, .name = try a.dupe(u8, "Save fixture"), .candidate = candidate };
     }
 };
+
+test "blueprint admission replies retain reasons and cells after their task retires" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    defer {
+        if (service.blueprint_task) |task| {
+            task.release();
+            a.destroy(task);
+        }
+        for (service.blueprint_retired.items) |task| {
+            if (task.future) |*future| future.await(service.io);
+            if (!task.retired.load(.acquire)) task.release();
+            a.destroy(task);
+        }
+        service.blueprint_retired.deinit(a);
+    }
+    service.saveBlueprint(try fixture.request(1));
+    var replies: std.ArrayList(BlueprintResult) = .empty;
+    defer replies.deinit(a);
+    fixture.client.takeBlueprintResults(&replies);
+    replies.clearRetainingCapacity();
+    for (std.enums.values(blueprint_admission.RejectCode), 0..) |code, index| {
+        const request_id: u64 = index + 2;
+        const rejection: BlueprintRejection = .{
+            .code = code,
+            .cell = if (code == .budget_exceeded or code == .invalid_definition or code == .bounds) null else .{ 10, 11, 70 },
+            .failure = if (code == .composition) .{
+                .reason = .would_invalidate_structure,
+                .cause = .horizontal_span,
+                .subject = .{ 10, 11, 70 },
+                .actual = 8,
+                .limit = 6,
+                .involved_count = 1,
+                .involved = .{.{ 10, 11, 70 }} ++ @as([31]rules.Cell, @splat(@splat(0))),
+            } else null,
+        };
+        try service.tryBeginBlueprintApplication(.{ .client = &fixture.client, .request_id = request_id, .owner = 1, .definition_id = 1, .origin = .{ 10, 10, 70 }, .rotation = 0 });
+        const task = service.blueprint_task.?;
+        task.result = .{ .rejected = rejection };
+        service.finishBlueprintApplication(task);
+        if (task.future) |*future| future.await(service.io);
+        service.reapBlueprintRetirements();
+        fixture.client.takeBlueprintResults(&replies);
+        try std.testing.expectEqual(@as(usize, 1), replies.items.len);
+        const reply = replies.items[0];
+        try std.testing.expectEqual(request_id, reply.request_id);
+        try std.testing.expectEqual(.apply, reply.kind);
+        try std.testing.expectEqual(@as(@FieldType(BlueprintResult, "status"), switch (code) {
+            .missing_data => .missing_data,
+            .budget_exceeded => .resource_exhausted,
+            else => .invalid,
+        }), reply.status);
+        try std.testing.expectEqualDeep(rejection, reply.rejection.?);
+        try std.testing.expectEqual(request_id, fixture.client.resolved_request);
+        try std.testing.expectEqual(@as(u32, 0), service.worker_state.blueprints.instances.count());
+        replies.clearRetainingCapacity();
+    }
+    // These rejections happen before the detached worker can start.
+    service.beginBlueprintApplication(.{ .client = &fixture.client, .request_id = 20, .owner = 1, .definition_id = 1, .origin = test_layout.size_in_blocks, .rotation = 0 });
+    var instance = try service.worker_state.blueprints.prepareInstance(a, &test_layout, 1, 1, 1, .{ 10, 10, 70 }, 0);
+    var owns_instance = true;
+    defer if (owns_instance) instance.deinit(a);
+    try service.worker_state.blueprints.insertInstance(a, &test_layout, instance);
+    owns_instance = false;
+    service.beginBlueprintApplication(.{ .client = &fixture.client, .request_id = 21, .owner = 1, .definition_id = 1, .origin = .{ 10, 10, 70 }, .rotation = 0 });
+    fixture.client.takeBlueprintResults(&replies);
+    try std.testing.expectEqual(@as(usize, 2), replies.items.len);
+    try std.testing.expectEqual(.bounds, replies.items[0].rejection.?.code);
+    try std.testing.expectEqual(.overlap, replies.items[1].rejection.?.code);
+    try std.testing.expectEqual(null, service.blueprint_task);
+}
 
 test "blueprint Save keys return the original definition and separate automatic identities" {
     const a = std.testing.allocator;
