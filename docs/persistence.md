@@ -64,14 +64,17 @@ When the uncommitted journal fills, the service retains the submitted definition
 the already accepted prefix, and retries publication after that writer finishes. Ephemeral
 worlds allocate no persistence journal.
 
+Every durable capture waits for delayed adaptive-road work from accepted blueprint fills to drain, including ordinary/autosave, overdue, final, and internal journal-prefix captures. Once a public save has resolved its selected command fence, or an internal prefix needs capture, and no older writer is active, the service holds later ordered mutations and timed transformations and pauses NPC simulation. Reads, completions, and budgeted road processing continue, at most one road seed per service turn. This gives the drain a finite producer boundary while keeping road planning outside fulfillment; save latency depends on the queued work and planner cost. An older writer retains normal admission rules.
+
+A drain failure or cancellation releases this additional hold while preserving snapshot source-hold rules and the empty-road capture gate. Explicit retries and the existing bounded final-save retry can re-arm the drain; road completion alone cannot restart a failed prefix. Road results are saved as terrain/metadata in the same transaction as fulfillment; the volatile queue needs no persisted representation or recovery-format change.
+
 Simulation and block timers pause while snapshot sources are held. The encoder releases sources as independent records become available, allowing gameplay to resume before disk synchronization. Conflicting player edits remain pending. Ordinary waits can cancel capture safely; saving that falls sufficiently behind can prioritize completion with visible status. UI/rendering continue, but world-changing actions may wait. Actual disk errors cannot be solved by prioritization; unsaved state stays dirty for retry.
 
 Closing the window or choosing Exit from the Escape menu stops producers and drains existing edits before publishing the final player checkpoint and save. The final capture is exempt from ordinary gameplay wait deadlines. After a failure or five seconds without meaningful progress, the dialog provides retry/wait, cancel exit, or explicit quit without saving. Quitting without saving may lose changes since the last durable snapshot. A durable WAL remains recoverable if final compaction fails.
 
-The drain includes submitted blueprint applications while their detached admission is
-pending, and preserves their order with later mutations. Final saving also drains delayed
-road formation before taking its snapshot. A failed application resolves its command
-fence without publishing an instance.
+The exit drain includes submitted blueprint applications while their detached admission is
+pending, and preserves their order with later mutations. A failed application resolves its
+command fence without publishing an instance.
 
 Saved player state includes identity, feet position, yaw, pitch, and the material in the one-slot inventory. Inventory changes belong to authoritative terrain transfers and are captured in the same snapshot. Movement checkpoints preserve the service-owned inventory. Velocity, climbing state, partial interaction holds, pending client predictions, and transient movement history are reset on startup. Format 3 uses inventory schema 1. Restored collision is checked against authoritative terrain before gameplay starts.
 

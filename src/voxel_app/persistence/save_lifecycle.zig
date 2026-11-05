@@ -68,7 +68,8 @@ pub const Lifecycle = struct {
     pub fn takeReady(self: *Lifecycle, observed: Observations) ?Intent {
         const drain = self.queued orelse return null;
         if (self.active != null or drain.fence_remaining != 0) return null;
-        if (drain.intent.final and (observed.pending_reads != 0 or observed.waiting_queries != 0 or observed.compactor_active or observed.derived_work_pending)) return null;
+        if (observed.derived_work_pending) return null;
+        if (drain.intent.final and (observed.pending_reads != 0 or observed.waiting_queries != 0 or observed.compactor_active)) return null;
         self.queued = null;
         return drain.intent;
     }
@@ -203,10 +204,11 @@ pub const Lifecycle = struct {
 const testing = std.testing;
 const test_deadlines: Deadlines = .{ .capture_wait_ns = 500, .player_wait_ns = 100, .overdue_ns = 10_000 };
 
-test "final save drains derived road work while ordinary snapshots may proceed" {
+test "every save drains derived road work before capture" {
     var lifecycle: Lifecycle = .{};
     _ = lifecycle.request(.{ .id = 1, .final = false }, 0);
-    try testing.expectEqual(@as(u64, 1), lifecycle.takeReady(.{ .derived_work_pending = true }).?.id);
+    try testing.expect(lifecycle.takeReady(.{ .derived_work_pending = true }) == null);
+    try testing.expectEqual(@as(u64, 1), lifecycle.takeReady(.{}).?.id);
     _ = lifecycle.request(.{ .id = 2, .final = true }, 1);
     lifecycle.commandResolved();
     try testing.expect(lifecycle.takeReady(.{ .derived_work_pending = true }) == null);
