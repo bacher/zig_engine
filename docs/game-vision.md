@@ -285,7 +285,7 @@ A more flexible route configuration could choose one of four policies:
 
 Payment from the destination raises an open choice: reserve food there, ensuring it remains usable until arrival, or deduct it immediately as part of accepting the task. Expiry and reservations must be accounted for consistently. Once food is successfully secured under the selected model, the delivery becomes active.
 
-Once transport starts, its accepted food cost and travel duration remain fixed in simulation time despite subsequent changes along the route. This deliberately avoids recalculating costs and timing for active deliveries. Exceptional interactions with route checks and disappearing destinations remain open as described in the [simulation notes](simulation-notes.md#production-and-outbound-delivery-are-separate-jobs).
+Calculate travel duration when transport starts. Its accepted food cost and travel duration remain fixed in simulation time despite subsequent changes along the route. The first version does not recheck or replan active routes. Cargo and task outcomes for disappearing destinations remain open as described in the [simulation notes](simulation-notes.md#production-and-outbound-delivery-are-separate-jobs).
 
 ### Planned journeys and visual reconstruction
 
@@ -310,11 +310,11 @@ Reconstructing the exact original route from historical chunk snapshots was cons
 
 ### Responding to world changes during travel
 
-The starting approach is to check an active plan at defined points, for example before entering another route segment. A relevant change can then lead to replanning or another explicitly defined response. Ordinary world edits do not require immediate interruption and replanning of every affected delivery. A new, better route does not by itself invalidate an accepted journey.
+In the first version, an active delivery's route is not rechecked or replanned after departure. Its duration is calculated when the delivery starts and remains fixed in simulation time. Changes along the route, including removal of a bridge or creation of a better path, do not change that schedule or the accepted food cost. Updated routing data affects new deliveries.
 
-For selected kinds of world changes, completing active deliveries under their accepted plans is an acceptable deliberate simplification. For example, a policy may allow couriers already on a journey to finish after a bridge is removed, with the consequences applying to new deliveries once routing data reflects the edit. Such a policy is an intended gameplay rule; its acceptability does not depend on bridge removal being rare. It still needs evaluation against the design principle that loopholes must not be easy to exploit repeatedly.
+Visualization may adapt the displayed motion to current terrain, for example to keep an NPC from walking through the air where a bridge used to be. These adjustments are purely visual: they must not change authoritative world state, travel progress, arrival time, food costs, or delivery outcomes. They must not make the simulation depend on whether, or by how many players, the courier is observed.
 
-The simulation design must choose the check points, which changes affect active plans, and which apply only to new deliveries. Handling a removed destination, canceled order, or unavailable recipient still requires an explicit outcome for the cargo and task; permission to finish an old route does not settle those cases. All policies must apply independently of observation. These choices guide the upcoming simulation and do not describe implemented courier behavior.
+Completing an accepted journey despite route changes is an intended gameplay rule; its acceptability does not depend on those changes being rare. Handling a removed destination, canceled order, or unavailable recipient still requires an explicit outcome for the cargo and task. Those lifecycle decisions remain open and do not introduce route revalidation in the first version. These choices guide the upcoming simulation and do not describe implemented courier behavior.
 
 ### Routing across roads and terrain
 
@@ -356,7 +356,7 @@ Before committing to related features, the main open design choices are:
 | --- | --- |
 | Economy and power | Food-only energy versus separate fuel/electricity; which progression stages earn their complexity. |
 | Logistics | Push/pull balance, supply radii, food payment and reservation, priorities, and replenishment controls. |
-| Routing | Mixed terrain versus road-centered travel; route representation; plan check points, changes that affect only new deliveries, and cargo/task outcomes when a destination or order disappears. |
+| Routing | Mixed terrain versus road-centered travel; route representation; visual adaptation to changed terrain; cargo/task outcomes when a destination or order disappears. Active routes are not rechecked in the first version. |
 | Settlements | Building recognition, service coverage, population growth, and needs at each technology level. |
 | Construction | Long-term weight/span rules, large-scale concrete workflows, and blueprint validity during incomplete construction. |
 | Storage | Spoilage, preservation, permafrost, and food-crate stack behavior. |

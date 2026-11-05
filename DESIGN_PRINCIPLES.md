@@ -59,7 +59,7 @@ Rendered motion may be reconstructed when needed. Observation must not change au
 
 Assigning workers, choosing suppliers, and planning routes can cost more than executing the resulting plans. A newly available better option does not by itself require reconsidering active work. Favor sufficiently good decisions that remain useful over continuous optimization.
 
-Define which changes invalidate a plan and when they are checked. The starting approach for travel is to check at defined points, such as before entering another route segment, rather than immediately notifying and replanning every affected courier after each edit. For selected changes, it is acceptable for active deliveries to finish under their accepted plans while new deliveries account for the changed world. The [game vision](docs/game-vision.md#responding-to-world-changes-during-travel) records this policy and the remaining choices.
+Define which changes invalidate a plan and when they are checked. For deliveries in the first version, calculate travel duration at the start and do not recheck or replan the route after departure. Changes along the route do not change the accepted food cost or duration in simulation time; new deliveries account for the changed world through updated routing data. Visual movement may adapt to current terrain, but cannot change authoritative simulation state, timing, or outcomes. The [game vision](docs/game-vision.md#responding-to-world-changes-during-travel) records this policy and the remaining choices about cargo and task outcomes.
 
 ## Bound the work caused by ordinary changes
 

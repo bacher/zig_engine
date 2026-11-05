@@ -42,9 +42,11 @@ A player may disable a workstation. It then stops automatically starting work an
 
 Moving a produced block to storage is a separate task from producing it. Once the block has been produced, a storage destination is sought. A courier starts transporting it when sufficient food is available from the dispenser to pay for that operation.
 
-After transport starts, its accepted food cost and travel duration are not recalculated in response to world changes along the route. This is a deliberate performance simplification. The fixed duration is measured in simulation time; coordinated slowdown under overload changes how quickly that time advances in real time.
+In the first version, calculate travel duration when the delivery starts and do not recheck or replan its route afterward. Its accepted food cost and travel duration are not recalculated in response to world changes along the route. This is a deliberate performance simplification. The fixed duration is measured in simulation time; coordinated slowdown under overload changes how quickly that time advances in real time.
 
-The [travel policy](game-vision.md#responding-to-world-changes-during-travel) starts with checking plans at defined points and permits selected changes to affect only new deliveries. How those checks interact with fixed travel duration in exceptional cases remains to be clarified. A removed destination, canceled order, or unavailable recipient still needs an explicit cargo and task outcome. These notes do not choose those outcomes.
+Visualization may adjust the NPC's motion to fit current terrain, for example to avoid walking through the air after terrain changes. This is purely visual and must not feed changes back into simulation state, travel timing, food costs, or delivery outcomes. It does not introduce simulation route checks, including when the NPC is observed by several players.
+
+The [travel policy](game-vision.md#responding-to-world-changes-during-travel) applies this simplification to active deliveries; updated routing information serves new deliveries. A removed destination, canceled order, or unavailable recipient still needs an explicit cargo and task outcome. Those are separate task-lifecycle questions, not permission to recheck the route in the first version. These notes do not choose those outcomes.
 
 ## Architecture ideas to revisit later
 
