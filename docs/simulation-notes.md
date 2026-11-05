@@ -10,6 +10,16 @@ Without player intervention, the simulation should not pay synchronization overh
 
 Simulation logic should benefit from that guarantee: it must not need rollback handling for losing an edit conflict to a player. The guarantee must be established by the future coordination model, rather than assumed while conflicts remain possible. Handling player edits, conflicts between simulation workers, and unrelated failures still needs design; this rule does not imply that every simulation action is infallible.
 
+## Local workforce and client-side NPCs
+
+NPCs do not need to exist persistently in the simulated world. Work can begin automatically once its prerequisites, including the necessary resources and food, are satisfied. There is no additional requirement to find an individually available worker, bring that worker to the job, or return them afterward. The local workforce model does not introduce a separate finite pool of free NPCs as a start condition.
+
+The simulation tracks work and delivery state, including cargo, resource payment, schedules, and progress. Clients visualize these tasks with NPC models. A continuously operating workstation may keep the same visible worker across successive operations. For a delivery, a courier model may appear, visually approach the pickup point, and show the transport. After completion, it may walk away and disappear or be reused for a nearby delivery starting at that time.
+
+Appearance, approach, departure, and model reuse are presentation choices. They must not delay authoritative task starts or completion, add food costs or empty journeys, or determine whether work can begin. Reusing a nearby model is optional; a new delivery never waits for one to become available. Separate clients may make different presentation choices without changing the shared simulation.
+
+The 100,000-active-NPC scale target therefore refers to concurrent work and delivery tasks represented by NPCs, not persistent characters or a requirement to render them all. Local infrastructure and resource prerequisites still matter; no NPC allocation system or visualization implementation is selected here.
+
 ## Participants and process boundaries
 
 There are three participants:

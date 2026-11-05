@@ -1,6 +1,6 @@
 # Design principles
 
-The game's primary goal is to sustain a massive world simulation. NPCs act as workers, builders, and couriers while many production chains, resource extraction operations, and construction sites run simultaneously. Logistics must support all of this activity: moving materials and supplies is part of the simulation itself.
+The game's primary goal is to sustain a massive world simulation. Many production chains, resource extraction operations, deliveries, and construction sites run simultaneously, represented visually by NPC workers, builders, and couriers. Logistics must support all of this activity: moving materials and supplies is part of the simulation itself.
 
 These principles guide feature design, implementation, and integration. The [game vision](docs/game-vision.md) describes the experience we are building toward; this document defines the priorities for choosing how to build it. Feature specifications should make the resulting tradeoffs explicit.
 
@@ -49,7 +49,9 @@ Use measurements where available and label estimates as estimates. Revisit a tra
 
 ## Spend work on meaningful changes
 
-Simulation cost should primarily follow changes that can affect outcomes. A production job with a known completion time need not recompute its progress continuously. An idle worker need not repeatedly search for work when no relevant opportunity has appeared. Identify what can change a result and what processing those changes require.
+Simulation cost should primarily follow changes that can affect outcomes. A production job with a known completion time need not recompute its progress continuously. A workstation waiting for resources need not repeatedly check unchanged prerequisites. Identify what can change a result and what processing those changes require.
+
+Use a local workforce model: work may start automatically once its prerequisites, including resources and food, are satisfied. The simulation does not require a persistent population of individual NPCs, a search for an available worker, or simulated approach and return journeys. Client-side NPC models represent active work and may appear, disappear, or be reused without affecting that work. The simulation retains the tasks, cargo, schedules, and progress needed for correct outcomes; visual NPC identity is not an execution prerequisite.
 
 Opening a world must allow simulation to resume in every area with active event emitters without scanning the entire world. The simulation needs its own index, and potentially additional state beyond chunk data; its representation remains an implementation decision.
 
@@ -59,7 +61,7 @@ In the first version, NPCs do not collide with or block one another in the simul
 
 ## Keep accepted plans stable
 
-Assigning workers, choosing suppliers, and planning routes can cost more than executing the resulting plans. A newly available better option does not by itself require reconsidering active work. Favor sufficiently good decisions that remain useful over continuous optimization.
+Choosing suppliers and destinations and planning routes can cost more than executing the resulting plans. A newly available better option does not by itself require reconsidering active work. Favor sufficiently good decisions that remain useful over continuous optimization.
 
 Consume all required inputs and operating resources in full when an operation or delivery starts. Started work is already paid for and does not depend on later replenishment or continued availability of those resources. Resources are not consumed progressively or charged again at completion. Transported cargo moves into the delivery's custody; it is not consumed as a transport cost. See the [resource consumption rule](docs/simulation-notes.md#consume-resources-at-start).
 
@@ -69,7 +71,7 @@ Stopping an object and dismantling it are separate player actions. Stopping prev
 
 ## Bound the work caused by ordinary changes
 
-An ordinary local change should cause a limited amount of work. Placing a block should not by default replan every courier's route; creating a job should not search the entire worker population; changing one warehouse should not reconsider the whole economy.
+An ordinary local change should cause a limited amount of work. Placing a block should not by default replan every delivery's route; creating a job should not search all world suppliers; changing one warehouse should not reconsider the whole economy.
 
 Consider service areas, limited candidate searches, approximate choices, and selective invalidation where they preserve useful gameplay. If consequences genuinely extend across the world, their processing must be distributable over time. Account for both direct processing and the follow-up work it triggers.
 
@@ -89,7 +91,7 @@ Simulation must support activity throughout the world, including areas far from 
 
 ## Make scale measurable from the first simulation prototype
 
-The initial scale target is **100,000 simultaneously active NPCs** in a developed world, working in production, extraction, construction, and logistics. This counts agents doing work or traveling, rather than decorative inhabitants or merely registered idle entities. It is a design and benchmarking target for the upcoming simulation, not a measured capability of the current game, and may be revised using prototype results.
+The initial scale target is **100,000 simultaneously active work and delivery tasks**, expressed in gameplay as 100,000 active NPC workers, builders, and couriers. Under the local workforce model this measures simulated activity in production, extraction, construction, and logistics, not a persistent population, idle NPCs, or 100,000 models rendered simultaneously. It is a design and benchmarking target for the upcoming simulation, not a measured capability of the current game, and may be revised using prototype results.
 
 Target a mid-range gaming PC with **4–8 CPU cores and 32 GB of system RAM**, with operation on **16 GB of system RAM** as a desirable goal. These are whole-machine resources, not a budget reserved for simulation. Leave CPU time and memory for rendering, world data, streaming, persistence, and the operating system. Measure against the lower CPU end as well as the upper end; exact reference CPU models and subsystem budgets remain to be selected.
 

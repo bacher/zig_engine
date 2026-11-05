@@ -25,9 +25,9 @@ Several ideas guide the experience:
 
 ## Vocabulary and simulation scope
 
-“People,” “minions,” “NPCs,” and “workers” generally mean the same thing here: NPC creatures represented by the simulation that can carry out player-directed work. A **courier** is an NPC performing a transport task.
+“People,” “minions,” “NPCs,” and “workers” describe the characters used to visualize work. A **courier** represents a transport task. The simulation uses a local workforce model: work may begin automatically when its prerequisites, including resources and food, are satisfied, without allocating a persistent individual NPC or simulating their approach and return.
 
-This does not imply that every person visible in a settlement needs an individually simulated domestic life. Houses support the settlement and improve nearby NPC efficiency. People shown inside houses can be a visual effect only; those decorative inhabitants are not additional simulation agents. Active workers and couriers do have the state needed to perform their jobs.
+The simulation retains active operations, cargo, schedules, and progress. Client-side NPC models illustrate that activity and need not persist between jobs. Houses support the settlement and improve nearby work efficiency; inhabitants shown inside them may also be purely visual. Neither domestic routines nor a separate finite pool of available individual workers is required by this model. See the [local workforce notes](simulation-notes.md#local-workforce-and-client-side-npcs).
 
 ## World and geography
 
@@ -84,7 +84,7 @@ Rivers and lakes would support fishing, scenery, and water-powered industry. Sim
 
 The eventual multiplayer target is up to 32 simultaneous players. Early versions will be single-player, but the player model and interaction with the world should remain compatible with a later move to a client-server architecture. This is a reason to preserve useful boundaries now, not a requirement to implement the full networking stack immediately.
 
-Progression connects settlement growth, production, research, and transport. NPCs need housing, production buildings, food, and potentially clothing; their needs grow as technology advances. The current clothing idea applies to cold biomes rather than requiring it everywhere. Houses enable population growth and improve the efficiency of NPCs nearby, without requiring simulated household routines.
+Progression connects settlement growth, production, research, and transport. Housing, production buildings, food, and potentially clothing support local work; requirements grow as technology advances. The current clothing idea applies to cold biomes rather than requiring it everywhere. Houses support settlement growth and improve nearby work efficiency. Exact settlement progression remains open; it does not require tracking individual residents or finding a free NPC before a task can start.
 
 Better materials enable more efficient buildings and larger structures. Research provides blueprints and new capabilities, while operating a larger economy creates the need for better transport and power sources.
 
@@ -272,15 +272,17 @@ This section preserves technical ideas that help explain the vision. It does not
 
 The [simulation notes](simulation-notes.md) preserve the author's 2026-11-05 clarification of the automated-world goal, player/service/simulation boundaries, startup without a full-world scan, workstation prerequisites, and separate production and delivery jobs. They also retain architecture alternatives for later consideration without selecting one.
 
-The initial performance target is 100,000 simultaneously active NPCs on a mid-range gaming PC with 4–8 CPU cores and 32 GB of system RAM, ideally also supporting a 16 GB machine. This is a target for the upcoming simulation, not an implemented or measured capacity. The [design principles](../DESIGN_PRINCIPLES.md#make-scale-measurable-from-the-first-simulation-prototype) define what counts toward the target and which workload and resource budgets still need to be established.
+The initial performance target is 100,000 simultaneous work and delivery tasks, represented in gameplay by active NPCs, on a mid-range gaming PC with 4–8 CPU cores and 32 GB of system RAM, ideally also supporting a 16 GB machine. This measures simulated activity, not persistent characters or simultaneously rendered models. It is a target for the upcoming simulation, not an implemented or measured capacity. The [design principles](../DESIGN_PRINCIPLES.md#make-scale-measurable-from-the-first-simulation-prototype) define the remaining workload and resource budget choices.
 
 ### Persistent work independent of observation
 
-Couriers are stateful agents moving goods through the world. Saving and loading must preserve enough state to resume their work, including active tasks, cargo, the fact that required resources were already consumed at departure, and travel progress. Resuming started work must not charge those resources again. A saved world must represent the ongoing economy, not just its terrain and buildings.
+Deliveries have persistent task state that moves goods through the world; they do not require persistent individual couriers between jobs. Saving and loading must preserve enough state to resume work, including active tasks, cargo, the fact that required resources were already consumed at departure, and travel progress. Resuming started work must not charge those resources again. A saved world must represent the ongoing economy, not just its terrain and buildings.
 
 Travel time must not depend on whether a player sees the courier. Observation must have no effects that modify authoritative world state. Rendering may adapt the visual movement to be plausible, but cannot change production, delivery outcomes, or the underlying schedule. The same principle applies when several players observe the same activity.
 
-We do not need to update a precise rendered pose for every unseen courier. We do need efficient queries for couriers present in selected chunks at the current simulation time, so nearby activity can be displayed without scanning the whole population.
+We do not need to update a precise rendered pose for every unseen courier. We do need efficient queries for active deliveries and work in selected chunks at the current simulation time, so nearby activity can be displayed without scanning all tasks.
+
+A client may keep one visible worker at a continuously operating workstation across multiple jobs. A delivery's model may appear and visually approach the pickup point; after arrival it may walk away and disappear or be reused for another nearby delivery. These animations and reuse choices must not delay task starts or completion, add resource costs, or create simulated approach and return journeys. Work does not wait for a model to appear or become available, and clients may choose different visuals for the same authoritative task.
 
 ### NPC movement and visual separation
 
@@ -290,7 +292,7 @@ Visualization will likely separate displayed movement to reduce overlap between 
 
 ### Accepting a delivery and paying for it
 
-A courier plans a route when accepting a task from A to B. The simplest payment model takes the required food from a dispenser in A; if it is unavailable, the task does not start.
+A delivery from A to B requires a planned route and its start prerequisites. No existing courier has to be found or brought to A. The simplest payment model takes the required food from a dispenser in A; if it is unavailable, the task does not start.
 
 A more flexible route configuration could choose one of four policies:
 
@@ -311,7 +313,7 @@ The initial idea is to calculate a journey in advance, including when the courie
 [{ timestamp, chunk_id }, ...]
 ```
 
-This schedule allows the current chunk to be found from elapsed time, including by a simple scan initially. It is a per-courier representation idea; an efficient query for all couriers in selected chunks may need an additional index.
+This schedule allows the current chunk to be found from elapsed time, including by a simple scan initially. It is a per-delivery representation idea; an efficient query for all active deliveries in selected chunks may need an additional index.
 
 Two ways of representing finer movement are under consideration:
 
@@ -373,7 +375,7 @@ Before committing to related features, the main open design choices are:
 | Economy and power | Food-only energy versus separate fuel/electricity; which progression stages earn their complexity. |
 | Logistics | Push/pull balance, supply radii, food payment source, allocation between competing jobs, priorities, replenishment controls, the scope of accepted obligations when stopping, and stored materials during dismantling. All required resources are consumed at the start of an operation or delivery. |
 | Routing | Mixed terrain versus road-centered travel; route representation; visual adaptation to changed terrain; cargo/task outcomes for explicit order cancellation and exceptional failures. Active routes are not rechecked in the first version; destinations cannot be dismantled while deliveries remain outstanding. |
-| Settlements | Building recognition, service coverage, population growth, and needs at each technology level. |
+| Settlements | Building recognition, service coverage, settlement growth, and needs at each technology level, using local workforce rather than persistent individual NPCs. |
 | Construction | Long-term weight/span rules, large-scale concrete workflows, and blueprint validity during incomplete construction. |
 | Storage | Spoilage, preservation, permafrost, and food-crate stack behavior. |
 | Geography | Biome overlap, a separate fertile-soil category, and eventual rivers/lakes. |
