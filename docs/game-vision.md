@@ -298,9 +298,17 @@ Two ways of representing finer movement are under consideration:
 | Compressed full route | Store intervals of movement in the same direction, splitting them at chunk boundaries so each chunk's entry point is easy to locate. Avoid storing every individual step. |
 | Chunk itinerary with local reconstruction | Store the chunk sequence, timing, and enough entry/exit information to recreate visible movement within a chunk using its current geometry. This reduces stored detail but may produce movement different from the originally planned path. |
 
-In the reconstruction approach, geometry may have changed since the journey was planned. A simplified visual path could permit movements normally disallowed during route planning, so the courier still reaches its scheduled exit or destination on time. The intent is to fit the animation to the journey's authoritative data while making it as plausible as possible to the observer. How to handle severe changes, blocked destinations, or deliberate route disruption still needs a gameplay policy; these cases must not acquire different outcomes merely because someone is watching.
+In the reconstruction approach, geometry may have changed since the journey was planned. A simplified visual path could permit movements normally disallowed during route planning, so the courier still reaches its scheduled exit or destination on time. The intent is to fit the animation to the journey's authoritative data while making it as plausible as possible to the observer. The policy below governs whether a world change affects an active journey; these cases must not acquire different outcomes merely because someone is watching.
 
 Reconstructing the exact original route from historical chunk snapshots was considered, but retaining arbitrary-time snapshots appears impractical. Planning all couriers against a retained common snapshot is another possibility, with its own costs. Even an exact historical path could conflict with today's geometry, so snapshots would not remove the need to adapt visible movement. No snapshot-based solution is selected here.
+
+### Responding to world changes during travel
+
+The starting approach is to check an active plan at defined points, for example before entering another route segment. A relevant change can then lead to replanning or another explicitly defined response. Ordinary world edits do not require immediate interruption and replanning of every affected delivery. A new, better route does not by itself invalidate an accepted journey.
+
+For selected kinds of world changes, completing active deliveries under their accepted plans is an acceptable deliberate simplification. For example, a policy may allow couriers already on a journey to finish after a bridge is removed, with the consequences applying to new deliveries once routing data reflects the edit. Such a policy is an intended gameplay rule; its acceptability does not depend on bridge removal being rare. It still needs evaluation against the design principle that loopholes must not be easy to exploit repeatedly.
+
+The simulation design must choose the check points, which changes affect active plans, and which apply only to new deliveries. Handling a removed destination, canceled order, or unavailable recipient still requires an explicit outcome for the cargo and task; permission to finish an old route does not settle those cases. All policies must apply independently of observation. These choices guide the upcoming simulation and do not describe implemented courier behavior.
 
 ### Routing across roads and terrain
 
@@ -342,7 +350,7 @@ Before committing to related features, the main open design choices are:
 | --- | --- |
 | Economy and power | Food-only energy versus separate fuel/electricity; which progression stages earn their complexity. |
 | Logistics | Push/pull balance, supply radii, food payment and reservation, priorities, and replenishment controls. |
-| Routing | Mixed terrain versus road-centered travel; route representation; behavior when the world changes during a journey. |
+| Routing | Mixed terrain versus road-centered travel; route representation; plan check points, changes that affect only new deliveries, and cargo/task outcomes when a destination or order disappears. |
 | Settlements | Building recognition, service coverage, population growth, and needs at each technology level. |
 | Construction | Long-term weight/span rules, large-scale concrete workflows, and blueprint validity during incomplete construction. |
 | Storage | Spoilage, preservation, permafrost, and food-crate stack behavior. |

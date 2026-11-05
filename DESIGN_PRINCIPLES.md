@@ -38,3 +38,39 @@ When a simplification could yield a substantial performance or throughput improv
 - How likely and consequential are exceptional outcomes, and can a player trigger them easily or repeatedly?
 
 Use measurements where available and label estimates as estimates. Revisit a tradeoff when actual scale, observed failures, or easy exploitation contradict its assumptions.
+
+## Spend work on meaningful changes
+
+Simulation cost should primarily follow changes that can affect outcomes. A production job with a known completion time need not recompute its progress continuously. An idle worker need not repeatedly search for work when no relevant opportunity has appeared. Identify what can change a result and what processing those changes require.
+
+Rendered motion may be reconstructed when needed. Observation must not change authoritative schedules or outcomes, including when several players watch the same activity. These are design requirements for the upcoming simulation; they do not select a scheduler or require every subsystem to use the same update mechanism.
+
+## Keep accepted plans stable
+
+Assigning workers, choosing suppliers, and planning routes can cost more than executing the resulting plans. A newly available better option does not by itself require reconsidering active work. Favor sufficiently good decisions that remain useful over continuous optimization.
+
+Define which changes invalidate a plan and when they are checked. The starting approach for travel is to check at defined points, such as before entering another route segment, rather than immediately notifying and replanning every affected courier after each edit. For selected changes, it is acceptable for active deliveries to finish under their accepted plans while new deliveries account for the changed world. The [game vision](docs/game-vision.md#responding-to-world-changes-during-travel) records this policy and the remaining choices.
+
+## Bound the work caused by ordinary changes
+
+An ordinary local change should cause a limited amount of work. Placing a block should not by default replan every courier's route; creating a job should not search the entire worker population; changing one warehouse should not reconsider the whole economy.
+
+Consider service areas, limited candidate searches, approximate choices, and selective invalidation where they preserve useful gameplay. If consequences genuinely extend across the world, their processing must be distributable over time. Account for both direct processing and the follow-up work it triggers.
+
+## Define time independently of processing delays
+
+Each feature must define when an action takes effect in simulation time, when dependent actions become eligible, and how late processing is handled. Processing a completion late must not accidentally change production rates, operating costs, or the relative speeds of different industries.
+
+Distinguish delayed knowledge of an event from a deliberate delay to the event itself. Specify how dependent work preserves causality when updates arrive late. Any slowdown of simulation time or delay to new work under load must follow an explicit policy, rather than emerge from whichever subsystem falls behind first.
+
+## Budget memory and define overload behavior
+
+For each subsystem, account for the state retained for jobs, routes, notifications, and deferred changes, including how that state grows with world activity. Queues must have a capacity or admission policy that prevents unbounded growth under sustained overload.
+
+Repeated requests to recompute the same state may be combined; accepted deliveries and their cargo need a policy that preserves their meaning. Choose explicitly whether overload delays new assignments, reduces computational detail, slows simulation time, or uses another justified response. A queue alone does not solve a throughput deficit.
+
+## Make scale measurable from the first simulation prototype
+
+Define a representative target workload with simultaneous active NPCs, production jobs, deliveries, and construction sites, along with reference hardware and the intended rate of simulation time. Initial targets may be revised using prototype measurements; the concrete numbers remain to be selected.
+
+The first simulation prototype should support running without graphics. Measure sustained useful work, memory consumption, queue growth, and whether the economy maintains its intended pace. Include changes that disrupt ongoing work, not just a steady world with no edits. Use these measurements to evaluate design choices before committing to a threading model, scheduler, or other implementation architecture.
