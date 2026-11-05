@@ -560,6 +560,27 @@ const Game = struct {
         game.updateBlueprintInputBlock();
     }
 
+    fn blueprintChoiceButton(id: u64, name: []const u8) bool {
+        var id_buffer: [40]u8 = undefined;
+        const label = std.fmt.bufPrintZ(&id_buffer, "##blueprint-{d}", .{id}) catch unreachable;
+        const style = zgui.getStyle();
+        const size = zgui.calcTextSize(name, .{ .hide_text_after_double_hash = false });
+        const pressed = zgui.button(label, .{
+            .w = size[0] + 2 * style.frame_padding[0],
+            .h = size[1] + 2 * style.frame_padding[1],
+        });
+        // User names are literal text; ImGui label syntax belongs only to the ID.
+        const min = zgui.getItemRectMin();
+        var color = style.getColor(.text);
+        color[3] *= style.alpha;
+        zgui.getWindowDrawList().addTextUnformatted(
+            .{ min[0] + style.frame_padding[0], min[1] + style.frame_padding[1] },
+            zgui.colorConvertFloat4ToU32(color),
+            name,
+        );
+        return pressed;
+    }
+
     fn drawBlueprintUI(game: *Game) void {
         const screen = zgui.io.getDisplaySize();
         const status = game.blueprintStatusMessage();
@@ -605,9 +626,7 @@ const Game = struct {
                 var definitions = world.blueprints.definitions.valueIterator();
                 while (definitions.next()) |saved| {
                     if (saved.owner != game.player_id) continue;
-                    var label_buffer: [460]u8 = undefined;
-                    const label = std.fmt.bufPrintZ(&label_buffer, "{s}##{d}", .{ saved.name, saved.id }) catch continue;
-                    if (zgui.button(label, .{})) game.selectBlueprint(saved.id);
+                    if (blueprintChoiceButton(saved.id, saved.name)) game.selectBlueprint(saved.id);
                 }
             }
             if (zgui.button("Cancel", .{})) game.cancelBlueprintChooser();
@@ -6394,6 +6413,104 @@ test "blueprint dialogs hide the crosshair and chooser has a DPI-scaled width fl
             }
         }
     }
+}
+
+test "blueprint choice buttons render embedded and leading hashes literally" {
+    zgui.init(std.testing.allocator);
+    defer zgui.deinit();
+    zgui.io.setIniFilename(null);
+    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
+    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
+    var dpi = zgui_utils.DpiScaling.init();
+
+    for ([_]f32{ 1, 2 }) |scale| {
+        dpi.update(.{ scale, scale });
+        zgui.io.setDisplaySize(1280 * scale, 720 * scale);
+        // The second frame also checks that literal text follows style opacity.
+        for ([_]f32{ 1, 0.6 }) |alpha| {
+            zgui.getStyle().alpha = alpha;
+            zgui.newFrame();
+            zgui.setNextWindowPos(.{ .x = 20, .y = 20 });
+            zgui.setNextWindowSize(.{ .w = 600 * scale, .h = 320 * scale });
+            _ = zgui.begin("Literal blueprint names", .{ .flags = .{ .no_title_bar = true, .no_saved_settings = true } });
+            const list = zgui.getWindowDrawList();
+            const style = zgui.getStyle();
+            var text_color = style.getColor(.text);
+            text_color[3] *= style.alpha;
+            const color = zgui.colorConvertFloat4ToU32(text_color);
+            for ([_][]const u8{ "House", "House##west", "##Tower", "House###west", "###" }, 1..) |name, id| {
+                try std.testing.expectEqualStrings(name, try blueprint_capture.checkedName(name));
+                const start = list.getVertexBuffer().len;
+                _ = Game.blueprintChoiceButton(id, name);
+                var text_vertices: usize = 0;
+                for (list.getVertexBuffer()[start..]) |vertex| {
+                    if (vertex.color == color) text_vertices += 1;
+                }
+                // Every non-space ASCII glyph contributes a quad. Truncated names
+                // and accidentally visible hidden IDs produce a different count.
+                try std.testing.expectEqual(4 * name.len, text_vertices);
+                const min = zgui.getItemRectMin();
+                const max = zgui.getItemRectMax();
+                const text_size = zgui.calcTextSize(name, .{});
+                try std.testing.expectApproxEqAbs(text_size[0] + 2 * style.frame_padding[0], max[0] - min[0], 0.01);
+            }
+            zgui.end();
+            zgui.render();
+        }
+    }
+}
+
+test "blueprint choice buttons keep duplicate names and full-width IDs distinct" {
+    zgui.init(std.testing.allocator);
+    defer zgui.deinit();
+    zgui.io.setIniFilename(null);
+    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
+    zgui.io.setDisplaySize(1280, 720);
+    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const ids = [_]u64{ 1, 1 + (@as(u64, 1) << 32) };
+    for (ids) |id| {
+        var saved: @import("blueprint_runtime.zig").SavedDefinition = .{
+            .id = id,
+            .owner = game.player_id,
+            .name = try std.testing.allocator.dupe(u8, "House##west"),
+            .definition = .{ .size = .{ 1, 1, 1 }, .cells = try std.testing.allocator.dupe(voxel_chunk_module.BlockType, &.{.dirt}), .target_count = 1 },
+        };
+        defer saved.deinit(std.testing.allocator);
+        try game.world.?.blueprints.insertDefinition(std.testing.allocator, try saved.clone(std.testing.allocator));
+    }
+    game.blueprint_chooser_open = true;
+    var second_center: [2]f32 = undefined;
+    var presses: usize = 0;
+    // Settle layout, move the mouse, then press and release on the second item.
+    for (0..5) |frame| {
+        if (frame == 2) zgui.io.addMousePositionEvent(second_center[0], second_center[1]);
+        if (frame == 3) zgui.io.addMouseButtonEvent(.left, true);
+        if (frame == 4) zgui.io.addMouseButtonEvent(.left, false);
+        zgui.newFrame();
+        zgui.setNextWindowPos(.{ .x = 20, .y = 20 });
+        zgui.setNextWindowSize(.{ .w = 600, .h = 320 });
+        _ = zgui.begin("Blueprint identity", .{ .flags = .{ .no_title_bar = true, .no_saved_settings = true } });
+        for (ids) |id| {
+            if (Game.blueprintChoiceButton(id, "House##west")) {
+                presses += 1;
+                game.selectBlueprint(id);
+            }
+            if (id == ids[1]) {
+                const min = zgui.getItemRectMin();
+                const max = zgui.getItemRectMax();
+                second_center = .{ (min[0] + max[0]) / 2, (min[1] + max[1]) / 2 };
+            }
+        }
+        zgui.end();
+        zgui.render();
+    }
+    try std.testing.expectEqual(@as(usize, 1), presses);
+    try std.testing.expectEqual(.preview, game.blueprint_mode);
+    try std.testing.expectEqual(ids[1], game.blueprint_preview.?.definition_id);
 }
 
 test "occluded capture frame selects only its own rails among site and preview instances" {
