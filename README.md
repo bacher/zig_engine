@@ -24,7 +24,7 @@ The applications load installed content relative to the executable directory. Se
 
 ## Documentation
 
-The [design principles](DESIGN_PRINCIPLES.md) define the development priorities: massive simulation, throughput over latency, eventual consistency, and deliberate simplification of gameplay and implementation.
+The [design principles](DESIGN_PRINCIPLES.md) prioritize throughput for world simulation and the world-data service, allow low-latency client behavior that preserves overall performance, and define consistency and simplification tradeoffs for a massive automated world.
 
 The game vision describes the long-term direction and open design questions that should inform technical and gameplay decisions. It is a living reference, not a final requirements specification or a release plan.
 

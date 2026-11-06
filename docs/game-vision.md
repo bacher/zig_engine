@@ -1,6 +1,6 @@
 # Game vision
 
-Use the [design principles](../DESIGN_PRINCIPLES.md) alongside this vision when designing or integrating features. They establish the priorities for simulation scale, throughput, eventual consistency, and deliberate simplification.
+Use the [design principles](../DESIGN_PRINCIPLES.md) alongside this vision when designing or integrating features. They prioritize throughput in world simulation and the world-data service, allow client responsiveness where overall performance is preserved, and define the tradeoffs for consistency and deliberate simplification.
 
 This is the long-term creative and technical direction for the game, based on the author's ideas as of 2026-10-21. It describes the experience we want to work toward and gives context for decisions made along the way. It is a living document, not a final requirements specification, a release commitment, or a description of everything currently implemented.
 
@@ -281,6 +281,8 @@ Near the end of progression, internet connectivity and drone or robot stations e
 ## Simulation direction and technical implications
 
 This section preserves technical ideas that help explain the vision. It does not choose a final scheduler, route representation, cache, threading model, or persistence format.
+
+The main performance goal is to let simulation threads sustain whole-world activity in the late game with minimal waiting and coordination. Throughput takes priority primarily in the simulation and the world-data service it relies on. Client threads may favor low latency where it does not degrade overall performance or simulation throughput, but their demand on the world-data service must be controlled to avoid indirectly slowing the simulation.
 
 The [simulation notes](simulation-notes.md) preserve the author's 2026-11-05 clarification of the automated-world goal, boundaries between players, the world-data service, and the simulation, startup without a full-world scan, workstation prerequisites, and separate production and delivery jobs. They also retain architecture alternatives for later consideration without selecting one.
 
