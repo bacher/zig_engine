@@ -6,7 +6,7 @@ The [open questions](simulation-open-questions.md) track decisions needed before
 
 ## Primary scenario and player intervention
 
-The long-term goal is fully automated extraction and resource processing, production of construction materials and tools, logistics, and construction of large numbers of buildings and structures worldwide, including megastructures. Players can participate directly in building and carrying resources, but this becomes of little practical value as the economy develops. Optimize for the automated scenario, prioritizing throughput over latency wherever practical.
+The long-term goal is fully automated extraction and resource processing, production of construction materials and tools, logistics, and construction of large numbers of buildings and structures worldwide, including megastructures. Players can participate directly in building and carrying resources, but this becomes of little practical value as the economy develops. Prioritize throughput over latency primarily in world simulation and the world-data service directly supporting it. World rules and execution conditions should minimize waiting and coordination for simulation threads so late-game activity across the whole world can sustain its intended pace.
 
 Without player intervention, the simulation should not pay synchronization overhead specifically for coordinating with player actions. When a player and the simulation concurrently make conflicting edits to the same blocks, simulation edits always win. This strengthens the earlier allowance to favor the simulation into a required guarantee for these conflicts.
 
@@ -33,6 +33,8 @@ There are three participants:
 Player action handling currently runs in the same OS process as the game and the existing simulation logic. Future multiplayer clients will interact with the server through asynchronous messages over the network. Player interaction therefore cannot depend on in-process synchronization between client and server.
 
 The world-data service and simulation will remain together in one server process. They may use in-process synchronization, including atomics, semaphores, and mutexes. This is a process constraint, not a choice of threads or synchronization primitives.
+
+Client threads that provide the player experience may use a more balanced throughput/latency policy and prioritize responsiveness where it does not degrade overall system performance or sustainable simulation throughput. This applies to current in-process clients as well as future network clients. Their requests and subscriptions must not overload the world-data service: client pressure on that shared layer can delay simulation work even when the simulation itself has not changed. Specific budgets and coordination mechanisms remain open; the [design principles](../DESIGN_PRINCIPLES.md#prioritize-throughput-over-latency) define the priority.
 
 ## Simulation state and startup
 

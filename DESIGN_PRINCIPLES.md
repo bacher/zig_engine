@@ -14,7 +14,11 @@ Player interaction must remain compatible with asynchronous messages from future
 
 ## Prioritize throughput over latency
 
-Optimize for the amount of useful simulation work the game can sustain as the world grows. Immediate propagation of every world change is not a default requirement. Prefer batching, asynchronous processing, deferred updates, and reuse of computed results when they substantially increase throughput.
+This priority applies primarily to world simulation and the world-data service as the layer directly supporting it. Shape world rules and execution conditions to minimize waiting and coordination for the simulation thread or threads, so the mature automated economy can sustain activity throughout the world at its intended pace. Immediate propagation of every world change is not a default requirement for this path. Prefer batching, asynchronous processing, deferred updates, and reuse of computed results when they substantially increase simulation throughput. Any relaxation of consistency remains subject to the per-check rules below and consistent resource accounting.
+
+Client threads responsible for the player experience may balance throughput and latency differently. Favor low latency for input, feedback, and presentation where doing so does not degrade overall system performance or the simulation's sustainable throughput. This applies both to clients in the current process and to future network clients.
+
+Client demand on the world-data service must remain controlled: faster or more frequent requests are not a successful latency optimization if the resulting load or contention slows the world-data service and, through it, the simulation. Evaluate client improvements together with their effect on this shared path and other system resources. The primary performance goal remains sustained whole-world simulation in the late game; the existing overload policy is a fallback when capacity is exceeded.
 
 Choose freshness and response-time requirements per feature according to their gameplay impact. A smooth presentation does not require every simulation subsystem to process every change in real time. Evaluate performance under many concurrent workers, deliveries, production jobs, and construction projects, rather than only the latency of an isolated action.
 

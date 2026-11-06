@@ -11,6 +11,7 @@ Keep the IDs stable when discussing these items. When resolved, mark the item co
 These decisions are already recorded and are not open questions:
 
 - Optimize for an automated world, initially targeting 100,000 concurrent work and delivery tasks on a 4–8-core gaming PC with 32 GB RAM, ideally 16 GB.
+- Throughput takes priority primarily in world simulation and the world-data service supporting it. Client threads may favor low latency where it preserves overall system performance and simulation throughput; client demand must not overload the world-data service.
 - Tasks start from their prerequisites; persistent individual NPCs, worker assignment, approach journeys, and return journeys are unnecessary. NPC models and movement separation are client-side presentation.
 - Consume required resources in full at task start, with consistent accounting. Delivery cargo remains cargo. First-version deliveries have fixed simulation-time duration and no route revalidation after departure.
 - Stopping rejects new work, completes accepted obligations, and leaves the object intact. Reactivation and dismantling are separate actions; dismantling waits for obligations to finish.
@@ -21,13 +22,13 @@ These decisions are already recorded and are not open questions:
 
 - [ ] **SIM-01 — First implementation scope.** Which complete production/delivery/construction sequence is the first supported scenario? Which mechanics are explicitly excluded or represented by temporary test fixtures, and what must work end to end before expanding scope?
 - [ ] **SIM-02 — Representative load.** What mix of production, extraction, construction, and delivery tasks makes up the 100,000-task target? What task durations, starts/completions per second, travel distances, spatial concentrations, and player-edit rates should the workload exercise? Concurrent task count alone does not define throughput.
-- [ ] **SIM-03 — Resource and acceptance budgets.** Which reference CPU models represent the 4- and 8-core ends? How much CPU time and memory may simulation use alongside rendering, world data, streaming, persistence, and the OS? Which sustained throughput, backlog, startup, and memory measurements demonstrate acceptable operation on 32 GB and, ideally, 16 GB machines? Which assertions and failure scenarios must the headless prototype check?
+- [ ] **SIM-03 — Resource and acceptance budgets.** Which reference CPU models represent the 4- and 8-core ends? How much CPU time and memory may simulation use alongside rendering, world data, streaming, persistence, and the OS? Which sustained throughput, backlog, startup, and memory measurements demonstrate acceptable operation on 32 GB and, ideally, 16 GB machines? Which client-latency goals and combined client/simulation workloads demonstrate responsiveness without reducing sustainable simulation throughput? Which assertions and failure scenarios must the headless prototype check?
 
 ## Time, scheduling, and overload
 
 - [ ] **SIM-04 — Meaning of simulation time.** What is the normal relationship between real and simulation time? What precision and ordering are required for equal-time or dependent events? What happens during pause, save/load, server downtime, or a long processing stall? Is offline catch-up supported in the first version?
 - [ ] **SIM-05 — Delayed processing and causality.** If a completion is processed late, when can dependent work start and which timestamp determines its duration and cost? How is coordinated slowdown applied so industries retain their relative rates and already accepted deliveries retain their simulation-time schedules?
-- [ ] **SIM-06 — Bounded work and fairness.** What are the limits for pending events, task admission, routing requests, and other deferred work? Which notifications can be combined, and what must be retained? How are work budgets and priorities chosen without indefinitely starving regions or making economic outcomes depend on observation?
+- [ ] **SIM-06 — Bounded work and fairness.** What are the limits for pending events, task admission, routing requests, and other deferred work? Which notifications can be combined, and what must be retained? How are client requests and subscriptions budgeted so they cannot overload the world-data service and delay simulation work? How are work budgets and priorities chosen without indefinitely starving regions or making economic outcomes depend on observation?
 - [ ] **SIM-07 — Overload feedback.** What sustained shortage triggers a warning? How is effective simulation speed measured, over which interval, and how is recovery reported? What information should a player receive when a new operation is delayed by system capacity rather than missing gameplay prerequisites?
 
 ## State ownership and consistency
