@@ -136,21 +136,46 @@ publication. Blueprint dialogs block controls while simulation and service proce
 These responsibilities are implemented by the capture helper, runtime indexes, and service
 admission pipeline.
 
-An approved application-admission follow-up is pending runtime implementation. It retains full
-platform/composition validation on an earlier destination snapshot, accepting roughly one to two
-seconds of environmental change during preparation without long region or global mutation locks.
-Immediately before atomic publication, the service checks current physical emptiness of every
-nonempty target, no active-box overlap, resource/inventory/index integrity, and a real non-`none`
-block directly below every target in the globally lowest occupied layer. It does not recheck
-3×3×3 platforms or rerun full structural validation because other environmental contents changed.
-Current-state checks and publication remain atomic; preparation does not freeze the region.
+An approved hybrid application-admission follow-up is pending runtime implementation. Apply is
+an infrequent player operation, with at most one active preparation attempt; NPC simulation fills already
+published sites and does not submit Apply. Each candidate attempt protects every whole chunk
+intersecting the rotated full bounding box, including blueprint-empty cells, cavities, and empty
+chunks, before its first terrain/index copy until atomic publication, rejection, or invalidation
+of that candidate attempt. This is the box's chunk footprint, not the 56-block structural halo.
+
+Prolonged journal/disk waits or storage failures release admission protection and invalidate the
+snapshot and prepared publication, while retaining the submitted operation identity/request and
+existing save, fence, and retry semantics. A late helper result cannot publish. Recovery reacquires
+protection and copies/reprepares fresh data; stale snapshot contents and prepared index records from before release
+may not be published. R62–R64 require a finite configurable hold/expiry policy and implementation
+measurements; no numeric timeout has been selected.
+
+All actual or conservative writes into protected terrain, metadata, or index chunks must wait,
+including indirect road changes, below-soil timer writes, and whole-site cleanup triggered by a
+site finishing outside the footprint. Reads may cross the boundary. Eligible independent work
+outside it continues, preserving producer order, contiguous resolution, and exact save-fence
+membership; persistence source holds remain a separate mechanism. Publication remains a short,
+sequential operation on the single authoritative worker.
+
+Full platform/composition validation still uses immutable observations. Exterior observations may
+be mixed-time and roughly one to two seconds old; exterior changes do not require full structural
+revalidation or a matching global blueprint-overlay revision merely because another site filled or
+was cleaned up. Protected target emptiness is checked once under protection and stays valid,
+without a final O(N) target scan. The helper's complete footprint `ChunkIndex` records can therefore
+be swapped in without merging current indexes. Ownership, IDs, resources, overlap, recipient,
+inventory, and progress bookkeeping must nevertheless remain live and atomic.
+
+At publication, every target in the globally lowest occupied layer must have a real non-`none`
+block directly below it. A protected checked support proves this when it cannot change; an
+unprotected support across a Z chunk boundary must be rechecked. This does not repeat 3×3×3
+platform or full structural validation and adds no O(N) work to fulfillment.
 
 This relaxation preserves initial cheap-rule assemblability through the certified definition and
 current bottom supports, while permitting lasting ordinary structural violations caused by stale
 composition. Ordinary edit checks remain; they do not restore a universal guarantee of validity
 in the completed logical world or eventual ordinary physical validity. The [construction contract](block-placement.md#approved-blueprint-application-follow-up)
 describes the scope. Existing implementation/validation reports remain evidence for the current
-version-checked pipeline, not this pending follow-up.
+FIFO/version-checked pipeline, not this pending follow-up.
 
 The [feature plan](../specs/features/blueprints.md#plan) defines the detailed capture/helper/Save
 protocol and retains the rejected service-owned capture alternative. Selection geometry and
