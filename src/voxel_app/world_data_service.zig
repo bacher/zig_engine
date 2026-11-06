@@ -30,6 +30,7 @@ const blueprint_wire = @import("persistence/blueprints.zig");
 const deferred_work = @import("deferred_world_work.zig");
 const blueprint_admission = @import("blueprint_admission.zig");
 const blueprint_road_updates = @import("blueprint_road_updates.zig");
+const background_work_log = std.log.scoped(.background_world_work);
 pub const BlueprintRejection = @import("blueprint_result.zig").Rejection;
 pub const BlueprintResult = @import("blueprint_result.zig").Result;
 pub const StandingSpaceRequest = standing_space.Request;
@@ -567,6 +568,28 @@ pub const Client = struct {
     }
 };
 
+/// One warning budget for the service, retained across errors and recoveries.
+/// Recovery is reported only for an episode with a visible warning, bounding
+/// rapidly alternating failures/successes to one warning/recovery pair per interval.
+const DeferredWorkLog = struct {
+    const repeat_interval_ns: i96 = 30 * std.time.ns_per_s;
+    next_warning_ns: ?i96 = null,
+    warning_active: bool = false,
+
+    fn failure(self: *DeferredWorkLog, at: i96) bool {
+        if (self.next_warning_ns) |deadline| if (at < deadline) return false;
+        self.next_warning_ns = at + repeat_interval_ns;
+        self.warning_active = true;
+        return true;
+    }
+
+    fn recover(self: *DeferredWorkLog) bool {
+        const report = self.warning_active;
+        self.warning_active = false;
+        return report;
+    }
+};
+
 /// Sole authority for generation, block preconditions and revisions. A single worker orders
 /// requests from all clients. Successful operations broadcast the subscribed representation;
 /// related snapshots, neighbor meshes, and command results share one update package.
@@ -647,6 +670,7 @@ pub const WorldDataService = struct {
     internal_capture_suspended: bool = false,
     captured_work_generation: u64 = 0,
     processing_deferred_work: bool = false,
+    deferred_work_log: DeferredWorkLog = .{},
     pending: std.ArrayList(Pending) = .empty,
     next_intent: std.atomic.Value(u64) = .init(1),
     outstanding_operations: std.atomic.Value(usize) = .init(0),
@@ -1193,6 +1217,18 @@ pub const WorldDataService = struct {
         // A saved obligation makes background failure independent of save success.
         self.status.deferred_work_error_name = @errorName(err);
         self.status.progress_generation +%= 1;
+        if (self.deferred_work_log.failure(persistence.now(self.io))) {
+            background_work_log.warn("Background world work failed: {s}", .{@errorName(err)});
+        }
+    }
+
+    fn clearDeferredWorkFailure(self: *WorldDataService) void {
+        const previous = self.status.deferred_work_error_name orelse return;
+        self.status.deferred_work_error_name = null;
+        if (self.deferred_work_log.recover()) {
+            // A successful step proves progress, not completion of the whole queue.
+            background_work_log.info("Background world work resumed (last error: {s})", .{previous});
+        }
     }
 
     fn retryReadFailures(self: *WorldDataService) void {
@@ -2118,7 +2154,7 @@ pub const WorldDataService = struct {
             return false;
         }
         const chunk = self.worker_state.modified_chunks.get(entry.id) orelse {
-            self.status.deferred_work_error_name = null;
+            self.clearDeferredWorkFailure();
             if (self.blueprint_road_queue.finish()) {
                 self.processing_deferred_work = false;
                 self.retryPending();
@@ -2127,7 +2163,7 @@ pub const WorldDataService = struct {
         };
         self.blueprint_road_queue.observeRevision(chunk.chunk_revision);
         if (entry.cursor >= chunk.metadata.roads.items.len) {
-            self.status.deferred_work_error_name = null;
+            self.clearDeferredWorkFailure();
             if (self.blueprint_road_queue.finish()) {
                 self.processing_deferred_work = false;
                 self.retryPending();
@@ -2149,7 +2185,7 @@ pub const WorldDataService = struct {
         };
         // Our own atomic shape updates do not require restarting this pass.
         entry.observed_revision = self.worker_state.modified_chunks.get(entry.id).?.chunk_revision;
-        self.status.deferred_work_error_name = null;
+        self.clearDeferredWorkFailure();
         self.blueprint_road_queue.advance();
         return true;
     }
@@ -8807,6 +8843,8 @@ test "cold background read failure preserves an independent successful Save" {
     try std.testing.expect(!service.worker_state.modified_chunks.contains(id));
     try std.testing.expectEqual(@as(usize, 0), service.processBlueprintRoadUpdatesWithBudget(1));
     try std.testing.expect(service.deferred_reads.contains(id));
+    // An ordinary asynchronous wait must not begin a warning episode.
+    try std.testing.expectEqual(null, service.deferred_work_log.next_warning_ns);
     const read = service.read_requests.items.items[0];
     service.requestSaveTransition(101, true);
     try f.waitSave(101);
@@ -8816,6 +8854,7 @@ test "cold background read failure preserves an independent successful Save" {
     try std.testing.expectEqual(persistence.Phase.complete, service.status.phase);
     try std.testing.expect(service.status.error_name == null);
     try std.testing.expectEqualStrings("Io", service.status.deferred_work_error_name.?);
+    try std.testing.expect(service.deferred_work_log.warning_active);
     try std.testing.expectEqual(sequence, f.store.sequence);
     try std.testing.expectEqual(@as(u32, 0), service.dirty_meshes.count());
     try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
@@ -8828,8 +8867,18 @@ test "a successful no-op road pass clears the recovered background diagnostic" {
     const service = &f.fixture.service;
     try queueBlueprintSaveTestRoadGate(service);
     service.noteDeferredWorkFailure(error.Io);
+    const deadline = service.deferred_work_log.next_warning_ns;
+    // Switching error codes shares the same service-wide warning budget.
+    service.noteDeferredWorkFailure(error.Capacity);
+    try std.testing.expectEqual(deadline, service.deferred_work_log.next_warning_ns);
+    try std.testing.expectEqualStrings("Capacity", service.status.deferred_work_error_name.?);
     try std.testing.expectEqual(@as(usize, 1), service.processBlueprintRoadUpdatesWithBudget(1));
     try std.testing.expect(service.status.deferred_work_error_name == null);
+    try std.testing.expect(!service.deferred_work_log.warning_active);
+    try std.testing.expectEqual(deadline, service.deferred_work_log.next_warning_ns);
+    // Further successful work cannot repeat the recovery or reset the deadline.
+    service.clearDeferredWorkFailure();
+    try std.testing.expectEqual(deadline, service.deferred_work_log.next_warning_ns);
     try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.count);
 }
 
@@ -8911,4 +8960,31 @@ test "same-revision reload revisits road seeds reordered behind a partially proc
     const after = service.worker_state.modified_chunks.get(id).?;
     try std.testing.expect(after.metadata.road(transformations.index(.{ 11, 2, 6 })).?.slope != null);
     try std.testing.expectEqualDeep(high, after.metadata.road(high.index).?);
+}
+
+test "background work warnings stay bounded across bursts, error changes, and recoveries" {
+    var log: DeferredWorkLog = .{};
+    try std.testing.expect(!log.recover());
+    var warnings: usize = 0;
+    var recoveries: usize = 0;
+    // Ten thousand separate failed attempts followed by successful steps must
+    // not bypass the shared limiter by repeatedly opening a new episode.
+    for (0..10_000) |attempt| {
+        if (log.failure(@as(i96, @intCast(attempt)) * std.time.ns_per_ms)) warnings += 1;
+        if (log.recover()) recoveries += 1;
+        try std.testing.expect(!log.recover());
+    }
+    try std.testing.expectEqual(@as(usize, 1), warnings);
+    try std.testing.expectEqual(@as(usize, 1), recoveries);
+    const interval = DeferredWorkLog.repeat_interval_ns;
+    try std.testing.expect(!log.failure(interval - 1));
+    try std.testing.expect(log.failure(interval));
+    // A persistent failure gets a reminder at the exact 30-second boundary.
+    try std.testing.expect(!log.failure(2 * interval - 1));
+    try std.testing.expect(log.failure(2 * interval));
+    try std.testing.expect(log.recover());
+    try std.testing.expect(!log.recover());
+    try std.testing.expect(!log.failure(2 * interval + 1));
+    try std.testing.expect(!log.recover());
+    try std.testing.expect(log.failure(3 * interval));
 }
