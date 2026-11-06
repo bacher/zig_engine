@@ -56,35 +56,63 @@ selection/definition limits in [R54/Q25](../specs/features/blueprints.md#horizon
 
 ### Approved blueprint application follow-up
 
-The approved destination-admission change below is pending runtime implementation. The current
-service still rechecks dependency versions before publication. Existing implementation and
-validation reports describe that stricter behavior; they do not verify this follow-up.
+The approved hybrid destination-admission change below is pending runtime implementation. The
+current service still uses FIFO admission and rechecks dependency versions before publication.
+Existing implementation and validation reports describe that behavior; they do not verify this
+follow-up.
 
-Application will validate real bottom platforms and the completed design's composition with
-nearby constructions on an earlier destination snapshot. The accepted observation-age window is roughly
-one to two seconds from the earliest copied data through publication, including helper and queue
-waits; it is not a real-time completion promise. The world keeps changing. It must not hold a region or global
-mutation lock across preparation. Environmental changes during that interval do not trigger
-full structural revalidation or require the snapshot to match publication-time terrain.
+Apply is an infrequent player operation, with at most one active preparation attempt. NPC simulation
+fills already published sites and does not initiate Apply. Before the first terrain or index copy,
+each candidate attempt protects every whole chunk intersecting the rotated full bounding box,
+including blueprint-empty cells, cavities, and empty chunks. Protection covers that chunk footprint,
+not the 56-block structural halo, and lasts until atomic publication, rejection, or invalidation
+of that candidate attempt.
 
-Immediately before atomic publication, the authority must check current physical emptiness
-at every nonempty target, no overlap with another active site's box, and resource,
-inventory, and index integrity. It must also find a real non-`none` block directly below
-**every target in the globally lowest occupied layer**. That last check accepts any real
-block type, never a miniature. It does not recheck the surrounding 3×3×3 platforms, every
-column's lowest target, or the full composed structure. Unknown required current cells
-cannot establish these checks. Failure publishes no partial site.
+Prolonged journal/disk waits or storage failures release admission protection and discard or
+invalidate its snapshot and prepared publication. The submitted operation identity/request and
+existing save, fence, and retry semantics survive; a late helper result cannot publish. Recovery
+must reacquire protection and copy/reprepare fresh data, without reusing stale snapshot contents or prepared
+index records from before release. R62–R64 require a finite configurable hold/expiry policy and
+implementation measurements; no numeric timeout has been selected.
 
-The initial snapshot still requires the full platforms and composition checks. The narrower
-current checks deliberately permit stale environmental approval: a changed platform or
-nearby structure can make the published completed arrangement ordinary-rule-invalid.
-Such a violation can last after construction finishes; there is no automatic repair or
-completion-time structural scan. The guarantees below distinguish initial cheap-rule
-assemblability from ordinary structural validity.
+All actual or conservative writes into protected terrain, metadata, and index chunks must wait.
+This includes indirect adaptive-road effects, timer writes to soil below an edited cell, and cleanup
+of an entire site even when its last fill occurred outside the protected footprint. Reads may cross
+the boundary. Independent work outside it must progress while preserving producer order, contiguous
+resolution, and the exact membership of selected save fences. A bypassed later request cannot
+satisfy an earlier unresolved fence. Existing persistence source holds remain separate from Apply
+protection, and final publication stays short and sequential on the single authoritative worker.
+
+Application still validates full real bottom platforms and the completed design's composition with
+nearby constructions using immutable observations. Exterior observations may be mixed-time and
+roughly one to two seconds old through publication, including helper and queue waits; this is not a
+real-time completion promise. Changes outside the protected chunks do not trigger full structural
+revalidation. In particular, external fills or cleanup alone must not cause rejection through a
+global blueprint-overlay revision check.
+
+Every nonempty target must be physically empty, even if an existing block has the required type.
+The authority checks target occupancy once under protection; the write gate preserves that
+result, so publication needs no final O(N) target scan. The helper prepares entire footprint
+`ChunkIndex` records for atomic swapping, without merging them with current indexes. Current owner,
+ID, resource, overlap, recipient, inventory, and progress bookkeeping must remain live and atomic;
+stale structural evidence does not authorize stale publication bookkeeping. Failure publishes no
+partial site.
+
+At atomic publication, a real non-`none` block must be directly below **every target in the globally
+lowest occupied layer**. Any real block type qualifies, never a miniature. A protected checked
+support can supply this proof without rereading it; unprotected supports below a Z chunk boundary
+must be rechecked. Unknown required current cells cannot establish support. This does not recheck
+the surrounding 3×3×3 platforms, every column's lowest target, or the full composed structure, and
+adds no O(N) work to fulfillment.
+
+The initial observations still require full platforms and composition checks. Exterior staleness
+can make the published completed arrangement ordinary-rule-invalid. Such a violation can last
+after construction finishes; there is no automatic repair or completion-time structural scan. The
+guarantees below distinguish initial cheap-rule assemblability from ordinary structural validity.
 
 ### Blueprint fulfillment
 
-Full designs are validated at creation and composed with an earlier destination snapshot
+Full designs are validated at creation and composed with earlier destination observations
 at application under the approved follow-up above.
 Subsequent blueprint-directed structural approval must inspect no more than the real block
 directly below and four immediate XY neighbors. Any real block below passes this cheap rule;
@@ -118,15 +146,16 @@ support rules and fixed windows, with all affected planned cells included as con
 Checking only real construction metadata would miss an instance whose blocks are still
 miniatures.
 
-There is no extra foundation lock. Full 3×3×3 platforms remain a requirement of the earlier
-application snapshot. Under the approved pending follow-up, publication rechecks only the real
-block directly below each globally lowest occupied target. Later ordinary extraction keeps
-its completed-world support checks. Collision, mining/item transfers, and cheap blueprint
+There is no permanent foundation lock. Full 3×3×3 platforms remain a requirement of the earlier
+application observations. Under the approved pending follow-up, publication requires only the real
+block directly below each globally lowest occupied target, using protected proof or a current
+recheck for unprotected supports. Later ordinary extraction keeps its completed-world support
+checks. Collision, mining/item transfers, and cheap blueprint
 fulfillment use real terrain; miniatures cannot be mined and never count as real support for filling
 another target. Replacing a miniature with its required real block leaves the completed
 logical view unchanged, so that operation needs no dependent revalidation.
 
-Application checks composition on the earlier snapshot under the approved pending follow-up;
+Application checks composition on earlier observations under the approved pending follow-up;
 its final current-state checks are narrower. An ordinary placement still first validates its
 new target against physical terrain, then validates that target and affected dependents in
 the completed logical view. Physical
