@@ -118,6 +118,36 @@ Future world gameplay simulation will use a configurable fixed step around 20 or
 
 GPU operations run on the application thread. The service generates data and face records without accessing GPU resources. Each producer/consumer thread uses its own client endpoint; a client's request-ID counter is not a shared multi-thread API. Service mailboxes use short mutex-protected sections, and an allocator used by the service must support concurrent allocation.
 
+The planned blueprint capture workflow follows these ownership boundaries:
+
+- The main thread owns selection/UI state and captures the player's predicted real+planned view,
+  including effective pending edits, into detached immutable data. Later source changes or
+  prediction rebases do not alter it.
+- A bounded helper validates detached contents in isolation, without live world pointers or
+  source coordinates. The client owns the checked candidate until Save is submitted.
+- WorldDataService receives the checked definition for persistence. A submitted operation owns
+  its payload independently of UI cleanup; unconfirmed candidates never enter autosave.
+
+Capture uses ordinary full-block subscriptions rather than persistence mutation-freezing holds.
+Jobs, memory, source retention, and cancellation/shutdown cleanup must remain bounded, and stale
+results must not affect a newer draft. Large application admission prepares a versioned dependency
+snapshot and resources before atomic publication. Blueprint dialogs block controls while simulation
+and service processing continue. These are planned responsibilities, not implemented behavior.
+
+The [feature plan](../specs/features/blueprints.md#plan) defines the detailed capture/helper/Save
+protocol and retains the rejected service-owned capture alternative. Selection geometry and
+horizontal limits belong to the [capture rules](../specs/features/blueprints.md#capture-and-input) and
+[R54/Q25](../specs/features/blueprints.md#horizontal-size-and-wrapped-target-uniqueness).
+The [resource accounting](../specs/features/blueprints.md#reference-workload-and-resource-accounting)
+defines the supported workload, memory considerations, and required measurements.
+
+The general [save compatibility policy](persistence.md#save-compatibility) applies to the
+whole world, including blueprints. There is one current game logic; blueprint definitions
+and unfinished instances do not select historical rules. Before the first release,
+incompatible development saves are rejected through world-save version gates rather than
+preserved through compatibility work. Any future migration policy between released game
+versions will be designed separately.
+
 The voxel app stops the simulation worker, submits any remaining local commands, and destroys the service before destroying its game state and engine. Service shutdown commits already submitted edits, skips pending generation work, and frees unconsumed replies. Persistent worlds drain admitted actions and player checkpoints before final capture. A delayed or failed save keeps the loop responsive and offers wait/retry, cancel exit, and explicit quit without saving. See [persistence](persistence.md) for the storage lifecycle.
 
 ## Read next

@@ -36,6 +36,113 @@ resources default to forbidden mining. `mined_type` is optional even on success;
 leaves keeps an empty player slot empty. An occupied slot still rejects all player mining.
 Deeprock has an independent mutation guard covering all direct and indirect writes.
 
+### Planned blueprint normalization
+
+The [blueprint specification](../specs/features/blueprints.md) describes planned capture and
+construction behavior; it is not implemented. Captured materials are normalized into supported
+construction materials, then the completed design is certified under the ordinary rules in this
+document, with assumed stable platforms beneath its globally lowest occupied cells. Source blocks
+outside the box supply no support. Normalization changes only the saved design, not source terrain
+or general construction rules.
+
+Natural stone and crushed stone are **not structurally interchangeable**. Natural stone is
+an unrestricted foundation; crushed stone has mineral/column/bridge limits and does not
+directly support rebar/concrete outside the existing platform and lateral-support routes.
+Blueprint validation must examine the converted arrangement. The feature spec defines the
+material allowlist and initial conversions in [R19](../specs/features/blueprints.md#full-validation-and-portability),
+the narrowly gated reinforced-support fallback and height diagnostics in
+[R47/R49/Q21](../specs/features/blueprints.md#conditional-concrete-support-conversion), and
+selection/definition limits in [R54/Q25](../specs/features/blueprints.md#horizontal-size-and-wrapped-target-uniqueness).
+
+### Planned blueprint fulfillment
+
+Full designs are validated at creation and composed with the destination at application.
+Subsequent blueprint-directed structural approval must inspect no more than the real block
+directly below and four immediate XY neighbors. Any real block below passes this cheap rule;
+with air below, an eligible real XY neighbor is required. This deliberately permits temporarily
+unsupported intermediate states without repeating ordinary height/span or dependent searches.
+
+For cheap fulfillment with air below, an eligible real XY neighbor is a matching logical
+material, either reinforced type for a rebar/concrete target, or natural rock for a
+crushed-stone target. Reuse the ordinary `isNaturalRock()` family: stone, metal_ore,
+limestone, coal, and deeprock; clay is not in that family. This directed support exception
+matches ordinary crushed-bridge routes and prevents a legal foundation removal from
+stranding a crushed miniature between real stone sides. It uses the same four XY reads,
+adds no recursive validation, and does not change the target's required inventory material.
+Normal dirt aging preserves its blueprint fulfillment identity across dirt, packed dirt, and grass.
+Miniatures never count as real support. Filling a target and completing the last target require
+no full-design scan; the detailed structural/performance contract is in
+[R27–R32 and R51](../specs/features/blueprints.md#assembly-and-completion).
+
+### Planned blueprint extraction view
+
+Extraction remains forbidden throughout an unfinished blueprint's box, including preexisting
+blocks in nontarget cells. Outside all such boxes, the planned general extraction check sees
+pending miniature targets as if they were completed blocks. It uses the same ordinary
+support rules and fixed windows, with all affected planned cells included as constructions.
+Checking only real construction metadata would miss an instance whose blocks are still
+miniatures.
+
+There is no extra foundation lock. Actual full 3×3×3 platforms are an application requirement;
+later ordinary extraction may remove their cells when the completed logical arrangement
+still has valid support. Collision, mining/item transfers, and cheap blueprint fulfillment
+use real terrain; miniatures cannot be mined and never count as real support for filling
+another target. Replacing a miniature with its required real block leaves the completed
+logical view unchanged, so that operation needs no dependent revalidation.
+
+Application checks the completed design's composition with the destination and affected
+constructions. An ordinary placement first validates its new target against physical terrain,
+then validates that target and affected dependents in the completed logical view. Physical
+approval ensures miniatures supply no real support; completed target approval catches conflicts
+in the new block itself, which dependent checks skip. Both views include the proposed placement.
+Affected-dependent discovery must cover every world material, including water/snow and other
+types excluded from capture. [R39/R40](../specs/features/blueprints.md#assembly-and-completion)
+record composition examples, and the [constraints](../specs/features/blueprints.md#constraints)
+define cache separation and safe approval reuse. These checks add no work to blueprint fulfillment.
+
+### Planned blueprint world-mutation invariant
+
+Every gameplay world modification must preserve ordinary structural validity of affected
+real and planned constructions in the resulting logical world where all pending targets
+are completed. This applies to player/NPC actions, blueprint application, simulation,
+timers, debug/service commands, batch edits, and indirect side effects. A modification that
+would invalidate that resulting arrangement must not commit. Preserve ordinary
+generated-terrain exemptions and bounded affected-region checks; this does not require
+scanning the whole world or repeating validation for a proven logical no-op.
+
+Unfinished construction may temporarily violate ordinary physical construction rules both
+internally and in its surroundings. This includes partially built structures and already
+completed buildings affected by the unfinished work. Finishing one blueprint removes its
+own frame and restrictions; it does not promise ordinary physical validity while nearby
+targets from other sites remain pending.
+
+Each fulfillment replaces one planned type with an equivalent real type, leaving the
+completed logical arrangement unchanged. Once a constructed cell's ordinary
+support window contains no pending target from any active site, physical and completed
+reads coincide and its ordinary physical validity follows. The current window is an
+inclusive cube of ±28 cells on each axis, using shortest wrapped-X displacement; recursive
+support checks do not move its center. For a whole completed building, the sufficient
+condition applies around every constructed cell, not just its origin or former box center.
+
+Eventual physical validity is a consequence of the mutation admission invariant. It adds no
+completion check, repair operation, per-fill search for neighboring sites, or persistent
+stability flag. A new nearby site may introduce temporary physical invalidity again while
+preserving the completed logical arrangement. [R50/Q22](../specs/features/blueprints.md#world-mutation-invariant-and-eventual-physical-validity)
+record the invariant and examples. Future cancellation and its effects on remaining or surrounding
+structures are excluded from this contract and require separate design.
+
+### Planned blueprint global completion order
+
+All active sites must remain structurally completable in some shared order. Placements may
+interleave sites: after a legal removal below plank target A, A may rely on a neighboring
+site's plank target B being filled first. Cross-site dependencies are accepted. Independent
+completion of each site is deferred as a potential improvement. This is a structural guarantee;
+materials, data, access, and scheduling are separate conditions. The spec contains the
+[completion-order argument](../specs/features/blueprints.md#global-completion-order-argument)
+and the preferred deferred [per-instance-reader alternative](../specs/features/blueprints.md#deferred-preferred-alternative-per-instance-logical-readers)
+to a support-component graph. The current guarantee adds no runtime graph, reachability scan,
+or final validation pass; the five-neighbor bound remains.
+
 ## Stable platforms
 
 A stable platform is a completely filled 3x3x3 cube immediately below a candidate block.
@@ -62,7 +169,26 @@ Trunks and planks can rest on structural materials. Crushed stone can rest on na
 crushed stone. Rebar and concrete can rest on natural stone or either reinforced material.
 A stable platform is an additional valid foundation for all these materials. Resting on
 either soil state requires the centered stable platform, rather than just one soil cell.
-An incompatible occupied block underneath cannot be treated as air to bypass the hierarchy.
+The current implementation also rejects an incompatible occupied block underneath even
+when a separate lateral support route could suffice. The planned correction below replaces
+that occupancy veto; it does not make the incompatible block provide support.
+
+### Planned correction: independent support routes
+
+The blueprint iteration must distinguish downward-support eligibility from occupancy.
+Failure of the direct route does not veto another support route already permitted for the
+material. In particular, laterally supported planks may have dirt/packed dirt/grass directly
+below without requiring that earth to form a stable platform. The same independent-route
+principle applies to materials with their own lateral support mechanisms; it grants no new
+lateral mechanism to trunks, soil, sand, or roads.
+
+Keep the actual block below in the reader and test the alternative route, rather than
+globally reporting that cell as air. Preserve footprint, span, height, crushed-column, and
+bridge-side restrictions. Unknown cells remain unknown. A valid lateral route accepts the
+block without treating the unsuitable below material as its foundation; absence of any
+valid route still rejects it. This changes general construction validation, including
+ordinary placement/removal and blueprint certification/composed admission, not just the
+blueprint shortcut. It is planned behavior, not yet implemented.
 
 | Construction group | Maximum height | Horizontal reach from a vertically supported block |
 | --- | --- | --- |

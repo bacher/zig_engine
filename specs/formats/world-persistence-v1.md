@@ -60,6 +60,12 @@ version 2 before interpreting any chunk bytes. An incompatible change in version
 legacy decoding sets the minimum to 3. A version bump alone does not implement compatibility:
 when layout/defaults change, retain the required old decoding logic or raise the minimum.
 
+All accepted file encodings map to the same current gameplay logic. The reader does not
+select a historical ruleset from a save or an individual blueprint. A sufficiently incompatible
+gameplay change also advances the write version and raises the minimum to exclude old worlds,
+even when record layouts are unchanged. This world-level gate covers saved blueprint definitions
+and unfinished instances without independent rule-version fields or migration.
+
 Initially perform no material-enum membership checks, either per raw cell or per RLE run.
 Retain file/record checksums and structural bounds, and reject unsupported codec IDs at the
 per-record dispatch point. Once version/integrity checks succeed and decoding yields exactly
@@ -271,9 +277,10 @@ centered coordinate convention and chunk-ID packing; reconstruct derived masks/s
 validated dimensions rather than serializing them. Reject unsupported layout, chunk size,
 topology, tick rate, generator identity/version, or settings. In particular, a saved topology
 must match what the running engine supports. Settings are immutable for the world's lifetime.
-Do not substitute runtime defaults for saved values. Changes to generator behavior that
-alter generated terrain require advancing the generator implementation version and retaining
-compatible generation or an explicit migration under Q1.
+Do not substitute runtime defaults for saved values. Incompatible generator behavior changes
+advance the generator implementation identity/version and the world-save write/minimum-readable
+versions so unsupported older worlds are rejected under Q1. Keep one current generator logic
+with its supported settings profiles rather than historical implementations or required migration.
 
 Terrain generator version 1 settings are exactly 39 bytes, in this order:
 

@@ -252,8 +252,11 @@ Implementation evidence and measured defaults are recorded in the
   Both playable profiles persist a seed and use the canonical deeprock floor. Reject legacy
   ID 0 (seedless flat), ID 1 (old terrain), and unknown versions/profiles explicitly before
   preparation or worker startup; never reinterpret their descriptors as the new profiles.
-  Backward compatibility and migration of old worlds are not required. Within a supported
-  version, reopening must reproduce the same unmodified world and environmental queries.
+  Backward compatibility and migration of old worlds are not required. Retain one current
+  generator logic, with natural/flat as settings profiles rather than historical algorithms.
+  Sufficiently incompatible generation/gameplay changes also advance the world-save write
+  and minimum-readable versions to reject old worlds under the persistence contract. Within
+  a supported version, reopening must reproduce the same unmodified world and environmental queries.
   Persist compact inputs and deterministically rebuild prepared macro data. The selected
   runtime generator, settings, seed, and layout must match the persisted descriptor.
 - R32: World creation and routine queries must not allocate block-resolution global maps
