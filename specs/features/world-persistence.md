@@ -748,6 +748,16 @@ mechanisms without overriding those contracts.
   verification, and compaction reads do not register live timers or execute them. No extra
   timer pass is required for chunk readiness or a save boundary; add no offline elapsed time.
 
+- R79: Persist the complete bounded set of typed unfinished-world-work keys with each
+  snapshot, initially road-shape reconciliation keyed by chunk. Accepted effects and marks,
+  and completed results and clears, share the same durable world boundary. Save readiness
+  must not require the global road queue to drain; preserve selected command prefixes and
+  normal source/read/compaction gates. Restore keys as fresh current-world reconciliation
+  passes before readiness, preserving saved ownership without whole-world scans/preloads.
+  Runtime cursors/repeat flags remain volatile. See [unfinished world work](deferred-world-work.md)
+  for canonical encoding, membership generations, bounds, and validation. Format 4 rejects
+  development formats 1–3 without migration.
+
 ## Clarifications
 
 - Q1: Persist generated or only changed chunks?
@@ -1574,6 +1584,13 @@ mechanisms without overriding those contracts.
   but remain monotonic. Cover/uncover
   edits across a chunk boundary maintain eligibility atomically; timer execution performs
   no neighboring reads/loads. Stale concurrent load results cannot overwrite newer state.
+
+- AC138: GIVEN unfinished road-shape work or a membership-only mark/clear WHEN capturing,
+  committing, failing, canceling, compacting, or reopening a save THEN the recovered full
+  work set and world effects share the same durable boundary, newer membership remains
+  unsaved after an older acknowledgment, and saved keys resume current-world passes without
+  a global road-drain barrier or world preload; source ownership and selected command-prefix
+  guarantees remain effective. Verify [unfinished-work AC1–AC12](deferred-world-work.md#acceptance-criteria).
 
 ## Constraints
 
@@ -2693,6 +2710,12 @@ durability by itself; report that distinction in validation results.
 - `docs/voxel-world.md`, `docs/architecture.md`: ownership, save lifecycle, and compatibility.
 
 ### Data Model Changes
+
+Format 4 additionally stores the canonical complete unfinished-world-work key set after
+blueprint state/operations in base/WAL records. It is bounded to 4,096 five-byte keys;
+chunk road state and ownership remain unchanged. Runtime cursors are rebuilt on load.
+See the [format contract](../formats/world-persistence-v1.md) and
+[unfinished-work spec](deferred-world-work.md).
 
 Introduce a world UUID, generator version, snapshot sequence, checkpoint world/player
 records, frozen source handles with epoch/revision identity, persistence dirty sets/watermarks,

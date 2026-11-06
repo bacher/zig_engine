@@ -118,7 +118,7 @@ Future world gameplay simulation will use a configurable fixed step around 20 or
 
 GPU operations run on the application thread. The service generates data and face records without accessing GPU resources. Each producer/consumer thread uses its own client endpoint; a client's request-ID counter is not a shared multi-thread API. Service mailboxes use short mutex-protected sections, and an allocator used by the service must support concurrent allocation.
 
-The planned blueprint capture workflow follows these ownership boundaries:
+The blueprint capture workflow follows these ownership boundaries:
 
 - The main thread owns selection/UI state and captures the player's predicted real+planned view,
   including effective pending edits, into detached immutable data. Later source changes or
@@ -132,7 +132,7 @@ Capture uses ordinary full-block subscriptions rather than persistence mutation-
 Jobs, memory, source retention, and cancellation/shutdown cleanup must remain bounded, and stale
 results must not affect a newer draft. Large application admission prepares a versioned dependency
 snapshot and resources before atomic publication. Blueprint dialogs block controls while simulation
-and service processing continue. These are planned responsibilities, not implemented behavior.
+and service processing continue. These responsibilities are implemented by the capture helper, runtime indexes, and service admission pipeline.
 
 The [feature plan](../specs/features/blueprints.md#plan) defines the detailed capture/helper/Save
 protocol and retains the rejected service-owned capture alternative. Selection geometry and
@@ -148,7 +148,7 @@ incompatible development saves are rejected through world-save version gates rat
 preserved through compatibility work. Any future migration policy between released game
 versions will be designed separately.
 
-The voxel app stops the simulation worker, submits any remaining local commands, and destroys the service before destroying its game state and engine. Service shutdown commits already submitted edits, skips pending generation work, and frees unconsumed replies. Persistent worlds drain admitted actions and player checkpoints before final capture. A delayed or failed save keeps the loop responsive and offers wait/retry, cancel exit, and explicit quit without saving. See [persistence](persistence.md) for the storage lifecycle.
+The voxel app stops the simulation worker, submits any remaining local commands, and destroys the service before destroying its game state and engine. Service shutdown commits already submitted edits, skips pending generation work, and frees unconsumed replies. Persistent worlds drain admitted actions and player checkpoints before final capture, while unfinished road work is saved as typed chunk obligations and resumes after loading. A delayed or failed save keeps the loop responsive and offers wait/retry, cancel exit, and explicit quit without saving. See [persistence](persistence.md) for the storage lifecycle.
 
 ## Read next
 

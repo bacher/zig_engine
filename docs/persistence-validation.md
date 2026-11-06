@@ -1,5 +1,52 @@
 # Persistence v1 validation
 
+Format 4 persists the complete unfinished-work key set atomically with each world
+snapshot. It removes the global road-drain save barrier while preserving source ownership,
+selected command prefixes, foreground read gates, and normal retry policy. Background
+road-only reads/errors remain deferred-work state; shared reads promoted by a foreground
+consumer use the ordinary save-read gate. Reloading a queued chunk restarts its runtime
+pass even when its revision is unchanged, because serialized road metadata can reorder.
+See the [unfinished-work contract](../specs/features/deferred-world-work.md) and
+[current verification and measurements](blueprints-validation.md#persisted-unfinished-work-verification-and-measurements).
+
+The final Debug check, `zig build test -Doptimize=Debug --summary all`, succeeded in
+47/47 steps with 1,768 tests passed and one existing skip. Formatting and
+`git diff --check` passed. Recovery source review and regressions cover background-read
+isolation, foreground promotion, and same-revision metadata reorder on reload. All required
+checks for this unfinished-work feature are complete; historical broader validation gaps
+below remain scoped to their original criteria.
+
+The final ReleaseFast check, `zig build install test -Doptimize=ReleaseFast --summary all`,
+succeeded in 55/55 steps with 1,761 tests passed and eight existing skips. The focused
+components include service 508/508, world 324/324, and persistence 72/72, and both
+applications built. Separate shared queue/codec and lifecycle checks each passed 13/13.
+These target totals include imported regressions and must not be added together.
+
+The format-3 results immediately below are historical; they describe the earlier blueprint
+extension rather than the new unfinished-work representation.
+
+Blueprint format-3 extension: `zig build test-blueprint-service test-capture test-persistence --summary all`
+passes **524/524** tests: 414 in the service target, 60 in capture/lifecycle, and 50 in
+storage/codecs. These target totals include existing imported regressions. The storage
+checks cover codec allocation failure, Unicode name validation, malformed/truncated progress rejection,
+terrain/dirt-aging agreement, private ownership and wrapped-box overlap rejection, ID
+exhaustion, whole-world base/WAL version rejection, uncertain commit-sync survival/loss,
+uncommitted fulfillment tails, and a checkpoint racing final completion. The recovery
+fixtures compare blueprint progress with the same terrain and player inventory snapshot.
+Fulfillment WAL encoding is 13 bytes per target; full definitions/bitmaps appear only in
+publication/checkpoints. These CPU/storage checks do not establish capture/render frame
+latency or physical power-loss behavior.
+
+Public service fixtures cover private publication, duplicate display names with stable
+IDs, occupied/overlapping/unsupported application, frozen target identity, exact partial
+and completed restart, and atomic player-inventory fulfillment. Save and final Save wait
+for earlier active or queued application admission. Focused resource fixtures cover
+terminal library/ID exhaustion, journal-prefix backpressure ahead of final saving,
+ephemeral journal omission, and shutdown cleanup of retained unpublished payloads.
+Checksum-valid terrain/progress disagreement is rejected before gameplay after storage
+recovery. Existing footer-cancellation and queued-write-failure gates include the format-3
+blueprint length/data writes and release their gates on assertion failure.
+
 This report accompanies the implementation stacked on spec PR #29. The [feature spec](../specs/features/world-persistence.md) remains the contract; this report distinguishes exercised behavior from validation that still needs a larger campaign. [Acceptance evidence](persistence-acceptance.md) maps individual criteria to tests and remaining gaps.
 
 ## Reproduce correctness checks
@@ -8,6 +55,7 @@ Use Zig 0.16.0 on macOS with the repository's graphics dependencies available:
 
 ```sh
 zig build test-persistence
+zig build test-blueprint-service
 zig build test-capture
 zig build test-world
 zig test src/voxel_app/persistence/save_lifecycle.zig
@@ -15,7 +63,10 @@ zig build test
 zig build
 ```
 
-Final full CPU run: **600 passed, 1 skipped** across 601 tests. The skip is the existing wrap-only coordinate test in the unwrapped configuration. The focused capture target also passed 47/47 tests.
+Earlier persistence baseline, before the blueprint extension: **600 passed, 1 skipped**
+across 601 tests, with 47/47 in the focused capture target. The skip was the wrap-only
+coordinate test in the unwrapped configuration. Current blueprint target results appear
+above; those earlier totals are retained as historical evidence.
 
 The focused targets isolate codec/storage, capture concurrency, and world/timer/client logic. The full suite also exercises the authoritative service and application lifecycle. Tests use temporary worlds and deterministic failure injection; they do not write the default player save.
 

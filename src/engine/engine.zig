@@ -109,6 +109,8 @@ pub const Engine = struct {
         onUpdate: ?*const fn (engine: *Engine, argument: *anyopaque) void,
         onRender: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder, argument: *anyopaque) void,
         /// Camera-space geometry after compositing, with fresh depth for self-occlusion.
+        /// World overlays retain scene depth; held geometry uses the separate cleared pass.
+        onRenderWorldOverlay3D: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder, argument: *anyopaque) void = null,
         onRenderOverlay3D: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder, argument: *anyopaque) void = null,
         /// Runs before gameplay input filtering. Return true to consume a UI key.
         onUIKeyPress: ?*const fn (engine: *Engine, key_params: KeyParams, argument: *anyopaque) bool = null,
@@ -532,7 +534,7 @@ pub const Engine = struct {
                 }
                 std.debug.print("Debug SSAO = {}\n", .{engine.state.debug_ssao_enabled});
             },
-            .b => {
+            .b => if (key_params.mods.control) {
                 engine.state.ssao_blur_enabled = !engine.state.ssao_blur_enabled;
                 std.debug.print("SSAO Blur = {}\n", .{engine.state.ssao_blur_enabled});
             },
@@ -1125,6 +1127,14 @@ pub const Engine = struct {
                         outline.drawBatch(pass, engine.pipelines.block_outline_occluded.pipeline_gpu, engine.pipelines.block_outline.pipeline_gpu, engine.bind_group_block_outline.wgpu_bind_group, 0, @intCast(scene.block_overlays.count), visible_count);
                     }
                 }
+            }
+
+            if (engine.callbacks.onRenderWorldOverlay3D) |render_world_overlay| {
+                const color_attachments = [_]wgpu.RenderPassColorAttachment{.{ .view = back_buffer_view, .load_op = .load, .store_op = .store }};
+                const pass = encoder.beginRenderPass(.{ .color_attachments = &color_attachments, .color_attachment_count = color_attachments.len, .depth_stencil_attachment = &.{ .view = engine.depth_texture.view, .depth_load_op = .load, .depth_store_op = .store } });
+                render_world_overlay(engine, pass, engine.callbacks.argument);
+                pass.end();
+                pass.release();
             }
 
             if (engine.callbacks.onRenderOverlay3D) |onRenderOverlay3D| {
@@ -1887,6 +1897,14 @@ test "input blocking releases the cursor, filters gameplay, and still delivers U
     try std.testing.expectEqual(2, probe.presses);
     engine.setGameplayInputBlocked(false);
     try std.testing.expectEqual(2, probe.input_changes);
+    const blur_enabled = engine.state.ssao_blur_enabled;
+    Engine.onKeyPress(&engine, .{ .key = .b, .mods = .{} });
+    try std.testing.expectEqual(blur_enabled, engine.state.ssao_blur_enabled);
+    Engine.onKeyPress(&engine, .{ .key = .b, .mods = .{ .control = true } });
+    try std.testing.expectEqual(!blur_enabled, engine.state.ssao_blur_enabled);
+    engine.setGameplayInputBlocked(true);
+    Engine.onKeyPress(&engine, .{ .key = .b, .mods = .{ .control = true } });
+    try std.testing.expectEqual(!blur_enabled, engine.state.ssao_blur_enabled);
 }
 
 test "pausing freezes gameplay time independently of input and drops the resumed interval" {

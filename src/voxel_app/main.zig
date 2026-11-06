@@ -42,6 +42,11 @@ const consts = @import("./consts.zig");
 const world_engine = @import("./world_engine_glue.zig");
 const transformations = @import("block_transformations.zig");
 const block_targeting = @import("block_targeting.zig");
+const block_coordinates = @import("block_coordinates.zig");
+const blueprint = @import("blueprint.zig");
+const blueprint_capture = @import("blueprint_capture.zig");
+const BlueprintTool = @import("blueprint_tool.zig").BlueprintTool;
+const blueprint_renderer = @import("engine").blueprint_renderer;
 const placement_preview = @import("placement_preview.zig");
 const block_diagnostics = @import("block_diagnostics.zig");
 const block_messages = @import("block_messages.zig");
@@ -112,6 +117,11 @@ const Game = struct {
     } = null,
     current_placement_preview: ?placement_preview.Preview = null,
     block_action_error: block_messages.TimedError = .{},
+    blueprint_tool: BlueprintTool = .{},
+    blueprint_renderer: ?blueprint_renderer.Renderer = null,
+    blueprint_render_instances: std.ArrayList(blueprint_renderer.Instance) = .empty,
+    blueprint_render_preview: ?blueprint_renderer.Preview = null,
+    blueprint_selection_frame_start: ?u32 = null,
     fractional_ticks: f64 = 0,
     /// Active subscriptions, including loads still in flight. Kept until cache eviction.
     chunk_subscriptions: std.AutoHashMapUnmanaged(u32, u64) = .empty,
@@ -134,13 +144,442 @@ const Game = struct {
     saved_game_objects: std.StringHashMapUnmanaged(*GameObject) = .empty,
     saved_game_object_groups: std.StringHashMapUnmanaged(*GameObjectGroup) = .empty,
 
+    fn clearToolInputs(game: *Game) void {
+        game.block_interaction.loseFocus();
+        game.blueprint_tool.press.loseFocus();
+        game.tool_commands.clearRetainingCapacity();
+        game.jump_requested = false;
+        game.engine.input_controller.cursor_position_delta = .{ 0, 0 };
+        if (game.player) |*player| player.resetJumpInput();
+        game.clearBlockFocus();
+    }
+
+    fn updateBlueprintInputBlock(game: *Game) void {
+        game.clearToolInputs();
+        game.engine.setGameplayInputBlocked(game.overlay != .none or game.blueprint_tool.controlsBlocked());
+    }
+
+    fn discardBlueprintDraft(game: *Game) void {
+        game.blueprint_tool.resetDraft(game.allocator);
+        game.updateBlueprintInputBlock();
+    }
+
+    fn leaveBlueprintTool(game: *Game) void {
+        game.blueprint_tool.leave(game.allocator);
+        game.blueprint_render_preview = null;
+        game.updateBlueprintInputBlock();
+    }
+
+    fn enterBlueprintCapture(game: *Game) void {
+        if (game.control_mode != .player) {
+            game.block_action_error.show("Blueprint tools require player control.", game.engine.time);
+            return;
+        }
+        if (game.block_interaction.inventory != null) {
+            game.block_action_error.show("Cannot enter blueprint capture while holding a block.", game.engine.time);
+            return;
+        }
+        game.blueprint_tool.enterCapture(game.allocator);
+        game.updateBlueprintInputBlock();
+    }
+
+    fn openBlueprintChooser(game: *Game) void {
+        if (game.overlay != .none or !game.blueprint_tool.canOpenChooser()) return;
+        if (game.control_mode != .player) {
+            game.block_action_error.show("Blueprint tools require player control.", game.engine.time);
+            return;
+        }
+        const world = if (game.world) |*world| world else return;
+        var definitions = world.blueprints.definitions.valueIterator();
+        while (definitions.next()) |saved| {
+            if (saved.owner != game.player_id) continue;
+            game.blueprint_tool.openChooser();
+            game.updateBlueprintInputBlock();
+            return;
+        }
+        game.block_action_error.show("You do not have any blueprints yet.", game.engine.time);
+    }
+
+    fn cancelBlueprintChooser(game: *Game) void {
+        game.blueprint_tool.cancelChooser();
+        game.updateBlueprintInputBlock();
+    }
+
+    fn selectBlueprint(game: *Game, definition_id: u64) void {
+        if (!game.blueprint_tool.chooser_open) return;
+        const world = if (game.world) |*world| world else return;
+        const saved = world.blueprints.definitions.get(definition_id) orelse return;
+        if (saved.owner != game.player_id) return;
+        game.blueprint_tool.select(game.allocator, definition_id);
+        game.updateBlueprintInputBlock();
+    }
+
+    fn blueprintAnchorTarget(game: *Game) ?[3]u32 {
+        const scene = game.engine.active_scene orelse return null;
+        const world = if (game.world) |*world| world else return null;
+        const camera = scene.camera;
+        return block_targeting.findTargetWithReach(world, camera.position, camera.forwardDirection(), .putting, @sqrt(blueprint_capture.range_squared)) catch null;
+    }
+
+    fn updateBlueprintRay(game: *Game) void {
+        const scene = game.engine.active_scene orelse return;
+        const player = game.player orelse return;
+        const selection = &game.blueprint_tool.selection;
+        const camera = scene.camera;
+        const direction = camera.forwardDirection();
+        const heading: Position = .{ -@sin(player.yaw), @cos(player.yaw), 0 };
+        if (selection.usesPlacementTarget(game.layout(), camera.position)) {
+            var target: ?blueprint_capture.PlacementTarget = null;
+            if (game.world) |*world| {
+                const length = @sqrt(@reduce(.Add, direction * direction));
+                if (std.math.isFinite(length) and length > 0) {
+                    const eye_offset = camera.position - player.position;
+                    // Traverse far enough for every hit within 30 m of the feet;
+                    // selection validates the raw hit before projecting to anchor Z.
+                    const query_reach = @sqrt(blueprint_capture.range_squared) + @sqrt(@reduce(.Add, eye_offset * eye_offset));
+                    if (block_targeting.castWithReach(world, camera.position, direction, query_reach) catch null) |hit| if (hit.placement) |cell| {
+                        target = .{ .cell = cell, .hit = camera.position + direction * @as(Position, @splat(hit.distance / length)) };
+                    };
+                }
+            }
+            selection.updatePlacementTarget(game.layout(), player.position, camera.position, heading, target);
+        } else {
+            selection.updateRay(game.layout(), player.position, camera.position, direction, heading);
+        }
+    }
+
+    fn prepareBlueprintSource(game: *Game) void {
+        game.blueprint_tool.prepareSource(game.allocator, game.layout());
+    }
+
+    fn updateBlueprintTool(game: *Game) void {
+        game.blueprint_tool.pollCapture(game.allocator);
+        if (game.world_client) |client| {
+            // Success can reach its mailbox before the matching ordered package.
+            // Keep that result until the package has passed local atomic preflight.
+            if (game.blueprint_tool.results.items.len == 0) client.takeBlueprintResults(&game.blueprint_tool.results);
+            game.resolveBlueprintResults();
+        }
+        if (game.blueprint_tool.mode == .capture) {
+            game.updateBlueprintRay();
+            if (game.blueprint_tool.selection.stage == .loading) {
+                const world = if (game.world) |*world| world else return;
+                for (game.blueprint_tool.source_chunks.items) |id| if (!world.hasChunk(game.layout().decodeChunkId(id))) return;
+                if (game.blueprint_tool.helper == null) game.blueprint_tool.helper = blueprint_capture.Helper.create(game.allocator, game.engine.io) catch {
+                    game.blueprint_tool.error_message = "Could not start the blueprint validation helper.";
+                    game.blueprint_tool.selection.stage = .invalid;
+                    game.blueprint_tool.source_chunks.clearRetainingCapacity();
+                    return;
+                };
+                const helper = game.blueprint_tool.helper.?;
+                // A cancelled job retains its one slot until its immutable input is released.
+                if (!helper.isIdle()) return;
+                const box = game.blueprint_tool.selection.bounds.?;
+                const size = box.size();
+                const count = box.volume() catch unreachable;
+                const cells = game.allocator.alloc(voxel_chunk_module.BlockType, count) catch {
+                    game.blueprint_tool.error_message = "Not enough memory for the blueprint snapshot.";
+                    game.blueprint_tool.selection.stage = .invalid;
+                    game.blueprint_tool.source_chunks.clearRetainingCapacity();
+                    return;
+                };
+                const started = std.Io.Clock.awake.now(game.engine.io);
+                // This is the sole snapshot pass. No replies or edits are processed midway.
+                for (cells, 0..) |*material, index| {
+                    const local = blueprint.cellAtIndex(size, index);
+                    const source = box.min + blueprint_capture.Cell{ local[0], local[1], local[2] };
+                    const block = block_coordinates.fromStorage(game.layout(), source) orelse unreachable;
+                    material.* = world.plannedBlock(block) orelse {
+                        game.allocator.free(cells);
+                        game.blueprint_tool.error_message = "Blueprint source data is unknown.";
+                        game.blueprint_tool.selection.stage = .invalid;
+                        game.blueprint_tool.source_chunks.clearRetainingCapacity();
+                        return;
+                    };
+                }
+                game.blueprint_tool.copy_ns = @intCast(started.durationTo(std.Io.Clock.awake.now(game.engine.io)).nanoseconds);
+                game.blueprint_tool.snapshot_bytes = count * @sizeOf(voxel_chunk_module.BlockType);
+                game.blueprint_tool.source_peak = @max(game.blueprint_tool.source_peak, game.blueprint_tool.source_chunks.items.len);
+                game.blueprint_tool.source_chunks.clearRetainingCapacity();
+                helper.submit(.{ .generation = game.blueprint_tool.selection.generation, .size = size, .cells = cells, .horizontal_limit = blueprint_capture.horizontalLimit(game.layout()), .max_cells = game.blueprint_tool.budgets.max_cells }) catch {
+                    game.allocator.free(cells);
+                    return;
+                };
+                game.blueprint_tool.selection.stage = .validating;
+            }
+        }
+        if (game.blueprint_tool.mode == .preview and game.blueprint_tool.preview != null and game.blueprint_tool.canRetarget()) {
+            const world = if (game.world) |*world| world else return;
+            const camera = game.engine.active_scene.?.camera;
+            game.blueprint_tool.updatePreviewOrigin(block_targeting.findTarget(world, camera.position, camera.forwardDirection(), .putting) catch null);
+        }
+        const input = game.engine.input_controller;
+        if (!input.focused or input.focus_changed) {
+            game.blueprint_tool.press.loseFocus();
+            return;
+        }
+        if (game.blueprint_tool.press.requested != null) {
+            game.blueprint_tool.press.requested = null;
+            game.confirmBlueprintTool();
+        }
+    }
+
+    fn blueprintResultReady(game: *const Game, result: world_data_service.BlueprintResult) bool {
+        const published: BlueprintTool.Publication = if (game.world) |world| .{
+            .definition_present = if (result.definition_id) |id| world.blueprints.definitions.contains(id) else false,
+            .max_instance_id = world.blueprints.max_instance_id,
+        } else .{};
+        return game.blueprint_tool.resultReady(result, published);
+    }
+
+    fn resolveBlueprintResults(game: *Game) void {
+        var retained: usize = 0;
+        for (game.blueprint_tool.results.items) |result| {
+            if (game.blueprintResultReady(result)) {
+                game.acceptBlueprintResult(result);
+            } else {
+                game.blueprint_tool.results.items[retained] = result;
+                retained += 1;
+            }
+        }
+        game.blueprint_tool.results.items.len = retained;
+    }
+
+    fn acceptBlueprintResult(game: *Game, result: world_data_service.BlueprintResult) void {
+        if (game.blueprint_tool.acceptResult(game.allocator, result, .{ .now = game.engine.real_time, .persistent = game.persistence_store != null, .status_duration = block_messages.action_error_duration })) {
+            if (game.blueprint_tool.mode == .none) game.blueprint_render_preview = null;
+            game.updateBlueprintInputBlock();
+        }
+    }
+
+    fn confirmBlueprintTool(game: *Game) void {
+        if (game.blueprint_tool.chooser_open) return;
+        if (game.blueprint_tool.mode == .capture) {
+            const selection = &game.blueprint_tool.selection;
+            if (selection.stage == .anchor) {
+                const target = game.blueprintAnchorTarget() orelse return;
+                const camera = game.engine.active_scene.?.camera;
+                selection.setAnchor(game.layout(), target, camera.position);
+                game.updateBlueprintRay();
+            } else {
+                game.updateBlueprintRay();
+                if (selection.confirmExtent() and selection.stage == .loading) game.prepareBlueprintSource();
+            }
+        } else if (game.blueprint_tool.mode == .preview and game.blueprint_tool.apply == null) {
+            const preview = game.blueprint_tool.preview orelse return;
+            const origin = preview.origin orelse return;
+            const client = game.world_client orelse return;
+            const saved = game.world.?.blueprints.definitions.get(preview.definition_id) orelse return;
+            const size = blueprint.rotatedSize(saved.definition.size, preview.rotation);
+            if (size[0] > blueprint_capture.horizontalLimit(game.layout()) or size[1] > blueprint_capture.horizontalLimit(game.layout())) {
+                game.blueprint_tool.error_message = "Rotated blueprint exceeds the horizontal size limit.";
+                return;
+            }
+            const request_id = client.tryApplyBlueprint(game.player_id, preview.definition_id, origin, preview.rotation) catch {
+                game.blueprint_tool.error_message = "Could not submit blueprint application. Try again.";
+                return;
+            };
+            game.blueprint_tool.didSubmitApply(request_id, preview.generation, game.engine.real_time);
+        }
+    }
+
+    fn submitBlueprintName(game: *Game) void {
+        const name = game.blueprint_tool.nameForSave() orelse return;
+        const candidate = if (game.blueprint_tool.candidate) |*candidate| candidate else return;
+        const client = game.world_client orelse return;
+        const request_id = client.trySaveBlueprint(game.player_id, name, candidate) catch {
+            game.blueprint_tool.error_message = "Could not submit blueprint save. The checked draft is retained; try again.";
+            return;
+        };
+        game.blueprint_tool.didSubmitSave(request_id, game.engine.real_time);
+        game.updateBlueprintInputBlock();
+    }
+
+    fn blueprintChoiceButton(id: u64, name: []const u8) bool {
+        var id_buffer: [40]u8 = undefined;
+        const label = std.fmt.bufPrintZ(&id_buffer, "##blueprint-{d}", .{id}) catch unreachable;
+        const style = zgui.getStyle();
+        const size = zgui.calcTextSize(name, .{ .hide_text_after_double_hash = false });
+        const pressed = zgui.button(label, .{
+            .w = size[0] + 2 * style.frame_padding[0],
+            .h = size[1] + 2 * style.frame_padding[1],
+        });
+        // User names are literal text; ImGui label syntax belongs only to the ID.
+        const min = zgui.getItemRectMin();
+        var color = style.getColor(.text);
+        color[3] *= style.alpha;
+        zgui.getWindowDrawList().addTextUnformatted(
+            .{ min[0] + style.frame_padding[0], min[1] + style.frame_padding[1] },
+            zgui.colorConvertFloat4ToU32(color),
+            name,
+        );
+        return pressed;
+    }
+
+    fn drawBlueprintUI(game: *Game) void {
+        const screen = zgui.io.getDisplaySize();
+        const status = game.blueprint_tool.statusMessage(game.engine.real_time);
+        if (game.blueprint_tool.mode == .capture or game.blueprint_tool.mode == .preview or status != null) {
+            zgui.setNextWindowPos(.{ .x = screen[0] - 16, .y = 16, .pivot_x = 1 });
+            _ = zgui.begin("Blueprint status", .{ .flags = .{ .always_auto_resize = true, .no_title_bar = true, .no_collapse = true, .no_saved_settings = true, .no_focus_on_appearing = true, .no_mouse_inputs = true, .no_nav_inputs = true, .no_nav_focus = true } });
+            if (game.blueprint_tool.mode == .capture) {
+                zgui.textUnformatted("Blueprint capture");
+                zgui.textUnformatted(switch (game.blueprint_tool.selection.stage) {
+                    .anchor => "Mouse1 / E: select anchor (30 m)",
+                    .xy => if (game.engine.active_scene != null and game.blueprint_tool.selection.usesPlacementTarget(game.layout(), game.engine.active_scene.?.camera.position)) "Mouse1 / E: confirm XY (aim next to a block, 30 m)" else "Mouse1 / E: confirm XY extent",
+                    .height => "Mouse1 / E: confirm height",
+                    .loading => "Loading selected blocks...",
+                    .validating => if (game.blueprint_tool.save != null) "Saving..." else "Validating frozen snapshot...",
+                    .ready => "Press Enter to create a blueprint.",
+                    .naming => "Enter a blueprint name.",
+                    .invalid => "Blueprint rejected. Escape: start again",
+                });
+                if (game.blueprint_tool.selection.target_error) |reason| if (game.blueprint_tool.selection.stage == .xy or game.blueprint_tool.selection.stage == .height) zgui.textUnformatted(blueprint_capture.targetMessage(reason));
+                if (game.blueprint_tool.diagnostics) |diagnostics| {
+                    const mineral_height_failure = if (diagnostics.failure) |failure| failure.reason == .mineral_height else false;
+                    if (mineral_height_failure and diagnostics.actual > 0 and diagnostics.limit > 0) zgui.text("Blueprint mineral height {d} exceeds the limit of {d}.", .{ diagnostics.actual, diagnostics.limit }) else zgui.text("Blueprint rejected: {s}.", .{@tagName(diagnostics.code)});
+                    if (diagnostics.failure) |failure| {
+                        var buffer: [block_diagnostics.message_capacity]u8 = undefined;
+                        if (block_diagnostics.errorMessageForResult(.{ .status = .constraint_violation, .failure = failure }, &buffer)) |message| zgui.textUnformatted(message);
+                    }
+                }
+            } else if (game.blueprint_tool.mode == .preview) {
+                zgui.textUnformatted("Blueprint placement");
+                zgui.textUnformatted(if (game.blueprint_tool.apply != null) "Checking destination..." else "R: rotate   Mouse1 / E: apply   B / Escape: cancel");
+                if (game.blueprint_tool.preview) |preview| if (preview.rejection) |rejection| if (rejection.failure) |failure| {
+                    var buffer: [block_diagnostics.message_capacity]u8 = undefined;
+                    if (block_diagnostics.errorMessageForResult(.{ .status = .constraint_violation, .failure = failure }, &buffer)) |message| zgui.textUnformatted(message);
+                };
+            }
+            if (game.blueprint_tool.error_message) |message| zgui.textUnformatted(message);
+            if (status) |message| zgui.textUnformatted(message);
+            zgui.end();
+        }
+        if (game.blueprint_tool.chooser_open) {
+            zgui.setNextWindowPos(.{ .x = screen[0] / 2, .y = screen[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
+            _ = zgui.begin("Choose a blueprint", .{ .flags = .{ .always_auto_resize = true, .no_collapse = true, .no_saved_settings = true } });
+            // Auto-sized windows ignore WindowMinSize; reserve the content width instead.
+            const style = zgui.getStyle();
+            zgui.dummy(.{ .w = @max(0, 300 * style.font_scale_dpi - 2 * style.window_padding[0]), .h = 0 });
+            if (game.world) |*world| {
+                var definitions = world.blueprints.definitions.valueIterator();
+                while (definitions.next()) |saved| {
+                    if (saved.owner != game.player_id) continue;
+                    if (blueprintChoiceButton(saved.id, saved.name)) game.selectBlueprint(saved.id);
+                }
+            }
+            if (zgui.button("Cancel", .{})) game.cancelBlueprintChooser();
+            zgui.end();
+        } else if (game.blueprint_tool.mode == .capture and game.blueprint_tool.selection.stage == .naming) {
+            zgui.setNextWindowPos(.{ .x = screen[0] / 2, .y = screen[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
+            _ = zgui.begin("Name blueprint", .{ .flags = .{ .always_auto_resize = true, .no_collapse = true, .no_saved_settings = true } });
+            const opening = game.blueprint_tool.name_focus;
+            // Wait for the opening key's release so ImGui cannot also submit or
+            // deactivate the new field with that same press (including repeats).
+            if (opening and !zgui.isKeyDown(.enter) and !zgui.isKeyDown(.keypad_enter)) {
+                zgui.setKeyboardFocusHere(0);
+                game.blueprint_tool.name_focus = false;
+            }
+            const enter = zgui.inputText("Name", .{ .buf = &game.blueprint_tool.name, .flags = .{ .enter_returns_true = true } });
+            if (zgui.button("Save", .{}) or (enter and !opening)) game.submitBlueprintName();
+            zgui.sameLine(.{});
+            if (zgui.button("Cancel capture", .{})) game.discardBlueprintDraft();
+            zgui.end();
+        }
+    }
+
+    fn buildBlueprintRenderInstances(game: *Game) void {
+        game.blueprint_selection_frame_start = null;
+        game.blueprint_render_preview = null;
+        const list = &game.blueprint_render_instances;
+        list.clearRetainingCapacity();
+        const scene = game.engine.active_scene orelse return;
+        const world = if (game.world) |*world| world else return;
+        var visible_frames: std.AutoHashMapUnmanaged(u64, void) = .empty;
+        defer visible_frames.deinit(game.allocator);
+        var chunks = game.loaded_chunk_ids.keyIterator();
+        while (chunks.next()) |id| {
+            const coords = game.layout().decodeChunkId(id.*);
+            if (getChunkDistance(game.layout(), id.*, scene.camera.chunk) > game.render_radius) continue;
+            _ = coords;
+            for (world.blueprints.chunkTargets(id.*)) |block| {
+                const target = world.blueprints.targetAt(block) orelse continue;
+                if (world.isBlockSolid(block) catch false) continue;
+                if (list.items.len >= blueprint_renderer.capacity - 12) return game.blueprintRenderLimit();
+                list.append(game.allocator, blueprint_renderer.blockInstance(scene.camera, .{ block[0], block[1], block[2] }, target.material, true, false)) catch return game.blueprintRenderLimit();
+            }
+            for (world.blueprints.chunkInstances(id.*)) |instance_id| {
+                const instance = world.blueprints.instances.get(instance_id) orelse continue;
+                if (!instance.active or visible_frames.contains(instance_id)) continue;
+                visible_frames.put(game.allocator, instance_id, {}) catch return game.blueprintRenderLimit();
+                const saved = world.blueprints.definitions.get(instance.definition_id) orelse continue;
+                if (list.items.len > blueprint_renderer.capacity - 12) return game.blueprintRenderLimit();
+                blueprint_renderer.appendFrame(list, game.allocator, scene.camera, .{ instance.origin[0], instance.origin[1], instance.origin[2] }, blueprint.rotatedSize(saved.definition.size, instance.rotation)) catch return game.blueprintRenderLimit();
+            }
+        }
+        if (game.blueprint_tool.mode == .capture) {
+            if (game.blueprint_tool.selection.stage == .anchor) {
+                if (game.blueprintAnchorTarget()) |target| {
+                    if (list.items.len > blueprint_renderer.capacity - 12) return game.blueprintRenderLimit();
+                    blueprint_renderer.appendFrame(list, game.allocator, scene.camera, .{ target[0], target[1], target[2] }, .{ 1, 1, 1 }) catch return game.blueprintRenderLimit();
+                    game.blueprint_selection_frame_start = @intCast(list.items.len - blueprint_renderer.frame_instance_count);
+                }
+            } else if (game.blueprint_tool.selection.bounds) |box| {
+                if (list.items.len > blueprint_renderer.capacity - 12) return game.blueprintRenderLimit();
+                blueprint_renderer.appendFrame(list, game.allocator, scene.camera, box.min, box.size()) catch return game.blueprintRenderLimit();
+                game.blueprint_selection_frame_start = @intCast(list.items.len - blueprint_renderer.frame_instance_count);
+                if (game.blueprint_tool.diagnostics) |diagnostics| for (diagnostics.highlightedCells()) |local| {
+                    if (list.items.len >= blueprint_renderer.capacity) return game.blueprintRenderLimit();
+                    const cell = box.min + blueprint_capture.Cell{ local[0], local[1], local[2] };
+                    list.append(game.allocator, blueprint_renderer.blockInstance(scene.camera, cell, .dirt, false, true)) catch return game.blueprintRenderLimit();
+                };
+            }
+        }
+        if (game.blueprint_tool.mode == .preview) if (game.blueprint_tool.preview) |preview| {
+            const saved = world.blueprints.definitions.get(preview.definition_id) orelse return;
+            if (preview.origin) |origin| {
+                // The cached draw shares the existing total visible-instance budget.
+                if (list.items.len > blueprint_renderer.capacity - blueprint_renderer.frame_instance_count or
+                    saved.definition.target_count > blueprint_renderer.capacity - blueprint_renderer.frame_instance_count - list.items.len) return game.blueprintRenderLimit();
+                blueprint_renderer.appendFrame(list, game.allocator, scene.camera, .{ origin[0], origin[1], origin[2] }, blueprint.rotatedSize(saved.definition.size, preview.rotation)) catch return game.blueprintRenderLimit();
+            }
+            if (preview.rejection) |rejection| if (rejection.cell) |cell| {
+                if (list.items.len >= blueprint_renderer.capacity - saved.definition.target_count) return game.blueprintRenderLimit();
+                var marker = blueprint_renderer.blockInstance(scene.camera, .{ cell[0], cell[1], cell[2] }, .dirt, false, true);
+                // Extend past the preview and existing block faces so their
+                // later equal-depth draw cannot hide the diagnostic.
+                inline for (0..3) |axis| {
+                    marker.position[axis] -= 0.01;
+                    marker.scale[axis] += 0.02;
+                }
+                list.append(game.allocator, marker) catch return game.blueprintRenderLimit();
+            };
+            // Borrow immutable source data only until this frame's renderer upload.
+            // Missing targeting hides the draw without invalidating its GPU cache.
+            game.blueprint_render_preview = .{
+                .definition_id = saved.id,
+                .generation = preview.generation,
+                .size = saved.definition.size,
+                .cells = saved.definition.cells,
+                .target_count = saved.definition.target_count,
+                .origin = preview.origin,
+                .rotation = preview.rotation,
+            };
+        };
+    }
+
+    fn blueprintRenderLimit(game: *Game) void {
+        game.blueprint_tool.error_message = "Visible blueprints exceed the rendering resource budget; some previews are unavailable.";
+    }
+
     fn setOverlay(game: *Game, overlay: Overlay) void {
         if (game.exit_requested or overlay == game.overlay) return;
+        if ((game.blueprint_tool.chooser_open or game.blueprint_tool.mode != .none) and overlay != .none) return;
         if (game.overlay == .world_map and game.map_teleport != null) return;
         if (game.overlay == .world_map) game.cancelMapTeleport();
         game.overlay = overlay;
         game.engine.setPaused(overlay == .menu and game.menu_pauses_game);
-        game.engine.setGameplayInputBlocked(overlay != .none);
+        game.engine.setGameplayInputBlocked(overlay != .none or game.blueprint_tool.controlsBlocked());
     }
 
     fn cancelMapTeleport(game: *Game) void {
@@ -296,6 +735,7 @@ const Game = struct {
     }
 
     fn stopWorkers(game: *Game) void {
+        game.blueprint_tool.stopCapture(game.allocator);
         if (game.simulation) |simulation| simulation.destroy();
         game.simulation = null;
         if (game.world_data) |world_data| {
@@ -313,6 +753,9 @@ const Game = struct {
         game.stopWorkers();
         game.map_state.deinit(game.engine.gctx);
         game.tool_commands.deinit(game.allocator);
+        game.blueprint_tool.deinit(game.allocator);
+        game.blueprint_render_instances.deinit(game.allocator);
+        if (game.blueprint_renderer) |renderer| renderer.deinit(game.engine.gctx);
         if (game.player) |*player| player.deinit();
         game.chunk_subscriptions.deinit(game.allocator);
         game.block_snapshot_tokens.deinit(game.allocator);
@@ -348,13 +791,17 @@ const Game = struct {
         game.updateMapTeleport();
         game.updateChunksAroundCamera(false);
         const has_new_chunks = game.receiveChunks();
+        // Retire client metadata even on empty-package frames, outside fulfillment.
+        game.world.?.blueprints.cleanup(game.allocator, 4);
         // Synchronize blocks first, then resolve local movement against that cache.
         // Player input remains independent of mesh work and GPU upload capacity.
         game.updateGameplay(has_new_chunks);
+        game.updateBlueprintTool();
         game.flushBlockOperations();
         game.updatePersistence();
         game.updateChunksAroundCamera(has_new_chunks);
-        if (!game.engine.gameplay_input_blocked) game.updateBlockFocus();
+        if (!game.engine.gameplay_input_blocked and game.blueprint_tool.mode == .none) game.updateBlockFocus();
+        game.buildBlueprintRenderInstances();
         game.rebuildDirtyChunks();
         const grid = game.engine.active_scene.?.voxel_grid;
         if (!grid.hasUploadCapacity() and game.render_radius > 2) {
@@ -439,6 +886,7 @@ const Game = struct {
 
     fn beginExit(game: *Game) void {
         if (game.exit_requested) return;
+        game.leaveBlueprintTool();
         game.exit_requested = true;
         game.overlay = .none;
         game.cancelMapTeleport();
@@ -473,7 +921,7 @@ const Game = struct {
     fn updateGameplay(game: *Game, terrain_changed: bool) void {
         if (game.exit_requested or game.engine.paused) return;
         if (game.player != null) game.updatePlayer(terrain_changed);
-        if (!game.engine.gameplay_input_blocked) game.updateBlockTool();
+        if (!game.engine.gameplay_input_blocked and game.blueprint_tool.mode == .none) game.updateBlockTool();
     }
 
     fn updatePlayer(game: *Game, terrain_changed: bool) void {
@@ -581,19 +1029,28 @@ const Game = struct {
     /// A package is consumed in full before any mesh rebuild or GPU upload. Retire all
     /// acknowledgments first, then replay only commands not represented by these snapshots.
     fn receiveChunks(game: *Game) bool {
-        game.world_client.?.takePackages(&game.chunk_packages);
-        defer game.chunk_packages.clearRetainingCapacity();
-        var changed = false;
-        for (game.chunk_packages.items) |*package| {
-            game.applyPackage(package);
+        // Preserve the entire ordered package after a failed blueprint preflight.
+        if (game.chunk_packages.items.len == 0) game.world_client.?.takePackages(&game.chunk_packages);
+        var consumed: usize = 0;
+        while (consumed < game.chunk_packages.items.len) : (consumed += 1) {
+            const package = &game.chunk_packages.items[consumed];
+            if (!game.applyPackage(package)) break;
             package.responses.deinit(game.allocator);
-            changed = true;
         }
-        return changed;
+        if (consumed != 0) {
+            const remaining = game.chunk_packages.items.len - consumed;
+            std.mem.copyForwards(world_data_service.ResponsePackage, game.chunk_packages.items[0..remaining], game.chunk_packages.items[consumed..]);
+            game.chunk_packages.items.len = remaining;
+        }
+        return consumed != 0;
     }
 
-    fn applyPackage(game: *Game, package: *world_data_service.ResponsePackage) void {
+    fn applyPackage(game: *Game, package: *world_data_service.ResponsePackage) bool {
         const world = &game.world.?;
+        world.applyBlueprintChanges(package.blueprint_changes.items) catch return false;
+        for (package.blueprint_changes.items) |*change| change.deinit(game.allocator);
+        package.blueprint_changes.deinit(game.allocator);
+        package.blueprint_changes = .empty;
         for (package.responses.items) |response| {
             if (response.operation) |result| {
                 // Rejection now restores material before snapshots are installed.
@@ -699,6 +1156,7 @@ const Game = struct {
                 !world.hasPendingMeshDependency(response.coords))
                 _ = game.dirty_chunk_ids.remove(id);
         }
+        return true;
     }
 
     fn installBoundaries(game: *Game, coords: ChunkCoords, masks: world_engine.BoundaryMasks, revision: u64) void {
@@ -748,6 +1206,7 @@ const Game = struct {
 
     fn refreshPinnedChunks(game: *Game) void {
         game.pinned_chunks.clearRetainingCapacity();
+        for (game.blueprint_tool.source_chunks.items) |id| game.pinned_chunks.put(game.allocator, id, {}) catch @panic("OOM");
         // A detached debug camera must not evict the frozen player's collision data.
         if (game.player) |*player| {
             const centre = game.layout().getChunkCoords(player.position);
@@ -885,6 +1344,7 @@ const Game = struct {
                 .operation = .{
                     .block = block,
                     .action = if (interaction.inventory) |material| .{ .put = material } else .remove,
+                    .blueprint = if (interaction.inventory != null) (if (world.blueprints.targetAt(block)) |planned_target| .{ .instance_id = planned_target.instance_id, .cell_index = planned_target.cell_index } else null) else null,
                     .player = .{ .id = game.player_id, .expected_sequence = chunk.cell_changes.sequence },
                 },
                 .material = chunk.content.getBlock(local),
@@ -976,7 +1436,7 @@ const Game = struct {
                 .block = block,
                 .material = material,
                 .window = world.validationWindow(block),
-                .result = world.previewOperation(.{ .block = block, .action = .{ .put = material } }),
+                .result = world.previewOperation(.{ .block = block, .action = .{ .put = material }, .blueprint = if (world.blueprints.targetAt(block)) |target| .{ .instance_id = target.instance_id, .cell_index = target.cell_index } else null }),
             };
         }
         preview = .{ .block = block, .material = material, .result = game.placement_validation.?.result };
@@ -1013,7 +1473,7 @@ const Game = struct {
                 return;
             }
         };
-        const result = world.tryOperation(.{ .block = edited_block, .action = switch (action) {
+        const result = world.tryOperation(.{ .block = edited_block, .blueprint = if (action == .place) (if (world.blueprints.targetAt(edited_block)) |target| .{ .instance_id = target.instance_id, .cell_index = target.cell_index } else null) else null, .action = switch (action) {
             .remove => .remove,
             .place => |material| .{ .put = material },
         } });
@@ -1310,6 +1770,7 @@ pub fn main(init: std.process.Init) !void {
             .onUpdate = onUpdate,
             .onRender = onRender,
             .onRenderOverlay3D = onRenderOverlay3D,
+            .onRenderWorldOverlay3D = onRenderWorldOverlay3D,
             .onUIKeyPress = onUIKeyPress,
             .onKeyPress = onKeyPress,
             .onKeyRelease = onKeyRelease,
@@ -1321,6 +1782,7 @@ pub fn main(init: std.process.Init) !void {
         },
     );
     game.engine = engine;
+    game.blueprint_renderer = blueprint_renderer.Renderer.init(engine.gctx, engine.bind_group_layouts.regular.bind_group_layout_handle, engine.gctx.swapchain_descriptor.format);
     game.held_block_renderer = held_block.Renderer.init(
         engine.gctx,
         engine.bind_group_layouts.regular.bind_group_layout_handle,
@@ -1496,6 +1958,7 @@ fn onCloseRequest(_: *Engine, game_opaque: *anyopaque) bool {
 fn onGameplayInputChanged(engine: *Engine, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
     game.block_interaction.loseFocus();
+    game.blueprint_tool.press.loseFocus();
     game.tool_commands.clearRetainingCapacity();
     game.jump_requested = false;
     if (game.player) |*player| {
@@ -1543,6 +2006,37 @@ fn onUIKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque)
 }
 
 fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
+    if (game.exit_requested) return true;
+    const action: BlueprintTool.Action = switch (key_params.key) {
+        .escape => .escape,
+        .z => .capture,
+        .b => if (key_params.mods.control) .other else .chooser,
+        .enter, .kp_enter => .name,
+        .r => if (key_params.mods.control) .other else .rotate,
+        .e => if (key_params.mods.control) .other else .interact,
+        .q => .control,
+        .m => .map,
+        else => .other,
+    };
+    switch (game.blueprint_tool.handleAction(game.allocator, action, game.overlay != .none)) {
+        .unhandled => {},
+        .consumed => return true,
+        .capture => {
+            game.enterBlueprintCapture();
+            return true;
+        },
+        .chooser => {
+            game.openBlueprintChooser();
+            return true;
+        },
+        .reset_inputs, .menu, .control => |effect| {
+            if (game.blueprint_tool.mode == .none) game.blueprint_render_preview = null;
+            game.updateBlueprintInputBlock();
+            if (effect == .menu) game.setOverlay(.menu);
+            if (effect == .control) game.toggleControlMode();
+            return true;
+        },
+    }
     switch (key_params.key) {
         .escape => {
             game.setOverlay(if (game.overlay == .none) .menu else .none);
@@ -1558,6 +2052,7 @@ fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
 
 fn handleKeyPress(game: *Game, key_params: KeyParams) void {
     if (game.exit_requested or game.engine.gameplay_input_blocked) return;
+    if (game.blueprint_tool.mode != .none and key_params.key != .space) return;
     switch (key_params.key) {
         .x => if (game.control_mode == .spectator) game.queueBlockAction(.remove),
         .e => if (!key_params.mods.control) {
@@ -1594,7 +2089,12 @@ fn onKeyRelease(_: *Engine, params: KeyParams, game_opaque: *anyopaque) void {
 }
 
 fn handleKeyRelease(game: *Game, params: KeyParams) void {
-    if (params.key == .e) game.block_interaction.release(.key);
+    if (params.key == .e) {
+        game.block_interaction.release(.key);
+        // Capture uses immediate presses, so a release before the next frame
+        // ends the held source without cancelling its queued confirmation.
+        game.blueprint_tool.press.key_down = false;
+    }
 }
 
 fn onMouseButtonRelease(_: *Engine, params: MouseButtonParams, game_opaque: *anyopaque) void {
@@ -1603,7 +2103,10 @@ fn onMouseButtonRelease(_: *Engine, params: MouseButtonParams, game_opaque: *any
 }
 
 fn handleMouseButtonRelease(game: *Game, params: MouseButtonParams) void {
-    if (params.button == .left) game.block_interaction.release(.mouse);
+    if (params.button == .left) {
+        game.block_interaction.release(.mouse);
+        game.blueprint_tool.press.mouse_down = false;
+    }
 }
 
 fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams, game_opaque: *anyopaque) void {
@@ -1614,6 +2117,10 @@ fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams, game_opaque: *
 
 fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
     if (game.exit_requested or game.engine.gameplay_input_blocked) return;
+    if (game.blueprint_tool.mode != .none) {
+        if (params.button == .left and (game.blueprint_tool.mode == .capture or game.blueprint_tool.mode == .preview)) game.blueprint_tool.press.press(.mouse);
+        return;
+    }
     if (game.control_mode == .player) {
         if (params.button == .left) game.block_interaction.press(.mouse);
         return;
@@ -1622,6 +2129,11 @@ fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
         .putting => .{ .place = game.selected_material },
         .removing => .remove,
     });
+}
+
+fn onRenderWorldOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
+    if (game.blueprint_renderer) |*renderer| if (engine.active_scene) |scene| renderer.drawWithPreview(engine.gctx, pass, engine.bind_group_minecraft_texture.wgpu_bind_group, scene.camera, game.blueprint_render_instances.items, game.blueprint_selection_frame_start, game.allocator, game.blueprint_render_preview) catch game.blueprintRenderLimit();
 }
 
 fn onRenderOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
@@ -1646,7 +2158,7 @@ fn onRenderOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque:
 
 fn onRender(engine: *Engine, _: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
-    if (game.overlay == .none) {
+    if (game.overlay == .none and !engine.gameplay_input_blocked) {
         block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
         drawCrosshair();
         if (game.control_mode == .player) if (game.block_interaction.holding) |hold| {
@@ -1656,6 +2168,7 @@ fn onRender(engine: *Engine, _: wgpu.RenderPassEncoder, game_opaque: *anyopaque)
     if (game.overlay == .world_map) if (game.world_data) |service| if (engine.active_scene) |scene| {
         game.handleMapAction(game.map_state.draw(game.allocator, engine.gctx, service.preparedGenerator(), game.mapView(scene)));
     };
+    game.drawBlueprintUI();
     drawPersistence(game);
     if (game.overlay == .menu) if (menu.draw(engine.paused)) |action| game.handleMenuAction(action);
 }
@@ -1691,6 +2204,7 @@ fn drawPersistence(game: *Game) void {
     } else if (status.error_name) |name| {
         zgui.text("Saving failed: {s}", .{name});
         zgui.textUnformatted("Unsaved changes remain in memory.");
+        if (zgui.button("Retry saving world", .{})) _ = game.world_data.?.requestSave(false);
     } else {
         zgui.textUnformatted("Saving is behind. World-changing actions may wait while saving catches up.");
     }
@@ -3875,6 +4389,7 @@ const StreamingTest = struct {
         self.scene.voxel_grid = &self.grid;
         self.scene.camera = &self.camera;
         self.engine.active_scene = &self.scene;
+        self.engine.io = std.testing.io;
         self.engine.time = 0;
         self.engine.real_time = 0;
         self.engine.paused = false;
@@ -3896,6 +4411,8 @@ const StreamingTest = struct {
     fn deinit(self: *StreamingTest) void {
         const allocator = self.game.allocator;
         self.game.tool_commands.deinit(allocator);
+        self.game.blueprint_tool.deinit(allocator);
+        self.game.blueprint_render_instances.deinit(allocator);
         self.input.pressed_keys.deinit();
         self.input.release_queue.deinit();
         self.input.pressed_this_frame.deinit(allocator);
@@ -3925,7 +4442,7 @@ const StreamingTest = struct {
         var package: world_data_service.ResponsePackage = .{};
         try package.responses.appendSlice(self.game.allocator, responses);
         defer package.responses.deinit(self.game.allocator);
-        self.game.applyPackage(&package);
+        try std.testing.expect(self.game.applyPackage(&package));
     }
 
     fn settled(self: *const StreamingTest) bool {
@@ -3942,7 +4459,7 @@ const StreamingTest = struct {
     fn waitAndApplyPackages(self: *StreamingTest) !void {
         try std.testing.expect(try self.game.world_client.?.waitPackages(&self.game.chunk_packages));
         for (self.game.chunk_packages.items) |*package| {
-            self.game.applyPackage(package);
+            try std.testing.expect(self.game.applyPackage(package));
             package.responses.deinit(self.game.allocator);
         }
         self.game.chunk_packages.clearRetainingCapacity();
@@ -5085,4 +5602,1068 @@ test "return from spectator waits for a legal player pose above the finite floor
     try std.testing.expect(fixture.game.player.?.position[2] >= -64);
     var query: terrain_collision.Query = .{ .world = &fixture.game.world.?, .body = fixture.game.player.?.body };
     try std.testing.expectEqual(terrain_collision.Overlap.clear, query.overlap(fixture.game.player.?.position, false));
+}
+
+test "blueprint capture preserves normal quick-tap and held Space jumps" {
+    const coordinates = @import("block_coordinates.zig");
+    for ([_]bool{ false, true }) |capture| {
+        for ([_]bool{ false, true }) |held| {
+            var fixture: StreamingTest = .{};
+            fixture.init();
+            defer fixture.deinit();
+            const game = &fixture.game;
+            try game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
+            try game.world.?.insertChunk(test_layout.origin_chunk - ChunkCoords{ 0, 0, 1 }, WorldChunk.initEmpty());
+            game.world.?.setBlockUnchecked(coordinates.fromWorld(&test_layout, .{ 0, 0, -1 }).?, .stone);
+            game.player = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
+            if (capture) game.enterBlueprintCapture();
+            try std.testing.expect(!handleUIKeyPress(game, .{ .key = .space, .mods = .{} }));
+            handleKeyPress(game, .{ .key = .space, .mods = .{} });
+            if (held) {
+                try fixture.input.pressed_keys.put(.space, {});
+            } else {
+                // A press and release between frames must still jump once.
+                handleKeyRelease(game, .{ .key = .space, .mods = .{} });
+            }
+            fixture.engine.frame_delta = 0.1;
+            fixture.engine.time = fixture.engine.frame_delta;
+            game.updateGameplay(false);
+            try std.testing.expectApproxEqAbs(player_module.jump_speed * 0.1 - 0.5 * player_module.gravity * 0.1 * 0.1, game.player.?.position[2], 0.000001);
+            try std.testing.expectApproxEqAbs(player_module.jump_speed - player_module.gravity * 0.1, game.player.?.vertical_velocity, 0.000001);
+            try std.testing.expect(!game.jump_requested);
+            for (0..20) |_| {
+                fixture.engine.time += fixture.engine.frame_delta;
+                game.updateGameplay(false);
+            }
+            try std.testing.expect(game.player.?.grounded);
+            try std.testing.expectApproxEqAbs(@as(f64, 0), game.player.?.position[2], 0.000001);
+            try std.testing.expectEqual(@as(f64, 0), game.player.?.vertical_velocity);
+        }
+    }
+}
+
+test "blueprint foreground routing owns capture reset, text, map, and held inputs" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    game.block_interaction.inventory = .sand;
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .z, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.blueprint_tool.mode);
+    try std.testing.expect(game.block_action_error.message(0) != null);
+    game.block_interaction.inventory = null;
+    game.block_interaction.press(.key);
+    game.jump_requested = true;
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .z, .mods = .{} }));
+    try std.testing.expectEqual(.capture, game.blueprint_tool.mode);
+    try std.testing.expect(!fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+    try std.testing.expectEqual(null, game.block_interaction.requested);
+    try std.testing.expect(!game.jump_requested);
+    const generation = game.blueprint_tool.selection.generation;
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.overlay);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expectEqual(blueprint_capture.Stage.anchor, game.blueprint_tool.selection.stage);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .enter, .mods = .{} }));
+    try std.testing.expectEqual(blueprint_capture.Stage.anchor, game.blueprint_tool.selection.stage);
+    try std.testing.expect(!handleUIKeyPress(game, .{ .key = .b, .mods = .{ .control = true } }));
+    const compiled = try blueprint.compile(std.testing.allocator, .{ .size = .{ 1, 1, 1 }, .cells = &.{.dirt} }, .{ .horizontal_limit = blueprint.horizontalLimit(game.layout()) });
+    game.blueprint_tool.candidate = compiled.valid;
+    game.blueprint_tool.selection.stage = .ready;
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expectEqual(blueprint_capture.Stage.ready, game.blueprint_tool.selection.stage);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .enter, .mods = .{} }));
+    try std.testing.expectEqual(blueprint_capture.Stage.naming, game.blueprint_tool.selection.stage);
+    try std.testing.expect(fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+    inline for (.{ zglfw.Key.m, .z, .f, .q, .b, .enter, .kp_enter, .r, .e, .space }) |key| {
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = key, .mods = .{} }));
+        try std.testing.expectEqual(blueprint_capture.Stage.naming, game.blueprint_tool.selection.stage);
+        try std.testing.expectEqual(.capture, game.blueprint_tool.mode);
+    }
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expectEqual(.capture, game.blueprint_tool.mode);
+    try std.testing.expectEqual(blueprint_capture.Stage.anchor, game.blueprint_tool.selection.stage);
+    try std.testing.expect(game.blueprint_tool.selection.generation != generation);
+    try std.testing.expectEqual(null, game.blueprint_tool.candidate);
+    try std.testing.expectEqual(.none, game.overlay);
+    try std.testing.expect(!fixture.engine.gameplay_input_blocked);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .z, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.blueprint_tool.mode);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .m, .mods = .{} }));
+    try std.testing.expectEqual(.world_map, game.overlay);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .z, .mods = .{} }));
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.blueprint_tool.mode);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.overlay);
+    try std.testing.expect(!handleUIKeyPress(game, .{ .key = .f, .mods = .{} }));
+    try std.testing.expect(!handleUIKeyPress(game, .{ .key = .enter, .mods = .{} }));
+    try std.testing.expect(!handleUIKeyPress(game, .{ .key = .b, .mods = .{ .control = true } }));
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.blueprint_tool.mode);
+    try std.testing.expectEqualStrings("You do not have any blueprints yet.", game.block_action_error.message(0).?);
+
+    const runtime = @import("blueprint_runtime.zig");
+    var saved: runtime.SavedDefinition = .{ .id = 1, .owner = game.player_id, .name = try std.testing.allocator.dupe(u8, "Hotkeys"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try std.testing.allocator.dupe(voxel_chunk_module.BlockType, &.{.dirt}), .target_count = 1 } };
+    defer saved.deinit(std.testing.allocator);
+    try game.world.?.applyBlueprintChanges(&.{.{ .definition = saved }});
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expect(game.blueprint_tool.chooser_open);
+    try std.testing.expectEqual(.none, game.blueprint_tool.mode);
+    try std.testing.expect(fixture.engine.gameplay_input_blocked);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expect(!game.blueprint_tool.chooser_open);
+    try std.testing.expectEqual(.none, game.blueprint_tool.mode);
+    game.blueprint_tool.mode = .preview;
+    game.updateBlueprintInputBlock();
+    try std.testing.expect(!handleUIKeyPress(game, .{ .key = .b, .mods = .{ .control = true } }));
+    try std.testing.expectEqual(.preview, game.blueprint_tool.mode);
+    try std.testing.expect(!handleUIKeyPress(game, .{ .key = .f, .mods = .{} }));
+    try std.testing.expectEqual(.preview, game.blueprint_tool.mode);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.blueprint_tool.mode);
+}
+
+test "blueprint chooser preserves unanchored capture until a definition is selected" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    const game = &fixture.game;
+    game.control_mode = .player;
+    game.enterBlueprintCapture();
+    const generation = game.blueprint_tool.selection.generation;
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expect(!game.blueprint_tool.chooser_open);
+    try std.testing.expectEqual(.capture, game.blueprint_tool.mode);
+    try std.testing.expectEqual(generation, game.blueprint_tool.selection.generation);
+    try std.testing.expectEqualStrings("You do not have any blueprints yet.", game.block_action_error.message(0).?);
+
+    const runtime = @import("blueprint_runtime.zig");
+    var saved: runtime.SavedDefinition = .{ .id = 1, .owner = game.player_id, .name = try std.testing.allocator.dupe(u8, "Chooser"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try std.testing.allocator.dupe(voxel_chunk_module.BlockType, &.{.dirt}), .target_count = 1 } };
+    defer saved.deinit(std.testing.allocator);
+    try game.world.?.applyBlueprintChanges(&.{.{ .definition = saved }});
+    const Dismissal = enum { button, escape, hotkey };
+    for ([_]Dismissal{ .button, .escape, .hotkey }) |dismissal| {
+        game.jump_requested = true;
+        game.blueprint_tool.press.press(.key);
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+        try std.testing.expect(game.blueprint_tool.chooser_open);
+        try std.testing.expectEqual(.capture, game.blueprint_tool.mode);
+        try std.testing.expectEqual(generation, game.blueprint_tool.selection.generation);
+        try std.testing.expect(fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+        try std.testing.expect(!game.jump_requested);
+        try std.testing.expectEqual(null, game.blueprint_tool.press.requested);
+        inline for (.{ zglfw.Key.m, .z, .enter, .e, .space }) |key| try std.testing.expect(handleUIKeyPress(game, .{ .key = key, .mods = .{} }));
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{ .control = true } }));
+        handleMouseButtonPress(game, .{ .button = .left, .mods = .{} });
+        game.confirmBlueprintTool();
+        game.setOverlay(.world_map);
+        try std.testing.expectEqual(.none, game.overlay);
+        try std.testing.expectEqual(.anchor, game.blueprint_tool.selection.stage);
+        try std.testing.expectEqual(null, game.blueprint_tool.selection.bounds);
+        try std.testing.expectEqual(null, game.blueprint_tool.press.requested);
+        switch (dismissal) {
+            .button => game.cancelBlueprintChooser(), // Same action as the dialog's Cancel.
+            .escape => try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} })),
+            .hotkey => try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} })),
+        }
+        try std.testing.expect(!game.blueprint_tool.chooser_open);
+        try std.testing.expectEqual(.capture, game.blueprint_tool.mode);
+        try std.testing.expectEqual(.player, game.control_mode);
+        try std.testing.expectEqual(generation, game.blueprint_tool.selection.generation);
+        try std.testing.expect(!fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+    }
+    game.confirmBlueprintTool();
+    try std.testing.expectEqual(.xy, game.blueprint_tool.selection.stage);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    try std.testing.expect(!game.blueprint_tool.chooser_open);
+    try std.testing.expectEqual(.xy, game.blueprint_tool.selection.stage);
+    game.discardBlueprintDraft();
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    game.selectBlueprint(saved.id);
+    try std.testing.expect(!game.blueprint_tool.chooser_open);
+    try std.testing.expectEqual(.preview, game.blueprint_tool.mode);
+    try std.testing.expectEqual(.player, game.control_mode);
+    try std.testing.expectEqual(saved.id, game.blueprint_tool.preview.?.definition_id);
+    try std.testing.expect(game.blueprint_tool.preview.?.generation > 0);
+    try std.testing.expect(!fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+    game.updateBlueprintTool();
+    try std.testing.expect(game.blueprint_tool.preview.?.origin != null);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expectEqual(.none, game.blueprint_tool.mode);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .b, .mods = .{} }));
+    game.cancelBlueprintChooser();
+    try std.testing.expectEqual(.none, game.blueprint_tool.mode);
+}
+
+test "Escape opens the game menu before capture starts and after discarding a selection" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    inline for (.{ true, false }) |menu_pauses_game| {
+        game.menu_pauses_game = menu_pauses_game;
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .z, .mods = .{} }));
+        game.blueprint_tool.press.press(.key);
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+        try std.testing.expectEqual(.menu, game.overlay);
+        try std.testing.expectEqual(.none, game.blueprint_tool.mode);
+        try std.testing.expectEqual(null, game.blueprint_tool.press.requested);
+        try std.testing.expect(fixture.engine.gameplay_input_blocked);
+        try std.testing.expectEqual(menu_pauses_game, fixture.engine.paused);
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+        try std.testing.expectEqual(.none, game.overlay);
+        try std.testing.expect(!fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .z, .mods = .{} }));
+        game.blueprint_tool.selection.setAnchor(game.layout(), StreamingTest.toolTarget(), fixture.camera.position);
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+        try std.testing.expectEqual(.capture, game.blueprint_tool.mode);
+        try std.testing.expectEqual(.anchor, game.blueprint_tool.selection.stage);
+        try std.testing.expectEqual(null, game.blueprint_tool.selection.bounds);
+        try std.testing.expectEqual(.none, game.overlay);
+        try std.testing.expect(!fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+        try std.testing.expectEqual(.menu, game.overlay);
+        try std.testing.expectEqual(.none, game.blueprint_tool.mode);
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    }
+}
+
+test "opening blueprint name entry with held Enter waits for release before accepting another Enter" {
+    zgui.init(std.testing.allocator);
+    defer zgui.deinit();
+    zgui.io.setIniFilename(null);
+    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
+    zgui.io.setDisplaySize(1280, 720);
+    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    inline for (.{ zglfw.Key.enter, .kp_enter }) |key| {
+        const gui_key: zgui.Key = if (key == .enter) .enter else .keypad_enter;
+        game.enterBlueprintCapture();
+        const compiled = try blueprint.compile(std.testing.allocator, .{ .size = .{ 1, 1, 1 }, .cells = &.{.dirt} }, .{ .horizontal_limit = blueprint.horizontalLimit(game.layout()) });
+        game.blueprint_tool.candidate = compiled.valid;
+        game.blueprint_tool.selection.stage = .ready;
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = key, .mods = .{} }));
+        zgui.io.addKeyEvent(gui_key, true);
+        // Holding the opening press beyond ImGui's repeat delay must not submit.
+        for (0..30) |_| {
+            zgui.newFrame();
+            game.drawBlueprintUI();
+            zgui.render();
+            try std.testing.expectEqual(blueprint_capture.Stage.naming, game.blueprint_tool.selection.stage);
+            try std.testing.expectEqual(null, game.blueprint_tool.error_message);
+        }
+        zgui.io.addKeyEvent(gui_key, false);
+        for (0..2) |_| {
+            zgui.newFrame();
+            game.drawBlueprintUI();
+            zgui.render();
+        }
+        try std.testing.expect(!game.blueprint_tool.name_focus);
+        zgui.io.addKeyEvent(gui_key, true);
+        zgui.newFrame();
+        game.drawBlueprintUI();
+        zgui.render();
+        // A separate Enter now submits the name through the dialog normally.
+        try std.testing.expectEqualStrings("Enter a nonempty blueprint name.", game.blueprint_tool.error_message.?);
+        zgui.io.addKeyEvent(gui_key, false);
+        game.leaveBlueprintTool();
+        zgui.newFrame();
+        zgui.render();
+    }
+}
+
+test "late blueprint save and apply results cannot reset a newer tool or close map" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    game.enterBlueprintCapture();
+    const old_generation = game.blueprint_tool.selection.generation;
+    game.blueprint_tool.save = .{ .request_id = 77, .generation = old_generation };
+    game.discardBlueprintDraft();
+    const current_generation = game.blueprint_tool.selection.generation;
+    game.acceptBlueprintResult(.{ .request_id = 77, .kind = .save, .status = .success });
+    try std.testing.expectEqual(current_generation, game.blueprint_tool.selection.generation);
+    try std.testing.expectEqual(.capture, game.blueprint_tool.mode);
+    try std.testing.expectEqual(null, game.blueprint_tool.save);
+    game.blueprint_tool.apply = .{ .request_id = 78, .generation = 10 };
+    game.leaveBlueprintTool();
+    game.setOverlay(.world_map);
+    game.acceptBlueprintResult(.{ .request_id = 78, .kind = .apply, .status = .success });
+    try std.testing.expectEqual(.world_map, game.overlay);
+    try std.testing.expectEqual(.none, game.blueprint_tool.mode);
+    try std.testing.expectEqual(null, game.blueprint_tool.apply);
+    try std.testing.expect(game.blueprint_tool.status != null);
+}
+
+test "terminal blueprint save rejection retains its error and allows capture restart" {
+    for ([_]@FieldType(world_data_service.BlueprintResult, "status"){ .resource_exhausted, .invalid }) |status| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        const game = &fixture.game;
+        game.enterBlueprintCapture();
+        game.blueprint_tool.selection.anchor = .{ 1, 1, 5 };
+        game.blueprint_tool.selection.bounds = .{ .min = .{ 1, 1, 5 }, .max = .{ 2, 1, 5 } };
+        // Successful submission has transferred the candidate and left no helper job.
+        game.blueprint_tool.selection.stage = .validating;
+        const selection = game.blueprint_tool.selection;
+        game.blueprint_tool.save = .{ .request_id = 77, .generation = selection.generation };
+        game.blueprint_tool.setStatus(game.engine.real_time, "Saving blueprint...", math.inf(f64));
+        // An unrelated response must not end the tracked save or change its draft.
+        game.acceptBlueprintResult(.{ .request_id = 76, .kind = .save, .status = status });
+        try std.testing.expectEqual(@as(u64, 77), game.blueprint_tool.save.?.request_id);
+        try std.testing.expectEqualDeep(selection, game.blueprint_tool.selection);
+        try std.testing.expectEqual(null, game.blueprint_tool.error_message);
+        try game.blueprint_tool.results.append(std.testing.allocator, .{ .request_id = 77, .kind = .save, .status = status });
+        game.resolveBlueprintResults();
+        const message = if (status == .resource_exhausted) "Blueprint library capacity was reached; this blueprint was not saved." else "Blueprint save was rejected; no blueprint was published.";
+        try std.testing.expectEqual(@as(usize, 0), game.blueprint_tool.results.items.len);
+        try std.testing.expectEqual(null, game.blueprint_tool.save);
+        try std.testing.expectEqual(null, game.blueprint_tool.candidate);
+        try std.testing.expectEqual(null, game.blueprint_tool.helper);
+        try std.testing.expectEqual(blueprint_capture.Stage.invalid, game.blueprint_tool.selection.stage);
+        try std.testing.expectEqual(selection.generation, game.blueprint_tool.selection.generation);
+        try std.testing.expectEqualDeep(selection.bounds, game.blueprint_tool.selection.bounds);
+        try std.testing.expectEqual(.capture, game.blueprint_tool.mode);
+        try std.testing.expectEqualStrings(message, game.blueprint_tool.error_message.?);
+        try std.testing.expect(!fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+        fixture.engine.real_time += block_messages.action_error_duration;
+        try std.testing.expectEqual(null, game.blueprint_tool.statusMessage(game.engine.real_time));
+        game.updateBlueprintTool();
+        try std.testing.expectEqual(blueprint_capture.Stage.invalid, game.blueprint_tool.selection.stage);
+        try std.testing.expectEqualStrings(message, game.blueprint_tool.error_message.?);
+        // A duplicate completion cannot erase the persistent failure or reset the tool.
+        game.acceptBlueprintResult(.{ .request_id = 77, .kind = .save, .status = .success });
+        try std.testing.expectEqual(blueprint_capture.Stage.invalid, game.blueprint_tool.selection.stage);
+        try std.testing.expectEqualStrings(message, game.blueprint_tool.error_message.?);
+        try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+        try std.testing.expectEqual(.capture, game.blueprint_tool.mode);
+        try std.testing.expectEqual(.none, game.overlay);
+        try std.testing.expectEqual(blueprint_capture.Stage.anchor, game.blueprint_tool.selection.stage);
+        try std.testing.expect(game.blueprint_tool.selection.generation != selection.generation);
+        try std.testing.expectEqual(null, game.blueprint_tool.selection.anchor);
+        try std.testing.expectEqual(null, game.blueprint_tool.selection.bounds);
+        try std.testing.expectEqual(null, game.blueprint_tool.error_message);
+    }
+}
+
+test "late rejected blueprint saves preserve a newer name dialog and unrelated overlays" {
+    for ([_]@FieldType(world_data_service.BlueprintResult, "status"){ .resource_exhausted, .invalid }) |status| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        const game = &fixture.game;
+        game.enterBlueprintCapture();
+        game.blueprint_tool.save = .{ .request_id = 77, .generation = game.blueprint_tool.selection.generation };
+        game.discardBlueprintDraft();
+        const compiled = try blueprint.compile(std.testing.allocator, .{ .size = .{ 1, 1, 1 }, .cells = &.{.dirt} }, .{ .horizontal_limit = blueprint.horizontalLimit(game.layout()) });
+        game.blueprint_tool.candidate = compiled.valid;
+        game.blueprint_tool.selection.stage = .naming;
+        @memcpy(game.blueprint_tool.name[0..9], "New draft");
+        game.blueprint_tool.error_message = "Keep this dialog error.";
+        game.updateBlueprintInputBlock();
+        const selection = game.blueprint_tool.selection;
+        const name = game.blueprint_tool.name;
+        const cells = game.blueprint_tool.candidate.?.definition.cells.ptr;
+        game.acceptBlueprintResult(.{ .request_id = 77, .kind = .save, .status = status });
+        try std.testing.expectEqual(null, game.blueprint_tool.save);
+        try std.testing.expectEqualDeep(selection, game.blueprint_tool.selection);
+        try std.testing.expectEqual(.capture, game.blueprint_tool.mode);
+        try std.testing.expectEqualSlices(u8, &name, &game.blueprint_tool.name);
+        try std.testing.expectEqual(cells, game.blueprint_tool.candidate.?.definition.cells.ptr);
+        try std.testing.expectEqualStrings("Keep this dialog error.", game.blueprint_tool.error_message.?);
+        try std.testing.expect(fixture.engine.gameplay_input_blocked);
+
+        game.blueprint_tool.save = .{ .request_id = 78, .generation = selection.generation };
+        game.leaveBlueprintTool();
+        game.setOverlay(.world_map);
+        game.acceptBlueprintResult(.{ .request_id = 78, .kind = .save, .status = status });
+        try std.testing.expectEqual(null, game.blueprint_tool.save);
+        try std.testing.expectEqual(.none, game.blueprint_tool.mode);
+        try std.testing.expectEqual(.world_map, game.overlay);
+        try std.testing.expectEqual(blueprint_capture.Stage.anchor, game.blueprint_tool.selection.stage);
+        try std.testing.expectEqual(null, game.blueprint_tool.error_message);
+        try std.testing.expect(fixture.engine.gameplay_input_blocked);
+    }
+}
+
+test "client capture pins full source chunks and freezes optimistic view before helper" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const block = StreamingTest.toolTarget();
+    const coords, _ = world_module.splitBlockCoords(block);
+    try game.world.?.insertChunk(coords, WorldChunk.initEmpty());
+    game.world.?.setBlockUnchecked(block, .stone);
+    game.blueprint_tool.mode = .capture;
+    game.blueprint_tool.selection.bounds = .{ .min = .{ block[0], block[1], block[2] }, .max = .{ block[0], block[1], block[2] } };
+    game.blueprint_tool.selection.stage = .loading;
+    game.prepareBlueprintSource();
+    try std.testing.expectEqual(@as(usize, 1), game.blueprint_tool.source_chunks.items.len);
+    game.refreshPinnedChunks();
+    try std.testing.expect(game.pinned_chunks.contains(game.layout().encodeChunkCoords(coords)));
+    game.updateBlueprintTool();
+    try std.testing.expectEqual(blueprint_capture.Stage.validating, game.blueprint_tool.selection.stage);
+    try std.testing.expectEqual(@as(usize, 0), game.blueprint_tool.source_chunks.items.len);
+    game.world.?.setBlockUnchecked(block, .sand);
+    while (game.blueprint_tool.selection.stage == .validating) {
+        game.updateBlueprintTool();
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expectEqual(blueprint_capture.Stage.ready, game.blueprint_tool.selection.stage);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.crushed_stone, game.blueprint_tool.candidate.?.definition.cells[0]);
+    try std.testing.expectEqual(@as(usize, 1), game.blueprint_tool.snapshot_bytes);
+}
+
+test "reference capture copies 320000 predicted cells with fifty retained source chunks" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 4 } });
+    var fixture: StreamingTest = .{};
+    fixture.initWithLayout(&layout);
+    defer fixture.deinit();
+    const game = &fixture.game;
+    game.blueprint_tool.mode = .capture;
+    game.blueprint_tool.selection.bounds = .{ .min = .{ 31, 31, 31 }, .max = .{ 130, 130, 62 } };
+    game.blueprint_tool.selection.stage = .loading;
+    game.prepareBlueprintSource();
+    try std.testing.expectEqual(@as(usize, 50), game.blueprint_tool.source_chunks.items.len);
+    for (game.blueprint_tool.source_chunks.items) |id| try game.world.?.insertChunk(layout.decodeChunkId(id), WorldChunk.initEmpty());
+    game.world.?.setBlockUnchecked(.{ 31, 31, 31 }, .stone);
+    game.updateBlueprintTool();
+    try std.testing.expectEqual(blueprint_capture.Stage.validating, game.blueprint_tool.selection.stage);
+    try std.testing.expectEqual(@as(usize, 320_000), game.blueprint_tool.snapshot_bytes);
+    try std.testing.expectEqual(@as(usize, 50), game.blueprint_tool.source_peak);
+    try std.testing.expectEqual(@as(usize, 0), game.blueprint_tool.source_chunks.items.len);
+    while (game.blueprint_tool.selection.stage == .validating) {
+        game.updateBlueprintTool();
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expectEqual(blueprint_capture.Stage.ready, game.blueprint_tool.selection.stage);
+    std.debug.print("blueprint client reference: cells=320000 source_chunks=50 one_pass_copy_ms={d:.3} snapshot_bytes={d} mode={s}\n", .{ @as(f64, @floatFromInt(game.blueprint_tool.copy_ns)) / std.time.ns_per_ms, game.blueprint_tool.snapshot_bytes, @tagName(@import("builtin").mode) });
+}
+
+test "blueprint success waits for matching authoritative package publication" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    game.enterBlueprintCapture();
+    game.blueprint_tool.selection.stage = .validating;
+    game.blueprint_tool.save = .{ .request_id = 77, .generation = game.blueprint_tool.selection.generation };
+    try game.blueprint_tool.results.append(std.testing.allocator, .{ .request_id = 77, .kind = .save, .status = .success, .definition_id = 41 });
+    game.resolveBlueprintResults();
+    try std.testing.expectEqual(@as(usize, 1), game.blueprint_tool.results.items.len);
+    try std.testing.expect(game.blueprint_tool.save != null);
+    try std.testing.expectEqual(blueprint_capture.Stage.validating, game.blueprint_tool.selection.stage);
+    const runtime = @import("blueprint_runtime.zig");
+    var definition: runtime.SavedDefinition = .{ .id = 41, .owner = 1, .name = try std.testing.allocator.dupe(u8, "Ordered"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try std.testing.allocator.dupe(voxel_chunk_module.BlockType, &.{.dirt}), .target_count = 1 } };
+    defer definition.deinit(std.testing.allocator);
+    try game.world.?.applyBlueprintChanges(&.{.{ .definition = definition }});
+    game.resolveBlueprintResults();
+    try std.testing.expectEqual(@as(usize, 0), game.blueprint_tool.results.items.len);
+    try std.testing.expectEqual(null, game.blueprint_tool.save);
+    try std.testing.expectEqual(blueprint_capture.Stage.anchor, game.blueprint_tool.selection.stage);
+
+    game.blueprint_tool.mode = .preview;
+    game.blueprint_tool.preview = .{ .definition_id = 41, .generation = 10 };
+    game.blueprint_tool.apply = .{ .request_id = 78, .generation = 10 };
+    try game.blueprint_tool.results.append(std.testing.allocator, .{ .request_id = 78, .kind = .apply, .status = .success, .definition_id = 41, .instance_id = 45 });
+    game.resolveBlueprintResults();
+    try std.testing.expectEqual(@as(usize, 1), game.blueprint_tool.results.items.len);
+    try std.testing.expectEqual(.preview, game.blueprint_tool.mode);
+    var instance = try game.world.?.blueprints.prepareInstance(std.testing.allocator, game.layout(), 45, 41, 1, .{ 3, 3, 3 }, 0);
+    defer instance.deinit(std.testing.allocator);
+    try game.world.?.applyBlueprintChanges(&.{.{ .instance = instance }});
+    game.resolveBlueprintResults();
+    try std.testing.expectEqual(@as(usize, 0), game.blueprint_tool.results.items.len);
+    try std.testing.expectEqual(null, game.blueprint_tool.apply);
+    try std.testing.expectEqual(.none, game.blueprint_tool.mode);
+}
+
+test "quick blueprint key and mouse presses survive release before the next frame" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    game.enterBlueprintCapture();
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .e, .mods = .{} }));
+    handleKeyRelease(game, .{ .key = .e, .mods = .{} });
+    try std.testing.expectEqual(BlueprintTool.Press.Source.key, game.blueprint_tool.press.requested.?);
+    try std.testing.expect(!game.blueprint_tool.press.key_down);
+    game.blueprint_tool.press.requested = null;
+    handleMouseButtonPress(game, .{ .button = .left, .mods = .{} });
+    handleMouseButtonRelease(game, .{ .button = .left, .mods = .{} });
+    try std.testing.expectEqual(BlueprintTool.Press.Source.mouse, game.blueprint_tool.press.requested.?);
+    try std.testing.expect(!game.blueprint_tool.press.mouse_down);
+    game.discardBlueprintDraft();
+    try std.testing.expectEqual(null, game.blueprint_tool.press.requested);
+}
+
+test "pending target placement preview uses the dedicated fulfillment identity" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareSupportedToolTest();
+    const game = &fixture.game;
+    const target = StreamingTest.toolTarget();
+    const pending_cell = [3]u32{ target[0], target[1] - 1, target[2] };
+    const runtime = @import("blueprint_runtime.zig");
+    var definition: runtime.SavedDefinition = .{ .id = 1, .owner = 1, .name = try std.testing.allocator.dupe(u8, "Preview"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try std.testing.allocator.dupe(voxel_chunk_module.BlockType, &.{.planks}), .target_count = 1 } };
+    defer definition.deinit(std.testing.allocator);
+    try game.world.?.applyBlueprintChanges(&.{.{ .definition = definition }});
+    var instance = try game.world.?.blueprints.prepareInstance(std.testing.allocator, game.layout(), 1, 1, 1, pending_cell, 0);
+    defer instance.deinit(std.testing.allocator);
+    try game.world.?.applyBlueprintChanges(&.{.{ .instance = instance }});
+    var ordinary_calls: usize = 0;
+    game.world.?.ordinary_preview_counter = &ordinary_calls;
+    game.block_mode = .putting;
+    game.selected_material = .planks;
+    game.updateBlockFocus();
+    try std.testing.expectEqualDeep(pending_cell, game.current_placement_preview.?.block);
+    try std.testing.expectEqual(world_module.OperationStatus.success, game.current_placement_preview.?.result.status);
+    try std.testing.expectEqual(@as(usize, 0), ordinary_calls);
+    game.selected_material = .sand;
+    game.updateBlockFocus();
+    try std.testing.expectEqual(world_module.OperationStatus.inventory_mismatch, game.current_placement_preview.?.result.status);
+    try std.testing.expectEqual(@as(usize, 0), ordinary_calls);
+}
+
+test "blueprint rejection highlights the failed destination and clears on retarget or rotation" {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const runtime = @import("blueprint_runtime.zig");
+    const origin = @import("block_coordinates.zig").fromWorld(&test_layout, .{ 8, 8, 1 }).?;
+    var saved: runtime.SavedDefinition = .{ .id = 1, .owner = game.player_id, .name = try a.dupe(u8, "Rejected"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(voxel_chunk_module.BlockType, &.{.planks}), .target_count = 1 } };
+    defer saved.deinit(a);
+    try game.world.?.applyBlueprintChanges(&.{.{ .definition = saved }});
+    game.blueprint_tool.mode = .preview;
+    game.blueprint_tool.preview = .{ .definition_id = 1, .generation = 10, .origin = origin };
+    game.blueprint_tool.apply = .{ .request_id = 77, .generation = 10 };
+    const rejection: world_data_service.BlueprintRejection = .{ .code = .occupied, .cell = origin };
+    game.acceptBlueprintResult(.{ .request_id = 77, .kind = .apply, .status = .invalid, .rejection = rejection });
+    try std.testing.expectEqual(null, game.blueprint_tool.apply);
+    try std.testing.expectEqualDeep(rejection, game.blueprint_tool.preview.?.rejection.?);
+    try std.testing.expectEqualStrings("A required blueprint cell is already occupied. Clear it or move the blueprint.", game.blueprint_tool.error_message.?);
+    fixture.engine.real_time += block_messages.action_error_duration;
+    try std.testing.expectEqual(null, game.blueprint_tool.statusMessage(game.engine.real_time));
+    try std.testing.expect(game.blueprint_tool.error_message != null);
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 13), game.blueprint_render_instances.items.len);
+    const marker = game.blueprint_render_instances.items[12];
+    const block = blueprint_renderer.blockInstance(&fixture.camera, .{ origin[0], origin[1], origin[2] }, .planks, false, false);
+    try std.testing.expectEqual(@as(u32, 2), marker.material[1]);
+    inline for (0..3) |axis| {
+        try std.testing.expect(marker.position[axis] < block.position[axis]);
+        try std.testing.expect(marker.position[axis] + marker.scale[axis] > block.position[axis] + block.scale[axis]);
+    }
+    game.blueprint_tool.updatePreviewOrigin(origin);
+    try std.testing.expect(game.blueprint_tool.preview.?.rejection != null);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .r, .mods = .{} }));
+    try std.testing.expectEqual(@as(u2, 1), game.blueprint_tool.preview.?.rotation);
+    try std.testing.expectEqual(null, game.blueprint_tool.preview.?.rejection);
+    try std.testing.expectEqual(null, game.blueprint_tool.error_message);
+    game.blueprint_tool.preview.?.rejection = rejection;
+    game.blueprint_tool.updatePreviewOrigin(null);
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(null, game.blueprint_tool.preview.?.rejection);
+    try std.testing.expectEqual(@as(usize, 0), game.blueprint_render_instances.items.len);
+}
+
+test "blueprint dialogs hide the crosshair and chooser has a DPI-scaled width floor" {
+    zgui.init(std.testing.allocator);
+    defer zgui.deinit();
+    zgui.io.setIniFilename(null);
+    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
+    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
+    var dpi = zgui_utils.DpiScaling.init();
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+
+    for ([_]f32{ 1, 2 }) |scale| {
+        dpi.update(.{ scale, scale });
+        zgui.io.setDisplaySize(1280 * scale, 720 * scale);
+        for ([_]struct { mode: @FieldType(BlueprintTool, "mode"), naming: bool = false, chooser: bool = false }{
+            .{ .mode = .capture, .naming = true },
+            .{ .mode = .none, .chooser = true },
+            .{ .mode = .capture, .chooser = true },
+            .{ .mode = .capture },
+            .{ .mode = .preview },
+            .{ .mode = .none },
+        }) |state| {
+            game.blueprint_tool.mode = state.mode;
+            game.blueprint_tool.chooser_open = state.chooser;
+            game.blueprint_tool.selection.stage = if (state.naming) .naming else .anchor;
+            game.updateBlueprintInputBlock();
+            // Auto-sized windows settle after their first content measurement.
+            for (0..2) |frame| {
+                zgui.newFrame();
+                onRender(&fixture.engine, undefined, game);
+                try std.testing.expectEqual(!game.blueprint_tool.controlsBlocked(), zgui.getForegroundDrawList().getVertexBuffer().len > 0);
+                if (state.chooser and frame > 0) {
+                    _ = zgui.begin("Choose a blueprint", .{});
+                    try std.testing.expect(zgui.getWindowSize()[0] >= 300 * scale);
+                    zgui.end();
+                }
+                zgui.render();
+            }
+        }
+    }
+}
+
+test "blueprint choice buttons render embedded and leading hashes literally" {
+    zgui.init(std.testing.allocator);
+    defer zgui.deinit();
+    zgui.io.setIniFilename(null);
+    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
+    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
+    var dpi = zgui_utils.DpiScaling.init();
+
+    for ([_]f32{ 1, 2 }) |scale| {
+        dpi.update(.{ scale, scale });
+        zgui.io.setDisplaySize(1280 * scale, 720 * scale);
+        // The second frame also checks that literal text follows style opacity.
+        for ([_]f32{ 1, 0.6 }) |alpha| {
+            zgui.getStyle().alpha = alpha;
+            zgui.newFrame();
+            zgui.setNextWindowPos(.{ .x = 20, .y = 20 });
+            zgui.setNextWindowSize(.{ .w = 600 * scale, .h = 320 * scale });
+            _ = zgui.begin("Literal blueprint names", .{ .flags = .{ .no_title_bar = true, .no_saved_settings = true } });
+            const list = zgui.getWindowDrawList();
+            const style = zgui.getStyle();
+            var text_color = style.getColor(.text);
+            text_color[3] *= style.alpha;
+            const color = zgui.colorConvertFloat4ToU32(text_color);
+            for ([_][]const u8{ "House", "House##west", "##Tower", "House###west", "###" }, 1..) |name, id| {
+                try std.testing.expectEqualStrings(name, try blueprint_capture.checkedName(name));
+                const start = list.getVertexBuffer().len;
+                _ = Game.blueprintChoiceButton(id, name);
+                var text_vertices: usize = 0;
+                for (list.getVertexBuffer()[start..]) |vertex| {
+                    if (vertex.color == color) text_vertices += 1;
+                }
+                // Every non-space ASCII glyph contributes a quad. Truncated names
+                // and accidentally visible hidden IDs produce a different count.
+                try std.testing.expectEqual(4 * name.len, text_vertices);
+                const min = zgui.getItemRectMin();
+                const max = zgui.getItemRectMax();
+                const text_size = zgui.calcTextSize(name, .{});
+                try std.testing.expectApproxEqAbs(text_size[0] + 2 * style.frame_padding[0], max[0] - min[0], 0.01);
+            }
+            zgui.end();
+            zgui.render();
+        }
+    }
+}
+
+test "blueprint choice buttons keep duplicate names and full-width IDs distinct" {
+    zgui.init(std.testing.allocator);
+    defer zgui.deinit();
+    zgui.io.setIniFilename(null);
+    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
+    zgui.io.setDisplaySize(1280, 720);
+    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const ids = [_]u64{ 1, 1 + (@as(u64, 1) << 32) };
+    for (ids) |id| {
+        var saved: @import("blueprint_runtime.zig").SavedDefinition = .{
+            .id = id,
+            .owner = game.player_id,
+            .name = try std.testing.allocator.dupe(u8, "House##west"),
+            .definition = .{ .size = .{ 1, 1, 1 }, .cells = try std.testing.allocator.dupe(voxel_chunk_module.BlockType, &.{.dirt}), .target_count = 1 },
+        };
+        defer saved.deinit(std.testing.allocator);
+        try game.world.?.blueprints.insertDefinition(std.testing.allocator, try saved.clone(std.testing.allocator));
+    }
+    game.blueprint_tool.chooser_open = true;
+    var second_center: [2]f32 = undefined;
+    var presses: usize = 0;
+    // Settle layout, move the mouse, then press and release on the second item.
+    for (0..5) |frame| {
+        if (frame == 2) zgui.io.addMousePositionEvent(second_center[0], second_center[1]);
+        if (frame == 3) zgui.io.addMouseButtonEvent(.left, true);
+        if (frame == 4) zgui.io.addMouseButtonEvent(.left, false);
+        zgui.newFrame();
+        zgui.setNextWindowPos(.{ .x = 20, .y = 20 });
+        zgui.setNextWindowSize(.{ .w = 600, .h = 320 });
+        _ = zgui.begin("Blueprint identity", .{ .flags = .{ .no_title_bar = true, .no_saved_settings = true } });
+        for (ids) |id| {
+            if (Game.blueprintChoiceButton(id, "House##west")) {
+                presses += 1;
+                game.selectBlueprint(id);
+            }
+            if (id == ids[1]) {
+                const min = zgui.getItemRectMin();
+                const max = zgui.getItemRectMax();
+                second_center = .{ (min[0] + max[0]) / 2, (min[1] + max[1]) / 2 };
+            }
+        }
+        zgui.end();
+        zgui.render();
+    }
+    try std.testing.expectEqual(@as(usize, 1), presses);
+    try std.testing.expectEqual(.preview, game.blueprint_tool.mode);
+    try std.testing.expectEqual(ids[1], game.blueprint_tool.preview.?.definition_id);
+}
+
+test "occluded capture frame selects only its own rails among site and preview instances" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    fixture.camera.updatePosition(.{ 0, 0, 0 });
+    try game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
+    try game.loaded_chunk_ids.put(std.testing.allocator, test_layout.encodeChunkCoords(test_layout.origin_chunk), {});
+    const runtime = @import("blueprint_runtime.zig");
+    const coordinates = @import("block_coordinates.zig");
+    var saved: runtime.SavedDefinition = .{ .id = 1, .owner = game.player_id, .name = try std.testing.allocator.dupe(u8, "Frame"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try std.testing.allocator.dupe(voxel_chunk_module.BlockType, &.{.dirt}), .target_count = 1 } };
+    defer saved.deinit(std.testing.allocator);
+    try game.world.?.applyBlueprintChanges(&.{.{ .definition = saved }});
+    const origin = coordinates.fromWorld(&test_layout, .{ 8, 8, 1 }).?;
+    var site = try game.world.?.blueprints.prepareInstance(std.testing.allocator, game.layout(), 1, 1, game.player_id, origin, 0);
+    defer site.deinit(std.testing.allocator);
+    try game.world.?.applyBlueprintChanges(&.{.{ .instance = site }});
+
+    game.enterBlueprintCapture();
+    game.blueprint_tool.selection.setAnchor(game.layout(), coordinates.fromWorld(&test_layout, .{ 0, 0, 1 }).?, fixture.camera.position);
+    game.buildBlueprintRenderInstances();
+    // A miniature and its site's twelve rails precede the capture's twelve rails.
+    try std.testing.expectEqual(@as(usize, 25), game.blueprint_render_instances.items.len);
+    try std.testing.expectEqual(@as(?u32, 13), game.blueprint_selection_frame_start);
+    for (game.blueprint_render_instances.items[13..]) |rail| try std.testing.expectEqual(@as(u32, 1), rail.material[1]);
+
+    game.leaveBlueprintTool();
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 13), game.blueprint_render_instances.items.len);
+    try std.testing.expectEqual(null, game.blueprint_selection_frame_start);
+    game.blueprint_tool.mode = .preview;
+    game.blueprint_tool.preview = .{ .definition_id = saved.id, .origin = origin, .generation = 1 };
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 25), game.blueprint_render_instances.items.len);
+    try std.testing.expectEqual(saved.id, game.blueprint_render_preview.?.definition_id);
+    try std.testing.expectEqual(null, game.blueprint_selection_frame_start);
+}
+
+test "large blueprint preview collection borrows local geometry and keeps only dynamic rails" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const allocator = std.testing.allocator;
+    var saved: @import("blueprint_runtime.zig").SavedDefinition = .{
+        .id = 1,
+        .owner = game.player_id,
+        .name = try allocator.dupe(u8, "Dense preview"),
+        .definition = .{ .size = .{ 100, 100, 32 }, .cells = try allocator.alloc(voxel_chunk_module.BlockType, 320_000), .target_count = 320_000 },
+    };
+    defer saved.deinit(allocator);
+    @memset(@constCast(saved.definition.cells), .planks);
+    try game.world.?.applyBlueprintChanges(&.{.{ .definition = saved }});
+    const cells = game.world.?.blueprints.definitions.get(saved.id).?.definition.cells;
+    game.blueprint_tool.mode = .preview;
+    game.blueprint_tool.preview = .{ .definition_id = saved.id, .origin = .{ 31, 31, 31 }, .generation = 7 };
+    for (0..4) |rotation| {
+        game.blueprint_tool.preview.?.rotation = @intCast(rotation);
+        game.blueprint_tool.preview.?.origin = .{ @as(u32, @intCast(rotation)) + 31, 31, 31 };
+        fixture.camera.updatePosition(.{ @as(f64, @floatFromInt(rotation)) * 32, 0, 0 });
+        game.buildBlueprintRenderInstances();
+        const source = game.blueprint_render_preview.?;
+        try std.testing.expectEqual(@as(usize, 12), game.blueprint_render_instances.items.len);
+        try std.testing.expectEqual(cells.ptr, source.cells.ptr);
+        try std.testing.expectEqual(@as(u32, 320_000), source.target_count);
+        try std.testing.expectEqual(@as(u64, 7), source.generation);
+        try std.testing.expectEqual(rotation, source.rotation);
+        try std.testing.expectEqualDeep(game.blueprint_tool.preview.?.origin, source.origin);
+        try std.testing.expectEqual(null, game.blueprint_selection_frame_start);
+    }
+    game.blueprint_tool.preview.?.origin = null;
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 0), game.blueprint_render_instances.items.len);
+    try std.testing.expectEqual(null, game.blueprint_render_preview.?.origin);
+    try std.testing.expectEqual(cells.ptr, game.blueprint_render_preview.?.cells.ptr);
+    game.leaveBlueprintTool();
+    try std.testing.expectEqual(null, game.blueprint_render_preview);
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(null, game.blueprint_render_preview);
+    try std.testing.expectEqual(@as(usize, 0), game.blueprint_render_instances.items.len);
+}
+
+test "capture previews an unconfirmed anchor at thirty metres and rechecks it on click" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const coordinates = @import("block_coordinates.zig");
+    try game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
+    try game.world.?.insertChunk(test_layout.origin_chunk - ChunkCoords{ 0, 1, 0 }, WorldChunk.initEmpty());
+    try game.world.?.insertChunk(test_layout.origin_chunk + ChunkCoords{ 0, 1, 0 }, WorldChunk.initEmpty());
+    fixture.camera.updatePosition(.{ 0, 0, 0 });
+    const backing = coordinates.fromWorld(&test_layout, .{ 0, 31, 0 }).?;
+    const target = coordinates.fromWorld(&test_layout, .{ 0, 30, 0 }).?;
+    game.world.?.setBlockUnchecked(backing, .stone);
+    try std.testing.expectEqual(null, try block_targeting.findTarget(&game.world.?, fixture.camera.position, fixture.camera.forwardDirection(), .putting));
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .z, .mods = .{} }));
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 12), game.blueprint_render_instances.items.len);
+    try std.testing.expectEqual(@as(?u32, 0), game.blueprint_selection_frame_start);
+    // The frame surrounds the adjacent placement cell, not its backing block.
+    try std.testing.expectApproxEqAbs(@as(f32, 30.0 - 0.035 / 2.0), game.blueprint_render_instances.items[0].position[1], 0.00001);
+    try std.testing.expectEqual(.anchor, game.blueprint_tool.selection.stage);
+    try std.testing.expectEqual(null, game.blueprint_tool.selection.anchor);
+    try std.testing.expectEqual(null, game.blueprint_tool.selection.bounds);
+    // Hovering has not started a selection: Escape still opens the menu.
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expectEqual(.menu, game.overlay);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    game.enterBlueprintCapture();
+
+    fixture.camera.updatePosition(.{ 0, -0.000001, 0 });
+    try std.testing.expectEqual(null, try block_targeting.findTargetWithReach(&game.world.?, fixture.camera.position, fixture.camera.forwardDirection(), .putting, 30));
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 0), game.blueprint_render_instances.items.len);
+    try std.testing.expectEqual(null, game.blueprint_selection_frame_start);
+    game.confirmBlueprintTool();
+    try std.testing.expectEqual(.anchor, game.blueprint_tool.selection.stage);
+    fixture.camera.updatePosition(.{ 0, 0, 0 });
+    game.confirmBlueprintTool();
+    try std.testing.expectEqual(.xy, game.blueprint_tool.selection.stage);
+    try std.testing.expectEqualDeep(blueprint_capture.Cell{ target[0], target[1], target[2] }, game.blueprint_tool.selection.anchor.?);
+    try std.testing.expectEqual([3]u32{ 1, 1, 1 }, game.blueprint_tool.selection.bounds.?.size());
+
+    game.discardBlueprintDraft();
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 12), game.blueprint_render_instances.items.len);
+    game.world.?.setBlockUnchecked(backing, .none);
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(usize, 0), game.blueprint_render_instances.items.len);
+    game.confirmBlueprintTool();
+    try std.testing.expectEqual(.anchor, game.blueprint_tool.selection.stage);
+    game.world.?.setBlockUnchecked(backing, .stone);
+    game.buildBlueprintRenderInstances();
+    const nearer_backing = coordinates.fromWorld(&test_layout, .{ 0, 20, 0 }).?;
+    const nearer_target = coordinates.fromWorld(&test_layout, .{ 0, 19, 0 }).?;
+    game.world.?.setBlockUnchecked(nearer_backing, .stone);
+    // Click before another render must use the new nearest target, not old preview.
+    game.confirmBlueprintTool();
+    try std.testing.expectEqualDeep(blueprint_capture.Cell{ nearer_target[0], nearer_target[1], nearer_target[2] }, game.blueprint_tool.selection.anchor.?);
+}
+
+test "same-height blueprint XY uses distant adjacent placement then absolute height" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const coordinates = @import("block_coordinates.zig");
+    try game.world.?.insertChunk(test_layout.origin_chunk, WorldChunk.initEmpty());
+    try game.world.?.insertChunk(test_layout.origin_chunk + ChunkCoords{ 0, 1, 0 }, WorldChunk.initEmpty());
+    game.player = PlayerController.init(std.testing.allocator, .{ 0.25, 0.25, 0 });
+    game.player.?.applyCamera(&fixture.camera);
+    game.enterBlueprintCapture();
+    const anchor = coordinates.fromWorld(&test_layout, .{ 0, 0, 1 }).?;
+    game.blueprint_tool.selection.setAnchor(&test_layout, anchor, fixture.camera.position);
+    const first_backing = coordinates.fromWorld(&test_layout, .{ 0, 20, 1 }).?;
+    game.world.?.setBlockUnchecked(first_backing, .stone);
+    game.updateBlueprintRay();
+    try std.testing.expect(game.blueprint_tool.selection.target_valid);
+    try std.testing.expectEqual([3]u32{ 1, 20, 1 }, game.blueprint_tool.selection.bounds.?.size());
+    try std.testing.expectEqual(null, try block_targeting.findTarget(&game.world.?, fixture.camera.position, fixture.camera.forwardDirection(), .putting));
+
+    game.world.?.setBlockUnchecked(first_backing, .none);
+    const distant_backing = coordinates.fromWorld(&test_layout, .{ 0, 30, 1 }).?;
+    game.world.?.setBlockUnchecked(distant_backing, .stone);
+    game.updateBlueprintRay();
+    try std.testing.expect(game.blueprint_tool.selection.target_valid);
+    try std.testing.expectEqual([3]u32{ 1, 30, 1 }, game.blueprint_tool.selection.bounds.?.size());
+    const last_valid = game.blueprint_tool.selection.bounds.?;
+
+    game.world.?.setBlockUnchecked(distant_backing, .none);
+    const too_far = coordinates.fromWorld(&test_layout, .{ 0, 31, 1 }).?;
+    game.world.?.setBlockUnchecked(too_far, .stone);
+    game.updateBlueprintRay();
+    try std.testing.expectEqual(blueprint_capture.TargetError.out_of_range, game.blueprint_tool.selection.target_error.?);
+    try std.testing.expectEqualDeep(last_valid, game.blueprint_tool.selection.bounds.?);
+    try std.testing.expect(!game.blueprint_tool.selection.confirmExtent());
+
+    game.world.?.setBlockUnchecked(too_far, .none);
+    game.updateBlueprintRay();
+    try std.testing.expectEqual(blueprint_capture.TargetError.no_placement_target, game.blueprint_tool.selection.target_error.?);
+    try std.testing.expectEqualDeep(last_valid, game.blueprint_tool.selection.bounds.?);
+    try std.testing.expect(!game.blueprint_tool.selection.confirmExtent());
+
+    const elevated_backing = coordinates.fromWorld(&test_layout, .{ 0, 20, 3 }).?;
+    game.world.?.setBlockUnchecked(elevated_backing, .stone);
+    game.player.?.pitch = @floatCast(std.math.atan((3.5 - fixture.camera.position[2]) / (20 - fixture.camera.position[1])));
+    game.player.?.applyCamera(&fixture.camera);
+    game.updateBlueprintRay();
+    try std.testing.expect(game.blueprint_tool.selection.target_valid);
+    try std.testing.expectEqual(@as(u32, 1), game.blueprint_tool.selection.bounds.?.size()[2]);
+    game.confirmBlueprintTool();
+    try std.testing.expectEqual(blueprint_capture.Stage.height, game.blueprint_tool.selection.stage);
+    game.updateBlueprintRay();
+    try std.testing.expect(game.blueprint_tool.selection.target_valid);
+    try std.testing.expectEqual(@as(i64, anchor[2]) + 2, game.blueprint_tool.selection.bounds.?.max[2]);
+    try std.testing.expectEqual(@as(u32, 3), game.blueprint_tool.selection.bounds.?.size()[2]);
+    game.player.?.pitch = 0.2;
+    game.player.?.applyCamera(&fixture.camera);
+    game.updateBlueprintRay();
+    try std.testing.expect(game.blueprint_tool.selection.target_valid);
+    try std.testing.expect(game.blueprint_tool.selection.bounds.?.max[2] > anchor[2]);
+}
+
+const BlueprintCleanupFrameTest = struct {
+    streaming: StreamingTest = .{},
+    service: WorldDataService = undefined,
+    client: world_data_service.Client = undefined,
+
+    fn init(self: *@This()) !void {
+        const a = std.testing.allocator;
+        self.streaming.init();
+        self.service = .{ .layout = &test_layout, .io = std.testing.io, .allocator = a, .worker = undefined, .worker_state = undefined };
+        self.client = .{ .service = &self.service };
+        errdefer self.deinit();
+        self.streaming.game.world_client = &self.client;
+        self.streaming.game.render_radius = 0;
+        self.streaming.engine.paused = true;
+        self.streaming.engine.gameplay_input_blocked = true;
+        // Match GPU preflight's occupied-grid guard: actual updateWorld must
+        // finish before touching the fixture's undefined graphics device.
+        for (0..64) |_| _ = try self.streaming.grid.gpu_block_buffer_manager.occupyBlock(.{ .size_exponent = 6 });
+        var mesh: voxel_chunk_module.ChunkSideData = .{};
+        try mesh.blocks_grouped_by_side[0].append(a, .{ .coords = .{ 8, 8, 8 }, .block_type = .stone });
+        self.streaming.grid.appendChunk(.{ .chunk_coords = .{ 0, 0, 0 }, .chunk_side_data = mesh });
+    }
+
+    fn deinit(self: *@This()) void {
+        self.streaming.deinit();
+        self.service.requests.items.deinit(std.testing.allocator);
+        self.client.responses.items.deinit(std.testing.allocator);
+        self.client.blueprint_results.items.deinit(std.testing.allocator);
+    }
+
+    fn frame(self: *@This()) !void {
+        try std.testing.expectEqual(@as(usize, 0), self.client.responses.items.items.len);
+        try std.testing.expectEqual(@as(usize, 0), self.streaming.game.chunk_packages.items.len);
+        self.streaming.game.updateWorld();
+        try std.testing.expectEqual(@as(usize, 0), self.client.responses.items.items.len);
+        try std.testing.expectEqual(@as(usize, 0), self.streaming.game.chunk_packages.items.len);
+    }
+};
+
+test "world update retires a completed client site without packages and ignores late replay" {
+    const a = std.testing.allocator;
+    const runtime = @import("blueprint_runtime.zig");
+    var f: BlueprintCleanupFrameTest = .{};
+    try f.init();
+    defer f.deinit();
+    const world = &f.streaming.game.world.?;
+    var saved: runtime.SavedDefinition = .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Completed"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(voxel_chunk_module.BlockType, &.{.planks}), .target_count = 1 } };
+    defer saved.deinit(a);
+    try world.applyBlueprintChanges(&.{.{ .definition = saved }});
+    var site = try world.blueprints.prepareInstance(a, &test_layout, 17, 1, 1, .{ 10, 10, 10 }, 0);
+    defer site.deinit(a);
+    try world.applyBlueprintChanges(&.{.{ .instance = site }});
+    try world.applyBlueprintChanges(&.{.{ .fulfill = .{ .instance_id = 17, .cell_index = 0 } }});
+    try std.testing.expect(!world.blueprints.instances.get(17).?.active);
+    try std.testing.expectEqual(@as(usize, 1), world.blueprints.cleanup_queue.items.len);
+    try std.testing.expectEqual(@as(u32, 1), world.blueprints.chunks.count());
+    try f.frame();
+    try std.testing.expectEqual(@as(u32, 0), world.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u32, 0), world.blueprints.chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), world.blueprints.cleanup_queue.items.len);
+    try std.testing.expectEqual(@as(usize, 0), world.blueprints.cleanup_head);
+    try std.testing.expectEqual(@as(u64, 17), world.blueprints.max_instance_id);
+    try std.testing.expectEqual(@as(u32, 1), world.blueprints.definitions.count());
+    const retired_revision = world.blueprints.revision;
+    try world.applyBlueprintChanges(&.{ .{ .instance = site }, .{ .fulfill = .{ .instance_id = 17, .cell_index = 0 } } });
+    try f.frame();
+    try std.testing.expectEqual(retired_revision, world.blueprints.revision);
+    try std.testing.expectEqual(@as(u32, 0), world.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u32, 0), world.blueprints.chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), world.blueprints.cleanup_queue.items.len);
+
+    // A retained library alone must return ordinary edits to exactly the
+    // physical-world validation path after the last site is reclaimed.
+    try world.insertChunk(.{ 0, 0, 0 }, WorldChunk.initEmpty());
+    const data = try world.chunks.getPtr(test_layout.encodeChunkCoords(.{ 0, 0, 0 })).?.tryEnsureData(a);
+    for (0..4) |z| @memset(std.mem.asBytes(&data.blocks[z]), @intFromEnum(voxel_chunk_module.BlockType.stone));
+    const operation: world_module.BlockOperation = .{ .block = .{ 10, 10, 4 }, .action = .{ .put = .planks } };
+    var reads: usize = 0;
+    world.physical_read_counter = &reads;
+    var ordinary = std.testing.FailingAllocator.init(a, .{});
+    const expected = world_module.validateEdit(ordinary.allocator(), world.reader(), &.{}, operation);
+    const ordinary_reads = reads;
+    try std.testing.expectEqual(world_module.OperationStatus.success, expected.status);
+    try std.testing.expect(ordinary_reads > 1);
+    reads = 0;
+    var completed = std.testing.FailingAllocator.init(a, .{});
+    const actual = world_module.validateCompletedEdit(completed.allocator(), world.reader(), &world.blueprints, &.{}, operation);
+    try std.testing.expectEqualDeep(expected, actual);
+    try std.testing.expectEqual(ordinary_reads, reads);
+    try std.testing.expectEqual(ordinary.allocations, completed.allocations);
+    try std.testing.expectEqual(ordinary.allocated_bytes, completed.allocated_bytes);
+}
+
+test "world update retires at most four footprint chunks while preserving a shared live site" {
+    const a = std.testing.allocator;
+    const runtime = @import("blueprint_runtime.zig");
+    var f: BlueprintCleanupFrameTest = .{};
+    try f.init();
+    defer f.deinit();
+    const world = &f.streaming.game.world.?;
+    const cells = try a.alloc(voxel_chunk_module.BlockType, 129);
+    @memset(cells, .none);
+    cells[0] = .planks;
+    cells[128] = .planks;
+    var wide: runtime.SavedDefinition = .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Five chunks"), .definition = .{ .size = .{ 129, 1, 1 }, .cells = cells, .target_count = 2 } };
+    defer wide.deinit(a);
+    var small: runtime.SavedDefinition = .{ .id = 2, .owner = 1, .name = try a.dupe(u8, "Still live"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(voxel_chunk_module.BlockType, &.{.planks}), .target_count = 1 } };
+    defer small.deinit(a);
+    try world.applyBlueprintChanges(&.{ .{ .definition = wide }, .{ .definition = small } });
+    var retired = try world.blueprints.prepareInstance(a, &test_layout, 1, 1, 1, .{ 31, 10, 10 }, 0);
+    defer retired.deinit(a);
+    var live = try world.blueprints.prepareInstance(a, &test_layout, 2, 2, 1, .{ 30, 10, 10 }, 0);
+    defer live.deinit(a);
+    try std.testing.expectEqual(@as(usize, 5), retired.box_chunks.len);
+    try world.applyBlueprintChanges(&.{ .{ .instance = retired }, .{ .instance = live } });
+    try world.applyBlueprintChanges(&.{ .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } }, .{ .fulfill = .{ .instance_id = 1, .cell_index = 128 } } });
+    const revision = world.blueprints.revision;
+    try f.frame();
+    try std.testing.expectEqual(revision + 4, world.blueprints.revision);
+    try std.testing.expectEqual(@as(usize, 4), world.blueprints.instances.get(1).?.cleanup_cursor);
+    try std.testing.expectEqual(@as(u32, 2), world.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u32, 2), world.blueprints.chunks.count());
+    const shared = world.blueprints.chunks.get(live.box_chunks[0]).?;
+    try std.testing.expectEqualSlices(u64, &.{2}, shared.instances.items);
+    try std.testing.expectEqual(@as(usize, 1), shared.targets.items.len);
+    try std.testing.expectEqual(@as(u64, 2), world.blueprints.targetAt(live.origin).?.instance_id);
+    try std.testing.expect(world.blueprints.instances.get(2).?.active);
+    try f.frame();
+    try std.testing.expectEqual(revision + 5, world.blueprints.revision);
+    try std.testing.expect(world.blueprints.instances.get(1) == null);
+    try std.testing.expectEqual(@as(u32, 1), world.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u32, 1), world.blueprints.chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), world.blueprints.cleanup_queue.items.len);
+    try std.testing.expectEqual(@as(u64, 2), world.blueprints.targetAt(live.origin).?.instance_id);
+    try world.applyBlueprintChanges(&.{.{ .fulfill = .{ .instance_id = 2, .cell_index = 0 } }});
+    try f.frame();
+    try std.testing.expectEqual(@as(u32, 0), world.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u32, 0), world.blueprints.chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), world.blueprints.cleanup_queue.items.len);
+    try std.testing.expectEqual(@as(usize, 0), world.blueprints.cleanup_head);
+    try std.testing.expectEqual(@as(u64, 2), world.blueprints.max_instance_id);
+    try std.testing.expectEqual(@as(u32, 2), world.blueprints.definitions.count());
 }

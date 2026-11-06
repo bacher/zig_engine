@@ -363,3 +363,19 @@ test "block outline preserves thick green edges over tilted surfaces and behind 
     try checked;
     try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
 }
+
+test "blueprint cached preview matches dynamic rendering and capture ghosts preserve scene depth" {
+    var uncaptured: ValidationResponse = .{};
+    var response: ValidationResponse = .{};
+    var mapping: coordinate_readback.MapResponse = .{};
+    const gpu = try HeadlessDawn.init();
+    defer gpu.deinit();
+    gpu.device.setUncapturedErrorCallback(ValidationResponse.callback, &uncaptured);
+    gpu.device.pushErrorScope(.validation);
+    const checked = @import("blueprint_readback.zig").check(gpu.device, &mapping);
+    _ = gpu.device.popErrorScope(ValidationResponse.callback, &response);
+    try coordinate_readback.waitForCallback(gpu.device, &response.done);
+    try std.testing.expectEqual(@as(usize, 0), response.errors);
+    try checked;
+    try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
+}

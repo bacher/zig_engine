@@ -202,6 +202,18 @@ pub const Lifecycle = struct {
 const testing = std.testing;
 const test_deadlines: Deadlines = .{ .capture_wait_ns = 500, .player_wait_ns = 100, .overdue_ns = 10_000 };
 
+test "ordinary and final saves capture obligations once their command fence resolves" {
+    var lifecycle: Lifecycle = .{};
+    _ = lifecycle.request(.{ .id = 1, .final = false }, 0);
+    // Deferred world work belongs to the captured state and is independent of
+    // readiness. The lifecycle only waits for the accepted command prefix.
+    try testing.expectEqual(@as(u64, 1), lifecycle.takeReady(.{}).?.id);
+    _ = lifecycle.request(.{ .id = 2, .final = true }, 1);
+    try testing.expect(lifecycle.takeReady(.{}) == null);
+    lifecycle.commandResolved();
+    try testing.expectEqual(@as(u64, 2), lifecycle.takeReady(.{}).?.id);
+}
+
 test "save drain fences the accepted prefix before retry and coalesces ordinary requests" {
     var lifecycle: Lifecycle = .{};
     try testing.expectEqual(DrainAction.retry_dependencies, lifecycle.request(.{ .id = 1, .final = false }, 2));

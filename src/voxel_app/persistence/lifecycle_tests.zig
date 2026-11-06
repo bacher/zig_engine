@@ -82,11 +82,12 @@ fn scenario(mode: Mode) !void {
     var gate: Gate = .{
         .io = io,
         .operation = if (mode == .write_stall or mode == .write_failure or mode == .queued_write_failure or mode == .footer_cancel or mode == .before_cancel) .write else .full_sync,
-        // Header, global, empty players, chunk; the fifth adapter write is footer.
-        .skip_writes = if (mode == .footer_cancel) 4 else if (mode == .queued_write_failure) 3 else 0,
+        // Header, global, empty players, blueprint length/data, pending-work
+        // length/data, chunk; the ninth adapter write is the commit footer.
+        .skip_writes = if (mode == .footer_cancel) 8 else if (mode == .queued_write_failure) 7 else 0,
     };
     const stalls = mode == .queued_write_failure or mode == .write_stall or mode == .sync_stall or mode == .footer_cancel or mode == .before_cancel;
-    var faults: adapter.Faults = .{ .operation = gate.operation, .enabled = mode == .write_failure or mode == .sync_failure or mode == .queued_write_failure, .after = if (mode == .queued_write_failure) 3 else 0, .hook = if (stalls) Gate.hook else null, .context = &gate };
+    var faults: adapter.Faults = .{ .operation = gate.operation, .enabled = mode == .write_failure or mode == .sync_failure or mode == .queued_write_failure, .after = if (mode == .queued_write_failure) 7 else 0, .hook = if (stalls) Gate.hook else null, .context = &gate };
     store.setFaults(&faults);
     defer store.setFaults(null);
     var blocks: [32768]u8 = undefined;
@@ -125,7 +126,10 @@ fn scenario(mode: Mode) !void {
         return;
     }
     try job.start();
-    defer job.deinit();
+    defer {
+        gate.release();
+        job.deinit();
+    }
     if (mode == .priority) {
         gate.mutex.lockUncancelable(io);
         while (!gate.entered) gate.changed.waitUncancelable(io, &gate.mutex);
@@ -232,7 +236,7 @@ fn scenario(mode: Mode) !void {
         try std.testing.expect(job.output_head < job.output.items.len);
     }
     for (gate.release_counts[0..count]) |released_count| try std.testing.expectEqual(@as(u8, 1), released_count);
-    if (mode == .before_cancel) try std.testing.expect(gate.writes < 5);
+    if (mode == .before_cancel) try std.testing.expect(gate.writes < 9);
 }
 test "cancellation releases all sources while real writer remains stalled and queue bounded" {
     try scenario(.write_stall);

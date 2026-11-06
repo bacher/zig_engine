@@ -34,8 +34,8 @@ versions only, not intermediate development builds, including builds between rel
 
 The game runs one current gameplay/construction logic. It does not select historical rules
 from a world or blueprint. Compatibility with older file encodings is separate: the current
-implementation writes format 2 and reads formats 1–2, decoding legacy empty inventories into
-the same current player model. The base and WAL readers enforce the supported inclusive
+implementation writes and reads format 4. Formats 1–3 are incompatible development
+saves and are rejected as whole worlds. The base and WAL readers enforce the supported inclusive
 range through `minimum_readable_version` and `current_write_version`.
 
 Under the current pre-release policy, a sufficiently incompatible gameplay or data
@@ -50,19 +50,68 @@ current game logic.
 
 Autosave attempts run every 60 seconds and compaction is requested every 10 minutes. Only a durable WAL commit establishes saved progress; the interval is not a maximum loss window. Base compaction allows exact-version dirty chunks to unload and retires covered journals after durable installation.
 
+Saved blueprints belong to the selected world's player identity. Immutable definitions are
+shared by active construction instances and retained while referenced. Definitions, instance
+creation, and individual target completions enter the same WAL transaction as changed real
+blocks and player inventory. A completion record occupies 13 bytes; ordinary saves do not
+rewrite the definition or fulfillment bitmap for every placed target. Checkpoints encode
+the full library and remaining progress, then rebuild derived runtime indexes after load.
+Temporary capture selections, helper jobs, diagnostics, and unconfirmed names have no save
+representation. In-memory library acceptance is distinct from a durable save acknowledgment;
+storage failures leave accepted state dirty for retry. Ephemeral worlds remain session-only.
+Library capacity and exhausted IDs reject a new definition with a terminal resource result.
+When the uncommitted journal fills, the service retains the submitted definition, saves
+the already accepted prefix, and retries publication after that writer finishes. Ephemeral
+worlds allocate no persistence journal.
+
+Every durable capture saves the complete set of unfinished world-work obligations with
+terrain, blueprint progress, inventory, and global state. The initial kind is road-shape
+reconciliation, keyed by chunk; the queue deduplicates at most 4,096 keys. This replaces
+the former requirement to drain every adaptive-road update before ordinary/autosave,
+overdue, final, or internal journal-prefix capture. Saving no longer holds later mutations
+solely to finish the road queue. Selected command prefixes and normal source holds remain.
+
+A fill reserves its road-work marks before committing material, inventory, and progress.
+A completed pass clears its key only when no coalesced repeat remains. Marks and clears
+are captured with the corresponding world state, and membership-only changes remain dirty
+until their captured generation is committed. Each save owns one canonical full key set;
+newer changes remain unsaved after an older writer completes.
+
+Saved road shapes and ownership remain chunk metadata. Runtime cursors, revision
+observations, and repeat flags are discarded on restart. The service restores fresh queue
+entries directly from saved keys before it is ready, then reconciles current world state
+without a whole-world scan or preload. Repeated work preserves valid ownership and current
+edits. Processing keeps the 16-work-unit budget, counting seeds and completion/requeue,
+with fair repeat passes and immediate yield on dependency, source-hold, or error waits.
+See [unfinished world work](../specs/features/deferred-world-work.md).
+
 Simulation and block timers pause while snapshot sources are held. The encoder releases sources as independent records become available, allowing gameplay to resume before disk synchronization. Conflicting player edits remain pending. Ordinary waits can cancel capture safely; saving that falls sufficiently behind can prioritize completion with visible status. UI/rendering continue, but world-changing actions may wait. Actual disk errors cannot be solved by prioritization; unsaved state stays dirty for retry.
 
 Closing the window or choosing Exit from the Escape menu stops producers and drains existing edits before publishing the final player checkpoint and save. The final capture is exempt from ordinary gameplay wait deadlines. After a failure or five seconds without meaningful progress, the dialog provides retry/wait, cancel exit, or explicit quit without saving. Quitting without saving may lose changes since the last durable snapshot. A durable WAL remains recoverable if final compaction fails.
 
-Saved player state includes identity, feet position, yaw, pitch, and the material in the one-slot inventory. Inventory changes belong to authoritative terrain transfers and are captured in the same snapshot. Movement checkpoints preserve the service-owned inventory. Velocity, climbing state, partial interaction holds, pending client predictions, and transient movement history are reset on startup. Format 2 writes inventory schema 1; supported format 1 saves load with empty inventories. Restored collision is checked against authoritative terrain before gameplay starts.
+The exit drain includes submitted blueprint applications while their detached admission is
+pending, and preserves their order with later mutations. A failed application resolves its
+command fence without publishing an instance.
+
+Saved player state includes identity, feet position, yaw, pitch, and the material in the one-slot inventory. Inventory changes belong to authoritative terrain transfers and are captured in the same snapshot. Movement checkpoints preserve the service-owned inventory. Velocity, climbing state, partial interaction holds, pending client predictions, and transient movement history are reset on startup. Format 4 uses inventory schema 1. Restored collision is checked against authoritative terrain before gameplay starts.
 
 ## Storage and ownership
 
 `format.zig` owns explicit versioned little-endian records and checksum domains. `storage.zig` implements framed WAL transactions, startup verification/recovery, indexed base reads, and compaction. `io.zig` provides stable exclusive locking and checked positional I/O with macOS `F_FULLFSYNC` and directory synchronization. `io_model.zig` models separate content and namespace durability for crash tests. `coordinator.zig` connects restricted source views to bounded encoded output; the service alone mutates live chunks.
 
+`blueprints.zig` owns bounded definition/instance wire records and transaction preflight.
+It prepares allocations and validates progress changes before commit authorization, then
+publishes them after the same durable footer as terrain/inventory. The loader checks
+definition dimensions/materials, ownership/references, progress bits/counts, box overlap,
+and stable-ID highwaters. The authority must also verify restored fulfilled and pending
+targets against real generated/overridden terrain before exposing rebuilt instances.
+Capture computes the exact encoded journal size before its working-memory check, then
+allocates that buffer once. A successful durable commit retires only its captured operation
+prefix; changes accepted while it was writing remain dirty for the next transaction.
+
 `save_lifecycle.zig` owns save policy on the service thread: the active attempt, a queued drain's command fence and retry allowance, cancellation policy, and watchdog deadlines. An older attempt can still be writing while a newer request drains. The service supplies observations of its source holds, pending reads, queries, and compactor, then executes the lifecycle's decisions. The lifecycle allocates no buffers, starts no workers, and performs no I/O.
 
-The service retains chunk ownership, dependency discovery, revision bookkeeping, and status metrics. Source release resumes simulation independently of durable completion. The encoder/writer still arbitrates cancellation against commit authorization; only its result establishes whether an attempt was cancelled. Application exit retains its existing wait, retry, cancel-exit, and quit choices. This boundary defines no future NPC state, scheduling, or simulation-persistence interface.
+The service retains chunk ownership, dependency discovery, revision bookkeeping, and status metrics. Source release resumes simulation independently of durable completion. The encoder/writer still arbitrates cancellation against commit authorization; only its result establishes whether an attempt was cancelled. Application exit retains its existing wait, retry, cancel-exit, and quit choices. The shared typed work-key representation supplies the initial road obligation only; future NPC state and scheduling need their own semantics and handlers.
 
 The durability contract is local APFS on macOS. Network filesystems, other platforms/filesystems, and devices that lie about synchronization are outside that contract. Fault-model tests check the required barrier semantics; native tests exercise the actual adapter. Neither substitutes for a physical power-cut campaign.
 
@@ -74,6 +123,8 @@ Lazy dirt/grass timers may unload once exact-version base and pin rules permit i
 
 ```sh
 zig build test-persistence
+zig build test-blueprint-service
+zig build test-capture
 zig test src/voxel_app/persistence/save_lifecycle.zig
 zig build test
 zig build

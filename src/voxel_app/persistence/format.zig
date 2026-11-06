@@ -1,8 +1,8 @@
 //! Versioned wire codecs. All wire storage is bytes, never native struct layout.
 const std = @import("std");
 const generation_settings = @import("../generation_settings.zig");
-pub const current_write_version: u32 = 2;
-pub const minimum_readable_version: u32 = 1;
+pub const current_write_version: u32 = 4;
+pub const minimum_readable_version: u32 = 4;
 pub const Uuid = [16]u8;
 pub const Digest = [32]u8;
 pub const cell_count = 32768;

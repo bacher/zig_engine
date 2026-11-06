@@ -3,6 +3,8 @@ const std = @import("std");
 const Io = std.Io;
 const format = @import("format.zig");
 const storage = @import("storage.zig");
+const blueprints = @import("blueprints.zig");
+const deferred_work = @import("../deferred_world_work.zig");
 const world = @import("../world.zig");
 const transformations = @import("../block_transformations.zig");
 const Road = @import("../road_data.zig").Road;
@@ -48,6 +50,7 @@ pub const Status = struct {
     active: bool = false,
     progress_generation: u64 = 0,
     error_name: ?[]const u8 = null,
+    deferred_work_error_name: ?[]const u8 = null,
     capture_started_ns: i96 = 0,
     sources_released_ns: i96 = 0,
     wal_committed_ns: i96 = 0,
@@ -100,6 +103,16 @@ pub const Job = struct {
     sources: []Source,
     players: []u8,
     player_count: u64,
+    /// Owned, already encoded authoritative changes through this capture fence.
+    blueprint_changes: []u8 = &.{},
+    /// Owned canonical complete set frozen at the same boundary as sources.
+    pending_work: []u8 = &.{},
+    /// The service supplies exact new-instance bitmap sizes. Direct callers
+    /// derive a conservative summary without reading the writer-owned State.
+    blueprint_summary: ?blueprints.PrepareSummary = null,
+    /// Included in extra_working_bytes; admission may replace only this shared
+    /// journal-array charge when its capacity grows during the running job.
+    blueprint_journal_reserved_bytes: usize = 0,
     canceled: std.atomic.Value(bool) = .init(false),
     mutex: Io.Mutex = .init,
     changed: Io.Condition = .init,
@@ -139,7 +152,28 @@ pub const Job = struct {
             scratch = @max(scratch, try scratchBound(source));
         }
         const manifest = try std.math.mul(usize, self.sources.len, @sizeOf(Source) + 2 + @sizeOf([]u8));
-        self.working_reserved_bytes = try std.math.add(usize, self.limits.output_bytes, try std.math.add(usize, manifest, try std.math.add(usize, self.players.len, scratch + @sizeOf(Job))));
+        const blueprint_summary = if (self.blueprint_summary) |supplied| verified: {
+            var framing_limits = self.store.limits.blueprints;
+            // Count framing without pessimistic bitmap multiplication: exact
+            // summaries can fit when max_cells times instance_count overflows.
+            framing_limits.max_cells = 0;
+            const framing = try blueprints.summarizeEncoded(self.blueprint_changes, framing_limits);
+            var supplied_framing = supplied;
+            supplied_framing.new_instance_bitmap_bytes = 0;
+            if (!std.meta.eql(supplied_framing, framing)) return error.InvalidBlueprintSummary;
+            const max_cells = self.store.limits.blueprints.max_cells;
+            const bitmap_per_instance = max_cells / 8 + @intFromBool(max_cells % 8 != 0);
+            const maximum_bitmap_bytes = std.math.mul(usize, framing.instance_count, bitmap_per_instance) catch std.math.maxInt(usize);
+            if (supplied.new_instance_bitmap_bytes < framing.instance_count or supplied.new_instance_bitmap_bytes > maximum_bitmap_bytes)
+                return error.InvalidBlueprintSummary;
+            break :verified supplied;
+        } else try blueprints.summarizeEncoded(self.blueprint_changes, self.store.limits.blueprints);
+        const blueprint_prepare = try blueprints.prepareMemoryBound(blueprint_summary, self.store.limits.blueprints);
+        // The empty set is valid without consulting world dimensions.
+        if (self.pending_work.len != 0) try deferred_work.validate(self.pending_work, self.store.dimensions, self.store.limits.max_pending_work);
+        self.working_reserved_bytes = try std.math.add(usize, self.limits.output_bytes, try std.math.add(usize, manifest, try std.math.add(usize, self.players.len + self.blueprint_changes.len, scratch + @sizeOf(Job))));
+        self.working_reserved_bytes = try std.math.add(usize, self.working_reserved_bytes, blueprint_prepare);
+        self.working_reserved_bytes = try std.math.add(usize, self.working_reserved_bytes, try pendingWorkMemoryBound(self.pending_work.len));
         self.working_reserved_bytes = try std.math.add(usize, self.working_reserved_bytes, self.extra_working_bytes);
         if (self.working_reserved_bytes > self.limits.working_bytes) return error.WorkingCapacityExceeded;
         self.released = try self.allocator.alloc(bool, self.sources.len);
@@ -222,6 +256,8 @@ pub const Job = struct {
         self.allocator.free(self.priority);
         self.allocator.free(self.sources);
         self.allocator.free(self.players);
+        self.allocator.free(self.blueprint_changes);
+        self.allocator.free(self.pending_work);
         self.allocator.destroy(self);
     }
     fn emit(self: *Job, event: Event) void {
@@ -330,7 +366,7 @@ pub const Job = struct {
         self.store_mutex.lockUncancelable(self.io);
         defer self.store_mutex.unlock(self.io);
         const global = format.encodeGlobal(self.tick);
-        try self.store.beginSnapshot(self.sequence, &global, self.players, self.player_count, self.sources.len);
+        try self.store.beginSnapshotWithState(self.sequence, &global, self.players, self.player_count, self.sources.len, self.blueprint_changes, self.pending_work);
         while (true) {
             self.mutex.lockUncancelable(self.io);
             while (self.output_head == self.output.items.len and !self.encoder_finished)
@@ -364,6 +400,11 @@ pub const Job = struct {
         }
     }
 };
+
+/// Capture owns one encoded set; the writer prepares one replacement before commit.
+pub fn pendingWorkMemoryBound(encoded_len: usize) !usize {
+    return std.math.mul(usize, encoded_len, 2);
+}
 
 fn encodeSource(allocator: std.mem.Allocator, uuid: [16]u8, source: Source) ![]u8 {
     const sorted = try allocator.dupe(Road, source.roads);
@@ -408,4 +449,101 @@ pub fn scratchBound(source: Source) !usize {
     // Temporary encoded metadata overlaps the final record. RLE uses a bounded
     // stack buffer; allocator/stack overhead remains outside process-RAM claims.
     return try metadataBound(source) + source.roads.len * (@sizeOf(Road) + @sizeOf(format.CustomRoad)) + source.constructed.len * @sizeOf(u16) + source.events.len * @sizeOf(format.Timer);
+}
+
+/// Admission can reserve a legal source's scratch without scanning chunk data.
+pub fn maximumScratchBound() usize {
+    return format.maximum_metadata_size + format.cell_count * (@sizeOf(Road) + @sizeOf(format.CustomRoad) + @sizeOf(u16) + @sizeOf(format.Timer));
+}
+
+test "job reserves blueprint preparation before allocating or starting workers" {
+    const operation: blueprints.Op = .{ .instance = .{ .id = 1, .definition_id = 1, .owner = 1, .origin = .{ 0, 0, 0 }, .rotation = 0 } };
+    const changes = try blueprints.encodeOps(std.testing.allocator, &.{operation});
+    defer std.testing.allocator.free(changes);
+    var exact: blueprints.PrepareSummary = .{};
+    try exact.addOperation(operation, 8);
+    var store: storage.Store = undefined;
+    store.limits = .{};
+    var store_mutex: Io.Mutex = .init;
+    var sources = [_]Source{.{ .id = 0, .revision = 1, .epoch = 1, .is_unreachable = false, .blocks = null, .roads = &.{}, .constructed = &.{}, .events = &.{} }};
+    const baseline = 64 + @sizeOf(Source) + 2 + @sizeOf([]u8) + changes.len + @sizeOf(Job);
+    for ([_]?blueprints.PrepareSummary{ exact, null }) |supplied| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+        var job: Job = .{
+            .allocator = failing.allocator(),
+            .io = std.testing.io,
+            .store = &store,
+            .store_mutex = &store_mutex,
+            .limits = .{ .output_bytes = 64, .working_bytes = baseline },
+            .notify = .{ .context = &store, .send = struct {
+                fn send(_: *anyopaque, _: Event) void {
+                    unreachable;
+                }
+            }.send },
+            .epoch = 1,
+            .sequence = 1,
+            .tick = 0,
+            .final = false,
+            .sources = &sources,
+            .players = &.{},
+            .player_count = 0,
+            .blueprint_changes = changes,
+            .blueprint_summary = supplied,
+        };
+        if (supplied) |valid| {
+            var missing_bitmap = valid;
+            missing_bitmap.new_instance_bitmap_bytes = 0;
+            var oversized_bitmap = valid;
+            oversized_bitmap.new_instance_bitmap_bytes = store.limits.blueprints.max_cells / 8 + 1;
+            for ([_]blueprints.PrepareSummary{ .{}, missing_bitmap, oversized_bitmap }) |invalid| {
+                job.blueprint_summary = invalid;
+                try std.testing.expectError(error.InvalidBlueprintSummary, job.start());
+                try std.testing.expect(!failing.has_induced_failure);
+            }
+            job.blueprint_summary = valid;
+        }
+        try std.testing.expectError(error.WorkingCapacityExceeded, job.start());
+        try std.testing.expect(!failing.has_induced_failure);
+        const summary = supplied orelse try blueprints.summarizeEncoded(changes, store.limits.blueprints);
+        try std.testing.expectEqual(baseline + try blueprints.prepareMemoryBound(summary, store.limits.blueprints), job.working_reserved_bytes);
+        // At the exact bound the next failure is the first descriptor allocation,
+        // so no writer can observe this deliberately uninitialized Store.
+        job.limits.working_bytes = job.working_reserved_bytes;
+        try std.testing.expectError(error.OutOfMemory, job.start());
+        try std.testing.expect(failing.has_induced_failure);
+    }
+}
+
+test "capture pending-work memory includes captured and prepared copies before allocation" {
+    const pending = [_]u8{ 1, 0, 0, 0, 0 };
+    var store: storage.Store = undefined;
+    store.limits = .{};
+    store.dimensions = .{ 4, 4, 4 };
+    var mutex: Io.Mutex = .init;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const baseline = 64 + @sizeOf(Job);
+    var job: Job = .{
+        .allocator = failing.allocator(),
+        .io = std.testing.io,
+        .store = &store,
+        .store_mutex = &mutex,
+        .limits = .{ .output_bytes = 64, .working_bytes = baseline },
+        .notify = .{ .context = &store, .send = struct {
+            fn send(_: *anyopaque, _: Event) void {
+                unreachable;
+            }
+        }.send },
+        .epoch = 1,
+        .sequence = 1,
+        .tick = 0,
+        .final = false,
+        .sources = &.{},
+        .players = &.{},
+        .player_count = 0,
+        .pending_work = @constCast(&pending),
+    };
+    try std.testing.expectError(error.WorkingCapacityExceeded, job.start());
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(baseline + try pendingWorkMemoryBound(pending.len), job.working_reserved_bytes);
+    try std.testing.expectError(error.Overflow, pendingWorkMemoryBound(std.math.maxInt(usize)));
 }
