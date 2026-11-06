@@ -136,26 +136,37 @@ publication. Blueprint dialogs block controls while simulation and service proce
 These responsibilities are implemented by the capture helper, runtime indexes, and service
 admission pipeline.
 
-An approved hybrid application-admission follow-up is pending runtime implementation. Apply is
-an infrequent player operation, with at most one active preparation attempt; NPC simulation fills already
-published sites and does not submit Apply. Each candidate attempt protects every whole chunk
+An approved hybrid application-admission follow-up is pending external specification review and
+runtime implementation. Apply is an infrequent player operation, with at most one active
+preparation attempt; NPC simulation fills already published sites and does not submit Apply. Each candidate attempt protects every whole chunk
 intersecting the rotated full bounding box, including blueprint-empty cells, cavities, and empty
 chunks, before its first terrain/index copy until atomic publication, rejection, or invalidation
 of that candidate attempt. This is the box's chunk footprint, not the 56-block structural halo.
 
-Prolonged journal/disk waits or storage failures release admission protection and invalidate the
-snapshot and prepared publication, while retaining the submitted operation identity/request and
-existing save, fence, and retry semantics. A late helper result cannot publish. Recovery reacquires
-protection and copies/reprepares fresh data; stale snapshot contents and prepared index records from before release
-may not be published. R62–R64 require a finite configurable hold/expiry policy and implementation
-measurements; no numeric timeout has been selected.
+Finite copy/helper/preparation freshness or hold expiry outside an already-recorded storage wait
+ends Apply with `preparation timed out; try again`: release protection, discard the candidate, and
+resolve the original command and its save-fence membership once, without automatic retry or
+reacquisition. A manual Apply retry is a new request and cannot revive that command or extend an
+older Save's required-command set. Deliver the failure independently of tool UI: keep an open
+preview available, without reopening a dismissed one.
+
+Prolonged actual journal/disk waits, storage failures, and expiry while already recorded as waiting
+for storage instead retain the submitted request and save-fence obligation after releasing
+protection and discarding the candidate. Recovery uses the existing bounded delayed/explicit
+storage retry policy and fresh protected copies; retire the old attempt's expiry timer without
+replenishing retry allowance. Late helper results cannot publish, and their buffers remain owned
+until the helper finishes or relinquishes them. Finite limits require implementation measurements;
+numeric tuning is deferred. See [R64–R65/Q29 and AC135–AC137](../specs/features/blueprints.md#hybrid-destination-validation-and-protected-publication).
 
 All actual or conservative writes into protected terrain, metadata, or index chunks must wait,
 including indirect road changes, below-soil timer writes, and whole-site cleanup triggered by a
 site finishing outside the footprint. Reads may cross the boundary. Eligible independent work
 outside it continues, preserving producer order, contiguous resolution, and exact save-fence
-membership. A save fence selects the commands it must await; capture freezes coherent current
-authoritative state, which may include independent later submissions committed before capture.
+membership. Before every new acquisition or reacquisition, already queued, otherwise admissible
+conflicting work from independent producers gets a scheduling opportunity before Apply retakes
+the same chunks, subject to producer order, dependencies, and persistence holds. Later commands
+from the retained Apply's producer need not pass it. A save fence selects the commands it must
+await; capture freezes coherent current authoritative state, which may include independent later submissions committed before capture.
 Changes committed after capture are excluded. Required producer order and player-checkpoint
 eligibility remain unchanged; no global post-fence hold is added solely to exclude later independent
 commands. Persistence source holds remain a separate mechanism. Publication remains a short,

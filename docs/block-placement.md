@@ -56,8 +56,9 @@ selection/definition limits in [R54/Q25](../specs/features/blueprints.md#horizon
 
 ### Approved blueprint application follow-up
 
-The approved hybrid destination-admission change below is pending runtime implementation. The
-current service still uses FIFO admission and rechecks dependency versions before publication.
+The approved hybrid destination-admission change below is pending external specification review
+and runtime implementation. The current service still uses FIFO admission and rechecks dependency
+versions before publication.
 Existing implementation and validation reports describe that behavior; they do not verify this
 follow-up.
 
@@ -68,12 +69,20 @@ including blueprint-empty cells, cavities, and empty chunks. Protection covers t
 not the 56-block structural halo, and lasts until atomic publication, rejection, or invalidation
 of that candidate attempt.
 
-Prolonged journal/disk waits or storage failures release admission protection and discard or
-invalidate its snapshot and prepared publication. The submitted operation identity/request and
-existing save, fence, and retry semantics survive; a late helper result cannot publish. Recovery
-must reacquire protection and copy/reprepare fresh data, without reusing stale snapshot contents or prepared
-index records from before release. R62–R64 require a finite configurable hold/expiry policy and
-implementation measurements; no numeric timeout has been selected.
+Finite copy/helper/preparation freshness or hold expiry outside an already-recorded storage wait
+ends Apply with `preparation timed out; try again`. Release protection and discard the candidate;
+resolve the original command and its save-fence membership once, without automatic retry or
+reacquisition. Manual Apply retry creates a new request; it cannot revive the original command or
+extend an older Save's required-command set. Under R23, deliver failure after tool dismissal without
+reopening the preview; a preview that remains open stays available for adjustment.
+
+Prolonged actual journal/disk waits, storage failures, and expiry while already recorded as waiting
+for storage instead release protection and discard the candidate while retaining the submitted
+request and save-fence obligation. Recovery follows the existing bounded delayed/explicit storage
+retry policy, taking fresh protected copies and preparing new indexes. Stop the retired attempt's
+expiry timer without replenishing retry allowance. Late helper results cannot publish; their
+buffers remain owned until the helper finishes or relinquishes them. Finite limits require
+implementation measurements; numeric tuning is deferred. See [R64–R65/Q29 and AC135–AC137](../specs/features/blueprints.md#hybrid-destination-validation-and-protected-publication).
 
 All actual or conservative writes into protected terrain, metadata, and index chunks must wait.
 This includes indirect adaptive-road effects, timer writes to soil below an edited cell, and cleanup
@@ -84,8 +93,11 @@ satisfy an earlier unresolved fence. The fence defines required waiting, while c
 current authoritative state: independent later commits before capture may be included; post-capture
 changes are excluded. This adds no global hold solely to exclude later independent commands; required
 producer order and player-checkpoint eligibility remain. See [R61/Q28 and AC134](../specs/features/blueprints.md#hybrid-destination-validation-and-protected-publication).
-Existing persistence source holds remain separate from Apply protection, and final publication stays
-short and sequential on the single authoritative worker.
+Before every new acquisition or reacquisition, already queued, otherwise admissible conflicting
+work from independent producers gets a scheduling opportunity before Apply retakes the same
+chunks, subject to producer order, dependencies, and persistence holds. Later commands from a
+retained Apply's producer need not pass it. Existing persistence source holds remain separate from
+Apply protection, and final publication stays short and sequential on the single authoritative worker.
 
 Application still validates full real bottom platforms and the completed design's composition with
 nearby constructions using immutable observations. Exterior observations may be mixed-time and
