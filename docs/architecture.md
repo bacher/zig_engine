@@ -154,7 +154,11 @@ All actual or conservative writes into protected terrain, metadata, or index chu
 including indirect road changes, below-soil timer writes, and whole-site cleanup triggered by a
 site finishing outside the footprint. Reads may cross the boundary. Eligible independent work
 outside it continues, preserving producer order, contiguous resolution, and exact save-fence
-membership; persistence source holds remain a separate mechanism. Publication remains a short,
+membership. A save fence selects the commands it must await; capture freezes coherent current
+authoritative state, which may include independent later submissions committed before capture.
+Changes committed after capture are excluded. Required producer order and player-checkpoint
+eligibility remain unchanged; no global post-fence hold is added solely to exclude later independent
+commands. Persistence source holds remain a separate mechanism. Publication remains a short,
 sequential operation on the single authoritative worker.
 
 Full platform/composition validation still uses immutable observations. Exterior observations may

@@ -80,8 +80,12 @@ This includes indirect adaptive-road effects, timer writes to soil below an edit
 of an entire site even when its last fill occurred outside the protected footprint. Reads may cross
 the boundary. Independent work outside it must progress while preserving producer order, contiguous
 resolution, and the exact membership of selected save fences. A bypassed later request cannot
-satisfy an earlier unresolved fence. Existing persistence source holds remain separate from Apply
-protection, and final publication stays short and sequential on the single authoritative worker.
+satisfy an earlier unresolved fence. The fence defines required waiting, while capture saves coherent
+current authoritative state: independent later commits before capture may be included; post-capture
+changes are excluded. This adds no global hold solely to exclude later independent commands; required
+producer order and player-checkpoint eligibility remain. See [R61/Q28 and AC134](../specs/features/blueprints.md#hybrid-destination-validation-and-protected-publication).
+Existing persistence source holds remain separate from Apply protection, and final publication stays
+short and sequential on the single authoritative worker.
 
 Application still validates full real bottom platforms and the completed design's composition with
 nearby constructions using immutable observations. Exterior observations may be mixed-time and

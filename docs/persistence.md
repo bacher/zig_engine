@@ -94,8 +94,17 @@ Simulation and block timers pause while snapshot sources are held. The encoder r
 Closing the window or choosing Exit from the Escape menu stops producers and drains existing edits before publishing the final player checkpoint and save. The final capture is exempt from ordinary gameplay wait deadlines. After a failure or five seconds without meaningful progress, the dialog provides retry/wait, cancel exit, or explicit quit without saving. Quitting without saving may lose changes since the last durable snapshot. A durable WAL remains recoverable if final compaction fails.
 
 The exit drain includes submitted blueprint applications while their detached admission is
-pending, and preserves their order with later mutations. A failed application resolves its
+pending, and preserves required producer order with later mutations. A failed application resolves its
 command fence without publishing an instance.
+
+The [approved blueprint admission follow-up](../specs/features/blueprints.md#hybrid-destination-validation-and-protected-publication),
+awaiting runtime implementation, distinguishes required save-fence members from snapshot contents.
+Only selected members can resolve that wait. Once they are terminal and normal capture gates permit,
+Save freezes coherent current authoritative state, potentially including independent later submissions
+already committed before capture. Post-capture changes remain outside that snapshot. Required
+producer order, contiguous resolution, selected player-checkpoint eligibility and source holds remain;
+there is no new global hold solely to exclude later independent submissions. AC134 requires reopening
+the resulting save to verify both included and excluded effects.
 
 Saved player state includes identity, feet position, yaw, pitch, and the material in the one-slot inventory. Inventory changes belong to authoritative terrain transfers and are captured in the same snapshot. Movement checkpoints preserve the service-owned inventory. Velocity, climbing state, partial interaction holds, pending client predictions, and transient movement history are reset on startup. Format 5 uses inventory schema 1. Restored collision is checked against authoritative terrain before gameplay starts.
 
