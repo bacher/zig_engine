@@ -130,9 +130,26 @@ The blueprint capture workflow follows these ownership boundaries:
 
 Capture uses ordinary full-block subscriptions rather than persistence mutation-freezing holds.
 Jobs, memory, source retention, and cancellation/shutdown cleanup must remain bounded, and stale
-results must not affect a newer draft. Large application admission prepares a versioned dependency
-snapshot and resources before atomic publication. Blueprint dialogs block controls while simulation
-and service processing continue. These responsibilities are implemented by the capture helper, runtime indexes, and service admission pipeline.
+results must not affect a newer draft. The current application admission pipeline prepares a
+versioned dependency snapshot and resources, then rechecks dependency versions before atomic
+publication. Blueprint dialogs block controls while simulation and service processing continue.
+These responsibilities are implemented by the capture helper, runtime indexes, and service
+admission pipeline.
+
+An approved hybrid application-admission follow-up is pending external specification review and
+runtime implementation. Apply remains player-initiated, with one bounded active preparation;
+NPC simulation assembles published sites. The service worker owns admission protection and all
+authoritative mutation. A helper prepares a candidate from owned immutable copies, and the
+service worker publishes it in a short atomic step. An invalidated helper cannot publish, and its
+buffers remain owned until it finishes or relinquishes them. Submitted operations retain their
+ownership independently of tool UI.
+
+Admission protection and persistence `source_holds` have separate owners and lifetimes; releasing
+one cannot clear the other. The spec's [Hybrid destination protocol](../specs/features/blueprints.md#hybrid-destination-protocol)
+defines protection scope, scheduling, expiry/recovery and publication checks. The
+[construction contract](block-placement.md#approved-blueprint-application-follow-up) describes the
+world-rule consequences. Existing implementation and validation reports describe the current
+FIFO/version-checked pipeline; they do not verify this pending follow-up.
 
 The [feature plan](../specs/features/blueprints.md#plan) defines the detailed capture/helper/Save
 protocol and retains the rejected service-owned capture alternative. Selection geometry and
