@@ -28,7 +28,7 @@ There are three participants:
 
 - **Players** issue actions primarily to the world-data service. Direct delivery of some events to the simulation is an option to consider, not a selected interface.
 - **World-data service** accepts changes from players and the simulation and distributes up-to-date chunk data.
-- **Simulation** maintains its own state, relies on world-data service data, and communicates primarily with that service. Player edits may affect it, but coordinating with those edits should not dominate its processing cost.
+- **Simulation** maintains its own state, relies on world-data service data, and communicates primarily with the world-data service. Player edits may affect it, but coordinating with those edits should not dominate its processing cost.
 
 Player action handling currently runs in the same OS process as the game and the existing simulation logic. Future multiplayer clients will interact with the server through asynchronous messages over the network. Player interaction therefore cannot depend on in-process synchronization between client and server.
 
@@ -106,7 +106,7 @@ Movement separation will likely be added as a visual effect to reduce overlap be
 The author has not chosen a simulation architecture. Candidates include:
 
 - World-data service and simulation on the same thread.
-- A separate world-data service and a simulation event loop acting as an orchestrator for workers. One variant isolates workers behind inbox communication with the orchestrator; another allows workers to access the service themselves.
+- A separate world-data service and a simulation event loop acting as an orchestrator for workers. One variant isolates workers behind inbox communication with the orchestrator; another allows workers to access the world-data service themselves.
 - A separate world-data service and simulation worker threads without an orchestrator.
 - Another approach if it better serves the requirements.
 
@@ -114,9 +114,9 @@ One possible structural simplification is to ensure that only one simulation wor
 
 ### Direct mutation of distant chunks
 
-Another candidate is to let a simulation thread update world-data service data directly, avoiding asynchronous communication for each edit. The service could grant an exclusive mutability lock on a chunk so the simulation thread can perform multiple edits without per-edit coordination while holding it. In this proposal, such access is allowed only for chunks sufficiently far from all current players.
+Another candidate is to let a simulation thread update world-data service data directly, avoiding asynchronous communication for each edit. The world-data service could grant an exclusive mutability lock on a chunk so the simulation thread can perform multiple edits without per-edit coordination while holding it. In this proposal, such access is allowed only for chunks sufficiently far from all current players.
 
-This remains an architecture idea, not a selected mechanism. Acquiring and releasing exclusive access still requires coordination; distance alone does not establish safe exclusive access. The distance threshold, behavior when a player approaches, and interaction with other service users remain open. The idea aims to reduce coordination cost without prescribing how ownership or publication works.
+This remains an architecture idea, not a selected mechanism. Acquiring and releasing exclusive access still requires coordination; distance alone does not establish safe exclusive access. The distance threshold, behavior when a player approaches, and interaction with other users of the world-data service remain open. The idea aims to reduce coordination cost without prescribing how ownership or publication works.
 
 ## Whole-world operation and visible overload
 
