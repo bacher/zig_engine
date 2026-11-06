@@ -130,9 +130,27 @@ The blueprint capture workflow follows these ownership boundaries:
 
 Capture uses ordinary full-block subscriptions rather than persistence mutation-freezing holds.
 Jobs, memory, source retention, and cancellation/shutdown cleanup must remain bounded, and stale
-results must not affect a newer draft. Large application admission prepares a versioned dependency
-snapshot and resources before atomic publication. Blueprint dialogs block controls while simulation
-and service processing continue. These responsibilities are implemented by the capture helper, runtime indexes, and service admission pipeline.
+results must not affect a newer draft. The current application admission pipeline prepares a
+versioned dependency snapshot and resources, then rechecks dependency versions before atomic
+publication. Blueprint dialogs block controls while simulation and service processing continue.
+These responsibilities are implemented by the capture helper, runtime indexes, and service
+admission pipeline.
+
+An approved application-admission follow-up is pending runtime implementation. It retains full
+platform/composition validation on an earlier destination snapshot, accepting roughly one to two
+seconds of environmental change during preparation without long region or global mutation locks.
+Immediately before atomic publication, the service checks current physical emptiness of every
+nonempty target, no active-box overlap, resource/inventory/index integrity, and a real non-`none`
+block directly below every target in the globally lowest occupied layer. It does not recheck
+3×3×3 platforms or rerun full structural validation because other environmental contents changed.
+Current-state checks and publication remain atomic; preparation does not freeze the region.
+
+This relaxation preserves initial cheap-rule assemblability through the certified definition and
+current bottom supports, while permitting lasting ordinary structural violations caused by stale
+composition. Ordinary edit checks remain; they do not restore a universal guarantee of validity
+in the completed logical world or eventual ordinary physical validity. The [construction contract](block-placement.md#approved-blueprint-application-follow-up)
+describes the scope. Existing implementation/validation reports remain evidence for the current
+version-checked pipeline, not this pending follow-up.
 
 The [feature plan](../specs/features/blueprints.md#plan) defines the detailed capture/helper/Save
 protocol and retains the rejected service-owned capture alternative. Selection geometry and

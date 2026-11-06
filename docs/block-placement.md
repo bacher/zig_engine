@@ -54,9 +54,38 @@ the narrowly gated reinforced-support fallback and height diagnostics in
 [R47/R49/Q21](../specs/features/blueprints.md#conditional-concrete-support-conversion), and
 selection/definition limits in [R54/Q25](../specs/features/blueprints.md#horizontal-size-and-wrapped-target-uniqueness).
 
+### Approved blueprint application follow-up
+
+The approved destination-admission change below is pending runtime implementation. The current
+service still rechecks dependency versions before publication. Existing implementation and
+validation reports describe that stricter behavior; they do not verify this follow-up.
+
+Application will validate real bottom platforms and the completed design's composition with
+nearby constructions on an earlier destination snapshot. The accepted observation-age window is roughly
+one to two seconds from the earliest copied data through publication, including helper and queue
+waits; it is not a real-time completion promise. The world keeps changing. It must not hold a region or global
+mutation lock across preparation. Environmental changes during that interval do not trigger
+full structural revalidation or require the snapshot to match publication-time terrain.
+
+Immediately before atomic publication, the authority must check current physical emptiness
+at every nonempty target, no overlap with another active site's box, and resource,
+inventory, and index integrity. It must also find a real non-`none` block directly below
+**every target in the globally lowest occupied layer**. That last check accepts any real
+block type, never a miniature. It does not recheck the surrounding 3×3×3 platforms, every
+column's lowest target, or the full composed structure. Unknown required current cells
+cannot establish these checks. Failure publishes no partial site.
+
+The initial snapshot still requires the full platforms and composition checks. The narrower
+current checks deliberately permit stale environmental approval: a changed platform or
+nearby structure can make the published completed arrangement ordinary-rule-invalid.
+Such a violation can last after construction finishes; there is no automatic repair or
+completion-time structural scan. The guarantees below distinguish initial cheap-rule
+assemblability from ordinary structural validity.
+
 ### Blueprint fulfillment
 
-Full designs are validated at creation and composed with the destination at application.
+Full designs are validated at creation and composed with an earlier destination snapshot
+at application under the approved follow-up above.
 Subsequent blueprint-directed structural approval must inspect no more than the real block
 directly below and four immediate XY neighbors. Any real block below passes this cheap rule;
 with air below, an eligible real XY neighbor is required. This deliberately permits temporarily
@@ -76,8 +105,9 @@ no full-design scan; the detailed structural/performance contract is in
 
 Blueprint fills queue coalesced adaptive-road work by chunk. Road shapes may update after
 a short delay; their proposed changes use ordinary completed-world validation and unsafe
-changes are rejected. Final saving drains this queue. Road planning does not run inside
-the five-neighbor structural approval path.
+changes are rejected. Saves persist unfinished road/chunk obligations with current world state
+rather than draining the queue. Road planning does not run inside the five-neighbor structural
+approval path.
 
 ### Blueprint extraction view
 
@@ -88,16 +118,18 @@ support rules and fixed windows, with all affected planned cells included as con
 Checking only real construction metadata would miss an instance whose blocks are still
 miniatures.
 
-There is no extra foundation lock. Actual full 3×3×3 platforms are an application requirement;
-later ordinary extraction may remove their cells when the completed logical arrangement
-still has valid support. Collision, mining/item transfers, and cheap blueprint fulfillment
-use real terrain; miniatures cannot be mined and never count as real support for filling
+There is no extra foundation lock. Full 3×3×3 platforms remain a requirement of the earlier
+application snapshot. Under the approved pending follow-up, publication rechecks only the real
+block directly below each globally lowest occupied target. Later ordinary extraction keeps
+its completed-world support checks. Collision, mining/item transfers, and cheap blueprint
+fulfillment use real terrain; miniatures cannot be mined and never count as real support for filling
 another target. Replacing a miniature with its required real block leaves the completed
 logical view unchanged, so that operation needs no dependent revalidation.
 
-Application checks the completed design's composition with the destination and affected
-constructions. An ordinary placement first validates its new target against physical terrain,
-then validates that target and affected dependents in the completed logical view. Physical
+Application checks composition on the earlier snapshot under the approved pending follow-up;
+its final current-state checks are narrower. An ordinary placement still first validates its
+new target against physical terrain, then validates that target and affected dependents in
+the completed logical view. Physical
 approval ensures miniatures supply no real support; completed target approval catches conflicts
 in the new block itself, which dependent checks skip. Both views include the proposed placement.
 Affected-dependent discovery must cover every world material, including water/snow and other
@@ -107,46 +139,47 @@ define cache separation and safe approval reuse. These checks add no work to blu
 
 ### Blueprint world-mutation invariant
 
-Every gameplay world modification must preserve ordinary structural validity of affected
-real and planned constructions in the resulting logical world where all pending targets
-are completed. This applies to player/NPC actions, blueprint application, simulation,
-timers, debug/service commands, batch edits, and indirect side effects. A modification that
-would invalidate that resulting arrangement must not commit. Preserve ordinary
-generated-terrain exemptions and bounded affected-region checks; this does not require
-scanning the whole world or repeating validation for a proven logical no-op.
+The current implementation requires every gameplay world modification to preserve ordinary
+structural validity of affected real and planned constructions in the resulting logical world
+where all pending targets are completed. The approved application follow-up is an explicit
+exception to that publication-time invariant, pending runtime implementation as described above.
+Ordinary placements, extractions, simulation/timer edits, debug/service commands, batch edits,
+and indirect side effects retain their existing affected-construction checks. Generated-terrain
+exemptions and bounded affected regions remain; a proven logical no-op needs no repeated search.
+These retained checks do not repair an invalid arrangement already admitted by stale application
+validation or restore a universal completed-world invariant.
 
-Unfinished construction may temporarily violate ordinary physical construction rules both
-internally and in its surroundings. This includes partially built structures and already
-completed buildings affected by the unfinished work. Finishing one blueprint removes its
-own frame and restrictions; it does not promise ordinary physical validity while nearby
-targets from other sites remain pending.
+Unfinished construction may temporarily violate ordinary physical construction rules internally
+and in its surroundings, including completed neighboring buildings. Each fulfillment replaces
+one planned type with an equivalent real type and leaves the completed logical arrangement
+unchanged. If that arrangement is ordinary-rule-valid, a constructed cell becomes physically
+valid once no pending target remains in its support window. The current window is an inclusive
+cube of ±28 cells on each axis, using shortest wrapped-X displacement; recursive support checks
+do not move its center. For a whole building the condition applies around every constructed cell.
 
-Each fulfillment replaces one planned type with an equivalent real type, leaving the
-completed logical arrangement unchanged. Once a constructed cell's ordinary
-support window contains no pending target from any active site, physical and completed
-reads coincide and its ordinary physical validity follows. The current window is an
-inclusive cube of ±28 cells on each axis, using shortest wrapped-X displacement; recursive
-support checks do not move its center. For a whole completed building, the sufficient
-condition applies around every constructed cell, not just its origin or former box center.
-
-Eventual physical validity is a consequence of the mutation admission invariant. It adds no
-completion check, repair operation, per-fill search for neighboring sites, or persistent
-stability flag. A new nearby site may introduce temporary physical invalidity again while
-preserving the completed logical arrangement. [R50/Q22](../specs/features/blueprints.md#world-mutation-invariant-and-eventual-physical-validity)
-record the invariant and examples. Future cancellation and its effects on remaining or surrounding
-structures are excluded from this contract and require separate design.
+Under the approved follow-up, absence of nearby pending targets alone no longer proves ordinary
+physical validity: stale application composition can leave the completed arrangement invalid,
+and filling the remaining targets preserves that violation. No unconditional eventual-validity
+promise, automatic repair, completion check, per-fill neighbor-site search, or persistent stability
+flag is added. [R50/Q22](../specs/features/blueprints.md#world-mutation-invariant-and-eventual-physical-validity)
+record the scoped guarantees. Future cancellation and its effects require separate design.
 
 ### Blueprint global completion order
 
-All active sites must remain structurally completable in some shared order. Placements may
-interleave sites: after a legal removal below plank target A, A may rely on a neighboring
-site's plank target B being filled first. Cross-site dependencies are accepted. Independent
-completion of each site is deferred as a potential improvement. This is a structural guarantee;
-materials, data, access, and scheduling are separate conditions. The spec contains the
-[completion-order argument](../specs/features/blueprints.md#global-completion-order-argument)
-and the preferred deferred [per-instance-reader alternative](../specs/features/blueprints.md#deferred-preferred-alternative-per-instance-logical-readers)
-to a support-component graph. The current guarantee adds no runtime graph, reachability scan,
-or final validation pass; the five-neighbor bound remains.
+At publication under the approved pending follow-up, the newly applied site has an initial
+completion sequence under the cheap fulfillment rule. The creation-time R20 certificate proves
+reachability from its globally lowest occupied targets; a current real non-`none` block directly
+below every such target makes those starting targets immediately placeable. This proves initial
+assemblability, not ordinary structural validity of the destination or progress through an endless
+stream of later edits. Materials, data, access, and scheduling remain separate conditions.
+
+Later ordinary checks remain in place, and sites may rely on a neighboring site's targets being
+filled first. Placements can interleave sites; an NPC scheduling guarantee and a universal
+completion-order guarantee after stale application are not established by this relaxation.
+The [completion-order argument](../specs/features/blueprints.md#global-completion-order-argument)
+and deferred [per-instance-reader alternative](../specs/features/blueprints.md#deferred-preferred-alternative-per-instance-logical-readers)
+retain their stated assumptions. The five-neighbor fulfillment bound remains, with no runtime
+support graph, reachability scan, or final validation pass.
 
 ## Stable platforms
 
