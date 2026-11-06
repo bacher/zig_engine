@@ -58,73 +58,41 @@ selection/definition limits in [R54/Q25](../specs/features/blueprints.md#horizon
 
 The approved hybrid destination-admission change below is pending external specification review
 and runtime implementation. The current service still uses FIFO admission and rechecks dependency
-versions before publication.
-Existing implementation and validation reports describe that behavior; they do not verify this
-follow-up.
+versions before publication. Existing implementation and validation reports describe that behavior;
+they do not verify this follow-up.
 
-Apply is an infrequent player operation, with at most one active preparation attempt. NPC simulation
-fills already published sites and does not initiate Apply. Before the first terrain or index copy,
-each candidate attempt protects every whole chunk intersecting the rotated full bounding box,
-including blueprint-empty cells, cavities, and empty chunks. Protection covers that chunk footprint,
-not the 56-block structural halo, and lasts until atomic publication, rejection, or invalidation
-of that candidate attempt.
+Apply is a player action; NPC simulation fills already published sites and does not initiate Apply.
+Preparation temporarily protects every whole chunk intersecting the rotated construction box,
+including blueprint-empty cells, cavities, and empty chunks. Operations that would change those
+chunks wait even when initiated elsewhere; neighboring edits outside the box itself can also wait. Eligible independent work outside those chunks continues, including
+work in the surrounding structural-support halo. Before a new or recovered attempt takes the chunks, already
+queued eligible conflicting work from independent producers gets a fair opportunity to run.
 
-Finite copy/helper/preparation freshness or hold expiry outside an already-recorded storage wait
-ends Apply with `preparation timed out; try again`. Release protection and discard the candidate;
-resolve the original command and its save-fence membership once, without automatic retry or
-reacquisition. Manual Apply retry creates a new request; it cannot revive the original command or
-extend an older Save's required-command set. Under R23, deliver failure after tool dismissal without
-reopening the preview; a preview that remains open stays available for adjustment.
+Every blueprint target must be physically empty, even if an existing block has the
+required type. Existing blocks in blueprint-empty cells stay in place. A site cannot overlap another
+unfinished site's box. Ownership, resources, inventory, and progress remain current and atomic;
+failure creates no partial site.
 
-Prolonged actual journal/disk waits, storage failures, and expiry while already recorded as waiting
-for storage instead release protection and discard the candidate while retaining the submitted
-request and save-fence obligation. Recovery follows the existing bounded delayed/explicit storage
-retry policy, taking fresh protected copies and preparing new indexes. Stop the retired attempt's
-expiry timer without replenishing retry allowance. Late helper results cannot publish; their
-buffers remain owned until the helper finishes or relinquishes them. Finite limits require
-implementation measurements; numeric tuning is deferred. See [R64–R65/Q29 and AC135–AC137](../specs/features/blueprints.md#hybrid-destination-validation-and-protected-publication).
+Preparation checks full real bottom platforms and the completed design's composition with nearby
+constructions on observed input. Exterior observations may be roughly one to two seconds old;
+later changes outside the protected chunks do not require full structural revalidation. At
+publication, a real non-`none` block must be directly below **every target in the globally lowest
+occupied layer**. Any real material qualifies; miniatures and unknown cells cannot establish
+support. Publication does not repeat the full 3×3×3 platform or composed-structure checks.
 
-All actual or conservative writes into protected terrain, metadata, and index chunks must wait.
-This includes indirect adaptive-road effects, timer writes to soil below an edited cell, and cleanup
-of an entire site even when its last fill occurred outside the protected footprint. Reads may cross
-the boundary. Independent work outside it must progress while preserving producer order, contiguous
-resolution, and the exact membership of selected save fences. A bypassed later request cannot
-satisfy an earlier unresolved fence. The fence defines required waiting, while capture saves coherent
-current authoritative state: independent later commits before capture may be included; post-capture
-changes are excluded. This adds no global hold solely to exclude later independent commands; required
-producer order and player-checkpoint eligibility remain. See [R61/Q28 and AC134](../specs/features/blueprints.md#hybrid-destination-validation-and-protected-publication).
-Before every new acquisition or reacquisition, already queued, otherwise admissible conflicting
-work from independent producers gets a scheduling opportunity before Apply retakes the same
-chunks, subject to producer order, dependencies, and persistence holds. Later commands from a
-retained Apply's producer need not pass it. Existing persistence source holds remain separate from
-Apply protection, and final publication stays short and sequential on the single authoritative worker.
+Preparation timeout outside an already-recorded storage wait ends Apply with
+`preparation timed out; try again` and releases the protected chunks, without automatic retry.
+A manual Apply retry starts a new request. Deliver failure even after tool dismissal without
+reopening the preview; an open preview remains available for adjustment. A prolonged actual
+journal/disk wait or storage failure, including timeout while already recorded as waiting for
+storage, instead releases the chunks while retaining the submitted request for the existing
+storage recovery process; recovery prepares a fresh candidate.
 
-Application still validates full real bottom platforms and the completed design's composition with
-nearby constructions using immutable observations. Exterior observations may be mixed-time and
-roughly one to two seconds old through publication, including helper and queue waits; this is not a
-real-time completion promise. Changes outside the protected chunks do not trigger full structural
-revalidation. In particular, external fills or cleanup alone must not cause rejection through a
-global blueprint-overlay revision check.
-
-Every nonempty target must be physically empty, even if an existing block has the required type.
-The authority checks target occupancy once under protection; the write gate preserves that
-result, so publication needs no final O(N) target scan. The helper prepares entire footprint
-`ChunkIndex` records for atomic swapping, without merging them with current indexes. Current owner,
-ID, resource, overlap, recipient, inventory, and progress bookkeeping must remain live and atomic;
-stale structural evidence does not authorize stale publication bookkeeping. Failure publishes no
-partial site.
-
-At atomic publication, a real non-`none` block must be directly below **every target in the globally
-lowest occupied layer**. Any real block type qualifies, never a miniature. A protected checked
-support can supply this proof without rereading it; unprotected supports below a Z chunk boundary
-must be rechecked. Unknown required current cells cannot establish support. This does not recheck
-the surrounding 3×3×3 platforms, every column's lowest target, or the full composed structure, and
-adds no O(N) work to fulfillment.
-
-The initial observations still require full platforms and composition checks. Exterior staleness
-can make the published completed arrangement ordinary-rule-invalid. Such a violation can last
-after construction finishes; there is no automatic repair or completion-time structural scan. The
-guarantees below distinguish initial cheap-rule assemblability from ordinary structural validity.
+Exterior staleness can make the published completed arrangement ordinary-rule-invalid. Such a
+violation can last after construction finishes; there is no automatic repair or completion-time
+structural scan. The guarantees below distinguish initial cheap-rule assemblability from ordinary
+structural validity. The specification's [Hybrid destination protocol](../specs/features/blueprints.md#hybrid-destination-protocol)
+defines the detailed admission lifecycle and publication checks.
 
 ### Blueprint fulfillment
 
@@ -164,11 +132,10 @@ Checking only real construction metadata would miss an instance whose blocks are
 miniatures.
 
 There is no permanent foundation lock. Full 3×3×3 platforms remain a requirement of the earlier
-application observations. Under the approved pending follow-up, publication requires only the real
-block directly below each globally lowest occupied target, using protected proof or a current
-recheck for unprotected supports. Later ordinary extraction keeps its completed-world support
-checks. Collision, mining/item transfers, and cheap blueprint
-fulfillment use real terrain; miniatures cannot be mined and never count as real support for filling
+application observations. Under the approved pending follow-up, publication requires a real block
+directly below each globally lowest occupied target. Later ordinary extraction keeps its
+completed-world support checks. Collision, mining/item transfers, and cheap blueprint fulfillment
+use real terrain; miniatures cannot be mined and never count as real support for filling
 another target. Replacing a miniature with its required real block leaves the completed
 logical view unchanged, so that operation needs no dependent revalidation.
 

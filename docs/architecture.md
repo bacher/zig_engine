@@ -137,60 +137,19 @@ These responsibilities are implemented by the capture helper, runtime indexes, a
 admission pipeline.
 
 An approved hybrid application-admission follow-up is pending external specification review and
-runtime implementation. Apply is an infrequent player operation, with at most one active
-preparation attempt; NPC simulation fills already published sites and does not submit Apply. Each candidate attempt protects every whole chunk
-intersecting the rotated full bounding box, including blueprint-empty cells, cavities, and empty
-chunks, before its first terrain/index copy until atomic publication, rejection, or invalidation
-of that candidate attempt. This is the box's chunk footprint, not the 56-block structural halo.
+runtime implementation. Apply remains player-initiated, with one bounded active preparation;
+NPC simulation assembles published sites. The service worker owns admission protection and all
+authoritative mutation. A helper prepares a candidate from owned immutable copies, and the
+service worker publishes it in a short atomic step. An invalidated helper cannot publish, and its
+buffers remain owned until it finishes or relinquishes them. Submitted operations retain their
+ownership independently of tool UI.
 
-Finite copy/helper/preparation freshness or hold expiry outside an already-recorded storage wait
-ends Apply with `preparation timed out; try again`: release protection, discard the candidate, and
-resolve the original command and its save-fence membership once, without automatic retry or
-reacquisition. A manual Apply retry is a new request and cannot revive that command or extend an
-older Save's required-command set. Deliver the failure independently of tool UI: keep an open
-preview available, without reopening a dismissed one.
-
-Prolonged actual journal/disk waits, storage failures, and expiry while already recorded as waiting
-for storage instead retain the submitted request and save-fence obligation after releasing
-protection and discarding the candidate. Recovery uses the existing bounded delayed/explicit
-storage retry policy and fresh protected copies; retire the old attempt's expiry timer without
-replenishing retry allowance. Late helper results cannot publish, and their buffers remain owned
-until the helper finishes or relinquishes them. Finite limits require implementation measurements;
-numeric tuning is deferred. See [R64–R65/Q29 and AC135–AC137](../specs/features/blueprints.md#hybrid-destination-validation-and-protected-publication).
-
-All actual or conservative writes into protected terrain, metadata, or index chunks must wait,
-including indirect road changes, below-soil timer writes, and whole-site cleanup triggered by a
-site finishing outside the footprint. Reads may cross the boundary. Eligible independent work
-outside it continues, preserving producer order, contiguous resolution, and exact save-fence
-membership. Before every new acquisition or reacquisition, already queued, otherwise admissible
-conflicting work from independent producers gets a scheduling opportunity before Apply retakes
-the same chunks, subject to producer order, dependencies, and persistence holds. Later commands
-from the retained Apply's producer need not pass it. A save fence selects the commands it must
-await; capture freezes coherent current authoritative state, which may include independent later submissions committed before capture.
-Changes committed after capture are excluded. Required producer order and player-checkpoint
-eligibility remain unchanged; no global post-fence hold is added solely to exclude later independent
-commands. Persistence source holds remain a separate mechanism. Publication remains a short,
-sequential operation on the single authoritative worker.
-
-Full platform/composition validation still uses immutable observations. Exterior observations may
-be mixed-time and roughly one to two seconds old; exterior changes do not require full structural
-revalidation or a matching global blueprint-overlay revision merely because another site filled or
-was cleaned up. Protected target emptiness is checked once under protection and stays valid,
-without a final O(N) target scan. The helper's complete footprint `ChunkIndex` records can therefore
-be swapped in without merging current indexes. Ownership, IDs, resources, overlap, recipient,
-inventory, and progress bookkeeping must nevertheless remain live and atomic.
-
-At publication, every target in the globally lowest occupied layer must have a real non-`none`
-block directly below it. A protected checked support proves this when it cannot change; an
-unprotected support across a Z chunk boundary must be rechecked. This does not repeat 3×3×3
-platform or full structural validation and adds no O(N) work to fulfillment.
-
-This relaxation preserves initial cheap-rule assemblability through the certified definition and
-current bottom supports, while permitting lasting ordinary structural violations caused by stale
-composition. Ordinary edit checks remain; they do not restore a universal guarantee of validity
-in the completed logical world or eventual ordinary physical validity. The [construction contract](block-placement.md#approved-blueprint-application-follow-up)
-describes the scope. Existing implementation/validation reports remain evidence for the current
-FIFO/version-checked pipeline, not this pending follow-up.
+Admission protection and persistence `source_holds` have separate owners and lifetimes; releasing
+one cannot clear the other. The spec's [Hybrid destination protocol](../specs/features/blueprints.md#hybrid-destination-protocol)
+defines protection scope, scheduling, expiry/recovery and publication checks. The
+[construction contract](block-placement.md#approved-blueprint-application-follow-up) describes the
+world-rule consequences. Existing implementation and validation reports describe the current
+FIFO/version-checked pipeline; they do not verify this pending follow-up.
 
 The [feature plan](../specs/features/blueprints.md#plan) defines the detailed capture/helper/Save
 protocol and retains the rejected service-owned capture alternative. Selection geometry and

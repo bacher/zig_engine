@@ -21,7 +21,7 @@ The voxel app has a one-block player inventory, timed manual placement/extractio
 The selected capture design uses the player's current client view, including already-applied optimistic edits, then validates detached contents in isolation. The previous service-owned source-snapshot design is retained under [Rejected alternative: WorldDataService-owned capture](#rejected-alternative-worlddataservice-owned-capture) as decision history. It is superseded and is not a second implementation target. Authoritative destination checks still apply when applying a blueprint.
 
 This spec owns the detailed blueprint selection algorithms, size limits, normalization, UI transitions,
-capture/helper/Save protocol, and acceptance criteria. [Game vision](../../docs/game-vision.md#blueprints-and-automated-construction)
+capture/helper/Save and destination-admission protocols, and acceptance criteria. [Game vision](../../docs/game-vision.md#blueprints-and-automated-construction)
 summarizes player-facing outcomes; [architecture](../../docs/architecture.md#ownership-and-concurrency-boundaries)
 records ownership boundaries; [construction rules](../../docs/block-placement.md) describe shared world
 semantics, including the completed-world view and local fulfillment contract. Those summaries
