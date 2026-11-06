@@ -282,7 +282,7 @@ Near the end of progression, internet connectivity and drone or robot stations e
 
 This section preserves technical ideas that help explain the vision. It does not choose a final scheduler, route representation, cache, threading model, or persistence format.
 
-The [simulation notes](simulation-notes.md) preserve the author's 2026-11-05 clarification of the automated-world goal, player/service/simulation boundaries, startup without a full-world scan, workstation prerequisites, and separate production and delivery jobs. They also retain architecture alternatives for later consideration without selecting one.
+The [simulation notes](simulation-notes.md) preserve the author's 2026-11-05 clarification of the automated-world goal, boundaries between players, the world-data service, and the simulation, startup without a full-world scan, workstation prerequisites, and separate production and delivery jobs. They also retain architecture alternatives for later consideration without selecting one.
 
 The [condition-check policy](simulation-notes.md#consistency-of-condition-checks) permits recent mixed observations only for individually discussed checks. Room recognition requires stronger consistency; blueprint-surroundings checks may be simplified with explicit accepted deviations. Resource consumption and transfers remain consistent. These permissions do not select a synchronization mechanism or change existing feature implementations.
 
