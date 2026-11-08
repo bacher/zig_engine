@@ -1,4 +1,6 @@
 Ordinary completed-edit locality benchmark
+The original locality measurements below are retained as history. The Review 56
+physical-preflight follow-up at the end supersedes the occupied-target tradeoff.
 Date: 2026-11-08
 Baseline: c0ecb6c584802fac7e4c545e44fc5dd163c3e964
 Fixed: the working-tree pendingTargetsMayAffectEdit early exit in world.zig
@@ -56,12 +58,11 @@ Median of the three process medians, microseconds per check:
   remove leaf plank                 1.712             1.232           1.161
   already exists                    0.047             0.111           0.055
 
-The distant-site query adds about 0.07-0.08 us over no-site structural checks.
-The already-exists case previously returned before doing structural validation;
-it now pays the bounded chunk-occupancy query first. Its measured cost rises by
-0.064 us (64 ns), while retaining 2 reads, 0 allocations and 0 allocated bytes.
-The query trades this small early-rejection overhead for avoiding duplicate
-placement proofs and dependent-array allocation when remote sites are present.
+The original distant-site query added about 0.07-0.08 us over no-site structural
+checks. At this revision the already-exists case paid the bounded chunk-occupancy
+query first, increasing its measured cost by 0.064 us (64 ns), while retaining
+2 reads, 0 allocations and 0 allocated bytes. The Review 56 follow-up below moves
+physical-only refusals ahead of this query and removes that measured overhead.
 
 Raw warmed outputs
 ==================
@@ -155,3 +156,142 @@ remove leaf plank        distant_site: reads=63    allocations=1   bytes=1312   
 already exists           physical    : reads=2     allocations=0   bytes=0       median=0.045 us/check min=0.041
 already exists           no_site     : reads=2     allocations=0   bytes=0       median=0.056 us/check min=0.055
 already exists           distant_site: reads=2     allocations=0   bytes=0       median=0.111 us/check min=0.105
+
+
+Review 56: physical preflight before locality
+============================================
+Date: 2026-11-08
+Comment: 4507260650
+Baseline: 21764da90d41cfdc4321112a7419b7edbc41e933
+Fixed: working-tree preflightEdit/validatePhysicalEdit refactor in world.zig
+Host/build: same native arm64 macOS machine, Zig 0.16.0, ReleaseFast
+
+The shared physical preflight now resolves the write guard, missing target data,
+occupied placement targets, empty removals and forbidden mining before the
+pending-target locality query. Blueprint identity and box guards still run first.
+The preflight result carries the resolved cell/material and removal information
+into physical or completed validation, avoiding duplicate target reads. The
+maintained fixture and benchmark commands above are unchanged.
+
+Both binaries were built and preserved before timing. One complete process run
+per binary warmed the machine and was discarded; three interleaved baseline/fixed
+process pairs followed, with no concurrent builds or tests. Each row retains
+100 warm-up checks and 11 samples of 1000 checks, and compares the full EditResult
+with the physical path. Raw ordinary-edit rows follow; unrelated placement-suite
+rows are omitted. Build-only runs are excluded from these statistics.
+
+Median of the three process medians, microseconds per check:
+                               baseline distant   preflight distant
+  put plank                         0.835             0.874
+  remove foundation plank           0.584             0.602
+  remove leaf plank                 1.222             1.227
+  already exists                    0.113             0.057
+
+Occupied-target refusal drops by 0.056 us (56 ns, about 50%). In the preflight
+binary its distant-site cost is close to the same binary's physical/no-site
+controls (0.053/0.064 us), so the distant pending target no longer adds the
+bounded locality-query cost to this early refusal.
+
+Every baseline/fixed path retains exactly the same reads and allocation counts:
+put plank 49 reads, 1 allocation/1312 bytes; rejected foundation removal 12 reads,
+2 allocations/10016 bytes; accepted leaf removal 63 reads, 1 allocation/1312 bytes;
+occupied target 2 reads, 0 allocations/0 bytes. All validation allocations are
+freed. Valid distant-site timing increases are 0.039/0.018/0.005 us for addition,
+rejected removal and accepted removal respectively. Direct physical controls
+also shift (addition 0.743 -> 0.768 us, rejected removal 0.496 -> 0.528 us), so
+these small wall-time changes should not be attributed entirely to locality.
+The distant/no-site structural difference remains about 0.07 us. The deterministic
+counts establish that the shared preflight adds no physical rereads or allocations.
+
+Review 56 raw warmed outputs
+----------------------------
+
+Pair 1: baseline
+build=ReleaseFast samples=11 checks/sample=1000; synthetic resident reader, detached validation only
+put plank                physical    : reads=49    allocations=1   bytes=1312    median=0.733 us/check min=0.720
+put plank                no_site     : reads=49    allocations=1   bytes=1312    median=0.758 us/check min=0.752
+put plank                distant_site: reads=49    allocations=1   bytes=1312    median=0.840 us/check min=0.824
+remove foundation plank  physical    : reads=12    allocations=2   bytes=10016   median=0.495 us/check min=0.492
+remove foundation plank  no_site     : reads=12    allocations=2   bytes=10016   median=0.509 us/check min=0.504
+remove foundation plank  distant_site: reads=12    allocations=2   bytes=10016   median=0.585 us/check min=0.575
+remove leaf plank        physical    : reads=63    allocations=1   bytes=1312    median=1.132 us/check min=1.120
+remove leaf plank        no_site     : reads=63    allocations=1   bytes=1312    median=1.146 us/check min=1.131
+remove leaf plank        distant_site: reads=63    allocations=1   bytes=1312    median=1.225 us/check min=1.207
+already exists           physical    : reads=2     allocations=0   bytes=0       median=0.044 us/check min=0.040
+already exists           no_site     : reads=2     allocations=0   bytes=0       median=0.055 us/check min=0.050
+already exists           distant_site: reads=2     allocations=0   bytes=0       median=0.116 us/check min=0.106
+
+Pair 1: physical preflight
+build=ReleaseFast samples=11 checks/sample=1000; synthetic resident reader, detached validation only
+put plank                physical    : reads=49    allocations=1   bytes=1312    median=0.783 us/check min=0.756
+put plank                no_site     : reads=49    allocations=1   bytes=1312    median=0.808 us/check min=0.799
+put plank                distant_site: reads=49    allocations=1   bytes=1312    median=0.875 us/check min=0.867
+remove foundation plank  physical    : reads=12    allocations=2   bytes=10016   median=0.535 us/check min=0.533
+remove foundation plank  no_site     : reads=12    allocations=2   bytes=10016   median=0.541 us/check min=0.535
+remove foundation plank  distant_site: reads=12    allocations=2   bytes=10016   median=0.609 us/check min=0.597
+remove leaf plank        physical    : reads=63    allocations=1   bytes=1312    median=1.154 us/check min=1.136
+remove leaf plank        no_site     : reads=63    allocations=1   bytes=1312    median=1.157 us/check min=1.152
+remove leaf plank        distant_site: reads=63    allocations=1   bytes=1312    median=1.227 us/check min=1.217
+already exists           physical    : reads=2     allocations=0   bytes=0       median=0.054 us/check min=0.048
+already exists           no_site     : reads=2     allocations=0   bytes=0       median=0.064 us/check min=0.057
+already exists           distant_site: reads=2     allocations=0   bytes=0       median=0.058 us/check min=0.053
+
+Pair 2: baseline
+build=ReleaseFast samples=11 checks/sample=1000; synthetic resident reader, detached validation only
+put plank                physical    : reads=49    allocations=1   bytes=1312    median=0.745 us/check min=0.701
+put plank                no_site     : reads=49    allocations=1   bytes=1312    median=0.768 us/check min=0.753
+put plank                distant_site: reads=49    allocations=1   bytes=1312    median=0.835 us/check min=0.825
+remove foundation plank  physical    : reads=12    allocations=2   bytes=10016   median=0.497 us/check min=0.495
+remove foundation plank  no_site     : reads=12    allocations=2   bytes=10016   median=0.510 us/check min=0.508
+remove foundation plank  distant_site: reads=12    allocations=2   bytes=10016   median=0.584 us/check min=0.576
+remove leaf plank        physical    : reads=63    allocations=1   bytes=1312    median=1.125 us/check min=1.112
+remove leaf plank        no_site     : reads=63    allocations=1   bytes=1312    median=1.147 us/check min=1.137
+remove leaf plank        distant_site: reads=63    allocations=1   bytes=1312    median=1.222 us/check min=1.208
+already exists           physical    : reads=2     allocations=0   bytes=0       median=0.044 us/check min=0.040
+already exists           no_site     : reads=2     allocations=0   bytes=0       median=0.055 us/check min=0.049
+already exists           distant_site: reads=2     allocations=0   bytes=0       median=0.113 us/check min=0.105
+
+Pair 2: physical preflight
+build=ReleaseFast samples=11 checks/sample=1000; synthetic resident reader, detached validation only
+put plank                physical    : reads=49    allocations=1   bytes=1312    median=0.768 us/check min=0.754
+put plank                no_site     : reads=49    allocations=1   bytes=1312    median=0.804 us/check min=0.792
+put plank                distant_site: reads=49    allocations=1   bytes=1312    median=0.874 us/check min=0.863
+remove foundation plank  physical    : reads=12    allocations=2   bytes=10016   median=0.528 us/check min=0.521
+remove foundation plank  no_site     : reads=12    allocations=2   bytes=10016   median=0.534 us/check min=0.528
+remove foundation plank  distant_site: reads=12    allocations=2   bytes=10016   median=0.602 us/check min=0.594
+remove leaf plank        physical    : reads=63    allocations=1   bytes=1312    median=1.151 us/check min=1.142
+remove leaf plank        no_site     : reads=63    allocations=1   bytes=1312    median=1.160 us/check min=1.149
+remove leaf plank        distant_site: reads=63    allocations=1   bytes=1312    median=1.234 us/check min=1.221
+already exists           physical    : reads=2     allocations=0   bytes=0       median=0.053 us/check min=0.048
+already exists           no_site     : reads=2     allocations=0   bytes=0       median=0.060 us/check min=0.057
+already exists           distant_site: reads=2     allocations=0   bytes=0       median=0.057 us/check min=0.051
+
+Pair 3: baseline
+build=ReleaseFast samples=11 checks/sample=1000; synthetic resident reader, detached validation only
+put plank                physical    : reads=49    allocations=1   bytes=1312    median=0.743 us/check min=0.706
+put plank                no_site     : reads=49    allocations=1   bytes=1312    median=0.740 us/check min=0.710
+put plank                distant_site: reads=49    allocations=1   bytes=1312    median=0.830 us/check min=0.811
+remove foundation plank  physical    : reads=12    allocations=2   bytes=10016   median=0.496 us/check min=0.481
+remove foundation plank  no_site     : reads=12    allocations=2   bytes=10016   median=0.503 us/check min=0.500
+remove foundation plank  distant_site: reads=12    allocations=2   bytes=10016   median=0.578 us/check min=0.568
+remove leaf plank        physical    : reads=63    allocations=1   bytes=1312    median=1.127 us/check min=1.111
+remove leaf plank        no_site     : reads=63    allocations=1   bytes=1312    median=1.146 us/check min=1.133
+remove leaf plank        distant_site: reads=63    allocations=1   bytes=1312    median=1.219 us/check min=1.212
+already exists           physical    : reads=2     allocations=0   bytes=0       median=0.044 us/check min=0.040
+already exists           no_site     : reads=2     allocations=0   bytes=0       median=0.055 us/check min=0.050
+already exists           distant_site: reads=2     allocations=0   bytes=0       median=0.113 us/check min=0.104
+
+Pair 3: physical preflight
+build=ReleaseFast samples=11 checks/sample=1000; synthetic resident reader, detached validation only
+put plank                physical    : reads=49    allocations=1   bytes=1312    median=0.766 us/check min=0.740
+put plank                no_site     : reads=49    allocations=1   bytes=1312    median=0.788 us/check min=0.738
+put plank                distant_site: reads=49    allocations=1   bytes=1312    median=0.865 us/check min=0.797
+remove foundation plank  physical    : reads=12    allocations=2   bytes=10016   median=0.496 us/check min=0.491
+remove foundation plank  no_site     : reads=12    allocations=2   bytes=10016   median=0.524 us/check min=0.500
+remove foundation plank  distant_site: reads=12    allocations=2   bytes=10016   median=0.591 us/check min=0.571
+remove leaf plank        physical    : reads=63    allocations=1   bytes=1312    median=1.134 us/check min=1.124
+remove leaf plank        no_site     : reads=63    allocations=1   bytes=1312    median=1.146 us/check min=1.133
+remove leaf plank        distant_site: reads=63    allocations=1   bytes=1312    median=1.216 us/check min=1.209
+already exists           physical    : reads=2     allocations=0   bytes=0       median=0.053 us/check min=0.047
+already exists           no_site     : reads=2     allocations=0   bytes=0       median=0.064 us/check min=0.057
+already exists           distant_site: reads=2     allocations=0   bytes=0       median=0.057 us/check min=0.051

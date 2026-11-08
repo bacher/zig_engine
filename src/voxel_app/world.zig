@@ -422,7 +422,16 @@ pub fn tryCollectConstructed(allocator: std.mem.Allocator, layout: *const WorldL
     return try cells.toOwnedSlice(allocator);
 }
 
-pub fn validateEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, constructed: []const block_rules.Cell, operation: BlockOperation) EditResult {
+const PhysicalEdit = struct {
+    cell: block_rules.Cell,
+    material: BlockType,
+    removal: bool,
+    mined_type: ?BlockType,
+};
+
+/// Resolve physical-only refusals before locality or structural work. The ready
+/// edit carries everything needed by either validator without repeating reads.
+fn preflightEdit(reader: block_rules.Reader, operation: BlockOperation, ready: *PhysicalEdit) ?EditResult {
     const cell: block_rules.Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
     const replacement = if (operation.action == .put) operation.action.put else BlockType.none;
     if (mutation_guard.validateWrites(reader, &.{.{ .block = operation.block, .material = replacement }})) |failure|
@@ -441,14 +450,25 @@ pub fn validateEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, co
             break :blk .none;
         },
     };
-    var validator: block_rules.Validator = .{ .allocator = allocator, .reader = reader, .edit = .{ .cell = cell, .material = material } };
+    ready.* = .{ .cell = cell, .material = material, .removal = operation.action == .remove, .mined_type = if (operation.action == .remove) existing.minedType() else null };
+    return null;
+}
+
+fn validatePhysicalEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, constructed: []const block_rules.Cell, edit: PhysicalEdit) EditResult {
+    var validator: block_rules.Validator = .{ .allocator = allocator, .reader = reader, .edit = .{ .cell = edit.cell, .material = edit.material } };
     defer validator.deinit();
-    var failure = if (material != .none) validator.checkPlacement(cell, material) else null;
+    var failure = if (edit.material != .none) validator.checkPlacement(edit.cell, edit.material) else null;
     // Legal empty-cell additions preserve existing support; removals still need its proof.
-    if (failure == null and operation.action == .remove) failure = validator.checkDependents(constructed, true);
+    if (failure == null and edit.removal) failure = validator.checkDependents(constructed, true);
     if (validator.allocation_failed) return .{ .status = .resource_exhausted };
     if (failure) |reason| return .{ .status = if (reason.reason == .missing_data) .missing_data else .constraint_violation, .failure = reason };
-    return .{ .status = .success, .mined_type = if (material == .none) existing.minedType() else null };
+    return .{ .status = .success, .mined_type = edit.mined_type };
+}
+
+pub fn validateEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, constructed: []const block_rules.Cell, operation: BlockOperation) EditResult {
+    var edit: PhysicalEdit = undefined;
+    if (preflightEdit(reader, operation, &edit)) |rejected| return rejected;
+    return validatePhysicalEdit(allocator, reader, constructed, edit);
 }
 
 /// This path exits before dependent enumeration, ordinary validation, and roads.
@@ -502,20 +522,16 @@ pub fn validateCompletedEdit(allocator: std.mem.Allocator, physical: block_rules
     if (state.targetAt(operation.block) != null) return .{ .status = .target_changed };
     const cell: block_rules.Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
     if (operation.action == .remove and state.boxAt(physical.layout, operation.block) != null) return .{ .status = .constraint_violation, .failure = .{ .reason = .would_remove_support, .subject = cell } };
-    if (!pendingTargetsMayAffectEdit(physical, state, operation.block)) return validateEdit(allocator, physical, constructed, operation);
-    const material = if (operation.action == .put) operation.action.put else BlockType.none;
-    if (mutation_guard.validateWrites(physical, &.{.{ .block = operation.block, .material = material }})) |failure| return .{ .status = .constraint_violation, .failure = failure };
-    const existing = physical.get(cell) orelse return .{ .status = .missing_data };
+    var edit: PhysicalEdit = undefined;
+    if (preflightEdit(physical, operation, &edit)) |rejected| return rejected;
+    if (!pendingTargetsMayAffectEdit(physical, state, operation.block)) return validatePhysicalEdit(allocator, physical, constructed, edit);
+    const material = edit.material;
     if (operation.action == .put) {
-        if (existing != .none) return .{ .status = .already_exists };
         var physical_validator: block_rules.Validator = .{ .allocator = allocator, .reader = physical, .edit = .{ .cell = cell, .material = material } };
         defer physical_validator.deinit();
         const failure = physical_validator.checkPlacement(cell, material);
         if (physical_validator.allocation_failed) return .{ .status = .resource_exhausted };
         if (failure) |reason| return .{ .status = if (reason.reason == .missing_data) .missing_data else .constraint_violation, .failure = reason };
-    } else {
-        if (existing == .none) return .{ .status = .already_removed };
-        if (existing.miningPolicy() == .forbidden or (existing.miningPolicy() == .yields and !existing.miningPolicy().yields.isPlaceable())) return .{ .status = .constraint_violation, .failure = .{ .reason = .mining_forbidden, .subject = cell } };
     }
     var completed: blueprint_runtime.CompletedReader = .{ .physical = physical, .state = state };
     var validator: block_rules.Validator = .{ .allocator = allocator, .reader = completed.reader(), .edit = .{ .cell = cell, .material = material } };
@@ -528,7 +544,7 @@ pub fn validateCompletedEdit(allocator: std.mem.Allocator, physical: block_rules
     }
     if (validator.allocation_failed) return .{ .status = .resource_exhausted };
     if (failure) |reason| return .{ .status = if (reason.reason == .missing_data) .missing_data else .constraint_violation, .failure = reason };
-    return .{ .status = .success, .mined_type = if (operation.action == .remove) existing.minedType() else null };
+    return .{ .status = .success, .mined_type = edit.mined_type };
 }
 
 /// Main-thread cache: authoritative snapshots with unacknowledged local operations replayed
