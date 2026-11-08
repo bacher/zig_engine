@@ -18,12 +18,12 @@ pub fn chunks(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, o
     errdefer result.deinit(allocator);
     var unique: std.AutoHashMapUnmanaged(ChunkId, void) = .empty;
     defer unique.deinit(allocator);
-    var z = @divFloor(@as(i64, origin[2]) - 3, consts.CHUNK_SIZE);
+    var z = @divFloor(@as(i64, origin[2]) - rules.Platform.depth, consts.CHUNK_SIZE);
     while (z <= @divFloor(@as(i64, origin[2]) + size[2] - 1, consts.CHUNK_SIZE)) : (z += 1) {
-        var y = @divFloor(@as(i64, origin[1]) - 1, consts.CHUNK_SIZE);
-        while (y <= @divFloor(@as(i64, origin[1]) + size[1], consts.CHUNK_SIZE)) : (y += 1) {
-            var x = @divFloor(@as(i64, origin[0]) - 1, consts.CHUNK_SIZE);
-            while (x <= @divFloor(@as(i64, origin[0]) + size[0], consts.CHUNK_SIZE)) : (x += 1) {
+        var y = @divFloor(@as(i64, origin[1]) - rules.Platform.xy_radius, consts.CHUNK_SIZE);
+        while (y <= @divFloor(@as(i64, origin[1]) + size[1] - 1 + rules.Platform.xy_radius, consts.CHUNK_SIZE)) : (y += 1) {
+            var x = @divFloor(@as(i64, origin[0]) - rules.Platform.xy_radius, consts.CHUNK_SIZE);
+            while (x <= @divFloor(@as(i64, origin[0]) + size[0] - 1 + rules.Platform.xy_radius, consts.CHUNK_SIZE)) : (x += 1) {
                 const coords = layout.normalizeChunkCoords(.{ @intCast(x), @intCast(y), @intCast(z) }) orelse continue;
                 const id = layout.encodeChunkCoords(coords);
                 if (unique.contains(id)) continue;

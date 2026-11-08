@@ -174,9 +174,9 @@ pub fn prepare(allocator: std.mem.Allocator, snapshot: *const Snapshot, definiti
     for (definition.cells[0 .. @as(usize, definition.size[0]) * definition.size[1]], 0..) |material, index| {
         if (material == .none) continue;
         const root = runtime.worldCell(&snapshot.layout, instance.origin, definition.size, instance.rotation, blueprint.cellAtIndex(definition.size, index)).?;
-        if (root[2] < 3) return .{ .rejected = .{ .code = .foundation, .cell = root } };
-        for (0..3) |y| for (0..3) |x| {
-            const position = rules.Cell{ root[0], root[1], root[2] } + rules.Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -1 };
+        if (root[2] < rules.Platform.depth) return .{ .rejected = .{ .code = .foundation, .cell = root } };
+        for (0..rules.Platform.width) |y| for (0..rules.Platform.width) |x| {
+            const position = rules.Cell{ root[0], root[1], root[2] } + rules.Cell{ @as(i64, @intCast(x)) - rules.Platform.xy_radius, @as(i64, @intCast(y)) - rules.Platform.xy_radius, -1 };
             const normalized = physical.normalize(position) orelse return .{ .rejected = .{ .code = .foundation, .cell = root } };
             try platform_xy.put(allocator, .{ @intCast(normalized[0]), @intCast(normalized[1]) }, {});
         };
@@ -185,7 +185,7 @@ pub fn prepare(allocator: std.mem.Allocator, snapshot: *const Snapshot, definiti
     var coordinates = platform_xy.keyIterator();
     while (coordinates.next()) |xy| {
         if (foundation_reads & 255 == 0 and options.cancelled()) return .cancelled;
-        for (1..4) |depth| {
+        for (1..rules.Platform.depth + 1) |depth| {
             const cell: Cell = .{ xy[0], xy[1], instance.origin[2] - @as(u32, @intCast(depth)) };
             const material = physical.get(.{ cell[0], cell[1], cell[2] }) orelse return .{ .rejected = .{ .code = .missing_data, .cell = cell } };
             foundation_reads += 1;

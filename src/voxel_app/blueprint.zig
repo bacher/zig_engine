@@ -237,11 +237,11 @@ const Isolated = struct {
             const cell: LocalCell = .{ @intCast(local[0]), @intCast(local[1]), @intCast(local[2]) };
             return self.cells[linearIndex(self.size, cell) orelse return .none];
         }
-        if (local[2] < -3) return .none;
+        if (local[2] < -@as(i64, rules.Platform.depth)) return .none;
         // The virtual foundation is precisely the 3x3 XY dilation of occupied
         // global-bottom cells, at z=-3..-1. No elevated island gets a root.
-        for (0..3) |y| for (0..3) |x| {
-            const root = local + rules.Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -local[2] };
+        for (0..rules.Platform.width) |y| for (0..rules.Platform.width) |x| {
+            const root = local + rules.Cell{ @as(i64, @intCast(x)) - rules.Platform.xy_radius, @as(i64, @intCast(y)) - rules.Platform.xy_radius, -local[2] };
             if (root[0] < 0 or root[1] < 0 or root[0] >= self.size[0] or root[1] >= self.size[1]) continue;
             if (self.cells[@as(usize, @intCast(root[1])) * self.size[0] + @as(usize, @intCast(root[0]))] != .none) return self.virtual_material;
         };

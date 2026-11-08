@@ -13,6 +13,14 @@ pub const Limits = struct {
     pub const support_radius: u32 = 28;
     pub const maximum_span: u32 = @max(plank_span, reinforced_span);
 };
+/// The centered foundation shared by structural rules, blueprint certification,
+/// and physical destination admission. Soil/sand footprints are a separate rule.
+pub const Platform = struct {
+    pub const xy_radius: u32 = 1;
+    pub const width: u32 = 2 * xy_radius + 1;
+    pub const depth: u32 = 3;
+    pub const cell_count: u32 = width * width * depth;
+};
 const horizontal_search_radius = Limits.maximum_span + 1;
 const horizontal_search_width = 2 * horizontal_search_radius + 1;
 const horizontal_search_capacity = horizontal_search_width * horizontal_search_width;
@@ -293,10 +301,10 @@ pub const Validator = struct {
     pub fn stablePlatform(self: *Validator, cell: Cell) ReadError!bool {
         var unresolved: ?ReadError = null;
         var incomplete = false;
-        for (1..4) |depth| {
-            for (0..3) |y| {
-                for (0..3) |x| {
-                    const block = self.get(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }) catch |err| {
+        for (1..Platform.depth + 1) |depth| {
+            for (0..Platform.width) |y| {
+                for (0..Platform.width) |x| {
+                    const block = self.get(cell + Cell{ @as(i64, @intCast(x)) - Platform.xy_radius, @as(i64, @intCast(y)) - Platform.xy_radius, -@as(i64, @intCast(depth)) }) catch |err| {
                         rememberError(&unresolved, err);
                         continue;
                     };
@@ -310,11 +318,11 @@ pub const Validator = struct {
     }
 
     fn platformFailure(self: *Validator, reason: Reason, cell: Cell) Evaluation {
-        var result: Failure = .{ .reason = reason, .subject = cell, .limit = 27 };
-        for (1..4) |depth| {
-            for (0..3) |y| {
-                for (0..3) |x| {
-                    const position = cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) };
+        var result: Failure = .{ .reason = reason, .subject = cell, .limit = Platform.cell_count };
+        for (1..Platform.depth + 1) |depth| {
+            for (0..Platform.width) |y| {
+                for (0..Platform.width) |x| {
+                    const position = cell + Cell{ @as(i64, @intCast(x)) - Platform.xy_radius, @as(i64, @intCast(y)) - Platform.xy_radius, -@as(i64, @intCast(depth)) };
                     const block = self.get(position) catch {
                         result.add(position);
                         continue;
@@ -657,7 +665,7 @@ pub const Validator = struct {
             const direct_result = self.direct(cell, material) catch |err| self.readFailure(err, cell);
             // Keep the useful direct-material diagnostic when no lateral route exists.
             if (direct_result == .rejected and lateral.rejected.reason == .horizontal_span and
-                (direct_result.rejected.reason != .missing_foundation or direct_result.rejected.limit == 27)) return direct_result;
+                (direct_result.rejected.reason != .missing_foundation or direct_result.rejected.limit == Platform.cell_count)) return direct_result;
             return lateral;
         }
         const direct_result = self.direct(cell, material) catch |err| self.readFailure(err, cell);

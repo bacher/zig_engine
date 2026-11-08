@@ -159,3 +159,19 @@ different workload from the insertion above, not a global performance estimate.
 Blueprint fulfillment keeps its existing physical-neighbor path and never runs
 these cube/height/span searches, so this ordinary-validation tradeoff adds no
 per-fill structural work to mass construction.
+
+## Review follow-ups
+
+### Shared platform geometry
+
+`block_rules.Platform` now defines the compile-time XY radius, width, depth and
+derived cell count. The structural validator/diagnostics, isolated compiler,
+physical bottom-platform guard and snapshot collector share these values.
+Traversal order, reads and the captured envelope are unchanged; soil/sand
+footprints and unrelated support limits remain separate. Test expectations keep
+literal coordinates/counts so they independently guard the 3×3×3 contract.
+
+`zig build test-blueprint-admission test-world -Doptimize=Debug --summary all`
+passed all 18 steps and 414 tests. Formatting, diff checks and independent review
+passed. This refactoring adds no runtime work; the paired measurements above
+remain the evidence for the original implementation at `b4065d9`.
