@@ -247,3 +247,18 @@ zig build install test test-blueprint-admission -Doptimize=ReleaseFast --summary
 zig fmt --check src/voxel_app/block_rules.zig src/voxel_app/world.zig src/voxel_app/world_data_service.zig
 git diff --check
 ```
+
+## Review follow-up: asymmetric support envelope, 2026-11-08
+
+The preservation fixtures now record signed vertical displacement for every observed
+block-reader callback relative to the current support-check root. Target-only placement
+and each fresh/shared existing-cell check assert XY distance at most 28, vertical depth
+at most 28, and no reads above that root. Fresh checks cover each root even when a shared
+validator reuses cached support. The generic cube-window test deliberately probes both
+vertical boundaries and verifies recorded displacements of -28 and +28 as a positive
+control. Removal checks and generic window probes retain their separate envelopes.
+
+This observer covers actual reader callbacks, not clipped/out-of-world requests handled
+before the callback or cache-evidence reuse eligibility. Those retain their existing tests.
+`zig build test-world -Doptimize=Debug --summary all` passes **306/306 tests**; formatting
+and `git diff --check` pass. Only test instrumentation changed.

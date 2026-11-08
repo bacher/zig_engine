@@ -764,6 +764,8 @@ const Fixture = struct {
     outside_reads: usize = 0,
     read_calls: usize = 0,
     maximum_read_distance: u64 = 0,
+    minimum_read_dz: i64 = 0,
+    maximum_read_dz: i64 = 0,
 
     fn deinit(self: *Fixture) void {
         self.blocks.deinit(std.testing.allocator);
@@ -775,6 +777,9 @@ const Fixture = struct {
         self.read_calls += 1;
         const cell: Cell = .{ block[0], block[1], block[2] };
         if (self.read_center) |center| {
+            const dz = cell[2] - center[2];
+            self.minimum_read_dz = @min(self.minimum_read_dz, dz);
+            self.maximum_read_dz = @max(self.maximum_read_dz, dz);
             const reach = distance(&self.layout, cell, center);
             self.maximum_read_distance = @max(self.maximum_read_distance, reach);
             if (reach > Limits.support_radius) {
@@ -823,6 +828,15 @@ const Fixture = struct {
         try self.constructed.append(std.testing.allocator, normalized);
     }
 
+    // Only own-root support checks use this asymmetric envelope. Removal checks
+    // and generic window probes may intentionally read above their edit/center.
+    fn expectSupportReadEnvelope(self: *const Fixture) !void {
+        try std.testing.expectEqual(0, self.outside_reads);
+        try std.testing.expect(self.maximum_read_distance <= Limits.support_radius);
+        try std.testing.expect(self.minimum_read_dz >= -@as(i64, Limits.support_radius));
+        try std.testing.expectEqual(0, self.maximum_read_dz);
+    }
+
     fn expectAllExistingValid(self: *Fixture) !void {
         const previous_center = self.read_center;
         defer self.read_center = previous_center;
@@ -841,11 +855,10 @@ const Fixture = struct {
                         std.debug.print("existing cell {any} failed with {s}, {d}/{d}\n", .{ cell, @tagName(reason.reason), reason.actual, reason.limit });
                         return error.TestUnexpectedResult;
                     }
+                    try self.expectSupportReadEnvelope();
                 }
             }
         }
-        try std.testing.expectEqual(0, self.outside_reads);
-        try std.testing.expect(self.maximum_read_distance <= Limits.support_radius);
     }
 
     fn expectLegalInsertionPreservesAllExisting(self: *Fixture, cell: Cell, material: BlockType) !void {
@@ -870,6 +883,7 @@ const Fixture = struct {
                 return error.TestUnexpectedResult;
             }
         }
+        try self.expectSupportReadEnvelope();
         try self.raw(normalized, material);
         // These validators belong to the new immutable world view. Cache entries
         // from before the mutation never participate in these checks.
@@ -1408,6 +1422,10 @@ test "the inclusive read window bounds every axis before querying blocks, includ
     try std.testing.expectEqual(28, diagnostic.limit);
     try std.testing.expectEqual(0, fixture.outside_reads);
     try std.testing.expectEqual(28, fixture.maximum_read_distance);
+    // A positive control: the generic cube allows both directions, and the
+    // observer must distinguish these from a target's downward support reads.
+    try std.testing.expectEqual(-28, fixture.minimum_read_dz);
+    try std.testing.expectEqual(28, fixture.maximum_read_dz);
 }
 
 test "stacked overhangs keep one 28-cell window under translations, directions, and wrapping" {
