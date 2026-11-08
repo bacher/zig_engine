@@ -13,12 +13,19 @@ Neither type changes movement speed.
 The adaptive road item held by the player or previewed in spectator putting mode uses the
 same unformed model, atlas UVs, and faceted normals as a placed adaptive block.
 
-Every road cell needs a solid block immediately underneath it. Existing cube-colliding
-materials, including an unformed adaptive road, supply that support, except sand and
-foliage. One exposed deeprock cell is sufficient without a surrounding platform. Formed slopes cannot
-support a road stacked directly above them. Roads otherwise have no foundation, height, or
-horizontal span restrictions. Removing required support is rejected by the shared
-client/service validator.
+Every road cell needs an eligible occupied block immediately underneath it: any material
+except air, sand, and foliage. Both unformed adaptive roads and formed slopes supply the same
+support to a road stacked directly above. One exposed deeprock cell is sufficient without a
+surrounding platform. Roads otherwise have no foundation, height, or horizontal span
+restrictions. Removing required support is rejected by the shared client/service validator.
+
+Formation and reversion preserve material, occupancy, and structural capabilities. Other
+blocks may occupy the cells above a road without preventing formation; they retain their own
+ordinary material-support requirements. Roads gain no new role as wood, masonry, earth, or
+platform foundations. Obstructions affect passage through the existing collision rules,
+without cancelling the road or its slope. Shape-only updates need no dependent search or
+structural revalidation of the surroundings; the planner still checks the road pattern,
+section support, ownership, bounds, and immutable writes.
 
 ## Forming a slope
 

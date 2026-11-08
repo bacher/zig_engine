@@ -2,6 +2,7 @@
 const std = @import("std");
 const engine = @import("engine");
 const world_module = @import("world.zig");
+const rules = @import("block_rules.zig");
 const WorldChunkData = @import("world_chunk_data.zig").WorldChunkData;
 const transformations = @import("block_transformations.zig");
 
@@ -68,6 +69,12 @@ pub fn main(init: std.process.Init) !void {
             try maximum_world.insertChunk(.{ @intCast(x), @intCast(y), @intCast(z) }, world_module.WorldChunk.initEmpty());
     };
     try benchmarkWindow(init, &maximum_world, .{ 80, 80, 80 });
+    try benchmarkCrushedColumns(init, false);
+    try benchmarkCrushedColumns(init, true);
+    try benchmarkCrushedRoutes(init);
+    try benchmarkCrushedReset(init);
+    try benchmarkCrushedRejection(init, false);
+    try benchmarkCrushedRejection(init, true);
 }
 
 /// Measure the unchanged-preview path separately from full structural validation.
@@ -92,4 +99,166 @@ fn benchmarkWindow(init: std.process.Init, world: *world_module.World, target: [
         frames_per_sample,
         @tagName(@import("builtin").mode),
     });
+}
+
+/// Six-cell columns keep the common old/new workload identical. The three-column
+/// groups additionally offer a legal bridge at the limit of a crushed run.
+fn benchmarkCrushedColumns(init: std.process.Init, bridges: bool) !void {
+    const allocator = init.gpa;
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 8 } });
+    var world = try world_module.World.init(allocator, &layout);
+    defer world.deinit();
+    var chunk = try crushedChunk(allocator);
+    const target: [3]u32 = .{ 16, 16, 9 };
+    if (bridges) {
+        for ([_]usize{ 8, 16, 24 }) |y| {
+            for ([_]usize{ 8, 16, 24 }) |center_x| {
+                for (center_x - 1..center_x + 2) |x| {
+                    for (4..10) |z| {
+                        if (x == target[0] and y == target[1] and z == target[2]) continue;
+                        try putFixture(allocator, &chunk, x, y, z, .crushed_stone);
+                    }
+                }
+            }
+        }
+    } else {
+        for ([_]usize{ 8, 12, 16, 20, 24 }) |y| {
+            for ([_]usize{ 8, 12, 16, 20, 24 }) |x| {
+                for (4..10) |z| {
+                    if (x == target[0] and y == target[1] and z == target[2]) continue;
+                    try putFixture(allocator, &chunk, x, y, z, .crushed_stone);
+                }
+            }
+        }
+    }
+    try world.insertChunk(.{ 0, 0, 0 }, chunk);
+    try measureCrushed(init, &world, target, if (bridges) "nine run-six crushed bridges" else "25 plain six-cell crushed columns", false, null);
+}
+
+/// The x-axis route has height six and the y-axis route has height one; the
+/// direct route is taller than one. Isolate selecting the shortest support.
+fn benchmarkCrushedRoutes(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 8 } });
+    var world = try world_module.World.init(allocator, &layout);
+    defer world.deinit();
+    var chunk = try crushedChunk(allocator);
+    for (15..18) |x| {
+        for (4..10) |z| {
+            if (x == 16 and z == 9) continue;
+            try putFixture(allocator, &chunk, x, 16, z, .crushed_stone);
+        }
+    }
+    for ([_]usize{ 15, 17 }) |y| {
+        for (4..9) |z| try putFixture(allocator, &chunk, 16, y, z, .stone);
+        try putFixture(allocator, &chunk, 16, y, 9, .crushed_stone);
+    }
+    try world.insertChunk(.{ 0, 0, 0 }, chunk);
+    try measureCrushed(init, &world, .{ 16, 16, 9 }, "crushed direct + two bridge routes (root only)", true, null);
+}
+
+/// A new-rules-only workload: every level has independent natural-rock bridge
+/// sides, allowing the center column to exceed the old six-cell run limit.
+fn benchmarkCrushedReset(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 8 } });
+    var world = try world_module.World.init(allocator, &layout);
+    defer world.deinit();
+    var chunk = try crushedChunk(allocator);
+    for (4..24) |z| {
+        for ([_]usize{ 15, 17 }) |x| try putFixture(allocator, &chunk, x, 16, z, .stone);
+        if (z < 23) try putFixture(allocator, &chunk, 16, 16, z, .crushed_stone);
+    }
+    try world.insertChunk(.{ 0, 0, 0 }, chunk);
+    try measureCrushed(init, &world, .{ 16, 16, 23 }, "20-cell independently bridged crushed column", false, null);
+}
+
+/// The ordinary case starts with a valid six-cell column over natural stone.
+/// The synthetic case adds deliberately unsupported side rails to exercise deeper
+/// failed support proofs. It is neither a valid starting world nor a worst-case bound.
+fn benchmarkCrushedRejection(init: std.process.Init, synthetic: bool) !void {
+    const allocator = init.gpa;
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 8 } });
+    var world = try world_module.World.init(allocator, &layout);
+    defer world.deinit();
+    var chunk = try crushedChunk(allocator);
+    for (4..10) |z| try putFixture(allocator, &chunk, 16, 16, z, .crushed_stone);
+    if (synthetic) {
+        for ([_][2]u5{ .{ 17, 16 }, .{ 16, 17 } }) |rail| {
+            if (chunk.apply(allocator, .{ rail[0], rail[1], 3 }, .remove) != .success) return error.SetupFailed;
+        }
+        for (4..11) |z| {
+            // Each orientation reaches its failing second side after a supported
+            // natural-rock first side. Empty corners prevent stable platforms.
+            try putFixture(allocator, &chunk, 15, 16, z, .stone);
+            try putFixture(allocator, &chunk, 16, 15, z, .stone);
+            try putFixture(allocator, &chunk, 17, 16, z, .crushed_stone);
+            try putFixture(allocator, &chunk, 16, 17, z, .crushed_stone);
+        }
+    }
+    try world.insertChunk(.{ 0, 0, 0 }, chunk);
+    try measureCrushed(init, &world, .{ 16, 16, 10 }, if (synthetic)
+        "synthetic unsupported side rails: crushed fallback rejected"
+    else
+        "unsupported seventh crushed cell (rejected)", false, .crushed_column);
+}
+
+fn crushedChunk(allocator: std.mem.Allocator) !world_module.WorldChunk {
+    const data = try allocator.create(WorldChunkData);
+    data.* = WorldChunkData.initEmpty();
+    for (0..4) |z| data.blocks[z] = @splat(@splat(.stone));
+    return world_module.WorldChunk.initBlocks(data);
+}
+
+fn putFixture(allocator: std.mem.Allocator, chunk: *world_module.WorldChunk, x: usize, y: usize, z: usize, material: engine.voxel_chunk.BlockType) !void {
+    const local: [3]u5 = .{ @intCast(x), @intCast(y), @intCast(z) };
+    if (chunk.apply(allocator, local, .{ .put = material }) != .success) return error.SetupFailed;
+    if (material == .crushed_stone) chunk.metadata.markConstructed(allocator, transformations.index(local));
+}
+
+fn crushedCheck(world: *const world_module.World, operation: world_module.BlockOperation, root_only: bool) world_module.EditResult {
+    return if (root_only) world_module.validateEdit(world.allocator, world.reader(), &.{}, operation) else world.previewOperation(operation);
+}
+
+fn measureCrushed(init: std.process.Init, world: *world_module.World, target: [3]u32, label: []const u8, root_only: bool, expected_failure: ?rules.Reason) !void {
+    const allocator = init.gpa;
+    const operation: world_module.BlockOperation = .{ .block = target, .action = .{ .put = .crushed_stone } };
+    const cells = if (root_only) try allocator.alloc(rules.Cell, 0) else world_module.collectConstructed(allocator, world.layout, &world.chunks, target);
+    defer allocator.free(cells);
+    var counter: ReadCounter = .{ .world = world };
+    const checked = world_module.validateEdit(allocator, .{ .layout = world.layout, .context = &counter, .block_at = ReadCounter.read }, cells, operation);
+    try expectCrushedResult(checked, label, expected_failure);
+    try expectCrushedResult(crushedCheck(world, operation, root_only), label, expected_failure);
+    const checks_per_sample = 100;
+    var samples: [11]u64 = undefined;
+    for (&samples) |*sample| {
+        const started = std.Io.Clock.awake.now(init.io);
+        for (0..checks_per_sample) |_| {
+            try expectCrushedResult(crushedCheck(world, operation, root_only), label, expected_failure);
+        }
+        sample.* = @intCast(started.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds);
+    }
+    std.mem.sort(u64, &samples, {}, std.sort.asc(u64));
+    std.debug.print("{s}: {d} reader calls; median {d:.3} us/check, min {d:.3} us/check ({d} checks/sample, {s})\n", .{
+        label,
+        counter.reads,
+        @as(f64, @floatFromInt(samples[samples.len / 2])) / (checks_per_sample * std.time.ns_per_us),
+        @as(f64, @floatFromInt(samples[0])) / (checks_per_sample * std.time.ns_per_us),
+        checks_per_sample,
+        @tagName(@import("builtin").mode),
+    });
+}
+
+fn expectCrushedResult(result: world_module.EditResult, label: []const u8, expected_failure: ?rules.Reason) !void {
+    const expected_status: world_module.OperationStatus = if (expected_failure != null) .constraint_violation else .success;
+    const actual_failure: ?rules.Reason = if (result.failure) |failure| failure.reason else null;
+    if (result.status == expected_status and actual_failure == expected_failure) return;
+    std.debug.print("{s}: expected {s} ({s}), got {s} ({s})\n", .{
+        label,
+        @tagName(expected_status),
+        if (expected_failure) |reason| @tagName(reason) else "no failure",
+        @tagName(result.status),
+        if (actual_failure) |reason| @tagName(reason) else "no failure",
+    });
+    return error.ValidationFailed;
 }

@@ -383,7 +383,12 @@ pub fn collectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayo
     return tryCollectConstructed(allocator, layout, chunks, target) catch @panic("OOM");
 }
 
+pub const Testing = if (@import("builtin").is_test) struct {
+    pub var constructed_collection_calls: std.atomic.Value(usize) = .init(0);
+} else struct {};
+
 pub fn tryCollectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayout, chunks: *const ChunksHashMap, target: [3]u32) ![]block_rules.Cell {
+    if (comptime @import("builtin").is_test) _ = Testing.constructed_collection_calls.fetchAdd(1, .monotonic);
     var cells: std.ArrayList(block_rules.Cell) = .empty;
     errdefer cells.deinit(allocator);
     const center: block_rules.Cell = .{ target[0], target[1], target[2] };
@@ -439,7 +444,8 @@ pub fn validateEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, co
     var validator: block_rules.Validator = .{ .allocator = allocator, .reader = reader, .edit = .{ .cell = cell, .material = material } };
     defer validator.deinit();
     var failure = if (material != .none) validator.checkPlacement(cell, material) else null;
-    if (failure == null) failure = validator.checkDependents(constructed, material == .none);
+    // Legal empty-cell additions preserve existing support; removals still need its proof.
+    if (failure == null and operation.action == .remove) failure = validator.checkDependents(constructed, true);
     if (validator.allocation_failed) return .{ .status = .resource_exhausted };
     if (failure) |reason| return .{ .status = if (reason.reason == .missing_data) .missing_data else .constraint_violation, .failure = reason };
     return .{ .status = .success, .mined_type = if (material == .none) existing.minedType() else null };
@@ -499,12 +505,14 @@ pub fn validateCompletedEdit(allocator: std.mem.Allocator, physical: block_rules
         if (existing.miningPolicy() == .forbidden or (existing.miningPolicy() == .yields and !existing.miningPolicy().yields.isPlaceable())) return .{ .status = .constraint_violation, .failure = .{ .reason = .mining_forbidden, .subject = cell } };
     }
     var completed: blueprint_runtime.CompletedReader = .{ .physical = physical, .state = state };
-    const affected = state.collectAffected(allocator, physical.layout, operation.block, constructed) catch return .{ .status = .resource_exhausted };
-    defer allocator.free(affected);
     var validator: block_rules.Validator = .{ .allocator = allocator, .reader = completed.reader(), .edit = .{ .cell = cell, .material = material } };
     defer validator.deinit();
     var failure = if (operation.action == .put) validator.checkPlacement(cell, material) else null;
-    if (failure == null) failure = validator.checkDependents(affected, operation.action == .remove);
+    if (operation.action == .remove) {
+        const affected = state.collectAffected(allocator, physical.layout, operation.block, constructed) catch return .{ .status = .resource_exhausted };
+        defer allocator.free(affected);
+        failure = validator.checkDependents(affected, true);
+    }
     if (validator.allocation_failed) return .{ .status = .resource_exhausted };
     if (failure) |reason| return .{ .status = if (reason.reason == .missing_data) .missing_data else .constraint_violation, .failure = reason };
     return .{ .status = .success, .mined_type = if (operation.action == .remove) existing.minedType() else null };
@@ -723,7 +731,6 @@ pub const World = struct {
         const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .virtual_edit = if (can_apply) pending.operation else null, .max_plan_changes = self.pending_byte_limit / @sizeOf(roads.Undo) };
         var plan = try context.planReplay(pending.operation, before.road, pending.road_formations.items);
         defer plan.deinit(self.allocator);
-        if (try roads.validateCompletedPlan(self.allocator, self.reader(), &self.blueprints, &self.chunks, plan, if (can_apply) pending.operation else null) != null) return;
         const undo_capacity = @max(pending.road_undo.capacity, plan.changes.len);
         const formed_capacity = pending.road_formations.items.len + @min(plan.changes.len, 20);
         const projected = self.pendingOperationBytes() - pending.road_undo.capacity * @sizeOf(roads.Undo) - pending.road_formations.capacity * @sizeOf(@import("road_data.zig").Slope) + undo_capacity * @sizeOf(roads.Undo) + @max(pending.road_formations.capacity, formed_capacity) * @sizeOf(@import("road_data.zig").Slope);
@@ -1042,8 +1049,11 @@ pub const World = struct {
         if (comptime @import("builtin").is_test) if (self.ordinary_preview_counter) |counter| {
             counter.* += 1;
         };
-        const cells = tryCollectConstructed(self.allocator, self.layout, &self.chunks, operation.block) catch return .{ .status = .resource_exhausted };
-        defer self.allocator.free(cells);
+        const cells: []const block_rules.Cell = if (operation.action == .remove)
+            tryCollectConstructed(self.allocator, self.layout, &self.chunks, operation.block) catch return .{ .status = .resource_exhausted }
+        else
+            &.{};
+        defer if (operation.action == .remove) self.allocator.free(cells);
         const result = validateCompletedEdit(self.allocator, self.reader(), &self.blueprints, cells, operation);
         if (result.status != .success) return result;
         const coords, const local = splitBlockCoords(operation.block);
@@ -1053,8 +1063,6 @@ pub const World = struct {
         const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = @constCast(&self.chunks), .changed = &changed, .virtual_edit = operation, .max_plan_changes = self.pending_byte_limit / @sizeOf(roads.Undo) };
         var plan = context.planAfterEdit(operation, chunk.metadata.road(transformations.index(local))) catch return .{ .status = .resource_exhausted };
         defer plan.deinit(self.allocator);
-        const failure = roads.validateCompletedPlan(self.allocator, self.reader(), &self.blueprints, &self.chunks, plan, operation) catch return .{ .status = .resource_exhausted };
-        if (failure) |reason| return .{ .status = if (reason.reason == .missing_data) .missing_data else .constraint_violation, .failure = reason };
         return result;
     }
 
@@ -1122,10 +1130,6 @@ pub const World = struct {
         const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .virtual_edit = operation, .max_plan_changes = self.pending_byte_limit / @sizeOf(roads.Undo) };
         var plan = try context.planAfterEdit(operation, before.road);
         defer plan.deinit(self.allocator);
-        if (try roads.validateCompletedPlan(self.allocator, self.reader(), &self.blueprints, &self.chunks, plan, operation)) |failure| {
-            self.last_edit_result = .{ .status = if (failure.reason == .missing_data) .missing_data else .constraint_violation, .failure = failure };
-            return self.last_edit_result.?.status;
-        }
         const planned_pending_capacity = @max(self.pending_operations.capacity, self.pending_operations.items.len + 1);
         const predicted_bytes = self.pendingOperationBytes() - self.pending_operations.capacity * @sizeOf(PendingOperation) + planned_pending_capacity * @sizeOf(PendingOperation) + plan.changes.len * @sizeOf(roads.Undo) + @as(usize, @min(plan.changes.len, 20)) * @sizeOf(@import("road_data.zig").Slope);
         if (predicted_bytes > self.pending_byte_limit) return error.Capacity;
@@ -2105,6 +2109,110 @@ fn setTestPhysical(world: *World, cell: [3]u32, material: BlockType) !void {
     const chunk = world.chunks.getPtr(world.layout.encodeChunkCoords(coords)).?;
     try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(world.allocator, local, .{ .put = material }));
 }
+
+test "ordinary put preview work is independent of dense construction and pending targets" {
+    const Metrics = struct {
+        reads: usize,
+        allocations: usize,
+        bytes: usize,
+
+        fn measure(world: *World, operation: BlockOperation) !@This() {
+            var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+            const original_allocator = world.allocator;
+            world.allocator = counted.allocator();
+            defer world.allocator = original_allocator;
+            var reads: usize = 0;
+            world.physical_read_counter = &reads;
+            defer world.physical_read_counter = null;
+            try std.testing.expectEqual(OperationStatus.success, world.previewOperation(operation).status);
+            return .{ .reads = reads, .allocations = counted.allocations, .bytes = counted.allocated_bytes };
+        }
+    };
+    const a = std.testing.allocator;
+    const target = [3]u32{ 10, 10, 70 };
+    const operation: BlockOperation = .{ .block = target, .action = .{ .put = .tree_trunk } };
+    for ([_]bool{ false, true }) |with_sites| {
+        var world = try World.init(a, &test_layout);
+        defer world.deinit();
+        try setTestPhysical(&world, .{ 10, 10, 69 }, .stone);
+        if (with_sites) try insertTestBlueprint(&world, 1, .{ 25, 25, 74 }, .{ 1, 1, 1 }, &.{.water});
+        const sparse = try Metrics.measure(&world, operation);
+
+        // These valid cells are in the edit window and above the new target.
+        // Eager collection costs memory even if dependent checking were skipped.
+        for (74..78) |z| for (2..10) |y| for (2..10) |x| {
+            const cell: [3]u32 = .{ @intCast(x), @intCast(y), @intCast(z) };
+            try setTestPhysical(&world, cell, .water);
+            const coords, const local = splitBlockCoords(cell);
+            try world.chunks.getPtr(world.layout.encodeChunkCoords(coords)).?.metadata.tryMarkConstructed(a, transformations.index(local));
+        };
+        if (with_sites) try insertTestBlueprint(&world, 2, .{ 12, 12, 74 }, .{ 8, 8, 4 }, &([_]BlockType{.water} ** 256));
+        const dense = try Metrics.measure(&world, operation);
+        try std.testing.expectEqualDeep(sparse, dense);
+        try std.testing.expectEqual(BlockType.none, world.reader().get(.{ target[0], target[1], target[2] }).?);
+        try std.testing.expectEqual(@as(usize, 0), world.pending_operations.items.len);
+        if (with_sites) {
+            try std.testing.expectEqual(@as(u32, 1), world.blueprints.instances.get(1).?.remaining);
+            try std.testing.expectEqual(@as(u32, 256), world.blueprints.instances.get(2).?.remaining);
+            try std.testing.expectEqual(BlockType.water, world.blueprints.targetAt(.{ 12, 12, 74 }).?.material);
+        }
+    }
+}
+
+test "ordinary puts check physical and completed targets without reading constructions above them" {
+    const Probe = struct {
+        world: *const World,
+        foundation_reads: usize = 0,
+        above_reads: usize = 0,
+
+        fn read(context: *anyopaque, block: [3]u32) ?BlockType {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (std.mem.eql(u32, &block, &.{ 10, 10, 69 })) self.foundation_reads += 1;
+            if (block[2] > 70) self.above_reads += 1;
+            return self.world.reader().get(.{ block[0], block[1], block[2] });
+        }
+    };
+    const a = std.testing.allocator;
+    var world = try World.init(a, &test_layout);
+    defer world.deinit();
+    try setTestPhysical(&world, .{ 10, 10, 69 }, .stone);
+    try setTestPhysical(&world, .{ 10, 10, 71 }, .water);
+    try insertTestBlueprint(&world, 1, .{ 12, 12, 74 }, .{ 8, 8, 4 }, &([_]BlockType{.water} ** 256));
+    const operation: BlockOperation = .{ .block = .{ 10, 10, 70 }, .action = .{ .put = .tree_trunk } };
+    const constructed = [_]block_rules.Cell{.{ 10, 10, 71 }};
+    var probe: Probe = .{ .world = &world };
+    const reader: block_rules.Reader = .{ .layout = world.layout, .context = &probe, .block_at = Probe.read };
+    try std.testing.expectEqual(OperationStatus.success, validateEdit(a, reader, &constructed, operation).status);
+    try std.testing.expectEqual(@as(usize, 1), probe.foundation_reads);
+    try std.testing.expectEqual(@as(usize, 0), probe.above_reads);
+    probe.foundation_reads = 0;
+    try std.testing.expectEqual(OperationStatus.success, validateCompletedEdit(a, reader, &world.blueprints, &constructed, operation).status);
+    // A trunk over natural stone has one foundation probe in each independent proof.
+    try std.testing.expectEqual(@as(usize, 2), probe.foundation_reads);
+    try std.testing.expectEqual(@as(usize, 0), probe.above_reads);
+    try std.testing.expectEqual(@as(u32, 256), world.blueprints.instances.get(1).?.remaining);
+}
+
+test "ordinary put still requires physical support when the completed target is valid" {
+    const a = std.testing.allocator;
+    var world = try World.init(a, &test_layout);
+    defer world.deinit();
+    try setTestPhysical(&world, .{ 10, 10, 68 }, .stone);
+    try insertTestBlueprint(&world, 1, .{ 10, 10, 69 }, .{ 1, 1, 1 }, &.{.tree_trunk});
+    const operation: BlockOperation = .{ .block = .{ 10, 10, 70 }, .action = .{ .put = .tree_trunk } };
+    var completed: blueprint_runtime.CompletedReader = .{ .physical = world.reader(), .state = &world.blueprints };
+    var validator: block_rules.Validator = .{ .allocator = a, .reader = completed.reader(), .edit = .{ .cell = .{ 10, 10, 70 }, .material = .tree_trunk } };
+    defer validator.deinit();
+    try std.testing.expect(validator.checkPlacement(.{ 10, 10, 70 }, .tree_trunk) == null);
+    const result = world.tryOperation(operation);
+    try std.testing.expectEqual(OperationStatus.constraint_violation, result.status);
+    try std.testing.expectEqual(block_rules.Reason.missing_foundation, result.failure.?.reason);
+    try std.testing.expectEqual(BlockType.none, world.reader().get(.{ 10, 10, 70 }).?);
+    try std.testing.expectEqual(@as(usize, 0), world.pending_operations.items.len);
+    try std.testing.expectEqual(@as(u32, 1), world.blueprints.instances.get(1).?.remaining);
+    try std.testing.expectEqual(BlockType.tree_trunk, world.blueprints.targetAt(.{ 10, 10, 69 }).?.material);
+}
+
 test "blueprint optimistic fulfillment uses at most five support reads and no ordinary or road work" {
     var client = try World.init(std.testing.allocator, &test_layout);
     defer client.deinit();
@@ -2173,7 +2281,62 @@ test "blueprint target identity, unknown capture data, and whole-box extraction 
     try std.testing.expectEqual(OperationStatus.constraint_violation, client.previewOperation(.{ .block = .{ 31, 10, 10 }, .action = .remove }).status);
 }
 
-test "ordinary bridge placement validates its completed target above pending crushed column" {
+test "road formation and optimistic replay preserve real and pending overhead roads without a wider construction scan" {
+    const a = std.testing.allocator;
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    for ([_]bool{ false, true }) |planned| {
+        var client = try World.init(a, &layout);
+        defer client.deinit();
+        for (1..3) |z| for (1..3) |y| for (1..3) |x| try client.insertChunk(.{ @intCast(x), @intCast(y), @intCast(z) }, WorldChunk.initEmpty());
+        for (64..69) |x| try setTestPhysical(&client, .{ @intCast(x), 64, 69 }, .stone);
+        try setTestPhysical(&client, .{ 69, 64, 68 }, .stone);
+        try setTestPhysical(&client, .{ 64, 64, 70 }, .country_road_solid);
+        for (65..69) |x| {
+            const road: [3]u32 = .{ @intCast(x), 64, 70 };
+            try setTestPhysical(&client, road, .country_road_adaptive);
+            const road_coords, const road_local = splitBlockCoords(road);
+            try client.chunks.getPtr(layout.encodeChunkCoords(road_coords)).?.metadata.tryMarkConstructed(a, transformations.index(road_local));
+        }
+        const overhead: [3]u32 = .{ 66, 64, 71 };
+        if (planned) {
+            try insertTestBlueprint(&client, 1, overhead, .{ 1, 1, 1 }, &.{.country_road_solid});
+        } else {
+            try setTestPhysical(&client, overhead, .country_road_solid);
+            const coords, const local = splitBlockCoords(overhead);
+            try client.chunks.getPtr(layout.encodeChunkCoords(coords)).?.metadata.tryMarkConstructed(a, transformations.index(local));
+        }
+        // This invalid block is outside the endpoint's ordinary edit window,
+        // but inside the former validation halo around the changed road shapes.
+        try setTestPhysical(&client, .{ 38, 64, 70 }, .planks);
+        try client.chunks.getPtr(layout.encodeChunkCoords(.{ 1, 2, 2 })).?.metadata.tryMarkConstructed(a, transformations.index(.{ 6, 0, 6 }));
+        const coords: ChunkCoords = .{ 2, 2, 2 };
+        var baseline = try client.getChunk(coords).?.tryClone(a);
+        baseline.chunk_revision = 1;
+        const operation: BlockOperation = .{ .block = .{ 69, 64, 69 }, .action = .{ .put = .country_road_solid } };
+        try std.testing.expectEqual(OperationStatus.success, client.previewOperation(operation).status);
+        try std.testing.expectEqual(OperationStatus.success, client.tryOperation(operation).status);
+        client.pending_operations.items[0].request_id = 1;
+        // A fresh authoritative baseline replays the intent and its saved formation.
+        try client.insertChunk(coords, baseline);
+        for (65..69) |x| try std.testing.expect(client.customShape(.{ @intCast(x), 64, 70 }).? == .slope);
+        try std.testing.expectEqual(BlockType.country_road_solid, client.reader().get(.{ 69, 64, 69 }).?);
+        try std.testing.expectEqual(@as(usize, 1), client.pending_operations.items.len);
+        if (planned) {
+            try std.testing.expectEqual(@as(u32, 1), client.blueprints.instances.get(1).?.remaining);
+            try std.testing.expect(client.blueprints.targetAt(overhead) != null);
+            try std.testing.expectEqual(BlockType.none, client.reader().get(.{ 66, 64, 71 }).?);
+            try std.testing.expectEqual(OperationStatus.target_changed, client.previewOperation(.{ .block = overhead, .action = .{ .put = .country_road_solid } }).status);
+        } else try std.testing.expectEqual(BlockType.country_road_solid, client.reader().get(.{ 66, 64, 71 }).?);
+        // Removing an actual foundation remains a material edit with dependents.
+        const rejected = client.tryOperation(.{ .block = .{ 66, 64, 69 }, .action = .remove });
+        try std.testing.expectEqual(OperationStatus.constraint_violation, rejected.status);
+        try std.testing.expectEqual(block_rules.Reason.would_remove_support, rejected.failure.?.reason);
+        try std.testing.expectEqual(BlockType.stone, client.reader().get(.{ 66, 64, 69 }).?);
+        try std.testing.expectEqual(@as(usize, 1), client.pending_operations.items.len);
+    }
+}
+
+test "ordinary bridge placement commits above a pending crushed column and protects its side support" {
     const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
     var client = try World.init(std.testing.allocator, &layout);
     defer client.deinit();
@@ -2186,12 +2349,66 @@ test "ordinary bridge placement validates its completed target above pending cru
     }
     const operation: BlockOperation = .{ .block = .{ 64, 64, 66 }, .action = .{ .put = .crushed_stone } };
     try std.testing.expectEqual(OperationStatus.success, validateEdit(std.testing.allocator, client.reader(), &.{}, operation).status);
-    const rejected = client.previewOperation(operation);
-    try std.testing.expectEqual(OperationStatus.constraint_violation, rejected.status);
-    try std.testing.expectEqual(block_rules.Reason.crushed_column, rejected.failure.?.reason);
-    try std.testing.expectEqual(BlockType.none, client.reader().get(.{ 64, 64, 66 }).?);
+    try std.testing.expectEqual(OperationStatus.success, client.previewOperation(operation).status);
+    try std.testing.expectEqual(OperationStatus.success, client.tryOperation(operation).status);
+    try std.testing.expectEqual(BlockType.crushed_stone, client.reader().get(.{ 64, 64, 66 }).?);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_operations.items.len);
     try std.testing.expectEqual(@as(u32, 6), client.blueprints.instances.get(1).?.remaining);
+    for (60..66) |z| {
+        const target = client.blueprints.targetAt(.{ 64, 64, @intCast(z) }).?;
+        try std.testing.expectEqual(@as(u64, 1), target.instance_id);
+        try std.testing.expectEqual(BlockType.crushed_stone, target.material);
+    }
     try std.testing.expectEqual(OperationStatus.target_changed, client.previewOperation(.{ .block = .{ 64, 64, 61 }, .action = .{ .put = .planks } }).status);
+    const removal = client.tryOperation(.{ .block = .{ 63, 64, 66 }, .action = .remove });
+    try std.testing.expectEqual(OperationStatus.constraint_violation, removal.status);
+    try std.testing.expectEqual(block_rules.Reason.would_remove_support, removal.failure.?.reason);
+    try std.testing.expectEqual(BlockType.stone, client.reader().get(.{ 63, 64, 66 }).?);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_operations.items.len);
+    try std.testing.expectEqual(@as(u32, 6), client.blueprints.instances.get(1).?.remaining);
+}
+
+test "sand and water or snow commit in either order with and without pending sites" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    const sand: [3]u32 = .{ 64, 64, 60 };
+    const above: [3]u32 = .{ 64, 64, 61 };
+    for ([_]BlockType{ .water, .snow }) |material| {
+        for ([_]bool{ false, true }) |sand_first| {
+            for ([_]bool{ false, true }) |pending_site| {
+                var client = try World.init(std.testing.allocator, &layout);
+                defer client.deinit();
+                for (1..3) |z| for (1..3) |y| for (1..3) |x| try client.insertChunk(.{ @intCast(x), @intCast(y), @intCast(z) }, WorldChunk.initEmpty());
+                for (63..66) |y| for (63..66) |x| try setTestPhysical(&client, .{ @intCast(x), @intCast(y), 59 }, .stone);
+                if (pending_site) {
+                    try setTestPhysical(&client, .{ 80, 80, 59 }, .stone);
+                    try insertTestBlueprint(&client, 1, .{ 80, 80, 60 }, .{ 1, 1, 1 }, &.{.planks});
+                }
+                const operations = [_]BlockOperation{
+                    .{ .block = sand, .action = .{ .put = .sand } },
+                    .{ .block = above, .action = .{ .put = material } },
+                };
+                const first: usize = if (sand_first) 0 else 1;
+                for ([_]usize{ first, 1 - first }) |index| {
+                    try std.testing.expectEqual(OperationStatus.success, client.previewOperation(operations[index]).status);
+                    try std.testing.expectEqual(OperationStatus.success, client.tryOperation(operations[index]).status);
+                }
+                try std.testing.expectEqual(BlockType.sand, client.reader().get(.{ sand[0], sand[1], sand[2] }).?);
+                try std.testing.expectEqual(material, client.reader().get(.{ above[0], above[1], above[2] }).?);
+                try std.testing.expectEqual(@as(usize, 2), client.pending_operations.items.len);
+                if (pending_site) {
+                    try std.testing.expectEqual(@as(u32, 1), client.blueprints.instances.get(1).?.remaining);
+                    try std.testing.expectEqual(BlockType.planks, client.blueprints.targetAt(.{ 80, 80, 60 }).?.material);
+                    try std.testing.expectEqual(BlockType.none, client.reader().get(.{ 80, 80, 60 }).?);
+                }
+                // Additive acceptance does not weaken a constructed sand footprint.
+                const removal = client.tryOperation(.{ .block = .{ 63, 63, 59 }, .action = .remove });
+                try std.testing.expectEqual(OperationStatus.constraint_violation, removal.status);
+                try std.testing.expectEqual(block_rules.Reason.would_remove_support, removal.failure.?.reason);
+                try std.testing.expectEqual(BlockType.stone, client.reader().get(.{ 63, 63, 59 }).?);
+                try std.testing.expectEqual(@as(usize, 2), client.pending_operations.items.len);
+            }
+        }
+    }
 }
 
 test "neighboring sites retain a global completion order after safe external support removal" {

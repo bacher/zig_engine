@@ -371,7 +371,7 @@ test "destination admission rejects occupied targets and incomplete physical pla
     try std.testing.expectEqual(RejectCode.foundation, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
 }
 
-test "composed admission discovers water and snow above a proposed sand target" {
+test "composed admission preserves water and snow above a proposed sand target" {
     for ([_]rules.BlockType{ .water, .snow }) |material| {
         var fixture = try Fixture.init();
         defer fixture.deinit();
@@ -379,14 +379,18 @@ test "composed admission discovers water and snow above a proposed sand target" 
         var instance = try fixture.instance(.{ 10, 10, 4 });
         defer instance.deinit(std.testing.allocator);
         try fixture.put(.{ 10, 10, 5 }, material, true);
-        const result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
-        try std.testing.expectEqual(RejectCode.composition, result.rejected.code);
-        try std.testing.expectEqual(rules.Reason.incompatible_support, result.rejected.failure.?.reason);
-        try std.testing.expectEqualDeep(@as(?Cell, .{ 10, 10, 5 }), result.rejected.cell);
+        var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+        try std.testing.expect(result == .prepared);
+        defer result.prepared.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.prepared.validated_targets);
+        try std.testing.expectEqual(@as(usize, 1), result.prepared.validated_dependents);
+        const blocks = fixture.snapshot.chunks.get(chunkId(&fixture.snapshot.layout, .{ 10, 10, 5 })).?.blocks;
+        try std.testing.expectEqual(material, blocks.blocks[5][10][10]);
+        try std.testing.expectEqual(rules.BlockType.none, blocks.blocks[4][10][10]);
     }
 }
 
-test "composed admission rejects a seventh crushed bridge cell above a six-cell blueprint" {
+test "composed admission preserves an independently supported seventh crushed bridge cell" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     const definition = try fixture.definition(.{ 1, 1, 6 }, &([_]rules.BlockType{.crushed_stone} ** 6));
@@ -397,10 +401,19 @@ test "composed admission rejects a seventh crushed bridge cell above a six-cell 
         try fixture.put(.{ x, 10, 9 }, .stone, false);
         try fixture.put(.{ x, 10, 10 }, .stone, false);
     }
-    const result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
-    try std.testing.expectEqual(RejectCode.composition, result.rejected.code);
-    try std.testing.expectEqual(rules.Reason.crushed_column, result.rejected.failure.?.reason);
-    try std.testing.expectEqualDeep(@as(?Cell, .{ 10, 10, 10 }), result.rejected.cell);
+    var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+    try std.testing.expect(result == .prepared);
+    defer result.prepared.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 6), result.prepared.validated_targets);
+    try std.testing.expectEqual(@as(usize, 1), result.prepared.validated_dependents);
+    const blocks = fixture.snapshot.chunks.get(chunkId(&fixture.snapshot.layout, .{ 10, 10, 10 })).?.blocks;
+    try std.testing.expectEqual(rules.BlockType.crushed_stone, blocks.blocks[10][10][10]);
+    for (4..10) |z| try std.testing.expectEqual(rules.BlockType.none, blocks.blocks[z][10][10]);
+    // The seven-cell direct run still needs the independent two-sided route.
+    try fixture.put(.{ 9, 10, 10 }, .none, false);
+    const rejected = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+    try std.testing.expectEqual(RejectCode.composition, rejected.rejected.code);
+    try std.testing.expectEqual(rules.Reason.crushed_column, rejected.rejected.failure.?.reason);
 }
 
 test "admission detects missing dependencies finite bounds cancellation and snapshot budget" {
@@ -434,7 +447,7 @@ test "harmless cavity earth preserves an independent lateral plank route" {
     try std.testing.expectEqual(rules.BlockType.dirt, fixture.snapshot.chunks.get(chunkId(&fixture.snapshot.layout, .{ 11, 10, 4 })).?.blocks.blocks[4][10][11]);
 }
 
-test "pending targets of another site participate as completed dependents" {
+test "composed admission preserves an independently supported pending seventh bridge target" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     const definition = try fixture.definition(.{ 1, 1, 6 }, &([_]rules.BlockType{.crushed_stone} ** 6));
@@ -448,10 +461,20 @@ test "pending targets of another site participate as completed dependents" {
         try fixture.put(.{ x, 10, 9 }, .stone, false);
         try fixture.put(.{ x, 10, 10 }, .stone, false);
     }
-    const result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
-    try std.testing.expectEqual(RejectCode.composition, result.rejected.code);
-    try std.testing.expectEqual(rules.Reason.crushed_column, result.rejected.failure.?.reason);
-    try std.testing.expectEqualDeep(@as(?Cell, cell), result.rejected.cell);
+    var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+    try std.testing.expect(result == .prepared);
+    defer result.prepared.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 6), result.prepared.validated_targets);
+    try std.testing.expectEqual(@as(usize, 1), result.prepared.validated_dependents);
+    try std.testing.expectEqual(@as(usize, 1), index.targets.items.len);
+    try std.testing.expectEqual(@as(u64, 99), index.lookup.get(cell).?.instance_id);
+    try std.testing.expectEqual(rules.BlockType.crushed_stone, index.lookup.get(cell).?.material);
+    try std.testing.expectEqual(rules.BlockType.none, fixture.snapshot.chunks.get(chunkId(&fixture.snapshot.layout, cell)).?.blocks.blocks[10][10][10]);
+    try fixture.put(.{ 9, 10, 10 }, .none, false);
+    const rejected = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+    try std.testing.expectEqual(RejectCode.composition, rejected.rejected.code);
+    try std.testing.expectEqual(rules.Reason.crushed_column, rejected.rejected.failure.?.reason);
+    try std.testing.expectEqual(@as(u64, 99), index.lookup.get(cell).?.instance_id);
 }
 
 fn allocationFixture(allocator: std.mem.Allocator, fixture: *const Fixture, definition: blueprint.Definition, instance: runtime.Instance) !void {

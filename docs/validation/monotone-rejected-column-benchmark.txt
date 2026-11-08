@@ -1,0 +1,53 @@
+Rejected crushed-column review follow-up, 2026-11-08
+Command: zig build bench-placement -Doptimize=ReleaseFast
+Zig: 0.16.0
+Host: Darwin 25.6.0 arm64
+Parent commit: b1996b62f4cb4e7e07fafc96be1f3d0d1c379852
+Source state: parent plus benchmark-only review follow-up; no production changes.
+SHA256 src/voxel_app/block_placement_benchmark.zig: e758722cdeaf91f82e8d161ef8687e81675aebeece8c91246af8e6551acc68ea
+SHA256 src/voxel_app/block_rules.zig: 11d66c467fe8b4cd714e2e1eb473f43717e3cab23a383ac14924c9898502a886
+SHA256 src/voxel_app/world.zig: 36854c611366c153280a44c4d2040b26f9a203cdba6ae5a4f69c0b3c1c8946f2
+Three sequential warm-build process runs; no concurrent tests or builds.
+Each crushed fixture: one counted check, one warmup, eleven 100-check timing samples.
+All count/warmup/timed results require the expected status and failure reason.
+Synthetic unsupported rails are invalid existing structures; this is not a worst-case bound.
+
+Process 1
+200-block plank building: 3 reader calls; preview median 0.001 ms, min 0.001 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.012 us/check, min 0.012 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.069 us/check, min 0.066 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 604 reader calls; median 25.258 us/check, min 24.716 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 1850 reader calls; median 76.511 us/check, min 73.548 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 1865 reader calls; median 76.092 us/check, min 74.455 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3563 reader calls; median 142.395 us/check, min 138.836 us/check (100 checks/sample, ReleaseFast)
+unsupported seventh crushed cell (rejected): 188 reader calls; median 8.238 us/check, min 8.109 us/check (100 checks/sample, ReleaseFast)
+synthetic unsupported side rails: crushed fallback rejected: 3055 reader calls; median 126.900 us/check, min 123.279 us/check (100 checks/sample, ReleaseFast)
+
+Process 2
+200-block plank building: 3 reader calls; preview median 0.001 ms, min 0.001 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.014 us/check, min 0.014 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.077 us/check, min 0.075 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 604 reader calls; median 27.707 us/check, min 24.450 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 1850 reader calls; median 77.487 us/check, min 76.011 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 1865 reader calls; median 76.419 us/check, min 74.269 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3563 reader calls; median 141.752 us/check, min 138.188 us/check (100 checks/sample, ReleaseFast)
+unsupported seventh crushed cell (rejected): 188 reader calls; median 8.158 us/check, min 7.925 us/check (100 checks/sample, ReleaseFast)
+synthetic unsupported side rails: crushed fallback rejected: 3055 reader calls; median 127.720 us/check, min 122.301 us/check (100 checks/sample, ReleaseFast)
+
+Process 3
+200-block plank building: 3 reader calls; preview median 0.001 ms, min 0.001 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.012 us/check, min 0.012 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.072 us/check, min 0.069 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 604 reader calls; median 25.138 us/check, min 24.264 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 1850 reader calls; median 76.783 us/check, min 74.370 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 1865 reader calls; median 77.459 us/check, min 74.710 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3563 reader calls; median 141.877 us/check, min 136.570 us/check (100 checks/sample, ReleaseFast)
+unsupported seventh crushed cell (rejected): 188 reader calls; median 8.355 us/check, min 8.148 us/check (100 checks/sample, ReleaseFast)
+synthetic unsupported side rails: crushed fallback rejected: 3055 reader calls; median 127.226 us/check, min 123.770 us/check (100 checks/sample, ReleaseFast)
+
+25 plain six-cell crushed columns: 604 reads, median of process medians 25.258 us/check, process range 25.138-27.707
+nine run-six crushed bridges: 1850 reads, median of process medians 76.783 us/check, process range 76.511-77.487
+crushed direct + two bridge routes (root only): 1865 reads, median of process medians 76.419 us/check, process range 76.092-77.459
+20-cell independently bridged crushed column: 3563 reads, median of process medians 141.877 us/check, process range 141.752-142.395
+unsupported seventh crushed cell (rejected): 188 reads, median of process medians 8.238 us/check, process range 8.158-8.355
+synthetic unsupported side rails: crushed fallback rejected: 3055 reads, median of process medians 127.226 us/check, process range 126.900-127.720
