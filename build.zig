@@ -207,7 +207,28 @@ pub fn build(b: *std.Build) void {
 
     const voxel_exe_unit_tests = b.addTest(.{
         .root_module = voxel_exe.root_module,
+        .filters = if (b.option([]const u8, "client-test-filter", "Run matching voxel client tests")) |filter| &.{filter} else &.{},
     });
+
+    const chunk_visual_queue_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/chunk_visual_queue.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_chunk_visual_queue_tests = b.addRunArtifact(chunk_visual_queue_tests);
+    b.step("test-chunk-visual-queue", "Run CPU tests for coalesced, budgeted chunk visual scheduling").dependOn(&run_chunk_visual_queue_tests.step);
+
+    const chunk_visual_queue_benchmark = b.addExecutable(.{
+        .name = "chunk-visual-queue-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/chunk_visual_queue_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.step("bench-chunk-visual-queue", "Measure bounded queue work for 8,192 repeated chunk invalidations").dependOn(&b.addRunArtifact(chunk_visual_queue_benchmark).step);
 
     const world_unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
@@ -372,6 +393,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_voxel_grid_unit_tests = b.addRunArtifact(voxel_grid_unit_tests);
     const run_voxel_exe_unit_tests = b.addRunArtifact(voxel_exe_unit_tests);
+    b.step("test-client", "Run voxel client integration and presentation tests").dependOn(&run_voxel_exe_unit_tests.step);
     const run_engine_utils_unit_tests = b.addRunArtifact(engine_utils_unit_tests);
     const run_space_tree_unit_tests = b.addRunArtifact(space_tree_unit_tests);
     const run_dynamic_slot_buffer_manager_unit_tests = b.addRunArtifact(dynamic_slot_buffer_manager_unit_tests);
@@ -379,6 +401,7 @@ pub fn build(b: *std.Build) void {
     const run_slot_buffer_manager_unit_tests = b.addRunArtifact(slot_buffer_manager_unit_tests);
 
     const test_step = b.step("test", "Run unit tests for both application wrapping modes");
+    test_step.dependOn(&run_chunk_visual_queue_tests.step);
     test_step.dependOn(&run_blueprint_service_tests.step);
     const generation_tests = b.addTest(.{
         .root_module = b.createModule(.{

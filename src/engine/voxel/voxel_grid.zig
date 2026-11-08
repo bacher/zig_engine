@@ -163,7 +163,34 @@ pub const VoxelGrid = struct {
     }
 
     pub fn appendChunk(self: *Self, chunk: VoxelChunkUpload) void {
+        self.replaceChunk(chunk);
+    }
+
+    /// Own the newest upload without disturbing the displayed chunk. Replacement
+    /// residents retire together only after the entire upload batch fits.
+    pub fn replaceChunk(self: *Self, chunk: VoxelChunkUpload) void {
+        for (self.chunks_to_upload.items) |*queued| {
+            if (!@reduce(.And, queued.chunk_coords == chunk.chunk_coords)) continue;
+            queued.chunk_side_data.deinit(self.allocator);
+            queued.* = chunk;
+            return;
+        }
         self.chunks_to_upload.append(self.allocator, chunk) catch @panic("OOM");
+    }
+
+    /// Transfer a queued replacement back to the caller without changing the
+    /// displayed resident. Used when its paired presentation work becomes stale.
+    pub fn takeReplacement(self: *Self, chunk_coords: ChunkCoords) ?VoxelChunkUpload {
+        for (self.chunks_to_upload.items, 0..) |queued, index| {
+            if (@reduce(.And, queued.chunk_coords == chunk_coords))
+                return self.chunks_to_upload.orderedRemove(index);
+        }
+        return null;
+    }
+
+    pub fn cancelReplacement(self: *Self, chunk_coords: ChunkCoords) void {
+        var queued = self.takeReplacement(chunk_coords) orelse return;
+        queued.chunk_side_data.deinit(self.allocator);
     }
 
     /// Removes a chunk (if it's loaded) from the voxel grid and releases the GPU memory slot.
@@ -177,6 +204,10 @@ pub const VoxelGrid = struct {
                 obsolete.chunk_side_data.deinit(self.allocator);
             } else queued += 1;
         }
+        self.removeResidentChunk(chunk_coords);
+    }
+
+    fn removeResidentChunk(self: *Self, chunk_coords: ChunkCoords) void {
         for (self.chunks.items, 0..) |*chunk, i| {
             if (@reduce(.And, chunk.chunk_origin == chunk_coords)) {
                 if (chunk.gpu_residence_info) |info| {
@@ -192,13 +223,29 @@ pub const VoxelGrid = struct {
         }
     }
 
+    fn hasQueuedChunk(self: *const Self, coords: ChunkCoords) bool {
+        for (self.chunks_to_upload.items) |upload| {
+            if (@reduce(.And, upload.chunk_coords == coords)) return true;
+        }
+        return false;
+    }
+
     /// Simulate the exact allocation sequence, including span fragmentation and rounding,
     /// before writing any part of the frame's uploads. Also usable without a GPU device.
     pub fn hasUploadCapacity(self: *const Self) bool {
         var blocks = self.gpu_block_buffer_manager;
         var chunks = self.gpu_chunk_info_buffer_manager;
         var custom_count: usize = 0;
-        for (self.chunks.items) |chunk| custom_count += chunk.custom_blocks.items.len;
+        // Every replaced allocation is available to the whole batch, including
+        // replacements queued later than the upload that will reuse its slots.
+        for (self.chunks.items) |chunk| {
+            if (self.hasQueuedChunk(chunk.chunk_origin)) {
+                if (chunk.gpu_residence_info) |info| {
+                    chunks.freeBlock(info.chunk_index);
+                    blocks.freeBlock(info.data_slot_index);
+                }
+            } else custom_count += chunk.custom_blocks.items.len;
+        }
         for (self.chunks_to_upload.items) |upload| {
             custom_count += upload.chunk_side_data.custom_blocks.items.len;
             if (custom_count > VOXEL_GRID_BUFFER_SIZE / @sizeOf(custom.GPU_CustomBlock)) return false;
@@ -213,7 +260,16 @@ pub const VoxelGrid = struct {
         return true;
     }
 
+    /// No displayed state changes when preflight fails. The successful path is
+    /// called immediately before the GPU writes, with no draw in between.
+    fn prepareUploads(self: *Self) bool {
+        if (!self.hasUploadCapacity()) return false;
+        for (self.chunks_to_upload.items) |upload| self.removeResidentChunk(upload.chunk_coords);
+        return true;
+    }
+
     pub fn uploadToGPU(self: *Self, gctx: *zgpu.GraphicsContext) void {
+        if (!self.prepareUploads()) return;
         const block_buffer = self.gpu_block_buffer.buffer;
         const chunk_info_buffer = self.gpu_chunk_info_buffer.buffer;
 
@@ -532,6 +588,162 @@ test "custom uploads group formed and unformed geometry and reset after reversio
     try std.testing.expectEqual(@as(u32, 8), grid.custom_block_count);
     grid.clearChunks();
     try std.testing.expectEqual(@as(u32, 0), grid.custom_slope_count);
+    try std.testing.expect(grid.prepareCustomBlocks());
+    try std.testing.expectEqual(@as(u32, 0), grid.custom_block_count);
+}
+
+test "queued replacements coalesce ownership while eviction removes queued and displayed geometry" {
+    const allocator = std.testing.allocator;
+    var grid: VoxelGrid = .{ .allocator = allocator, .gpu_chunk_info_buffer = undefined, .gpu_block_buffer = undefined };
+    defer {
+        grid.clearChunks();
+        grid.chunks.deinit(allocator);
+        grid.chunks_to_upload.deinit(allocator);
+        grid.custom_upload.deinit(allocator);
+    }
+    const coords: ChunkCoords = .{ 1, 2, 3 };
+    var resident: VoxelChunk = .{ .chunk_origin = coords };
+    try resident.custom_blocks.append(allocator, .{ .coords = .{ 0, 0, 0 }, .shape = .adaptive });
+    try grid.chunks.append(allocator, resident);
+    const resident_records = grid.chunks.items[0].custom_blocks.items.ptr;
+    var first: VoxelChunkUpload = .{ .chunk_coords = coords, .chunk_side_data = .{} };
+    try first.chunk_side_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 1, 0, 0 }, .block_type = .dirt });
+    grid.replaceChunk(first);
+    var latest: VoxelChunkUpload = .{ .chunk_coords = coords, .chunk_side_data = .{} };
+    try latest.chunk_side_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 2, 0, 0 }, .block_type = .stone });
+    try latest.chunk_side_data.custom_blocks.append(allocator, .{ .coords = .{ 3, 0, 0 }, .shape = .adaptive });
+    grid.appendChunk(latest);
+    try std.testing.expectEqual(@as(usize, 1), grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(@as(usize, 1), grid.chunks.items.len);
+    try std.testing.expectEqual(resident_records, grid.chunks.items[0].custom_blocks.items.ptr);
+    try std.testing.expectEqual(@as(u8, 2), grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[0].items[0].coords[0]);
+    try std.testing.expect(!grid.custom_dirty);
+    grid.removeChunk(coords);
+    try std.testing.expectEqual(@as(usize, 0), grid.chunks.items.len);
+    try std.testing.expectEqual(@as(usize, 0), grid.chunks_to_upload.items.len);
+    try std.testing.expect(grid.custom_dirty);
+}
+
+test "taking a replacement transfers pending ownership and preserves displayed geometry" {
+    const allocator = std.testing.allocator;
+    var grid: VoxelGrid = .{ .allocator = allocator, .gpu_chunk_info_buffer = undefined, .gpu_block_buffer = undefined };
+    defer {
+        grid.clearChunks();
+        grid.chunks.deinit(allocator);
+        grid.chunks_to_upload.deinit(allocator);
+        grid.custom_upload.deinit(allocator);
+    }
+    const coords: ChunkCoords = .{ 1, 2, 3 };
+    var resident: VoxelChunk = .{ .chunk_origin = coords };
+    try resident.custom_blocks.append(allocator, .{ .coords = .{ 0, 0, 0 }, .shape = .adaptive });
+    try grid.chunks.append(allocator, resident);
+    const resident_records = grid.chunks.items[0].custom_blocks.items.ptr;
+    var replacement: VoxelChunkUpload = .{ .chunk_coords = coords, .chunk_side_data = .{} };
+    try replacement.chunk_side_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 1, 0, 0 }, .block_type = .dirt });
+    const faces = replacement.chunk_side_data.blocks_grouped_by_side[0].items.ptr;
+    grid.replaceChunk(replacement);
+    var taken = grid.takeReplacement(coords).?;
+    defer taken.chunk_side_data.deinit(allocator);
+    try std.testing.expectEqual(faces, taken.chunk_side_data.blocks_grouped_by_side[0].items.ptr);
+    try std.testing.expectEqual(@as(usize, 0), grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(@as(usize, 1), grid.chunks.items.len);
+    try std.testing.expectEqual(resident_records, grid.chunks.items[0].custom_blocks.items.ptr);
+    try std.testing.expect(!grid.custom_dirty);
+    try std.testing.expect(grid.takeReplacement(coords) == null);
+    grid.cancelReplacement(coords);
+    try std.testing.expectEqual(@as(usize, 1), grid.chunks.items.len);
+}
+
+test "failed replacement capacity preserves the displayed chunk until a later batch fits" {
+    const allocator = std.testing.allocator;
+    var grid: VoxelGrid = .{ .allocator = allocator, .gpu_chunk_info_buffer = undefined, .gpu_block_buffer = undefined };
+    defer {
+        grid.clearChunks();
+        grid.chunks.deinit(allocator);
+        grid.chunks_to_upload.deinit(allocator);
+        grid.custom_upload.deinit(allocator);
+    }
+    for (0..VOXEL_GRID_SLOT_COUNT) |_| _ = try grid.gpu_block_buffer_manager.occupyBlock(.{ .size_exponent = 0 });
+    const chunk_slot = try grid.gpu_chunk_info_buffer_manager.occupyBlock();
+    const coords: ChunkCoords = .{ 1, 0, 0 };
+    var resident: VoxelChunk = .{ .chunk_origin = coords, .gpu_residence_info = .{
+        .faces_count_per_view = @splat(1),
+        .chunk_index = chunk_slot,
+        .data_slot_index = 0,
+        .data_slot_size_level = 0,
+    } };
+    try resident.custom_blocks.append(allocator, .{ .coords = .{ 0, 0, 0 }, .shape = .adaptive });
+    try grid.chunks.append(allocator, resident);
+    var replacement: VoxelChunkUpload = .{ .chunk_coords = coords, .chunk_side_data = .{} };
+    try replacement.chunk_side_data.blocks_grouped_by_side[0].resize(allocator, BLOCKS_PER_SLOT + 1);
+    @memset(replacement.chunk_side_data.blocks_grouped_by_side[0].items, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone });
+    grid.replaceChunk(replacement);
+    const old_records = grid.chunks.items[0].custom_blocks.items.ptr;
+    const pending_faces = grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[0].items.ptr;
+    const old_blocks = grid.gpu_block_buffer_manager;
+    const old_chunks = grid.gpu_chunk_info_buffer_manager;
+    try std.testing.expect(!grid.prepareUploads());
+    try std.testing.expectEqualDeep(old_blocks, grid.gpu_block_buffer_manager);
+    try std.testing.expectEqualDeep(old_chunks, grid.gpu_chunk_info_buffer_manager);
+    try std.testing.expectEqual(@as(usize, 1), grid.chunks.items.len);
+    try std.testing.expectEqual(old_records, grid.chunks.items[0].custom_blocks.items.ptr);
+    try std.testing.expectEqual(pending_faces, grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[0].items.ptr);
+    try std.testing.expect(!grid.custom_dirty);
+
+    // Releasing the rest of the old span permits its larger replacement.
+    for (1..64) |slot| grid.gpu_block_buffer_manager.freeBlock(@intCast(slot));
+    try std.testing.expect(grid.prepareUploads());
+    try std.testing.expectEqual(@as(usize, 0), grid.chunks.items.len);
+    try std.testing.expectEqual(@as(usize, 1), grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(@as(u32, 0), try grid.gpu_block_buffer_manager.occupyBlock(.{ .size_exponent = 1 }));
+    try std.testing.expectEqual(chunk_slot, try grid.gpu_chunk_info_buffer_manager.occupyBlock());
+    try std.testing.expect(grid.custom_dirty);
+}
+
+test "replacement preflight releases the complete batch including empty and custom residents" {
+    const allocator = std.testing.allocator;
+    var grid: VoxelGrid = .{ .allocator = allocator, .gpu_chunk_info_buffer = undefined, .gpu_block_buffer = undefined };
+    defer {
+        grid.clearChunks();
+        grid.chunks.deinit(allocator);
+        grid.chunks_to_upload.deinit(allocator);
+        grid.custom_upload.deinit(allocator);
+    }
+    // A's small span stays fragmented even after A retires. Only B's later
+    // queued empty replacement frees a complete span for the first upload.
+    for (0..64) |_| _ = try grid.gpu_block_buffer_manager.occupyBlock(.{ .size_exponent = 0 });
+    const second_data_slot = try grid.gpu_block_buffer_manager.occupyBlock(.{ .size_exponent = MAX_SPAN_SIZE_EXPONENT });
+    for (2..DynamicSlotBufferManager.SPAN_COUNT) |_| _ = try grid.gpu_block_buffer_manager.occupyBlock(.{ .size_exponent = MAX_SPAN_SIZE_EXPONENT });
+    const first_coords: ChunkCoords = .{ 1, 0, 0 };
+    const second_coords: ChunkCoords = .{ 2, 0, 0 };
+    try grid.chunks.append(allocator, .{ .chunk_origin = first_coords, .gpu_residence_info = .{
+        .faces_count_per_view = @splat(1),
+        .chunk_index = try grid.gpu_chunk_info_buffer_manager.occupyBlock(),
+        .data_slot_index = 0,
+        .data_slot_size_level = 0,
+    } });
+    var second: VoxelChunk = .{ .chunk_origin = second_coords, .gpu_residence_info = .{
+        .faces_count_per_view = @splat(1),
+        .chunk_index = try grid.gpu_chunk_info_buffer_manager.occupyBlock(),
+        .data_slot_index = second_data_slot,
+        .data_slot_size_level = MAX_SPAN_SIZE_EXPONENT,
+    } };
+    const custom_limit = VOXEL_GRID_BUFFER_SIZE / @sizeOf(custom.GPU_CustomBlock);
+    try second.custom_blocks.resize(allocator, custom_limit);
+    @memset(second.custom_blocks.items, .{ .coords = .{ 0, 0, 0 }, .shape = .adaptive });
+    try grid.chunks.append(allocator, second);
+    grid.custom_block_count = custom_limit;
+    var replacement: VoxelChunkUpload = .{ .chunk_coords = first_coords, .chunk_side_data = .{} };
+    try replacement.chunk_side_data.blocks_grouped_by_side[0].resize(allocator, BLOCKS_PER_SLOT + 1);
+    @memset(replacement.chunk_side_data.blocks_grouped_by_side[0].items, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone });
+    try replacement.chunk_side_data.custom_blocks.append(allocator, .{ .coords = .{ 0, 0, 0 }, .shape = .adaptive });
+    grid.replaceChunk(replacement);
+    try std.testing.expect(!grid.hasUploadCapacity());
+    grid.replaceChunk(.{ .chunk_coords = second_coords, .chunk_side_data = .{} });
+    try std.testing.expect(grid.prepareUploads());
+    try std.testing.expectEqual(@as(usize, 0), grid.chunks.items.len);
+    try std.testing.expectEqual(@as(usize, 2), grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(second_data_slot, try grid.gpu_block_buffer_manager.occupyBlock(.{ .size_exponent = 1 }));
     try std.testing.expect(grid.prepareCustomBlocks());
     try std.testing.expectEqual(@as(u32, 0), grid.custom_block_count);
 }

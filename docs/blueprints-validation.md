@@ -4,9 +4,9 @@ This report accompanies the implementation of [the blueprint specification](../s
 
 ## Implemented paths
 
-- The selected capture frame, including the unconfirmed anchor frame, uses a faint `.greater` pass without depth writes before the normal opaque `.less_equal` depth-writing pass. Miniatures, diagnostics, and rails share one dynamic opaque instanced draw. A full-size application preview uses a separate cached instanced draw. The occluded-frame draw reuses the dynamic instances and adds only the selected frame's twelve rails, 144 triangles, in one extra draw. Miniatures, full-size application previews, and other active sites' frames receive no occluded-frame draw.
+- The selected capture frame, including the unconfirmed anchor frame, uses a faint `.greater` pass without depth writes before the normal opaque `.less_equal` depth-writing pass. Diagnostics and rails share one dynamic opaque instanced draw. Miniatures use a cached instanced draw per visible nonempty chunk; a full-size application preview uses a separate cached instanced draw. The occluded-frame draw reuses the dynamic instances and adds only the selected frame's twelve rails, 144 triangles, in one extra draw. Miniatures, full-size application previews, and other active sites' frames receive no occluded-frame draw.
 - All frames choose one continuous periodic X image using their middle cell. The renderer reuses its single chunk-relative conversion and subtracts the middle-cell offset before emitting the same twelve rails. There is no block traversal, second wrap calculation, split geometry, extra upload, or extra draw. Simultaneously visible opposite images of one site are outside this rendering scope; miniature and cached-preview coordinate policies retain their existing behavior.
-- Full-size application previews upload packed local cell coordinates/materials once per selected immutable definition and tool generation. Camera/origin changes and quarter-turn rotations update uniforms without rebuilding or uploading source geometry; rotations move cell offsets while preserving world-aligned cube faces and texture orientation. An unavailable placement origin hides the preview while retaining its cache; replacement or leaving preview releases it. Miniatures, diagnostics, and rails retain their dynamic path.
+- Full-size application previews upload packed local cell coordinates/materials once per selected immutable definition and tool generation. Camera/origin changes and quarter-turn rotations update uniforms without rebuilding or uploading source geometry; rotations move cell offsets while preserving world-aligned cube faces and texture orientation. An unavailable placement origin hides the preview while retaining its cache; replacement or leaving preview releases it. Miniatures retain per-chunk GPU sources across unchanged/camera frames, while diagnostics and rails remain dynamic. Explicit dirty hooks coalesce matching terrain/miniature replacements, committing miniatures only after the corresponding terrain batch is accepted.
 - Capture immediately previews a 1×1×1 striped frame at the eligible unconfirmed anchor target. Hover and first-click confirmation share ordinary putting-target selection with 30-metre camera-to-nearest-cube-vertex reach, including adjacent physical placement and full-cell miniature targets. Hover does not create draft anchor/bounds, so Escape still opens the menu. Ordinary placement/mining remains at four metres; XY/height retain their raw-contact-from-feet metric.
 - Escape while capture awaits its first anchor with the chooser closed leaves the tool and opens the ordinary game menu; Resume returns to ordinary play. After anchor selection, Escape discards the whole draft and stays in capture awaiting an anchor, where the next fresh Escape with the chooser closed opens the menu.
 - B opens the saved-blueprint chooser from ordinary play or unanchored capture, or dismisses chooser/placement preview. A chooser over capture preserves capture mode/selection/generation; Cancel/Escape/B closes only that chooser, selecting a definition exits capture into placement preview, and an empty library leaves the current mode unchanged. Z controls capture, and Enter opens the validated capture name dialog; Enter in that dialog confirms the name and saves. B is ignored after anchor selection outside name entry. Ctrl+B toggles SSAO blur during ordinary play, capture outside name entry, and placement preview while modal/map input blocking remains in force. Bare B does not toggle blur, and F has no blueprint-tool binding.
@@ -44,15 +44,85 @@ These are technical budgets rather than additional material/geometry rules. Reso
 | Library/active-instance wire budgets | 4,096 definitions, 4,096 instances, 64 MiB durable state |
 | Pending blueprint journal | 16 MiB, at most 1,048,576 operations; backpressure drains earlier accepted work |
 | Save working memory | 64 MiB by default; includes journal capacity/growth, encoded changes, preparation, source encoding, and capture bookkeeping. Admission may drain before the wire/count limits. |
-| Visible GPU instances | Combined dynamic and full-size preview limit of 1,100,000; miniatures use visible-chunk collection |
-| Dynamic GPU instances | Lazy growth from 1,024, 48 bytes each; miniatures, diagnostics, and rails |
+| Visible GPU instances | Combined cached miniature, dynamic, and full-size preview limit of 1,100,000; miniatures use visible-chunk collection |
+| Dynamic GPU instances | Lazy growth from 1,024, 48 bytes each; diagnostics and rails |
 | Cached full-size preview | 16 bytes per occupied cell, uploaded once per selection; separate transform uniforms |
+| Cached miniature sources | 16 bytes per cell; 1,100,000 logical cells, at most 2,200,000 displayed plus staged records (35,200,000 source bytes), excluding transforms, bindings, other buffers, and driver overhead |
+| Miniature chunk ownership | At most 4,096 nonempty/staged chunks and 4,096 preparations; logical reservations retain the larger old/new count until commit |
+| Pending visual work | At most one FIFO entry per admitted loaded chunk; cancellation removes its live entry immediately, allocation retains the peak simultaneous population |
+| Chunk preparation per client update | Two-frame first-dirty minimum age; at most four whole chunks and two milliseconds of elapsed preparation time, checked between chunks; one whole chunk may exceed the soft time limit |
 
 The independent horizontal limit remains `min(world_block_size_x / 2 - 1, world_block_size_y)` for each horizontal dimension. The 100×100×32 reference scenario fits the volume/source/snapshot budgets where world dimensions permit it.
 
-For a dense 100×100×32 placement preview, packed source storage/upload is 5,120,000 bytes once per selection, replacing 15,360,000 bytes of full-size dynamic instances rebuilt/uploaded per frame. Warm draws update a 128-byte preview transform; dynamic rails and miniatures retain their separate uploads. These are representation/upload calculations, not measured FPS improvements. Each preview cube still submits 36 vertices; exposed-face culling remains deferred.
+For a dense 100×100×32 placement preview, packed source storage/upload is 5,120,000 bytes once per selection, replacing 15,360,000 bytes of full-size dynamic instances rebuilt/uploaded per frame. Warm preview draws update a 128-byte transform. Dynamic rails/diagnostics retain their uploads; cached miniatures update per-chunk transforms. These are representation/upload calculations, not measured FPS improvements. Each preview cube still submits 36 vertices; exposed-face culling remains deferred.
 
 ## Automated coverage
+
+### Incremental construction visuals (2026-11-08)
+
+The [incremental construction visuals spec](../specs/features/incremental-construction-visuals.md)
+records the selected presentation policy: FIFO, a two-frame first-dirty coalescing interval,
+and up to four whole chunk builds per frame with a two-millisecond soft elapsed preparation budget checked
+between builds. Physics, resources, and progress remain immediate. Terrain and miniature
+geometry publish together per chunk; capacity waits retain the previous coherent display.
+These defaults do not promise a hard frame-time or visual-latency bound.
+
+`zig test src/voxel_app/chunk_visual_queue.zig` passed all 11 module/scenario tests. Coverage
+includes repeated marks without age reset, FIFO progress, physical cancellation, fresh
+subscription lifetimes, constant retained storage across 10,000 streaming cancellations,
+allocation-free repeated marks, admission allocation failures, and count/soft-time budgets.
+
+The deterministic ReleaseFast fixture is reproducible with
+`zig build bench-chunk-visual-queue -Doptimize=ReleaseFast`. It performs 2,048 marks per frame
+for four frames, processes at most four builds each frame, drains pending work, and checks
+1,024 idle frames:
+
+| Chunks | Marks | Rebuild-every-dirty-frame count | Budgeted builds | Coalesced marks | Peak pending | Maximum builds/frame | Total work frames | Head checks | Idle head checks |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 | 8,192 | 512 | 132 | 8,060 | 128 | 4 | 35 | 134 | 0 |
+| 343 | 8,192 | 1,372 | 347 | 7,845 | 343 | 4 | 89 | 349 | 0 |
+
+The comparison counts rebuilds of each dirty chunk once per edit frame, matching the old
+frame-drain policy. Queueing avoids about 74% of those builds in this fixture by reading
+the latest view after several marks. It trades that work for delayed display. These are
+deterministic scheduling counts: there is no terrain extraction, miniature packing, GPU
+upload, rendering, storage wait, or complete game loop in this fixture. It establishes
+neither a CPU speedup nor whole-game FPS, and does not measure a hard two-millisecond limit.
+
+`zig build test-gpu -j2 --summary all` passed 19/19 build steps and all 118 tests on
+Apple M4 Max/Metal in both compiled wrapping modes.
+Production renderer readback compares 19 cached-miniature/dynamic-reference color/depth
+image pairs per mode: 15 scenes and four transactional stages, 38 pairs across both modes.
+Coverage includes seams, chunk carry, antipodes, maximum world width, signed camera limits,
+selected capture ghosts and diagnostics, zero source upload after camera/same-key changes,
+prepare/commit/discard, stale tokens, metadata allocation failure, and visible-budget errors.
+Dense source checks retain 1,100,000 displayed plus 1,100,000 staged cells within the
+2,200,000-record physical bound. Logical reservation uses the larger old/new count until
+commit, so a staged removal cannot lend capacity that cancellation would need to restore.
+Existing immutable full-size preview checks also pass.
+Renderer reuse checks hold the source revision fixed. Application dirty hooks are
+conservative: a byte-identical accepted block snapshot may repack/reupload that chunk.
+There is no content fingerprint or probabilistic source-equality policy.
+
+Client integration uses local dirty hooks and effective committed-change callbacks, retains
+displayed pairs while replacements wait, and cancels stale prepared ownership on newer
+changes or representation handoff. While earlier uploads wait for capacity, new eligible
+dirty chunks continue receiving normal budgeted turns, allowing shrinking replacements to
+join the held batch. Unchanged preparations remain staged; only superseded chunk work is
+canceled. Staging can span multiple frames, bounded by loaded chunks and renderer limits.
+Client regressions cover prediction rejection and cross-chunk replay, effective versus
+duplicate fulfillment notifications, accepted empty snapshots after fulfillment,
+promotion/demotion and boundary certification, and capacity-blocked uploads unlocked by a
+smaller queued replacement. The latter includes a shrinking fifth chunk admitted after a
+blocked four-chunk preparation frame, without rebuilding the unchanged held uploads.
+
+`zig build install test -Doptimize=ReleaseFast -j4 --summary all` passed all 57 build
+steps with 1,935 tests passed and eight existing skips; the game built successfully.
+`zig build test -j4 --summary all` passed all 49 build steps with 1,942 tests passed
+and one existing skip, including all 731 client integration/imported tests.
+Formatting and `git diff --check` pass. The queue fixture and renderer transaction readback
+are component evidence; they do not measure the complete client update/render loop or
+establish full-game throughput/frame time.
 
 ### Persisted unfinished-work verification and measurements
 

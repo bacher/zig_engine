@@ -20,6 +20,14 @@ pub const block_rules = @import("block_rules.zig");
 const blueprint = @import("blueprint.zig");
 pub const blueprint_runtime = @import("blueprint_runtime.zig");
 
+/// Synchronous notifications for committed changes only. Footprint slices are
+/// borrowed during the callback; observers must not mutate blueprint state.
+pub const BlueprintChangeObserver = struct {
+    context: *anyopaque,
+    instance_published: *const fn (*anyopaque, []const u32) void,
+    fulfilled: *const fn (*anyopaque, [3]u32) void,
+};
+
 /// Face neighbors wrap around x; missing y/z neighbors leave the world exposed.
 pub fn adjacentChunk(layout: *const WorldLayout, coords: ChunkCoords, side: Side) ?ChunkCoords {
     std.debug.assert(@reduce(.And, coords >= @as(ChunkCoords, @splat(0))));
@@ -808,6 +816,12 @@ pub const World = struct {
     /// fulfillment-only packages allocate nothing and never copy a bitmap.
     /// All fallible work is finished before any target/index publication.
     pub fn applyBlueprintChanges(self: *World, changes: []const blueprint_runtime.Change) !void {
+        return self.applyBlueprintChangesObserved(changes, null);
+    }
+
+    /// Reports only effective changes, in commit order, after all fallible
+    /// preflight. Duplicate/unknown changes never notify the observer.
+    pub fn applyBlueprintChangesObserved(self: *World, changes: []const blueprint_runtime.Change, observer: ?BlueprintChangeObserver) !void {
         var definition_count: usize = 0;
         var instance_count: usize = 0;
         for (changes) |change| switch (change) {
@@ -816,7 +830,7 @@ pub const World = struct {
             .fulfill => {},
         };
         if (definition_count == 0 and instance_count == 0) {
-            for (changes) |change| _ = self.blueprints.fulfill(self.layout, change.fulfill);
+            for (changes) |change| self.fulfillBlueprintObserved(change.fulfill, observer);
             return;
         }
         const old_revision = self.blueprints.revision;
@@ -917,13 +931,27 @@ pub const World = struct {
             .definition => {},
             .instance => {
                 if (next_publication < publications.items.len and publications.items[next_publication].change_index == change_index) {
-                    self.blueprints.publishPublication(&publications.items[next_publication].publication);
+                    const publication = &publications.items[next_publication].publication;
+                    self.blueprints.publishPublication(publication);
+                    if (observer) |notify| notify.instance_published(notify.context, publication.instance.box_chunks);
                     next_publication += 1;
                 }
             },
-            .fulfill => |value| _ = self.blueprints.fulfill(self.layout, value),
+            .fulfill => |value| self.fulfillBlueprintObserved(value, observer),
         };
         if (definitions.items.len != 0) self.blueprints.revision +%= 1;
+    }
+
+    fn fulfillBlueprintObserved(self: *World, value: blueprint_runtime.Fulfill, observer: ?BlueprintChangeObserver) void {
+        const notify = observer orelse {
+            _ = self.blueprints.fulfill(self.layout, value);
+            return;
+        };
+        const instance = self.blueprints.instances.get(value.instance_id) orelse return;
+        const saved = self.blueprints.definitions.get(instance.definition_id) orelse return;
+        if (value.cell_index >= saved.definition.cells.len) return;
+        const cell = blueprint_runtime.worldCell(self.layout, instance.origin, saved.definition.size, instance.rotation, blueprint.cellAtIndex(saved.definition.size, value.cell_index)) orelse return;
+        if (self.blueprints.fulfill(self.layout, value)) notify.fulfilled(notify.context, cell);
     }
 
     fn immutableAt(context: *anyopaque, block: [3]u32) bool {
@@ -2710,6 +2738,110 @@ test "client fulfillment-only packages allocate nothing including completion and
     try std.testing.expect(client.blueprints.targetAt(.{ 31, 10, 10 }) == null);
     try std.testing.expect(client.blueprints.targetAt(.{ 32, 10, 10 }) == null);
     try std.testing.expectEqualSlices(u64, &.{1}, client.blueprints.cleanup_queue.items);
+}
+
+const BlueprintObserverTestLog = struct {
+    const Event = union(enum) {
+        publication: struct { first_chunk: u32, chunk_count: usize },
+        fulfilled: [3]u32,
+    };
+    events: [16]Event = undefined,
+    count: usize = 0,
+
+    fn observer(self: *BlueprintObserverTestLog) BlueprintChangeObserver {
+        return .{ .context = self, .instance_published = published, .fulfilled = fulfilled };
+    }
+
+    fn published(context: *anyopaque, chunks: []const u32) void {
+        const self: *BlueprintObserverTestLog = @ptrCast(@alignCast(context));
+        self.events[self.count] = .{ .publication = .{ .first_chunk = chunks[0], .chunk_count = chunks.len } };
+        self.count += 1;
+    }
+
+    fn fulfilled(context: *anyopaque, cell: [3]u32) void {
+        const self: *BlueprintObserverTestLog = @ptrCast(@alignCast(context));
+        self.events[self.count] = .{ .fulfilled = cell };
+        self.count += 1;
+    }
+
+    fn expect(self: *const BlueprintObserverTestLog, expected: []const Event) !void {
+        try std.testing.expectEqual(expected.len, self.count);
+        for (expected, self.events[0..self.count]) |wanted, actual| try std.testing.expectEqualDeep(wanted, actual);
+    }
+};
+
+test "observed fulfillment notifies only real transitions without allocating" {
+    const a = std.testing.allocator;
+    var client = try World.init(a, &test_layout);
+    defer client.deinit();
+    try insertTestBlueprint(&client, 1, .{ 31, 10, 10 }, .{ 2, 1, 1 }, &.{ .planks, .planks });
+    var log: BlueprintObserverTestLog = .{};
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    client.allocator = failing.allocator();
+    defer client.allocator = a;
+    try client.applyBlueprintChangesObserved(&.{
+        .{ .fulfill = .{ .instance_id = 99, .cell_index = 0 } },
+        .{ .fulfill = .{ .instance_id = 1, .cell_index = 99 } },
+        .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } },
+        .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } },
+        .{ .fulfill = .{ .instance_id = 1, .cell_index = 1 } },
+        .{ .fulfill = .{ .instance_id = 1, .cell_index = 1 } },
+    }, log.observer());
+    try log.expect(&.{ .{ .fulfilled = .{ 31, 10, 10 } }, .{ .fulfilled = .{ 32, 10, 10 } } });
+    try std.testing.expectEqual(@as(usize, 0), failing.allocations);
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
+test "blueprint observer follows committed publication fulfillment and replacement order" {
+    const a = std.testing.allocator;
+    var client = try World.init(a, &test_layout);
+    defer client.deinit();
+    var source = try World.init(a, &test_layout);
+    defer source.deinit();
+    const origin = [3]u32{ 31, 10, 10 };
+    try insertTestBlueprint(&source, 1, origin, .{ 1, 1, 1 }, &.{.planks});
+    const first = source.blueprints.instances.get(1).?;
+    var second = try source.blueprints.prepareInstance(a, source.layout, 2, 1, 1, origin, 0);
+    defer second.deinit(a);
+    const changes = [_]blueprint_runtime.Change{
+        .{ .definition = source.blueprints.definitions.get(1).? },
+        .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } }, // Not published yet.
+        .{ .instance = first },
+        .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } },
+        .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } },
+        .{ .instance = second },
+        .{ .fulfill = .{ .instance_id = 2, .cell_index = 0 } },
+        .{ .fulfill = .{ .instance_id = 2, .cell_index = 0 } },
+    };
+    var log: BlueprintObserverTestLog = .{};
+    try client.applyBlueprintChangesObserved(&changes, log.observer());
+    const coords, _ = splitBlockCoords(origin);
+    const publication: BlueprintObserverTestLog.Event = .{ .publication = .{ .first_chunk = client.layout.encodeChunkCoords(coords), .chunk_count = 1 } };
+    try log.expect(&.{ publication, .{ .fulfilled = origin }, publication, .{ .fulfilled = origin } });
+    log.count = 0;
+    try client.applyBlueprintChangesObserved(&changes, log.observer());
+    try log.expect(&.{});
+    client.blueprints.cleanup(a, std.math.maxInt(usize));
+    try client.applyBlueprintChangesObserved(&changes, log.observer());
+    try log.expect(&.{});
+}
+
+test "failed blueprint preflight never notifies or fulfills preceding changes" {
+    const a = std.testing.allocator;
+    var client = try World.init(a, &test_layout);
+    defer client.deinit();
+    try insertTestBlueprint(&client, 1, .{ 31, 10, 10 }, .{ 1, 1, 1 }, &.{.planks});
+    var invalid = try client.blueprints.prepareInstance(a, client.layout, 2, 1, 1, .{ 35, 10, 10 }, 0);
+    defer invalid.deinit(a);
+    invalid.definition_id = 99;
+    var log: BlueprintObserverTestLog = .{};
+    try std.testing.expectError(error.UnknownDefinition, client.applyBlueprintChangesObserved(&.{
+        .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } },
+        .{ .instance = invalid },
+    }, log.observer()));
+    try log.expect(&.{});
+    try std.testing.expect(!client.blueprints.instances.get(1).?.isFulfilled(0));
+    try std.testing.expect(client.blueprints.targetAt(.{ 31, 10, 10 }) != null);
 }
 
 test "client blueprint package ignores fulfillment before a future instance appears" {
