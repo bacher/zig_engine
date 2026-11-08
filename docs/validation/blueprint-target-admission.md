@@ -2,7 +2,7 @@
 
 Date: 2026-11-08. Baseline: `b73e671` (merged PR #51). Branch: `codex/blueprint-target-only-admission`.
 
-This follow-up removes existing-dependent enumeration from Apply and stops copying construction-marker lists used only by that pass. New completed targets and full physical bottom platforms are still validated. The service uses a shared pure region collector: the rotated box expanded by 28 along X/Y and downward, with no upward support extension, rounded to canonical deduplicated chunks. Every whole box record remains available for publication, including cavities.
+This follow-up removes existing-dependent enumeration from Apply and stops copying construction-marker lists used only by that pass. Detached admission also omits road geometry, which structural validation does not read; road block materials remain in the snapshot. New completed targets and full physical bottom platforms are still validated. The service uses a shared pure region collector: the rotated box expanded by 28 along X/Y and downward, with no upward support extension, rounded to canonical deduplicated chunks. Every whole box record remains available for publication, including cavities.
 
 The mutation FIFO, chunk/global-overlay version checks, retries, atomic publication, inventory/progress accounting, persistence and five-neighbor fulfillment retain their existing behavior. This does not implement the hybrid admission/scheduling design in PR #48.
 
@@ -10,7 +10,7 @@ The [batch argument](../../specs/features/blueprints.md#monotone-batch-admission
 
 ## Correctness
 
-Focused Debug verification:
+Original focused Debug verification at `6fbf948`:
 
 - `zig build test-blueprint-admission -Doptimize=Debug --summary all`: 84 tests passed.
 - `zig build test-blueprint-service --cache-dir /private/tmp/blueprint-target-admission-zig-cache --summary all`: 532 tests passed.
@@ -18,6 +18,10 @@ Focused Debug verification:
 The admission fixtures compare old real/planned roots before and after the whole proposed overlay using fresh and shared validator caches. They cover both crushed-bridge orientations and six-cell prefixes, independent plank/mixed-reinforced routes at height limits, earth/sand footprints, roads, water/snow and cavity contents. All allowed new materials retain target checks; malformed support, occupancy, missing data, immutable targets, overlap, physical-platform and allocation-failure cases remain guarded.
 
 Region fixtures cover all four rotations, exact chunk boundaries, wrapped-X seams and deduplication before the cap, finite Y/Z clipping, bottom platforms and cavity-only publication sources. The service fixture checks full-index preservation and rejection after support-only chunk, cavity-index chunk or global-overlay revision changes, with no partial instance or journal mutation.
+
+The review follow-up adds a differential fixture using the production collector and an independently enumerated whole-world snapshot of the same 128³ resident world. Eight rotation/translation cases exercise a 28-cell reinforced support route at chunk edges and the X seam. An upper target depends on its outermost source chunk; a separate lowest target has a full physical platform. Both snapshots must accept with the same semantic instance, footprint, target identities/materials and retained index memberships, or reject a broken source with the same code. Removing the required outer chunk from only the narrow snapshot must also reject. The restored, well-formed test definition deliberately needs external support, so internal blueprint support cannot hide a collector omission.
+
+Road geometry independence is covered by the existing structural-rule fixture that panics if its shape callback is read, across road/custom supports and nine target material families. Removing the detached road slice removes its clone/free/accounting and the unused shape callback together; block materials, immutable masks, complete indexes and revision checks remain.
 
 ## Benchmark method
 
@@ -41,7 +45,9 @@ For the baseline, archive `b73e671` into a separate directory, copy this revisio
 zig build bench-blueprint -Doptimize=ReleaseFast -- --admission-only --legacy-region --sample baseline-1
 ```
 
-## Results
+## Paired results at `6fbf948`
+
+These paired measurements predate the review follow-up removing the road-geometry slice from each snapshot record. The fixtures contain no road records; they do not measure the saving from avoiding road-record copies in road-rich chunks. The current harness verification is recorded separately below.
 
 All six cases reduce input from **384 to 108 chunks**, retaining **32 footprint chunks**, **31,212 physical foundation reads**, and **10,110 / 320,000 validated new targets** for sparse/dense designs. Existing dependent checks change from 14,336 to zero in the real/planned-neighbor cases. No-neighbor cases had zero dependents in both versions.
 
@@ -60,6 +66,17 @@ Sparse helper preparation with existing neighbors improves by about 28–30%. De
 
 The unchanged four-chunk-per-turn copy budget would require 27 rather than 96 copy turns for this fully resident input. This is a work-count consequence, not a measured service latency. Timings exclude source loading/generation, world-service scheduling, journal/source waits, final version/recipient preflight, authority publication, client copies/meshing/rendering and persistence. They do not establish whole-server throughput or FPS. Helper peak and retained publication allocations remain dominated by the new target index and are recorded in the raw output.
 
-## Full verification
+## Full verification at `6fbf948`
 
 `zig build install test test-blueprint-admission -Doptimize=ReleaseFast --summary all` passed all 58 steps: **1,912 tests passed, eight existing tests skipped**. Both applications build. Focused Debug suites above additionally exercise allocation failures and service behavior. Formatting, diff checks, spec schema/stable IDs and local document links were checked before publication. No graphical playtest was needed for this service/helper-only change.
+
+## Review follow-up verification
+
+- Focused Debug admission suite: **90 tests passed**, including the differential matrix and the collector tests it imports.
+- Focused Debug service suite: **533 tests passed**.
+- `zig build install test test-blueprint-admission -Doptimize=ReleaseFast --summary all`: **58 steps succeeded, 1,926 tests passed, eight existing skips**; both applications build.
+- Formatting and diff checks passed.
+
+All six current ReleaseFast benchmark cases passed counter and allocation-cleanup assertions. They retain 108 source chunks, 32 footprint chunks, 31,212 platform reads and the same target/dependent counts. Snapshot requested ownership is now **3,564,824 bytes** without planned neighbors and **4,571,748 bytes** with planned neighbors: 4,096 bytes less than `6fbf948` in each case because the snapshot records no longer contain a road slice. The fixtures contain no road records; avoiding the additional record copies and nonempty-slice allocations in road-rich chunks is not timed here. No new runtime validation or traversal is added.
+
+The [current raw run](blueprint-target-admission-review-benchmark.txt), sample `review-follow-up`, is a single harness verification after the test jobs finished, without a dedicated warmup or paired baseline. Its timings are not used to claim a further speedup; the paired results above remain attached to their measured revision.

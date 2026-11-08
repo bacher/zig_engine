@@ -1879,18 +1879,16 @@ pub const WorldDataService = struct {
             const cell: [3]u32 = .{ @as(u32, @intCast(coords[0])) * CHUNK_SIZE + local[0], @as(u32, @intCast(coords[1])) * CHUNK_SIZE + local[1], local[2] };
             if (cell[2] < self.worker_state.generator.deeprockThickness(cell[0], cell[1])) try immutable.append(self.allocator, @intCast(index));
         };
-        const estimate = blueprint_admission.estimatedChunkBytes(chunk.metadata.roads.items.len, immutable.items.len, source_index);
+        const estimate = blueprint_admission.estimatedChunkBytes(immutable.items.len, source_index);
         if (estimate > 128 * 1024 * 1024 -| task.snapshot_bytes) return error.Capacity;
         const blocks = try self.allocator.create(@import("world_chunk_data.zig").WorldChunkData);
         errdefer self.allocator.destroy(blocks);
         blocks.* = chunk.content.toData();
-        const road_records = try self.allocator.dupe(@import("road_data.zig").Road, chunk.metadata.roads.items);
-        errdefer self.allocator.free(road_records);
         const mask = try immutable.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(mask);
         var index = try source_index.clone(self.allocator);
         errdefer index.deinit(self.allocator);
-        try task.snapshot.chunks.put(self.allocator, id, .{ .revision = chunk.chunk_revision, .blocks = blocks, .roads = road_records, .immutable = mask, .index = index });
+        try task.snapshot.chunks.put(self.allocator, id, .{ .revision = chunk.chunk_revision, .blocks = blocks, .immutable = mask, .index = index });
         task.snapshot_bytes += estimate;
     }
 

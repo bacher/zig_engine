@@ -7,7 +7,6 @@ const runtime = @import("blueprint_runtime.zig");
 const rules = @import("block_rules.zig");
 const consts = @import("consts.zig");
 const WorldChunkData = @import("world_chunk_data.zig").WorldChunkData;
-const Road = @import("road_data.zig").Road;
 const transforms = @import("block_transformations.zig");
 pub const ChunkId = consts.ChunkId;
 pub const Cell = runtime.Cell;
@@ -15,16 +14,14 @@ pub const default_max_snapshot_bytes: usize = 128 * 1024 * 1024;
 
 /// Apply this before cloning the next source chunk. Slice clones allocate from
 /// their lengths; the index bound includes its retained hash/list capacities.
-pub fn estimatedChunkBytes(road_len: usize, immutable_len: usize, index: runtime.ChunkIndex) usize {
+pub fn estimatedChunkBytes(immutable_len: usize, index: runtime.ChunkIndex) usize {
     return @sizeOf(WorldChunkData) +|
-        road_len *| @sizeOf(Road) +|
         immutable_len *| @sizeOf(transforms.BlockIndex) +|
         index.estimatedOwnedBytes();
 }
 pub const ChunkSnapshot = struct {
     revision: u64,
     blocks: *WorldChunkData,
-    roads: []const Road = &.{},
     /// Sorted canonical floor indices captured from the source generator,
     /// independently of corrupted or hypothetical physical block contents.
     immutable: []const transforms.BlockIndex = &.{},
@@ -32,14 +29,13 @@ pub const ChunkSnapshot = struct {
 
     pub fn deinit(self: *ChunkSnapshot, allocator: std.mem.Allocator) void {
         allocator.destroy(self.blocks);
-        allocator.free(self.roads);
         allocator.free(self.immutable);
         self.index.deinit(allocator);
         self.* = undefined;
     }
 
     pub fn estimatedOwnedBytes(self: ChunkSnapshot) usize {
-        return estimatedChunkBytes(self.roads.len, self.immutable.len, self.index);
+        return estimatedChunkBytes(self.immutable.len, self.index);
     }
 };
 
@@ -104,7 +100,7 @@ const View = struct {
     publication: ?*const runtime.PreparedPublication = null,
 
     fn reader(self: *View) rules.Reader {
-        return .{ .layout = &self.snapshot.layout, .context = self, .block_at = read, .custom_shape_at = shape, .immutable_at = immutable, .playable_y_inset = self.snapshot.playable_y_inset };
+        return .{ .layout = &self.snapshot.layout, .context = self, .block_at = read, .immutable_at = immutable, .playable_y_inset = self.snapshot.playable_y_inset };
     }
 
     fn target(self: *const View, cell: Cell) ?runtime.Target {
@@ -119,14 +115,6 @@ const View = struct {
         const chunk = self.snapshot.chunks.get(chunkId(&self.snapshot.layout, cell)) orelse return null;
         if (self.publication != null) if (self.target(cell)) |planned| return planned.material;
         return chunk.blocks.blocks[cell[2] % 32][cell[1] % 32][cell[0] % 32];
-    }
-
-    fn shape(context: *anyopaque, cell: Cell) ?engine.voxel_chunk.custom_block.Shape {
-        const self: *View = @ptrCast(@alignCast(context));
-        const chunk = self.snapshot.chunks.get(chunkId(&self.snapshot.layout, cell)) orelse return null;
-        const local = localIndex(cell);
-        for (chunk.roads) |road| if (road.index == local) return road.shape();
-        return null;
     }
 
     fn immutable(context: *anyopaque, cell: Cell) bool {
@@ -580,4 +568,199 @@ test "all detached admission allocation failures preserve snapshot and free publ
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFixture, .{ &fixture, definition, instance });
     try std.testing.expectEqual(@as(usize, 0), fixture.state.instances.count());
     try std.testing.expect(fixture.state.targetAt(instance.origin) == null);
+}
+
+const DifferentialAdmissionWorld = struct {
+    resident: Snapshot,
+
+    fn init(layout: engine.WorldLayout) !DifferentialAdmissionWorld {
+        var result: DifferentialAdmissionWorld = .{ .resident = .{ .layout = layout, .overlay_revision = 7 } };
+        errdefer result.resident.deinit(std.testing.allocator);
+        for (0..@intCast(layout.size_in_chunks[2])) |z| for (0..@intCast(layout.size_in_chunks[1])) |y| for (0..@intCast(layout.size_in_chunks[0])) |x| {
+            const blocks = try std.testing.allocator.create(WorldChunkData);
+            errdefer std.testing.allocator.destroy(blocks);
+            blocks.* = WorldChunkData.initEmpty();
+            try result.resident.chunks.put(std.testing.allocator, layout.encodeChunkCoords(.{ @intCast(x), @intCast(y), @intCast(z) }), .{ .revision = 1, .blocks = blocks });
+        };
+        return result;
+    }
+
+    fn canonical(self: *const DifferentialAdmissionWorld, cell: rules.Cell) Cell {
+        return .{ @intCast(@mod(cell[0], self.resident.layout.size_in_blocks[0])), @intCast(cell[1]), @intCast(cell[2]) };
+    }
+
+    fn put(self: *DifferentialAdmissionWorld, cell: rules.Cell, material: rules.BlockType) void {
+        const normalized = self.canonical(cell);
+        const chunk = self.resident.chunks.getPtr(chunkId(&self.resident.layout, normalized)).?;
+        chunk.blocks.blocks[normalized[2] % 32][normalized[1] % 32][normalized[0] % 32] = material;
+    }
+
+    fn cloneSelected(self: *const DifferentialAdmissionWorld, ids: []const ChunkId) !Snapshot {
+        const allocator = std.testing.allocator;
+        var result: Snapshot = .{ .layout = self.resident.layout, .overlay_revision = self.resident.overlay_revision };
+        errdefer result.deinit(allocator);
+        for (ids) |id| {
+            const source = self.resident.chunks.get(id).?;
+            const blocks = try allocator.create(WorldChunkData);
+            errdefer allocator.destroy(blocks);
+            blocks.* = source.blocks.*;
+            var index = try source.index.clone(allocator);
+            errdefer index.deinit(allocator);
+            const immutable = try allocator.dupe(transforms.BlockIndex, source.immutable);
+            errdefer allocator.free(immutable);
+            try result.chunks.put(allocator, id, .{ .revision = source.revision, .blocks = blocks, .immutable = immutable, .index = index });
+        }
+        return result;
+    }
+};
+
+fn expectSamePublication(expected: runtime.PreparedPublication, actual: runtime.PreparedPublication) !void {
+    const left = expected.instance;
+    const right = actual.instance;
+    try std.testing.expectEqual(left.id, right.id);
+    try std.testing.expectEqual(left.definition_id, right.definition_id);
+    try std.testing.expectEqual(left.owner, right.owner);
+    try std.testing.expectEqual(left.origin, right.origin);
+    try std.testing.expectEqual(left.rotation, right.rotation);
+    try std.testing.expectEqual(left.remaining, right.remaining);
+    try std.testing.expectEqual(left.active, right.active);
+    try std.testing.expectEqualSlices(u8, left.fulfilled, right.fulfilled);
+    try std.testing.expectEqual(left.box_chunks.len, right.box_chunks.len);
+    for (left.box_chunks) |id| try std.testing.expect(std.mem.indexOfScalar(ChunkId, right.box_chunks, id) != null);
+    try std.testing.expectEqual(expected.chunks.count(), actual.chunks.count());
+    var chunks = expected.chunks.iterator();
+    while (chunks.next()) |entry| {
+        const other = actual.chunks.get(entry.key_ptr.*).?;
+        const index = entry.value_ptr;
+        try std.testing.expectEqual(index.instances.items.len, other.instances.items.len);
+        for (index.instances.items) |id| try std.testing.expect(std.mem.indexOfScalar(u64, other.instances.items, id) != null);
+        try std.testing.expectEqual(index.targets.items.len, other.targets.items.len);
+        try std.testing.expectEqual(index.lookup.count(), other.lookup.count());
+        for (index.targets.items) |cell| {
+            const target = index.lookup.get(cell).?;
+            const other_target = other.lookup.get(cell).?;
+            try std.testing.expectEqual(target.instance_id, other_target.instance_id);
+            try std.testing.expectEqual(target.cell_index, other_target.cell_index);
+            try std.testing.expectEqual(target.material, other_target.material);
+            try std.testing.expectEqual(cell, other.targets.items[other_target.chunk_slot]);
+        }
+    }
+}
+
+test "narrow and oversized admission snapshots agree on rotated boundary support routes" {
+    const allocator = std.testing.allocator;
+    const region = @import("blueprint_admission_region.zig");
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    // Enumerate the entire resident world independently of the region collector.
+    var all_ids: [64]ChunkId = undefined;
+    var count: usize = 0;
+    for (0..4) |z| for (0..4) |y| for (0..4) |x| {
+        all_ids[count] = layout.encodeChunkCoords(.{ @intCast(x), @intCast(y), @intCast(z) });
+        count += 1;
+    };
+    // This restored, well-formed definition deliberately lacks an isolated
+    // structural certificate: its upper target must use the external staircase.
+    // A compiler-certified definition could mask missing halo data with its own
+    // internal support route above the required real bottom platform.
+    var cells = [_]rules.BlockType{.none} ** 16;
+    cells[0] = .rebar;
+    cells[15] = .rebar;
+    const definition: blueprint.Definition = .{ .size = .{ 2, 1, 8 }, .cells = &cells, .target_count = 2 };
+    try definition.validateWellFormed(blueprint.horizontalLimit(&layout), blueprint.default_max_cells);
+    for (0..4) |turn| for ([_]bool{ false, true }) |seam| {
+        const rotation: u2 = @intCast(turn);
+        const direction: rules.Cell = switch (rotation) {
+            0 => .{ 1, 0, 0 },
+            1 => .{ 0, -1, 0 },
+            2 => .{ -1, 0, 0 },
+            3 => .{ 0, 1, 0 },
+        };
+        const axis: usize = if (direction[0] != 0) 0 else 1;
+        const positive = direction[0] > 0 or direction[1] > 0;
+        var upper: rules.Cell = .{ 95, 95, 71 };
+        // Reach 28 places the required source at 31 or 64, on the far
+        // chunk boundary. Seam translations instead use canonical X=127/0.
+        if (axis == 0) upper[0] = if (direction[0] > 0) 59 else 36 else upper[1] = if (direction[1] > 0) 59 else 36;
+        if (seam) {
+            upper[0] = if (axis == 0) (if (direction[0] > 0) @as(i64, 27) else 100) else 0;
+        }
+        const offset = blueprint.rotatedCell(definition.size, .{ 1, 0, 7 }, rotation);
+        const origin: Cell = .{ @intCast(upper[0] - offset[0]), @intCast(upper[1] - offset[1]), 64 };
+        const bottom = runtime.worldCell(&layout, origin, definition.size, rotation, .{ 0, 0, 0 }).?;
+        var instance: runtime.Instance = .{
+            .id = 1,
+            .definition_id = 1,
+            .owner = 1,
+            .origin = origin,
+            .rotation = rotation,
+            .fulfilled = try allocator.dupe(u8, &.{ 0, 0 }),
+            .remaining = 2,
+            .box_chunks = try runtime.boxChunks(allocator, &layout, origin, definition.size, rotation),
+        };
+        defer instance.deinit(allocator);
+        var world = try DifferentialAdmissionWorld.init(layout);
+        defer world.resident.deinit(allocator);
+        for (1..4) |depth| for (0..3) |y| for (0..3) |x| world.put(rules.Cell{ bottom[0], bottom[1], bottom[2] } + rules.Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, .stone);
+        const base = upper - direction * @as(rules.Cell, @splat(28)) - rules.Cell{ 0, 0, 7 };
+        const foundation = base - rules.Cell{ 0, 0, 1 };
+        world.put(foundation, .stone);
+        world.put(base, .rebar);
+        for (1..8) |level| {
+            const start = base + direction * @as(rules.Cell, @splat(@as(i64, @intCast((level - 1) * 4)))) + rules.Cell{ 0, 0, @intCast(level) };
+            for (0..5) |step| {
+                const cell = start + direction * @as(rules.Cell, @splat(@as(i64, @intCast(step))));
+                if (!@reduce(.And, cell == upper)) world.put(cell, .rebar);
+            }
+        }
+        const footprint = instance.box_chunks[0];
+        const chunk_coords = layout.decodeChunkId(footprint);
+        const sentinel: Cell = .{ @as(u32, @intCast(chunk_coords[0])) * 32 + 31, @as(u32, @intCast(chunk_coords[1])) * 32 + 31, 95 };
+        const old_index = &world.resident.chunks.getPtr(footprint).?.index;
+        try old_index.instances.append(allocator, 99);
+        try old_index.targets.append(allocator, sentinel);
+        try old_index.lookup.put(allocator, sentinel, .{ .instance_id = 99, .cell_index = 7, .material = .planks, .chunk_slot = 0 });
+        const selected = try region.chunks(allocator, &layout, origin, definition.size, rotation, 1024);
+        defer allocator.free(selected);
+        try std.testing.expect(selected.len < all_ids.len);
+        const source_id = chunkId(&layout, world.canonical(foundation));
+        try std.testing.expect(std.mem.indexOfScalar(ChunkId, selected, source_id) != null);
+        try std.testing.expect(std.mem.indexOfScalar(ChunkId, instance.box_chunks, source_id) == null);
+        var edge: [3]i64 = .{ origin[0], origin[1], origin[2] };
+        edge[axis] += if (positive) -28 else @as(i64, blueprint.rotatedSize(definition.size, rotation)[axis]) - 1 + 28;
+        const edge_coords: [3]i32 = layout.decodeChunkId(chunkId(&layout, world.canonical(edge)));
+        const source_coords: [3]i32 = layout.decodeChunkId(source_id);
+        try std.testing.expectEqual(edge_coords[axis], source_coords[axis]);
+        // Removing the sole source rejects in both views. Keeping it accepts
+        // with identical full footprint indexes, despite different input sizes.
+        for ([_]bool{ false, true }) |broken| {
+            world.put(foundation, if (broken) .none else .stone);
+            var narrow = try world.cloneSelected(selected);
+            defer narrow.deinit(allocator);
+            var oversized = try world.cloneSelected(&all_ids);
+            defer oversized.deinit(allocator);
+            var narrow_result = try prepare(allocator, &narrow, definition, instance, .{});
+            defer if (narrow_result == .prepared) narrow_result.prepared.deinit(allocator);
+            var oversized_result = try prepare(allocator, &oversized, definition, instance, .{});
+            defer if (oversized_result == .prepared) oversized_result.prepared.deinit(allocator);
+            if (broken) {
+                try std.testing.expect(narrow_result == .rejected and oversized_result == .rejected);
+                try std.testing.expectEqual(RejectCode.composition, narrow_result.rejected.code);
+                try std.testing.expectEqual(oversized_result.rejected.code, narrow_result.rejected.code);
+            } else {
+                try std.testing.expect(narrow_result == .prepared and oversized_result == .prepared);
+                try expectSamePublication(oversized_result.prepared.publication, narrow_result.prepared.publication);
+                const published_index = narrow_result.prepared.publication.chunks.get(footprint).?;
+                try std.testing.expect(std.mem.indexOfScalar(u64, published_index.instances.items, 99) != null);
+                try std.testing.expectEqual(@as(u64, 99), published_index.lookup.get(sentinel).?.instance_id);
+                // A positive sensitivity control: only the narrow capture loses
+                // this required outer chunk. Missing source data must reject.
+                var removed = narrow.chunks.fetchRemove(source_id).?.value;
+                removed.deinit(allocator);
+                var missing = try prepare(allocator, &narrow, definition, instance, .{});
+                defer if (missing == .prepared) missing.prepared.deinit(allocator);
+                try std.testing.expect(missing == .rejected);
+                try std.testing.expectEqual(RejectCode.composition, missing.rejected.code);
+            }
+        }
+    };
 }
