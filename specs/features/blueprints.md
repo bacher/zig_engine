@@ -16,6 +16,8 @@ Runtime implementation is authorized and in progress. Requirements distinguish u
 
 The voxel app has a one-block player inventory, timed manual placement/extraction, debug spectator tools, a main-thread streamed world cache, and an authoritative `WorldDataService` worker. Client and service currently run ordinary structural validation, including potentially affected constructions. Persistent saves include terrain, construction metadata, roads, block timers, player identity, inventory, blueprint definitions, and active construction progress.
 
+The proposed [optimistic admission alternative](blueprint-optimistic-admission.md) describes potentially inconsistent reads and publication without retained admission locks. It competes with the independent [full-input-protection proposal in PR #48](https://github.com/bacher/zig_engine/pull/48); neither option is selected or implemented by these proposals. The destination behavior below remains the current runtime contract until a later choice and implementation.
+
 The selected capture design uses the player's current client view, including already-applied optimistic edits, then validates detached contents in isolation. The previous service-owned source-snapshot design is retained under [Rejected alternative: WorldDataService-owned capture](#rejected-alternative-worlddataservice-owned-capture) as decision history. It is superseded and is not a second implementation target. Authoritative destination checks still apply when applying a blueprint.
 
 This spec owns the detailed blueprint selection algorithms, size limits, normalization, UI transitions,
