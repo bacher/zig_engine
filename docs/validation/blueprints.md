@@ -143,3 +143,39 @@ ordinary structural validation, delayed safe road plans publish atomically,
 unsafe plans preserve the accepted fill, and a full road queue rejects before
 terrain/progress mutation. These checks do not replace the complete acceptance
 matrix or native UI playtesting.
+
+## Ordinary edits away from pending targets
+
+The shared client/authority dispatcher now reuses physical validation when no
+pending targets occur in any chunk intersecting the edit's inclusive ±28 cube.
+It uses the existing finite-clipped, wrapped chunk window: at most 27 index
+lookups, without allocating or enumerating targets/sites. Validator reads are
+bounded by the edit even during dependent checks. Target identity and active-box
+extraction guards precede the shortcut; nearby targets retain completed checks.
+
+`test-world` compares complete results, physical reads, allocation calls and bytes
+against ordinary validation for placements and removals with no sites, a library
+only, distant active sites and retired sites awaiting cleanup. Additional
+regressions cover all 27 intersecting chunks, inclusive boundary faces, wrapped
+seams in small/large worlds, finite edges, custom reader topology, sparse active
+cavities, planned dependents and real dependents supported by planned blocks.
+
+The [maintained placement benchmark](../../src/voxel_app/ordinary_edit_benchmark.zig)
+and [raw paired results](blueprint-ordinary-edit-locality-benchmark.txt) compare
+`c0ecb6c` with this shortcut. Distant-site plank placement drops from 96 reads and
+two allocations to 49 reads and one allocation, matching ordinary validation.
+Removal avoids two affected-set allocations in both measured fixtures. Three
+warmed process pairs observed 1.859 → 0.852 µs for placement, 0.727 → 0.587 µs for
+rejected support removal, and 1.712 → 1.232 µs for accepted side-plank removal.
+These detached synthetic checks exclude collection, service commits, rendering
+and persistence. The query adds roughly 0.07–0.08 µs versus no sites; an
+already-occupied target adds about 64 ns before its early rejection. These are
+fixture observations rather than full-game throughput or latency guarantees.
+
+Verification on 2026-11-08 passed: `zig build test-world test-blueprint-service
+-Doptimize=Debug --summary all` (325 world and 542 authority tests), `zig build
+test -Doptimize=Debug --summary all` (47/47 steps, 1,870 passed and one skipped),
+and `zig build bench-placement -Doptimize=ReleaseFast --summary all` (15/15 steps;
+maintained fixture results and allocation balance matched). Formatting and
+`git diff --check` passed. This changes validation dispatch only; gameplay rules,
+world-save format, and the five-neighbor fulfillment contract remain the same.

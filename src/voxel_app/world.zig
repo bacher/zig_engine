@@ -481,15 +481,28 @@ pub fn validateBlueprintFulfillment(physical: block_rules.Reader, state: *const 
     return .{ .status = .success };
 }
 
-/// Shared client/authority dispatch: without sites, validate the physical world once.
-/// Otherwise preserve the world with every pending target completed, while keeping
-/// physical target approval independent so miniatures grant no support.
+/// Every structural read, including dependent searches, is bounded by the edit's
+/// support cube. Chunk occupancy is a conservative proof: false positives keep
+/// completed-world validation, with at most 27 index lookups and no target scan.
+fn pendingTargetsMayAffectEdit(physical: block_rules.Reader, state: *const blueprint_runtime.State, target: [3]u32) bool {
+    // validationChunks follows the world's compiled topology. A custom reader
+    // with another topology must retain the completed-world path.
+    if (physical.periodic_x != WorldLayout.wrap_x) return true;
+    const window = validationChunks(physical.layout, target);
+    for (window.ids[0..window.count]) |id| if (state.chunkTargets(id).len != 0) return true;
+    return false;
+}
+
+/// Shared client/authority dispatch: when the edit window has no pending targets,
+/// the physical and completed views coincide and need only one ordinary check.
+/// Otherwise keep physical target approval independent of miniature support.
 pub fn validateCompletedEdit(allocator: std.mem.Allocator, physical: block_rules.Reader, state: *const blueprint_runtime.State, constructed: []const block_rules.Cell, operation: BlockOperation) EditResult {
     if (operation.blueprint != null) return validateBlueprintFulfillment(physical, state, operation);
     if (state.instances.count() == 0) return validateEdit(allocator, physical, constructed, operation);
     if (state.targetAt(operation.block) != null) return .{ .status = .target_changed };
     const cell: block_rules.Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
     if (operation.action == .remove and state.boxAt(physical.layout, operation.block) != null) return .{ .status = .constraint_violation, .failure = .{ .reason = .would_remove_support, .subject = cell } };
+    if (!pendingTargetsMayAffectEdit(physical, state, operation.block)) return validateEdit(allocator, physical, constructed, operation);
     const material = if (operation.action == .put) operation.action.put else BlockType.none;
     if (mutation_guard.validateWrites(physical, &.{.{ .block = operation.block, .material = material }})) |failure| return .{ .status = .constraint_violation, .failure = failure };
     const existing = physical.get(cell) orelse return .{ .status = .missing_data };
@@ -2486,28 +2499,35 @@ test "client blueprint package preflight is atomic across all allocation failure
     try std.testing.checkAllAllocationFailures(std.testing.allocator, blueprintPackageAllocationScenario, .{});
 }
 
-test "ordinary completed validation matches physical validation work without instances" {
+test "ordinary completed validation matches physical work with no local pending targets" {
     const a = std.testing.allocator;
-    var world = try World.init(a, &test_layout);
-    defer world.deinit();
-    for (6..9) |z| for (9..12) |y| for (9..12) |x| try setTestPhysical(&world, .{ @intCast(x), @intCast(y), @intCast(z) }, .stone);
-    for (9..13) |z| try setTestPhysical(&world, .{ 10, 10, @intCast(z) }, .planks);
-    try setTestPhysical(&world, .{ 11, 10, 11 }, .planks);
-    const constructed = [_]block_rules.Cell{
-        .{ 10, 10, 9 }, .{ 10, 10, 10 }, .{ 10, 10, 11 }, .{ 11, 10, 11 }, .{ 10, 10, 12 },
-    };
-    const cases = [_]struct { operation: BlockOperation, status: OperationStatus }{
-        .{ .operation = .{ .block = .{ 11, 10, 10 }, .action = .{ .put = .planks } }, .status = .success },
-        .{ .operation = .{ .block = .{ 10, 10, 9 }, .action = .remove }, .status = .constraint_violation },
-        .{ .operation = .{ .block = .{ 11, 10, 11 }, .action = .remove }, .status = .success },
-    };
-    var reads: usize = 0;
-    world.physical_read_counter = &reads;
-    for ([_]bool{ false, true }) |library_only| {
-        if (library_only) {
+    const Site = enum { none, library_only, distant, retired };
+    for (std.enums.values(Site)) |site| {
+        var world = try World.init(a, &test_layout);
+        defer world.deinit();
+        for (6..9) |z| for (9..12) |y| for (9..12) |x| try setTestPhysical(&world, .{ @intCast(x), @intCast(y), @intCast(z) }, .stone);
+        for (9..13) |z| try setTestPhysical(&world, .{ 10, 10, @intCast(z) }, .planks);
+        try setTestPhysical(&world, .{ 11, 10, 11 }, .planks);
+        const constructed = [_]block_rules.Cell{
+            .{ 10, 10, 9 }, .{ 10, 10, 10 }, .{ 10, 10, 11 }, .{ 11, 10, 11 }, .{ 10, 10, 12 },
+        };
+        const cases = [_]struct { operation: BlockOperation, status: OperationStatus }{
+            .{ .operation = .{ .block = .{ 11, 10, 10 }, .action = .{ .put = .planks } }, .status = .success },
+            .{ .operation = .{ .block = .{ 10, 10, 9 }, .action = .remove }, .status = .constraint_violation },
+            .{ .operation = .{ .block = .{ 11, 10, 11 }, .action = .remove }, .status = .success },
+        };
+        var reads: usize = 0;
+        world.physical_read_counter = &reads;
+        if (site != .none) {
             var saved: blueprint_runtime.SavedDefinition = .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Unused"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(BlockType, &.{.planks}), .target_count = 1 } };
             defer saved.deinit(a);
             try world.applyBlueprintChanges(&.{.{ .definition = saved }});
+        }
+        if (site == .distant or site == .retired) {
+            const origin: [3]u32 = if (site == .distant) .{ 160, 160, 10 } else .{ 10, 10, 10 };
+            const instance = try world.blueprints.prepareInstance(a, world.layout, 1, 1, 1, origin, 0);
+            try world.blueprints.insertInstance(a, world.layout, instance);
+            if (site == .retired) try std.testing.expect(world.blueprints.fulfill(world.layout, .{ .instance_id = 1, .cell_index = 0 }));
         }
         for (cases) |case| {
             reads = 0;
@@ -2525,6 +2545,94 @@ test "ordinary completed validation matches physical validation work without ins
             try std.testing.expectEqual(ordinary.allocations, shared.allocations);
             try std.testing.expectEqual(ordinary.allocated_bytes, shared.allocated_bytes);
         }
+    }
+}
+
+test "pending target locality covers the full edit cube without scanning targets" {
+    const a = std.testing.allocator;
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } });
+    const center = [3]u32{ 80, 80, 80 };
+    for (1..4) |z| for (1..4) |y| for (1..4) |x| {
+        var world = try World.init(a, &layout);
+        defer world.deinit();
+        // Include each of the 27 intersecting chunks, even when the chosen cell
+        // is outside the exact cube: chunk-level false positives are intentional.
+        try insertTestBlueprint(&world, 1, .{ @intCast(x * CHUNK_SIZE), @intCast(y * CHUNK_SIZE), @intCast(z * CHUNK_SIZE) }, .{ 1, 1, 1 }, &.{.planks});
+        try std.testing.expect(pendingTargetsMayAffectEdit(world.reader(), &world.blueprints, center));
+    };
+    for (0..3) |axis| for ([_]i64{ -28, 28 }) |offset| {
+        var world = try World.init(a, &layout);
+        defer world.deinit();
+        var target = center;
+        target[axis] = @intCast(@as(i64, center[axis]) + offset);
+        try insertTestBlueprint(&world, 1, target, .{ 1, 1, 1 }, &.{.planks});
+        try std.testing.expect(pendingTargetsMayAffectEdit(world.reader(), &world.blueprints, center));
+    };
+    var world = try World.init(a, &layout);
+    defer world.deinit();
+    try insertTestBlueprint(&world, 1, .{ 160, 160, 160 }, .{ 1, 1, 1 }, &.{.planks});
+    try std.testing.expect(!pendingTargetsMayAffectEdit(world.reader(), &world.blueprints, center));
+    var custom_reader = world.reader();
+    custom_reader.periodic_x = !WorldLayout.wrap_x;
+    try std.testing.expect(pendingTargetsMayAffectEdit(custom_reader, &world.blueprints, center));
+}
+
+test "ordinary removal still checks planned dependents and their planned support" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |planned_support| {
+        var world = try World.init(a, &test_layout);
+        defer world.deinit();
+        try setTestPhysical(&world, .{ 10, 10, 9 }, .limestone);
+        try setTestPhysical(&world, .{ 10, 10, 10 }, .planks);
+        const operation: BlockOperation = .{ .block = .{ 10, 10, 10 }, .action = .remove };
+        if (planned_support) {
+            try setTestPhysical(&world, .{ 11, 10, 10 }, .planks);
+            try setTestPhysical(&world, .{ 12, 10, 9 }, .limestone);
+            try insertTestBlueprint(&world, 1, .{ 12, 10, 10 }, .{ 1, 1, 1 }, &.{.planks});
+        } else {
+            try insertTestBlueprint(&world, 1, .{ 10, 10, 11 }, .{ 1, 1, 1 }, &.{.planks});
+        }
+        const constructed: []const block_rules.Cell = if (planned_support) &.{.{ 11, 10, 10 }} else &.{};
+        const physical = validateEdit(a, world.reader(), constructed, operation);
+        const completed = validateCompletedEdit(a, world.reader(), &world.blueprints, constructed, operation);
+        try std.testing.expectEqual(if (planned_support) OperationStatus.constraint_violation else .success, physical.status);
+        try std.testing.expectEqual(if (planned_support) OperationStatus.success else .constraint_violation, completed.status);
+        if (!planned_support) try std.testing.expectEqual(block_rules.Reason.would_remove_support, completed.failure.?.reason);
+    }
+}
+
+test "remote pending targets cannot bypass active cavity extraction guards" {
+    var world = try World.init(std.testing.allocator, &test_layout);
+    defer world.deinit();
+    var cells = [_]BlockType{.none} ** 128;
+    cells[0] = .planks;
+    cells[127] = .planks;
+    try insertTestBlueprint(&world, 1, .{ 0, 10, 10 }, .{ 128, 1, 1 }, &cells);
+    try setTestPhysical(&world, .{ 64, 10, 10 }, .planks);
+    const operation: BlockOperation = .{ .block = .{ 64, 10, 10 }, .action = .remove };
+    try std.testing.expect(!pendingTargetsMayAffectEdit(world.reader(), &world.blueprints, operation.block));
+    try std.testing.expectEqual(OperationStatus.success, validateEdit(std.testing.allocator, world.reader(), &.{}, operation).status);
+    const result = validateCompletedEdit(std.testing.allocator, world.reader(), &world.blueprints, &.{}, operation);
+    try std.testing.expectEqual(OperationStatus.constraint_violation, result.status);
+    try std.testing.expectEqual(block_rules.Reason.would_remove_support, result.failure.?.reason);
+}
+
+test "pending target locality preserves wrapped seam and finite edge protection" {
+    const a = std.testing.allocator;
+    for ([_][3]u32{ .{ 8, 8, 8 }, .{ 2, 2, 2 } }) |size| {
+        const layout = try WorldLayout.init(.{ .size_in_chunks = size });
+        var world = try World.init(a, &layout);
+        defer world.deinit();
+        const edge = layout.size_in_blocks[0] - 1;
+        try setTestPhysical(&world, .{ 0, 10, 9 }, .limestone);
+        try setTestPhysical(&world, .{ 0, 10, 10 }, .planks);
+        try world.insertChunk(.{ @intCast(size[0] - 1), 0, 0 }, WorldChunk.initEmpty());
+        try insertTestBlueprint(&world, 1, .{ edge, 10, 10 }, .{ 1, 1, 1 }, &.{.planks});
+        const operation: BlockOperation = .{ .block = .{ 0, 10, 10 }, .action = .remove };
+        try std.testing.expectEqual(WorldLayout.wrap_x, pendingTargetsMayAffectEdit(world.reader(), &world.blueprints, operation.block));
+        const result = validateCompletedEdit(a, world.reader(), &world.blueprints, &.{}, operation);
+        try std.testing.expectEqual(if (WorldLayout.wrap_x) OperationStatus.constraint_violation else .success, result.status);
+        try std.testing.expect(!pendingTargetsMayAffectEdit(world.reader(), &world.blueprints, .{ 0, layout.size_in_blocks[1] - 1, layout.size_in_blocks[2] - 1 }));
     }
 }
 
