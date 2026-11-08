@@ -1,0 +1,78 @@
+Baseline: 47fd39d (main, merged PR #52)
+Current: codex/blueprint-certified-admission
+Zig: 0.16.0; ReleaseFast; Apple M4 Max; macOS 26.7.1
+Three alternating pairs after dedicated warmups; no concurrent test/build jobs.
+blueprint_benchmark.zig sha256=e4f6ee82bef0cb3c48c14179ac2bb1eb259b79299d1afcacaf8022c5a59bdab2
+block_placement_benchmark.zig sha256=931edacbe3c885087790209ba8b237f35e110c3c346d31f9f4e244f5ed79c083
+
+=== baseline sample=baseline-1 ===
+$ zig build bench-placement -Doptimize=ReleaseFast
+200-block plank building: 3 reader calls; preview median 0.001 ms, min 0.001 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.013 us/check, min 0.013 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.074 us/check, min 0.074 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 604 reader calls; median 26.228 us/check, min 26.013 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 1850 reader calls; median 81.560 us/check, min 80.772 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 1865 reader calls; median 85.884 us/check, min 81.355 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3563 reader calls; median 152.062 us/check, min 148.607 us/check (100 checks/sample, ReleaseFast)
+unsupported seventh crushed cell (rejected): 188 reader calls; median 8.619 us/check, min 8.590 us/check (100 checks/sample, ReleaseFast)
+synthetic unsupported side rails: crushed fallback rejected: 3055 reader calls; median 134.677 us/check, min 132.230 us/check (100 checks/sample, ReleaseFast)
+
+=== certified sample=certified-1 ===
+$ zig build bench-placement -Doptimize=ReleaseFast
+200-block plank building: 30 reader calls; preview median 0.002 ms, min 0.002 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.014 us/check, min 0.014 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.075 us/check, min 0.075 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 793 reader calls; median 35.456 us/check, min 34.950 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 2363 reader calls; median 103.933 us/check, min 100.712 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 2378 reader calls; median 103.105 us/check, min 99.289 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3752 reader calls; median 158.002 us/check, min 155.306 us/check (100 checks/sample, ReleaseFast)
+unsupported seventh crushed cell (rejected): 188 reader calls; median 8.654 us/check, min 8.572 us/check (100 checks/sample, ReleaseFast)
+synthetic unsupported side rails: crushed fallback rejected: 3354 reader calls; median 147.301 us/check, min 144.208 us/check (100 checks/sample, ReleaseFast)
+
+=== certified sample=certified-2 ===
+$ zig build bench-placement -Doptimize=ReleaseFast
+200-block plank building: 30 reader calls; preview median 0.002 ms, min 0.002 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.013 us/check, min 0.012 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.074 us/check, min 0.074 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 793 reader calls; median 34.793 us/check, min 34.569 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 2363 reader calls; median 102.494 us/check, min 97.860 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 2378 reader calls; median 102.889 us/check, min 101.458 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3752 reader calls; median 157.423 us/check, min 154.267 us/check (100 checks/sample, ReleaseFast)
+unsupported seventh crushed cell (rejected): 188 reader calls; median 9.130 us/check, min 8.760 us/check (100 checks/sample, ReleaseFast)
+synthetic unsupported side rails: crushed fallback rejected: 3354 reader calls; median 148.760 us/check, min 147.879 us/check (100 checks/sample, ReleaseFast)
+
+=== baseline sample=baseline-2 ===
+$ zig build bench-placement -Doptimize=ReleaseFast
+200-block plank building: 3 reader calls; preview median 0.001 ms, min 0.001 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.013 us/check, min 0.012 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.074 us/check, min 0.072 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 604 reader calls; median 26.999 us/check, min 26.662 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 1850 reader calls; median 81.421 us/check, min 79.696 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 1865 reader calls; median 81.915 us/check, min 81.038 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3563 reader calls; median 150.856 us/check, min 147.915 us/check (100 checks/sample, ReleaseFast)
+unsupported seventh crushed cell (rejected): 188 reader calls; median 8.618 us/check, min 8.507 us/check (100 checks/sample, ReleaseFast)
+synthetic unsupported side rails: crushed fallback rejected: 3055 reader calls; median 134.218 us/check, min 131.393 us/check (100 checks/sample, ReleaseFast)
+
+=== baseline sample=baseline-3 ===
+$ zig build bench-placement -Doptimize=ReleaseFast
+200-block plank building: 3 reader calls; preview median 0.001 ms, min 0.001 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.013 us/check, min 0.012 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.074 us/check, min 0.072 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 604 reader calls; median 26.836 us/check, min 26.399 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 1850 reader calls; median 82.075 us/check, min 78.525 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 1865 reader calls; median 83.133 us/check, min 81.301 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3563 reader calls; median 149.945 us/check, min 145.734 us/check (100 checks/sample, ReleaseFast)
+unsupported seventh crushed cell (rejected): 188 reader calls; median 8.664 us/check, min 8.582 us/check (100 checks/sample, ReleaseFast)
+synthetic unsupported side rails: crushed fallback rejected: 3055 reader calls; median 134.424 us/check, min 132.263 us/check (100 checks/sample, ReleaseFast)
+
+=== certified sample=certified-3 ===
+$ zig build bench-placement -Doptimize=ReleaseFast
+200-block plank building: 30 reader calls; preview median 0.002 ms, min 0.002 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.014 us/check, min 0.014 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.073 us/check, min 0.073 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 793 reader calls; median 34.952 us/check, min 33.034 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 2363 reader calls; median 103.295 us/check, min 99.194 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 2378 reader calls; median 103.103 us/check, min 100.649 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3752 reader calls; median 162.903 us/check, min 154.518 us/check (100 checks/sample, ReleaseFast)
+unsupported seventh crushed cell (rejected): 188 reader calls; median 8.758 us/check, min 8.695 us/check (100 checks/sample, ReleaseFast)
+synthetic unsupported side rails: crushed fallback rejected: 3354 reader calls; median 149.025 us/check, min 147.873 us/check (100 checks/sample, ReleaseFast)

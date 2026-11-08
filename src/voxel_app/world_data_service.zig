@@ -228,7 +228,7 @@ const BlueprintAdmissionTask = struct {
 
     fn prepare(task: *BlueprintAdmissionTask) !blueprint_admission.Result {
         const allocator = task.service.allocator;
-        var result = try blueprint_admission.prepare(allocator, &task.snapshot, task.definition, task.instance, .{ .cancel = &task.cancel });
+        var result = try blueprint_admission.prepareCertified(allocator, &task.snapshot, task.definition, task.instance, .{ .cancel = &task.cancel });
         errdefer if (result == .prepared) result.prepared.deinit(allocator);
         if (result == .prepared) {
             try task.response_copies.ensureTotalCapacity(allocator, task.client_count);
@@ -3725,7 +3725,9 @@ test "client and authority agree with only the player's 3x3x3 chunks and ignore 
                     }
                 }
             }
-            Setup.put(&state, origin - rules.Cell{ 0, 0, 1 }, .stone);
+            // A resource foundation keeps the route's exact 28-cell boundary
+            // independent of the three-layer platform required by ordinary stone.
+            Setup.put(&state, origin - rules.Cell{ 0, 0, 1 }, .limestone);
             Setup.put(&state, origin, .rebar);
             var progress: u32 = 0;
             var level: i64 = 0;
@@ -6225,7 +6227,7 @@ test "Apply captures cavity index sources and retains every narrowed dependency 
         try service.worker_state.modified_chunks.put(a, id, chunk);
         try service.copyBlueprintDependency(task, id);
     }
-    try std.testing.expectEqual(@as(usize, 16), task.chunk_ids.len);
+    try std.testing.expectEqual(@as(usize, 12), task.chunk_ids.len);
     try std.testing.expectEqual(task.chunk_ids.len, task.snapshot.chunks.count());
     for (task.instance.box_chunks) |id| try std.testing.expect(task.snapshot.chunks.contains(id));
     const cavity_id = test_layout.encodeChunkCoords(.{ 1, 0, 2 });
@@ -6238,14 +6240,14 @@ test "Apply captures cavity index sources and retains every narrowed dependency 
     const result = try task.result.?;
     try std.testing.expect(result == .prepared);
     try std.testing.expectEqual(@as(usize, 54), result.prepared.foundation_reads);
-    try std.testing.expectEqual(@as(usize, 2), result.prepared.validated_targets);
+    try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
     const publication = result.prepared.publication.chunks.get(cavity_id).?;
     try std.testing.expectEqualSlices(u64, &.{ 99, 100 }, publication.instances.items);
     try std.testing.expectEqualSlices(blueprint_runtime.Cell, &.{neighbor}, publication.targets.items);
     try std.testing.expectEqualDeep(captured.lookup.get(neighbor).?, publication.lookup.get(neighbor).?);
     // A changed support-only source and a changed cavity publication source
     // both invalidate preparation before any publication or journal mutation.
-    for ([_]ChunkId{ test_layout.encodeChunkCoords(.{ 3, 1, 1 }), cavity_id }) |id| {
+    for ([_]ChunkId{ test_layout.encodeChunkCoords(.{ 2, 1, 1 }), cavity_id }) |id| {
         service.worker_state.modified_chunks.getPtr(id).?.chunk_revision += 1;
         try std.testing.expectError(error.StalePreparation, service.commitBlueprintApplication(task));
         service.worker_state.modified_chunks.getPtr(id).?.chunk_revision -= 1;
@@ -7036,11 +7038,11 @@ test "ordinary puts agree across dense sites while removals protect lateral plat
     try state.modified_chunks.put(a, id, WorldChunk.initEmpty());
     const chunk = state.modified_chunks.getPtr(id).?;
     try Setup.put(chunk, .{ 6, 6, 5 }, .stone, false);
-    try Setup.put(chunk, .{ 10, 10, 5 }, .stone, false);
+    for (3..6) |z| for (9..12) |y| for (9..12) |x| try Setup.put(chunk, .{ @intCast(x), @intCast(y), @intCast(z) }, .stone, false);
     for (10..13) |x| try Setup.put(chunk, .{ @intCast(x), 10, 6 }, .planks, true);
     for (3..6) |z| for (9..12) |y| for (19..22) |x| try Setup.put(chunk, .{ @intCast(x), @intCast(y), @intCast(z) }, .packed_dirt, false);
     try Setup.put(chunk, .{ 20, 10, 6 }, .tree_trunk, true);
-    try Setup.put(chunk, .{ 24, 24, 5 }, .stone, false);
+    for (3..6) |z| for (23..26) |y| for (23..26) |x| try Setup.put(chunk, .{ @intCast(x), @intCast(y), @intCast(z) }, .stone, false);
     for (10..14) |z| for (20..28) |y| for (2..10) |x| try Setup.put(chunk, .{ @intCast(x), @intCast(y), @intCast(z) }, .water, true);
     var targets: [64]rules.BlockType = @splat(.water);
     targets[0] = .planks;
@@ -7051,6 +7053,30 @@ test "ordinary puts agree across dense sites while removals protect lateral plat
     try client.insertChunk(coords, try chunk.tryClone(a));
     try client.applyBlueprintChanges(&.{ .{ .definition = state.blueprints.definitions.get(1).? }, .{ .instance = state.blueprints.instances.get(1).? } });
     const operation: BlockOperation = .{ .block = .{ 6, 6, 70 }, .action = .{ .put = .tree_trunk } };
+    // Both sides reject an isolated stone, then accept the same edit once all
+    // 27 platform cells exist, including qualifying mixed-material corners.
+    const isolated = client.previewOperation(operation);
+    try std.testing.expectEqual(OperationStatus.constraint_violation, isolated.status);
+    try std.testing.expectEqual(rules.Reason.missing_foundation, isolated.failure.?.reason);
+    try std.testing.expectEqual(@as(u32, 1), isolated.failure.?.actual);
+    try std.testing.expectEqual(@as(u32, 27), isolated.failure.?.limit);
+    {
+        const rejected = try state.tryApplyOperation(a, operation);
+        defer rejected.chunk.deinit(a);
+        try std.testing.expectEqualDeep(isolated, rejected.diagnostics);
+    }
+    try std.testing.expectEqual(rules.BlockType.none, readStateBlock(&state, operation.block));
+    try std.testing.expectEqual(@as(usize, 0), client.pending_operations.items.len);
+    const platform_materials = [_]rules.BlockType{ .stone, .dirt, .packed_dirt, .grass, .clay, .crushed_stone, .rebar, .reinforced_concrete, .metal_ore, .limestone, .coal };
+    const platform_chunk = state.modified_chunks.getPtr(id).?;
+    var platform_index: usize = 0;
+    for (3..6) |z| for (5..8) |y| for (5..8) |x| {
+        if (x == 6 and y == 6 and z == 5) continue;
+        try Setup.put(platform_chunk, .{ @intCast(x), @intCast(y), @intCast(z) }, platform_materials[platform_index % platform_materials.len], false);
+        platform_index += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 26), platform_index);
+    try client.insertChunk(coords, try platform_chunk.tryClone(a));
     const collections = &world_module.Testing.constructed_collection_calls;
     const before_client_put = collections.load(.monotonic);
     const preview = client.tryOperation(operation);
@@ -8455,7 +8481,7 @@ const BlueprintRoadSchedulingTest = struct {
             for (11..15) |x| try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ @intCast(x), y, 6 }, .{ .put = .country_road_adaptive }));
             try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ 15, y, 5 }, .{ .put = .country_road_solid }));
         }
-        try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ 25, 25, 5 }, .{ .put = .stone }));
+        try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ 25, 25, 5 }, .{ .put = .limestone }));
         return chunk;
     }
 
@@ -8927,7 +8953,7 @@ test "pending roads allow player NPC and timer progress while source holds still
     var chunk = WorldChunk.initEmpty();
     var owns_chunk = true;
     defer if (owns_chunk) chunk.deinit(a);
-    for ([_]u5{ 10, 11 }) |x| try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ x, 10, 5 }, .{ .put = .stone }));
+    for ([_]u5{ 10, 11 }) |x| try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ x, 10, 5 }, .{ .put = .limestone }));
     try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ 20, 20, 6 }, .{ .put = .dirt }));
     const event: transformations.Event = .{ .block = transformations.index(.{ 20, 20, 6 }), .kind = .compact_dirt, .due_tick = 1 };
     try chunk.metadata.timed.trySchedule(a, event);

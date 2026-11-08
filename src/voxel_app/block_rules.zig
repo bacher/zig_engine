@@ -13,6 +13,14 @@ pub const Limits = struct {
     pub const support_radius: u32 = 28;
     pub const maximum_span: u32 = @max(plank_span, reinforced_span);
 };
+/// The centered foundation shared by structural rules, blueprint certification,
+/// and physical destination admission. Soil/sand footprints are a separate rule.
+pub const Platform = struct {
+    pub const xy_radius: u32 = 1;
+    pub const width: u32 = 2 * xy_radius + 1;
+    pub const depth: u32 = 3;
+    pub const cell_count: u32 = width * width * depth;
+};
 const horizontal_search_radius = Limits.maximum_span + 1;
 const horizontal_search_width = 2 * horizontal_search_radius + 1;
 const horizontal_search_capacity = horizontal_search_width * horizontal_search_width;
@@ -124,6 +132,12 @@ pub const Reader = struct {
 /// Road support is independent of full-cube collision.
 pub fn supportsRoad(material: BlockType) bool {
     return material != .none and material != .sand and material != .leaves;
+}
+
+/// Ordinary stone needs a complete platform; other geological foundations
+/// retain their single-block support. Crushed bridge sides use their own rule.
+fn isSingleRockFoundation(material: BlockType) bool {
+    return material != .stone and material.isNaturalRock();
 }
 
 const State = struct { wood: u32 = 0, mineral: u32 = 0 };
@@ -287,10 +301,10 @@ pub const Validator = struct {
     pub fn stablePlatform(self: *Validator, cell: Cell) ReadError!bool {
         var unresolved: ?ReadError = null;
         var incomplete = false;
-        for (1..4) |depth| {
-            for (0..3) |y| {
-                for (0..3) |x| {
-                    const block = self.get(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }) catch |err| {
+        for (1..Platform.depth + 1) |depth| {
+            for (0..Platform.width) |y| {
+                for (0..Platform.width) |x| {
+                    const block = self.get(cell + Cell{ @as(i64, @intCast(x)) - Platform.xy_radius, @as(i64, @intCast(y)) - Platform.xy_radius, -@as(i64, @intCast(depth)) }) catch |err| {
                         rememberError(&unresolved, err);
                         continue;
                     };
@@ -304,11 +318,11 @@ pub const Validator = struct {
     }
 
     fn platformFailure(self: *Validator, reason: Reason, cell: Cell) Evaluation {
-        var result: Failure = .{ .reason = reason, .subject = cell, .limit = 27 };
-        for (1..4) |depth| {
-            for (0..3) |y| {
-                for (0..3) |x| {
-                    const position = cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) };
+        var result: Failure = .{ .reason = reason, .subject = cell, .limit = Platform.cell_count };
+        for (1..Platform.depth + 1) |depth| {
+            for (0..Platform.width) |y| {
+                for (0..Platform.width) |x| {
+                    const position = cell + Cell{ @as(i64, @intCast(x)) - Platform.xy_radius, @as(i64, @intCast(y)) - Platform.xy_radius, -@as(i64, @intCast(depth)) };
                     const block = self.get(position) catch {
                         result.add(position);
                         continue;
@@ -351,7 +365,7 @@ pub const Validator = struct {
             return result;
         }
         // These foundations already give the minimum height without inspecting an unused cube.
-        if (below.isNaturalRock() or (material.isWood() and below.isMineralConstruction()))
+        if (isSingleRockFoundation(below) or (material.isWood() and below.isMineralConstruction()))
             return height(cell, material, .{});
         var unresolved: ?ReadError = null;
         const platform = below.isStablePlatformMaterial() and (self.stablePlatform(cell) catch |err| blk: {
@@ -371,14 +385,15 @@ pub const Validator = struct {
     fn vertical(self: *Validator, cell: Cell, material: BlockType, below: BlockType) ReadError!Evaluation {
         const below_cell = cell - Cell{ 0, 0, 1 };
         if (below.isEarth() or below == .clay) return self.platformFailure(.earth_requires_stable_platform, cell);
+        if (below == .stone) return self.platformFailure(.missing_foundation, cell);
         if (material.isWood()) {
             if (!below.isStructural()) return failure(.incompatible_support, below_cell, 0, 0);
             if (!below.isWood()) return height(cell, material, .{});
         } else if (material == .crushed_stone) {
-            if (below.isNaturalRock()) return height(cell, material, .{});
+            if (isSingleRockFoundation(below)) return height(cell, material, .{});
             if (below != .crushed_stone) return failure(.incompatible_support, below_cell, 0, 0);
         } else {
-            if (below.isNaturalRock()) return height(cell, material, .{});
+            if (isSingleRockFoundation(below)) return height(cell, material, .{});
             if (!below.isReinforced()) return self.platformFailure(.missing_foundation, cell);
         }
         return switch (try self.evaluate(below_cell, below)) {
@@ -397,7 +412,7 @@ pub const Validator = struct {
 
     fn immediateFoundation(self: *Validator, cell: Cell, material: BlockType) ReadError!bool {
         const below = try self.get(cell - Cell{ 0, 0, 1 });
-        if (below.isNaturalRock() or (material.isWood() and below.isMineralConstruction())) return true;
+        if (isSingleRockFoundation(below) or (material.isWood() and below.isMineralConstruction())) return true;
         return below.isStablePlatformMaterial() and try self.stablePlatform(cell);
     }
 
@@ -563,7 +578,7 @@ pub const Validator = struct {
                 column_unresolved = true;
                 break :column;
             };
-            if (foundation.isNaturalRock()) return null;
+            if (isSingleRockFoundation(foundation)) return null;
             const platform = self.stablePlatform(below) catch |err| blk: {
                 rememberError(&unresolved, err);
                 break :blk false;
@@ -650,7 +665,7 @@ pub const Validator = struct {
             const direct_result = self.direct(cell, material) catch |err| self.readFailure(err, cell);
             // Keep the useful direct-material diagnostic when no lateral route exists.
             if (direct_result == .rejected and lateral.rejected.reason == .horizontal_span and
-                direct_result.rejected.reason != .missing_foundation) return direct_result;
+                (direct_result.rejected.reason != .missing_foundation or direct_result.rejected.limit == Platform.cell_count)) return direct_result;
             return lateral;
         }
         const direct_result = self.direct(cell, material) catch |err| self.readFailure(err, cell);
@@ -967,10 +982,87 @@ test "soil supports other materials only through the centered three-layer platfo
     try std.testing.expect(fixture.check(.{ 33, 30, 7 }, .tree_trunk) != null);
 }
 
+test "ordinary stone supports wood and minerals only through a complete qualifying platform" {
+    const cell: Cell = .{ 20, 20, 12 };
+    const corner = cell + Cell{ 1, 1, -3 };
+    for ([_]BlockType{ .tree_trunk, .planks, .crushed_stone, .rebar, .reinforced_concrete }) |material| {
+        var fixture: Fixture = .{ .read_center = cell };
+        defer fixture.deinit();
+        try fixture.raw(cell - Cell{ 0, 0, 1 }, .stone);
+        const isolated = fixture.check(cell, material).?;
+        try std.testing.expectEqual(Reason.missing_foundation, isolated.reason);
+        try std.testing.expectEqual(1, isolated.actual);
+        try std.testing.expectEqual(27, isolated.limit);
+        for (1..4) |depth| for (0..3) |y| for (0..3) |x| {
+            try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, .stone);
+        };
+        try std.testing.expect(fixture.check(cell, material) == null);
+        try fixture.raw(corner, .none);
+        const incomplete = fixture.check(cell, material).?;
+        try std.testing.expectEqual(Reason.missing_foundation, incomplete.reason);
+        try std.testing.expectEqual(26, incomplete.actual);
+        try std.testing.expectEqual(27, incomplete.limit);
+        try std.testing.expectEqual(1, incomplete.involved_count);
+        try std.testing.expectEqualDeep(corner, incomplete.involved[0]);
+        // Every qualifying soil-platform material can also fill a stone platform corner.
+        for ([_]BlockType{ .dirt, .packed_dirt, .grass, .clay, .metal_ore, .limestone, .coal, .deeprock, .crushed_stone, .rebar, .reinforced_concrete }) |qualifying| {
+            try fixture.raw(corner, qualifying);
+            try std.testing.expect(fixture.check(cell, material) == null);
+        }
+        fixture.missing = corner;
+        try std.testing.expectEqual(Reason.missing_data, fixture.check(cell, material).?.reason);
+        fixture.missing = null;
+        try fixture.raw(cell, material);
+        try fixture.constructed.append(std.testing.allocator, cell);
+        const removal = fixture.check(corner, .none).?;
+        try std.testing.expectEqual(Reason.would_remove_support, removal.reason);
+        try std.testing.expectEqual(Reason.missing_foundation, removal.cause.?);
+        try std.testing.expectEqual(0, fixture.outside_reads);
+    }
+}
+
+test "stone keeps nine-cell loose-material footprints and one-cell road support" {
+    const cell: Cell = .{ 20, 20, 12 };
+    var fixture: Fixture = .{ .read_center = cell };
+    defer fixture.deinit();
+    try fixture.raw(cell - Cell{ 0, 0, 1 }, .stone);
+    for ([_]BlockType{ .country_road_solid, .country_road_adaptive }) |road| {
+        try std.testing.expect(fixture.check(cell, road) == null);
+    }
+    for ([_]BlockType{ .dirt, .sand }) |material| {
+        const incomplete = fixture.check(cell, material).?;
+        try std.testing.expectEqual(if (material == .sand) Reason.sand_footprint else Reason.earth_footprint, incomplete.reason);
+        try std.testing.expectEqual(1, incomplete.actual);
+        try std.testing.expectEqual(9, incomplete.limit);
+    }
+    for (0..3) |y| for (0..3) |x| {
+        try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -1 }, .stone);
+    };
+    // These materials need no second or third layer beneath the footprint.
+    fixture.missing = cell + Cell{ 1, 1, -3 };
+    for ([_]BlockType{ .dirt, .sand, .country_road_solid, .country_road_adaptive }) |material| {
+        try std.testing.expect(fixture.check(cell, material) == null);
+    }
+    try fixture.expectSupportReadEnvelope();
+}
+
+test "geological resource foundations retain single-cell support with unavailable platform neighbors" {
+    const cell: Cell = .{ 20, 20, 12 };
+    for ([_]BlockType{ .metal_ore, .limestone, .coal, .deeprock }) |foundation| {
+        var fixture: Fixture = .{ .read_center = cell, .missing = cell + Cell{ 1, 1, -3 } };
+        defer fixture.deinit();
+        try fixture.raw(cell - Cell{ 0, 0, 1 }, foundation);
+        for ([_]BlockType{ .tree_trunk, .planks, .crushed_stone, .rebar, .reinforced_concrete }) |material| {
+            try std.testing.expect(fixture.check(cell, material) == null);
+        }
+        try fixture.expectSupportReadEnvelope();
+    }
+}
+
 test "unsuitable occupied support cannot veto a legal independent lateral route" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
-    for ([_]BlockType{ .dirt, .packed_dirt, .grass, .sand }) |below| {
+    for ([_]BlockType{ .dirt, .packed_dirt, .grass, .sand, .stone }) |below| {
         try fixture.raw(.{ 10, 10, 4 }, .tree_trunk);
         try fixture.raw(.{ 10, 10, 5 }, .planks);
         try fixture.raw(.{ 11, 10, 4 }, below);
@@ -981,10 +1073,13 @@ test "unsuitable occupied support cannot veto a legal independent lateral route"
     }
     try fixture.raw(.{ 10, 10, 4 }, .rebar);
     try fixture.raw(.{ 10, 10, 5 }, .rebar);
-    try fixture.raw(.{ 11, 10, 4 }, .crushed_stone);
-    try std.testing.expect(fixture.check(.{ 11, 10, 5 }, .reinforced_concrete) == null);
-    try fixture.raw(.{ 10, 10, 5 }, .none);
-    try std.testing.expect(fixture.check(.{ 11, 10, 5 }, .reinforced_concrete) != null);
+    for ([_]BlockType{ .crushed_stone, .stone }) |below| {
+        try fixture.raw(.{ 10, 10, 5 }, .rebar);
+        try fixture.raw(.{ 11, 10, 4 }, below);
+        try std.testing.expect(fixture.check(.{ 11, 10, 5 }, .reinforced_concrete) == null);
+        try fixture.raw(.{ 10, 10, 5 }, .none);
+        try std.testing.expect(fixture.check(.{ 11, 10, 5 }, .reinforced_concrete) != null);
+    }
     // Missing direct data supplies no support, but cannot hide a fully known
     // independently supported plank route that does not use that data.
     try fixture.raw(.{ 10, 10, 5 }, .planks);
@@ -1082,7 +1177,7 @@ test "a newly completed crushed bridge preserves the lower direct route" {
     const target: Cell = .{ 32, 20, 22 };
     const addition = target - Cell{ 1, 0, 0 };
     try fixture.raw(target + Cell{ 1, 0, 0 }, .crushed_stone);
-    try fixture.raw(target - Cell{ 0, 0, 2 }, .stone);
+    try fixture.raw(target - Cell{ 0, 0, 2 }, .limestone);
     try fixture.put(target - Cell{ 0, 0, 1 }, .crushed_stone);
     // The direct route gives height two. The new bridge has height nineteen.
     for (0..3) |level| try fixture.put(target + Cell{ 0, 0, @intCast(level) }, .crushed_stone);
@@ -1104,7 +1199,7 @@ test "legal plank insertion preserves horizontal spans and all lower and higher 
             var fixture: Fixture = .{};
             defer fixture.deinit();
             const column_height = Limits.wood_height - 2;
-            try fixture.raw(origin - Cell{ 0, 0, 1 }, .stone);
+            try fixture.raw(origin - Cell{ 0, 0, 1 }, .limestone);
             for (0..column_height - 1) |level| try fixture.existing(origin + Cell{ 0, 0, @intCast(level) }, .tree_trunk);
             const floor = origin + Cell{ 0, 0, column_height - 1 };
             // The end of the old floor already uses the full plank span. Its
@@ -1129,7 +1224,7 @@ test "legal mixed reinforced insertion preserves horizontal spans and every cons
                 var fixture: Fixture = .{};
                 defer fixture.deinit();
                 const column_height = Limits.mineral_height - 2;
-                try fixture.raw(origin - Cell{ 0, 0, 1 }, .stone);
+                try fixture.raw(origin - Cell{ 0, 0, 1 }, .limestone);
                 for (0..column_height - 1) |level| try fixture.existing(origin + Cell{ 0, 0, @intCast(level) }, if (level % 2 == 0) .rebar else .reinforced_concrete);
                 const floor = origin + Cell{ 0, 0, column_height - 1 };
                 for (0..Limits.reinforced_span + 1) |offset| try fixture.existing(floor + direction * @as(Cell, @splat(@intCast(offset))), if (offset % 2 == 0) .reinforced_concrete else .rebar);
@@ -1339,7 +1434,7 @@ test "planks and reinforced blocks inherit the lowest height across vertical and
         for (4..@as(usize, @intCast(top + 1))) |z| try fixture.put(.{ 10, 10, @intCast(z) }, construction.material);
         try std.testing.expect(fixture.check(.{ 10, 10, top + 1 }, construction.above) != null);
         // The existing top cell can inherit height one from this nearby natural ledge.
-        try fixture.raw(.{ 11, 10, top - 1 }, .stone);
+        try fixture.raw(.{ 11, 10, top - 1 }, .limestone);
         try fixture.put(.{ 11, 10, top }, construction.material);
         try fixture.put(.{ 10, 10, top + 1 }, construction.above);
         const removed = fixture.check(.{ 11, 10, top - 1 }, .none).?;
@@ -1421,7 +1516,7 @@ test "stacked overhangs keep one 28-cell window under translations, directions, 
             for ([_]u32{ 28, 29 }) |reach| {
                 var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = origin };
                 defer fixture.deinit();
-                const target = try fixture.staircase(origin, direction, reach, .stone);
+                const target = try fixture.staircase(origin, direction, reach, .limestone);
                 const result = fixture.check(target, .rebar);
                 if (reach == 28) {
                     try std.testing.expect(result == null);
@@ -1437,21 +1532,23 @@ test "stacked overhangs keep one 28-cell window under translations, directions, 
 }
 
 test "a stable platform must fit wholly inside the window and a known closer route still suffices" {
-    for ([_]u32{ 27, 28 }) |reach| {
-        var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = .{ 96, 96, 64 } };
-        defer fixture.deinit();
-        const target = try fixture.staircase(.{ 96, 96, 64 }, .{ 1, 0, 0 }, reach, .packed_dirt);
-        const result = fixture.check(target, .rebar);
-        if (reach == 27) {
-            try std.testing.expect(result == null);
-        } else {
-            try std.testing.expectEqual(Reason.support_search_limit, result.?.reason);
-            // A valid nearby side foundation makes the unresolved remote route unnecessary.
-            try fixture.raw(target + Cell{ 0, 1, -1 }, .stone);
-            try fixture.raw(target + Cell{ 0, 1, 0 }, .reinforced_concrete);
-            try std.testing.expect(fixture.check(target, .rebar) == null);
+    for ([_]BlockType{ .stone, .packed_dirt }) |foundation| {
+        for ([_]u32{ 27, 28 }) |reach| {
+            var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = .{ 96, 96, 64 } };
+            defer fixture.deinit();
+            const target = try fixture.staircase(.{ 96, 96, 64 }, .{ 1, 0, 0 }, reach, foundation);
+            const result = fixture.check(target, .rebar);
+            if (reach == 27) {
+                try std.testing.expect(result == null);
+            } else {
+                try std.testing.expectEqual(Reason.support_search_limit, result.?.reason);
+                // A valid nearby side foundation makes the unresolved remote route unnecessary.
+                try fixture.raw(target + Cell{ 0, 1, -1 }, .limestone);
+                try fixture.raw(target + Cell{ 0, 1, 0 }, .reinforced_concrete);
+                try std.testing.expect(fixture.check(target, .rebar) == null);
+            }
+            try std.testing.expectEqual(0, fixture.outside_reads);
         }
-        try std.testing.expectEqual(0, fixture.outside_reads);
     }
 }
 
@@ -1459,11 +1556,11 @@ test "removal conservatively rejects a dependent whose remaining foundation is o
     const origin: Cell = .{ 80, 80, 64 };
     var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = origin };
     defer fixture.deinit();
-    const end = try fixture.staircase(origin, .{ 1, 0, 0 }, 28, .stone);
+    const end = try fixture.staircase(origin, .{ 1, 0, 0 }, 28, .limestone);
     try fixture.raw(end, .rebar);
     // This taller fallback column keeps the offset floors legal after removing the
     // original foundation, but cannot support the last two levels of the tower.
-    try fixture.raw(.{ 81, 80, 52 }, .stone);
+    try fixture.raw(.{ 81, 80, 52 }, .limestone);
     for (53..65) |z| try fixture.raw(.{ 81, 80, @intCast(z) }, .rebar);
     try fixture.raw(end + Cell{ 0, 0, 1 }, .rebar);
     const top = end + Cell{ 0, 0, 2 };
@@ -1471,7 +1568,7 @@ test "removal conservatively rejects a dependent whose remaining foundation is o
     // The tower has another legal, low foundation within its own window, but this
     // route is beyond x=108, the removal's inclusive boundary.
     for (1..5) |offset| try fixture.raw(end + Cell{ @intCast(offset), 0, 0 }, .rebar);
-    try fixture.raw(end + Cell{ 4, 0, -1 }, .stone);
+    try fixture.raw(end + Cell{ 4, 0, -1 }, .limestone);
     var validator: Validator = .{
         .allocator = std.testing.allocator,
         .reader = .{ .layout = &fixture.layout, .context = &fixture, .block_at = Fixture.read },
@@ -1508,7 +1605,7 @@ test "dependent windows intersect the edit window and never reuse another root's
     const edit: Cell = .{ 94, 80, 67 };
     var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = edit };
     defer fixture.deinit();
-    const near = try fixture.staircase(origin, .{ 1, 0, 0 }, 28, .stone);
+    const near = try fixture.staircase(origin, .{ 1, 0, 0 }, 28, .limestone);
     try fixture.raw(near, .rebar);
     const far = near + Cell{ 1, 0, 0 };
     try fixture.raw(far, .rebar);
@@ -1531,23 +1628,29 @@ test "dependent windows intersect the edit window and never reuse another root's
     try std.testing.expect(fixture.maximum_read_distance <= 28);
 }
 
-test "a short crushed column on known natural stone needs no unresolved platform corners" {
+test "short crushed columns retain resource shortcuts while stone platforms stay inside the edit window" {
     const edit: Cell = .{ 80, 80, 64 };
     const dependent: Cell = .{ 108, 80, 80 };
-    var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = edit };
-    defer fixture.deinit();
-    // The apparent platform crosses the edit's boundary, but direct natural-stone
-    // support and the one-cell crushed run are both completely known inside it.
-    for (1..4) |depth| {
-        for (0..3) |y| {
-            for (0..3) |x| try fixture.raw(dependent + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, .stone);
+    for ([_]BlockType{ .limestone, .stone }) |foundation| {
+        var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = edit };
+        defer fixture.deinit();
+        // The full platform fits the dependent's own window, but crosses the edit's.
+        for (1..4) |depth| for (0..3) |y| for (0..3) |x| {
+            try fixture.raw(dependent + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, foundation);
+        };
+        try fixture.raw(dependent, .crushed_stone);
+        try fixture.constructed.append(std.testing.allocator, dependent);
+        const result = fixture.check(edit, .none);
+        if (foundation == .limestone) {
+            // The resource's single-cell reset and short run are completely known.
+            try std.testing.expect(result == null);
+        } else {
+            try std.testing.expectEqual(Reason.would_remove_support, result.?.reason);
+            try std.testing.expectEqual(Reason.support_search_limit, result.?.cause.?);
         }
+        try std.testing.expectEqual(0, fixture.outside_reads);
+        try std.testing.expect(fixture.maximum_read_distance <= 28);
     }
-    try fixture.raw(dependent, .crushed_stone);
-    try fixture.constructed.append(std.testing.allocator, dependent);
-    try std.testing.expect(fixture.check(edit, .none) == null);
-    try std.testing.expectEqual(0, fixture.outside_reads);
-    try std.testing.expect(fixture.maximum_read_distance <= 28);
 }
 
 test "nested unknown foundations retain their diagnostic while a known horizontal route can still succeed" {
@@ -1558,7 +1661,7 @@ test "nested unknown foundations retain their diagnostic while a known horizonta
     try fixture.raw(.{ 11, 10, 7 }, .planks);
     fixture.missing = .{ 10, 10, 4 };
     try std.testing.expectEqual(Reason.missing_data, fixture.check(.{ 12, 10, 7 }, .planks).?.reason);
-    try fixture.raw(.{ 12, 11, 6 }, .stone);
+    try fixture.raw(.{ 12, 11, 6 }, .limestone);
     try fixture.raw(.{ 12, 11, 7 }, .planks);
     try std.testing.expect(fixture.check(.{ 12, 10, 7 }, .planks) == null);
 }
@@ -1594,7 +1697,7 @@ test "a clipped successful search is recomputed when another root admits a lower
     defer fixture.deinit();
     const first = try fixture.staircase(origin, .{ -1, 0, 0 }, 28, .stone);
     try fixture.raw(first, .rebar);
-    try fixture.raw(.{ 108, 80, 52 }, .stone);
+    try fixture.raw(.{ 108, 80, 52 }, .limestone);
     for (53..65) |z| try fixture.raw(.{ 108, 80, @intCast(z) }, .rebar);
     // The first root's window ends at x=108. It can use the tall column, but
     // cannot see the lower foundation and platform corners at x=109.

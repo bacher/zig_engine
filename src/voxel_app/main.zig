@@ -3612,7 +3612,9 @@ test "observer Tab separates focus and placement previews and skips removal vali
     const target = StreamingTest.toolTarget();
     const below_chunk = test_layout.origin_chunk - ChunkCoords{ 0, 0, 1 };
     try fixture.game.world.?.insertChunk(below_chunk, WorldChunk.initEmpty());
-    fixture.game.world.?.setBlockUnchecked(.{ target[0], target[1] - 1, target[2] - 1 }, .stone);
+    // Keep this focus/cache fixture's single-cell geological foundation; literal
+    // stone platform diagnostics are covered by the structural-rule fixtures.
+    fixture.game.world.?.setBlockUnchecked(.{ target[0], target[1] - 1, target[2] - 1 }, .limestone);
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
 
     var validation_calls: usize = 0;

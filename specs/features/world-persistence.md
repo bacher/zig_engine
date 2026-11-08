@@ -755,8 +755,8 @@ mechanisms without overriding those contracts.
   normal source/read/compaction gates. Restore keys as fresh current-world reconciliation
   passes before readiness, preserving saved ownership without whole-world scans/preloads.
   Runtime cursors/repeat flags remain volatile. See [unfinished world work](deferred-world-work.md)
-  for canonical encoding, membership generations, bounds, and validation. Format 4 rejects
-  development formats 1–3 without migration.
+  for canonical encoding, membership generations, bounds, and validation. Format 4 introduced
+  these keys; the current format-5 gates reject development formats 1–4 without migration.
 
 ## Clarifications
 

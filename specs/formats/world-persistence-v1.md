@@ -3,7 +3,9 @@
 This is the normative format reference for the
 [world-persistence feature spec](../features/world-persistence.md). It contains the existing
 binary layouts, encoding rules, compatibility policy, checksums, and metadata bounds
-for current format 4. Formats 1–3 are rejected as incompatible development worlds.
+for current format 5. Formats 1–4 are rejected as incompatible development worlds.
+Version 5 retains the version-4 byte layouts and gates the changed stone support and
+blueprint certificate semantics; it adds no migration or historical ruleset.
 All R/Q identifiers refer to that feature spec;
 requirement and acceptance-criterion IDs remain there. Runtime ownership, cancellation,
 recovery procedures, and platform durability remain in the feature spec.
@@ -55,7 +57,7 @@ range, with actual decoding support for every accepted version. These are distin
 snapshot sequences, world ticks, and generator versions. The minimum is an engine support
 policy; a second per-file version field is not required for this initial design.
 
-The current writer and minimum reader version are both 4. Development formats 1–3
+The current writer and minimum reader version are both 5. Development formats 1–4
 are rejected before their gameplay records are interpreted. A version bump alone does
 not implement compatibility: incompatible changes must also raise the minimum unless
 the engine supplies every required older decoding path. Pre-release development saves
@@ -203,9 +205,9 @@ alternative algorithms are follow-up improvements, not prerequisites for this in
 
 The initial save-format version was 1; version 2 added inventory schema 1 below.
 Version 3 added the world's private blueprint library and unfinished-instance progress.
-The current writer and minimum readable version are both 4. Version 4 additionally stores
-unfinished world-work keys with each base and WAL snapshot, using current construction
-semantics. The base and every WAL segment must pass this
+The current writer and minimum readable version are both 5. Version 4 added unfinished
+world-work keys with each base and WAL snapshot. Version 5 retains that layout and gates
+platform-only direct stone support and portable blueprint certification. The base and every WAL segment must pass this
 whole-world version gate before their gameplay data is published. No migration or
 historical ruleset dispatch is provided. Fixed base/WAL header sizes remain unchanged.
 All integer fields are explicitly sized and little-endian; f32/f64 use
