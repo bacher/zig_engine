@@ -1038,20 +1038,7 @@ test "a bridge preserves every higher crushed block after any legal material fil
                         try fixture.raw(side - Cell{ 0, 0, 1 }, .stone);
                     }
                     for (0..height_count) |level| try fixture.put(bottom + Cell{ 0, 0, @intCast(level) }, .crushed_stone);
-                    try fixture.put(bottom - Cell{ 0, 0, 1 }, material);
-                    const reader: Reader = .{ .layout = &fixture.layout, .context = &fixture, .block_at = Fixture.read };
-                    var shared: Validator = .{ .allocator = std.testing.allocator, .reader = reader };
-                    defer shared.deinit();
-                    for ([_]bool{ false, true }) |reverse| {
-                        for (0..height_count) |index| {
-                            const level = if (reverse) height_count - 1 - index else index;
-                            const cell = bottom + Cell{ 0, 0, @intCast(level) };
-                            var fresh: Validator = .{ .allocator = std.testing.allocator, .reader = reader };
-                            defer fresh.deinit();
-                            try std.testing.expect(fresh.checkExisting(cell) == null);
-                            try std.testing.expect(shared.checkExisting(cell) == null);
-                        }
-                    }
+                    try fixture.expectLegalInsertionPreservesAllExisting(bottom - Cell{ 0, 0, 1 }, material);
                     // A bridge starts a new run; it does not remove the six-cell cap.
                     if (height_count == Limits.crushed_column) {
                         const overlong = fixture.check(bottom + Cell{ 0, 0, Limits.crushed_column }, .crushed_stone).?;

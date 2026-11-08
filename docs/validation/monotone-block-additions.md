@@ -262,3 +262,18 @@ This observer covers actual reader callbacks, not clipped/out-of-world requests 
 before the callback or cache-evidence reuse eligibility. Those retain their existing tests.
 `zig build test-world -Doptimize=Debug --summary all` passes **306/306 tests**; formatting
 and `git diff --check` pass. Only test instrumentation changed.
+
+## Review follow-up: independent crushed-material matrix, 2026-11-08
+
+The 264-case bridge matrix now uses the same independent insertion helper as the all-cell
+contract regressions: validate the existing cells first, approve only the new target,
+then revalidate the old cells in their own windows. It retains both fresh and shared
+validators in both traversal orders, adds the asymmetric callback envelope assertions,
+and removes the duplicate manual post-insertion traversal. All eleven placeable insertion
+materials, six column heights, both bridge axes, and both translations remain covered.
+The separate rejection of a seventh cell above a six-cell bridge run is unchanged.
+
+The earlier matrix already failed if an insertion invalidated a dependent; this change
+makes the proof independent of that admission path and explicitly verifies the baseline.
+`zig build test-world -Doptimize=Debug --summary all` passes **306/306 tests**; formatting
+and `git diff --check` pass. No production logic changed.
