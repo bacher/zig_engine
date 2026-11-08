@@ -150,10 +150,12 @@ Implementation evidence and measured defaults are recorded in the
   snow, and foliage do not qualify. Soil may also use sand in its `3 × 3` support footprint,
   without making sand structural. Natural generated terrain remains exempt from construction
   validation, as it is today.
-- R17: Sand cannot directly support buildings, trunks, planks, masonry, reinforced
-  materials, or either road type. Of currently relevant placeable blocks, only soil and
-  sand may be placed directly on sand, subject to their footprint rules. Water and foliage
-  do not supply such footprints. Sand is never a stable-platform material.
+- R17: Sand cannot provide direct support for buildings, trunks, planks, masonry,
+  reinforced materials, or either road type. Soil and sand may use it in their footprints.
+  A legal independent lateral construction route may span above sand; water and standalone
+  snow require no structural support and may also be placed above it. Water, snow, and foliage
+  do not supply footprints. Sand is never a stable-platform material. See the
+  [additive-validity rules](monotone-block-additions.md).
 - R18: Temporarily allow construction on a valid soil platform above remaining sand,
   confirmed by the user. Preserve existing platform resets and bounded support validation;
   this iteration requires no proof of a continuous foundation down to rock. R17 still

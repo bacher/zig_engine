@@ -498,6 +498,7 @@ pub const Validator = struct {
 
     fn crushedBridge(self: *Validator, cell: Cell) ReadError!Evaluation {
         var pending: ?ReadError = null;
+        var best: ?State = null;
         for ([_]Cell{ .{ 1, 0, 0 }, .{ 0, 1, 0 } }) |direction| {
             var states: [2]State = undefined;
             var valid = true;
@@ -526,14 +527,62 @@ pub const Validator = struct {
                 rememberError(&pending, err);
                 continue;
             }
-            return .{ .supported = .{ .mineral = @max(1, @min(states[0].mineral, states[1].mineral)) } };
+            const state: State = .{ .mineral = @max(1, @min(states[0].mineral, states[1].mineral)) };
+            if (state.mineral == 1) return .{ .supported = state };
+            if (best == null or state.mineral < best.?.mineral) best = state;
         }
+        if (best) |state| return .{ .supported = state };
         if (pending) |err| return err;
         var result = failure(.missing_foundation, cell, 0, 2);
         for ([_]Cell{ .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 } }) |direction| {
             result.rejected.add(cell + direction);
             result.rejected.add(cell + direction - Cell{ 0, 0, 1 });
         }
+        return result;
+    }
+
+    /// The run is a geometric constraint independent of the minimum-height route.
+    /// A known short run needs no extra side probes. Longer or unavailable lower
+    /// columns can still end at an independently supported one-cell bridge.
+    fn crushedColumn(self: *Validator, cell: Cell) ReadError!?Evaluation {
+        var run: u32 = 0;
+        var below = cell;
+        var unresolved: ?ReadError = null;
+        var column_unresolved = false;
+        column: while (true) : (below[2] -= 1) {
+            const material = self.get(below) catch |err| {
+                rememberError(&unresolved, err);
+                column_unresolved = true;
+                break;
+            };
+            if (material != .crushed_stone) break;
+            run += 1;
+            if (run > Limits.crushed_column) break;
+            const foundation = self.get(below - Cell{ 0, 0, 1 }) catch |err| {
+                rememberError(&unresolved, err);
+                column_unresolved = true;
+                break :column;
+            };
+            if (foundation.isNaturalRock()) return null;
+            const platform = self.stablePlatform(below) catch |err| blk: {
+                rememberError(&unresolved, err);
+                break :blk false;
+            };
+            if (platform) return null;
+        }
+        if (run <= Limits.crushed_column and !column_unresolved) return null;
+        // Side sources use direct support, whose recursive evaluation is strictly
+        // below the bridge. Same-level bridges cannot support one another.
+        for (0..@min(run, Limits.crushed_column)) |depth| {
+            const bridge = self.crushedBridge(cell - Cell{ 0, 0, @intCast(depth) }) catch |err| {
+                rememberError(&unresolved, err);
+                continue;
+            };
+            if (bridge == .supported) return null;
+        }
+        if (unresolved) |err| return err;
+        var result = failure(.crushed_column, cell, run, Limits.crushed_column);
+        for (1..run) |depth| result.rejected.add(cell - Cell{ 0, 0, @intCast(depth) });
         return result;
     }
 
@@ -584,8 +633,6 @@ pub const Validator = struct {
     }
 
     fn evaluateUncached(self: *Validator, cell: Cell, material: BlockType) ReadError!Evaluation {
-        if ((material == .water or material == .snow) and (try self.get(cell - Cell{ 0, 0, 1 })) == .sand)
-            return failure(.incompatible_support, cell - Cell{ 0, 0, 1 }, 0, 0);
         if (material.isRoad()) {
             const below_cell = cell - Cell{ 0, 0, 1 };
             const below = try self.get(below_cell);
@@ -602,28 +649,7 @@ pub const Validator = struct {
         }
         if (material.isEarth() or material == .sand) return self.footprint(cell, material);
         if (!material.isWood() and !material.isMineralConstruction()) return .{ .supported = .{} };
-        if (material == .crushed_stone) {
-            var run: u32 = 0;
-            var below = cell;
-            var unresolved: ?ReadError = null;
-            while (try self.get(below) == .crushed_stone) : (below[2] -= 1) {
-                run += 1;
-                if (run > Limits.crushed_column) {
-                    if (unresolved) |err| return err;
-                    var result = failure(.crushed_column, cell, run, Limits.crushed_column);
-                    for (1..run) |depth| result.rejected.add(cell - Cell{ 0, 0, @intCast(depth) });
-                    return result;
-                }
-                // An exposed rock contact is a complete direct foundation;
-                // especially at deeprock's irregular floor, no box is needed.
-                if ((try self.get(below - Cell{ 0, 0, 1 })).isNaturalRock()) break;
-                const platform = self.stablePlatform(below) catch |err| blk: {
-                    rememberError(&unresolved, err);
-                    break :blk false;
-                };
-                if (platform) break;
-            }
-        }
+        if (material == .crushed_stone) if (try self.crushedColumn(cell)) |rejected| return rejected;
         if (material == .planks or material.isReinforced()) {
             const lateral = self.horizontal(cell, material, if (material == .planks) Limits.plank_span else Limits.reinforced_span) catch |err| self.readFailure(err, cell);
             if (lateral == .supported) return lateral;
@@ -638,7 +664,11 @@ pub const Validator = struct {
             return direct_result;
         if (material == .crushed_stone) {
             const bridge = self.crushedBridge(cell) catch |err| self.readFailure(err, cell);
-            if (bridge == .supported) return bridge;
+            if (bridge == .supported) {
+                if (direct_result == .supported and direct_result.supported.mineral <= bridge.supported.mineral)
+                    return direct_result;
+                return bridge;
+            }
             const below = try self.get(cell - Cell{ 0, 0, 1 });
             if (below == .none) return bridge;
         }
@@ -693,10 +723,6 @@ pub const Validator = struct {
         self.beginCheck(cell);
         const material = try self.get(cell);
         if (material.isRoad()) {
-            const delta = self.reader.displacement(cell, edit.cell);
-            return depth == 1 and delta[0] == 0 and delta[1] == 0;
-        }
-        if (material == .water or material == .snow) {
             const delta = self.reader.displacement(cell, edit.cell);
             return depth == 1 and delta[0] == 0 and delta[1] == 0;
         }
@@ -791,6 +817,19 @@ const Fixture = struct {
         try self.blocks.put(std.testing.allocator, reader.normalize(cell) orelse return error.TestUnexpectedResult, material);
     }
 
+    /// Alternating gaps keep every vertical run short without forming a 3x3
+    /// platform. At level n, each existing block inherits mineral height n+1.
+    fn crushedBraid(self: *Fixture, origin: Cell, direction: Cell, levels: u32) !void {
+        for (0..levels) |level| {
+            const radius: i64 = @intCast(3 + (levels - 1) / 2 - level / 2);
+            var offset = -radius;
+            while (offset <= radius) : (offset += 1) {
+                if (level % 2 == 0 and @mod(offset, 2) != @as(i64, @intCast((level / 2) % 2))) continue;
+                try self.raw(origin + direction * @as(Cell, @splat(offset)) + Cell{ 0, 0, @intCast(level) }, .crushed_stone);
+            }
+        }
+    }
+
     fn staircase(self: *Fixture, origin: Cell, direction: Cell, reach: u32, foundation: BlockType) !Cell {
         for (1..4) |depth| {
             for (0..3) |y| {
@@ -882,7 +921,7 @@ test "unsuitable occupied support cannot veto a legal independent lateral route"
     try std.testing.expectEqual(Reason.missing_data, fixture.check(.{ 11, 10, 5 }, .planks).?.reason);
 }
 
-test "crushed bridges retain their side and consecutive-run requirements over unsuitable support" {
+test "independent crushed bridges reset an otherwise overlong column" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     const target: Cell = .{ 20, 20, 12 };
@@ -896,19 +935,120 @@ test "crushed bridges retain their side and consecutive-run requirements over un
     try std.testing.expect(fixture.check(target, .crushed_stone) != null);
     try fixture.raw(target + Cell{ 1, 0, -1 }, .stone);
     for (1..7) |depth| try fixture.raw(target - Cell{ 0, 0, @intCast(depth) }, .crushed_stone);
+    try std.testing.expect(fixture.check(target, .crushed_stone) == null);
+    try fixture.raw(target + Cell{ 1, 0, -1 }, .none);
     try std.testing.expectEqual(Reason.crushed_column, fixture.check(target, .crushed_stone).?.reason);
 }
 
-test "water and snow are affected direct dependents when sand is placed beneath them" {
+test "water and snow remain valid when sand is placed beneath them" {
     for ([_]BlockType{ .water, .snow }) |material| {
         var fixture: Fixture = .{};
         defer fixture.deinit();
         try fixture.put(.{ 10, 10, 5 }, material);
-        const rejected = fixture.check(.{ 10, 10, 4 }, .sand).?;
-        try std.testing.expectEqual(Reason.would_invalidate_structure, rejected.reason);
-        try std.testing.expectEqual(Reason.incompatible_support, rejected.cause.?);
-        try std.testing.expectEqualDeep(Cell{ 10, 10, 5 }, rejected.subject);
+        try fixture.put(.{ 10, 10, 4 }, .sand);
+        try std.testing.expect(fixture.check(.{ 10, 10, 5 }, material) == null);
     }
+}
+
+test "a bridge preserves every higher crushed block after any legal material fills the gap below" {
+    const translated_x: i64 = if (engine.WorldLayout.wrap_x) 63 else 40;
+    for ([_]Cell{ .{ 20, 20, 5 }, .{ translated_x, 20, 5 } }) |bottom| {
+        for ([_]Cell{ .{ 1, 0, 0 }, .{ 0, 1, 0 } }) |direction| {
+            for (1..Limits.crushed_column + 1) |height_count| {
+                for (std.enums.values(BlockType)) |material| {
+                    if (!material.isPlaceable()) continue;
+                    var fixture: Fixture = .{};
+                    defer fixture.deinit();
+                    for ([_]i64{ -1, 1 }) |sign| {
+                        const side = bottom + direction * @as(Cell, @splat(sign));
+                        try fixture.raw(side, .stone);
+                        try fixture.raw(side - Cell{ 0, 0, 1 }, .stone);
+                    }
+                    for (0..height_count) |level| try fixture.put(bottom + Cell{ 0, 0, @intCast(level) }, .crushed_stone);
+                    try fixture.put(bottom - Cell{ 0, 0, 1 }, material);
+                    const reader: Reader = .{ .layout = &fixture.layout, .context = &fixture, .block_at = Fixture.read };
+                    var shared: Validator = .{ .allocator = std.testing.allocator, .reader = reader };
+                    defer shared.deinit();
+                    for ([_]bool{ false, true }) |reverse| {
+                        for (0..height_count) |index| {
+                            const level = if (reverse) height_count - 1 - index else index;
+                            const cell = bottom + Cell{ 0, 0, @intCast(level) };
+                            var fresh: Validator = .{ .allocator = std.testing.allocator, .reader = reader };
+                            defer fresh.deinit();
+                            try std.testing.expect(fresh.checkExisting(cell) == null);
+                            try std.testing.expect(shared.checkExisting(cell) == null);
+                        }
+                    }
+                    // A bridge starts a new run; it does not remove the six-cell cap.
+                    if (height_count == Limits.crushed_column) {
+                        const overlong = fixture.check(bottom + Cell{ 0, 0, Limits.crushed_column }, .crushed_stone).?;
+                        try std.testing.expectEqual(Reason.crushed_column, overlong.reason);
+                    }
+                }
+            }
+        }
+    }
+}
+
+test "a newly completed crushed bridge orientation preserves the lower existing route" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.crushedBraid(.{ 32, 20, 4 }, .{ 1, 0, 0 }, 19);
+    const target: Cell = .{ 32, 20, 22 };
+    const addition = target - Cell{ 1, 0, 0 };
+    try fixture.raw(addition, .none);
+    for ([_]i64{ -1, 1 }) |side| {
+        try fixture.raw(target + Cell{ 0, side, 0 }, .stone);
+        try fixture.raw(target + Cell{ 0, side, -1 }, .stone);
+    }
+    // The y bridge gives height one. Completing the x bridge later gives height
+    // nineteen, so choosing the first orientation would reject the top at 21.
+    for (0..3) |level| try fixture.put(target + Cell{ 0, 0, @intCast(level) }, .crushed_stone);
+    try fixture.put(addition, .crushed_stone);
+    var validator: Validator = .{
+        .allocator = std.testing.allocator,
+        .reader = .{ .layout = &fixture.layout, .context = &fixture, .block_at = Fixture.read },
+    };
+    defer validator.deinit();
+    const top = target + Cell{ 0, 0, 2 };
+    try std.testing.expect(validator.checkExisting(top) == null);
+    try std.testing.expectEqual(3, validator.cache.get(top).?.state.mineral);
+}
+
+test "a newly completed crushed bridge preserves the lower direct route" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    for ([_]i64{ 31, 33 }) |x| try fixture.crushedBraid(.{ x, 20, 4 }, .{ 0, 1, 0 }, 19);
+    const target: Cell = .{ 32, 20, 22 };
+    const addition = target - Cell{ 1, 0, 0 };
+    try fixture.raw(target + Cell{ 1, 0, 0 }, .crushed_stone);
+    try fixture.raw(target - Cell{ 0, 0, 2 }, .stone);
+    try fixture.put(target - Cell{ 0, 0, 1 }, .crushed_stone);
+    // The direct route gives height two. The new bridge has height nineteen.
+    for (0..3) |level| try fixture.put(target + Cell{ 0, 0, @intCast(level) }, .crushed_stone);
+    try fixture.put(addition, .crushed_stone);
+    var validator: Validator = .{
+        .allocator = std.testing.allocator,
+        .reader = .{ .layout = &fixture.layout, .context = &fixture, .block_at = Fixture.read },
+    };
+    defer validator.deinit();
+    const top = target + Cell{ 0, 0, 2 };
+    try std.testing.expect(validator.checkExisting(top) == null);
+    try std.testing.expectEqual(4, validator.cache.get(top).?.state.mineral);
+}
+
+test "known independent crushed bridges do not require unavailable lower columns" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    const target: Cell = .{ 20, 20, 12 };
+    for ([_]i64{ -1, 1 }) |side| {
+        try fixture.raw(target + Cell{ side, 0, 0 }, .stone);
+        try fixture.raw(target + Cell{ side, 0, -1 }, .stone);
+    }
+    fixture.missing = target - Cell{ 0, 0, 1 };
+    try std.testing.expect(fixture.check(target, .crushed_stone) == null);
+    try fixture.raw(target + Cell{ 1, 0, 0 }, .none);
+    try std.testing.expectEqual(Reason.missing_data, fixture.check(target, .crushed_stone).?.reason);
 }
 
 test "wood and reinforced spans count diagonal steps only through filled corners" {
@@ -1386,8 +1526,6 @@ test "sand and leaves cannot directly support construction or either road" {
         for ([_]BlockType{ .tree_trunk, .planks, .crushed_stone, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive }) |material| {
             try std.testing.expect(fixture.check(cell, material) != null);
         }
-        if (support == .sand) for ([_]BlockType{ .water, .snow }) |material|
-            try std.testing.expect(fixture.check(cell, material) != null);
     }
 }
 

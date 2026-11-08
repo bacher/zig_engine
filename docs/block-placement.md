@@ -19,15 +19,14 @@ client data produces `missing_data`, never an assumption that the missing cells 
 | Rebar and reinforced concrete | Share horizontal support and the mineral height group. |
 | Solid country road | Ordinary cube; requires solid support directly below. |
 | Adaptive country road | Custom cell (255); full-cube collision until a supported 4–12-section run forms a slope. |
-| Sand | Placeable/minable; retains a filled 3×3 footprint, has no soil timers, and directly supports only soil/sand. |
+| Sand | Placeable/minable; retains a filled 3×3 footprint, has no soil timers, and fills soil/sand footprints without providing construction support. |
 | Leaves | Opaque colliding foliage; removable without an item, with no structural support or decay. |
 | Ore, limestone, coal | Natural-rock support; mining disabled until usable resource results are configured. |
 | Clay | Packed-soil support, without compaction/grass timers; mining disabled pending resource mechanics. |
 | Deeprock | Immutable seeded bottom formation; one exposed top supplies a direct stable foundation. |
 
-Water and standalone snow keep their existing placement/collision behavior except that
-neither can be placed directly on sand. They cannot supply earth/sand footprints or stable
-platforms. Construction materials and unformed adaptive roads have full-cube collision;
+Water and standalone snow may be placed above sand, air, or other materials. They require
+no structural support and cannot supply earth/sand footprints or stable platforms. Construction materials and unformed adaptive roads have full-cube collision;
 formed roads follow their inclined surfaces. See [country roads](country-roads.md).
 
 `BlockType.miningPolicy()` is the shared explicit allowlist used by prediction and authority:
@@ -100,8 +99,8 @@ constructions. An ordinary placement first validates its new target against phys
 then validates that target and affected dependents in the completed logical view. Physical
 approval ensures miniatures supply no real support; completed target approval catches conflicts
 in the new block itself, which dependent checks skip. Both views include the proposed placement.
-Affected-dependent discovery must cover every world material, including water/snow and other
-types excluded from capture. [R39/R40](../specs/features/blueprints.md#assembly-and-completion)
+Affected-dependent discovery must follow the actual support predicates of every world
+material, including types excluded from capture. Water/snow have no support dependencies. [R39/R40](../specs/features/blueprints.md#assembly-and-completion)
 record composition examples, and the [constraints](../specs/features/blueprints.md#constraints)
 define cache separation and safe approval reuse. These checks add no work to blueprint fulfillment.
 
@@ -198,14 +197,16 @@ blueprint shortcut.
 | --- | --- | --- |
 | Trunks and planks | 12 levels | Planks: 2 steps; trunks: none |
 | Crushed stone, rebar, concrete | 20 levels | Rebar/concrete: 4 steps |
-| Crushed stone alone | At most 6 consecutive cells before a platform or material change | One-cell bridge exception below |
+| Crushed stone alone | At most 6 consecutive cells before a foundation or independently supported bridge | One-cell bridge exception below |
 | Natural stone | Unrestricted | Generated terrain |
 
 Wood starts a fresh 12-level count above an eligible non-wood foundation. Rebar and concrete
 inherit the shared mineral counter across material changes. Vertical moves increment the
 relevant counter; horizontal moves inherit it. Air does not reset height: an overhang must
 inherit a valid foundation through its horizontal supports. When several routes exist, a
-valid route within the span limit can support the block.
+valid route within the span limit can support the block. Choose the minimum supported
+height across the direct route and all eligible lateral routes, including both crushed-bridge
+orientations; adding another route cannot replace a better existing route.
 
 Horizontal transmission stays in the same z layer and material family: planks transmit
 to planks; rebar and concrete transmit to each other. Face-neighbor steps cost one. A
@@ -221,6 +222,28 @@ Crushed stone can fill one unsupported cell between two opposite horizontal ston
 neighbors. Both neighbors must have direct vertical support; another unsupported bridge
 cell cannot act as one of these sides. This exception does not permit an unlimited stone
 bridge. Multi-cell gaps need temporary supports, which are a separate future feature.
+
+An independently supported bridge stops the downward six-cell run count, including when
+crushed stone is subsequently placed below it. Seven vertically adjacent crushed cells are
+therefore legal if a suitable bridge or foundation interrupts that count. A narrow seven-cell
+column with no such support still rejects. This is independent of the mineral-height proof:
+a bridge does not itself reset the 20-level counter, which inherits the best eligible route.
+The bridge-side predicate and the one-cell gap limit remain unchanged.
+
+### Additive validity
+
+With fixed road shapes and support data, inserting a block into an empty cell preserves
+the support witnesses of previously valid higher constructions. Direct and lateral routes
+remain available, platform/footprint occupancy can only improve, and newly available routes
+cannot increase the minimum height. The bridge run reset preserves the independent support
+of a crushed bridge when a lower column grows into it.
+
+This property concerns ordinary structural rules. It does not validate the new block,
+permit occupied-cell replacement, or cover removals and road shape changes. Those still
+require their normal checks. Blueprint fulfillment can place temporarily unsupported new
+cells and keeps its existing five-neighbor rule. This change does not remove composed
+admission/dependent checks or reduce snapshot halos; those optimizations require separate
+review. See the [feature spec](../specs/features/monotone-block-additions.md).
 
 ## Fixed support window
 
@@ -274,8 +297,8 @@ player overlap. An isolated removed cube is not remembered as an empty-air targe
 Validation evaluates hypothetical contents before mutation. Both placements and removals
 are checked against potentially affected constructed cells, including changes to platform
 cubes away from a vertical support column. An edit that invalidates a construction is rejected atomically.
-This prevents support-removal exploits and adding an incompatible material beneath an
-existing overhang. Natural terrain cells are not themselves revalidated as constructions.
+This protects required supports against removal or replacement. An unsuitable new block
+below a valid overhang cannot suppress its independent lateral support. Natural terrain cells are not themselves revalidated as constructions.
 
 Operation results carry status, an optional mined material, and an optional failure:
 reason, underlying cause, affected cell, measured value, limit, and up to 32 involved cell

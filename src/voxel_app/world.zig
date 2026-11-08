@@ -2173,7 +2173,7 @@ test "blueprint target identity, unknown capture data, and whole-box extraction 
     try std.testing.expectEqual(OperationStatus.constraint_violation, client.previewOperation(.{ .block = .{ 31, 10, 10 }, .action = .remove }).status);
 }
 
-test "ordinary bridge placement validates its completed target above pending crushed column" {
+test "ordinary bridge placement commits above a pending crushed column and protects its side support" {
     const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
     var client = try World.init(std.testing.allocator, &layout);
     defer client.deinit();
@@ -2186,12 +2186,66 @@ test "ordinary bridge placement validates its completed target above pending cru
     }
     const operation: BlockOperation = .{ .block = .{ 64, 64, 66 }, .action = .{ .put = .crushed_stone } };
     try std.testing.expectEqual(OperationStatus.success, validateEdit(std.testing.allocator, client.reader(), &.{}, operation).status);
-    const rejected = client.previewOperation(operation);
-    try std.testing.expectEqual(OperationStatus.constraint_violation, rejected.status);
-    try std.testing.expectEqual(block_rules.Reason.crushed_column, rejected.failure.?.reason);
-    try std.testing.expectEqual(BlockType.none, client.reader().get(.{ 64, 64, 66 }).?);
+    try std.testing.expectEqual(OperationStatus.success, client.previewOperation(operation).status);
+    try std.testing.expectEqual(OperationStatus.success, client.tryOperation(operation).status);
+    try std.testing.expectEqual(BlockType.crushed_stone, client.reader().get(.{ 64, 64, 66 }).?);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_operations.items.len);
     try std.testing.expectEqual(@as(u32, 6), client.blueprints.instances.get(1).?.remaining);
+    for (60..66) |z| {
+        const target = client.blueprints.targetAt(.{ 64, 64, @intCast(z) }).?;
+        try std.testing.expectEqual(@as(u64, 1), target.instance_id);
+        try std.testing.expectEqual(BlockType.crushed_stone, target.material);
+    }
     try std.testing.expectEqual(OperationStatus.target_changed, client.previewOperation(.{ .block = .{ 64, 64, 61 }, .action = .{ .put = .planks } }).status);
+    const removal = client.tryOperation(.{ .block = .{ 63, 64, 66 }, .action = .remove });
+    try std.testing.expectEqual(OperationStatus.constraint_violation, removal.status);
+    try std.testing.expectEqual(block_rules.Reason.would_remove_support, removal.failure.?.reason);
+    try std.testing.expectEqual(BlockType.stone, client.reader().get(.{ 63, 64, 66 }).?);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_operations.items.len);
+    try std.testing.expectEqual(@as(u32, 6), client.blueprints.instances.get(1).?.remaining);
+}
+
+test "sand and water or snow commit in either order with and without pending sites" {
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    const sand: [3]u32 = .{ 64, 64, 60 };
+    const above: [3]u32 = .{ 64, 64, 61 };
+    for ([_]BlockType{ .water, .snow }) |material| {
+        for ([_]bool{ false, true }) |sand_first| {
+            for ([_]bool{ false, true }) |pending_site| {
+                var client = try World.init(std.testing.allocator, &layout);
+                defer client.deinit();
+                for (1..3) |z| for (1..3) |y| for (1..3) |x| try client.insertChunk(.{ @intCast(x), @intCast(y), @intCast(z) }, WorldChunk.initEmpty());
+                for (63..66) |y| for (63..66) |x| try setTestPhysical(&client, .{ @intCast(x), @intCast(y), 59 }, .stone);
+                if (pending_site) {
+                    try setTestPhysical(&client, .{ 80, 80, 59 }, .stone);
+                    try insertTestBlueprint(&client, 1, .{ 80, 80, 60 }, .{ 1, 1, 1 }, &.{.planks});
+                }
+                const operations = [_]BlockOperation{
+                    .{ .block = sand, .action = .{ .put = .sand } },
+                    .{ .block = above, .action = .{ .put = material } },
+                };
+                const first: usize = if (sand_first) 0 else 1;
+                for ([_]usize{ first, 1 - first }) |index| {
+                    try std.testing.expectEqual(OperationStatus.success, client.previewOperation(operations[index]).status);
+                    try std.testing.expectEqual(OperationStatus.success, client.tryOperation(operations[index]).status);
+                }
+                try std.testing.expectEqual(BlockType.sand, client.reader().get(.{ sand[0], sand[1], sand[2] }).?);
+                try std.testing.expectEqual(material, client.reader().get(.{ above[0], above[1], above[2] }).?);
+                try std.testing.expectEqual(@as(usize, 2), client.pending_operations.items.len);
+                if (pending_site) {
+                    try std.testing.expectEqual(@as(u32, 1), client.blueprints.instances.get(1).?.remaining);
+                    try std.testing.expectEqual(BlockType.planks, client.blueprints.targetAt(.{ 80, 80, 60 }).?.material);
+                    try std.testing.expectEqual(BlockType.none, client.reader().get(.{ 80, 80, 60 }).?);
+                }
+                // Additive acceptance does not weaken a constructed sand footprint.
+                const removal = client.tryOperation(.{ .block = .{ 63, 63, 59 }, .action = .remove });
+                try std.testing.expectEqual(OperationStatus.constraint_violation, removal.status);
+                try std.testing.expectEqual(block_rules.Reason.would_remove_support, removal.failure.?.reason);
+                try std.testing.expectEqual(BlockType.stone, client.reader().get(.{ 63, 63, 59 }).?);
+                try std.testing.expectEqual(@as(usize, 2), client.pending_operations.items.len);
+            }
+        }
+    }
 }
 
 test "neighboring sites retain a global completion order after safe external support removal" {
