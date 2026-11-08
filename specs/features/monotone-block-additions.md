@@ -8,8 +8,9 @@ status: in-progress
 
 ## Intent
 
-Preserve existing valid higher constructions when a legal block is inserted into an empty
-cell. Make support rules additive so new support cannot suppress an existing support route,
+Preserve every previously valid constructed cell when a legal block is inserted into an
+empty cell, including cells above, beside, and below the insertion. Make support rules
+additive so new support cannot suppress an existing support route,
 without adding synchronization or persistent support metadata to the simulation.
 
 ## Context
@@ -24,8 +25,10 @@ constructions solely because a block was added below or beside them.
 ## Requirements
 
 - R1: Inserting a legal block into an empty cell preserves
-  the ordinary structural validity of previously valid higher constructed cells, with each
-  cell assessed in its existing support window. Use one shared current ruleset.
+  the ordinary structural validity of every previously valid constructed cell, including
+  cells on the same level and below the insertion. Assess each cell in its own existing
+  support window; do not require the inserted block to fit that cell's window. Use one
+  shared current ruleset.
 - R2: An independently supported crushed-stone bridge interrupts the downward six-cell run
   count. A seventh adjacent crushed cell is allowed when this independent support exists.
   A narrow seven-cell column without such support or a foundation reset still rejects.
@@ -78,6 +81,13 @@ constructions solely because a block was added below or beside them.
   A6: No. Existing ordinary dependent validation may still read above the target. Its removal
   remains separate. Road shape changes no longer trigger extra surrounding validation;
   pattern discovery still reads endpoints, candidate sections, and their immediate support.
+- Q7: Does monotonicity also protect constructions at or below the insertion level?
+  A7: Yes. Existing same-level horizontal routes remain available and can only gain eligible
+  connections. Cells below the insertion never read upwards, so their support data does
+  not change. This is a structural guarantee for already-valid cells, not an instruction
+  to repair pre-existing invalid constructions. Keep the new target's own validation and
+  all other operation preconditions. Removing the redundant placement-only dependent pass
+  is a separate implementation change, verified against this stronger contract.
 
 ## Acceptance Criteria
 
@@ -95,8 +105,10 @@ constructions solely because a block was added below or beside them.
   or blueprint admission run with real or pending neighboring targets THEN the revised rule
   agrees across physical/completed views and target progress remains correct.
 - AC6: GIVEN representative valid material arrangements WHEN accepted empty-cell additions
-  are applied in varied orders/orientations/translations THEN previously valid higher cells
-  remain valid when rechecked with fresh and shared validator caches.
+  are applied in varied orders/orientations/translations THEN all previously valid cells
+  above, on the same level, and below remain valid when rechecked in their own fixed windows
+  with fresh and shared validator caches; verify insertion legality independently of
+  dependent revalidation.
 - AC7: GIVEN missing support data, span/height limits, required supports, or immutable writes
   WHEN validation/planning runs THEN existing conservative guards still apply; no cheap
   blueprint fulfillment gains recursive work.
@@ -155,5 +167,8 @@ CPU suites, the preserved-support argument, and paired benchmark measurements.
 - [x] T5: Unify formed/unformed road support and remove shape-only structural validation.
 - [x] T6: Verify overhead real/planned roads, formation/reversion/replay, read bounds, unchanged
   material families, immutable writes, and client/authority/deferred publication.
+- [x] T7: Extend the contract and regressions to all pre-existing cells, checking legal
+  insertions independently and revalidating same-level/higher/lower witnesses in their own
+  windows with fresh/shared caches.
 - [x] T-val: Run relevant CPU suites and record road-follow-up validation alongside the
   existing before/after placement benchmark results.

@@ -814,6 +814,68 @@ const Fixture = struct {
         try self.blocks.put(std.testing.allocator, reader.normalize(cell) orelse return error.TestUnexpectedResult, material);
     }
 
+    /// Stage a construction without depending on the edit admission path. The
+    /// insertion contract helper independently validates the whole starting world.
+    fn existing(self: *Fixture, cell: Cell, material: BlockType) !void {
+        const reader: Reader = .{ .layout = &self.layout, .context = self, .block_at = read };
+        const normalized = reader.normalize(cell) orelse return error.TestUnexpectedResult;
+        try self.raw(normalized, material);
+        try self.constructed.append(std.testing.allocator, normalized);
+    }
+
+    fn expectAllExistingValid(self: *Fixture) !void {
+        const previous_center = self.read_center;
+        defer self.read_center = previous_center;
+        const reader: Reader = .{ .layout = &self.layout, .context = self, .block_at = read };
+        var shared: Validator = .{ .allocator = std.testing.allocator, .reader = reader };
+        defer shared.deinit();
+        for ([_]bool{ false, true }) |reverse| {
+            for (0..self.constructed.items.len) |index| {
+                const ordered = if (reverse) self.constructed.items.len - 1 - index else index;
+                const cell = self.constructed.items[ordered];
+                self.read_center = cell;
+                var fresh: Validator = .{ .allocator = std.testing.allocator, .reader = reader };
+                defer fresh.deinit();
+                for ([_]*Validator{ &fresh, &shared }) |validator| {
+                    if (validator.checkExisting(cell)) |reason| {
+                        std.debug.print("existing cell {any} failed with {s}, {d}/{d}\n", .{ cell, @tagName(reason.reason), reason.actual, reason.limit });
+                        return error.TestUnexpectedResult;
+                    }
+                }
+            }
+        }
+        try std.testing.expectEqual(0, self.outside_reads);
+        try std.testing.expect(self.maximum_read_distance <= Limits.support_radius);
+    }
+
+    fn expectLegalInsertionPreservesAllExisting(self: *Fixture, cell: Cell, material: BlockType) !void {
+        try self.expectAllExistingValid();
+        const reader: Reader = .{ .layout = &self.layout, .context = self, .block_at = read };
+        const normalized = reader.normalize(cell) orelse return error.TestUnexpectedResult;
+        const previous_center = self.read_center;
+        defer self.read_center = previous_center;
+        self.read_center = normalized;
+        try std.testing.expectEqual(BlockType.none, reader.get(normalized).?);
+        {
+            var placement: Validator = .{
+                .allocator = std.testing.allocator,
+                .reader = reader,
+                .edit = .{ .cell = normalized, .material = material },
+            };
+            defer placement.deinit();
+            // Establish legality using only the target. A dependent check here
+            // would make preservation an admission precondition and a tautology.
+            if (placement.checkPlacement(normalized, material)) |reason| {
+                std.debug.print("insertion at {any} failed with {s}\n", .{ normalized, @tagName(reason.reason) });
+                return error.TestUnexpectedResult;
+            }
+        }
+        try self.raw(normalized, material);
+        // These validators belong to the new immutable world view. Cache entries
+        // from before the mutation never participate in these checks.
+        try self.expectAllExistingValid();
+    }
+
     /// Alternating gaps keep every vertical run short without forming a 3x3
     /// platform. At level n, each existing block inherits mineral height n+1.
     fn crushedBraid(self: *Fixture, origin: Cell, direction: Cell, levels: u32) !void {
@@ -1032,6 +1094,79 @@ test "a newly completed crushed bridge preserves the lower direct route" {
     const top = target + Cell{ 0, 0, 2 };
     try std.testing.expect(validator.checkExisting(top) == null);
     try std.testing.expectEqual(4, validator.cache.get(top).?.state.mineral);
+}
+
+test "legal plank insertion preserves horizontal spans and all lower and higher constructions" {
+    const translated_x: i64 = if (engine.WorldLayout.wrap_x) 63 else 40;
+    for ([_]Cell{ .{ 20, 20, 6 }, .{ translated_x, 35, 6 } }) |origin| {
+        for ([_]Cell{ .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 } }) |direction| {
+            var fixture: Fixture = .{};
+            defer fixture.deinit();
+            const column_height = Limits.wood_height - 2;
+            try fixture.raw(origin - Cell{ 0, 0, 1 }, .stone);
+            for (0..column_height - 1) |level| try fixture.existing(origin + Cell{ 0, 0, @intCast(level) }, .tree_trunk);
+            const floor = origin + Cell{ 0, 0, column_height - 1 };
+            // The end of the old floor already uses the full plank span. Its
+            // upper column reaches the wood height limit before the insertion.
+            for (0..Limits.plank_span + 1) |offset| try fixture.existing(floor + direction * @as(Cell, @splat(@intCast(offset))), .planks);
+            const end = floor + direction * @as(Cell, @splat(Limits.plank_span));
+            for (1..3) |level| try fixture.existing(end + Cell{ 0, 0, @intCast(level) }, .planks);
+            const addition = floor + direction * @as(Cell, @splat(Limits.plank_span + 1));
+            // Its new, closer direct source has height twelve. It must not
+            // replace the old height-ten route used by the two upper cells.
+            for (1..Limits.wood_height) |depth| try fixture.existing(addition - Cell{ 0, 0, @intCast(depth) }, .tree_trunk);
+            try fixture.expectLegalInsertionPreservesAllExisting(addition, .planks);
+        }
+    }
+}
+
+test "legal mixed reinforced insertion preserves horizontal spans and every construction level" {
+    const translated_x: i64 = if (engine.WorldLayout.wrap_x) 63 else 40;
+    for ([_]Cell{ .{ 20, 20, 6 }, .{ translated_x, 35, 6 } }) |origin| {
+        for ([_]Cell{ .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 } }) |direction| {
+            for ([_]BlockType{ .rebar, .reinforced_concrete }) |material| {
+                var fixture: Fixture = .{};
+                defer fixture.deinit();
+                const column_height = Limits.mineral_height - 2;
+                try fixture.raw(origin - Cell{ 0, 0, 1 }, .stone);
+                for (0..column_height - 1) |level| try fixture.existing(origin + Cell{ 0, 0, @intCast(level) }, if (level % 2 == 0) .rebar else .reinforced_concrete);
+                const floor = origin + Cell{ 0, 0, column_height - 1 };
+                for (0..Limits.reinforced_span + 1) |offset| try fixture.existing(floor + direction * @as(Cell, @splat(@intCast(offset))), if (offset % 2 == 0) .reinforced_concrete else .rebar);
+                const end = floor + direction * @as(Cell, @splat(Limits.reinforced_span));
+                try fixture.existing(end + Cell{ 0, 0, 1 }, .rebar);
+                try fixture.existing(end + Cell{ 0, 0, 2 }, .reinforced_concrete);
+                const addition = floor + direction * @as(Cell, @splat(Limits.reinforced_span + 1));
+                // The completed new source reaches height twenty, while the
+                // original mixed floor supplies height eighteen to its tower.
+                for (1..Limits.mineral_height) |depth| try fixture.existing(addition - Cell{ 0, 0, @intCast(depth) }, if (depth % 2 == 0) .reinforced_concrete else .rebar);
+                try fixture.expectLegalInsertionPreservesAllExisting(addition, material);
+            }
+        }
+    }
+}
+
+test "legal crushed insertion preserves same-level bridge routes and all lower and higher cells" {
+    const translated_x: i64 = if (engine.WorldLayout.wrap_x) 63 else 40;
+    for ([_]Cell{ .{ 20, 20, 9 }, .{ translated_x, 35, 9 } }) |center| {
+        for ([_]Cell{ .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 } }) |direction| {
+            var fixture: Fixture = .{};
+            defer fixture.deinit();
+            const perpendicular: Cell = .{ -direction[1], direction[0], 0 };
+            for ([_]i64{ -1, 1 }) |side| {
+                const natural_side = center + perpendicular * @as(Cell, @splat(side));
+                try fixture.raw(natural_side, .stone);
+                try fixture.raw(natural_side - Cell{ 0, 0, 1 }, .stone);
+                // Filling the last gap completes a second bridge whose side
+                // columns are taller than the existing natural-rock route.
+                for (0..Limits.crushed_column) |level| {
+                    if (side == -1 and level == Limits.crushed_column - 1) continue;
+                    try fixture.existing(center + direction * @as(Cell, @splat(side)) + Cell{ 0, 0, @as(i64, @intCast(level)) - Limits.crushed_column + 1 }, .crushed_stone);
+                }
+            }
+            for (0..Limits.crushed_column) |level| try fixture.existing(center + Cell{ 0, 0, @intCast(level) }, .crushed_stone);
+            try fixture.expectLegalInsertionPreservesAllExisting(center - direction, .crushed_stone);
+        }
+    }
 }
 
 test "known independent crushed bridges do not require unavailable lower columns" {

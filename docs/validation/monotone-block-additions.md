@@ -148,3 +148,27 @@ baseline measurements; they do not demonstrate a timing improvement. Determinist
 checks establish removal of the above-road and surrounding structural work. No per-fill
 work, serialized state, collision geometry, or GPU code was added. GPU execution and
 interactive gameplay were not rerun for this follow-up.
+
+## Contract for all existing cells, 2026-11-08
+
+R1/AC6 now explicitly cover every previously valid constructed cell, including cells at
+and below the insertion level. Each old cell is assessed in its own fixed window rather
+than the intersection with the edit window. Same-level plank/reinforced connectivity only
+gains vertices, edges, and candidate support routes; existing eligible routes remain and
+minimum heights cannot increase. Crushed bridges retain their independent routes. Lower
+cells never read upwards, so an insertion above them changes none of their support inputs.
+The guarantee preserves already-valid cells without repairing pre-existing invalid ones.
+
+Three regressions exercise 32 scenarios: eight plank, sixteen mixed reinforced (both
+insertion materials), and eight crushed-bridge arrangements. They vary all four cardinal
+directions and two translations, including the wrapped seam. Each fixture first checks all
+tracked existing cells, independently approves the insertion with `checkPlacement` only,
+then checks all old cells again with fresh and shared validators in both traversal orders.
+Every root has its own fixed-window read instrumentation; no pre-mutation cache is reused
+across the edit. Lower support columns, same-level spans/routes, and upper height-limit
+constructions participate in the checks. This avoids making preservation a precondition
+of the insertion itself.
+
+`zig build test-world -Doptimize=Debug --summary all` passes **303/303 tests**.
+Formatting and `git diff --check` pass. This commit extends the contract and tests;
+production dependent-scan removal is a separate change.

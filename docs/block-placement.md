@@ -235,10 +235,15 @@ The bridge-side predicate and the one-cell gap limit remain unchanged.
 ### Additive validity
 
 With unchanged source data apart from the insertion, adding a block into an empty cell preserves
-the support witnesses of previously valid higher constructions. Direct and lateral routes
-remain available, platform/footprint occupancy can only improve, and newly available routes
-cannot increase the minimum height. The bridge run reset preserves the independent support
+the support witnesses of every previously valid constructed cell, including cells on the
+same level and below the insertion. Each cell retains its own fixed support window. Direct
+and lateral routes remain available, platform/footprint occupancy can only improve, and
+newly available routes cannot increase the minimum height. The bridge run reset preserves the independent support
 of a crushed bridge when a lower column grows into it.
+
+Same-level connections can only gain eligible routes; lower cells do not read upwards,
+so their support data is unchanged. This guarantee preserves already-valid cells and does
+not repair any construction that was invalid before the insertion.
 
 Formation and reversion of adaptive roads also preserve these support witnesses: structural
 rules use the road material, independently of its shape. A road above a slope receives the
