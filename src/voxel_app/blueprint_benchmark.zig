@@ -1,10 +1,15 @@
 //! `zig build bench-blueprint -Doptimize=ReleaseFast`.
-//! Detached copy and helper compile only; excludes chunk acquisition, application,
-//! service mutation, rendering, persistence, and backing allocator page overhead.
+//! Detached compilation and Apply preparation from resident chunks. Excludes
+//! chunk acquisition, service mutation, rendering, persistence, and allocator pages.
+//! Use --admission-only for six sparse/dense and none/real/planned cases;
+//! --legacy-region selects the old symmetric region for benchmark comparisons only.
 const std = @import("std");
 const blueprint = @import("blueprint.zig");
 const rules = @import("block_rules.zig");
 const admission = @import("blueprint_admission.zig");
+const admission_region = @import("blueprint_admission_region.zig");
+const consts = @import("consts.zig");
+const transforms = @import("block_transformations.zig");
 const runtime = @import("blueprint_runtime.zig");
 const engine = @import("engine");
 const WorldChunkData = @import("world_chunk_data.zig").WorldChunkData;
@@ -79,10 +84,42 @@ fn populate(cells: []BlockType, size: blueprint.Size, kind: Kind) void {
     }
 }
 
+const Neighbors = enum { none, real, planned };
+const AdmissionOptions = struct { legacy_region: bool = false, sample: []const u8 = "single" };
+
 pub fn main(init: std.process.Init) !void {
-    std.debug.print("blueprint mode={s} BlockType={d} Failure={d} cache_entry={d} max_cells={d} cache_limit=8192\n", .{
-        @tagName(@import("builtin").mode), @sizeOf(BlockType), @sizeOf(rules.Failure), rules.Validator.cacheEntrySize(), blueprint.default_max_cells,
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
+    var admission_only = false;
+    var options: AdmissionOptions = .{};
+    var argument: usize = 1;
+    while (argument < args.len) : (argument += 1) {
+        if (std.mem.eql(u8, args[argument], "--admission-only")) {
+            admission_only = true;
+        } else if (std.mem.eql(u8, args[argument], "--legacy-region")) {
+            options.legacy_region = true;
+        } else if (std.mem.eql(u8, args[argument], "--sample")) {
+            argument += 1;
+            if (argument == args.len) return error.MissingSampleLabel;
+            options.sample = args[argument];
+        } else if (std.mem.eql(u8, args[argument], "--help")) {
+            std.debug.print("bench-blueprint [--admission-only] [--legacy-region] [--sample LABEL]\n", .{});
+            return;
+        } else return error.UnknownBenchmarkArgument;
+    }
+    std.debug.print("blueprint sample={s} build={s} legacy_region={} admission_only={} admission_policy={s} BlockType={d} Failure={d} cache_entry={d} max_cells={d} cache_limit=8192\n", .{
+        options.sample,                                                                                  @tagName(@import("builtin").mode), options.legacy_region,  admission_only,
+        if (@hasField(admission.ChunkSnapshot, "constructed")) "existing-dependents" else "new-targets", @sizeOf(BlockType),                @sizeOf(rules.Failure), rules.Validator.cacheEntrySize(),
+        blueprint.default_max_cells,
     });
+    if (!admission_only) try benchmarkCompilation(init);
+    for ([_]Kind{ .sparse, .dense }) |kind| {
+        if (admission_only) {
+            for ([_]Neighbors{ .none, .real, .planned }) |neighbors| try benchmarkAdmission(init, kind, neighbors, options);
+        } else try benchmarkAdmission(init, kind, .none, options);
+    }
+}
+
+fn benchmarkCompilation(init: std.process.Init) !void {
     for ([_]blueprint.Size{ .{ 10, 10, 8 }, .{ 100, 100, 32 } }) |size| {
         const volume = try blueprint.checkedVolume(size, 32767, blueprint.default_max_cells);
         const source = try init.gpa.alloc(BlockType, volume);
@@ -120,50 +157,183 @@ pub fn main(init: std.process.Init) !void {
             });
         }
     }
-    try benchmarkAdmission(init, .sparse);
-    try benchmarkAdmission(init, .dense);
 }
 
-fn benchmarkAdmission(init: std.process.Init, kind: Kind) !void {
+const ResidentChunk = struct {
+    blocks: *WorldChunkData,
+    constructed: std.ArrayList(transforms.BlockIndex) = .empty,
+    index: runtime.ChunkIndex = .{},
+};
+
+/// These are resident sources, not detached copies. Their allocation and the
+/// neighbor population are deliberately outside every measured phase and Meter.
+const Resident = struct {
+    layout: engine.WorldLayout,
+    chunks: std.AutoHashMapUnmanaged(admission.ChunkId, ResidentChunk) = .empty,
+
+    fn init(allocator: std.mem.Allocator) !Resident {
+        var result: Resident = .{ .layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) };
+        errdefer result.deinit(allocator);
+        // origin87 gives legacy bounds31..242 XY and31..174 Z: 8x8x6
+        // chunks. Both policies select from these same 384 resident records.
+        for (0..6) |z| for (0..8) |y| for (0..8) |x| {
+            const blocks = try allocator.create(WorldChunkData);
+            blocks.* = WorldChunkData.initEmpty();
+            if (z == 2) for (20..23) |level| @memset(std.mem.asBytes(&blocks.blocks[level]), @intFromEnum(BlockType.stone));
+            const id = result.layout.encodeChunkCoords(.{ @intCast(x), @intCast(y), @intCast(z) });
+            result.chunks.put(allocator, id, .{ .blocks = blocks }) catch |err| {
+                allocator.destroy(blocks);
+                return err;
+            };
+        };
+        return result;
+    }
+
+    fn deinit(self: *Resident, allocator: std.mem.Allocator) void {
+        var chunks = self.chunks.valueIterator();
+        while (chunks.next()) |chunk| {
+            allocator.destroy(chunk.blocks);
+            chunk.constructed.deinit(allocator);
+            chunk.index.deinit(allocator);
+        }
+        self.chunks.deinit(allocator);
+    }
+
+    fn at(self: *Resident, cell: runtime.Cell) *ResidentChunk {
+        return self.chunks.getPtr(self.layout.encodeChunkCoords(.{ @intCast(cell[0] / consts.CHUNK_SIZE), @intCast(cell[1] / consts.CHUNK_SIZE), @intCast(cell[2] / consts.CHUNK_SIZE) })).?;
+    }
+
+    fn populateNeighbors(self: *Resident, allocator: std.mem.Allocator, mode: Neighbors) !usize {
+        if (mode == .none) return 0;
+        var count: usize = 0;
+        if (mode == .real) {
+            for (59..215) |y| for (59..215) |x| {
+                if (x >= 87 and x < 187 and y >= 87 and y < 187) continue;
+                const cell: runtime.Cell = .{ @intCast(x), @intCast(y), 87 };
+                const chunk = self.at(cell);
+                chunk.blocks.blocks[87 % 32][y % 32][x % 32] = .rebar;
+                try chunk.constructed.append(allocator, transforms.index(.{ @truncate(x), @truncate(y), 87 % 32 }));
+                count += 1;
+            };
+        } else {
+            const Strip = struct { id: u64, origin: runtime.Cell, size: blueprint.Size };
+            // Six legal rectangular boxes cover the ring without overlaps.
+            // Their complete indexes preserve the same per-chunk target slots
+            // and instance membership that publication must clone in the game.
+            for ([_]Strip{
+                .{ .id = 2, .origin = .{ 59, 59, 87 }, .size = .{ 78, 28, 1 } },
+                .{ .id = 3, .origin = .{ 137, 59, 87 }, .size = .{ 78, 28, 1 } },
+                .{ .id = 4, .origin = .{ 59, 187, 87 }, .size = .{ 78, 28, 1 } },
+                .{ .id = 5, .origin = .{ 137, 187, 87 }, .size = .{ 78, 28, 1 } },
+                .{ .id = 6, .origin = .{ 59, 87, 87 }, .size = .{ 28, 100, 1 } },
+                .{ .id = 7, .origin = .{ 187, 87, 87 }, .size = .{ 28, 100, 1 } },
+            }) |strip| {
+                if (strip.size[0] > blueprint.horizontalLimit(&self.layout) or strip.size[1] > blueprint.horizontalLimit(&self.layout)) return error.InvalidNeighborSite;
+                const box_chunks = try runtime.boxChunks(allocator, &self.layout, strip.origin, strip.size, 0);
+                defer allocator.free(box_chunks);
+                for (box_chunks) |id| try self.chunks.getPtr(id).?.index.instances.append(allocator, strip.id);
+                for (0..strip.size[1]) |y| for (0..strip.size[0]) |x| {
+                    const cell: runtime.Cell = .{ strip.origin[0] + @as(u32, @intCast(x)), strip.origin[1] + @as(u32, @intCast(y)), 87 };
+                    const index = &self.at(cell).index;
+                    try index.lookup.put(allocator, cell, .{ .instance_id = strip.id, .cell_index = @intCast(y * strip.size[0] + x), .material = .rebar, .chunk_slot = index.targets.items.len });
+                    try index.targets.append(allocator, cell);
+                    count += 1;
+                };
+            }
+        }
+        if (count != 14_336) return error.IncorrectNeighborFixture;
+        return count;
+    }
+};
+
+/// Historical input geometry exists only in this executable, never in Apply.
+fn legacyChunks(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, origin: runtime.Cell, size: blueprint.Size) ![]admission.ChunkId {
+    const radius = 2 * rules.Limits.support_radius;
+    var result: std.ArrayList(admission.ChunkId) = .empty;
+    errdefer result.deinit(allocator);
+    var unique: std.AutoHashMapUnmanaged(admission.ChunkId, void) = .empty;
+    defer unique.deinit(allocator);
+    var z = @divFloor(@as(i64, origin[2]) - radius, consts.CHUNK_SIZE);
+    while (z <= @divFloor(@as(i64, origin[2]) + size[2] - 1 + radius, consts.CHUNK_SIZE)) : (z += 1) {
+        var y = @divFloor(@as(i64, origin[1]) - radius, consts.CHUNK_SIZE);
+        while (y <= @divFloor(@as(i64, origin[1]) + size[1] - 1 + radius, consts.CHUNK_SIZE)) : (y += 1) {
+            var x = @divFloor(@as(i64, origin[0]) - radius, consts.CHUNK_SIZE);
+            while (x <= @divFloor(@as(i64, origin[0]) + size[0] - 1 + radius, consts.CHUNK_SIZE)) : (x += 1) {
+                const coords = layout.normalizeChunkCoords(.{ @intCast(x), @intCast(y), @intCast(z) }) orelse continue;
+                const id = layout.encodeChunkCoords(coords);
+                if (unique.contains(id)) continue;
+                try unique.put(allocator, id, {});
+                try result.append(allocator, id);
+            }
+        }
+    }
+    return result.toOwnedSlice(allocator);
+}
+
+fn benchmarkAdmission(init: std.process.Init, kind: Kind, neighbors: Neighbors, options: AdmissionOptions) !void {
     const size: blueprint.Size = .{ 100, 100, 32 };
+    const origin: runtime.Cell = .{ 87, 87, 87 };
     const volume = try blueprint.checkedVolume(size, 32767, blueprint.default_max_cells);
-    const source = try init.gpa.alloc(BlockType, volume);
-    defer init.gpa.free(source);
-    populate(source, size, kind);
-    var compiled = try blueprint.compile(init.gpa, .{ .size = size, .cells = source }, .{ .horizontal_limit = 127 });
+    const source_cells = try init.gpa.alloc(BlockType, volume);
+    defer init.gpa.free(source_cells);
+    populate(source_cells, size, kind);
+    var compiled = try blueprint.compile(init.gpa, .{ .size = size, .cells = source_cells }, .{ .horizontal_limit = 127 });
     if (compiled != .valid) return error.InvalidBenchmarkDefinition;
     defer compiled.valid.deinit(init.gpa);
-    var snapshot_meter: Meter = .{ .backing = init.gpa };
-    var snapshot: admission.Snapshot = .{ .layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }), .overlay_revision = 0 };
-    defer snapshot.deinit(snapshot_meter.allocator());
-    // origin87 gives halo bounds31..242 XY and31..174 Z, touching 8x8x6
-    // chunks. This is the worst 384-chunk alignment for the 56-cell halo.
-    for (0..6) |z| for (0..8) |y| for (0..8) |x| {
-        const blocks = try snapshot_meter.allocator().create(WorldChunkData);
-        blocks.* = WorldChunkData.initEmpty();
-        if (z == 2) {
-            for (20..23) |level| @memset(std.mem.asBytes(&blocks.blocks[level]), @intFromEnum(BlockType.stone));
-        }
-        const id = snapshot.layout.encodeChunkCoords(.{ @intCast(x), @intCast(y), @intCast(z) });
-        try snapshot.chunks.put(snapshot_meter.allocator(), id, .{ .revision = 1, .blocks = blocks });
-    };
     const definition = compiled.valid.definition;
+    var source = try Resident.init(init.gpa);
+    defer source.deinit(init.gpa);
+    const neighbor_count = try source.populateNeighbors(init.gpa, neighbors);
     var instance: runtime.Instance = .{
         .id = 1,
         .definition_id = 1,
         .owner = 1,
-        .origin = .{ 87, 87, 87 },
+        .origin = origin,
         .rotation = 0,
         .remaining = definition.target_count,
         .fulfilled = try init.gpa.alloc(u8, (definition.cells.len + 7) / 8),
-        .box_chunks = try runtime.boxChunks(init.gpa, &snapshot.layout, .{ 87, 87, 87 }, definition.size, 0),
+        .box_chunks = try runtime.boxChunks(init.gpa, &source.layout, origin, definition.size, 0),
     };
     defer instance.deinit(init.gpa);
     @memset(instance.fulfilled, 0);
+
+    var region_meter: Meter = .{ .backing = init.gpa };
+    const region_start = std.Io.Clock.awake.now(init.io);
+    const selected = if (options.legacy_region)
+        try legacyChunks(region_meter.allocator(), &source.layout, origin, definition.size)
+    else
+        try admission_region.chunks(region_meter.allocator(), &source.layout, origin, definition.size, instance.rotation, 1024);
+    const region_ns = region_start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
+    const region_requested = region_meter.live;
+    var owns_region = true;
+    defer if (owns_region) region_meter.allocator().free(selected);
+
+    var snapshot_meter: Meter = .{ .backing = init.gpa };
+    var snapshot: admission.Snapshot = .{ .layout = source.layout, .overlay_revision = 0 };
+    var owns_snapshot = true;
+    defer if (owns_snapshot) snapshot.deinit(snapshot_meter.allocator());
+    const copy_start = std.Io.Clock.awake.now(init.io);
+    for (selected) |id| {
+        const resident = source.chunks.getPtr(id) orelse return error.MissingResidentChunk;
+        var clone: admission.ChunkSnapshot = .{ .revision = 1, .blocks = try snapshot_meter.allocator().create(WorldChunkData) };
+        errdefer clone.deinit(snapshot_meter.allocator());
+        clone.blocks.* = resident.blocks.*;
+        clone.index = try resident.index.clone(snapshot_meter.allocator());
+        if (comptime @hasField(admission.ChunkSnapshot, "constructed")) clone.constructed = try snapshot_meter.allocator().dupe(transforms.BlockIndex, resident.constructed.items);
+        try snapshot.chunks.put(snapshot_meter.allocator(), id, clone);
+    }
+    const copy_ns = copy_start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
+    const snapshot_requested = snapshot_meter.live;
+    const snapshot_estimate = snapshot.estimatedOwnedBytes();
+    const snapshot_chunks = snapshot.chunks.count();
+    region_meter.allocator().free(selected);
+    owns_region = false;
+    if (region_meter.live != 0) return error.LeakedRegionAllocation;
+
     var meter: Meter = .{ .backing = init.gpa };
     const start = std.Io.Clock.awake.now(init.io);
     var result = try admission.prepare(meter.allocator(), &snapshot, definition, instance, .{});
-    const elapsed = start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
+    const prepare_ns = start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
     if (result != .prepared) {
         if (result == .rejected) std.debug.print("admission unexpected rejection={s} cell={any} failure={any}\n", .{ @tagName(result.rejected.code), result.rejected.cell, result.rejected.failure });
         return error.AdmissionBenchmarkRejected;
@@ -171,12 +341,18 @@ fn benchmarkAdmission(init: std.process.Init, kind: Kind) !void {
     const retained = meter.live;
     const foundation_reads = result.prepared.foundation_reads;
     const targets = result.prepared.validated_targets;
+    const dependents = result.prepared.validated_dependents;
     const footprint_chunks = result.prepared.publication.chunks.count();
     result.prepared.deinit(meter.allocator());
     if (meter.live != 0) return error.LeakedAdmissionAllocation;
-    std.debug.print("admission case={s} size=100x100x32 snapshot_chunks={d} footprint_chunks={d} targets={d} foundation_reads={d} prepare_ms={d:.3} snapshot_requested={d} snapshot_estimate={d} helper_peak_requested={d} retained_publication={d} helper_allocations={d}\n", .{
-        @tagName(kind),                                        snapshot.chunks.count(), footprint_chunks,               targets,    foundation_reads,
-        @as(f64, @floatFromInt(elapsed)) / std.time.ns_per_ms, snapshot_meter.live,     snapshot.estimatedOwnedBytes(), meter.peak, retained,
-        meter.allocations,
+    snapshot.deinit(snapshot_meter.allocator());
+    owns_snapshot = false;
+    if (snapshot_meter.live != 0) return error.LeakedSnapshotAllocation;
+    if (targets != definition.target_count or foundation_reads != 31_212 or footprint_chunks != instance.box_chunks.len or snapshot_chunks != (if (options.legacy_region) @as(usize, 384) else 108)) return error.IncorrectAdmissionBenchmarkCounters;
+    if (dependents != (if (@hasField(admission.ChunkSnapshot, "constructed")) neighbor_count else 0)) return error.IncorrectDependentBenchmarkCount;
+    std.debug.print("admission sample={s} case={s} neighbors={s} neighbor_count={d} size=100x100x32 resident_chunks=384 snapshot_chunks={d} footprint_chunks={d} validated_targets={d} validated_dependents={d} foundation_reads={d} region_ms={d:.3} copy_ms={d:.3} prepare_ms={d:.3} region_requested={d} region_peak_requested={d} region_allocations={d} snapshot_requested={d} snapshot_peak_requested={d} snapshot_estimate={d} snapshot_allocations={d} helper_peak_requested={d} retained_publication={d} helper_allocations={d}\n", .{
+        options.sample,                                          @tagName(kind),                                        @tagName(neighbors),                                      neighbor_count,    snapshot_chunks,   footprint_chunks,         targets,            dependents,          foundation_reads,
+        @as(f64, @floatFromInt(region_ns)) / std.time.ns_per_ms, @as(f64, @floatFromInt(copy_ns)) / std.time.ns_per_ms, @as(f64, @floatFromInt(prepare_ns)) / std.time.ns_per_ms, region_requested,  region_meter.peak, region_meter.allocations, snapshot_requested, snapshot_meter.peak, snapshot_estimate,
+        snapshot_meter.allocations,                              meter.peak,                                            retained,                                                 meter.allocations,
     });
 }

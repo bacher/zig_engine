@@ -29,6 +29,7 @@ const blueprint_runtime = @import("blueprint_runtime.zig");
 const blueprint_wire = @import("persistence/blueprints.zig");
 const deferred_work = @import("deferred_world_work.zig");
 const blueprint_admission = @import("blueprint_admission.zig");
+const blueprint_admission_region = @import("blueprint_admission_region.zig");
 const blueprint_road_updates = @import("blueprint_road_updates.zig");
 const background_work_log = std.log.scoped(.background_world_work);
 pub const BlueprintRejection = @import("blueprint_result.zig").Rejection;
@@ -1815,30 +1816,10 @@ pub const WorldDataService = struct {
         var instance = try state.prepareInstance(self.allocator, self.layout, id, saved.id, apply.owner, apply.origin, apply.rotation);
         errdefer instance.deinit(self.allocator);
         if (state.overlaps(self.layout, instance)) return error.Overlap;
-        const size = blueprint.rotatedSize(saved.definition.size, apply.rotation);
-        const halo = 2 * rules.Limits.support_radius;
-        var ids: std.ArrayList(ChunkId) = .empty;
-        errdefer ids.deinit(self.allocator);
-        var unique: std.AutoHashMapUnmanaged(ChunkId, void) = .empty;
-        defer unique.deinit(self.allocator);
-        var z = @divFloor(@as(i64, apply.origin[2]) - halo, CHUNK_SIZE);
-        while (z <= @divFloor(@as(i64, apply.origin[2]) + size[2] - 1 + halo, CHUNK_SIZE)) : (z += 1) {
-            var y = @divFloor(@as(i64, apply.origin[1]) - halo, CHUNK_SIZE);
-            while (y <= @divFloor(@as(i64, apply.origin[1]) + size[1] - 1 + halo, CHUNK_SIZE)) : (y += 1) {
-                var x = @divFloor(@as(i64, apply.origin[0]) - halo, CHUNK_SIZE);
-                while (x <= @divFloor(@as(i64, apply.origin[0]) + size[0] - 1 + halo, CHUNK_SIZE)) : (x += 1) {
-                    const coords = self.layout.normalizeChunkCoords(.{ @intCast(x), @intCast(y), @intCast(z) }) orelse continue;
-                    const chunk_id = self.layout.encodeChunkCoords(coords);
-                    if (unique.contains(chunk_id)) continue;
-                    if (ids.items.len == 1024) return error.Capacity;
-                    try unique.put(self.allocator, chunk_id, {});
-                    try ids.append(self.allocator, chunk_id);
-                }
-            }
-        }
+        const chunk_ids = try blueprint_admission_region.chunks(self.allocator, self.layout, apply.origin, saved.definition.size, apply.rotation, 1024);
+        errdefer self.allocator.free(chunk_ids);
         const task = try self.allocator.create(BlueprintAdmissionTask);
         errdefer self.allocator.destroy(task);
-        const chunk_ids = try ids.toOwnedSlice(self.allocator);
         task.* = .{
             .service = self,
             .request = apply,
@@ -1898,20 +1879,18 @@ pub const WorldDataService = struct {
             const cell: [3]u32 = .{ @as(u32, @intCast(coords[0])) * CHUNK_SIZE + local[0], @as(u32, @intCast(coords[1])) * CHUNK_SIZE + local[1], local[2] };
             if (cell[2] < self.worker_state.generator.deeprockThickness(cell[0], cell[1])) try immutable.append(self.allocator, @intCast(index));
         };
-        const estimate = blueprint_admission.estimatedChunkBytes(chunk.metadata.constructed.items.len, chunk.metadata.roads.items.len, immutable.items.len, source_index);
+        const estimate = blueprint_admission.estimatedChunkBytes(chunk.metadata.roads.items.len, immutable.items.len, source_index);
         if (estimate > 128 * 1024 * 1024 -| task.snapshot_bytes) return error.Capacity;
         const blocks = try self.allocator.create(@import("world_chunk_data.zig").WorldChunkData);
         errdefer self.allocator.destroy(blocks);
         blocks.* = chunk.content.toData();
-        const constructed = try self.allocator.dupe(transformations.BlockIndex, chunk.metadata.constructed.items);
-        errdefer self.allocator.free(constructed);
         const road_records = try self.allocator.dupe(@import("road_data.zig").Road, chunk.metadata.roads.items);
         errdefer self.allocator.free(road_records);
         const mask = try immutable.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(mask);
         var index = try source_index.clone(self.allocator);
         errdefer index.deinit(self.allocator);
-        try task.snapshot.chunks.put(self.allocator, id, .{ .revision = chunk.chunk_revision, .blocks = blocks, .constructed = constructed, .roads = road_records, .immutable = mask, .index = index });
+        try task.snapshot.chunks.put(self.allocator, id, .{ .revision = chunk.chunk_revision, .blocks = blocks, .roads = road_records, .immutable = mask, .index = index });
         task.snapshot_bytes += estimate;
     }
 
@@ -6209,6 +6188,76 @@ const BlueprintSaveFixture = struct {
         return .{ .client = &self.client, .owner = 1, .request_id = id, .name = try a.dupe(u8, "Save fixture"), .candidate = candidate };
     }
 };
+
+test "Apply captures cavity index sources and retains every narrowed dependency version gate" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    defer {
+        if (service.blueprint_task) |task| {
+            service.blueprint_task = null;
+            task.release();
+            a.destroy(task);
+        }
+        service.blueprint_retired.deinit(a);
+    }
+    const state = &service.worker_state.blueprints;
+    const cells = try a.alloc(rules.BlockType, 65);
+    @memset(cells, .none);
+    cells[0] = .planks;
+    cells[cells.len - 1] = .planks;
+    try state.insertDefinition(a, .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Sparse box"), .definition = .{ .size = .{ 65, 1, 1 }, .cells = cells, .target_count = 2 } });
+    try state.insertDefinition(a, .{ .id = 2, .owner = 1, .name = try a.dupe(u8, "Neighbor"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(rules.BlockType, &.{.planks}), .target_count = 1 } });
+    const neighbor: blueprint_runtime.Cell = .{ 50, 30, 64 };
+    try state.insertInstance(a, &test_layout, try state.prepareInstance(a, &test_layout, 99, 2, 1, neighbor, 0));
+    try service.tryBeginBlueprintApplication(.{ .client = &fixture.client, .request_id = 1, .owner = 1, .definition_id = 1, .origin = .{ 30, 31, 64 }, .rotation = 0 });
+    const task = service.blueprint_task.?;
+    // Both new targets sit exactly above a chunk boundary. Their platform
+    // crosses Y=32 and reads three actual levels below Z=64.
+    for (task.chunk_ids) |id| {
+        const coords = test_layout.decodeChunkId(id);
+        var chunk = WorldChunk.initEmpty();
+        if (coords[2] == 1) {
+            const data = try chunk.tryEnsureData(a);
+            @memset(std.mem.asBytes(&data.blocks), @intFromEnum(rules.BlockType.stone));
+        }
+        chunk.chunk_revision = 1;
+        try service.worker_state.modified_chunks.put(a, id, chunk);
+        try service.copyBlueprintDependency(task, id);
+    }
+    try std.testing.expectEqual(@as(usize, 16), task.chunk_ids.len);
+    try std.testing.expectEqual(task.chunk_ids.len, task.snapshot.chunks.count());
+    for (task.instance.box_chunks) |id| try std.testing.expect(task.snapshot.chunks.contains(id));
+    const cavity_id = test_layout.encodeChunkCoords(.{ 1, 0, 2 });
+    const captured = task.snapshot.chunks.get(cavity_id).?.index;
+    try std.testing.expectEqualSlices(u64, &.{99}, captured.instances.items);
+    try std.testing.expectEqualSlices(blueprint_runtime.Cell, &.{neighbor}, captured.targets.items);
+    try std.testing.expectEqualDeep(state.chunks.get(cavity_id).?.lookup.get(neighbor).?, captured.lookup.get(neighbor).?);
+    try std.testing.expect(captured.targets.items.ptr != state.chunks.get(cavity_id).?.targets.items.ptr);
+    task.result = try task.prepare();
+    const result = try task.result.?;
+    try std.testing.expect(result == .prepared);
+    try std.testing.expectEqual(@as(usize, 54), result.prepared.foundation_reads);
+    try std.testing.expectEqual(@as(usize, 2), result.prepared.validated_targets);
+    const publication = result.prepared.publication.chunks.get(cavity_id).?;
+    try std.testing.expectEqualSlices(u64, &.{ 99, 100 }, publication.instances.items);
+    try std.testing.expectEqualSlices(blueprint_runtime.Cell, &.{neighbor}, publication.targets.items);
+    try std.testing.expectEqualDeep(captured.lookup.get(neighbor).?, publication.lookup.get(neighbor).?);
+    // A changed support-only source and a changed cavity publication source
+    // both invalidate preparation before any publication or journal mutation.
+    for ([_]ChunkId{ test_layout.encodeChunkCoords(.{ 3, 1, 1 }), cavity_id }) |id| {
+        service.worker_state.modified_chunks.getPtr(id).?.chunk_revision += 1;
+        try std.testing.expectError(error.StalePreparation, service.commitBlueprintApplication(task));
+        service.worker_state.modified_chunks.getPtr(id).?.chunk_revision -= 1;
+        try std.testing.expectEqual(@as(u32, 1), state.instances.count());
+        try std.testing.expectEqual(@as(usize, 0), service.blueprint_journal.items.len);
+    }
+    state.revision +%= 1;
+    try std.testing.expectError(error.StalePreparation, service.commitBlueprintApplication(task));
+    try std.testing.expectEqual(@as(u32, 1), state.instances.count());
+}
 
 test "blueprint admission replies retain reasons and cells after their task retires" {
     const a = std.testing.allocator;
