@@ -98,11 +98,13 @@ logical view unchanged, so that operation needs no dependent revalidation.
 
 Application checks the completed design's composition with the destination and affected
 constructions. An ordinary placement first validates its new target against physical terrain,
-then validates that target and affected dependents in the completed logical view. Physical
-approval ensures miniatures supply no real support; completed target approval catches conflicts
-in the new block itself, which dependent checks skip. Both views include the proposed placement.
-Affected-dependent discovery must follow the actual support predicates of every world
-material, including types excluded from capture. Water/snow have no support dependencies. [R39/R40](../specs/features/blueprints.md#assembly-and-completion)
+then validates that target in the completed logical view. Physical approval ensures miniatures
+supply no real support; completed approval establishes the new block's completed-world
+validity. Both views include the proposed placement. Insertion preserves already-valid
+constructions by the additive contract below, so ordinary placements collect no dependent
+candidates and perform no dependent revalidation. Removals still discover and check real and
+planned dependents using the actual support predicates of every world material, including
+types excluded from capture. Water/snow have no support dependencies. [R39/R40](../specs/features/blueprints.md#assembly-and-completion)
 record composition examples, and the [constraints](../specs/features/blueprints.md#constraints)
 define cache separation and safe approval reuse. These checks add no work to blueprint fulfillment.
 
@@ -254,9 +256,9 @@ ownership, immutable writes, and instance progress.
 The property does not validate the new block or permit occupied-cell replacement. Removals
 and material replacements retain their normal checks. Blueprint fulfillment can place
 temporarily unsupported new cells and keeps its existing five-neighbor rule. Ordinary
-material admission/dependent checks and blueprint snapshot halos remain; their optimization
-is separate from removing the obsolete road-shape validation. See the
-[feature spec](../specs/features/monotone-block-additions.md).
+insertions validate only their new target, retaining both physical/completed checks when
+sites exist. Removals retain dependent checks, and application admission/snapshot halos
+remain unchanged. See the [feature spec](../specs/features/monotone-block-additions.md).
 
 ## Fixed support window
 
@@ -269,8 +271,8 @@ intermediate supports: stacked overhangs accumulate horizontal displacement acro
 Stable platforms reset height counters, but do not reset the window.
 
 This envelope describes structural approval of the new target. It does not bound whole-chunk
-loading/copying, diagnostics, soil state bookkeeping, or the existing dependent checks below.
-Those are separate from the new target's support proof.
+loading/copying, diagnostics, soil state bookkeeping, road discovery, or the removal-dependent
+checks below. Those are separate from the new target's support proof.
 
 Each revalidated dependent also keeps a 28-cell cube centered on itself. Its support must
 be proved within the intersection of that cube and the edit's cube. Validation accepts any
@@ -313,11 +315,13 @@ player overlap. An isolated removed cube is not remembered as an empty-air targe
 
 ## Edits and diagnostics
 
-Validation evaluates hypothetical contents before mutation. Both placements and removals
-are checked against potentially affected constructed cells, including changes to platform
-cubes away from a vertical support column. An edit that invalidates a construction is rejected atomically.
-This protects required supports against removal or replacement. An unsuitable new block
-below a valid overhang cannot suppress its independent lateral support. Natural terrain cells are not themselves revalidated as constructions.
+Validation evaluates hypothetical contents before mutation. Empty-cell placements check
+the new target and preserve existing validity by monotonicity, without collecting or checking
+dependents. Removals revalidate potentially affected constructions, including changes to
+platform cubes away from a vertical support column, and reject atomically if required
+support would be lost. Occupied-cell replacement still requires removal followed by placement.
+An unsuitable new block below a valid overhang cannot suppress its independent lateral support.
+Natural terrain cells are not themselves revalidated as constructions.
 
 Operation results carry status, an optional mined material, and an optional failure:
 reason, underlying cause, affected cell, measured value, limit, and up to 32 involved cell

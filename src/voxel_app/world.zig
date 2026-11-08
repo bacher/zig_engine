@@ -383,7 +383,12 @@ pub fn collectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayo
     return tryCollectConstructed(allocator, layout, chunks, target) catch @panic("OOM");
 }
 
+pub const Testing = if (@import("builtin").is_test) struct {
+    pub var constructed_collection_calls: std.atomic.Value(usize) = .init(0);
+} else struct {};
+
 pub fn tryCollectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayout, chunks: *const ChunksHashMap, target: [3]u32) ![]block_rules.Cell {
+    if (comptime @import("builtin").is_test) _ = Testing.constructed_collection_calls.fetchAdd(1, .monotonic);
     var cells: std.ArrayList(block_rules.Cell) = .empty;
     errdefer cells.deinit(allocator);
     const center: block_rules.Cell = .{ target[0], target[1], target[2] };
@@ -439,7 +444,8 @@ pub fn validateEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, co
     var validator: block_rules.Validator = .{ .allocator = allocator, .reader = reader, .edit = .{ .cell = cell, .material = material } };
     defer validator.deinit();
     var failure = if (material != .none) validator.checkPlacement(cell, material) else null;
-    if (failure == null) failure = validator.checkDependents(constructed, material == .none);
+    // Legal empty-cell additions preserve existing support; removals still need its proof.
+    if (failure == null and operation.action == .remove) failure = validator.checkDependents(constructed, true);
     if (validator.allocation_failed) return .{ .status = .resource_exhausted };
     if (failure) |reason| return .{ .status = if (reason.reason == .missing_data) .missing_data else .constraint_violation, .failure = reason };
     return .{ .status = .success, .mined_type = if (material == .none) existing.minedType() else null };
@@ -499,12 +505,14 @@ pub fn validateCompletedEdit(allocator: std.mem.Allocator, physical: block_rules
         if (existing.miningPolicy() == .forbidden or (existing.miningPolicy() == .yields and !existing.miningPolicy().yields.isPlaceable())) return .{ .status = .constraint_violation, .failure = .{ .reason = .mining_forbidden, .subject = cell } };
     }
     var completed: blueprint_runtime.CompletedReader = .{ .physical = physical, .state = state };
-    const affected = state.collectAffected(allocator, physical.layout, operation.block, constructed) catch return .{ .status = .resource_exhausted };
-    defer allocator.free(affected);
     var validator: block_rules.Validator = .{ .allocator = allocator, .reader = completed.reader(), .edit = .{ .cell = cell, .material = material } };
     defer validator.deinit();
     var failure = if (operation.action == .put) validator.checkPlacement(cell, material) else null;
-    if (failure == null) failure = validator.checkDependents(affected, operation.action == .remove);
+    if (operation.action == .remove) {
+        const affected = state.collectAffected(allocator, physical.layout, operation.block, constructed) catch return .{ .status = .resource_exhausted };
+        defer allocator.free(affected);
+        failure = validator.checkDependents(affected, true);
+    }
     if (validator.allocation_failed) return .{ .status = .resource_exhausted };
     if (failure) |reason| return .{ .status = if (reason.reason == .missing_data) .missing_data else .constraint_violation, .failure = reason };
     return .{ .status = .success, .mined_type = if (operation.action == .remove) existing.minedType() else null };
@@ -1041,8 +1049,11 @@ pub const World = struct {
         if (comptime @import("builtin").is_test) if (self.ordinary_preview_counter) |counter| {
             counter.* += 1;
         };
-        const cells = tryCollectConstructed(self.allocator, self.layout, &self.chunks, operation.block) catch return .{ .status = .resource_exhausted };
-        defer self.allocator.free(cells);
+        const cells: []const block_rules.Cell = if (operation.action == .remove)
+            tryCollectConstructed(self.allocator, self.layout, &self.chunks, operation.block) catch return .{ .status = .resource_exhausted }
+        else
+            &.{};
+        defer if (operation.action == .remove) self.allocator.free(cells);
         const result = validateCompletedEdit(self.allocator, self.reader(), &self.blueprints, cells, operation);
         if (result.status != .success) return result;
         const coords, const local = splitBlockCoords(operation.block);
@@ -2098,6 +2109,110 @@ fn setTestPhysical(world: *World, cell: [3]u32, material: BlockType) !void {
     const chunk = world.chunks.getPtr(world.layout.encodeChunkCoords(coords)).?;
     try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(world.allocator, local, .{ .put = material }));
 }
+
+test "ordinary put preview work is independent of dense construction and pending targets" {
+    const Metrics = struct {
+        reads: usize,
+        allocations: usize,
+        bytes: usize,
+
+        fn measure(world: *World, operation: BlockOperation) !@This() {
+            var counted = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+            const original_allocator = world.allocator;
+            world.allocator = counted.allocator();
+            defer world.allocator = original_allocator;
+            var reads: usize = 0;
+            world.physical_read_counter = &reads;
+            defer world.physical_read_counter = null;
+            try std.testing.expectEqual(OperationStatus.success, world.previewOperation(operation).status);
+            return .{ .reads = reads, .allocations = counted.allocations, .bytes = counted.allocated_bytes };
+        }
+    };
+    const a = std.testing.allocator;
+    const target = [3]u32{ 10, 10, 70 };
+    const operation: BlockOperation = .{ .block = target, .action = .{ .put = .tree_trunk } };
+    for ([_]bool{ false, true }) |with_sites| {
+        var world = try World.init(a, &test_layout);
+        defer world.deinit();
+        try setTestPhysical(&world, .{ 10, 10, 69 }, .stone);
+        if (with_sites) try insertTestBlueprint(&world, 1, .{ 25, 25, 74 }, .{ 1, 1, 1 }, &.{.water});
+        const sparse = try Metrics.measure(&world, operation);
+
+        // These valid cells are in the edit window and above the new target.
+        // Eager collection costs memory even if dependent checking were skipped.
+        for (74..78) |z| for (2..10) |y| for (2..10) |x| {
+            const cell: [3]u32 = .{ @intCast(x), @intCast(y), @intCast(z) };
+            try setTestPhysical(&world, cell, .water);
+            const coords, const local = splitBlockCoords(cell);
+            try world.chunks.getPtr(world.layout.encodeChunkCoords(coords)).?.metadata.tryMarkConstructed(a, transformations.index(local));
+        };
+        if (with_sites) try insertTestBlueprint(&world, 2, .{ 12, 12, 74 }, .{ 8, 8, 4 }, &([_]BlockType{.water} ** 256));
+        const dense = try Metrics.measure(&world, operation);
+        try std.testing.expectEqualDeep(sparse, dense);
+        try std.testing.expectEqual(BlockType.none, world.reader().get(.{ target[0], target[1], target[2] }).?);
+        try std.testing.expectEqual(@as(usize, 0), world.pending_operations.items.len);
+        if (with_sites) {
+            try std.testing.expectEqual(@as(u32, 1), world.blueprints.instances.get(1).?.remaining);
+            try std.testing.expectEqual(@as(u32, 256), world.blueprints.instances.get(2).?.remaining);
+            try std.testing.expectEqual(BlockType.water, world.blueprints.targetAt(.{ 12, 12, 74 }).?.material);
+        }
+    }
+}
+
+test "ordinary puts check physical and completed targets without reading constructions above them" {
+    const Probe = struct {
+        world: *const World,
+        foundation_reads: usize = 0,
+        above_reads: usize = 0,
+
+        fn read(context: *anyopaque, block: [3]u32) ?BlockType {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            if (std.mem.eql(u32, &block, &.{ 10, 10, 69 })) self.foundation_reads += 1;
+            if (block[2] > 70) self.above_reads += 1;
+            return self.world.reader().get(.{ block[0], block[1], block[2] });
+        }
+    };
+    const a = std.testing.allocator;
+    var world = try World.init(a, &test_layout);
+    defer world.deinit();
+    try setTestPhysical(&world, .{ 10, 10, 69 }, .stone);
+    try setTestPhysical(&world, .{ 10, 10, 71 }, .water);
+    try insertTestBlueprint(&world, 1, .{ 12, 12, 74 }, .{ 8, 8, 4 }, &([_]BlockType{.water} ** 256));
+    const operation: BlockOperation = .{ .block = .{ 10, 10, 70 }, .action = .{ .put = .tree_trunk } };
+    const constructed = [_]block_rules.Cell{.{ 10, 10, 71 }};
+    var probe: Probe = .{ .world = &world };
+    const reader: block_rules.Reader = .{ .layout = world.layout, .context = &probe, .block_at = Probe.read };
+    try std.testing.expectEqual(OperationStatus.success, validateEdit(a, reader, &constructed, operation).status);
+    try std.testing.expectEqual(@as(usize, 1), probe.foundation_reads);
+    try std.testing.expectEqual(@as(usize, 0), probe.above_reads);
+    probe.foundation_reads = 0;
+    try std.testing.expectEqual(OperationStatus.success, validateCompletedEdit(a, reader, &world.blueprints, &constructed, operation).status);
+    // A trunk over natural stone has one foundation probe in each independent proof.
+    try std.testing.expectEqual(@as(usize, 2), probe.foundation_reads);
+    try std.testing.expectEqual(@as(usize, 0), probe.above_reads);
+    try std.testing.expectEqual(@as(u32, 256), world.blueprints.instances.get(1).?.remaining);
+}
+
+test "ordinary put still requires physical support when the completed target is valid" {
+    const a = std.testing.allocator;
+    var world = try World.init(a, &test_layout);
+    defer world.deinit();
+    try setTestPhysical(&world, .{ 10, 10, 68 }, .stone);
+    try insertTestBlueprint(&world, 1, .{ 10, 10, 69 }, .{ 1, 1, 1 }, &.{.tree_trunk});
+    const operation: BlockOperation = .{ .block = .{ 10, 10, 70 }, .action = .{ .put = .tree_trunk } };
+    var completed: blueprint_runtime.CompletedReader = .{ .physical = world.reader(), .state = &world.blueprints };
+    var validator: block_rules.Validator = .{ .allocator = a, .reader = completed.reader(), .edit = .{ .cell = .{ 10, 10, 70 }, .material = .tree_trunk } };
+    defer validator.deinit();
+    try std.testing.expect(validator.checkPlacement(.{ 10, 10, 70 }, .tree_trunk) == null);
+    const result = world.tryOperation(operation);
+    try std.testing.expectEqual(OperationStatus.constraint_violation, result.status);
+    try std.testing.expectEqual(block_rules.Reason.missing_foundation, result.failure.?.reason);
+    try std.testing.expectEqual(BlockType.none, world.reader().get(.{ 10, 10, 70 }).?);
+    try std.testing.expectEqual(@as(usize, 0), world.pending_operations.items.len);
+    try std.testing.expectEqual(@as(u32, 1), world.blueprints.instances.get(1).?.remaining);
+    try std.testing.expectEqual(BlockType.tree_trunk, world.blueprints.targetAt(.{ 10, 10, 69 }).?.material);
+}
+
 test "blueprint optimistic fulfillment uses at most five support reads and no ordinary or road work" {
     var client = try World.init(std.testing.allocator, &test_layout);
     defer client.deinit();

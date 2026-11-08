@@ -4,9 +4,10 @@ Date: 2026-11-08. Branch: `codex/monotone-block-additions`, based on
 `72880e8` (`origin/main` when the branch was created). See the
 [feature spec](../../specs/features/monotone-block-additions.md).
 
-The original checks and timings below describe commit `8b5e47a`. The road follow-up at the
-end of this report supersedes its fixed-road-shape assumption and road-shape validation;
-the recorded measurements remain historical evidence for that commit.
+The original checks and timings below describe commit `8b5e47a`. Subsequent dated sections
+record shape-neutral roads, the all-cells contract, and placement-only scan removal. These
+supersede earlier implementation details; original measurements remain historical evidence
+for their stated revisions.
 
 ## Scope and reasoning
 
@@ -172,3 +173,77 @@ of the insertion itself.
 `zig build test-world -Doptimize=Debug --summary all` passes **303/303 tests**.
 Formatting and `git diff --check` pass. This commit extends the contract and tests;
 production dependent-scan removal is a separate change.
+
+## Placement-only dependent-scan removal, 2026-11-08
+
+Ordinary empty-cell insertion now skips `tryCollectConstructed`, `collectAffected`, and
+`checkDependents` on both client and authority. The new target still requires ordinary
+physical support and, when instances exist, completed-world target approval. Occupancy,
+mining, immutable writes, inventory, target identity/progress, and all removal-dependent
+checks retain their existing guards. Application admission, service dependency preloads,
+validation-window/cache stamps, road discovery, timers, and cheap blueprint fulfillment
+remain on their existing paths. This bounds the target's structural reads, not all I/O,
+response cloning, or operation latency.
+
+The sparse/dense preview regression adds 256 real constructed cells and 256 planned cells
+above the target, outside its support proof, and requires identical read counts, allocation
+counts, and allocated bytes. A direct counting reader observes one physical foundation
+probe without sites and two independent physical/completed probes with sites, with zero
+above-target structural reads. A miniature-only-support control still rejects placement
+without changing progress or the pending command queue.
+
+The actual client/authority integration observes the collector entry using a test-only
+atomic counter: neither insertion calls it; each attempted removal calls it once. Reverting
+the authority to eager collection fails the insertion assertion. The counter has no storage
+or increments in production builds. The fixture also compares reconciled terrain and
+construction markers, preserves 64 pending targets, and rejects removal of a lateral beam's
+foundation, an off-center soil-platform cell, and a pending plank's foundation on both paths.
+
+The focused Debug run passed **908/908 tests** (306 world, 80 admission, 522 service).
+After adding the authority collection guard, the final Debug service target passed
+**522/522**, including the imported world/core regressions.
+
+### Placement CPU measurements
+
+The baseline is production at contract commit `74c5293`, identical to `04567e9` for executable
+code. The optimized executable uses the same `bench-placement` source. Three alternating
+before/after process pairs ran without concurrent tests/builds, Zig 0.16.0, ReleaseFast, on
+the same local Mac. Each process warms its preview first; crushed workloads use eleven
+100-check samples. The table reports the median of three process medians.
+
+| Workload | Reader calls before → after | Median µs before → after |
+| --- | ---: | ---: |
+| 200-block plank building | 42,386 → 3 | 2,349 → approximately 1 |
+| 25 plain six-cell crushed columns | 5,460 → 604 | 243.465 → 26.813 |
+| Nine run-six crushed bridges | 2,262 → 1,850 | 101.685 → 82.448 |
+| Direct and two bridge routes, root only | 1,865 → 1,865 | 81.739 → 81.773 |
+| 20-cell independently bridged column | 3,563 → 3,563 | 151.746 → 151.296 |
+
+The plank benchmark prints milliseconds rounded to 0.001, so its optimized timing is
+approximate at one-microsecond resolution. Exact reader counts and the unchanged root-only
+control distinguish removed dependent work from changes to support semantics. The tall
+crushed fixture has no higher dependent constructions; its target proof remains the dominant
+cost. Preview timings include ordinary road discovery and candidate enumeration where
+applicable; setup and the separate read-count collector setup are outside the timed loop.
+These fixtures measure resident client preview/shared validation, not server throughput,
+I/O, response cloning, or whole-game frame time. Authority regressions separately enforce
+the same forbidden-collection condition. Unchanged-preview stamp checks retain their existing
+8-/27-chunk paths.
+
+[Raw paired outputs and executable hashes](monotone-placement-scan-benchmark.txt) retain all
+six runs. No collision geometry, rendering code, serialized state, or save version changed.
+
+Final ReleaseFast verification passed **58/58 build steps**, **1,884 tests**, with eight
+existing skips. Both applications built successfully. The 128-site fixture still records
+8,192 fills, exactly 8,192 physical support reads, and zero ordinary-validation calls during
+fulfillment. Formatting and `git diff --check` pass. GPU execution and interactive gameplay
+were not rerun for this CPU structural-validation change.
+
+```sh
+zig build test-world test-blueprint-admission test-blueprint-service -Doptimize=Debug --summary all
+zig build test-blueprint-service -Doptimize=Debug --summary all
+zig build bench-placement -Doptimize=ReleaseFast --summary all
+zig build install test test-blueprint-admission -Doptimize=ReleaseFast --summary all
+zig fmt --check src/voxel_app/block_rules.zig src/voxel_app/world.zig src/voxel_app/world_data_service.zig
+git diff --check
+```

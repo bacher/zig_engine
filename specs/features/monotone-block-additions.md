@@ -46,7 +46,7 @@ constructions solely because a block was added below or beside them.
   `abs(dy) <= 28`, `-28 <= dz <= 0`, with Z vertical and shortest wrapped-X displacement.
   Both horizontal axes may reach 28 simultaneously. Recursive searches never recenter.
   This invariant applies to new support features; it excludes chunk I/O/copies, diagnostics,
-  soil state bookkeeping, and the existing separate dependent checks.
+  soil state bookkeeping, and the separate dependent checks retained for removals.
 - R8: Formed slopes and unformed adaptive roads have identical structural capabilities.
   A road above either receives the same support. Preserve all other material-support
   families; do not add roads to wood, mineral, earth, or stable-platform support families.
@@ -55,6 +55,13 @@ constructions solely because a block was added below or beside them.
   above the road. Preserve pattern, section-support, ownership, finite-bound, immutable-write,
   source-hold, persistence, and atomic-publication guards. Do not change collision geometry;
   obstructions affect passage through the normal collision rules.
+- R10: Ordinary insertion into a physically empty, unclaimed target checks the new target
+  without collecting constructed/planned dependent candidates or calling dependent
+  validation. With active sites retain both physical and completed target checks; the
+  physical check prevents miniatures from granting real support. Removals retain real/planned dependent collection
+  and validation. Preserve occupancy, immutable, inventory, progress, and mutation guards,
+  and keep blueprint fulfillment, application admission, dependency preloads, and validation
+  cache windows on their existing paths.
 
 ## Clarifications
 
@@ -67,9 +74,10 @@ constructions solely because a block was added below or beside them.
   underlying rules and supersedes old conflict examples; admission optimization is separate.
 - Q3: Does every legal target placement now have to be accepted by an ordinary edit?
   A3: The property concerns preservation of existing support, not all operation preconditions.
-  Existing dependent checks may conservatively reject when the intersection of the edit's
-  and dependent's fixed windows cannot prove support. No window expansion or dependent-check
-  bypass is introduced here. Occupancy, inventory, progress, and other checks still apply.
+  Ordinary insertions validate the new target and rely on R1 to preserve old cells.
+  Removals still conservatively reject when intersected edit/dependent windows cannot
+  prove support. Occupancy, inventory, progress, and other checks still apply; the contract
+  never promises that an invalid or unsupported new target will be accepted.
 - Q4: Are save migrations or historical gameplay rules needed?
   A4: No. The serialization is unchanged and previously valid arrangements remain valid.
   Retain the current save version and the pre-release compatibility policy.
@@ -78,16 +86,18 @@ constructions solely because a block was added below or beside them.
   formed/unformed states. Another road can stand above either; other materials still need
   their existing eligible direct/platform/lateral support.
 - Q6: Does R7 describe the whole current placement operation?
-  A6: No. Existing ordinary dependent validation may still read above the target. Its removal
-  remains separate. Road shape changes no longer trigger extra surrounding validation;
-  pattern discovery still reads endpoints, candidate sections, and their immediate support.
+  A6: No. Ordinary insertions no longer validate dependents, but road discovery may still
+  inspect a road above a low-endpoint edit, and soil timer bookkeeping can read above the
+  target. Removal-dependent checks also read above the edit. Shape changes need no extra
+  surrounding structural validation. R7 bounds the target support proof, not chunk preloads,
+  all material bookkeeping, or the whole operation.
 - Q7: Does monotonicity also protect constructions at or below the insertion level?
   A7: Yes. Existing same-level horizontal routes remain available and can only gain eligible
   connections. Cells below the insertion never read upwards, so their support data does
   not change. This is a structural guarantee for already-valid cells, not an instruction
   to repair pre-existing invalid constructions. Keep the new target's own validation and
-  all other operation preconditions. Removing the redundant placement-only dependent pass
-  is a separate implementation change, verified against this stronger contract.
+  all other operation preconditions. The redundant placement-only dependent pass is removed
+  in a separate commit verified against this stronger contract.
 
 ## Acceptance Criteria
 
@@ -125,6 +135,12 @@ constructions solely because a block was added below or beside them.
 - AC11: GIVEN either road shape as immediate support WHEN target structural checks run THEN
   solid/adaptive roads agree across shapes, other material families keep their old results,
   custom-shape callbacks are not queried, and removal of required support still rejects.
+- AC12: GIVEN an ordinary insertion with the same target-support inputs and sparse/dense
+  constructed/planned metadata outside that proof WHEN preview or authority validation runs
+  THEN no dependent candidates are collected or revalidated, structural work is independent
+  of those metadata populations, both required target views
+  remain checked, and blueprint progress is unchanged. Unsupported/miniature-only targets
+  reject, and removals still protect real/planned lateral, footprint, and platform support.
 
 ## Constraints
 
@@ -140,7 +156,7 @@ accepted configurations; it does not tighten raw/generated bridge-side semantics
 
 ## Out of Scope
 
-Blueprint snapshot-halo reduction, removal of admission/dependent checks, PR48 publication
+Blueprint snapshot-halo reduction, removal of application/removal-dependent checks, PR48 publication
 scheduling/locking changes, a joint run/height path frontier, physics/collapse, new spans or
 material families, new pathfinding/usability flags, NPC scheduling, save migrations, and
 historical rulesets.
@@ -155,6 +171,8 @@ Measure representative costs against `main` before considering separate admissio
 Make road structural support independent of geometry, remove above-road formation vetoes
 and obsolete final-plan structural validation, and cover overhead targets and replay without
 adding new replay admission policy. Record the two agreed locality/monotonicity invariants.
+Use R1 to skip ordinary insertion candidate collection and dependent revalidation on client
+and authority, retaining both target views and the existing removal path.
 The [validation report](../../docs/validation/monotone-block-additions.md) records passing
 CPU suites, the preserved-support argument, and paired benchmark measurements.
 
@@ -170,5 +188,7 @@ CPU suites, the preserved-support argument, and paired benchmark measurements.
 - [x] T7: Extend the contract and regressions to all pre-existing cells, checking legal
   insertions independently and revalidating same-level/higher/lower witnesses in their own
   windows with fresh/shared caches.
+- [x] T8: Remove ordinary insertion dependent enumeration/checks, verify population-independent
+  root work and both target views, retain removal guards, and measure before/after cost.
 - [x] T-val: Run relevant CPU suites and record road-follow-up validation alongside the
   existing before/after placement benchmark results.

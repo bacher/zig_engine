@@ -1,0 +1,63 @@
+Placement-only dependent-scan removal, 2026-11-08
+Before: production at 74c5293 (same executable code as 04567e9). After: optimization based on 74c5293.
+Zig 0.16.0, ReleaseFast, existing bench-placement source unchanged.
+Three alternating before/after pairs; no concurrent builds or tests. Each process performs its own warmup.
+Each crushed sample contains 100 checks, eleven samples/process; plank has ten one-check samples with millisecond output rounded to 0.001.
+Fixture construction and explicit count-only collector setup are outside timed preview calls.
+
+before executable sha256: f8e0b489c21884fa9e563199f5c7689cfb9ba4dc2bce4550976557b9070db0fb
+after executable sha256: 9287ef29d947ffcc0aa55e37acde806a89b7ed0246b1be02a2d8306e998efaed
+
+Pair 1: before
+200-block plank building: 42386 reader calls; preview median 2.349 ms, min 2.310 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.013 us/check, min 0.013 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.074 us/check, min 0.072 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 5460 reader calls; median 243.465 us/check, min 240.246 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 2262 reader calls; median 101.945 us/check, min 98.546 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 1865 reader calls; median 81.885 us/check, min 80.154 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3563 reader calls; median 151.308 us/check, min 148.689 us/check (100 checks/sample, ReleaseFast)
+
+Pair 1: after
+200-block plank building: 3 reader calls; preview median 0.001 ms, min 0.001 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.019 us/check, min 0.019 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.097 us/check, min 0.090 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 604 reader calls; median 30.646 us/check, min 28.940 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 1850 reader calls; median 83.016 us/check, min 81.113 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 1865 reader calls; median 83.586 us/check, min 81.635 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3563 reader calls; median 151.296 us/check, min 148.917 us/check (100 checks/sample, ReleaseFast)
+
+Pair 2: before
+200-block plank building: 42386 reader calls; preview median 2.391 ms, min 2.349 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.014 us/check, min 0.013 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.074 us/check, min 0.073 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 5460 reader calls; median 243.963 us/check, min 238.800 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 2262 reader calls; median 101.685 us/check, min 99.625 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 1865 reader calls; median 81.588 us/check, min 78.233 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3563 reader calls; median 151.746 us/check, min 150.378 us/check (100 checks/sample, ReleaseFast)
+
+Pair 2: after
+200-block plank building: 3 reader calls; preview median 0.001 ms, min 0.001 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.013 us/check, min 0.012 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.078 us/check, min 0.074 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 604 reader calls; median 26.813 us/check, min 26.615 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 1850 reader calls; median 82.448 us/check, min 80.954 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 1865 reader calls; median 81.773 us/check, min 81.433 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3563 reader calls; median 151.841 us/check, min 148.168 us/check (100 checks/sample, ReleaseFast)
+
+Pair 3: before
+200-block plank building: 42386 reader calls; preview median 2.347 ms, min 2.322 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.013 us/check, min 0.013 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.074 us/check, min 0.074 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 5460 reader calls; median 242.065 us/check, min 237.954 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 2262 reader calls; median 101.467 us/check, min 98.098 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 1865 reader calls; median 81.739 us/check, min 81.006 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3563 reader calls; median 151.870 us/check, min 149.385 us/check (100 checks/sample, ReleaseFast)
+
+Pair 3: after
+200-block plank building: 3 reader calls; preview median 0.001 ms, min 0.001 ms (10 samples, ReleaseFast)
+8-chunk placement cache: median 0.013 us/check, min 0.012 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+27-chunk placement cache: median 0.074 us/check, min 0.073 us/check (10000 frames/sample, ReleaseFast; excludes raycast, validation and rendering)
+25 plain six-cell crushed columns: 604 reader calls; median 26.769 us/check, min 26.589 us/check (100 checks/sample, ReleaseFast)
+nine run-six crushed bridges: 1850 reader calls; median 80.789 us/check, min 80.121 us/check (100 checks/sample, ReleaseFast)
+crushed direct + two bridge routes (root only): 1865 reader calls; median 81.459 us/check, min 77.918 us/check (100 checks/sample, ReleaseFast)
+20-cell independently bridged crushed column: 3563 reader calls; median 150.818 us/check, min 145.170 us/check (100 checks/sample, ReleaseFast)
