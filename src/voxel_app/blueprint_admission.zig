@@ -7,7 +7,6 @@ const runtime = @import("blueprint_runtime.zig");
 const rules = @import("block_rules.zig");
 const consts = @import("consts.zig");
 const WorldChunkData = @import("world_chunk_data.zig").WorldChunkData;
-const Road = @import("road_data.zig").Road;
 const transforms = @import("block_transformations.zig");
 pub const ChunkId = consts.ChunkId;
 pub const Cell = runtime.Cell;
@@ -15,18 +14,14 @@ pub const default_max_snapshot_bytes: usize = 128 * 1024 * 1024;
 
 /// Apply this before cloning the next source chunk. Slice clones allocate from
 /// their lengths; the index bound includes its retained hash/list capacities.
-pub fn estimatedChunkBytes(constructed_len: usize, road_len: usize, immutable_len: usize, index: runtime.ChunkIndex) usize {
+pub fn estimatedChunkBytes(immutable_len: usize, index: runtime.ChunkIndex) usize {
     return @sizeOf(WorldChunkData) +|
-        constructed_len *| @sizeOf(transforms.BlockIndex) +|
-        road_len *| @sizeOf(Road) +|
         immutable_len *| @sizeOf(transforms.BlockIndex) +|
         index.estimatedOwnedBytes();
 }
 pub const ChunkSnapshot = struct {
     revision: u64,
     blocks: *WorldChunkData,
-    constructed: []const transforms.BlockIndex = &.{},
-    roads: []const Road = &.{},
     /// Sorted canonical floor indices captured from the source generator,
     /// independently of corrupted or hypothetical physical block contents.
     immutable: []const transforms.BlockIndex = &.{},
@@ -34,15 +29,13 @@ pub const ChunkSnapshot = struct {
 
     pub fn deinit(self: *ChunkSnapshot, allocator: std.mem.Allocator) void {
         allocator.destroy(self.blocks);
-        allocator.free(self.constructed);
-        allocator.free(self.roads);
         allocator.free(self.immutable);
         self.index.deinit(allocator);
         self.* = undefined;
     }
 
     pub fn estimatedOwnedBytes(self: ChunkSnapshot) usize {
-        return estimatedChunkBytes(self.constructed.len, self.roads.len, self.immutable.len, self.index);
+        return estimatedChunkBytes(self.immutable.len, self.index);
     }
 };
 
@@ -84,6 +77,7 @@ pub const Prepared = struct {
     publication: runtime.PreparedPublication,
     foundation_reads: usize = 0,
     validated_targets: usize = 0,
+    /// Pure additions preserve existing support witnesses without rechecking them.
     validated_dependents: usize = 0,
 
     pub fn deinit(self: *Prepared, allocator: std.mem.Allocator) void {
@@ -101,22 +95,12 @@ fn localIndex(cell: Cell) transforms.BlockIndex {
     return transforms.index(.{ @truncate(cell[0]), @truncate(cell[1]), @truncate(cell[2]) });
 }
 
-fn globalCell(layout: *const engine.WorldLayout, id: ChunkId, local: transforms.BlockIndex) Cell {
-    const chunk = layout.decodeChunkId(id);
-    const offset = transforms.coordinates(local);
-    return .{
-        @as(u32, @intCast(chunk[0])) * consts.CHUNK_SIZE + offset[0],
-        @as(u32, @intCast(chunk[1])) * consts.CHUNK_SIZE + offset[1],
-        @as(u32, @intCast(chunk[2])) * consts.CHUNK_SIZE + offset[2],
-    };
-}
-
 const View = struct {
     snapshot: *const Snapshot,
     publication: ?*const runtime.PreparedPublication = null,
 
     fn reader(self: *View) rules.Reader {
-        return .{ .layout = &self.snapshot.layout, .context = self, .block_at = read, .custom_shape_at = shape, .immutable_at = immutable, .playable_y_inset = self.snapshot.playable_y_inset };
+        return .{ .layout = &self.snapshot.layout, .context = self, .block_at = read, .immutable_at = immutable, .playable_y_inset = self.snapshot.playable_y_inset };
     }
 
     fn target(self: *const View, cell: Cell) ?runtime.Target {
@@ -133,14 +117,6 @@ const View = struct {
         return chunk.blocks.blocks[cell[2] % 32][cell[1] % 32][cell[0] % 32];
     }
 
-    fn shape(context: *anyopaque, cell: Cell) ?engine.voxel_chunk.custom_block.Shape {
-        const self: *View = @ptrCast(@alignCast(context));
-        const chunk = self.snapshot.chunks.get(chunkId(&self.snapshot.layout, cell)) orelse return null;
-        const local = localIndex(cell);
-        for (chunk.roads) |road| if (road.index == local) return road.shape();
-        return null;
-    }
-
     fn immutable(context: *anyopaque, cell: Cell) bool {
         const self: *View = @ptrCast(@alignCast(context));
         const chunk = self.snapshot.chunks.get(chunkId(&self.snapshot.layout, cell)) orelse return false;
@@ -155,17 +131,6 @@ const View = struct {
         return false;
     }
 };
-
-fn affected(layout: *const engine.WorldLayout, origin: Cell, size: blueprint.Size, cell: Cell) bool {
-    const radius = rules.Limits.support_radius;
-    const dx = (@as(u64, cell[0]) + layout.size_in_blocks[0] - origin[0]) % layout.size_in_blocks[0];
-    if (dx > @as(u64, size[0]) - 1 + radius and dx + radius < layout.size_in_blocks[0]) return false;
-    inline for (1..3) |axis| {
-        if (@as(i64, cell[axis]) < @as(i64, origin[axis]) - radius or
-            @as(u64, cell[axis]) > @as(u64, origin[axis]) + size[axis] - 1 + radius) return false;
-    }
-    return true;
-}
 
 /// The caller retains snapshot, definition, and instance. A successful result
 /// owns an independent cloned instance and all publication resources.
@@ -243,30 +208,12 @@ pub fn prepare(allocator: std.mem.Allocator, snapshot: *const Snapshot, definiti
         if (failed) |failure| return .{ .rejected = .{ .code = .composition, .cell = cell, .failure = failure } };
         targets += 1;
     }
-    var dependents: usize = 0;
-    var chunks = snapshot.chunks.iterator();
-    while (chunks.next()) |chunk| {
-        for (chunk.value_ptr.constructed) |local| {
-            const cell = globalCell(&snapshot.layout, chunk.key_ptr.*, local);
-            if (!affected(&snapshot.layout, instance.origin, size, cell)) continue;
-            if (view.target(cell)) |target| if (target.instance_id == instance.id) continue;
-            const failed = validator.checkExisting(.{ cell[0], cell[1], cell[2] });
-            if (options.cancelled()) return .cancelled;
-            if (validator.allocation_failed) return error.OutOfMemory;
-            if (failed) |failure| return .{ .rejected = .{ .code = .composition, .cell = cell, .failure = failure } };
-            dependents += 1;
-        }
-        for (chunk.value_ptr.index.targets.items) |cell| {
-            if (!affected(&snapshot.layout, instance.origin, size, cell)) continue;
-            const failed = validator.checkExisting(.{ cell[0], cell[1], cell[2] });
-            if (options.cancelled()) return .cancelled;
-            if (validator.allocation_failed) return error.OutOfMemory;
-            if (failed) |failure| return .{ .rejected = .{ .code = .composition, .cell = cell, .failure = failure } };
-            dependents += 1;
-        }
-    }
+    // Every target was empty and unclaimed, so this is a finite pure addition.
+    // Existing support witnesses remain available under the shared monotone
+    // rules, even when intermediate physical fills would not be ordinary-valid.
+    // Only the new completed targets and real bottom platforms need admission.
     own_publication = false;
-    return .{ .prepared = .{ .publication = publication, .foundation_reads = foundation_reads, .validated_targets = targets, .validated_dependents = dependents } };
+    return .{ .prepared = .{ .publication = publication, .foundation_reads = foundation_reads, .validated_targets = targets } };
 }
 
 const Fixture = struct {
@@ -293,16 +240,34 @@ const Fixture = struct {
         self.state.deinit(std.testing.allocator);
     }
 
-    fn put(self: *Fixture, cell: Cell, material: rules.BlockType, constructed: bool) !void {
+    fn put(self: *Fixture, cell: Cell, material: rules.BlockType) !void {
         const chunk = self.snapshot.chunks.getPtr(chunkId(&self.snapshot.layout, cell)).?;
         chunk.blocks.blocks[cell[2] % 32][cell[1] % 32][cell[0] % 32] = material;
-        if (constructed) {
-            const old = chunk.constructed;
-            const next = try std.testing.allocator.alloc(transforms.BlockIndex, old.len + 1);
-            @memcpy(next[0..old.len], old);
-            next[old.len] = localIndex(cell);
-            std.testing.allocator.free(old);
-            chunk.constructed = next;
+    }
+
+    fn existing(self: *Fixture, cell: Cell, material: rules.BlockType, planned: bool) !void {
+        if (!planned) return self.put(cell, material);
+        const index = &self.snapshot.chunks.getPtr(chunkId(&self.snapshot.layout, cell)).?.index;
+        try index.targets.append(std.testing.allocator, cell);
+        try index.lookup.put(std.testing.allocator, cell, .{ .instance_id = 99, .cell_index = @intCast(index.targets.items.len - 1), .material = material, .chunk_slot = index.targets.items.len - 1 });
+    }
+
+    /// Independently evaluate the old roots in their own support windows, before
+    /// and after adding the entire batch. Never use this as admission evidence.
+    fn expectValidRoots(self: *Fixture, roots: []const Cell, publication: ?*const runtime.PreparedPublication) !void {
+        const existing_overlay: runtime.PreparedPublication = .{ .instance = undefined };
+        var view: View = .{ .snapshot = &self.snapshot, .publication = publication orelse &existing_overlay };
+        var shared: rules.Validator = .{ .allocator = std.testing.allocator, .reader = view.reader() };
+        defer shared.deinit();
+        for (roots) |cell| {
+            var fresh: rules.Validator = .{ .allocator = std.testing.allocator, .reader = view.reader() };
+            defer fresh.deinit();
+            for ([_]*rules.Validator{ &fresh, &shared }) |validator| {
+                if (validator.checkExisting(.{ cell[0], cell[1], cell[2] })) |failure| {
+                    std.debug.print("existing root {any} failed with {s}\n", .{ cell, @tagName(failure.reason) });
+                    return error.TestUnexpectedResult;
+                }
+            }
         }
     }
 
@@ -364,10 +329,10 @@ test "destination admission rejects occupied targets and incomplete physical pla
     const definition = try fixture.definition(.{ 1, 1, 1 }, &.{.planks});
     var instance = try fixture.instance(.{ 10, 10, 4 });
     defer instance.deinit(std.testing.allocator);
-    try fixture.put(.{ 10, 10, 4 }, .planks, false);
+    try fixture.put(.{ 10, 10, 4 }, .planks);
     try std.testing.expectEqual(RejectCode.occupied, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
-    try fixture.put(.{ 10, 10, 4 }, .none, false);
-    try fixture.put(.{ 9, 9, 1 }, .none, false);
+    try fixture.put(.{ 10, 10, 4 }, .none);
+    try fixture.put(.{ 9, 9, 1 }, .none);
     try std.testing.expectEqual(RejectCode.foundation, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
 }
 
@@ -378,42 +343,53 @@ test "composed admission preserves water and snow above a proposed sand target" 
         const definition = try fixture.definition(.{ 1, 1, 1 }, &.{.sand});
         var instance = try fixture.instance(.{ 10, 10, 4 });
         defer instance.deinit(std.testing.allocator);
-        try fixture.put(.{ 10, 10, 5 }, material, true);
+        try fixture.put(.{ 10, 10, 5 }, material);
         var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
         try std.testing.expect(result == .prepared);
         defer result.prepared.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 1), result.prepared.validated_targets);
-        try std.testing.expectEqual(@as(usize, 1), result.prepared.validated_dependents);
+        try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_dependents);
         const blocks = fixture.snapshot.chunks.get(chunkId(&fixture.snapshot.layout, .{ 10, 10, 5 })).?.blocks;
         try std.testing.expectEqual(material, blocks.blocks[5][10][10]);
         try std.testing.expectEqual(rules.BlockType.none, blocks.blocks[4][10][10]);
     }
 }
 
-test "composed admission preserves an independently supported seventh crushed bridge cell" {
-    var fixture = try Fixture.init();
-    defer fixture.deinit();
-    const definition = try fixture.definition(.{ 1, 1, 6 }, &([_]rules.BlockType{.crushed_stone} ** 6));
-    var instance = try fixture.instance(.{ 10, 10, 4 });
-    defer instance.deinit(std.testing.allocator);
-    try fixture.put(.{ 10, 10, 10 }, .crushed_stone, true);
-    for ([_]u32{ 9, 11 }) |x| {
-        try fixture.put(.{ x, 10, 9 }, .stone, false);
-        try fixture.put(.{ x, 10, 10 }, .stone, false);
+test "finite batches preserve real and planned crushed bridge prefixes in both orientations" {
+    for ([_]bool{ false, true }) |planned| {
+        for (0..2) |axis| {
+            var fixture = try Fixture.init();
+            defer fixture.deinit();
+            const definition = try fixture.definition(.{ 1, 1, 6 }, &([_]rules.BlockType{.crushed_stone} ** 6));
+            var instance = try fixture.instance(.{ 10, 10, 4 });
+            defer instance.deinit(std.testing.allocator);
+            var roots: [6]Cell = undefined;
+            for (&roots, 0..) |*cell, level| {
+                cell.* = .{ 10, 10, 10 + @as(u32, @intCast(level)) };
+                try fixture.existing(cell.*, .crushed_stone, planned);
+            }
+            for ([_]u32{ 9, 11 }) |side| {
+                var support: Cell = .{ 10, 10, 9 };
+                support[axis] = side;
+                try fixture.put(support, .stone);
+                support[2] += 1;
+                try fixture.put(support, .stone);
+            }
+            try fixture.expectValidRoots(&roots, null);
+            var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+            try std.testing.expect(result == .prepared);
+            defer result.prepared.deinit(std.testing.allocator);
+            try std.testing.expectEqual(@as(usize, 6), result.prepared.validated_targets);
+            try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_dependents);
+            try fixture.expectValidRoots(&roots, &result.prepared.publication);
+            for (4..10) |z| try std.testing.expectEqual(rules.BlockType.none, fixture.snapshot.chunks.get(chunkId(&fixture.snapshot.layout, instance.origin)).?.blocks.blocks[z][10][10]);
+            if (planned) {
+                const index = fixture.snapshot.chunks.get(chunkId(&fixture.snapshot.layout, roots[0])).?.index;
+                try std.testing.expectEqual(@as(usize, 6), index.targets.items.len);
+                for (roots) |cell| try std.testing.expectEqual(@as(u64, 99), index.lookup.get(cell).?.instance_id);
+            }
+        }
     }
-    var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
-    try std.testing.expect(result == .prepared);
-    defer result.prepared.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 6), result.prepared.validated_targets);
-    try std.testing.expectEqual(@as(usize, 1), result.prepared.validated_dependents);
-    const blocks = fixture.snapshot.chunks.get(chunkId(&fixture.snapshot.layout, .{ 10, 10, 10 })).?.blocks;
-    try std.testing.expectEqual(rules.BlockType.crushed_stone, blocks.blocks[10][10][10]);
-    for (4..10) |z| try std.testing.expectEqual(rules.BlockType.none, blocks.blocks[z][10][10]);
-    // The seven-cell direct run still needs the independent two-sided route.
-    try fixture.put(.{ 9, 10, 10 }, .none, false);
-    const rejected = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
-    try std.testing.expectEqual(RejectCode.composition, rejected.rejected.code);
-    try std.testing.expectEqual(rules.Reason.crushed_column, rejected.rejected.failure.?.reason);
 }
 
 test "admission detects missing dependencies finite bounds cancellation and snapshot budget" {
@@ -439,42 +415,142 @@ test "harmless cavity earth preserves an independent lateral plank route" {
     const definition = try fixture.definition(.{ 3, 1, 2 }, &.{ .rebar, .none, .rebar, .planks, .planks, .planks });
     var instance = try fixture.instance(.{ 10, 10, 4 });
     defer instance.deinit(std.testing.allocator);
-    try fixture.put(.{ 11, 10, 4 }, .dirt, true);
+    try fixture.put(.{ 11, 10, 4 }, .dirt);
     var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
     try std.testing.expect(result == .prepared);
     defer result.prepared.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), result.prepared.validated_dependents);
+    try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_dependents);
     try std.testing.expectEqual(rules.BlockType.dirt, fixture.snapshot.chunks.get(chunkId(&fixture.snapshot.layout, .{ 11, 10, 4 })).?.blocks.blocks[4][10][11]);
 }
 
-test "composed admission preserves an independently supported pending seventh bridge target" {
+test "finite batches retain lower independent plank and mixed reinforced routes" {
+    for ([_]bool{ false, true }) |planned| {
+        for ([_]bool{ false, true }) |reinforced| {
+            var fixture = try Fixture.init();
+            defer fixture.deinit();
+            const limit = if (reinforced) rules.Limits.mineral_height else rules.Limits.wood_height;
+            const span = if (reinforced) rules.Limits.reinforced_span else rules.Limits.plank_span;
+            const floor_z = limit + 3;
+            var cells: [rules.Limits.mineral_height]rules.BlockType = undefined;
+            for (cells[0..limit], 0..) |*material, level| material.* = if (!reinforced) .planks else if (level % 2 == 0) .rebar else .reinforced_concrete;
+            const definition = try fixture.definition(.{ 1, 1, limit }, cells[0..limit]);
+            var instance = try fixture.instance(.{ 10 + span + 1, 10, 4 });
+            defer instance.deinit(std.testing.allocator);
+            try fixture.put(.{ 10, 10, 5 }, .stone);
+            var roots: [32]Cell = undefined;
+            var count: usize = 0;
+            for (6..floor_z) |z| {
+                const material: rules.BlockType = if (!reinforced) .tree_trunk else if (z % 2 == 0) .rebar else .reinforced_concrete;
+                roots[count] = .{ 10, 10, @intCast(z) };
+                try fixture.existing(roots[count], material, planned);
+                count += 1;
+            }
+            for (0..span + 1) |offset| {
+                roots[count] = .{ 10 + @as(u32, @intCast(offset)), 10, floor_z };
+                try fixture.existing(roots[count], if (!reinforced) .planks else if (offset % 2 == 0) .rebar else .reinforced_concrete, planned);
+                count += 1;
+            }
+            for (1..3) |level| {
+                roots[count] = .{ 10 + span, 10, floor_z + @as(u32, @intCast(level)) };
+                try fixture.existing(roots[count], if (!reinforced) .planks else if (level == 1) .rebar else .reinforced_concrete, planned);
+                count += 1;
+            }
+            // The old tower already reaches its height limit. The new, closer
+            // full-height column must not discard the original lower route.
+            try fixture.expectValidRoots(roots[0..count], null);
+            var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+            try std.testing.expect(result == .prepared);
+            defer result.prepared.deinit(std.testing.allocator);
+            try std.testing.expectEqual(@as(usize, limit), result.prepared.validated_targets);
+            try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_dependents);
+            try fixture.expectValidRoots(roots[0..count], &result.prepared.publication);
+        }
+    }
+}
+
+test "finite batches preserve real and planned footprint and road support witnesses" {
+    for ([_]bool{ false, true }) |planned| {
+        for ([_]rules.BlockType{ .dirt, .sand, .country_road_solid, .country_road_adaptive, .custom }) |material| {
+            var fixture = try Fixture.init();
+            defer fixture.deinit();
+            const definition = try fixture.definition(.{ 2, 1, 2 }, &.{ .rebar, .rebar, .planks, .planks });
+            var instance = try fixture.instance(.{ 12, 10, 4 });
+            defer instance.deinit(std.testing.allocator);
+            const root: Cell = .{ 10, 10, 5 };
+            for (9..12) |y| for (9..12) |x| try fixture.put(.{ @intCast(x), @intCast(y), 4 }, if (material.isRoad()) .country_road_adaptive else .stone);
+            try fixture.existing(root, material, planned);
+            try fixture.expectValidRoots(&.{root}, null);
+            var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+            try std.testing.expect(result == .prepared);
+            defer result.prepared.deinit(std.testing.allocator);
+            try std.testing.expectEqual(@as(usize, 4), result.prepared.validated_targets);
+            try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_dependents);
+            try fixture.expectValidRoots(&.{root}, &result.prepared.publication);
+        }
+    }
+}
+
+test "admission does not certify or scan pre-existing invalid planned roots" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
-    const definition = try fixture.definition(.{ 1, 1, 6 }, &([_]rules.BlockType{.crushed_stone} ** 6));
+    const definition = try fixture.definition(.{ 1, 1, 2 }, &.{ .planks, .planks });
     var instance = try fixture.instance(.{ 10, 10, 4 });
     defer instance.deinit(std.testing.allocator);
-    const cell: Cell = .{ 10, 10, 10 };
-    const index = &fixture.snapshot.chunks.getPtr(chunkId(&fixture.snapshot.layout, cell)).?.index;
-    try index.targets.append(std.testing.allocator, cell);
-    try index.lookup.put(std.testing.allocator, cell, .{ .instance_id = 99, .cell_index = 0, .material = .crushed_stone });
-    for ([_]u32{ 9, 11 }) |x| {
-        try fixture.put(.{ x, 10, 9 }, .stone, false);
-        try fixture.put(.{ x, 10, 10 }, .stone, false);
-    }
+    const old_root: Cell = .{ 11, 10, 20 };
+    try fixture.existing(old_root, .planks, true);
     var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
     try std.testing.expect(result == .prepared);
     defer result.prepared.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 6), result.prepared.validated_targets);
-    try std.testing.expectEqual(@as(usize, 1), result.prepared.validated_dependents);
-    try std.testing.expectEqual(@as(usize, 1), index.targets.items.len);
-    try std.testing.expectEqual(@as(u64, 99), index.lookup.get(cell).?.instance_id);
-    try std.testing.expectEqual(rules.BlockType.crushed_stone, index.lookup.get(cell).?.material);
-    try std.testing.expectEqual(rules.BlockType.none, fixture.snapshot.chunks.get(chunkId(&fixture.snapshot.layout, cell)).?.blocks.blocks[10][10][10]);
-    try fixture.put(.{ 9, 10, 10 }, .none, false);
-    const rejected = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
-    try std.testing.expectEqual(RejectCode.composition, rejected.rejected.code);
-    try std.testing.expectEqual(rules.Reason.crushed_column, rejected.rejected.failure.?.reason);
-    try std.testing.expectEqual(@as(u64, 99), index.lookup.get(cell).?.instance_id);
+    try std.testing.expectEqual(@as(usize, 2), result.prepared.validated_targets);
+    try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_dependents);
+    var view: View = .{ .snapshot = &fixture.snapshot, .publication = &result.prepared.publication };
+    var validator: rules.Validator = .{ .allocator = std.testing.allocator, .reader = view.reader() };
+    defer validator.deinit();
+    try std.testing.expect(validator.checkExisting(.{ old_root[0], old_root[1], old_root[2] }) != null);
+    try std.testing.expectEqual(@as(u64, 99), result.prepared.publication.chunks.get(chunkId(&fixture.snapshot.layout, old_root)).?.lookup.get(old_root).?.instance_id);
+}
+
+test "every new target still needs a completed structural proof" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    // Shape validation alone is insufficient: a well-formed restored definition
+    // can contain an unsupported upper target. Admission must inspect it too.
+    const cells = try std.testing.allocator.dupe(rules.BlockType, &.{ .planks, .none, .none, .planks });
+    const definition: blueprint.Definition = .{ .size = .{ 2, 1, 2 }, .cells = cells, .target_count = 2 };
+    try fixture.state.insertDefinition(std.testing.allocator, .{ .id = 1, .owner = 1, .name = try std.testing.allocator.dupe(u8, "restored"), .definition = definition });
+    var instance = try fixture.instance(.{ 10, 10, 4 });
+    defer instance.deinit(std.testing.allocator);
+    const result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+    try std.testing.expectEqual(RejectCode.composition, result.rejected.code);
+    try std.testing.expectEqual(Cell{ 11, 10, 5 }, result.rejected.cell.?);
+    try std.testing.expectEqual(rules.Reason.horizontal_span, result.rejected.failure.?.reason);
+    try std.testing.expectEqual(@as(usize, 0), fixture.state.instances.count());
+}
+
+test "target-only admission retains all allowed materials overlap immutable and platform checks" {
+    for ([_]rules.BlockType{ .dirt, .sand, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete, .country_road_solid }) |material| {
+        var fixture = try Fixture.init();
+        defer fixture.deinit();
+        const definition = try fixture.definition(.{ 1, 1, 1 }, &.{material});
+        var instance = try fixture.instance(.{ 10, 10, 4 });
+        defer instance.deinit(std.testing.allocator);
+        var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+        try std.testing.expect(result == .prepared);
+        defer result.prepared.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.prepared.validated_targets);
+        try std.testing.expectEqual(@as(usize, 27), result.prepared.foundation_reads);
+        try fixture.existing(instance.origin, material, true);
+        try std.testing.expectEqual(RejectCode.overlap, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
+        const chunk = fixture.snapshot.chunks.getPtr(chunkId(&fixture.snapshot.layout, instance.origin)).?;
+        _ = chunk.index.removeTarget(instance.origin);
+        chunk.immutable = try std.testing.allocator.dupe(transforms.BlockIndex, &.{localIndex(instance.origin)});
+        try std.testing.expectEqual(RejectCode.immutable, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
+        std.testing.allocator.free(chunk.immutable);
+        chunk.immutable = &.{};
+        try fixture.put(.{ 9, 9, 1 }, .none);
+        try fixture.existing(.{ 9, 9, 1 }, .rebar, true);
+        try std.testing.expectEqual(RejectCode.foundation, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
+    }
 }
 
 fn allocationFixture(allocator: std.mem.Allocator, fixture: *const Fixture, definition: blueprint.Definition, instance: runtime.Instance) !void {
@@ -492,4 +568,199 @@ test "all detached admission allocation failures preserve snapshot and free publ
     try std.testing.checkAllAllocationFailures(std.testing.allocator, allocationFixture, .{ &fixture, definition, instance });
     try std.testing.expectEqual(@as(usize, 0), fixture.state.instances.count());
     try std.testing.expect(fixture.state.targetAt(instance.origin) == null);
+}
+
+const DifferentialAdmissionWorld = struct {
+    resident: Snapshot,
+
+    fn init(layout: engine.WorldLayout) !DifferentialAdmissionWorld {
+        var result: DifferentialAdmissionWorld = .{ .resident = .{ .layout = layout, .overlay_revision = 7 } };
+        errdefer result.resident.deinit(std.testing.allocator);
+        for (0..@intCast(layout.size_in_chunks[2])) |z| for (0..@intCast(layout.size_in_chunks[1])) |y| for (0..@intCast(layout.size_in_chunks[0])) |x| {
+            const blocks = try std.testing.allocator.create(WorldChunkData);
+            errdefer std.testing.allocator.destroy(blocks);
+            blocks.* = WorldChunkData.initEmpty();
+            try result.resident.chunks.put(std.testing.allocator, layout.encodeChunkCoords(.{ @intCast(x), @intCast(y), @intCast(z) }), .{ .revision = 1, .blocks = blocks });
+        };
+        return result;
+    }
+
+    fn canonical(self: *const DifferentialAdmissionWorld, cell: rules.Cell) Cell {
+        return .{ @intCast(@mod(cell[0], self.resident.layout.size_in_blocks[0])), @intCast(cell[1]), @intCast(cell[2]) };
+    }
+
+    fn put(self: *DifferentialAdmissionWorld, cell: rules.Cell, material: rules.BlockType) void {
+        const normalized = self.canonical(cell);
+        const chunk = self.resident.chunks.getPtr(chunkId(&self.resident.layout, normalized)).?;
+        chunk.blocks.blocks[normalized[2] % 32][normalized[1] % 32][normalized[0] % 32] = material;
+    }
+
+    fn cloneSelected(self: *const DifferentialAdmissionWorld, ids: []const ChunkId) !Snapshot {
+        const allocator = std.testing.allocator;
+        var result: Snapshot = .{ .layout = self.resident.layout, .overlay_revision = self.resident.overlay_revision };
+        errdefer result.deinit(allocator);
+        for (ids) |id| {
+            const source = self.resident.chunks.get(id).?;
+            const blocks = try allocator.create(WorldChunkData);
+            errdefer allocator.destroy(blocks);
+            blocks.* = source.blocks.*;
+            var index = try source.index.clone(allocator);
+            errdefer index.deinit(allocator);
+            const immutable = try allocator.dupe(transforms.BlockIndex, source.immutable);
+            errdefer allocator.free(immutable);
+            try result.chunks.put(allocator, id, .{ .revision = source.revision, .blocks = blocks, .immutable = immutable, .index = index });
+        }
+        return result;
+    }
+};
+
+fn expectSamePublication(expected: runtime.PreparedPublication, actual: runtime.PreparedPublication) !void {
+    const left = expected.instance;
+    const right = actual.instance;
+    try std.testing.expectEqual(left.id, right.id);
+    try std.testing.expectEqual(left.definition_id, right.definition_id);
+    try std.testing.expectEqual(left.owner, right.owner);
+    try std.testing.expectEqual(left.origin, right.origin);
+    try std.testing.expectEqual(left.rotation, right.rotation);
+    try std.testing.expectEqual(left.remaining, right.remaining);
+    try std.testing.expectEqual(left.active, right.active);
+    try std.testing.expectEqualSlices(u8, left.fulfilled, right.fulfilled);
+    try std.testing.expectEqual(left.box_chunks.len, right.box_chunks.len);
+    for (left.box_chunks) |id| try std.testing.expect(std.mem.indexOfScalar(ChunkId, right.box_chunks, id) != null);
+    try std.testing.expectEqual(expected.chunks.count(), actual.chunks.count());
+    var chunks = expected.chunks.iterator();
+    while (chunks.next()) |entry| {
+        const other = actual.chunks.get(entry.key_ptr.*).?;
+        const index = entry.value_ptr;
+        try std.testing.expectEqual(index.instances.items.len, other.instances.items.len);
+        for (index.instances.items) |id| try std.testing.expect(std.mem.indexOfScalar(u64, other.instances.items, id) != null);
+        try std.testing.expectEqual(index.targets.items.len, other.targets.items.len);
+        try std.testing.expectEqual(index.lookup.count(), other.lookup.count());
+        for (index.targets.items) |cell| {
+            const target = index.lookup.get(cell).?;
+            const other_target = other.lookup.get(cell).?;
+            try std.testing.expectEqual(target.instance_id, other_target.instance_id);
+            try std.testing.expectEqual(target.cell_index, other_target.cell_index);
+            try std.testing.expectEqual(target.material, other_target.material);
+            try std.testing.expectEqual(cell, other.targets.items[other_target.chunk_slot]);
+        }
+    }
+}
+
+test "narrow and oversized admission snapshots agree on rotated boundary support routes" {
+    const allocator = std.testing.allocator;
+    const region = @import("blueprint_admission_region.zig");
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    // Enumerate the entire resident world independently of the region collector.
+    var all_ids: [64]ChunkId = undefined;
+    var count: usize = 0;
+    for (0..4) |z| for (0..4) |y| for (0..4) |x| {
+        all_ids[count] = layout.encodeChunkCoords(.{ @intCast(x), @intCast(y), @intCast(z) });
+        count += 1;
+    };
+    // This restored, well-formed definition deliberately lacks an isolated
+    // structural certificate: its upper target must use the external staircase.
+    // A compiler-certified definition could mask missing halo data with its own
+    // internal support route above the required real bottom platform.
+    var cells = [_]rules.BlockType{.none} ** 16;
+    cells[0] = .rebar;
+    cells[15] = .rebar;
+    const definition: blueprint.Definition = .{ .size = .{ 2, 1, 8 }, .cells = &cells, .target_count = 2 };
+    try definition.validateWellFormed(blueprint.horizontalLimit(&layout), blueprint.default_max_cells);
+    for (0..4) |turn| for ([_]bool{ false, true }) |seam| {
+        const rotation: u2 = @intCast(turn);
+        const direction: rules.Cell = switch (rotation) {
+            0 => .{ 1, 0, 0 },
+            1 => .{ 0, -1, 0 },
+            2 => .{ -1, 0, 0 },
+            3 => .{ 0, 1, 0 },
+        };
+        const axis: usize = if (direction[0] != 0) 0 else 1;
+        const positive = direction[0] > 0 or direction[1] > 0;
+        var upper: rules.Cell = .{ 95, 95, 71 };
+        // Reach 28 places the required source at 31 or 64, on the far
+        // chunk boundary. Seam translations instead use canonical X=127/0.
+        if (axis == 0) upper[0] = if (direction[0] > 0) 59 else 36 else upper[1] = if (direction[1] > 0) 59 else 36;
+        if (seam) {
+            upper[0] = if (axis == 0) (if (direction[0] > 0) @as(i64, 27) else 100) else 0;
+        }
+        const offset = blueprint.rotatedCell(definition.size, .{ 1, 0, 7 }, rotation);
+        const origin: Cell = .{ @intCast(upper[0] - offset[0]), @intCast(upper[1] - offset[1]), 64 };
+        const bottom = runtime.worldCell(&layout, origin, definition.size, rotation, .{ 0, 0, 0 }).?;
+        var instance: runtime.Instance = .{
+            .id = 1,
+            .definition_id = 1,
+            .owner = 1,
+            .origin = origin,
+            .rotation = rotation,
+            .fulfilled = try allocator.dupe(u8, &.{ 0, 0 }),
+            .remaining = 2,
+            .box_chunks = try runtime.boxChunks(allocator, &layout, origin, definition.size, rotation),
+        };
+        defer instance.deinit(allocator);
+        var world = try DifferentialAdmissionWorld.init(layout);
+        defer world.resident.deinit(allocator);
+        for (1..4) |depth| for (0..3) |y| for (0..3) |x| world.put(rules.Cell{ bottom[0], bottom[1], bottom[2] } + rules.Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, .stone);
+        const base = upper - direction * @as(rules.Cell, @splat(28)) - rules.Cell{ 0, 0, 7 };
+        const foundation = base - rules.Cell{ 0, 0, 1 };
+        world.put(foundation, .stone);
+        world.put(base, .rebar);
+        for (1..8) |level| {
+            const start = base + direction * @as(rules.Cell, @splat(@as(i64, @intCast((level - 1) * 4)))) + rules.Cell{ 0, 0, @intCast(level) };
+            for (0..5) |step| {
+                const cell = start + direction * @as(rules.Cell, @splat(@as(i64, @intCast(step))));
+                if (!@reduce(.And, cell == upper)) world.put(cell, .rebar);
+            }
+        }
+        const footprint = instance.box_chunks[0];
+        const chunk_coords = layout.decodeChunkId(footprint);
+        const sentinel: Cell = .{ @as(u32, @intCast(chunk_coords[0])) * 32 + 31, @as(u32, @intCast(chunk_coords[1])) * 32 + 31, 95 };
+        const old_index = &world.resident.chunks.getPtr(footprint).?.index;
+        try old_index.instances.append(allocator, 99);
+        try old_index.targets.append(allocator, sentinel);
+        try old_index.lookup.put(allocator, sentinel, .{ .instance_id = 99, .cell_index = 7, .material = .planks, .chunk_slot = 0 });
+        const selected = try region.chunks(allocator, &layout, origin, definition.size, rotation, 1024);
+        defer allocator.free(selected);
+        try std.testing.expect(selected.len < all_ids.len);
+        const source_id = chunkId(&layout, world.canonical(foundation));
+        try std.testing.expect(std.mem.indexOfScalar(ChunkId, selected, source_id) != null);
+        try std.testing.expect(std.mem.indexOfScalar(ChunkId, instance.box_chunks, source_id) == null);
+        var edge: [3]i64 = .{ origin[0], origin[1], origin[2] };
+        edge[axis] += if (positive) -28 else @as(i64, blueprint.rotatedSize(definition.size, rotation)[axis]) - 1 + 28;
+        const edge_coords: [3]i32 = layout.decodeChunkId(chunkId(&layout, world.canonical(edge)));
+        const source_coords: [3]i32 = layout.decodeChunkId(source_id);
+        try std.testing.expectEqual(edge_coords[axis], source_coords[axis]);
+        // Removing the sole source rejects in both views. Keeping it accepts
+        // with identical full footprint indexes, despite different input sizes.
+        for ([_]bool{ false, true }) |broken| {
+            world.put(foundation, if (broken) .none else .stone);
+            var narrow = try world.cloneSelected(selected);
+            defer narrow.deinit(allocator);
+            var oversized = try world.cloneSelected(&all_ids);
+            defer oversized.deinit(allocator);
+            var narrow_result = try prepare(allocator, &narrow, definition, instance, .{});
+            defer if (narrow_result == .prepared) narrow_result.prepared.deinit(allocator);
+            var oversized_result = try prepare(allocator, &oversized, definition, instance, .{});
+            defer if (oversized_result == .prepared) oversized_result.prepared.deinit(allocator);
+            if (broken) {
+                try std.testing.expect(narrow_result == .rejected and oversized_result == .rejected);
+                try std.testing.expectEqual(RejectCode.composition, narrow_result.rejected.code);
+                try std.testing.expectEqual(oversized_result.rejected.code, narrow_result.rejected.code);
+            } else {
+                try std.testing.expect(narrow_result == .prepared and oversized_result == .prepared);
+                try expectSamePublication(oversized_result.prepared.publication, narrow_result.prepared.publication);
+                const published_index = narrow_result.prepared.publication.chunks.get(footprint).?;
+                try std.testing.expect(std.mem.indexOfScalar(u64, published_index.instances.items, 99) != null);
+                try std.testing.expectEqual(@as(u64, 99), published_index.lookup.get(sentinel).?.instance_id);
+                // A positive sensitivity control: only the narrow capture loses
+                // this required outer chunk. Missing source data must reject.
+                var removed = narrow.chunks.fetchRemove(source_id).?.value;
+                removed.deinit(allocator);
+                var missing = try prepare(allocator, &narrow, definition, instance, .{});
+                defer if (missing == .prepared) missing.prepared.deinit(allocator);
+                try std.testing.expect(missing == .rejected);
+                try std.testing.expectEqual(RejectCode.composition, missing.rejected.code);
+            }
+        }
+    };
 }

@@ -96,8 +96,13 @@ use real terrain; miniatures cannot be mined and never count as real support for
 another target. Replacing a miniature with its required real block leaves the completed
 logical view unchanged, so that operation needs no dependent revalidation.
 
-Application checks the completed design's composition with the destination and affected
-constructions. An ordinary placement first validates its new target against physical terrain,
+Application checks every new target in the complete proposed logical world and verifies real bottom
+platforms. Existing valid real/planned cells retain their support witnesses under a finite batch of
+empty-cell additions, so application performs no old-dependent scan. Its versioned chunk input covers
+the rotated box expanded by 28 horizontally and downward, with no upward support extension; whole
+box chunks remain publication sources through cavities. The spec gives the
+[batch argument](../specs/features/blueprints.md#monotone-batch-admission). An ordinary placement first
+validates its new target against physical terrain,
 then validates that target in the completed logical view. Physical approval ensures miniatures
 supply no real support; completed approval establishes the new block's completed-world
 validity. Both views include the proposed placement. Insertion preserves already-valid
@@ -257,8 +262,11 @@ The property does not validate the new block or permit occupied-cell replacement
 and material replacements retain their normal checks. Blueprint fulfillment can place
 temporarily unsupported new cells and keeps its existing five-neighbor rule. Ordinary
 insertions validate only their new target, retaining both physical/completed checks when
-sites exist. Removals retain dependent checks, and application admission/snapshot halos
-remain unchanged. See the [feature spec](../specs/features/monotone-block-additions.md).
+sites exist. Removals retain dependent checks. Application uses the finite-batch witness
+argument and target-only read envelope [described above](#blueprint-extraction-view), with
+its existing version barriers and publication guards. The original
+[additive-validity feature](../specs/features/monotone-block-additions.md) left Apply unchanged;
+the target-only follow-up applies that rule property to admission.
 
 ## Fixed support window
 
