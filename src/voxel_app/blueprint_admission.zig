@@ -777,6 +777,138 @@ test "certified admission agrees with complete-world structural reference across
     try std.testing.expect(cavity_controls > 0);
 }
 
+test "seeded certified admission preserves complete-world proofs under mixed platforms and additions" {
+    const allocator = std.testing.allocator;
+    const region = @import("blueprint_admission_region.zig");
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    const seed: u64 = 530811;
+    const candidate_count = 32;
+    const materials = [_]rules.BlockType{ .none, .none, .none, .stone, .crushed_stone, .dirt, .packed_dirt, .grass, .sand, .tree_trunk, .planks, .rebar, .reinforced_concrete, .country_road_solid };
+    const platforms = [_]rules.BlockType{ .stone, .dirt, .packed_dirt, .grass, .clay, .crushed_stone, .rebar, .reinforced_concrete, .metal_ore, .limestone, .coal, .deeprock };
+    const additions = [_]rules.BlockType{ .sand, .leaves, .water, .snow, .tree_trunk, .crushed_stone, .rebar, .stone, .dirt };
+    var accepted: usize = 0;
+    var multilayer: usize = 0;
+    var transform_count: usize = 0;
+    var reference_target_checks: usize = 0;
+    var cavity_additions: usize = 0;
+    var surrounding_additions: usize = 0;
+    for (0..candidate_count) |candidate| {
+        // A candidate's contents do not depend on which earlier candidates compiled.
+        var prng = std.Random.DefaultPrng.init(seed + @as(u64, @intCast(candidate)));
+        const random = prng.random();
+        const kind = candidate % 4;
+        const size: blueprint.Size = .{ 2 + random.uintLessThan(u32, 4), 2 + random.uintLessThan(u32, 4), if (kind == 0) 1 else 2 + random.uintLessThan(u32, 7) };
+        var storage = [_]rules.BlockType{.none} ** (5 * 5 * 8);
+        const cells = storage[0 .. @as(usize, size[0]) * size[1] * size[2]];
+        errdefer std.debug.print("seeded admission seed={d} candidate={d} raw_shape={any} cells={any}\n", .{ seed, candidate, size, cells });
+        if (kind == 0 or kind == 2) {
+            // Flat floors guarantee broad bottom-material coverage; arbitrary
+            // sparse volumes also generate invalid candidates for the compiler.
+            for (cells) |*material| material.* = materials[random.uintLessThan(usize, materials.len)];
+            cells[0] = .stone;
+            cells[@as(usize, size[0]) * size[1] - 1] = .packed_dirt;
+        } else {
+            for (0..size[1]) |y| for (0..size[0]) |x| {
+                if (x == 0 and y == 0) {
+                    for (0..size[2]) |z| cells[(z * size[1] + y) * size[0] + x] = .planks;
+                    continue;
+                }
+                if (x == size[0] - 1 and y == size[1] - 1) {
+                    cells[y * size[0] + x] = .packed_dirt;
+                    continue;
+                }
+                if (random.uintLessThan(u32, 4) == 0) continue;
+                const family = random.uintLessThan(u32, 5);
+                var height = 1 + random.uintLessThan(u32, size[2]);
+                if (family == 2) height = @min(height, rules.Limits.crushed_column);
+                if (family >= 3) height = 1;
+                for (0..height) |z| {
+                    cells[(z * size[1] + y) * size[0] + x] = switch (family) {
+                        0 => if (random.boolean()) .tree_trunk else .planks,
+                        1 => if (random.boolean()) .rebar else .reinforced_concrete,
+                        2 => if (random.boolean()) .stone else .crushed_stone,
+                        3 => if (random.boolean()) .sand else .grass,
+                        else => .country_road_solid,
+                    };
+                }
+            };
+            if (kind == 3) for (0..3) |_| {
+                cells[random.uintLessThan(usize, cells.len)] = materials[random.uintLessThan(usize, materials.len)];
+            };
+        }
+        const compiled = try blueprint.compile(allocator, .{ .size = size, .cells = cells }, .{ .horizontal_limit = blueprint.horizontalLimit(&layout), .max_cells = 256 });
+        try std.testing.expect(compiled != .cancelled);
+        if (compiled != .valid) continue;
+        var certified = compiled.valid;
+        defer certified.deinit(allocator);
+        const definition = certified.definition;
+        accepted += 1;
+        if (definition.size[2] > 1) multilayer += 1;
+        for (0..4) |turn| for ([_]Cell{ .{ 31, 31, 64 }, .{ 126, 31, 64 } }, 0..) |origin, origin_index| {
+            const rotation: u2 = @intCast(turn);
+            errdefer std.debug.print("seeded admission seed={d} candidate={d} certified_shape={any} origin={any} rotation={d}\n", .{ seed, candidate, definition.size, origin, rotation });
+            var world = try DifferentialAdmissionWorld.init(layout);
+            defer world.resident.deinit(allocator);
+            var terrain_prng = std.Random.DefaultPrng.init(seed + candidate_count + @as(u64, @intCast(candidate * 8 + turn * 2 + origin_index)));
+            const terrain_random = terrain_prng.random();
+            for (definition.cells[0 .. @as(usize, definition.size[0]) * definition.size[1]], 0..) |material, index| {
+                if (material == .none) continue;
+                const root = runtime.worldCell(&layout, origin, definition.size, rotation, blueprint.cellAtIndex(definition.size, index)).?;
+                for (1..rules.Platform.depth + 1) |depth| for (0..rules.Platform.width) |y| for (0..rules.Platform.width) |x| {
+                    const position = rules.Cell{ root[0], root[1], root[2] } + rules.Cell{ @as(i64, @intCast(x)) - rules.Platform.xy_radius, @as(i64, @intCast(y)) - rules.Platform.xy_radius, -@as(i64, @intCast(depth)) };
+                    world.put(position, platforms[terrain_random.uintLessThan(usize, platforms.len)]);
+                };
+            }
+            for (definition.cells, 0..) |material, index| {
+                if (material != .none or !terrain_random.boolean()) continue;
+                const cell = runtime.worldCell(&layout, origin, definition.size, rotation, blueprint.cellAtIndex(definition.size, index)).?;
+                world.put(.{ cell[0], cell[1], cell[2] }, additions[terrain_random.uintLessThan(usize, additions.len)]);
+                cavity_additions += 1;
+            }
+            var physical: View = .{ .snapshot = &world.resident };
+            const rotated_size = blueprint.rotatedSize(definition.size, rotation);
+            for (0..8) |_| {
+                const cell = rules.Cell{ origin[0], origin[1], origin[2] } + rules.Cell{
+                    if (terrain_random.boolean()) -1 else @intCast(rotated_size[0]),
+                    terrain_random.uintLessThan(u32, rotated_size[1]),
+                    terrain_random.uintLessThan(u32, rotated_size[2]),
+                };
+                if (physical.reader().get(cell) != .none) continue;
+                world.put(cell, additions[terrain_random.uintLessThan(usize, additions.len)]);
+                surrounding_additions += 1;
+            }
+            const fulfilled = try allocator.alloc(u8, (definition.cells.len + 7) / 8);
+            @memset(fulfilled, 0);
+            var instance: runtime.Instance = .{ .id = 1, .definition_id = 1, .owner = 1, .origin = origin, .rotation = rotation, .fulfilled = fulfilled, .remaining = definition.target_count, .box_chunks = &.{} };
+            defer instance.deinit(allocator);
+            instance.box_chunks = try runtime.boxChunks(allocator, &layout, origin, definition.size, rotation);
+            const selected = try region.chunks(allocator, &layout, origin, definition.size, rotation, 1024);
+            defer allocator.free(selected);
+            try std.testing.expect(selected.len < world.resident.chunks.count());
+            var narrow = try world.cloneSelected(selected);
+            defer narrow.deinit(allocator);
+            var reference = try structurallyCheckedPublication(&world.resident, definition, instance);
+            defer reference.deinit(allocator);
+            var result = try prepareCertified(allocator, &narrow, definition, instance, .{});
+            try std.testing.expect(result == .prepared);
+            defer result.prepared.deinit(allocator);
+            try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
+            try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_dependents);
+            try expectSamePublication(reference, result.prepared.publication);
+            transform_count += 1;
+            reference_target_checks += 2 * definition.target_count;
+        };
+    }
+    std.debug.print("seeded certified admission seed={d}: {d}/{d} accepted, {d} multilayer, {d} transforms, {d} full target checks, {d} cavity and {d} surrounding additions\n", .{ seed, accepted, candidate_count, multilayer, transform_count, reference_target_checks, cavity_additions, surrounding_additions });
+    // Eight flat and eight unperturbed column candidates must exercise the
+    // certificate; a compiler that rejects everything cannot make this test pass.
+    try std.testing.expect(accepted >= 16);
+    try std.testing.expect(multilayer >= 8);
+    try std.testing.expectEqual(accepted * 8, transform_count);
+    try std.testing.expect(cavity_additions > 0);
+    try std.testing.expect(surrounding_additions > 0);
+}
+
 test "compiler rejects the clipped support route that box-face validation misses" {
     const allocator = std.testing.allocator;
     var fixture = try Fixture.init();

@@ -191,3 +191,32 @@ counter/allocation checks against both the current tree and `47fd39d` using the
 identical updated source. Those runs verify compatibility; they do not replace
 the paired performance results above. Formatting, diff checks and independent
 review passed.
+
+### Bounded seeded differential coverage
+
+One additional test uses seed `530811` and exactly 32 candidate shapes, each no
+larger than 5×5×8 cells, with a compiler budget of 256 cells. Candidate RNG state
+does not depend on earlier acceptance. It compiles mixed floors, columns, sparse
+contents and perturbed columns, and only passes accepted immutable definitions
+to `prepareCertified`. Every accepted definition runs all four rotations at the
+chunk-edge and seam origins, over mixed qualifying real platforms and additions
+to previously empty cavity/surrounding cells. Target cells and platforms remain
+untouched. The complete resident-world oracle repeats every target proof using
+fresh and shared caches, independently of the narrow chunk collector.
+
+The fixed sample accepts **16 designs**, including **eight multilayer designs**,
+and exercises **128 transforms**, **5,184 full target checks**, **1,775 cavity
+additions** and **786 surrounding additions**. Minimum accepted/multilayer counts,
+all-transform counts and nonzero additions prevent vacuous success. Failure output
+includes the seed, candidate, raw contents, shape, origin and rotation. Existing
+targeted regressions are unchanged, and no game path or test framework was added.
+
+The focused Debug admission suite passed **95 tests**, with a five-second runner
+summary. A separate filtered Debug run containing the new test and an empty
+module-discovery test took **1.981 seconds**, excluding compilation. These are local
+timing observations; CI cost depends on its host. Formatting,
+diff checks and independent review passed.
+
+Final `zig build install test test-blueprint-admission -Doptimize=ReleaseFast --summary all`
+passed all 58 steps: **1,946 tests passed, eight existing skips**. Both applications
+build. The seeded coverage counters match the Debug run in every imported suite.
