@@ -2134,7 +2134,7 @@ test "ordinary put preview work is independent of dense construction and pending
     for ([_]bool{ false, true }) |with_sites| {
         var world = try World.init(a, &test_layout);
         defer world.deinit();
-        try setTestPhysical(&world, .{ 10, 10, 69 }, .stone);
+        for (67..70) |z| for (9..12) |y| for (9..12) |x| try setTestPhysical(&world, .{ @intCast(x), @intCast(y), @intCast(z) }, .stone);
         if (with_sites) try insertTestBlueprint(&world, 1, .{ 25, 25, 74 }, .{ 1, 1, 1 }, &.{.water});
         const sparse = try Metrics.measure(&world, operation);
 
@@ -2175,7 +2175,8 @@ test "ordinary puts check physical and completed targets without reading constru
     const a = std.testing.allocator;
     var world = try World.init(a, &test_layout);
     defer world.deinit();
-    try setTestPhysical(&world, .{ 10, 10, 69 }, .stone);
+    // Limestone retains a single-cell reset so each proof has one foundation probe.
+    try setTestPhysical(&world, .{ 10, 10, 69 }, .limestone);
     try setTestPhysical(&world, .{ 10, 10, 71 }, .water);
     try insertTestBlueprint(&world, 1, .{ 12, 12, 74 }, .{ 8, 8, 4 }, &([_]BlockType{.water} ** 256));
     const operation: BlockOperation = .{ .block = .{ 10, 10, 70 }, .action = .{ .put = .tree_trunk } };
@@ -2187,7 +2188,7 @@ test "ordinary puts check physical and completed targets without reading constru
     try std.testing.expectEqual(@as(usize, 0), probe.above_reads);
     probe.foundation_reads = 0;
     try std.testing.expectEqual(OperationStatus.success, validateCompletedEdit(a, reader, &world.blueprints, &constructed, operation).status);
-    // A trunk over natural stone has one foundation probe in each independent proof.
+    // The physical and completed views each perform their own limestone probe.
     try std.testing.expectEqual(@as(usize, 2), probe.foundation_reads);
     try std.testing.expectEqual(@as(usize, 0), probe.above_reads);
     try std.testing.expectEqual(@as(u32, 256), world.blueprints.instances.get(1).?.remaining);
@@ -2197,7 +2198,7 @@ test "ordinary put still requires physical support when the completed target is 
     const a = std.testing.allocator;
     var world = try World.init(a, &test_layout);
     defer world.deinit();
-    try setTestPhysical(&world, .{ 10, 10, 68 }, .stone);
+    for (66..69) |z| for (9..12) |y| for (9..12) |x| try setTestPhysical(&world, .{ @intCast(x), @intCast(y), @intCast(z) }, .stone);
     try insertTestBlueprint(&world, 1, .{ 10, 10, 69 }, .{ 1, 1, 1 }, &.{.tree_trunk});
     const operation: BlockOperation = .{ .block = .{ 10, 10, 70 }, .action = .{ .put = .tree_trunk } };
     var completed: blueprint_runtime.CompletedReader = .{ .physical = world.reader(), .state = &world.blueprints };
@@ -2418,8 +2419,19 @@ test "neighboring sites retain a global completion order after safe external sup
     for (1..3) |z| for (1..3) |y| for (1..3) |x| try client.insertChunk(.{ @intCast(x), @intCast(y), @intCast(z) }, WorldChunk.initEmpty());
     try insertTestBlueprint(&client, 1, .{ 64, 64, 64 }, .{ 1, 1, 1 }, &.{.planks});
     try insertTestBlueprint(&client, 2, .{ 65, 64, 64 }, .{ 1, 1, 1 }, &.{.planks});
-    try setTestPhysical(&client, .{ 64, 64, 63 }, .stone);
-    try setTestPhysical(&client, .{ 65, 64, 63 }, .stone);
+    // Each removable mineral source is valid on a full stone platform. The
+    // shared platform lies below both sources, so removing A cannot damage B's.
+    for (60..63) |z| for (63..66) |y| for (63..67) |x| try setTestPhysical(&client, .{ @intCast(x), @intCast(y), @intCast(z) }, .stone);
+    try setTestPhysical(&client, .{ 64, 64, 63 }, .crushed_stone);
+    try setTestPhysical(&client, .{ 65, 64, 63 }, .crushed_stone);
+    {
+        var completed: blueprint_runtime.CompletedReader = .{ .physical = client.reader(), .state = &client.blueprints };
+        var initial: block_rules.Validator = .{ .allocator = std.testing.allocator, .reader = completed.reader() };
+        defer initial.deinit();
+        for ([_]block_rules.Cell{ .{ 64, 64, 63 }, .{ 65, 64, 63 }, .{ 64, 64, 64 }, .{ 65, 64, 64 } }) |cell| {
+            try std.testing.expect(initial.checkExisting(cell) == null);
+        }
+    }
     // A may rely on completed B, but removing their final real support is invalid.
     try std.testing.expectEqual(OperationStatus.success, client.tryOperation(.{ .block = .{ 64, 64, 63 }, .action = .remove }).status);
     try std.testing.expectEqual(OperationStatus.constraint_violation, client.previewOperation(.{ .block = .{ 65, 64, 63 }, .action = .remove }).status);
@@ -2478,7 +2490,7 @@ test "ordinary completed validation matches physical validation work without ins
     const a = std.testing.allocator;
     var world = try World.init(a, &test_layout);
     defer world.deinit();
-    try setTestPhysical(&world, .{ 10, 10, 8 }, .stone);
+    for (6..9) |z| for (9..12) |y| for (9..12) |x| try setTestPhysical(&world, .{ @intCast(x), @intCast(y), @intCast(z) }, .stone);
     for (9..13) |z| try setTestPhysical(&world, .{ 10, 10, @intCast(z) }, .planks);
     try setTestPhysical(&world, .{ 11, 10, 11 }, .planks);
     const constructed = [_]block_rules.Cell{

@@ -34,7 +34,7 @@ versions only, not intermediate development builds, including builds between rel
 
 The game runs one current gameplay/construction logic. It does not select historical rules
 from a world or blueprint. Compatibility with older file encodings is separate: the current
-implementation writes and reads format 4. Formats 1–3 are incompatible development
+implementation writes and reads format 5. Formats 1–4 are incompatible development
 saves and are rejected as whole worlds. The base and WAL readers enforce the supported inclusive
 range through `minimum_readable_version` and `current_write_version`.
 
@@ -45,6 +45,10 @@ saves readable. This applies even when the byte layout has not changed, and cove
 saved blueprint libraries, and unfinished construction sites together. Generator
 identity/version guards likewise reject unsupported algorithms. All accepted saves use the
 current game logic.
+
+Version 5 keeps the version-4 byte layouts but requires platform-only direct stone
+foundations and portable blueprint certification. Raising both gates excludes old
+buildings and blueprint libraries certified under the former single-stone shortcut.
 
 ## Saving and exit
 
@@ -93,7 +97,7 @@ The exit drain includes submitted blueprint applications while their detached ad
 pending, and preserves their order with later mutations. A failed application resolves its
 command fence without publishing an instance.
 
-Saved player state includes identity, feet position, yaw, pitch, and the material in the one-slot inventory. Inventory changes belong to authoritative terrain transfers and are captured in the same snapshot. Movement checkpoints preserve the service-owned inventory. Velocity, climbing state, partial interaction holds, pending client predictions, and transient movement history are reset on startup. Format 4 uses inventory schema 1. Restored collision is checked against authoritative terrain before gameplay starts.
+Saved player state includes identity, feet position, yaw, pitch, and the material in the one-slot inventory. Inventory changes belong to authoritative terrain transfers and are captured in the same snapshot. Movement checkpoints preserve the service-owned inventory. Velocity, climbing state, partial interaction holds, pending client predictions, and transient movement history are reset on startup. Format 5 uses inventory schema 1. Restored collision is checked against authoritative terrain before gameplay starts.
 
 ## Storage and ownership
 

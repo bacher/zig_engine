@@ -22,6 +22,11 @@ even if another orientation or the direct route had a lower mineral height. Wate
 allowed above air but rejected above sand. These predicates could invalidate existing
 constructions solely because a block was added below or beside them.
 
+The later [stone-platform/certified-admission change](stone-platform-certified-admission.md)
+tightens literal stone's direct foundation shortcuts while preserving this additive
+contract. It also supersedes Q2's original retained admission halo: current Apply
+reuses portable certification and reads only the box and physical platform envelope.
+
 ## Requirements
 
 - R1: Inserting a legal block into an empty cell preserves
@@ -70,8 +75,9 @@ constructions solely because a block was added below or beside them.
   eligible route. These remain separate existing constraints, rather than requiring a new
   joint run/height path representation.
 - Q2: Does this remove blueprint admission's environment checks?
-  A2: No. Those checks and their snapshot halo remain in place. This branch changes the
-  underlying rules and supersedes old conflict examples; admission optimization is separate.
+  A2: This original change retained those checks. PR #52 then removed old-dependent
+  checks; the later portable-certificate follow-up removes repeated target searches.
+  Physical target/platform guards, complete box sources and revision checks remain.
 - Q3: Does every legal target placement now have to be accepted by an ordinary edit?
   A3: The property concerns preservation of existing support, not all operation preconditions.
   Ordinary insertions validate the new target and rely on R1 to preserve old cells.

@@ -64,7 +64,6 @@ pub const Options = struct {
     cancel: ?*const std.atomic.Value(bool) = null,
     max_snapshot_chunks: usize = 1024,
     max_snapshot_bytes: usize = default_max_snapshot_bytes,
-    cache_entries: usize = 8192,
 
     fn cancelled(self: Options) bool {
         return if (self.cancel) |token| token.load(.acquire) else false;
@@ -76,6 +75,7 @@ pub const Rejection = @import("blueprint_result.zig").Rejection;
 pub const Prepared = struct {
     publication: runtime.PreparedPublication,
     foundation_reads: usize = 0,
+    /// Structural target checks are certified at compile time, never repeated here.
     validated_targets: usize = 0,
     /// Pure additions preserve existing support witnesses without rechecking them.
     validated_dependents: usize = 0,
@@ -132,8 +132,10 @@ const View = struct {
     }
 };
 
-/// The caller retains snapshot, definition, and instance. A successful result
-/// owns an independent cloned instance and all publication resources.
+/// Requires immutable contents certified by blueprint.compile under the current
+/// rules. Definition remains the owned serialization type; well-formedness alone
+/// does not establish this trusted-input contract. The caller retains snapshot,
+/// definition, and instance. Success owns a cloned instance and publication data.
 pub fn prepare(allocator: std.mem.Allocator, snapshot: *const Snapshot, definition: blueprint.Definition, instance: runtime.Instance, options: Options) !Result {
     if (options.cancelled()) return .cancelled;
     if (snapshot.chunks.count() > options.max_snapshot_chunks or snapshot.estimatedOwnedBytes() > options.max_snapshot_bytes) return .{ .rejected = .{ .code = .budget_exceeded } };
@@ -149,6 +151,9 @@ pub fn prepare(allocator: std.mem.Allocator, snapshot: *const Snapshot, definiti
     defer source.deinit(allocator); // borrowed chunk values
     var source_chunks = snapshot.chunks.iterator();
     while (source_chunks.next()) |chunk| try source.put(allocator, chunk.key_ptr.*, chunk.value_ptr.index);
+    // Publication swaps complete footprint indexes, including target-free cavity
+    // chunks. Missing sources must never silently become empty replacement indexes.
+    for (instance.box_chunks) |id| if (!snapshot.chunks.contains(id)) return .{ .rejected = .{ .code = .missing_data } };
     var view: View = .{ .snapshot = snapshot };
     const physical = view.reader();
     // Target checks remain physical. Correct existing materials do not count
@@ -192,28 +197,14 @@ pub fn prepare(allocator: std.mem.Allocator, snapshot: *const Snapshot, definiti
         owned_instance.deinit(allocator);
         return err;
     };
-    var own_publication = true;
-    defer if (own_publication) publication.deinit(allocator);
-    view.publication = &publication;
-    var validator: rules.Validator = .{ .allocator = allocator, .reader = view.reader(), .cache_limit = options.cache_entries, .cancel = options.cancel };
-    defer validator.deinit();
-    var targets: usize = 0;
-    for (definition.cells, 0..) |material, index| {
-        if (index & 255 == 0 and options.cancelled()) return .cancelled;
-        if (material == .none) continue;
-        const cell = runtime.worldCell(&snapshot.layout, instance.origin, definition.size, instance.rotation, blueprint.cellAtIndex(definition.size, index)).?;
-        const failed = validator.checkExisting(.{ cell[0], cell[1], cell[2] });
-        if (options.cancelled()) return .cancelled;
-        if (validator.allocation_failed) return error.OutOfMemory;
-        if (failed) |failure| return .{ .rejected = .{ .code = .composition, .cell = cell, .failure = failure } };
-        targets += 1;
+    if (options.cancelled()) {
+        publication.deinit(allocator);
+        return .cancelled;
     }
-    // Every target was empty and unclaimed, so this is a finite pure addition.
-    // Existing support witnesses remain available under the shared monotone
-    // rules, even when intermediate physical fills would not be ordinary-valid.
-    // Only the new completed targets and real bottom platforms need admission.
-    own_publication = false;
-    return .{ .prepared = .{ .publication = publication, .foundation_reads = foundation_reads, .validated_targets = targets } };
+    // The full real platforms replace the compiler's virtual platform witnesses
+    // within the same fixed windows. Rotation/translation preserve those proofs;
+    // additions in real terrain and other sites retain them by monotonicity.
+    return .{ .prepared = .{ .publication = publication, .foundation_reads = foundation_reads } };
 }
 
 const Fixture = struct {
@@ -311,7 +302,7 @@ test "detached admission prebuilds chunk publication and completion stays consta
     try std.testing.expect(result == .prepared);
     defer result.prepared.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 36), result.prepared.foundation_reads);
-    try std.testing.expectEqual(@as(usize, 2), result.prepared.validated_targets);
+    try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
     try fixture.state.reservePublication(std.testing.allocator, &fixture.snapshot.layout, &result.prepared.publication);
     fixture.state.publishPublication(&result.prepared.publication);
     try std.testing.expect(fixture.state.targetAt(.{ 10, 10, 4 }) != null);
@@ -347,7 +338,7 @@ test "composed admission preserves water and snow above a proposed sand target" 
         var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
         try std.testing.expect(result == .prepared);
         defer result.prepared.deinit(std.testing.allocator);
-        try std.testing.expectEqual(@as(usize, 1), result.prepared.validated_targets);
+        try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
         try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_dependents);
         const blocks = fixture.snapshot.chunks.get(chunkId(&fixture.snapshot.layout, .{ 10, 10, 5 })).?.blocks;
         try std.testing.expectEqual(material, blocks.blocks[5][10][10]);
@@ -379,7 +370,7 @@ test "finite batches preserve real and planned crushed bridge prefixes in both o
             var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
             try std.testing.expect(result == .prepared);
             defer result.prepared.deinit(std.testing.allocator);
-            try std.testing.expectEqual(@as(usize, 6), result.prepared.validated_targets);
+            try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
             try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_dependents);
             try fixture.expectValidRoots(&roots, &result.prepared.publication);
             for (4..10) |z| try std.testing.expectEqual(rules.BlockType.none, fixture.snapshot.chunks.get(chunkId(&fixture.snapshot.layout, instance.origin)).?.blocks.blocks[z][10][10]);
@@ -436,7 +427,7 @@ test "finite batches retain lower independent plank and mixed reinforced routes"
             const definition = try fixture.definition(.{ 1, 1, limit }, cells[0..limit]);
             var instance = try fixture.instance(.{ 10 + span + 1, 10, 4 });
             defer instance.deinit(std.testing.allocator);
-            try fixture.put(.{ 10, 10, 5 }, .stone);
+            for (4..6) |z| for (9..12) |y| for (9..12) |x| try fixture.put(.{ @intCast(x), @intCast(y), @intCast(z) }, .stone);
             var roots: [32]Cell = undefined;
             var count: usize = 0;
             for (6..floor_z) |z| {
@@ -461,7 +452,7 @@ test "finite batches retain lower independent plank and mixed reinforced routes"
             var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
             try std.testing.expect(result == .prepared);
             defer result.prepared.deinit(std.testing.allocator);
-            try std.testing.expectEqual(@as(usize, limit), result.prepared.validated_targets);
+            try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
             try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_dependents);
             try fixture.expectValidRoots(roots[0..count], &result.prepared.publication);
         }
@@ -483,7 +474,7 @@ test "finite batches preserve real and planned footprint and road support witnes
             var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
             try std.testing.expect(result == .prepared);
             defer result.prepared.deinit(std.testing.allocator);
-            try std.testing.expectEqual(@as(usize, 4), result.prepared.validated_targets);
+            try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
             try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_dependents);
             try fixture.expectValidRoots(&.{root}, &result.prepared.publication);
         }
@@ -501,7 +492,7 @@ test "admission does not certify or scan pre-existing invalid planned roots" {
     var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
     try std.testing.expect(result == .prepared);
     defer result.prepared.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 2), result.prepared.validated_targets);
+    try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
     try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_dependents);
     var view: View = .{ .snapshot = &fixture.snapshot, .publication = &result.prepared.publication };
     var validator: rules.Validator = .{ .allocator = std.testing.allocator, .reader = view.reader() };
@@ -510,21 +501,14 @@ test "admission does not certify or scan pre-existing invalid planned roots" {
     try std.testing.expectEqual(@as(u64, 99), result.prepared.publication.chunks.get(chunkId(&fixture.snapshot.layout, old_root)).?.lookup.get(old_root).?.instance_id);
 }
 
-test "every new target still needs a completed structural proof" {
-    var fixture = try Fixture.init();
-    defer fixture.deinit();
-    // Shape validation alone is insufficient: a well-formed restored definition
-    // can contain an unsupported upper target. Admission must inspect it too.
-    const cells = try std.testing.allocator.dupe(rules.BlockType, &.{ .planks, .none, .none, .planks });
-    const definition: blueprint.Definition = .{ .size = .{ 2, 1, 2 }, .cells = cells, .target_count = 2 };
-    try fixture.state.insertDefinition(std.testing.allocator, .{ .id = 1, .owner = 1, .name = try std.testing.allocator.dupe(u8, "restored"), .definition = definition });
-    var instance = try fixture.instance(.{ 10, 10, 4 });
-    defer instance.deinit(std.testing.allocator);
-    const result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
-    try std.testing.expectEqual(RejectCode.composition, result.rejected.code);
-    try std.testing.expectEqual(Cell{ 11, 10, 5 }, result.rejected.cell.?);
-    try std.testing.expectEqual(rules.Reason.horizontal_span, result.rejected.failure.?.reason);
-    try std.testing.expectEqual(@as(usize, 0), fixture.state.instances.count());
+test "compiler rejects well-formed unsupported contents before certified admission" {
+    const cells = [_]rules.BlockType{ .planks, .none, .none, .planks };
+    const definition: blueprint.Definition = .{ .size = .{ 2, 1, 2 }, .cells = &cells, .target_count = 2 };
+    try definition.validateWellFormed(31, blueprint.default_max_cells);
+    const compiled = try blueprint.compile(std.testing.allocator, .{ .size = definition.size, .cells = definition.cells }, .{ .horizontal_limit = 31 });
+    try std.testing.expect(compiled == .invalid);
+    try std.testing.expectEqual(blueprint.DiagnosticCode.structural, compiled.invalid.code);
+    try std.testing.expectEqual(rules.Reason.horizontal_span, compiled.invalid.failure.?.reason);
 }
 
 test "target-only admission retains all allowed materials overlap immutable and platform checks" {
@@ -537,7 +521,7 @@ test "target-only admission retains all allowed materials overlap immutable and 
         var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
         try std.testing.expect(result == .prepared);
         defer result.prepared.deinit(std.testing.allocator);
-        try std.testing.expectEqual(@as(usize, 1), result.prepared.validated_targets);
+        try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
         try std.testing.expectEqual(@as(usize, 27), result.prepared.foundation_reads);
         try fixture.existing(instance.origin, material, true);
         try std.testing.expectEqual(RejectCode.overlap, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
@@ -647,120 +631,225 @@ fn expectSamePublication(expected: runtime.PreparedPublication, actual: runtime.
     }
 }
 
-test "narrow and oversized admission snapshots agree on rotated boundary support routes" {
+fn structurallyCheckedPublication(snapshot: *const Snapshot, definition: blueprint.Definition, instance: runtime.Instance) !runtime.PreparedPublication {
+    const allocator = std.testing.allocator;
+    var sources: std.AutoHashMapUnmanaged(ChunkId, runtime.ChunkIndex) = .empty;
+    defer sources.deinit(allocator);
+    var chunks = snapshot.chunks.iterator();
+    while (chunks.next()) |entry| try sources.put(allocator, entry.key_ptr.*, entry.value_ptr.index);
+    var owned_instance = try instance.clone(allocator);
+    var publication = runtime.buildPublication(allocator, &snapshot.layout, definition, owned_instance, &sources, null) catch |err| {
+        owned_instance.deinit(allocator);
+        return err;
+    };
+    errdefer publication.deinit(allocator);
+    var view: View = .{ .snapshot = snapshot, .publication = &publication };
+    var shared: rules.Validator = .{ .allocator = allocator, .reader = view.reader() };
+    defer shared.deinit();
+    for (definition.cells, 0..) |material, index| {
+        if (material == .none) continue;
+        const cell = runtime.worldCell(&snapshot.layout, instance.origin, definition.size, instance.rotation, blueprint.cellAtIndex(definition.size, index)).?;
+        var fresh: rules.Validator = .{ .allocator = allocator, .reader = view.reader() };
+        defer fresh.deinit();
+        for ([_]*rules.Validator{ &fresh, &shared }) |validator| {
+            if (validator.checkExisting(.{ cell[0], cell[1], cell[2] })) |failure| {
+                std.debug.print("certified target {any} failed reference validation: {s}\n", .{ cell, @tagName(failure.reason) });
+                return error.TestUnexpectedResult;
+            }
+        }
+    }
+    return publication;
+}
+
+test "certified admission agrees with complete-world structural reference across materials rotations and seams" {
     const allocator = std.testing.allocator;
     const region = @import("blueprint_admission_region.zig");
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
-    // Enumerate the entire resident world independently of the region collector.
+    // Enumerate all resident chunks independently of the production collector.
     var all_ids: [64]ChunkId = undefined;
     var count: usize = 0;
     for (0..4) |z| for (0..4) |y| for (0..4) |x| {
         all_ids[count] = layout.encodeChunkCoords(.{ @intCast(x), @intCast(y), @intCast(z) });
         count += 1;
     };
-    // This restored, well-formed definition deliberately lacks an isolated
-    // structural certificate: its upper target must use the external staircase.
-    // A compiler-certified definition could mask missing halo data with its own
-    // internal support route above the required real bottom platform.
-    var cells = [_]rules.BlockType{.none} ** 16;
-    cells[0] = .rebar;
-    cells[15] = .rebar;
-    const definition: blueprint.Definition = .{ .size = .{ 2, 1, 8 }, .cells = &cells, .target_count = 2 };
-    try definition.validateWellFormed(blueprint.horizontalLimit(&layout), blueprint.default_max_cells);
-    for (0..4) |turn| for ([_]bool{ false, true }) |seam| {
-        const rotation: u2 = @intCast(turn);
-        const direction: rules.Cell = switch (rotation) {
-            0 => .{ 1, 0, 0 },
-            1 => .{ 0, -1, 0 },
-            2 => .{ -1, 0, 0 },
-            3 => .{ 0, 1, 0 },
-        };
-        const axis: usize = if (direction[0] != 0) 0 else 1;
-        const positive = direction[0] > 0 or direction[1] > 0;
-        var upper: rules.Cell = .{ 95, 95, 71 };
-        // Reach 28 places the required source at 31 or 64, on the far
-        // chunk boundary. Seam translations instead use canonical X=127/0.
-        if (axis == 0) upper[0] = if (direction[0] > 0) 59 else 36 else upper[1] = if (direction[1] > 0) 59 else 36;
-        if (seam) {
-            upper[0] = if (axis == 0) (if (direction[0] > 0) @as(i64, 27) else 100) else 0;
+    const size: blueprint.Size = .{ 31, 7, 20 };
+    var mixed = [_]rules.BlockType{.none} ** (31 * 7 * 20);
+    mixed[blueprint.linearIndex(size, .{ 0, 3, 0 }).?] = .rebar;
+    // Reach 27 leaves room for the far platform corner at distance 28.
+    for (1..8) |level| {
+        const start = (level - 1) * 4;
+        for (0..@min(4, 27 - start) + 1) |step| mixed[blueprint.linearIndex(size, .{ @intCast(start + step), 3, @intCast(level) }).?] = .rebar;
+    }
+    for (0..20) |z| mixed[blueprint.linearIndex(size, .{ 30, 6, @intCast(z) }).?] = if (z % 2 == 0) .rebar else .reinforced_concrete;
+    for (0..12) |z| mixed[blueprint.linearIndex(size, .{ 30, 0, @intCast(z) }).?] = .tree_trunk;
+    mixed[blueprint.linearIndex(size, .{ 0, 6, 0 }).?] = .tree_trunk;
+    for (0..3) |x| mixed[blueprint.linearIndex(size, .{ @intCast(x), 6, 1 }).?] = .planks;
+    for (2..12) |z| mixed[blueprint.linearIndex(size, .{ 2, 6, @intCast(z) }).?] = .planks;
+    for (0..6) |z| mixed[blueprint.linearIndex(size, .{ 10, 0, @intCast(z) }).?] = .stone;
+    mixed[blueprint.linearIndex(size, .{ 15, 0, 0 }).?] = .grass;
+    mixed[blueprint.linearIndex(size, .{ 16, 0, 0 }).?] = .sand;
+    mixed[blueprint.linearIndex(size, .{ 15, 6, 0 }).?] = .country_road_solid;
+    const fallback = [_]rules.BlockType{.stone} ** 7 ++ [_]rules.BlockType{.rebar};
+    const platforms = [_]rules.BlockType{ .stone, .dirt, .packed_dirt, .grass, .clay, .crushed_stone, .rebar, .reinforced_concrete, .metal_ore, .limestone, .coal, .deeprock };
+    var cavity_controls: usize = 0;
+    for ([_]blueprint.Snapshot{ .{ .size = size, .cells = &mixed }, .{ .size = .{ 1, 1, 8 }, .cells = &fallback } }, 0..) |input, scenario| {
+        const compiled = try blueprint.compile(allocator, input, .{ .horizontal_limit = blueprint.horizontalLimit(&layout) });
+        try std.testing.expect(compiled == .valid);
+        var certified = compiled.valid;
+        defer certified.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, if (scenario == 0) 0 else 7), certified.substituted_count);
+        const definition = certified.definition;
+        if (scenario == 0) {
+            try std.testing.expectEqual(rules.BlockType.crushed_stone, definition.blockAt(.{ 10, 0, 0 }).?);
+            try std.testing.expectEqual(rules.BlockType.dirt, definition.blockAt(.{ 15, 0, 0 }).?);
         }
-        const offset = blueprint.rotatedCell(definition.size, .{ 1, 0, 7 }, rotation);
-        const origin: Cell = .{ @intCast(upper[0] - offset[0]), @intCast(upper[1] - offset[1]), 64 };
-        const bottom = runtime.worldCell(&layout, origin, definition.size, rotation, .{ 0, 0, 0 }).?;
-        var instance: runtime.Instance = .{
-            .id = 1,
-            .definition_id = 1,
-            .owner = 1,
-            .origin = origin,
-            .rotation = rotation,
-            .fulfilled = try allocator.dupe(u8, &.{ 0, 0 }),
-            .remaining = 2,
-            .box_chunks = try runtime.boxChunks(allocator, &layout, origin, definition.size, rotation),
-        };
-        defer instance.deinit(allocator);
-        var world = try DifferentialAdmissionWorld.init(layout);
-        defer world.resident.deinit(allocator);
-        for (1..4) |depth| for (0..3) |y| for (0..3) |x| world.put(rules.Cell{ bottom[0], bottom[1], bottom[2] } + rules.Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, .stone);
-        const base = upper - direction * @as(rules.Cell, @splat(28)) - rules.Cell{ 0, 0, 7 };
-        const foundation = base - rules.Cell{ 0, 0, 1 };
-        world.put(foundation, .stone);
-        world.put(base, .rebar);
-        for (1..8) |level| {
-            const start = base + direction * @as(rules.Cell, @splat(@as(i64, @intCast((level - 1) * 4)))) + rules.Cell{ 0, 0, @intCast(level) };
-            for (0..5) |step| {
-                const cell = start + direction * @as(rules.Cell, @splat(@as(i64, @intCast(step))));
-                if (!@reduce(.And, cell == upper)) world.put(cell, .rebar);
+        for (0..4) |turn| for ([_]Cell{ .{ 31, 31, 64 }, .{ 126, 31, 64 } }) |origin| {
+            const rotation: u2 = @intCast(turn);
+            const fulfilled = try allocator.alloc(u8, (definition.cells.len + 7) / 8);
+            @memset(fulfilled, 0);
+            var instance: runtime.Instance = .{ .id = 1, .definition_id = 1, .owner = 1, .origin = origin, .rotation = rotation, .fulfilled = fulfilled, .remaining = definition.target_count, .box_chunks = try runtime.boxChunks(allocator, &layout, origin, definition.size, rotation) };
+            defer instance.deinit(allocator);
+            var world = try DifferentialAdmissionWorld.init(layout);
+            defer world.resident.deinit(allocator);
+            var first_bottom: ?Cell = null;
+            for (definition.cells[0 .. @as(usize, definition.size[0]) * definition.size[1]], 0..) |material, index| {
+                if (material == .none) continue;
+                const root = runtime.worldCell(&layout, origin, definition.size, rotation, blueprint.cellAtIndex(definition.size, index)).?;
+                if (first_bottom == null) first_bottom = root;
+                for (1..4) |depth| for (0..3) |y| for (0..3) |x| world.put(rules.Cell{ root[0], root[1], root[2] } + rules.Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, platforms[((depth - 1) * 9 + y * 3 + x) % platforms.len]);
             }
-        }
-        const footprint = instance.box_chunks[0];
-        const chunk_coords = layout.decodeChunkId(footprint);
-        const sentinel: Cell = .{ @as(u32, @intCast(chunk_coords[0])) * 32 + 31, @as(u32, @intCast(chunk_coords[1])) * 32 + 31, 95 };
-        const old_index = &world.resident.chunks.getPtr(footprint).?.index;
-        try old_index.instances.append(allocator, 99);
-        try old_index.targets.append(allocator, sentinel);
-        try old_index.lookup.put(allocator, sentinel, .{ .instance_id = 99, .cell_index = 7, .material = .planks, .chunk_slot = 0 });
-        const selected = try region.chunks(allocator, &layout, origin, definition.size, rotation, 1024);
-        defer allocator.free(selected);
-        try std.testing.expect(selected.len < all_ids.len);
-        const source_id = chunkId(&layout, world.canonical(foundation));
-        try std.testing.expect(std.mem.indexOfScalar(ChunkId, selected, source_id) != null);
-        try std.testing.expect(std.mem.indexOfScalar(ChunkId, instance.box_chunks, source_id) == null);
-        var edge: [3]i64 = .{ origin[0], origin[1], origin[2] };
-        edge[axis] += if (positive) -28 else @as(i64, blueprint.rotatedSize(definition.size, rotation)[axis]) - 1 + 28;
-        const edge_coords: [3]i32 = layout.decodeChunkId(chunkId(&layout, world.canonical(edge)));
-        const source_coords: [3]i32 = layout.decodeChunkId(source_id);
-        try std.testing.expectEqual(edge_coords[axis], source_coords[axis]);
-        // Removing the sole source rejects in both views. Keeping it accepts
-        // with identical full footprint indexes, despite different input sizes.
-        for ([_]bool{ false, true }) |broken| {
-            world.put(foundation, if (broken) .none else .stone);
+            if (scenario == 0) {
+                const cavity = runtime.worldCell(&layout, origin, definition.size, rotation, .{ 12, 2, 4 }).?;
+                world.put(.{ cavity[0], cavity[1], cavity[2] }, .sand);
+            }
+            world.put(rules.Cell{ origin[0], origin[1], origin[2] } + rules.Cell{ -2, 0, 1 }, .rebar);
+            const footprint = instance.box_chunks[0];
+            const coords = layout.decodeChunkId(footprint);
+            const sentinel: Cell = .{ @as(u32, @intCast(coords[0])) * 32 + 31, @as(u32, @intCast(coords[1])) * 32 + 31, 95 };
+            const old_index = &world.resident.chunks.getPtr(footprint).?.index;
+            try old_index.instances.append(allocator, 99);
+            try old_index.targets.append(allocator, sentinel);
+            try old_index.lookup.put(allocator, sentinel, .{ .instance_id = 99, .cell_index = 7, .material = .planks, .chunk_slot = 0 });
+            const selected = try region.chunks(allocator, &layout, origin, definition.size, rotation, 1024);
+            defer allocator.free(selected);
+            try std.testing.expect(selected.len < all_ids.len);
             var narrow = try world.cloneSelected(selected);
             defer narrow.deinit(allocator);
-            var oversized = try world.cloneSelected(&all_ids);
-            defer oversized.deinit(allocator);
-            var narrow_result = try prepare(allocator, &narrow, definition, instance, .{});
-            defer if (narrow_result == .prepared) narrow_result.prepared.deinit(allocator);
-            var oversized_result = try prepare(allocator, &oversized, definition, instance, .{});
-            defer if (oversized_result == .prepared) oversized_result.prepared.deinit(allocator);
-            if (broken) {
-                try std.testing.expect(narrow_result == .rejected and oversized_result == .rejected);
-                try std.testing.expectEqual(RejectCode.composition, narrow_result.rejected.code);
-                try std.testing.expectEqual(oversized_result.rejected.code, narrow_result.rejected.code);
-            } else {
-                try std.testing.expect(narrow_result == .prepared and oversized_result == .prepared);
-                try expectSamePublication(oversized_result.prepared.publication, narrow_result.prepared.publication);
-                const published_index = narrow_result.prepared.publication.chunks.get(footprint).?;
-                try std.testing.expect(std.mem.indexOfScalar(u64, published_index.instances.items, 99) != null);
-                try std.testing.expectEqual(@as(u64, 99), published_index.lookup.get(sentinel).?.instance_id);
-                // A positive sensitivity control: only the narrow capture loses
-                // this required outer chunk. Missing source data must reject.
-                var removed = narrow.chunks.fetchRemove(source_id).?.value;
+            var complete = try world.cloneSelected(&all_ids);
+            defer complete.deinit(allocator);
+            // The oracle repeats every full proof on complete data, with fresh
+            // and shared validator caches, independently of optimized prepare.
+            var reference = try structurallyCheckedPublication(&complete, definition, instance);
+            defer reference.deinit(allocator);
+            var result = try prepare(allocator, &narrow, definition, instance, .{});
+            try std.testing.expect(result == .prepared);
+            defer result.prepared.deinit(allocator);
+            try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
+            try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_dependents);
+            try expectSamePublication(reference, result.prepared.publication);
+            const retained = result.prepared.publication.chunks.get(footprint).?;
+            try std.testing.expect(std.mem.indexOfScalar(u64, retained.instances.items, 99) != null);
+            try std.testing.expectEqual(@as(u64, 99), retained.lookup.get(sentinel).?.instance_id);
+            // A cavity-only chunk remains a required complete index source.
+            for (instance.box_chunks) |id| {
+                var has_target = false;
+                for (definition.cells, 0..) |material, index| {
+                    if (material == .none) continue;
+                    const cell = runtime.worldCell(&layout, origin, definition.size, rotation, blueprint.cellAtIndex(definition.size, index)).?;
+                    has_target = has_target or chunkId(&layout, cell) == id;
+                }
+                if (has_target) continue;
+                var missing_cavity = try world.cloneSelected(selected);
+                defer missing_cavity.deinit(allocator);
+                var removed = missing_cavity.chunks.fetchRemove(id).?.value;
                 removed.deinit(allocator);
-                var missing = try prepare(allocator, &narrow, definition, instance, .{});
-                defer if (missing == .prepared) missing.prepared.deinit(allocator);
-                try std.testing.expect(missing == .rejected);
-                try std.testing.expectEqual(RejectCode.composition, missing.rejected.code);
+                try std.testing.expectEqual(RejectCode.missing_data, (try prepare(allocator, &missing_cavity, definition, instance, .{})).rejected.code);
+                cavity_controls += 1;
+                break;
             }
-        }
+            const source_id = chunkId(&layout, .{ first_bottom.?[0], first_bottom.?[1], first_bottom.?[2] - 1 });
+            try std.testing.expect(std.mem.indexOfScalar(ChunkId, instance.box_chunks, source_id) == null);
+            var removed = narrow.chunks.fetchRemove(source_id).?.value;
+            removed.deinit(allocator);
+            try std.testing.expectEqual(RejectCode.missing_data, (try prepare(allocator, &narrow, definition, instance, .{})).rejected.code);
+        };
+    }
+    try std.testing.expect(cavity_controls > 0);
+}
+
+test "compiler rejects the clipped support route that box-face validation misses" {
+    const allocator = std.testing.allocator;
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const size: blueprint.Size = .{ 31, 5, 9 };
+    var source = [_]rules.BlockType{.none} ** (31 * 5 * 9);
+    source[blueprint.linearIndex(size, .{ 0, 2, 0 }).?] = .rebar;
+    // Seven four-cell overhangs make the far target depend on the bottom
+    // source exactly 28 cells away, while keeping mineral height below 20.
+    for (1..8) |level| for (0..5) |step| {
+        source[blueprint.linearIndex(size, .{ @intCast((level - 1) * 4 + step), 2, @intCast(level) }).?] = .rebar;
     };
+    // Independent wood roots make the failing far target strictly interior
+    // on all six box faces without adding any reinforced support route.
+    for (0..9) |z| source[blueprint.linearIndex(size, .{ 30, 4, @intCast(z) }).?] = .tree_trunk;
+    source[blueprint.linearIndex(size, .{ 30, 0, 0 }).?] = .tree_trunk;
+    const compiled = try blueprint.compile(allocator, .{ .size = size, .cells = &source }, .{ .horizontal_limit = blueprint.horizontalLimit(&fixture.snapshot.layout) });
+    try std.testing.expect(compiled == .invalid);
+    try std.testing.expectEqual(blueprint.DiagnosticCode.structural, compiled.invalid.code);
+    try std.testing.expectEqual(rules.Reason.support_search_limit, compiled.invalid.failure.?.reason);
+    // This deliberately uncertified definition is used only by the full
+    // validator below, never by certificate-based admission.
+    const definition: blueprint.Definition = .{ .size = size, .cells = try allocator.dupe(rules.BlockType, &source), .target_count = 46 };
+    try definition.validateWellFormed(31, blueprint.default_max_cells);
+    try fixture.state.insertDefinition(allocator, .{ .id = 1, .owner = 1, .name = try allocator.dupe(u8, "uncertified face-only control"), .definition = definition });
+    var instance = try fixture.instance(.{ 10, 10, 4 });
+    defer instance.deinit(allocator);
+    var sources: std.AutoHashMapUnmanaged(ChunkId, runtime.ChunkIndex) = .empty;
+    defer sources.deinit(allocator);
+    var chunks = fixture.snapshot.chunks.iterator();
+    while (chunks.next()) |entry| try sources.put(allocator, entry.key_ptr.*, entry.value_ptr.index);
+    var owned_instance = try instance.clone(allocator);
+    var publication = runtime.buildPublication(allocator, &fixture.snapshot.layout, definition, owned_instance, &sources, null) catch |err| {
+        owned_instance.deinit(allocator);
+        return err;
+    };
+    defer publication.deinit(allocator);
+    for ([_]blueprint.LocalCell{ .{ 0, 2, 0 }, .{ 30, 4, 0 }, .{ 30, 0, 0 } }) |local| {
+        const root = runtime.worldCell(&fixture.snapshot.layout, instance.origin, size, 0, local).?;
+        for (1..4) |depth| for (0..3) |y| for (0..3) |x| {
+            try fixture.put(.{ root[0] + @as(u32, @intCast(x)) - 1, root[1] + @as(u32, @intCast(y)) - 1, root[2] - @as(u32, @intCast(depth)) }, .dirt);
+        };
+    }
+    // Full ordinary validation still distinguishes an unsupported interior cell
+    // from every occupied face cell; the compiler now makes this check itself.
+    var view: View = .{ .snapshot = &fixture.snapshot, .publication = &publication };
+    const bad_local: blueprint.LocalCell = .{ 28, 2, 7 };
+    const bad_world = runtime.worldCell(&fixture.snapshot.layout, instance.origin, size, 0, bad_local).?;
+    var boundary_count: usize = 0;
+    var failed_count: usize = 0;
+    for (definition.cells, 0..) |material, index| {
+        if (material == .none) continue;
+        const local = blueprint.cellAtIndex(size, index);
+        const cell = runtime.worldCell(&fixture.snapshot.layout, instance.origin, size, 0, local).?;
+        var validator: rules.Validator = .{ .allocator = allocator, .reader = view.reader() };
+        defer validator.deinit();
+        const failure = validator.checkExisting(.{ cell[0], cell[1], cell[2] });
+        var boundary = false;
+        for (local, size) |coordinate, extent| boundary = boundary or coordinate == 0 or coordinate == extent - 1;
+        if (boundary) {
+            boundary_count += 1;
+            try std.testing.expect(failure == null);
+        }
+        if (std.mem.eql(u32, &local, &bad_local)) {
+            try std.testing.expect(!boundary);
+            try std.testing.expect(failure != null);
+            try std.testing.expectEqual(rules.Reason.support_search_limit, failure.?.reason);
+            try std.testing.expectEqual(@as(u32, 29), failure.?.actual);
+            try std.testing.expectEqual(@as(u32, 28), failure.?.limit);
+            failed_count += 1;
+        } else try std.testing.expect(failure == null);
+    }
+    try std.testing.expectEqual(@as(usize, 12), boundary_count);
+    try std.testing.expectEqual(@as(usize, 1), failed_count);
+    try std.testing.expectEqual(Cell{ 38, 12, 11 }, bad_world);
 }

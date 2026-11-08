@@ -44,8 +44,9 @@ document, with assumed stable platforms beneath its globally lowest occupied cel
 outside the box supply no support. Normalization changes only the saved design, not source terrain
 or general construction rules.
 
-Natural stone and crushed stone are **not structurally interchangeable**. Natural stone is
-an unrestricted foundation; crushed stone has mineral/column/bridge limits and does not
+Natural stone and crushed stone are **not structurally interchangeable**. Natural stone
+provides direct wood/mineral support through a full stable platform; crushed stone also
+has mineral/column/bridge limits and does not
 directly support rebar/concrete outside the existing platform and lateral-support routes.
 Blueprint validation must examine the converted arrangement. The feature spec defines the
 material allowlist and initial conversions in [R19](../specs/features/blueprints.md#full-validation-and-portability),
@@ -96,11 +97,13 @@ use real terrain; miniatures cannot be mined and never count as real support for
 another target. Replacing a miniature with its required real block leaves the completed
 logical view unchanged, so that operation needs no dependent revalidation.
 
-Application checks every new target in the complete proposed logical world and verifies real bottom
-platforms. Existing valid real/planned cells retain their support witnesses under a finite batch of
-empty-cell additions, so application performs no old-dependent scan. Its versioned chunk input covers
-the rotated box expanded by 28 horizontally and downward, with no upward support extension; whole
-box chunks remain publication sources through cavities. The spec gives the
+Application reuses the current compiler's portable certificate and verifies physical target
+emptiness, immutability, overlap and real bottom platforms. Existing valid real/planned cells
+retain their support witnesses under a finite batch of empty-cell additions, so application
+performs no structural target searches or old-dependent scan. Its versioned chunk input covers
+the rotated box expanded by one cell horizontally and three cells downward, with no upward
+extension; whole box chunks remain publication sources through cavities. The spec gives the
+[certificate proof](../specs/features/blueprints.md#portable-certificate-admission) and
 [batch argument](../specs/features/blueprints.md#monotone-batch-admission). An ordinary placement first
 validates its new target against physical terrain,
 then validates that target in the completed logical view. Physical approval ensures miniatures
@@ -178,10 +181,13 @@ retains this footprint requirement after compaction (and constructed sand retain
 leave a previously placed soil block floating. Generated terrain is exempt from building
 validation; natural cliffs and hills remain mineable.
 
-Trunks and planks can rest on structural materials. Crushed stone can rest on natural or
-crushed stone. Rebar and concrete can rest on natural stone or either reinforced material.
-A stable platform is an additional valid foundation for all these materials. Resting on
-either soil state requires the centered stable platform, rather than just one soil cell.
+Trunks and planks can rest on structural materials. Crushed stone can rest on crushed
+stone. Rebar and concrete can rest on either reinforced material. A stable platform is
+an additional valid foundation for all these materials. Literal natural `stone`, soil
+and clay provide direct support only through the centered full 3x3x3 stable platform.
+Stone remains a qualifying platform material, and mixtures are allowed. Ore, limestone,
+coal and deeprock retain their single-block natural-foundation shortcut. Wood retains
+its existing direct support on mineral construction. Height/span limits are unchanged.
 An incompatible occupied block underneath supplies no direct support; an independently
 valid lateral route can still support the target.
 
@@ -231,6 +237,12 @@ Crushed stone can fill one unsupported cell between two opposite horizontal ston
 neighbors. Both neighbors must have direct vertical support; another unsupported bridge
 cell cannot act as one of these sides. This exception does not permit an unlimited stone
 bridge. Multi-cell gaps need temporary supports, which are a separate future feature.
+
+Natural-rock bridge sides retain their separate immediate-below support predicate;
+the platform-only direct-stone rule does not require a full cube beneath each side.
+Such a cube would also fill the cell below the middle gap. Soil/sand keep their
+nine-cell footprints, roads keep their immediate-below predicate, and blueprint
+fulfillment keeps its five-neighbor path.
 
 An independently supported bridge stops the downward six-cell run count, including when
 crushed stone is subsequently placed below it. Seven vertically adjacent crushed cells are

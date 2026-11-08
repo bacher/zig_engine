@@ -107,8 +107,8 @@ pub fn main(init: std.process.Init) !void {
         } else return error.UnknownBenchmarkArgument;
     }
     std.debug.print("blueprint sample={s} build={s} legacy_region={} admission_only={} admission_policy={s} BlockType={d} Failure={d} cache_entry={d} max_cells={d} cache_limit=8192\n", .{
-        options.sample,                                                                                  @tagName(@import("builtin").mode), options.legacy_region,  admission_only,
-        if (@hasField(admission.ChunkSnapshot, "constructed")) "existing-dependents" else "new-targets", @sizeOf(BlockType),                @sizeOf(rules.Failure), rules.Validator.cacheEntrySize(),
+        options.sample,                                                                                                                                                                @tagName(@import("builtin").mode), options.legacy_region,  admission_only,
+        if (@hasField(admission.ChunkSnapshot, "constructed")) "existing-dependents" else if (@hasField(admission.Options, "cache_entries")) "new-targets" else "certified-platforms", @sizeOf(BlockType),                @sizeOf(rules.Failure), rules.Validator.cacheEntrySize(),
         blueprint.default_max_cells,
     });
     if (!admission_only) try benchmarkCompilation(init);
@@ -348,7 +348,9 @@ fn benchmarkAdmission(init: std.process.Init, kind: Kind, neighbors: Neighbors, 
     snapshot.deinit(snapshot_meter.allocator());
     owns_snapshot = false;
     if (snapshot_meter.live != 0) return error.LeakedSnapshotAllocation;
-    if (targets != definition.target_count or foundation_reads != 31_212 or footprint_chunks != instance.box_chunks.len or snapshot_chunks != (if (options.legacy_region) @as(usize, 384) else 108)) return error.IncorrectAdmissionBenchmarkCounters;
+    const expected_targets: usize = if (@hasField(admission.Options, "cache_entries")) definition.target_count else 0;
+    const expected_chunks: usize = if (options.legacy_region) 384 else if (@hasField(admission.Options, "cache_entries")) 108 else 32;
+    if (targets != expected_targets or foundation_reads != 31_212 or footprint_chunks != instance.box_chunks.len or snapshot_chunks != expected_chunks) return error.IncorrectAdmissionBenchmarkCounters;
     if (dependents != (if (@hasField(admission.ChunkSnapshot, "constructed")) neighbor_count else 0)) return error.IncorrectDependentBenchmarkCount;
     std.debug.print("admission sample={s} case={s} neighbors={s} neighbor_count={d} size=100x100x32 resident_chunks=384 snapshot_chunks={d} footprint_chunks={d} validated_targets={d} validated_dependents={d} foundation_reads={d} region_ms={d:.3} copy_ms={d:.3} prepare_ms={d:.3} region_requested={d} region_peak_requested={d} region_allocations={d} snapshot_requested={d} snapshot_peak_requested={d} snapshot_estimate={d} snapshot_allocations={d} helper_peak_requested={d} retained_publication={d} helper_allocations={d}\n", .{
         options.sample,                                          @tagName(kind),                                        @tagName(neighbors),                                      neighbor_count,    snapshot_chunks,   footprint_chunks,         targets,            dependents,          foundation_reads,

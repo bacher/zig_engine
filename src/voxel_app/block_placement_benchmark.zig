@@ -150,7 +150,9 @@ fn benchmarkCrushedRoutes(init: std.process.Init) !void {
         }
     }
     for ([_]usize{ 15, 17 }) |y| {
-        for (4..9) |z| try putFixture(allocator, &chunk, 16, y, z, .stone);
+        // Resource pillars retain a one-cell reset under both rule revisions;
+        // the flat stone ground separately measures the platform restriction.
+        for (4..9) |z| try putFixture(allocator, &chunk, 16, y, z, .limestone);
         try putFixture(allocator, &chunk, 16, y, 9, .crushed_stone);
     }
     try world.insertChunk(.{ 0, 0, 0 }, chunk);

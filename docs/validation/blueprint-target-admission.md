@@ -1,5 +1,8 @@
 # Target-only blueprint admission: validation
 
+Historical report for PR #52. Current Apply behavior and measurements are recorded
+in [portable certificate admission](blueprint-certified-admission.md).
+
 Date: 2026-11-08. Baseline: `b73e671` (merged PR #51). Branch: `codex/blueprint-target-only-admission`.
 
 This follow-up removes existing-dependent enumeration from Apply and stops copying construction-marker lists used only by that pass. Detached admission also omits road geometry, which structural validation does not read; road block materials remain in the snapshot. New completed targets and full physical bottom platforms are still validated. The service uses a shared pure region collector: the rotated box expanded by 28 along X/Y and downward, with no upward support extension, rounded to canonical deduplicated chunks. Every whole box record remains available for publication, including cavities.

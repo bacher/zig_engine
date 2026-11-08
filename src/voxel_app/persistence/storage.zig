@@ -1932,7 +1932,7 @@ test "incompatible development worlds are rejected by both base and WAL gates" {
     const original_base = try readAlloc(a, f.store.base, 0, try f.store.base.size());
     defer a.free(original_base);
     var old_header: [120]u8 = original_base[0..120].*;
-    put(u32, &old_header, 8, 3);
+    put(u32, &old_header, 8, format.minimum_readable_version - 1);
     try f.store.base.write(&old_header, 0);
     const wal_name = try a.dupeZ(u8, f.store.segments.items[0].name);
     defer a.free(wal_name);
@@ -1957,7 +1957,7 @@ test "incompatible development worlds are rejected by both base and WAL gates" {
         const wal = try dir.file(wal_name, false);
         defer wal.close();
         var header = original_wal;
-        put(u32, &header, 8, 3);
+        put(u32, &header, 8, format.minimum_readable_version - 1);
         var h = hasher("ZGW-WALHDR-1\x00");
         h.update(header[0..88]);
         h.final(header[88..120]);
