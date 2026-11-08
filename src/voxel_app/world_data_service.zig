@@ -3727,6 +3727,100 @@ test "generated cache promotion preserves ownership on resident index allocation
     try std.testing.expectEqual(@as(u64, 1), state.generated_chunk_count);
 }
 
+fn testReadContextCacheIndexOom(comptime reserve_fallback: bool) !void {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const a = failing.allocator();
+    const data_bytes = @sizeOf(@import("world_chunk_data.zig").WorldChunkData);
+    {
+        var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) };
+        defer state.deinit(a);
+        const coords: ChunkCoords = .{ 0, 0, 1 };
+        const id = test_layout.encodeChunkCoords(coords);
+        const retained_id = test_layout.encodeChunkCoords(.{ 1, 0, 1 });
+        const column = ColumnGenerator.init(&state.generator, .{ 1, 0 });
+        {
+            const chunk = try column.tryGenerateChunk(a, 1);
+            errdefer chunk.deinit(a);
+            try std.testing.expect(try state.generated_chunks.insert(a, retained_id, chunk));
+        }
+        const retained_data = state.generated_chunks.peek(retained_id).?.content.blocks;
+        const capacity = state.generated_chunks.entries.capacity();
+        state.generated_chunks.max_entries = capacity + 1;
+        // Make the next insertion grow the shared index while retaining a real
+        // block allocation whose ownership must survive that failed growth.
+        for (1..capacity) |offset| {
+            try std.testing.expect(try state.generated_chunks.insert(a, retained_id + @as(ChunkId, @intCast(offset)), WorldChunk.initEmpty()));
+        }
+        const retained_bytes = failing.allocated_bytes - failing.freed_bytes;
+        const retained_allocations = failing.allocations - failing.deallocations;
+        {
+            var context: ReadContext = .{ .state = &state, .allocator = a };
+            defer context.deinit();
+            // A persistent allocator failure can still use an already reserved
+            // operation-local slot after optional shared-cache insertion fails.
+            if (reserve_fallback) try context.chunks.ensureUnusedCapacity(a, 1);
+            const allocations = failing.allocations;
+            const deallocations = failing.deallocations;
+            const allocated_bytes = failing.allocated_bytes;
+            const freed_bytes = failing.freed_bytes;
+            // Flat stone materializes in one allocation. Fail every allocation
+            // after it, and reject in-place growth so the cache cannot escape OOM.
+            failing.fail_index = failing.alloc_index + 1;
+            failing.resize_fail_index = failing.resize_index;
+            const result = context.reader().get(.{ 10, 10, 40 });
+            try std.testing.expect(failing.has_induced_failure);
+            try std.testing.expectEqual(allocations + 1, failing.allocations);
+            try std.testing.expectEqual(allocated_bytes + data_bytes, failing.allocated_bytes);
+            try std.testing.expectEqual(@as(u64, 1), state.generated_chunk_count);
+            if (reserve_fallback) {
+                try std.testing.expectEqual(rules.BlockType.stone, result.?);
+                try std.testing.expect(context.failure == null);
+                try std.testing.expectEqual(@as(usize, 1), context.chunks.count());
+                const fallback_data = context.chunks.get(id).?.content.blocks;
+                for (0..3) |_| {
+                    try std.testing.expectEqual(rules.BlockType.stone, context.reader().get(.{ 10, 10, 40 }).?);
+                    try std.testing.expectEqual(fallback_data, context.chunks.get(id).?.content.blocks);
+                }
+                try std.testing.expectEqual(@as(u64, 1), state.generated_chunk_count);
+                try std.testing.expectEqual(allocations + 1, failing.allocations);
+                try std.testing.expectEqual(deallocations, failing.deallocations);
+                try std.testing.expectEqual(freed_bytes, failing.freed_bytes);
+            } else {
+                try std.testing.expect(result == null);
+                try std.testing.expectEqual(error.OutOfMemory, context.failure.?);
+                try std.testing.expectEqual(@as(usize, 0), context.chunks.count());
+                try std.testing.expectEqual(deallocations + 1, failing.deallocations);
+                try std.testing.expectEqual(freed_bytes + data_bytes, failing.freed_bytes);
+            }
+            try std.testing.expect(state.generated_chunks.peek(id) == null);
+            try std.testing.expectEqual(capacity, state.generated_chunks.count());
+            try std.testing.expectEqual(capacity, state.generated_chunks.entries.capacity());
+            try std.testing.expectEqual(@as(u64, 0), state.generated_chunks.evictions);
+            try std.testing.expectEqual(@as(usize, 0), state.generated_chunks.eviction_cursor);
+            try std.testing.expectEqual(data_bytes, state.generated_chunks.blockBytes());
+            try std.testing.expectEqual(retained_data, state.generated_chunks.peek(retained_id).?.content.blocks);
+            try std.testing.expectEqual(rules.BlockType.stone, state.generated_chunks.peek(retained_id).?.content.getBlock(.{ 10, 10, 8 }));
+            for (1..capacity) |offset| {
+                try std.testing.expect(state.generated_chunks.peek(retained_id + @as(ChunkId, @intCast(offset))).?.content == .empty);
+            }
+        }
+        // Context teardown releases the fallback map and block exactly once;
+        // the shared cache still owns all of its original allocations.
+        try std.testing.expectEqual(retained_bytes, failing.allocated_bytes - failing.freed_bytes);
+        try std.testing.expectEqual(retained_allocations, failing.allocations - failing.deallocations);
+    }
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    try std.testing.expectEqual(failing.allocations, failing.deallocations);
+}
+
+test "read context retains generated data locally when shared cache index growth fails" {
+    try testReadContextCacheIndexOom(true);
+}
+
+test "read context frees generated data when shared and local cache indices cannot grow" {
+    try testReadContextCacheIndexOom(false);
+}
+
 test "cold blueprint support reuses generated chunks across operations with bounded eviction" {
     try @import("blueprint_cold_support_tests.zig").run(struct {
         pub const State = WorkerState;
