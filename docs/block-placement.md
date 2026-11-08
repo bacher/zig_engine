@@ -65,7 +65,7 @@ Apply is a player action; NPC simulation fills already published sites and does 
 Preparation temporarily protects every whole chunk intersecting the rotated construction box,
 including blueprint-empty cells, cavities, and empty chunks. Operations that would change those
 chunks wait even when initiated elsewhere; neighboring edits outside the box itself can also wait. Eligible independent work outside those chunks continues, including
-work in the surrounding structural-support halo. Before a new or recovered attempt takes the chunks, already
+work in nearby unprotected platform chunks. Before a new or recovered attempt takes the chunks, already
 queued eligible conflicting work from independent producers gets a fair opportunity to run.
 
 Every blueprint target must be physically empty, even if an existing block has the
@@ -73,9 +73,11 @@ required type. Existing blocks in blueprint-empty cells stay in place. A site ca
 unfinished site's box. Ownership, resources, inventory, and progress remain current and atomic;
 failure creates no partial site.
 
-Preparation checks full real bottom platforms and the completed design's composition with nearby
-constructions on observed input. Exterior observations may be roughly one to two seconds old;
-later changes outside the protected chunks do not require full structural revalidation. At
+PR #53 already reuses portable compiler certification: preparation checks physical target conditions
+and full real bottom platforms without structural target searches or old-dependent scans. Its input
+is the full rotated box expanded by one cell horizontally and three downward, rounded to whole
+chunks. The follow-up retains that path while allowing exterior platform observations to be roughly
+one to two seconds old; later changes outside the protected chunks do not restart preparation. At
 publication, a real non-`none` block must be directly below **every target in the globally lowest
 occupied layer**. Any real material qualifies; miniatures and unknown cells cannot establish
 support. Publication does not repeat the full 3×3×3 platform or composed-structure checks.
@@ -96,8 +98,8 @@ defines the detailed admission lifecycle and publication checks.
 
 ### Blueprint fulfillment
 
-Full designs are validated at creation and composed with earlier destination observations
-at application under the approved follow-up above.
+Full designs are certified at creation; application reuses that certificate and verifies physical
+target conditions and observed real platforms under the approved follow-up above.
 Subsequent blueprint-directed structural approval must inspect no more than the real block
 directly below and four immediate XY neighbors. Any real block below passes this cheap rule;
 with air below, an eligible real XY neighbor is required. This deliberately permits temporarily
@@ -142,11 +144,13 @@ logical view unchanged, so that operation needs no dependent revalidation.
 Application reuses the current compiler's portable certificate and verifies physical target
 emptiness, immutability, overlap and real bottom platforms. Existing valid real/planned cells
 retain their support witnesses under a finite batch of empty-cell additions, so application
-performs no structural target searches or old-dependent scan. Its versioned chunk input covers
+performs no structural target searches or old-dependent scan. Its chunk input covers
 the rotated box expanded by one cell horizontally and three cells downward, with no upward
 extension; whole box chunks remain publication sources through cavities. The spec gives the
 [certificate proof](../specs/features/blueprints.md#portable-certificate-admission) and
-[batch argument](../specs/features/blueprints.md#monotone-batch-admission). An ordinary placement first
+[batch argument](../specs/features/blueprints.md#monotone-batch-admission). Under the pending
+follow-up, exterior platform observations may become stale; the final current-state checks above
+remain narrower. An ordinary placement first
 validates its new target against physical terrain,
 then validates that target in the completed logical view. Physical approval ensures miniatures
 supply no real support; completed approval establishes the new block's completed-world
@@ -155,7 +159,7 @@ constructions by the additive contract below, so ordinary placements collect no 
 candidates and perform no dependent revalidation. Removals still discover and check real and
 planned dependents using the actual support predicates of every world material, including
 types excluded from capture. Water/snow have no support dependencies. [R39/R40](../specs/features/blueprints.md#assembly-and-completion)
-record composition examples, and the [constraints](../specs/features/blueprints.md#constraints)
+record the composition contract, and the [constraints](../specs/features/blueprints.md#constraints)
 define cache separation and safe approval reuse. These checks add no work to blueprint fulfillment.
 
 ### Blueprint world-mutation invariant
@@ -164,9 +168,10 @@ The current implementation requires every gameplay world modification to preserv
 structural validity of affected real and planned constructions in the resulting logical world
 where all pending targets are completed. The approved application follow-up is an explicit
 exception to that publication-time invariant, pending runtime implementation as described above.
-Ordinary placements, extractions, simulation/timer edits, debug/service commands, batch edits,
-and indirect side effects retain their existing affected-construction checks. Generated-terrain
-exemptions and bounded affected regions remain; a proven logical no-op needs no repeated search.
+Ordinary insertions retain physical/completed target checks and preserve already-valid existing
+constructions by monotonicity. Removals and non-additive simulation/timer, debug/service, batch
+or indirect edits retain affected-dependent protection. Generated-terrain exemptions and bounded
+affected regions remain; a proven logical no-op needs no repeated search.
 These retained checks do not repair an invalid arrangement already admitted by stale application
 validation or restore a universal completed-world invariant.
 
@@ -318,10 +323,11 @@ and material replacements retain their normal checks. Blueprint fulfillment can 
 temporarily unsupported new cells and keeps its existing five-neighbor rule. Ordinary
 insertions validate only their new target, retaining both physical/completed checks when
 sites exist. Removals retain dependent checks. Application uses the finite-batch witness
-argument and target-only read envelope [described above](#blueprint-extraction-view), with
-its existing version barriers and publication guards. The original
-[additive-validity feature](../specs/features/monotone-block-additions.md) left Apply unchanged;
-the target-only follow-up applies that rule property to admission.
+argument and portable certificate with the box-plus-platform input
+[described above](#blueprint-extraction-view). The current runtime retains version barriers;
+the pending hybrid changes scheduling and protection while retaining physical publication guards.
+The original [additive-validity feature](../specs/features/monotone-block-additions.md) left Apply
+unchanged; PR #52 and PR #53 delivered the structural-search and read-envelope reductions.
 
 ## Fixed support window
 
