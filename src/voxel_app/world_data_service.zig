@@ -3171,12 +3171,15 @@ const WorkerState = struct {
         // Check persisted ownership before consulting generated cache entries.
         if (self.persistence_service) |service| if (!service.requireBase(id)) return error.DependencyPending;
         if (self.boundary_cache.get(id)) |masks| return masks;
-        const chunk = try self.tryLoadAt(allocator, coords);
-        defer chunk.deinit(allocator);
+        const masks = if (self.generated_chunks.peek(id)) |chunk| chunk.boundaries else blk: {
+            const chunk = try self.tryLoadAt(allocator, coords);
+            defer chunk.deinit(allocator);
+            break :blk chunk.boundaries;
+        };
         if (self.boundary_cache.count() >= 512) self.boundary_cache.clearRetainingCapacity();
         // Caching is optional; the correctly computed masks remain usable on OOM.
-        self.boundary_cache.put(allocator, id, chunk.boundaries) catch {};
-        return chunk.boundaries;
+        self.boundary_cache.put(allocator, id, masks) catch {};
+        return masks;
     }
 
     fn neighborBoundaries(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) BoundaryMasks {
@@ -4834,6 +4837,39 @@ test "block subscriptions receive coalesced neighbor masks with mesh updates acr
     try std.testing.expect(!reloaded.items[0].data.blocks.neighbors.?[0].contains(.left, .{ 0, 8, 8 }));
 }
 
+test "generated boundary masks need no full chunk clone and survive cache index OOM" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const a = failing.allocator();
+    var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) };
+    defer state.deinit(a);
+    const coords: ChunkCoords = .{ 0, 0, 1 };
+    const id = test_layout.encodeChunkCoords(coords);
+    {
+        var context: ReadContext = .{ .state = &state, .allocator = a };
+        defer context.deinit();
+        try std.testing.expectEqual(rules.BlockType.stone, context.reader().get(.{ 10, 10, 40 }).?);
+    }
+    const cached = state.generated_chunks.peek(id).?;
+    const blocks = cached.content.blocks;
+    const expected = cached.boundaries;
+    const bytes = failing.allocated_bytes;
+    const generations = state.generated_chunk_count;
+    // Both a full-block clone and the optional boundary-index insertion would
+    // fail. The masks already exist and must remain usable without either.
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    try std.testing.expectEqualDeep(expected, try state.tryBoundariesAt(a, coords));
+    try std.testing.expectEqual(bytes, failing.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), state.boundary_cache.count());
+    try std.testing.expectEqual(blocks, state.generated_chunks.peek(id).?.content.blocks);
+    try std.testing.expectEqual(generations, state.generated_chunk_count);
+    try std.testing.expectEqual(@as(usize, 0), state.modified_chunks.count());
+    failing.fail_index = std.math.maxInt(usize);
+    failing.resize_fail_index = std.math.maxInt(usize);
+    try std.testing.expectEqualDeep(expected, try state.tryBoundariesAt(a, coords));
+    try std.testing.expectEqualDeep(expected, state.boundary_cache.get(id).?);
+}
+
 test "neighbor masks expose world edges and cache generated planes independently of blocks" {
     var state = WorkerState{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, std.testing.allocator, &test_layout) };
     defer state.deinit(std.testing.allocator);
@@ -5658,6 +5694,7 @@ test "generated cache cannot bypass pending or failed persisted reads or a reloa
     const hits = service.worker_state.generated_chunks.hits;
     try std.testing.expectEqual(@as(usize, 1), service.worker_state.generated_chunks.count());
     try std.testing.expectEqual(@as(usize, 0), service.worker_state.modified_chunks.count());
+    _ = try service.worker_state.tryBoundariesAt(a, coords);
     const revision = service.catalog.?.revision(id).?;
     try service.read_pending.put(a, id, revision);
     service.worker_state.persistence_service = &service;
@@ -5670,6 +5707,7 @@ test "generated cache cannot bypass pending or failed persisted reads or a reloa
     try std.testing.expect(service.read_discovered);
     try std.testing.expectError(error.DependencyPending, service.worker_state.ensureResident(a, coords));
     try std.testing.expectError(error.DependencyPending, service.worker_state.tryLoadAt(a, coords));
+    try std.testing.expectError(error.DependencyPending, service.worker_state.tryBoundariesAt(a, coords));
     try service.read_failed.put(a, id, error.ChecksumMismatch);
     {
         var context: ReadContext = .{ .state = &service.worker_state, .allocator = a };
@@ -5677,6 +5715,7 @@ test "generated cache cannot bypass pending or failed persisted reads or a reloa
         try std.testing.expect(context.reader().get(.{ 10, 10, 48 }) == null);
     }
     try std.testing.expectEqual(error.ChecksumMismatch, service.blocked_dependency_error.?);
+    try std.testing.expectError(error.DependencyPending, service.worker_state.tryBoundariesAt(a, coords));
     try std.testing.expectEqual(hits, service.worker_state.generated_chunks.hits);
     try std.testing.expectEqual(@as(u64, 1), service.worker_state.generated_chunk_count);
     var read = (try service.catalog.?.prepareRead(id)).?;
