@@ -97,8 +97,14 @@ The exit drain includes submitted blueprint applications while their detached ad
 pending, and preserves required producer order with later mutations. A failed application resolves its
 command fence without publishing an instance.
 
-The [approved blueprint admission follow-up](../specs/features/blueprints.md#hybrid-destination-validation-and-protected-publication),
-awaiting runtime implementation, distinguishes required save-fence members from snapshot contents.
+The [protected-input blueprint admission follow-up](../specs/features/blueprints.md#protected-input-validation-and-publication),
+awaiting external review and runtime implementation, protects all application input chunks through
+publication while keeping admission ownership separate from persistence source holds. Hold expiry
+outside a recorded storage wait terminates Apply; a prolonged actual storage wait/failure releases
+protection and retains the request under existing bounded retry and save-fence rules. Recovery takes
+fresh input under fair acquisition; late helpers cannot publish after release, and in-use buffers
+remain owned until the helper finishes or relinquishes them.
+The follow-up distinguishes required save-fence members from snapshot contents.
 Only selected members can resolve that wait. Once they are terminal and normal capture gates permit,
 Save freezes coherent current authoritative state, potentially including independent later submissions
 already committed before capture. Post-capture changes remain outside that snapshot. Required
