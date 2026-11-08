@@ -136,8 +136,12 @@ publication. Blueprint dialogs block controls while simulation and service proce
 These responsibilities are implemented by the capture helper, runtime indexes, and service
 admission pipeline.
 
-An approved protected-input application follow-up is pending external specification review and
-runtime implementation. Apply remains player-initiated, with one bounded active preparation;
+This PR describes the protected-input application option. The independent
+[inconsistent-read/nonblocking proposal](https://github.com/bacher/zig_engine/pull/55) is the other option;
+selection and runtime implementation are deferred pending measurements, external review and further
+requirements. The following protocol belongs only to this protected-input option.
+
+Apply remains player-initiated, with one bounded active preparation;
 NPC simulation assembles published sites. The service worker owns admission protection and all
 authoritative mutation. Before copying, it acquires the entire input set D: canonical whole chunks
 covering the rotated box expanded by one cell in X/Y and three cells downward, including every

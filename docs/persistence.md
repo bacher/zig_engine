@@ -97,9 +97,10 @@ The exit drain includes submitted blueprint applications while their detached ad
 pending, and preserves required producer order with later mutations. A failed application resolves its
 command fence without publishing an instance.
 
-The [protected-input blueprint admission follow-up](../specs/features/blueprints.md#protected-input-validation-and-publication),
-awaiting external review and runtime implementation, protects all application input chunks through
-publication while keeping admission ownership separate from persistence source holds. Hold expiry
+The [protected-input blueprint admission proposal](../specs/features/blueprints.md#protected-input-validation-and-publication)
+is an alternative to the independent [inconsistent-read/nonblocking proposal](https://github.com/bacher/zig_engine/pull/55).
+Selection and implementation are deferred. If chosen, this option protects all application input
+chunks through publication while keeping admission ownership separate from persistence source holds. Hold expiry
 outside a recorded storage wait terminates Apply; a prolonged actual storage wait/failure releases
 protection and retains the request under existing bounded retry and save-fence rules. Recovery takes
 fresh input under fair acquisition; late helpers cannot publish after release, and in-use buffers

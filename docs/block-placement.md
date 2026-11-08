@@ -56,8 +56,10 @@ selection/definition limits in [R54/Q25](../specs/features/blueprints.md#horizon
 
 ### Protected blueprint application follow-up
 
-The approved protected-input admission change below is pending external specification review
-and runtime implementation. The current service still uses FIFO admission and rechecks dependency
+This PR describes only the protected-input admission option below. The independent
+[inconsistent-read/nonblocking proposal](https://github.com/bacher/zig_engine/pull/55) describes the other candidate.
+Selection and implementation are deferred pending measurements, external review and further
+requirements. The current service still uses FIFO admission and rechecks dependency
 versions before publication. Existing implementation and validation reports describe that behavior;
 they do not verify this follow-up.
 
