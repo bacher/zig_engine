@@ -268,6 +268,21 @@ pub fn build(b: *std.Build) void {
     const run_blueprint_service_tests = b.addRunArtifact(blueprint_service_tests);
     b.step("test-blueprint-service", "Run blueprint authority, inventory, transaction, and restart tests").dependOn(&run_blueprint_service_tests.step);
 
+    const generated_support_benchmark = b.addTest(.{
+        .name = "generated-support-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/world_data_service.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+        .filters = &.{"cold blueprint support"},
+    });
+    generated_support_benchmark.root_module.linkLibrary(voxel_engine_lib);
+    generated_support_benchmark.root_module.addImport("engine", voxel_engine_lib.root_module);
+    generated_support_benchmark.root_module.addImport("zmath", zmath.module("root"));
+    b.step("bench-generated-support", "Compare repeated blueprint fills with nonresident natural support and bounded caching").dependOn(&b.addRunArtifact(generated_support_benchmark).step);
+
     const blueprint_benchmark = b.addExecutable(.{
         .name = "blueprint-benchmark",
         .root_module = b.createModule(.{

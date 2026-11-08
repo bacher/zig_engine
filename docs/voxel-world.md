@@ -141,10 +141,28 @@ a simple dimension-derived surface. Natural worlds reserve the outer two Y chunk
 each pole as an invisible player wall. The finite lower-Z collision boundary is independent
 of terrain residency.
 
-Untouched chunks are discarded and deterministically regenerated from the compact identity;
-only modified chunks need persistence. Generation order, column eviction, and restart do
-not advance a shared random stream. See the [generation spec](../specs/features/world-generation.md)
-for feature bounds, failure categories, and validation requirements.
+Untouched chunks can be discarded and deterministically regenerated from the compact identity;
+only modified chunks need persistence. The world-data worker retains up to 128 immutable
+generated chunks used by physical reads, independently of subscriptions and individual
+operations. This avoids regenerating the same support chunk for successive blueprint fills.
+Lookup and round-robin eviction use a bounded chunk index; hits do not update an LRU list.
+The default retains at most 4 MiB of block arrays plus bounded index/header storage, with one
+incoming generated chunk temporarily overlapping a full cache. This is a separate cache
+allowance through the service allocator, outside persistence's `live_bytes` accounting.
+
+Modified residents take precedence, and every nonresident access checks saved ownership
+before consulting generated data. Pending or failed saved-chunk reads remain unknown. Cached
+chunks never join save sources, timers, source holds, or resident-authority counts. Promotion
+reuses generated data: move ownership when the live and cache allocators match, otherwise
+clone through the live-state budget before releasing the cache entry. A failed promotion
+keeps its cached owner. Installing saved data removes any generated entry for that ID.
+Disabled caching or index-allocation failure falls back to operation-local generated data.
+
+Generation order, cache eviction, and restart do not advance a shared random stream. See the
+[generation spec](../specs/features/world-generation.md) for feature bounds, failure
+categories, and validation requirements, and the
+[generated-support cache report](validation/generated-support-cache.md) for the cold-support
+workload and measured scope.
 
 ## Authoritative service and client protocol
 

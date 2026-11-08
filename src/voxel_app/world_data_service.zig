@@ -16,6 +16,7 @@ const world_generator = @import("./world_generator.zig");
 const WorldGenerator = world_generator.WorldGenerator;
 const PreparedWorldGenerator = world_generator.PreparedWorldGenerator;
 const ColumnGenerator = world_generator.ColumnGenerator;
+const GeneratedChunkCache = @import("generated_chunk_cache.zig").Cache;
 const ChunkId = @import("./consts.zig").ChunkId;
 const CHUNK_SIZE = @import("./consts.zig").CHUNK_SIZE;
 const WORLD_SIZE = test_layout.size_in_chunks;
@@ -2800,6 +2801,7 @@ pub const WorldDataService = struct {
         // Persistence canonicalizes road order without changing chunk revision.
         // A resident cursor cannot be carried across that array replacement.
         self.blueprint_road_queue.restartAfterLoad(id);
+        self.worker_state.generated_chunks.remove(self.allocator, id);
         self.worker_state.modified_chunks.putAssumeCapacity(id, chunk);
         self.base_revisions.putAssumeCapacity(id, revision);
         self.wal_revisions.putAssumeCapacity(id, revision);
@@ -3027,6 +3029,8 @@ fn validateRestoredFloor(generator: *const PreparedWorldGenerator, coords: Chunk
 const ReadContext = struct {
     state: *WorkerState,
     allocator: std.mem.Allocator,
+    /// Operation-local fallback when shared caching is disabled or its index
+    /// cannot grow. Shared entries have the worker's lifetime instead.
     chunks: world_module.ChunksHashMap = .empty,
     failure: ?anyerror = null,
     read_count: u64 = 0,
@@ -3050,22 +3054,32 @@ const ReadContext = struct {
         const self: *ReadContext = @ptrCast(@alignCast(context));
         self.read_count +%= 1;
         const coords, const local = world_module.splitBlockCoords(block);
+        const chunk = self.chunkAt(coords) catch |err| {
+            if (err != error.DependencyPending) self.failure = err;
+            return null;
+        };
+        return chunk.content.getBlock(local);
+    }
+
+    /// Borrowed only until the next cache access. Callers consume the requested
+    /// block/shape immediately; reads never pin every active site's support.
+    fn chunkAt(self: *ReadContext, coords: ChunkCoords) !*const WorldChunk {
         const id = self.state.layout.encodeChunkCoords(coords);
-        if (self.state.modified_chunks.getPtr(id)) |chunk| return chunk.content.getBlock(local);
-        if (!self.chunks.contains(id)) {
-            if (self.state.persistence_service) |service| if (!service.requireBase(id)) return null;
-            const generator = ColumnGenerator.init(&self.state.generator, .{ coords[0], coords[1] });
-            const chunk = generator.tryGenerateChunk(self.allocator, coords[2]) catch |err| {
-                self.failure = err;
-                return null;
-            };
-            self.chunks.put(self.allocator, id, chunk) catch |err| {
-                chunk.deinit(self.allocator);
-                self.failure = err;
-                return null;
-            };
-        }
-        return self.chunks.get(id).?.content.getBlock(local);
+        if (self.state.modified_chunks.getPtr(id)) |chunk| return chunk;
+        // Catalog-backed data must be loaded even if a generated entry exists.
+        if (self.state.persistence_service) |service| if (!service.requireBase(id)) return error.DependencyPending;
+        if (self.chunks.getPtr(id)) |chunk| return chunk;
+        if (self.state.generated_chunks.get(id)) |chunk| return chunk;
+        const generator = ColumnGenerator.init(&self.state.generator, .{ coords[0], coords[1] });
+        const chunk = try generator.tryGenerateChunk(self.allocator, coords[2]);
+        self.state.generated_chunk_count +%= 1;
+        // Cache metadata is optional. On allocation failure retain the ordinary
+        // per-operation owner, so caching cannot turn a usable read into OOM.
+        if (self.state.generated_chunks.insert(self.allocator, id, chunk) catch false)
+            return self.state.generated_chunks.peek(id).?;
+        errdefer chunk.deinit(self.allocator);
+        try self.chunks.put(self.allocator, id, chunk);
+        return self.chunks.getPtr(id).?;
     }
 
     fn readShape(context: *anyopaque, block: [3]u32) ?@import("engine").voxel_chunk.custom_block.Shape {
@@ -3073,7 +3087,7 @@ const ReadContext = struct {
         if (read(context, block) != .custom) return null;
         const coords, const local = world_module.splitBlockCoords(block);
         const id = self.state.layout.encodeChunkCoords(coords);
-        const chunk = self.state.modified_chunks.get(id) orelse self.chunks.get(id).?;
+        const chunk = self.state.modified_chunks.get(id) orelse self.chunks.get(id) orelse self.state.generated_chunks.peek(id).?.*;
         const road = chunk.metadata.road(transformations.index(local)) orelse return null;
         return road.shape();
     }
@@ -3085,6 +3099,11 @@ const WorkerState = struct {
     blueprints: blueprint_runtime.State = .{},
     /// Committed edits survive cache eviction. Untouched chunks are regenerated on demand.
     modified_chunks: std.AutoHashMapUnmanaged(ChunkId, WorldChunk) = .empty,
+    /// Immutable generated data, independently bounded and never captured as
+    /// authoritative state. Uses the service allocator, not the live-state budget.
+    generated_chunks: GeneratedChunkCache = .{},
+    /// Successful generated materializations by read/load/promotion paths.
+    generated_chunk_count: u64 = 0,
     /// Retained independently of mesh allocation/subscription lifetime. Untouched inputs
     /// have revision zero; a neighboring edit may advance it without a chunk revision change.
     mesh_revisions: std.AutoHashMapUnmanaged(ChunkId, u64) = .empty,
@@ -3192,12 +3211,15 @@ const WorkerState = struct {
         if (self.persistence_service) |service| {
             if (!service.requireBase(id)) return error.DependencyPending;
         }
+        if (self.generated_chunks.peek(id)) |chunk| return chunk.tryClone(allocator);
         const key = @as(u64, @intCast(coords[0])) << 32 | @as(u64, @intCast(coords[1]));
         if (!self.columns.contains(key)) {
             if (self.columns.count() >= 64) self.columns.clearRetainingCapacity();
             try self.columns.put(allocator, key, ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] }));
         }
-        return self.columns.getPtr(key).?.tryGenerateChunk(allocator, coords[2]);
+        const chunk = try self.columns.getPtr(key).?.tryGenerateChunk(allocator, coords[2]);
+        self.generated_chunk_count +%= 1;
+        return chunk;
     }
 
     fn deinit(self: *WorkerState, allocator: std.mem.Allocator) void {
@@ -3205,6 +3227,7 @@ const WorkerState = struct {
         var iterator = self.modified_chunks.valueIterator();
         while (iterator.next()) |chunk| chunk.deinit(self.liveAllocator(allocator));
         self.modified_chunks.deinit(allocator);
+        self.generated_chunks.deinit(allocator);
         self.mesh_revisions.deinit(allocator);
         self.columns.deinit(allocator);
         self.boundary_cache.deinit(allocator);
@@ -3238,9 +3261,24 @@ const WorkerState = struct {
         const id = self.layout.encodeChunkCoords(coords);
         if (self.modified_chunks.contains(id)) return;
         if (self.persistence_service) |service| if (!service.requireBase(id)) return error.DependencyPending;
+        const live = self.liveAllocator(allocator);
+        if (self.generated_chunks.peek(id)) |cached| {
+            // Reserve the destination before releasing cache ownership. Persistent
+            // live-state allocations use a distinct budget wrapper and must clone;
+            // freeing a backing allocation through that wrapper is invalid.
+            try self.modified_chunks.ensureUnusedCapacity(allocator, 1);
+            const chunk = if (live.ptr == allocator.ptr and live.vtable == allocator.vtable)
+                self.generated_chunks.take(id).?
+            else
+                try cached.tryClone(live);
+            self.modified_chunks.putAssumeCapacity(id, chunk);
+            self.generated_chunks.remove(allocator, id);
+            return;
+        }
         const generator = ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] });
-        const chunk = try generator.tryGenerateChunk(self.liveAllocator(allocator), coords[2]);
-        errdefer chunk.deinit(self.liveAllocator(allocator));
+        const chunk = try generator.tryGenerateChunk(live, coords[2]);
+        errdefer chunk.deinit(live);
+        self.generated_chunk_count +%= 1;
         try self.modified_chunks.put(allocator, id, chunk);
     }
 
@@ -3276,10 +3314,7 @@ const WorkerState = struct {
             }
         }
         if (diagnostics.status != .success) {
-            const chunk = if (self.modified_chunks.get(position)) |stored| try stored.tryClone(allocator) else blk: {
-                const generator = ColumnGenerator.init(&self.generator, .{ coords[0], coords[1] });
-                break :blk try generator.tryGenerateChunk(allocator, coords[2]);
-            };
+            const chunk = try (try context.chunkAt(coords)).tryClone(allocator);
             return .{ .status = diagnostics.status, .chunk = chunk, .revealed_neighbors = @splat(null), .changed_below = null, .diagnostics = diagnostics };
         }
 
@@ -3593,6 +3628,119 @@ const WorkerState = struct {
         return true;
     }
 };
+
+test "rejected edits share generated chunks without making authoritative residents" {
+    const a = std.testing.allocator;
+    var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) };
+    defer state.deinit(a);
+    const block: [3]u32 = .{ 10, 10, 40 };
+    for (0..3) |_| {
+        const result = try state.tryApplyOperation(a, .{ .block = block, .action = .{ .put = .planks } });
+        defer result.chunk.deinit(a);
+        try std.testing.expectEqual(OperationStatus.already_exists, result.status);
+        try std.testing.expectEqual(rules.BlockType.stone, result.chunk.content.getBlock(.{ 10, 10, 8 }));
+    }
+    try std.testing.expectEqual(@as(u64, 1), state.generated_chunk_count);
+    try std.testing.expect(state.generated_chunks.hits > 0);
+    try std.testing.expectEqual(@as(usize, 1), state.generated_chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), state.modified_chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), state.timed_chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), state.mesh_revisions.count());
+}
+
+test "promotion moves cached generated data once and later reads see real edits" {
+    const a = std.testing.allocator;
+    var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) };
+    defer state.deinit(a);
+    const coords: ChunkCoords = .{ 0, 0, 1 };
+    const id = test_layout.encodeChunkCoords(coords);
+    {
+        var context: ReadContext = .{ .state = &state, .allocator = a };
+        defer context.deinit();
+        try std.testing.expectEqual(rules.BlockType.stone, context.reader().get(.{ 10, 10, 40 }).?);
+    }
+    const generated = state.generated_chunks.peek(id).?.content.blocks;
+    const flags = state.generated_chunks.peek(id).?.flags;
+    try state.ensureResident(a, coords);
+    const resident = state.modified_chunks.getPtr(id).?;
+    try std.testing.expectEqual(generated, resident.content.blocks);
+    try std.testing.expectEqual(flags, resident.flags);
+    try std.testing.expectEqual(@as(u64, 1), state.generated_chunk_count);
+    try std.testing.expectEqual(@as(usize, 0), state.generated_chunks.count());
+    try std.testing.expectEqual(OperationStatus.success, try resident.tryApply(a, .{ 10, 10, 8 }, .remove));
+    resident.chunk_revision = 1;
+    var context: ReadContext = .{ .state = &state, .allocator = a };
+    defer context.deinit();
+    try std.testing.expectEqual(rules.BlockType.none, context.reader().get(.{ 10, 10, 40 }).?);
+    try std.testing.expectEqual(@as(u64, 1), state.generated_chunk_count);
+}
+
+test "generated cache does not bypass live budget and clone failure retains its owner" {
+    const a = std.testing.allocator;
+    var budget = @import("persistence/budget.zig").Budget.init(a, 0);
+    {
+        var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout), .live_allocator = budget.allocator() };
+        defer state.deinit(a);
+        const coords: ChunkCoords = .{ 0, 0, 1 };
+        const id = test_layout.encodeChunkCoords(coords);
+        {
+            var context: ReadContext = .{ .state = &state, .allocator = a };
+            defer context.deinit();
+            try std.testing.expectEqual(rules.BlockType.stone, context.reader().get(.{ 10, 10, 40 }).?);
+        }
+        const generated = state.generated_chunks.peek(id).?.content.blocks;
+        try std.testing.expectError(error.OutOfMemory, state.ensureResident(a, coords));
+        try std.testing.expectEqual(generated, state.generated_chunks.peek(id).?.content.blocks);
+        try std.testing.expectEqual(@as(usize, 0), state.modified_chunks.count());
+        try std.testing.expectEqual(@as(usize, 0), budget.stats().used);
+        budget.limit = 128 * 1024;
+        try state.ensureResident(a, coords);
+        try std.testing.expect(generated != state.modified_chunks.get(id).?.content.blocks);
+        try std.testing.expectEqual(@sizeOf(@import("world_chunk_data.zig").WorldChunkData), budget.stats().used);
+        try std.testing.expectEqual(@as(usize, 0), state.generated_chunks.count());
+        try std.testing.expectEqual(@as(u64, 1), state.generated_chunk_count);
+    }
+    try std.testing.expectEqual(@as(usize, 0), budget.stats().used);
+}
+
+test "generated cache promotion preserves ownership on resident index allocation failure" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const a = failing.allocator();
+    var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) };
+    defer state.deinit(a);
+    const coords: ChunkCoords = .{ 0, 0, 1 };
+    const id = test_layout.encodeChunkCoords(coords);
+    {
+        var context: ReadContext = .{ .state = &state, .allocator = a };
+        defer context.deinit();
+        try std.testing.expectEqual(rules.BlockType.stone, context.reader().get(.{ 10, 10, 40 }).?);
+    }
+    const generated = state.generated_chunks.peek(id).?.content.blocks;
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    try std.testing.expectError(error.OutOfMemory, state.ensureResident(a, coords));
+    try std.testing.expectEqual(@as(usize, 0), state.modified_chunks.count());
+    try std.testing.expectEqual(generated, state.generated_chunks.peek(id).?.content.blocks);
+    try std.testing.expectEqual(@as(u64, 1), state.generated_chunk_count);
+}
+
+test "cold blueprint support reuses generated chunks across operations with bounded eviction" {
+    try @import("blueprint_cold_support_tests.zig").run(struct {
+        pub const State = WorkerState;
+
+        pub fn init(allocator: std.mem.Allocator, layout: *const WorldLayout, generator: WorldGenerator) !State {
+            return .{ .layout = layout, .generator = try generator.prepare(allocator, layout) };
+        }
+
+        pub fn deinit(state: *State, allocator: std.mem.Allocator) void {
+            state.deinit(allocator);
+        }
+
+        pub fn fulfill(state: *State, allocator: std.mem.Allocator, operation: BlockOperation) !WorkerState.BlueprintCommit {
+            return state.tryFulfillBlueprint(allocator, operation);
+        }
+    });
+}
 
 fn waitForResponses(client: *Client, out: *std.ArrayList(ChunkResponse), count: usize) !void {
     var batch: std.ArrayList(ChunkResponse) = .empty;
@@ -5478,6 +5626,80 @@ fn savedDependencyFixture() !*PersistenceFixture {
     try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = .{ 10, 10, 48 }, .action = .{ .put = .snow } }));
     try std.testing.expectEqual(persistence.Phase.complete, (try f.waitSave(f.service.requestSave(true))).phase);
     return f;
+}
+
+test "generated cache cannot bypass pending or failed persisted reads or a reloaded edit" {
+    const a = std.testing.allocator;
+    const f = try savedDependencyFixture();
+    defer f.deinit();
+    var service: WorldDataService = .{
+        .layout = &f.layout,
+        .io = std.testing.io,
+        .allocator = a,
+        .worker = undefined,
+        .worker_state = .{ .layout = &f.layout, .generator = try WorldGenerator.prepare(.flat, a, &f.layout) },
+        .catalog = try f.store.snapshotCatalog(),
+    };
+    defer service.catalog.?.deinit();
+    defer service.worker_state.deinit(a);
+    defer service.read_pending.deinit(a);
+    defer service.read_failed.deinit(a);
+    defer service.base_revisions.deinit(a);
+    defer service.wal_revisions.deinit(a);
+    const block: [3]u32 = .{ 10, 10, 48 };
+    const coords, _ = world_module.splitBlockCoords(block);
+    const id = f.layout.encodeChunkCoords(coords);
+    // Deliberately retain generated air before exposing an edited saved catalog.
+    {
+        var context: ReadContext = .{ .state = &service.worker_state, .allocator = a };
+        defer context.deinit();
+        try std.testing.expectEqual(rules.BlockType.none, context.reader().get(.{ 10, 10, 48 }).?);
+    }
+    const hits = service.worker_state.generated_chunks.hits;
+    try std.testing.expectEqual(@as(usize, 1), service.worker_state.generated_chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), service.worker_state.modified_chunks.count());
+    const revision = service.catalog.?.revision(id).?;
+    try service.read_pending.put(a, id, revision);
+    service.worker_state.persistence_service = &service;
+    {
+        var context: ReadContext = .{ .state = &service.worker_state, .allocator = a };
+        defer context.deinit();
+        try std.testing.expect(context.reader().get(.{ 10, 10, 48 }) == null);
+        try std.testing.expect(context.failure == null);
+    }
+    try std.testing.expect(service.read_discovered);
+    try std.testing.expectError(error.DependencyPending, service.worker_state.ensureResident(a, coords));
+    try std.testing.expectError(error.DependencyPending, service.worker_state.tryLoadAt(a, coords));
+    try service.read_failed.put(a, id, error.ChecksumMismatch);
+    {
+        var context: ReadContext = .{ .state = &service.worker_state, .allocator = a };
+        defer context.deinit();
+        try std.testing.expect(context.reader().get(.{ 10, 10, 48 }) == null);
+    }
+    try std.testing.expectEqual(error.ChecksumMismatch, service.blocked_dependency_error.?);
+    try std.testing.expectEqual(hits, service.worker_state.generated_chunks.hits);
+    try std.testing.expectEqual(@as(u64, 1), service.worker_state.generated_chunk_count);
+    var read = (try service.catalog.?.prepareRead(id)).?;
+    defer read.deinit();
+    const loaded = try service.readPersisted(&read);
+    service.installLoaded(id, revision, loaded) catch |err| {
+        loaded.deinit(a);
+        return err;
+    };
+    try std.testing.expectEqual(@as(usize, 0), service.worker_state.generated_chunks.count());
+    {
+        var context: ReadContext = .{ .state = &service.worker_state, .allocator = a };
+        defer context.deinit();
+        try std.testing.expectEqual(rules.BlockType.snow, context.reader().get(.{ 10, 10, 48 }).?);
+    }
+    const removed = service.worker_state.modified_chunks.fetchRemove(id).?.value;
+    removed.deinit(a);
+    {
+        var context: ReadContext = .{ .state = &service.worker_state, .allocator = a };
+        defer context.deinit();
+        try std.testing.expect(context.reader().get(.{ 10, 10, 48 }) == null);
+    }
+    try std.testing.expectEqual(@as(u64, 1), service.worker_state.generated_chunk_count);
 }
 
 fn waitDependencyFailure(service: *WorldDataService) !void {
