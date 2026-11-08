@@ -92,7 +92,8 @@ retains 42,386 reads, with paired process medians of 2.242–2.320 ms before and
 after. The eight-/27-chunk unchanged-preview cache checks remain about 0.013–0.014 µs and
 0.072–0.073 µs respectively. These local synthetic measurements do not bound full simulation
 throughput or worst-case latency. The newly explored fallback on rejected long columns is
-bounded as described above but is not included in these timing fixtures.
+bounded as described above but is not included in this original before/after comparison.
+The review follow-up below separately measures rejected-column workloads.
 
 [Raw paired outputs](monotone-block-additions-benchmark.txt) retain all measurements.
 
@@ -277,3 +278,51 @@ The earlier matrix already failed if an insertion invalidated a dependent; this 
 makes the proof independent of that admission path and explicitly verifies the baseline.
 `zig build test-world -Doptimize=Debug --summary all` passes **306/306 tests**; formatting
 and `git diff --check` pass. No production logic changed.
+
+## Review follow-up: rejected crushed-column measurements, 2026-11-08
+
+`bench-placement` now measures unsuccessful bridge fallback as well as accepted placements.
+The ordinary fixture attempts a seventh crushed cell above a valid six-cell column on
+natural stone. A separate synthetic fixture adds supported natural-rock first sides and
+unsupported crushed second sides on both bridge axes, forcing deeper failed support
+proofs. Those unsupported side rails are deliberately invalid existing structures; the
+synthetic fixture is neither representative ordinary gameplay nor a worst-case bound.
+
+The shared measurement helper requires the exact expected status and failure reason for
+the counted check, warmup, and every timed iteration. Both rejection cases must produce
+`constraint_violation` with `crushed_column`; missing data or another rejection fails the
+benchmark. Existing accepted cases still require success with no failure.
+
+Three sequential warm-build processes ran on the same local arm64 Mac, Zig 0.16.0,
+ReleaseFast, without concurrent builds or tests. Each crushed workload uses eleven samples
+of 100 checks. The table reports the median of the three process medians.
+
+| Rejected workload | Reader callbacks | Median µs/check | Process-median range µs |
+| --- | ---: | ---: | ---: |
+| Ordinary seventh crushed cell | 188 | 8.238 | 8.158–8.355 |
+| Synthetic unsupported side rails | 3,055 | 127.226 | 126.900–127.720 |
+
+Counts measure shared validation callbacks and exclude the separate constructed-cell
+collector setup. Timings include a fresh validator, its allocations, and the result check.
+Rejected previews return before road discovery. All fixture support data is resident;
+these measurements exclude streaming, rendering, and server scheduling. They measure the
+current implementation rather than a before/after change in production performance.
+No machine-dependent timing threshold was added.
+
+[Raw output and source hashes](monotone-rejected-column-benchmark.txt) retain all three
+runs. Existing accepted workloads retain their deterministic reader counts: 3 for planks,
+604 for plain columns, 1,850 for bridges, 1,865 for the root-only route control, and 3,563
+for the independently bridged tall column. No production rules changed.
+
+Final focused Debug verification passes **908 tests** across the world (306), blueprint
+admission (80), and blueprint service (522) suites, including their imported tests.
+Formatting and `git diff --check` pass. `bench-placement` builds and all measured checks
+return their expected results.
+
+```sh
+zig build test-world -Doptimize=Debug --summary all
+zig build test-blueprint-admission test-blueprint-service -Doptimize=Debug --summary all
+zig build bench-placement -Doptimize=ReleaseFast --summary all
+zig fmt --check src/voxel_app/block_rules.zig src/voxel_app/block_placement_benchmark.zig
+git diff --check
+```
