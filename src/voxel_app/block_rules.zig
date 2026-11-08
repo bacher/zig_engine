@@ -636,13 +636,7 @@ pub const Validator = struct {
         if (material.isRoad()) {
             const below_cell = cell - Cell{ 0, 0, 1 };
             const below = try self.get(below_cell);
-            var supported = supportsRoad(below);
-            if (below == .custom) if (self.reader.custom_shape_at) |read_shape| {
-                const normalized = self.reader.normalize(below_cell).?;
-                if (read_shape(self.reader.context, .{ @intCast(normalized[0]), @intCast(normalized[1]), @intCast(normalized[2]) })) |shape|
-                    supported = shape == .adaptive;
-            };
-            if (supported) return .{ .supported = .{} };
+            if (supportsRoad(below)) return .{ .supported = .{} };
             var result = failure(.road_support, cell, 0, 1);
             result.rejected.add(below_cell);
             return result;
@@ -707,6 +701,9 @@ pub const Validator = struct {
         };
     }
 
+    /// Target support reads stay within XY +/-28 and Z [-28, 0] of this cell.
+    /// Support searches never recenter or read above the target. Dependent checks
+    /// are a separate operation and retain their own intersected windows.
     pub fn checkPlacement(self: *Validator, cell: Cell, material: BlockType) ?Failure {
         if (!material.isPlaceable()) return failure(.material_not_placeable, cell, 0, 0).rejected;
         return self.checkExisting(cell);
@@ -1515,6 +1512,31 @@ test "sand retains a wrapped nine-cell footprint and rejects nonstructural suppo
     try std.testing.expectEqual(Reason.sand_footprint, dependent.cause.?);
     fixture.missing = corner;
     try std.testing.expectEqual(Reason.missing_data, fixture.check(cell, .sand).?.reason);
+}
+
+test "road geometry does not change structural support or material families" {
+    const Geometry = struct {
+        fn read(_: *anyopaque, _: [3]u32) ?engine.voxel_chunk.custom_block.Shape {
+            @panic("structural validation must not query road geometry");
+        }
+    };
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    const cell: Cell = .{ 12, 12, 12 };
+    for ([_]BlockType{ .country_road_solid, .country_road_adaptive, .custom }) |support| {
+        for (0..3) |y| for (0..3) |x| {
+            try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -1 }, support);
+        };
+        for ([_]BlockType{ .country_road_solid, .country_road_adaptive, .tree_trunk, .planks, .crushed_stone, .rebar, .reinforced_concrete, .dirt, .sand }) |material| {
+            var validator: Validator = .{
+                .allocator = std.testing.allocator,
+                .reader = .{ .layout = &fixture.layout, .context = &fixture, .block_at = Fixture.read, .custom_shape_at = Geometry.read },
+                .edit = .{ .cell = cell, .material = material },
+            };
+            defer validator.deinit();
+            try std.testing.expectEqual(material.isRoad(), validator.checkPlacement(cell, material) == null);
+        }
+    }
 }
 
 test "sand and leaves cannot directly support construction or either road" {

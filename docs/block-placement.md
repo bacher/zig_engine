@@ -74,9 +74,11 @@ no full-design scan; the detailed structural/performance contract is in
 [R27–R32 and R51](../specs/features/blueprints.md#assembly-and-completion).
 
 Blueprint fills queue coalesced adaptive-road work by chunk. Road shapes may update after
-a short delay; their proposed changes use ordinary completed-world validation and unsafe
-changes are rejected. Final saving drains this queue. Road planning does not run inside
-the five-neighbor structural approval path.
+a short delay. Formation/reversion preserve structural capabilities, so shape-only updates
+need no completed-world target/dependent validation or queries above the road. Planning still
+checks the road pattern and section support, preserving ownership and immutable-write guards.
+Saving persists unfinished road obligations without waiting for the queue to drain. Road
+planning does not run inside the five-neighbor structural approval path.
 
 ### Blueprint extraction view
 
@@ -232,26 +234,38 @@ The bridge-side predicate and the one-cell gap limit remain unchanged.
 
 ### Additive validity
 
-With fixed road shapes and support data, inserting a block into an empty cell preserves
+With unchanged source data apart from the insertion, adding a block into an empty cell preserves
 the support witnesses of previously valid higher constructions. Direct and lateral routes
 remain available, platform/footprint occupancy can only improve, and newly available routes
 cannot increase the minimum height. The bridge run reset preserves the independent support
 of a crushed bridge when a lower column grows into it.
 
-This property concerns ordinary structural rules. It does not validate the new block,
-permit occupied-cell replacement, or cover removals and road shape changes. Those still
-require their normal checks. Blueprint fulfillment can place temporarily unsupported new
-cells and keeps its existing five-neighbor rule. This change does not remove composed
-admission/dependent checks or reduce snapshot halos; those optimizations require separate
-review. See the [feature spec](../specs/features/monotone-block-additions.md).
+Formation and reversion of adaptive roads also preserve these support witnesses: structural
+rules use the road material, independently of its shape. A road above a slope receives the
+same support as above an unformed adaptive block. Other material-support families stay as
+specified above. Shape changes still update collision/render geometry and preserve road
+ownership, immutable writes, and instance progress.
+
+The property does not validate the new block or permit occupied-cell replacement. Removals
+and material replacements retain their normal checks. Blueprint fulfillment can place
+temporarily unsupported new cells and keeps its existing five-neighbor rule. Ordinary
+material admission/dependent checks and blueprint snapshot halos remain; their optimization
+is separate from removing the obsolete road-shape validation. See the
+[feature spec](../specs/features/monotone-block-additions.md).
 
 ## Fixed support window
 
-Every edit uses an inclusive cube centered on its target cell: at most 28 cells away on
-each axis. All support reads, including platform corners and diagonal intermediate cells,
-must fit inside this cube. Searches do not recenter on intermediate supports: stacked
-overhangs accumulate horizontal displacement across floors. Stable platforms reset height
-counters, but do not reset the window.
+The new block's structural support check has a fixed inclusive read envelope centered on
+that block: `abs(dx) <= 28`, `abs(dy) <= 28`, and `-28 <= dz <= 0` (Z is vertical).
+The horizontal limit uses Chebyshev distance, so an offset `(28, 28)` is inside it. This is
+an invariant for current and future support rules, including platform corners and diagonal
+intermediate cells. The check needs no cells above its root. Searches do not recenter on
+intermediate supports: stacked overhangs accumulate horizontal displacement across floors.
+Stable platforms reset height counters, but do not reset the window.
+
+This envelope describes structural approval of the new target. It does not bound whole-chunk
+loading/copying, diagnostics, soil state bookkeeping, or the existing dependent checks below.
+Those are separate from the new target's support proof.
 
 Each revalidated dependent also keeps a 28-cell cube centered on itself. Its support must
 be proved within the intersection of that cube and the edit's cube. Validation accepts any

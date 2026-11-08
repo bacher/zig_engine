@@ -19,15 +19,16 @@ Chunks store byte-sized block types, sparse construction metadata, and separate 
 - R5: A straight same-level run of N adaptive blocks, 4 <= N <= 12, between a solid road at that level and a solid road one level below forms an N:1 slope in any horizontal cardinal direction, including across chunk boundaries.
 - R6: Formation snapshots orientation, endpoints, length, and section index. Existing sections cannot be claimed by a crossing. Ambiguous unformed intersections remain unformed.
 - R7: Removing either endpoint or any section reverts surviving sections of that run to unformed adaptive roads; the removed cell remains empty.
-- R8: Every road block needs occupied solid support directly underneath. Roads have no additional foundation or span restrictions. Removing required support is rejected.
+- R8: Every road block needs an eligible support material directly underneath, including either formed or unformed roads. Support depends on material, never road shape. Roads have no additional foundation or span restrictions. Removing required support is rejected.
 - R9: Grounded walking follows slopes continuously in both directions without jumping or climbing. Collision still handles walls, ceilings, jumping, falling, and player placement overlap.
 - R10: Metadata survives authoritative snapshots and subscription eviction; cross-chunk changes are delivered and applied consistently.
+- R11: Formation, reversion, and saved-formation replay preserve structural capabilities. Overhead real or planned blocks do not veto them, and shape changes require no surrounding-construction validation or above-road reads. Preserve existing support families for other materials and retain pattern, ownership, immutable-write, source-hold, persistence, and publication guards. Collision still determines whether an obstructed road can be traversed.
 
 ## Clarifications
 - Q1: How long may a run be? A1: 4 <= N <= 12 adaptive sections, with exactly one block of elevation change. The upper bound keeps dependencies inside the loaded 3x3x3 chunk neighborhood.
 - Q2: Which shapes are supported? A2: Straight cardinal runs; parallel lanes form wider roads. Ambiguous junctions remain unformed.
 - Q3: What removal invalidates a slope? A3: Either solid endpoint or any adaptive member, not unrelated lateral neighbors.
-- Q4: What support is required? A4: A solid occupied cell directly underneath each road block; no other construction constraints. Existing cube-colliding materials count as support; custom roads can support only when unformed and full-cube.
+- Q4: What support is required? A4: An eligible occupied material directly underneath each road block; no other construction constraints. The existing road-support material family is unchanged, and formed slopes and unformed adaptive roads support other roads equally. Roads gain no new support role for wood, mineral, earth, or stable platforms.
 - Q5: What happens at an existing crossing? A5: Formed sections retain their saved orientation and cannot be reassigned until their run is invalidated.
 
 ## Acceptance Criteria
@@ -41,6 +42,8 @@ Chunks store byte-sized block types, sparse construction metadata, and separate 
 - AC8: GIVEN a supported slope WHEN a grounded player walks uphill, downhill, or diagonally across its sections THEN feet follow the surface without climbing, penetration, or loss of contact.
 - AC9: GIVEN a run crossing a chunk boundary or the wrapped x seam WHEN it forms, reverts, or reloads THEN metadata, meshes, and collision agree across all affected chunks.
 - AC10: GIVEN custom geometry WHEN visible and shadow pipelines are exercised THEN it renders with scene depth, lighting, atlas UVs, and shadows.
+- AC11: GIVEN a supported road beneath real or planned blocks WHEN it forms, reverts, or replays THEN its support capabilities and overhead target progress remain unchanged; required-support removal still rejects.
+- AC12: GIVEN a supported road pattern WHEN formation or replay runs THEN there are no above-road reads or surrounding structural-validation passes; immutable member writes still fail without partial publication, and other materials retain their existing support families.
 
 ## Constraints
 Preserve byte block storage and the existing ordinary voxel face layout. Keep metadata sparse, update revisions for metadata changes, and avoid global chunk scans for routine edits. Missing streamed cells are unknown, never air. Custom geometry participates in the normal scene depth and post-processing.
@@ -72,9 +75,14 @@ Optimistic replay and cross-chunk formation must not restore stale slope ownersh
 - [x] T3: Add custom geometry rendering, meshing exclusions, and road selection.
 - [x] T4: Add shape collision, surface following, and targeting.
 - [x] T5: Document road behavior and complete regression coverage.
+- [x] T6: Make structural support shape-independent and verify formation/replay beneath real, planned, and unreadable upper cells through client, authority, and deferred updates.
 - [x] T-val: Run acceptance criteria verification, CPU tests, build, and GPU pipeline checks.
 
 ### Validation
+
+The original implementation was verified as follows. The 2026-11-08 shape-neutral support
+follow-up is recorded separately in the
+[additive-rules validation report](../../docs/validation/monotone-block-additions.md).
 
 `zig build test test-gpu install --summary all` completed successfully: 54/54 build steps,
 534 tests passed and 1 skipped. Both applications built. GPU checks passed on Apple M4 Max

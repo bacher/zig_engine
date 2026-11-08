@@ -2205,12 +2205,8 @@ pub const WorldDataService = struct {
             if (self.job) |job| job.prioritize(plan.chunk_ids);
             return error.CapturePending;
         };
-        const failure = try roads.validateCompletedPlan(self.allocator, read.reader(), &self.worker_state.blueprints, &self.worker_state.modified_chunks, plan, null);
-        if (read.failure) |err| return err;
-        if (self.read_discovered) return error.DependencyPending;
-        // An unsafe candidate stays unformed. The accepted fill already left
-        // the completed logical world unchanged and remains committed.
-        if (failure != null) return;
+        // Shapes preserve structural material capabilities, so their publication
+        // requires no support or surrounding-construction validation.
         try plan.reserveCommit(context);
         const additional = std.math.mul(usize, plan.chunk_ids.len, 7) catch return error.Capacity;
         try self.worker_state.mesh_revisions.ensureUnusedCapacity(self.allocator, @intCast(additional));
@@ -3321,10 +3317,6 @@ const WorkerState = struct {
         };
         var road_plan = try road_context.planAfterEdit(operation, previous_road);
         defer road_plan.deinit(allocator);
-        if (try @import("roads.zig").validateCompletedPlan(allocator, context.reader(), &self.blueprints, &self.modified_chunks, road_plan, operation)) |failure| {
-            const rejected: world_module.EditResult = .{ .status = if (failure.reason == .missing_data) .missing_data else .constraint_violation, .failure = failure };
-            return .{ .status = rejected.status, .chunk = try self.modified_chunks.get(position).?.tryClone(allocator), .revealed_neighbors = @splat(null), .changed_below = null, .diagnostics = rejected };
-        }
         if (context.failure) |err| return err;
         if (self.persistence_service) |service| {
             if (service.read_discovered) return error.DependencyPending;
@@ -6948,7 +6940,7 @@ test "blueprint fulfillment queues adaptive road work and delayed safe plans pub
     try std.testing.expect(fixture.service.lifecycle.unsaved_work);
 }
 
-test "delayed road plans retain source-held work and cannot invalidate a planned road above" {
+test "delayed road plans retain source-held work and form beneath real and pending overhead roads" {
     const a = std.testing.allocator;
     var fixture: BlueprintRoadFixture = undefined;
     try fixture.init();
@@ -6964,11 +6956,75 @@ test "delayed road plans retain source-held work and cannot invalidate a planned
     try fixture.service.worker_state.blueprints.insertDefinition(a, .{ .id = 2, .owner = 1, .name = try a.dupe(u8, "upper road"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(rules.BlockType, &.{.country_road_solid}), .target_count = 1 } });
     const upper = try fixture.service.worker_state.blueprints.prepareInstance(a, &test_layout, 2, 2, 1, .{ 12, 10, 71 }, 0);
     try fixture.service.worker_state.blueprints.insertInstance(a, &test_layout, upper);
+    const chunk = fixture.service.worker_state.modified_chunks.getPtr(id).?;
+    try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ 13, 10, 7 }, .{ .put = .country_road_solid }));
+    try chunk.metadata.tryMarkConstructed(a, transformations.index(.{ 13, 10, 7 }));
+    const before = chunk.chunk_revision;
     _ = fixture.service.processBlueprintRoadUpdatesWithBudget(1);
-    try std.testing.expect(fixture.slope() == null);
+    try std.testing.expect(fixture.slope() != null);
+    try std.testing.expectEqual(before + 1, fixture.service.worker_state.modified_chunks.get(id).?.chunk_revision);
+    try std.testing.expectEqual(rules.BlockType.country_road_solid, fixture.service.worker_state.modified_chunks.get(id).?.content.getBlock(.{ 13, 10, 7 }));
+    try std.testing.expectEqual(@as(u32, 1), fixture.service.worker_state.blueprints.instances.get(2).?.remaining);
+    try std.testing.expectEqual(@as(u64, 0), fixture.service.worker_state.ordinary_validation_calls);
     try std.testing.expect(!fixture.service.blueprint_road_waiting);
     try std.testing.expectEqual(@as(usize, 1), fixture.service.blueprint_road_queue.peek().?.cursor);
     try std.testing.expect(fixture.service.worker_state.blueprints.targetAt(.{ 12, 10, 71 }) != null);
+}
+
+test "ordinary authority and client converge when roads form beneath real and pending overhead roads" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |planned| {
+        var fixture: BlueprintRoadFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const state = &fixture.service.worker_state;
+        // This fixture normally fulfills the low endpoint; exercise an ordinary
+        // endpoint command here, while optionally retaining a separate overhead site.
+        state.blueprints.deinit(a);
+        state.blueprints = .{};
+        const coords: ChunkCoords = .{ 0, 0, 2 };
+        const id = test_layout.encodeChunkCoords(coords);
+        const overhead = [3]u32{ 12, 10, 71 };
+        if (planned) {
+            try installFulfillmentTestSite(state, a, overhead, .{ 1, 1, 1 }, &.{.country_road_solid});
+        } else {
+            const chunk = state.modified_chunks.getPtr(id).?;
+            try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ 12, 10, 7 }, .{ .put = .country_road_solid }));
+            try chunk.metadata.tryMarkConstructed(a, transformations.index(.{ 12, 10, 7 }));
+        }
+        // Outside the ordinary endpoint window, inside the old shape-change halo.
+        const distant: ChunkCoords = .{ @intCast(test_layout.size_in_chunks[0] - 1), 0, 2 };
+        var unrelated = WorldChunk.initEmpty();
+        try std.testing.expectEqual(OperationStatus.success, try unrelated.tryApply(a, .{ 16, 10, 6 }, .{ .put = .planks }));
+        try unrelated.metadata.tryMarkConstructed(a, transformations.index(.{ 16, 10, 6 }));
+        try state.modified_chunks.put(a, test_layout.encodeChunkCoords(distant), unrelated);
+        var client = try world_module.World.init(a, &test_layout);
+        defer client.deinit();
+        var chunks = state.modified_chunks.iterator();
+        while (chunks.next()) |entry| try client.insertChunk(test_layout.decodeChunkId(entry.key_ptr.*), try entry.value_ptr.tryClone(a));
+        if (planned) try client.applyBlueprintChanges(&.{ .{ .definition = state.blueprints.definitions.get(1).? }, .{ .instance = state.blueprints.instances.get(1).? } });
+        const operation: BlockOperation = .{ .block = .{ 15, 10, 69 }, .action = .{ .put = .country_road_solid } };
+        try std.testing.expectEqual(OperationStatus.success, client.tryOperation(operation).status);
+        client.pending_operations.items[0].request_id = 1;
+        const result = try state.tryApplyOperation(a, operation);
+        defer result.chunk.deinit(a);
+        try std.testing.expectEqual(OperationStatus.success, result.status);
+        try std.testing.expectEqual(@as(u64, 1), state.ordinary_validation_calls);
+        client.acknowledgeOperation(1);
+        try client.insertChunk(coords, try result.chunk.tryClone(a));
+        try std.testing.expectEqual(@as(usize, 0), client.pending_operations.items.len);
+        const authoritative = state.modified_chunks.get(id).?;
+        const received = client.getChunk(coords).?;
+        try std.testing.expectEqualSlices(u8, std.mem.asBytes(&authoritative.content.blocks.blocks), std.mem.asBytes(&received.content.blocks.blocks));
+        try std.testing.expectEqualSlices(@import("road_data.zig").Road, authoritative.metadata.roads.items, received.metadata.roads.items);
+        for (11..15) |x| try std.testing.expect(client.customShape(.{ @intCast(x), 10, 70 }).? == .slope);
+        if (planned) {
+            try std.testing.expectEqual(@as(u32, 1), state.blueprints.instances.get(1).?.remaining);
+            try std.testing.expectEqual(@as(u32, 1), client.blueprints.instances.get(1).?.remaining);
+            try std.testing.expect(state.blueprints.targetAt(overhead) != null);
+            try std.testing.expect(client.blueprints.targetAt(overhead) != null);
+        } else try std.testing.expectEqual(rules.BlockType.country_road_solid, received.content.getBlock(.{ 12, 10, 7 }));
+    }
 }
 
 test "road queue capacity rejects a fill before terrain inventory or progress changes" {

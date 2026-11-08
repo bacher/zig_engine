@@ -23,7 +23,7 @@ constructions solely because a block was added below or beside them.
 
 ## Requirements
 
-- R1: With fixed custom-road shapes, inserting a legal block into an empty cell preserves
+- R1: Inserting a legal block into an empty cell preserves
   the ordinary structural validity of previously valid higher constructed cells, with each
   cell assessed in its existing support window. Use one shared current ruleset.
 - R2: An independently supported crushed-stone bridge interrupts the downward six-cell run
@@ -35,10 +35,23 @@ constructions solely because a block was added below or beside them.
 - R4: Water and standalone snow may be placed directly above sand; adding legal sand below
   existing water/snow is also allowed. They gain no structural-support or platform role.
 - R5: Preserve wood height, mineral height, spans, footprints, platform semantics, unknown
-  data handling, and the fixed support radius. Removals, occupied-cell replacements, and
-  road shape changes keep their normal validation.
+  data handling, and the fixed support radius. Removals and occupied-cell replacements
+  keep their normal validation; shape-only road changes preserve structural capabilities.
 - R6: Preserve bounded validator memory and cached-read evidence. Do not introduce persistent
   dependency graphs, per-block support versions, or additional blueprint-fulfillment work.
+- R7: The new target's structural proof reads only the fixed envelope `abs(dx) <= 28`,
+  `abs(dy) <= 28`, `-28 <= dz <= 0`, with Z vertical and shortest wrapped-X displacement.
+  Both horizontal axes may reach 28 simultaneously. Recursive searches never recenter.
+  This invariant applies to new support features; it excludes chunk I/O/copies, diagnostics,
+  soil state bookkeeping, and the existing separate dependent checks.
+- R8: Formed slopes and unformed adaptive roads have identical structural capabilities.
+  A road above either receives the same support. Preserve all other material-support
+  families; do not add roads to wood, mineral, earth, or stable-platform support families.
+- R9: Overhead real or planned blocks do not veto formation or saved-formation replay.
+  Shape-only formation/reversion requires no structural/dependent validation or queries
+  above the road. Preserve pattern, section-support, ownership, finite-bound, immutable-write,
+  source-hold, persistence, and atomic-publication guards. Do not change collision geometry;
+  obstructions affect passage through the normal collision rules.
 
 ## Clarifications
 
@@ -57,6 +70,14 @@ constructions solely because a block was added below or beside them.
 - Q4: Are save migrations or historical gameplay rules needed?
   A4: No. The serialization is unchanged and previously valid arrangements remain valid.
   Retain the current save version and the pre-release compatibility policy.
+- Q5: Do roads acquire new support roles for other materials?
+  A5: No. The user explicitly confirmed preserving material families and only unifying the
+  formed/unformed states. Another road can stand above either; other materials still need
+  their existing eligible direct/platform/lateral support.
+- Q6: Does R7 describe the whole current placement operation?
+  A6: No. Existing ordinary dependent validation may still read above the target. Its removal
+  remains separate. Road shape changes no longer trigger extra surrounding validation;
+  pattern discovery still reads endpoints, candidate sections, and their immediate support.
 
 ## Acceptance Criteria
 
@@ -76,12 +97,22 @@ constructions solely because a block was added below or beside them.
 - AC6: GIVEN representative valid material arrangements WHEN accepted empty-cell additions
   are applied in varied orders/orientations/translations THEN previously valid higher cells
   remain valid when rechecked with fresh and shared validator caches.
-- AC7: GIVEN missing support data, span/height limits, required supports, or a road shape
-  mutation WHEN validation runs THEN existing conservative guards still apply; no cheap
+- AC7: GIVEN missing support data, span/height limits, required supports, or immutable writes
+  WHEN validation/planning runs THEN existing conservative guards still apply; no cheap
   blueprint fulfillment gains recursive work.
 - AC8: GIVEN representative ordinary and crushed-stone workloads WHEN the existing placement
   benchmark is run before and after THEN validation cost and reader-call changes are recorded,
   including the new bridge-reset path, without claiming a universal latency bound.
+- AC9: GIVEN a supported road with an occupied or planned cell directly above WHEN it forms
+  or reverts THEN its structural capabilities and the upper target's identity/progress are
+  unchanged, including ordinary preview/commit, authority, deferred updates, and replay.
+- AC10: GIVEN a complete adaptive road pattern and an unreadable region above the road or
+  an unrelated construction nearby WHEN formation/replay runs THEN the planner does not
+  query that upper region or revalidate unrelated constructions; immutable section writes
+  still reject without partial publication.
+- AC11: GIVEN either road shape as immediate support WHEN target structural checks run THEN
+  solid/adaptive roads agree across shapes, other material families keep their old results,
+  custom-shape callbacks are not queried, and removal of required support still rejects.
 
 ## Constraints
 
@@ -99,7 +130,8 @@ accepted configurations; it does not tighten raw/generated bridge-side semantics
 
 Blueprint snapshot-halo reduction, removal of admission/dependent checks, PR48 publication
 scheduling/locking changes, a joint run/height path frontier, physics/collapse, new spans or
-material families, NPC scheduling, save migrations, and historical rulesets.
+material families, new pathfinding/usability flags, NPC scheduling, save migrations, and
+historical rulesets.
 
 ## Plan
 
@@ -108,6 +140,9 @@ predicate for water/snow. Cover preserved support witnesses, route-selection reg
 operation order, ordinary world edits, and real/planned admission. Update superseded examples
 in block-placement documentation and the blueprint spec while preserving their stable IDs.
 Measure representative costs against `main` before considering separate admission work.
+Make road structural support independent of geometry, remove above-road formation vetoes
+and obsolete final-plan structural validation, and cover overhead targets and replay without
+adding new replay admission policy. Record the two agreed locality/monotonicity invariants.
 The [validation report](../../docs/validation/monotone-block-additions.md) records passing
 CPU suites, the preserved-support argument, and paired benchmark measurements.
 
@@ -117,4 +152,8 @@ CPU suites, the preserved-support argument, and paired benchmark measurements.
 - [x] T2: Allow water/snow above sand and remove their obsolete dependency predicate.
 - [x] T3: Add core monotonicity/limit/removal/cache regressions and world/admission coverage.
 - [x] T4: Update current rules and superseded blueprint examples without changing admission.
-- [x] T-val: Run relevant CPU suites and record before/after placement benchmark results.
+- [x] T5: Unify formed/unformed road support and remove shape-only structural validation.
+- [x] T6: Verify overhead real/planned roads, formation/reversion/replay, read bounds, unchanged
+  material families, immutable writes, and client/authority/deferred publication.
+- [x] T-val: Run relevant CPU suites and record road-follow-up validation alongside the
+  existing before/after placement benchmark results.

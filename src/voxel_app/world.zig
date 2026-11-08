@@ -723,7 +723,6 @@ pub const World = struct {
         const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .virtual_edit = if (can_apply) pending.operation else null, .max_plan_changes = self.pending_byte_limit / @sizeOf(roads.Undo) };
         var plan = try context.planReplay(pending.operation, before.road, pending.road_formations.items);
         defer plan.deinit(self.allocator);
-        if (try roads.validateCompletedPlan(self.allocator, self.reader(), &self.blueprints, &self.chunks, plan, if (can_apply) pending.operation else null) != null) return;
         const undo_capacity = @max(pending.road_undo.capacity, plan.changes.len);
         const formed_capacity = pending.road_formations.items.len + @min(plan.changes.len, 20);
         const projected = self.pendingOperationBytes() - pending.road_undo.capacity * @sizeOf(roads.Undo) - pending.road_formations.capacity * @sizeOf(@import("road_data.zig").Slope) + undo_capacity * @sizeOf(roads.Undo) + @max(pending.road_formations.capacity, formed_capacity) * @sizeOf(@import("road_data.zig").Slope);
@@ -1053,8 +1052,6 @@ pub const World = struct {
         const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = @constCast(&self.chunks), .changed = &changed, .virtual_edit = operation, .max_plan_changes = self.pending_byte_limit / @sizeOf(roads.Undo) };
         var plan = context.planAfterEdit(operation, chunk.metadata.road(transformations.index(local))) catch return .{ .status = .resource_exhausted };
         defer plan.deinit(self.allocator);
-        const failure = roads.validateCompletedPlan(self.allocator, self.reader(), &self.blueprints, &self.chunks, plan, operation) catch return .{ .status = .resource_exhausted };
-        if (failure) |reason| return .{ .status = if (reason.reason == .missing_data) .missing_data else .constraint_violation, .failure = reason };
         return result;
     }
 
@@ -1122,10 +1119,6 @@ pub const World = struct {
         const context: roads.Context = .{ .allocator = self.allocator, .reader = self.reader(), .chunks = &self.chunks, .changed = &self.changed_road_chunks, .virtual_edit = operation, .max_plan_changes = self.pending_byte_limit / @sizeOf(roads.Undo) };
         var plan = try context.planAfterEdit(operation, before.road);
         defer plan.deinit(self.allocator);
-        if (try roads.validateCompletedPlan(self.allocator, self.reader(), &self.blueprints, &self.chunks, plan, operation)) |failure| {
-            self.last_edit_result = .{ .status = if (failure.reason == .missing_data) .missing_data else .constraint_violation, .failure = failure };
-            return self.last_edit_result.?.status;
-        }
         const planned_pending_capacity = @max(self.pending_operations.capacity, self.pending_operations.items.len + 1);
         const predicted_bytes = self.pendingOperationBytes() - self.pending_operations.capacity * @sizeOf(PendingOperation) + planned_pending_capacity * @sizeOf(PendingOperation) + plan.changes.len * @sizeOf(roads.Undo) + @as(usize, @min(plan.changes.len, 20)) * @sizeOf(@import("road_data.zig").Slope);
         if (predicted_bytes > self.pending_byte_limit) return error.Capacity;
@@ -2171,6 +2164,61 @@ test "blueprint target identity, unknown capture data, and whole-box extraction 
     try std.testing.expectEqual(OperationStatus.target_changed, client.previewOperation(.{ .block = .{ 30, 10, 10 }, .action = .{ .put = .planks } }).status);
     try setTestPhysical(&client, .{ 31, 10, 10 }, .stone);
     try std.testing.expectEqual(OperationStatus.constraint_violation, client.previewOperation(.{ .block = .{ 31, 10, 10 }, .action = .remove }).status);
+}
+
+test "road formation and optimistic replay preserve real and pending overhead roads without a wider construction scan" {
+    const a = std.testing.allocator;
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    for ([_]bool{ false, true }) |planned| {
+        var client = try World.init(a, &layout);
+        defer client.deinit();
+        for (1..3) |z| for (1..3) |y| for (1..3) |x| try client.insertChunk(.{ @intCast(x), @intCast(y), @intCast(z) }, WorldChunk.initEmpty());
+        for (64..69) |x| try setTestPhysical(&client, .{ @intCast(x), 64, 69 }, .stone);
+        try setTestPhysical(&client, .{ 69, 64, 68 }, .stone);
+        try setTestPhysical(&client, .{ 64, 64, 70 }, .country_road_solid);
+        for (65..69) |x| {
+            const road: [3]u32 = .{ @intCast(x), 64, 70 };
+            try setTestPhysical(&client, road, .country_road_adaptive);
+            const road_coords, const road_local = splitBlockCoords(road);
+            try client.chunks.getPtr(layout.encodeChunkCoords(road_coords)).?.metadata.tryMarkConstructed(a, transformations.index(road_local));
+        }
+        const overhead: [3]u32 = .{ 66, 64, 71 };
+        if (planned) {
+            try insertTestBlueprint(&client, 1, overhead, .{ 1, 1, 1 }, &.{.country_road_solid});
+        } else {
+            try setTestPhysical(&client, overhead, .country_road_solid);
+            const coords, const local = splitBlockCoords(overhead);
+            try client.chunks.getPtr(layout.encodeChunkCoords(coords)).?.metadata.tryMarkConstructed(a, transformations.index(local));
+        }
+        // This invalid block is outside the endpoint's ordinary edit window,
+        // but inside the former validation halo around the changed road shapes.
+        try setTestPhysical(&client, .{ 38, 64, 70 }, .planks);
+        try client.chunks.getPtr(layout.encodeChunkCoords(.{ 1, 2, 2 })).?.metadata.tryMarkConstructed(a, transformations.index(.{ 6, 0, 6 }));
+        const coords: ChunkCoords = .{ 2, 2, 2 };
+        var baseline = try client.getChunk(coords).?.tryClone(a);
+        baseline.chunk_revision = 1;
+        const operation: BlockOperation = .{ .block = .{ 69, 64, 69 }, .action = .{ .put = .country_road_solid } };
+        try std.testing.expectEqual(OperationStatus.success, client.previewOperation(operation).status);
+        try std.testing.expectEqual(OperationStatus.success, client.tryOperation(operation).status);
+        client.pending_operations.items[0].request_id = 1;
+        // A fresh authoritative baseline replays the intent and its saved formation.
+        try client.insertChunk(coords, baseline);
+        for (65..69) |x| try std.testing.expect(client.customShape(.{ @intCast(x), 64, 70 }).? == .slope);
+        try std.testing.expectEqual(BlockType.country_road_solid, client.reader().get(.{ 69, 64, 69 }).?);
+        try std.testing.expectEqual(@as(usize, 1), client.pending_operations.items.len);
+        if (planned) {
+            try std.testing.expectEqual(@as(u32, 1), client.blueprints.instances.get(1).?.remaining);
+            try std.testing.expect(client.blueprints.targetAt(overhead) != null);
+            try std.testing.expectEqual(BlockType.none, client.reader().get(.{ 66, 64, 71 }).?);
+            try std.testing.expectEqual(OperationStatus.target_changed, client.previewOperation(.{ .block = overhead, .action = .{ .put = .country_road_solid } }).status);
+        } else try std.testing.expectEqual(BlockType.country_road_solid, client.reader().get(.{ 66, 64, 71 }).?);
+        // Removing an actual foundation remains a material edit with dependents.
+        const rejected = client.tryOperation(.{ .block = .{ 66, 64, 69 }, .action = .remove });
+        try std.testing.expectEqual(OperationStatus.constraint_violation, rejected.status);
+        try std.testing.expectEqual(block_rules.Reason.would_remove_support, rejected.failure.?.reason);
+        try std.testing.expectEqual(BlockType.stone, client.reader().get(.{ 66, 64, 69 }).?);
+        try std.testing.expectEqual(@as(usize, 1), client.pending_operations.items.len);
+    }
 }
 
 test "ordinary bridge placement commits above a pending crushed column and protects its side support" {

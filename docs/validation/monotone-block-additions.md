@@ -4,6 +4,10 @@ Date: 2026-11-08. Branch: `codex/monotone-block-additions`, based on
 `72880e8` (`origin/main` when the branch was created). See the
 [feature spec](../../specs/features/monotone-block-additions.md).
 
+The original checks and timings below describe commit `8b5e47a`. The road follow-up at the
+end of this report supersedes its fixed-road-shape assumption and road-shape validation;
+the recorded measurements remain historical evidence for that commit.
+
 ## Scope and reasoning
 
 With unchanged road shapes and support data, adding to an empty cell cannot remove a
@@ -90,3 +94,57 @@ throughput or worst-case latency. The newly explored fallback on rejected long c
 bounded as described above but is not included in these timing fixtures.
 
 [Raw paired outputs](monotone-block-additions-benchmark.txt) retain all measurements.
+
+## Shape-neutral road follow-up, 2026-11-08
+
+Formed slopes and unformed adaptive roads now provide identical structural support. All
+support rules depend on material rather than road geometry. Roads still support roads;
+wood, mineral, earth, and stable-platform material families are unchanged. Shape transitions
+therefore retain existing support witnesses while changing render/collision geometry.
+Overhead obstructions use ordinary collision behavior and do not veto slope formation.
+
+Removed the final road-plan structural validation from preview, ordinary publication,
+optimistic replay, and deferred processing. The planner still checks candidate patterns,
+section support, ownership, and immutable writes. Deferred publication retains read-error
+and discovered-dependency waits, source holds, capacity reservations, checked revisions,
+persistence, and atomic commit. Ordinary material admission/removal still checks dependents.
+Optimistic replay retains its existing intent/occupancy policy; authority remains the source
+of material admission, with no new full-validation pass added to each replay.
+
+The target-support invariant is documented at `Validator.checkPlacement` and in the rules
+and feature specs: fixed Chebyshev XY radius 28, at most 28 below, and zero above the target.
+A supported seven-floor reinforced staircase reaches its only foundation 28 cells away,
+so radius 20 or 24 would remove allowed arrangements. Recursive searches do not recenter.
+This is the target's support proof, not the whole operation: existing dependent checks can
+still read above the edited block. Road discovery reads endpoints, candidate sections, and
+immediate support; a low-endpoint edit may discover a road one level above that edit, without
+reading above that road. Blueprint admission checks and snapshot halos remain unchanged.
+
+| Coverage | Evidence |
+| --- | --- |
+| Unchanged material families, no geometry callback | Core regression uses a callback that panics if structural validation queries shape; only road targets accept immediate solid/adaptive/custom-road support in the isolated fixture. |
+| Formation/reversion and removal | Stacked solid/adaptive roads remain supported through lower-road formation and reversion; removing a required support still rejects. An upper adaptive run can form above a formed run. |
+| Planner/replay read bounds and guards | Instrumented formation and saved replay succeed when all above-road cells are unreadable, with zero above-road reads and zero reads beyond 14 XY cells of the edit. Immutable member writes fail without partial mutation. |
+| Integration | Ordinary preview/commit, fresh-baseline replay, actual client/authority convergence, and deferred publication preserve real overhead roads and planned-target identity/progress. An unrelated invalid construction in the former shape-validation halo no longer vetoes formation. Source-held deferred work waits and resumes. |
+| Queue/persistence and throughput | Full service suite retains fair bounded queue processing, saved unfinished obligations, recovery, reservations, and five-neighbor fulfillment regressions. The 128-site fixture verifies 8,192 fills, exactly 8,192 support reads, zero ordinary-validation calls, and 512 road seeds in both dense/spread layouts. |
+
+Focused Debug verification passed **892/892 tests**: 300 world, 77 admission, and 515 service.
+Final ReleaseFast verification passed **58/58 build steps**, **1,861 tests**, with eight
+existing skips. Both applications built. Target totals overlap through imports and must
+not be interpreted as distinct gameplay scenarios.
+
+```sh
+zig build test-world test-blueprint-admission test-blueprint-service -Doptimize=Debug --summary all
+zig build install test test-blueprint-admission -Doptimize=ReleaseFast --summary all
+zig fmt --check src/voxel_app/block_rules.zig src/voxel_app/roads.zig src/voxel_app/road_tests.zig src/voxel_app/world.zig src/voxel_app/world_data_service.zig
+git diff --check
+```
+
+The existing resident throughput fixture reported 7.690–7.935 ms for 8,192 fills and
+4.336–4.667 ms for 512 road seeds across its two imported runs and dense/spread layouts.
+The dense layout took 33 processor turns/520 work units; the spread layout took 40/640,
+with a 16-unit budget. These are observations from the full build, without paired warm
+baseline measurements; they do not demonstrate a timing improvement. Deterministic read
+checks establish removal of the above-road and surrounding structural work. No per-fill
+work, serialized state, collision geometry, or GPU code was added. GPU execution and
+interactive gameplay were not rerun for this follow-up.

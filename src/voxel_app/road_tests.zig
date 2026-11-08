@@ -6,6 +6,8 @@ const coordinates = @import("block_coordinates.zig");
 const Cell = coordinates.Cell;
 const custom = engine.voxel_chunk.custom_block;
 const collision = @import("terrain_collision.zig");
+const roads = @import("roads.zig");
+const rules = @import("block_rules.zig");
 const player_module = @import("player_controller.zig");
 
 fn storage(fixture: *const Fixture, cell: Cell) [3]u32 {
@@ -336,6 +338,125 @@ test "country roads form only 4 through 12 sections with saved orientation in ev
             }
         }
     }
+}
+
+test "stacked roads retain support through lower road formation and reversion" {
+    for ([_]engine.voxel_chunk.BlockType{ .country_road_solid, .country_road_adaptive }) |upper_material| {
+        var fixture = try Fixture.init();
+        defer fixture.deinit();
+        const high: Cell = .{ 0, 0, 0 };
+        const low: Cell = .{ 5, 0, -1 };
+        const upper: Cell = .{ 2, 0, 1 };
+        row(&fixture, high, .positive_x, 4);
+        try std.testing.expectEqual(world.OperationStatus.success, fixture.world.setBlock(storage(&fixture, low), .none).status);
+        try std.testing.expect(shape(&fixture, .{ 2, 0, 0 }).? == .adaptive);
+        try std.testing.expectEqual(world.OperationStatus.success, fixture.world.setBlock(storage(&fixture, upper), upper_material).status);
+        try std.testing.expectEqual(world.OperationStatus.success, fixture.world.setBlock(storage(&fixture, low), .country_road_solid).status);
+        try std.testing.expect(shape(&fixture, .{ 2, 0, 0 }).? == .slope);
+        const unsupported = fixture.world.setBlock(storage(&fixture, .{ 2, 0, 0 }), .none);
+        try std.testing.expectEqual(world.OperationStatus.constraint_violation, unsupported.status);
+        try std.testing.expectEqual(rules.Reason.road_support, unsupported.failure.?.cause.?);
+        try std.testing.expect(shape(&fixture, .{ 2, 0, 0 }).? == .slope);
+        var validator: rules.Validator = .{ .allocator = std.testing.allocator, .reader = fixture.world.reader() };
+        defer validator.deinit();
+        const upper_block = storage(&fixture, upper);
+        try std.testing.expect(validator.checkExisting(.{ upper_block[0], upper_block[1], upper_block[2] }) == null);
+        try std.testing.expectEqual(world.OperationStatus.success, fixture.world.setBlock(storage(&fixture, low), .none).status);
+        try std.testing.expect(shape(&fixture, .{ 2, 0, 0 }).? == .adaptive);
+        validator.invalidate();
+        try std.testing.expect(validator.checkExisting(.{ upper_block[0], upper_block[1], upper_block[2] }) == null);
+    }
+}
+
+test "an adaptive road run can form directly above an already formed run" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    row(&fixture, .{ 0, 0, 0 }, .positive_x, 4);
+    try std.testing.expectEqual(world.OperationStatus.success, fixture.world.setBlock(storage(&fixture, .{ 0, 0, 1 }), .country_road_solid).status);
+    for (1..5) |x| {
+        try std.testing.expectEqual(world.OperationStatus.success, fixture.world.setBlock(storage(&fixture, .{ @intCast(x), 0, 1 }), .country_road_adaptive).status);
+    }
+    try std.testing.expectEqual(world.OperationStatus.success, fixture.world.setBlock(storage(&fixture, .{ 5, 0, 0 }), .country_road_solid).status);
+    for (1..5) |x| {
+        try std.testing.expect(shape(&fixture, .{ @intCast(x), 0, 0 }).? == .slope);
+        try std.testing.expect(shape(&fixture, .{ @intCast(x), 0, 1 }).? == .slope);
+    }
+}
+
+const PlanningProbe = struct {
+    base: rules.Reader,
+    target: rules.Cell,
+    row_z: i64,
+    immutable: ?rules.Cell = null,
+    reads: usize = 0,
+    above_reads: usize = 0,
+    distant_reads: usize = 0,
+
+    fn read(context: *anyopaque, block: [3]u32) ?rules.BlockType {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        const cell: rules.Cell = .{ block[0], block[1], block[2] };
+        self.reads += 1;
+        if (cell[2] > self.row_z) {
+            self.above_reads += 1;
+            return null;
+        }
+        const delta = self.base.displacement(cell, self.target);
+        if (@max(@abs(delta[0]), @abs(delta[1])) > 14) self.distant_reads += 1;
+        return self.base.block_at(self.base.context, block);
+    }
+
+    fn isImmutable(context: *anyopaque, block: [3]u32) bool {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.immutable) |cell| if (@reduce(.And, cell == rules.Cell{ block[0], block[1], block[2] })) return true;
+        return self.base.isImmutable(.{ block[0], block[1], block[2] });
+    }
+
+    fn reader(self: *@This()) rules.Reader {
+        var result = self.base;
+        result.context = self;
+        result.block_at = read;
+        result.custom_shape_at = null;
+        result.immutable_at = isImmutable;
+        return result;
+    }
+};
+
+test "road formation and replay need no above-road or distant construction reads" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    const high: Cell = .{ 0, 0, 0 };
+    const low: Cell = .{ 5, 0, -1 };
+    row(&fixture, high, .positive_x, 4);
+    fixture.set(low, .none);
+    fixture.set(.{ 2, 0, 1 }, .country_road_solid);
+    // Unrelated unsupported construction must not trigger surrounding validation.
+    fixture.set(.{ 40, 0, 0 }, .planks);
+    const target = storage(&fixture, low);
+    const row_cell = storage(&fixture, high);
+    const operation: world.BlockOperation = .{ .block = target, .action = .{ .put = .country_road_solid } };
+    var probe: PlanningProbe = .{ .base = fixture.world.reader(), .target = .{ target[0], target[1], target[2] }, .row_z = row_cell[2] };
+    var changed: std.ArrayList(u32) = .empty;
+    defer changed.deinit(std.testing.allocator);
+    const context: roads.Context = .{ .allocator = std.testing.allocator, .reader = probe.reader(), .chunks = &fixture.world.chunks, .changed = &changed, .virtual_edit = operation };
+    var plan = try context.planAfterEdit(operation, null);
+    defer plan.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 4), plan.changes.len);
+    const formation = plan.changes[0].slope.?;
+    var replay = try context.planReplay(operation, null, &.{formation});
+    defer replay.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 4), replay.changes.len);
+    try std.testing.expect(probe.reads > 0);
+    try std.testing.expectEqual(@as(usize, 0), probe.above_reads);
+    try std.testing.expectEqual(@as(usize, 0), probe.distant_reads);
+    try std.testing.expectEqual(@as(usize, 0), changed.items.len);
+    for (1..5) |x| try std.testing.expect(shape(&fixture, .{ @intCast(x), 0, 0 }).? == .adaptive);
+
+    const protected = storage(&fixture, .{ 2, 0, 0 });
+    probe.immutable = .{ protected[0], protected[1], protected[2] };
+    try std.testing.expectError(error.ImmutableCell, context.planAfterEdit(operation, null));
+    try std.testing.expectError(error.ImmutableCell, context.planReplay(operation, null, &.{formation}));
+    try std.testing.expectEqual(@as(usize, 0), changed.items.len);
+    for (1..5) |x| try std.testing.expect(shape(&fixture, .{ @intCast(x), 0, 0 }).? == .adaptive);
 }
 
 test "breaking either endpoint or any section reverts the whole run across chunk boundaries" {
