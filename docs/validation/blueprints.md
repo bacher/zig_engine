@@ -159,15 +159,21 @@ repeating physical reads.
 
 `test-world` compares complete results, physical reads, allocation calls and bytes
 against ordinary validation for placements and removals with no sites, a library
-only, distant active sites and retired sites awaiting cleanup. Additional
+only, distant active sites and retired sites awaiting cleanup. Its 11 edit cases
+include occupied placement, empty removal, unavailable target/support data,
+immutable cells, forbidden mining and structural allocation failure. Early
+refusals require zero allocations; structural cases and induced allocation
+failures have separate work assertions. A nearby-site regression also pins the
+complete unavailable-target diagnostic and its allocation-free return. Additional
 regressions cover all 27 intersecting chunks, inclusive boundary faces, wrapped
 seams in small/large worlds, finite edges, custom reader topology, sparse active
 cavities, planned dependents and real dependents supported by planned blocks.
 
 The [maintained placement benchmark](../../src/voxel_app/ordinary_edit_benchmark.zig)
 and [raw paired results](blueprint-ordinary-edit-locality-benchmark.txt) compare
-`c0ecb6c` with the original locality shortcut in `21764da`. Distant-site plank placement drops from 96 reads and
-two allocations to 49 reads and one allocation, matching ordinary validation.
+`c0ecb6c` with the original locality shortcut in `21764da`. Distant-site plank
+placement drops from 96 reads and two allocations to 49 reads and one allocation,
+matching ordinary validation.
 Removal avoids two affected-set allocations in both measured fixtures. Three
 warmed process pairs observed 1.859 → 0.852 µs for placement, 0.727 → 0.587 µs for
 rejected support removal, and 1.712 → 1.232 µs for accepted side-plank removal.
@@ -184,11 +190,16 @@ Physical-only controls also shifted between runs; these small timing changes do
 not isolate locality cost. These are fixture observations rather than full-game
 throughput or latency guarantees.
 
-Original locality verification on 2026-11-08 passed: `zig build test-world test-blueprint-service
+Original locality verification on 2026-11-08 passed: `zig build test-world
+test-blueprint-service
 -Doptimize=Debug --summary all` (325 world and 542 authority tests), `zig build
 test -Doptimize=Debug --summary all` (47/47 steps, 1,870 passed and one skipped),
 and `zig build bench-placement -Doptimize=ReleaseFast --summary all` (15/15 steps;
 maintained fixture results and allocation balance matched). The shared-preflight
 follow-up also passed the 325 world and 542 authority tests and the maintained
-benchmark (15/15 build steps). Formatting and `git diff --check` passed. This changes validation dispatch only; gameplay rules,
-world-save format, and the five-neighbor fulfillment contract remain the same.
+benchmark (15/15 build steps). With the expanded early-exit/OOM coverage, the
+focused command passes 326 world and 543 authority tests (18/18 steps), and the
+full command passes 1,873 tests with one existing skip (47/47 steps). Formatting
+and `git diff --check` passed. This
+changes validation dispatch only; gameplay rules, world-save format, and the
+five-neighbor fulfillment contract remain the same.
