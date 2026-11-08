@@ -15,6 +15,10 @@ const engine = @import("engine");
 const WorldChunkData = @import("world_chunk_data.zig").WorldChunkData;
 const BlockType = blueprint.BlockType;
 
+// The identical harness also runs against older baseline archives. Resolve the
+// API name at compile time; the game itself only exposes prepareCertified.
+const prepare_admission = if (@hasDecl(admission, "prepareCertified")) admission.prepareCertified else admission.prepare;
+
 const Meter = struct {
     backing: std.mem.Allocator,
     live: usize = 0,
@@ -332,7 +336,7 @@ fn benchmarkAdmission(init: std.process.Init, kind: Kind, neighbors: Neighbors, 
 
     var meter: Meter = .{ .backing = init.gpa };
     const start = std.Io.Clock.awake.now(init.io);
-    var result = try admission.prepare(meter.allocator(), &snapshot, definition, instance, .{});
+    var result = try prepare_admission(meter.allocator(), &snapshot, definition, instance, .{});
     const prepare_ns = start.durationTo(std.Io.Clock.awake.now(init.io)).nanoseconds;
     if (result != .prepared) {
         if (result == .rejected) std.debug.print("admission unexpected rejection={s} cell={any} failure={any}\n", .{ @tagName(result.rejected.code), result.rejected.cell, result.rejected.failure });

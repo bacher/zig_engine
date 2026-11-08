@@ -228,7 +228,7 @@ const BlueprintAdmissionTask = struct {
 
     fn prepare(task: *BlueprintAdmissionTask) !blueprint_admission.Result {
         const allocator = task.service.allocator;
-        var result = try blueprint_admission.prepare(allocator, &task.snapshot, task.definition, task.instance, .{ .cancel = &task.cancel });
+        var result = try blueprint_admission.prepareCertified(allocator, &task.snapshot, task.definition, task.instance, .{ .cancel = &task.cancel });
         errdefer if (result == .prepared) result.prepared.deinit(allocator);
         if (result == .prepared) {
             try task.response_copies.ensureTotalCapacity(allocator, task.client_count);

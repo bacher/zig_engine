@@ -136,7 +136,7 @@ const View = struct {
 /// rules. Definition remains the owned serialization type; well-formedness alone
 /// does not establish this trusted-input contract. The caller retains snapshot,
 /// definition, and instance. Success owns a cloned instance and publication data.
-pub fn prepare(allocator: std.mem.Allocator, snapshot: *const Snapshot, definition: blueprint.Definition, instance: runtime.Instance, options: Options) !Result {
+pub fn prepareCertified(allocator: std.mem.Allocator, snapshot: *const Snapshot, definition: blueprint.Definition, instance: runtime.Instance, options: Options) !Result {
     if (options.cancelled()) return .cancelled;
     if (snapshot.chunks.count() > options.max_snapshot_chunks or snapshot.estimatedOwnedBytes() > options.max_snapshot_bytes) return .{ .rejected = .{ .code = .budget_exceeded } };
     definition.validateWellFormed(blueprint.horizontalLimit(&snapshot.layout), blueprint.default_max_cells) catch return .{ .rejected = .{ .code = .invalid_definition } };
@@ -298,7 +298,7 @@ test "detached admission prebuilds chunk publication and completion stays consta
     const definition = try fixture.definition(.{ 2, 1, 1 }, &.{ .rebar, .rebar });
     var instance = try fixture.instance(.{ 10, 10, 4 });
     defer instance.deinit(std.testing.allocator);
-    var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+    var result = try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
     try std.testing.expect(result == .prepared);
     defer result.prepared.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 36), result.prepared.foundation_reads);
@@ -321,10 +321,10 @@ test "destination admission rejects occupied targets and incomplete physical pla
     var instance = try fixture.instance(.{ 10, 10, 4 });
     defer instance.deinit(std.testing.allocator);
     try fixture.put(.{ 10, 10, 4 }, .planks);
-    try std.testing.expectEqual(RejectCode.occupied, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
+    try std.testing.expectEqual(RejectCode.occupied, (try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
     try fixture.put(.{ 10, 10, 4 }, .none);
     try fixture.put(.{ 9, 9, 1 }, .none);
-    try std.testing.expectEqual(RejectCode.foundation, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
+    try std.testing.expectEqual(RejectCode.foundation, (try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
 }
 
 test "composed admission preserves water and snow above a proposed sand target" {
@@ -335,7 +335,7 @@ test "composed admission preserves water and snow above a proposed sand target" 
         var instance = try fixture.instance(.{ 10, 10, 4 });
         defer instance.deinit(std.testing.allocator);
         try fixture.put(.{ 10, 10, 5 }, material);
-        var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+        var result = try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
         try std.testing.expect(result == .prepared);
         defer result.prepared.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
@@ -367,7 +367,7 @@ test "finite batches preserve real and planned crushed bridge prefixes in both o
                 try fixture.put(support, .stone);
             }
             try fixture.expectValidRoots(&roots, null);
-            var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+            var result = try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
             try std.testing.expect(result == .prepared);
             defer result.prepared.deinit(std.testing.allocator);
             try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
@@ -389,15 +389,15 @@ test "admission detects missing dependencies finite bounds cancellation and snap
     const definition = try fixture.definition(.{ 1, 1, 1 }, &.{.planks});
     var instance = try fixture.instance(.{ 10, 10, 4 });
     defer instance.deinit(std.testing.allocator);
-    try std.testing.expectEqual(RejectCode.budget_exceeded, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{ .max_snapshot_chunks = 1 })).rejected.code);
+    try std.testing.expectEqual(RejectCode.budget_exceeded, (try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{ .max_snapshot_chunks = 1 })).rejected.code);
     var token = std.atomic.Value(bool).init(true);
-    try std.testing.expect((try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{ .cancel = &token })) == .cancelled);
+    try std.testing.expect((try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{ .cancel = &token })) == .cancelled);
     fixture.snapshot.playable_y_inset = 11;
-    try std.testing.expectEqual(RejectCode.bounds, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
+    try std.testing.expectEqual(RejectCode.bounds, (try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
     fixture.snapshot.playable_y_inset = 0;
     var removed = fixture.snapshot.chunks.fetchRemove(chunkId(&fixture.snapshot.layout, instance.origin)).?.value;
     removed.deinit(std.testing.allocator);
-    try std.testing.expectEqual(RejectCode.missing_data, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
+    try std.testing.expectEqual(RejectCode.missing_data, (try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
 }
 
 test "harmless cavity earth preserves an independent lateral plank route" {
@@ -407,7 +407,7 @@ test "harmless cavity earth preserves an independent lateral plank route" {
     var instance = try fixture.instance(.{ 10, 10, 4 });
     defer instance.deinit(std.testing.allocator);
     try fixture.put(.{ 11, 10, 4 }, .dirt);
-    var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+    var result = try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
     try std.testing.expect(result == .prepared);
     defer result.prepared.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_dependents);
@@ -449,7 +449,7 @@ test "finite batches retain lower independent plank and mixed reinforced routes"
             // The old tower already reaches its height limit. The new, closer
             // full-height column must not discard the original lower route.
             try fixture.expectValidRoots(roots[0..count], null);
-            var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+            var result = try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
             try std.testing.expect(result == .prepared);
             defer result.prepared.deinit(std.testing.allocator);
             try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
@@ -471,7 +471,7 @@ test "finite batches preserve real and planned footprint and road support witnes
             for (9..12) |y| for (9..12) |x| try fixture.put(.{ @intCast(x), @intCast(y), 4 }, if (material.isRoad()) .country_road_adaptive else .stone);
             try fixture.existing(root, material, planned);
             try fixture.expectValidRoots(&.{root}, null);
-            var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+            var result = try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
             try std.testing.expect(result == .prepared);
             defer result.prepared.deinit(std.testing.allocator);
             try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
@@ -489,7 +489,7 @@ test "admission does not certify or scan pre-existing invalid planned roots" {
     defer instance.deinit(std.testing.allocator);
     const old_root: Cell = .{ 11, 10, 20 };
     try fixture.existing(old_root, .planks, true);
-    var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+    var result = try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
     try std.testing.expect(result == .prepared);
     defer result.prepared.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
@@ -518,27 +518,27 @@ test "target-only admission retains all allowed materials overlap immutable and 
         const definition = try fixture.definition(.{ 1, 1, 1 }, &.{material});
         var instance = try fixture.instance(.{ 10, 10, 4 });
         defer instance.deinit(std.testing.allocator);
-        var result = try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+        var result = try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
         try std.testing.expect(result == .prepared);
         defer result.prepared.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
         try std.testing.expectEqual(@as(usize, 27), result.prepared.foundation_reads);
         try fixture.existing(instance.origin, material, true);
-        try std.testing.expectEqual(RejectCode.overlap, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
+        try std.testing.expectEqual(RejectCode.overlap, (try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
         const chunk = fixture.snapshot.chunks.getPtr(chunkId(&fixture.snapshot.layout, instance.origin)).?;
         _ = chunk.index.removeTarget(instance.origin);
         chunk.immutable = try std.testing.allocator.dupe(transforms.BlockIndex, &.{localIndex(instance.origin)});
-        try std.testing.expectEqual(RejectCode.immutable, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
+        try std.testing.expectEqual(RejectCode.immutable, (try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
         std.testing.allocator.free(chunk.immutable);
         chunk.immutable = &.{};
         try fixture.put(.{ 9, 9, 1 }, .none);
         try fixture.existing(.{ 9, 9, 1 }, .rebar, true);
-        try std.testing.expectEqual(RejectCode.foundation, (try prepare(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
+        try std.testing.expectEqual(RejectCode.foundation, (try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
     }
 }
 
 fn allocationFixture(allocator: std.mem.Allocator, fixture: *const Fixture, definition: blueprint.Definition, instance: runtime.Instance) !void {
-    var result = try prepare(allocator, &fixture.snapshot, definition, instance, .{});
+    var result = try prepareCertified(allocator, &fixture.snapshot, definition, instance, .{});
     if (result != .prepared) return error.TestUnexpectedResult;
     defer result.prepared.deinit(allocator);
 }
@@ -738,10 +738,10 @@ test "certified admission agrees with complete-world structural reference across
             var complete = try world.cloneSelected(&all_ids);
             defer complete.deinit(allocator);
             // The oracle repeats every full proof on complete data, with fresh
-            // and shared validator caches, independently of optimized prepare.
+            // and shared validator caches, independently of prepareCertified.
             var reference = try structurallyCheckedPublication(&complete, definition, instance);
             defer reference.deinit(allocator);
-            var result = try prepare(allocator, &narrow, definition, instance, .{});
+            var result = try prepareCertified(allocator, &narrow, definition, instance, .{});
             try std.testing.expect(result == .prepared);
             defer result.prepared.deinit(allocator);
             try std.testing.expectEqual(@as(usize, 0), result.prepared.validated_targets);
@@ -763,7 +763,7 @@ test "certified admission agrees with complete-world structural reference across
                 defer missing_cavity.deinit(allocator);
                 var removed = missing_cavity.chunks.fetchRemove(id).?.value;
                 removed.deinit(allocator);
-                try std.testing.expectEqual(RejectCode.missing_data, (try prepare(allocator, &missing_cavity, definition, instance, .{})).rejected.code);
+                try std.testing.expectEqual(RejectCode.missing_data, (try prepareCertified(allocator, &missing_cavity, definition, instance, .{})).rejected.code);
                 cavity_controls += 1;
                 break;
             }
@@ -771,7 +771,7 @@ test "certified admission agrees with complete-world structural reference across
             try std.testing.expect(std.mem.indexOfScalar(ChunkId, instance.box_chunks, source_id) == null);
             var removed = narrow.chunks.fetchRemove(source_id).?.value;
             removed.deinit(allocator);
-            try std.testing.expectEqual(RejectCode.missing_data, (try prepare(allocator, &narrow, definition, instance, .{})).rejected.code);
+            try std.testing.expectEqual(RejectCode.missing_data, (try prepareCertified(allocator, &narrow, definition, instance, .{})).rejected.code);
         };
     }
     try std.testing.expect(cavity_controls > 0);

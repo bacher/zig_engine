@@ -175,3 +175,19 @@ literal coordinates/counts so they independently guard the 3×3×3 contract.
 passed all 18 steps and 414 tests. Formatting, diff checks and independent review
 passed. This refactoring adds no runtime work; the paired measurements above
 remain the evidence for the original implementation at `b4065d9`.
+
+### Explicit certified-admission API
+
+The public helper is named `prepareCertified`; service and test callers make the
+trusted compiler/library provenance precondition visible. Its signature, body,
+ownership, scalar well-formedness guards and compatible-save policy retain their
+behavior. The benchmark alone selects the old/new name at compile time so the
+same source can still run against the original baseline. This adds no runtime
+dispatch or structural validation.
+
+`zig build test-blueprint-admission test-blueprint-service -Doptimize=Debug --summary all`
+passed all 18 steps and 631 tests. The ReleaseFast admission harness passed all six
+counter/allocation checks against both the current tree and `47fd39d` using the
+identical updated source. Those runs verify compatibility; they do not replace
+the paired performance results above. Formatting, diff checks and independent
+review passed.
