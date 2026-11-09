@@ -5,11 +5,11 @@ two PRs: immediate miniature caching, then FIFO preparation with four chunks per
 a two-millisecond soft budget and no minimum age. The user approved brief terrain/miniature
 mismatches; strict paired publication and persistent GPU staging are removed.
 
-The first PR is based on main `b223e01`. It replaces sources synchronously and retains
-main's terrain/service-mesh paths. GPU resource retirement, subscription checks, source
+[PR #58](https://github.com/bacher/zig_engine/pull/58), commit `0df6e85`, is based on main
+`b223e01`. It replaces sources synchronously and retains main's terrain/service-mesh paths. GPU resource retirement, subscription checks, source
 limits and cache invalidation remain required independently of visual coherence.
 
-## Current synchronous cache
+## Immediate cache — PR #58
 
 `replaceMiniatureChunk` validates data and capacity, reserves metadata, creates/uploads
 one replacement, swaps it into the cache and releases the old source in the same call.
@@ -129,6 +129,80 @@ enabled build/upload activity, exact draw/uniform totals including warmup, live 
 and balanced releases after clear. Their [correctness-only log](../benchmarks/construction-visuals-2026-11-09/gpu-counter-checks.log)
 is separate from performance evidence.
 
+## Shared FIFO preparation — follow-up to PR #58
+
+The follow-up builds on the cache-first PR. One FIFO entry per loaded chunk coalesces
+terrain/miniature dirty flags and reads the latest client state when visited. Default
+minimum age is zero. Each update visits at most four chunks and stops starting visits
+after two milliseconds of elapsed preparation time, checked between whole visits. Stale
+or failed visits also consume a count slot; one visit may exceed the soft time limit.
+Successful work for either representation can publish while the other remains dirty.
+There is no paired staging or VoxelGrid change.
+
+The budget covers local terrain extraction and miniature collection/replacement.
+Reconciliation, direct accepted service meshes and terrain GPU uploads stay outside it.
+It therefore bounds work started in this preparation pass, not complete frame time or
+visual age. Unload and new subscription identities cancel obsolete queue membership;
+failed dirty flags remain retryable and yield to other chunks.
+
+The [fresh CPU replay](../benchmarks/construction-visuals-2026-11-09/cpu-budget-age0-results.log)
+uses the current queue, World and extraction code atop `0df6e85`. All 60 runs converged to
+matching final mesh/source/world checksums. The fixture remains 27 chunks with 19,872
+initial targets, four seconds of fixed 60 Hz input and a final drain. Initial allocations
+are warmed outside timing, and three alternating repetitions produce these medians of
+per-run statistics at 512 accepted fills/second:
+
+| Variant | Mesh builds | CPU-side p95, ms | Total CPU-side time, ms | First dirty age p95, ms | Latest dirty age p95, ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Cache immediate | 2,048 | 0.5722 | 125.495 | 15.7552 | 15.7552 |
+| Cache + budget, age 0 | 974 | 0.2568 | 59.529 | 110.1563 | 49.4792 |
+
+A 27-chunk burst has median per-run maximum preparation time of 1.7063 ms with immediate
+caching and 0.2572 ms with the budget; maximum scheduled dirty age increases from 0 to
+100 ms. At 1, 32 and 128 fills/second, age zero adds no scheduled delay or extra builds.
+The optional age-two comparison produces 970 builds at 512 Hz, only four fewer than age
+zero, and is not product policy. The count limit drives this fixture; four preparations
+fit well below two milliseconds. This is a throughput-versus-freshness tradeoff within
+preparation work, not evidence of improved whole-game smoothness.
+
+Six focused client tests cover immediate count-limited FIFO/fairness and idle handling,
+one whole visit beyond a soft zero time limit, initial-count retry bounds and independent
+completion in both failure directions, stale subscriptions/eviction, direct service meshes
+outside the budget and extraction allocation failure preserving older queued geometry.
+Read-only review of the production integration and queue helper found no issue.
+The branch's Debug aggregate passed **49/49 steps, 1,946 tests and one existing skip**.
+ReleaseFast install/test passed **57/57 steps, 1,939 tests and eight existing skips**,
+building both applications. Aggregate counts include imported queue cases in multiple
+runners. Formatting and whitespace checks passed.
+Renderer code is unchanged from PR #58, whose **19/19 GPU steps and 108 passing tests**
+remain the renderer evidence; those GPU tests were not rerun for scheduling alone.
+
+The [fresh queue-only fixture](../benchmarks/construction-visuals-2026-11-09/queue-age0-results.log)
+passed with default age zero. Four input frames each issue 2,048 marks; work then drains
+before 1,024 idle frames:
+
+| Chunks | Marks | Visits with immediate draining | Budgeted visits | Coalesced marks | Peak pending | Total work frames | Head inspections |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 | 8,192 | 512 | 140 | 8,052 | 128 | 35 | 140 |
+| 343 | 8,192 | 1,372 | 355 | 7,837 | 343 | 89 | 355 |
+
+Both runs start at most four visits per frame and inspect zero heads during idle frames.
+Total work frames include the four input frames. These are deterministic queue counts;
+they contain no geometry generation, CPU/GPU timings or game-throughput measurement.
+The historical age-zero/age-two results below remain separate evidence for earlier code.
+Reproduce the standalone evidence from the follow-up branch, running separately:
+
+```sh
+zig build bench-chunk-visual-queue -Doptimize=ReleaseFast
+zig build bench-construction-visuals -Doptimize=ReleaseFast
+```
+
+The CPU replay uses production extraction, target/solid lookups, CPU record packing and
+queue/budget helpers. It bypasses the complete `Game` lifecycle, GPU uploads, service and
+streaming work. Its publication ages use nominal 60 Hz ticks sampled per chunk update;
+they omit actual build completion/display and are not event-to-present latency. Any
+age-two variant is a comparison only; the product default is age zero.
+
 ## Historical prepared-API measurements (2026-11-09)
 
 These results were recorded before the split, on Apple M4 Max (16 CPU cores, 64 GiB),
@@ -217,8 +291,9 @@ is a correctness fix, not a cache performance benefit.
 ## Conclusions and remaining work
 
 Fresh synchronous renderer results support removing repeated miniature packing/uploads.
-The historical CPU replay supports a count budget to combine busy preparation work,
-with little support for an additional minimum age. The approved split takes immediate
+The fresh CPU replay supports a count budget to combine busy preparation work while
+showing the resulting increase in scheduled visual age. Historical and comparison runs
+provide little support for an additional minimum age. The approved split takes immediate
 caching first and zero-age FIFO preparation second; it drops strict paired publication
 rather than carrying its unmeasured complexity into either PR.
 

@@ -218,6 +218,40 @@ pub fn build(b: *std.Build) void {
         .root_module = voxel_exe.root_module,
     });
 
+    const chunk_visual_queue_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/chunk_visual_queue.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_chunk_visual_queue_tests = b.addRunArtifact(chunk_visual_queue_tests);
+    b.step("test-chunk-visual-queue", "Run CPU tests for coalesced, budgeted chunk visual scheduling").dependOn(&run_chunk_visual_queue_tests.step);
+
+    const construction_visual_benchmark = b.addExecutable(.{
+        .name = "construction-visual-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/construction_visual_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    construction_visual_benchmark.root_module.linkLibrary(voxel_engine_lib);
+    construction_visual_benchmark.root_module.addImport("engine", voxel_engine_lib.root_module);
+    construction_visual_benchmark.root_module.addImport("zmath", zmath.module("root"));
+    b.step("build-construction-visual-benchmark", "Compile the standalone construction visual CPU benchmark").dependOn(&construction_visual_benchmark.step);
+    b.step("bench-construction-visuals", "Measure production meshing, target lookup and CPU miniature packing on fixed accepted-fill traces").dependOn(&b.addRunArtifact(construction_visual_benchmark).step);
+
+    const chunk_visual_queue_benchmark = b.addExecutable(.{
+        .name = "chunk-visual-queue-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/chunk_visual_queue_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.step("bench-chunk-visual-queue", "Measure bounded queue work for 8,192 repeated chunk invalidations").dependOn(&b.addRunArtifact(chunk_visual_queue_benchmark).step);
+
     const world_unit_tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/voxel_app/world.zig"),
@@ -422,6 +456,7 @@ pub fn build(b: *std.Build) void {
     const run_slot_buffer_manager_unit_tests = b.addRunArtifact(slot_buffer_manager_unit_tests);
 
     const test_step = b.step("test", "Run unit tests for both application wrapping modes");
+    test_step.dependOn(&run_chunk_visual_queue_tests.step);
     test_step.dependOn(&run_blueprint_service_tests.step);
     const generation_tests = b.addTest(.{
         .root_module = b.createModule(.{
