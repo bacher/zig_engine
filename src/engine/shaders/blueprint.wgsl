@@ -71,6 +71,14 @@ fn previewChunkOffset(chunk: vec3i, camera: vec3i) -> vec3f {
     let position = cell_position + vertex.position.xyz;
     return Vertex(transform.clip_from_chunk * vec4f(position, 1), vertex.uv, vertex.normal, vertex.material_and_side, 0u, position);
 }
+@vertex fn vs_miniature(@builtin(vertex_index) index: u32, @builtin(instance_index) instance_index: u32) -> Vertex {
+    let source = instances[instance_index];
+    let cell_position = previewChunkOffset(transform.origin_chunk.xyz, transform.camera_chunk.xyz) + vec3f(source.xyz);
+    let instance_position = cell_position + vec3f(0.375);
+    let vertex = blockVertex(index, source.w);
+    let position = instance_position + vertex.position.xyz * vec3f(0.25);
+    return Vertex(transform.clip_from_chunk * vec4f(position, 1), vertex.uv, vertex.normal, vertex.material_and_side, 0u, position);
+}
 fn surfaceLight(normal: vec3f) -> f32 {
     return 0.6 + 0.4 * max(dot(normal, normalize(vec3f(-0.4, -0.3, 0.8))), 0.0);
 }

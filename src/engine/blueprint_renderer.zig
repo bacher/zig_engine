@@ -1,6 +1,9 @@
 //! Noncolliding instanced blueprint blocks and twelve square-section hazard rails.
 const std = @import("std");
 const builtin = @import("builtin");
+/// Tests always collect lifecycle counters. Ordinary builds opt in explicitly;
+/// the counter storage and increments disappear entirely when disabled.
+pub const cache_counters_enabled = builtin.is_test or @import("engine_options").blueprint_render_stats;
 const WorldLayout = @import("world_layout.zig").WorldLayout;
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
@@ -12,6 +15,25 @@ const shader = (if (WorldLayout.wrap_x) "const BLUEPRINT_WRAP_X = true;\n" else 
 pub const capacity = 1_100_000;
 pub const frame_instance_count: u32 = 12;
 pub const Cell = @Vector(3, i64);
+pub const ChunkId = chunks.ChunkId;
+pub const miniature_chunk_capacity = 4096;
+/// Compact, camera-independent source. A chunk never reserves unused cell space.
+pub const MiniatureCell = extern struct {
+    local: [3]u32,
+    material: u32,
+};
+pub const MiniatureError = error{ OutOfMemory, InvalidMiniatureChunk, MiniatureCapacityExceeded };
+pub const MiniatureCacheStats = struct {
+    /// When false, only occupancy is measured; cumulative fields are unavailable.
+    counters_enabled: bool = cache_counters_enabled,
+    cache_builds: u64 = 0,
+    source_upload_bytes: u64 = 0,
+    cache_releases: u64 = 0,
+    uniform_upload_bytes: u64 = 0,
+    draw_calls: u64 = 0,
+    cached_instances: u32 = 0,
+    cached_chunks: u32 = 0,
+};
 pub const Instance = extern struct {
     position: [4]f32,
     scale: [4]f32,
@@ -81,6 +103,7 @@ const Transform = extern struct {
 pub const PreviewError = error{ OutOfMemory, InvalidPreviewDefinition, PreviewCapacityExceeded };
 
 pub const PreviewCacheStats = struct {
+    counters_enabled: bool = cache_counters_enabled,
     cache_builds: u64 = 0,
     source_upload_bytes: u64 = 0,
     cache_releases: u64 = 0,
@@ -105,6 +128,29 @@ const PreviewCache = struct {
         gctx.releaseResource(self.uniform);
     }
 };
+
+const MiniatureChunkCache = struct {
+    chunk: @Vector(3, i32),
+    revision: u64,
+    instance_count: u32,
+    uniform: zgpu.BufferHandle,
+    instances: zgpu.BufferHandle,
+    binding: zgpu.BindGroupHandle,
+
+    fn release(self: MiniatureChunkCache, gctx: *zgpu.GraphicsContext) void {
+        gctx.releaseResource(self.binding);
+        gctx.releaseResource(self.instances);
+        gctx.releaseResource(self.uniform);
+    }
+};
+fn miniatureTransform(camera: *const Camera, chunk: @Vector(3, i32)) Transform {
+    return .{
+        .clip_from_chunk = camera.clip_from_world_chunked,
+        .origin_chunk = .{ chunk[0], chunk[1], chunk[2], 0 },
+        .camera_chunk = .{ camera.chunk[0], camera.chunk[1], camera.chunk[2], 0 },
+        .origin_local_and_width = .{ 0, 0, 0, @intCast(camera.layout.size_in_chunks[0]) },
+    };
+}
 
 fn previewTransform(camera: *const Camera, preview: Preview) Transform {
     const origin = preview.origin.?;
@@ -163,12 +209,20 @@ pub const Renderer = struct {
     binding: zgpu.BindGroupHandle,
     pipeline: zgpu.RenderPipelineHandle,
     preview_pipeline: zgpu.RenderPipelineHandle,
+    miniature_pipeline: zgpu.RenderPipelineHandle,
     occluded_pipeline: zgpu.RenderPipelineHandle,
     allocated_capacity: usize = 1024,
     preview_cache: ?PreviewCache = null,
-    preview_stats: if (builtin.is_test) PreviewCacheStats else void = if (builtin.is_test) .{} else {},
+    preview_stats: if (cache_counters_enabled) PreviewCacheStats else void = if (cache_counters_enabled) .{} else {},
+    miniature_chunks: std.AutoHashMap(ChunkId, MiniatureChunkCache),
+    miniature_cached_instances: u32 = 0,
+    miniature_stats: if (cache_counters_enabled) MiniatureCacheStats else void = if (cache_counters_enabled) .{} else {},
 
     pub fn init(gctx: *zgpu.GraphicsContext, atlas_layout: zgpu.BindGroupLayoutHandle, format: wgpu.TextureFormat) Renderer {
+        return initWithAllocator(gctx, atlas_layout, format, std.heap.page_allocator);
+    }
+
+    pub fn initWithAllocator(gctx: *zgpu.GraphicsContext, atlas_layout: zgpu.BindGroupLayoutHandle, format: wgpu.TextureFormat, allocator: std.mem.Allocator) Renderer {
         // Storage is an array of 16-byte words: three words for each dynamic
         // Instance and one word for each cached PreviewInstance.
         const layout = gctx.createBindGroupLayout(&.{ zgpu.bufferEntry(0, .{ .vertex = true }, .uniform, false, @sizeOf(Transform)), zgpu.bufferEntry(1, .{ .vertex = true }, .read_only_storage, false, @sizeOf(PreviewInstance)) });
@@ -182,6 +236,7 @@ pub const Renderer = struct {
         const targets = [_]wgpu.ColorTargetState{.{ .format = format }};
         const pipeline = gctx.createRenderPipeline(pipeline_layout, .{ .label = "blueprints", .primitive = .{ .topology = .triangle_list, .front_face = .ccw, .cull_mode = .back }, .depth_stencil = &.{ .format = .depth32_float, .depth_write_enabled = true, .depth_compare = .less_equal }, .vertex = .{ .module = module, .entry_point = "vs" }, .fragment = &.{ .module = module, .entry_point = "fs", .targets = &targets, .target_count = targets.len } });
         const preview_pipeline = gctx.createRenderPipeline(pipeline_layout, .{ .label = "cached blueprint preview", .primitive = .{ .topology = .triangle_list, .front_face = .ccw, .cull_mode = .back }, .depth_stencil = &.{ .format = .depth32_float, .depth_write_enabled = true, .depth_compare = .less_equal }, .vertex = .{ .module = module, .entry_point = "vs_preview" }, .fragment = &.{ .module = module, .entry_point = "fs", .targets = &targets, .target_count = targets.len } });
+        const miniature_pipeline = gctx.createRenderPipeline(pipeline_layout, .{ .label = "cached blueprint miniatures", .primitive = .{ .topology = .triangle_list, .front_face = .ccw, .cull_mode = .back }, .depth_stencil = &.{ .format = .depth32_float, .depth_write_enabled = true, .depth_compare = .less_equal }, .vertex = .{ .module = module, .entry_point = "vs_miniature" }, .fragment = &.{ .module = module, .entry_point = "fs", .targets = &targets, .target_count = targets.len } });
         const occluded_targets = [_]wgpu.ColorTargetState{.{ .format = format, .blend = &.{
             .color = .{ .src_factor = .src_alpha, .dst_factor = .one_minus_src_alpha, .operation = .add },
             .alpha = .{ .src_factor = .one, .dst_factor = .one_minus_src_alpha, .operation = .add },
@@ -193,12 +248,16 @@ pub const Renderer = struct {
             .vertex = .{ .module = module, .entry_point = "vs" },
             .fragment = &.{ .module = module, .entry_point = "fs_occluded", .targets = &occluded_targets, .target_count = occluded_targets.len },
         });
-        return .{ .layout = layout, .uniform = uniform, .instances = instances, .binding = binding, .pipeline = pipeline, .preview_pipeline = preview_pipeline, .occluded_pipeline = occluded_pipeline };
+        return .{ .layout = layout, .uniform = uniform, .instances = instances, .binding = binding, .pipeline = pipeline, .preview_pipeline = preview_pipeline, .miniature_pipeline = miniature_pipeline, .occluded_pipeline = occluded_pipeline, .miniature_chunks = .init(allocator) };
     }
     pub fn deinit(self: Renderer, gctx: *zgpu.GraphicsContext) void {
+        var mutable = self;
+        mutable.clearMiniatures(gctx);
+        mutable.miniature_chunks.deinit();
         if (self.preview_cache) |cache| cache.release(gctx);
         gctx.releaseResource(self.occluded_pipeline);
         gctx.releaseResource(self.preview_pipeline);
+        gctx.releaseResource(self.miniature_pipeline);
         gctx.releaseResource(self.pipeline);
         gctx.releaseResource(self.binding);
         gctx.releaseResource(self.instances);
@@ -206,18 +265,116 @@ pub const Renderer = struct {
         gctx.releaseResource(self.layout);
     }
 
+    /// Replace one camera-independent source immediately. Call before encoding
+    /// its draws, and change revision whenever source cells change. Empty sources
+    /// remove the entry. Repeating a chunk/revision key does not inspect cells.
+    ///
+    /// A failed preflight or map allocation preserves the old source. Renderer
+    /// ownership is capped at capacity cells and 4096 chunks, plus this call's
+    /// transient replacement of at most one chunk. Released WebGPU references
+    /// remain alive for already submitted commands until the queue finishes.
+    pub fn replaceMiniatureChunk(self: *Renderer, gctx: *zgpu.GraphicsContext, id: ChunkId, chunk: @Vector(3, i32), revision: u64, cells: []const MiniatureCell) MiniatureError!void {
+        if (cells.len == 0) {
+            self.removeMiniatureChunk(gctx, id);
+            return;
+        }
+        const previous = self.miniature_chunks.get(id);
+        if (previous) |source| if (source.revision == revision and @reduce(.And, source.chunk == chunk)) return;
+        if (cells.len > chunks.CHUNK_SIZE * chunks.CHUNK_SIZE * chunks.CHUNK_SIZE) return error.InvalidMiniatureChunk;
+        for (cells) |cell| {
+            for (cell.local) |axis| if (axis >= chunks.CHUNK_SIZE) return error.InvalidMiniatureChunk;
+            const material = std.enums.fromInt(BlockType, cell.material) orelse return error.InvalidMiniatureChunk;
+            if (material == .none) return error.InvalidMiniatureChunk;
+        }
+        const count: u32 = @intCast(cells.len);
+        const old_count = if (previous) |source| source.instance_count else 0;
+        const next_count = self.miniature_cached_instances - old_count + count;
+        if (next_count > capacity or
+            (previous == null and self.miniature_chunks.count() == miniature_chunk_capacity)) return error.MiniatureCapacityExceeded;
+
+        // Finish fallible metadata allocation before creating GPU resources.
+        // An existing entry needs no allocation, even while the cache shrinks.
+        if (previous == null) try self.miniature_chunks.ensureUnusedCapacity(1);
+        const byte_size = @sizeOf(MiniatureCell) * cells.len;
+        const uniform = gctx.createBuffer(.{ .label = "blueprint miniature chunk transform", .usage = .{ .uniform = true, .copy_dst = true }, .size = @sizeOf(Transform) });
+        const instances = gctx.createBuffer(.{ .label = "blueprint miniature chunk cells", .usage = .{ .storage = true, .copy_dst = true }, .size = byte_size });
+        const binding = gctx.createBindGroup(self.layout, &.{ .{ .binding = 0, .buffer_handle = uniform, .size = @sizeOf(Transform) }, .{ .binding = 1, .buffer_handle = instances, .size = byte_size } });
+        gctx.queue.writeBuffer(gctx.lookupResource(instances).?, 0, MiniatureCell, cells);
+        self.miniature_chunks.putAssumeCapacity(id, .{ .chunk = chunk, .revision = revision, .instance_count = count, .uniform = uniform, .instances = instances, .binding = binding });
+        self.miniature_cached_instances = next_count;
+        if (previous) |source| self.releaseMiniatureSource(gctx, source);
+        if (cache_counters_enabled) {
+            self.miniature_stats.cache_builds += 1;
+            self.miniature_stats.source_upload_bytes += byte_size;
+        }
+    }
+
+    fn releaseMiniatureSource(self: *Renderer, gctx: *zgpu.GraphicsContext, source: MiniatureChunkCache) void {
+        source.release(gctx);
+        if (cache_counters_enabled) self.miniature_stats.cache_releases += 1;
+    }
+
+    pub fn removeMiniatureChunk(self: *Renderer, gctx: *zgpu.GraphicsContext, id: ChunkId) void {
+        const removed = self.miniature_chunks.fetchRemove(id) orelse return;
+        self.miniature_cached_instances -= removed.value.instance_count;
+        self.releaseMiniatureSource(gctx, removed.value);
+    }
+
+    pub fn clearMiniatures(self: *Renderer, gctx: *zgpu.GraphicsContext) void {
+        var iterator = self.miniature_chunks.valueIterator();
+        while (iterator.next()) |source| self.releaseMiniatureSource(gctx, source.*);
+        self.miniature_chunks.clearRetainingCapacity();
+        self.miniature_cached_instances = 0;
+    }
+
+    pub fn miniatureChunkCount(self: *const Renderer, id: ChunkId) u32 {
+        const source = self.miniature_chunks.get(id) orelse return 0;
+        return source.instance_count;
+    }
+
+    pub fn miniatureCacheStats(self: *const Renderer) MiniatureCacheStats {
+        var result: MiniatureCacheStats = if (cache_counters_enabled) self.miniature_stats else .{};
+        result.cached_instances = self.miniature_cached_instances;
+        result.cached_chunks = self.miniature_chunks.count();
+        return result;
+    }
+
+    /// One draw per visible nonempty chunk; work follows chunk count, never cell
+    /// count. Visibility does not allocate, rebuild sources, or change residency.
+    pub fn drawMiniatures(self: *Renderer, gctx: *zgpu.GraphicsContext, pass: wgpu.RenderPassEncoder, atlas: wgpu.BindGroup, camera: *const Camera, visible_chunk_ids: []const ChunkId, max_instances: u32) MiniatureError!void {
+        var count: usize = 0;
+        for (visible_chunk_ids) |id| {
+            count += self.miniatureChunkCount(id);
+            if (count > max_instances or count > capacity) return error.MiniatureCapacityExceeded;
+        }
+        if (count == 0) return;
+        pass.setBindGroup(1, atlas, null);
+        pass.setPipeline(gctx.lookupResource(self.miniature_pipeline).?);
+        for (visible_chunk_ids) |id| {
+            const source = self.miniature_chunks.get(id) orelse continue;
+            const transform = miniatureTransform(camera, source.chunk);
+            gctx.queue.writeBuffer(gctx.lookupResource(source.uniform).?, 0, Transform, &.{transform});
+            pass.setBindGroup(0, gctx.lookupResource(source.binding).?, null);
+            pass.draw(36, source.instance_count, 0, 0);
+            if (cache_counters_enabled) {
+                self.miniature_stats.uniform_upload_bytes += @sizeOf(Transform);
+                self.miniature_stats.draw_calls += 1;
+            }
+        }
+    }
+
     pub fn clearPreview(self: *Renderer, gctx: *zgpu.GraphicsContext) void {
         if (self.preview_cache) |cache| {
             cache.release(gctx);
             self.preview_cache = null;
-            if (builtin.is_test) self.preview_stats.cache_releases += 1;
+            if (cache_counters_enabled) self.preview_stats.cache_releases += 1;
         }
     }
 
-    /// Counters are stored only in test builds. The live instance count also
-    /// allows lifecycle tests to distinguish a hidden source from a released one.
+    /// Check counters_enabled before interpreting cumulative counters. Live
+    /// occupancy remains available even when instrumentation is compiled out.
     pub fn previewCacheStats(self: *const Renderer) PreviewCacheStats {
-        var result: PreviewCacheStats = if (builtin.is_test) self.preview_stats else .{};
+        var result: PreviewCacheStats = if (cache_counters_enabled) self.preview_stats else .{};
         result.cached_instances = if (self.preview_cache) |cache| cache.instance_count else 0;
         return result;
     }
@@ -236,7 +393,7 @@ pub const Renderer = struct {
         const binding = gctx.createBindGroup(self.layout, &.{ .{ .binding = 0, .buffer_handle = uniform, .size = @sizeOf(Transform) }, .{ .binding = 1, .buffer_handle = instances, .size = byte_size } });
         gctx.queue.writeBuffer(gctx.lookupResource(instances).?, 0, PreviewInstance, source);
         self.preview_cache = .{ .definition_id = selected.definition_id, .generation = selected.generation, .size = selected.size, .instance_count = selected.target_count, .uniform = uniform, .instances = instances, .binding = binding };
-        if (builtin.is_test) {
+        if (cache_counters_enabled) {
             self.preview_stats.cache_builds += 1;
             self.preview_stats.source_upload_bytes += byte_size;
         }
@@ -270,7 +427,7 @@ pub const Renderer = struct {
         };
         if (instances.len > 0) {
             if (instances.len > self.allocated_capacity) {
-                const next_capacity = @min(capacity, std.math.ceilPowerOfTwoAssert(usize, instances.len));
+                const next_capacity: usize = @min(capacity, std.math.ceilPowerOfTwoAssert(usize, instances.len));
                 gctx.releaseResource(self.binding);
                 gctx.releaseResource(self.instances);
                 self.instances = gctx.createBuffer(.{ .label = "visible blueprint instances", .usage = .{ .storage = true, .copy_dst = true }, .size = @sizeOf(Instance) * next_capacity });
