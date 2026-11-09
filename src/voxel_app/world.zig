@@ -422,7 +422,16 @@ pub fn tryCollectConstructed(allocator: std.mem.Allocator, layout: *const WorldL
     return try cells.toOwnedSlice(allocator);
 }
 
-pub fn validateEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, constructed: []const block_rules.Cell, operation: BlockOperation) EditResult {
+const PhysicalEdit = struct {
+    cell: block_rules.Cell,
+    material: BlockType,
+    removal: bool,
+    mined_type: ?BlockType,
+};
+
+/// Resolve physical-only refusals before locality or structural work. The ready
+/// edit carries everything needed by either validator without repeating reads.
+fn preflightEdit(reader: block_rules.Reader, operation: BlockOperation, ready: *PhysicalEdit) ?EditResult {
     const cell: block_rules.Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
     const replacement = if (operation.action == .put) operation.action.put else BlockType.none;
     if (mutation_guard.validateWrites(reader, &.{.{ .block = operation.block, .material = replacement }})) |failure|
@@ -441,14 +450,25 @@ pub fn validateEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, co
             break :blk .none;
         },
     };
-    var validator: block_rules.Validator = .{ .allocator = allocator, .reader = reader, .edit = .{ .cell = cell, .material = material } };
+    ready.* = .{ .cell = cell, .material = material, .removal = operation.action == .remove, .mined_type = if (operation.action == .remove) existing.minedType() else null };
+    return null;
+}
+
+fn validatePhysicalEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, constructed: []const block_rules.Cell, edit: PhysicalEdit) EditResult {
+    var validator: block_rules.Validator = .{ .allocator = allocator, .reader = reader, .edit = .{ .cell = edit.cell, .material = edit.material } };
     defer validator.deinit();
-    var failure = if (material != .none) validator.checkPlacement(cell, material) else null;
+    var failure = if (edit.material != .none) validator.checkPlacement(edit.cell, edit.material) else null;
     // Legal empty-cell additions preserve existing support; removals still need its proof.
-    if (failure == null and operation.action == .remove) failure = validator.checkDependents(constructed, true);
+    if (failure == null and edit.removal) failure = validator.checkDependents(constructed, true);
     if (validator.allocation_failed) return .{ .status = .resource_exhausted };
     if (failure) |reason| return .{ .status = if (reason.reason == .missing_data) .missing_data else .constraint_violation, .failure = reason };
-    return .{ .status = .success, .mined_type = if (material == .none) existing.minedType() else null };
+    return .{ .status = .success, .mined_type = edit.mined_type };
+}
+
+pub fn validateEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, constructed: []const block_rules.Cell, operation: BlockOperation) EditResult {
+    var edit: PhysicalEdit = undefined;
+    if (preflightEdit(reader, operation, &edit)) |rejected| return rejected;
+    return validatePhysicalEdit(allocator, reader, constructed, edit);
 }
 
 /// This path exits before dependent enumeration, ordinary validation, and roads.
@@ -481,28 +501,37 @@ pub fn validateBlueprintFulfillment(physical: block_rules.Reader, state: *const 
     return .{ .status = .success };
 }
 
-/// Shared client/authority dispatch: without sites, validate the physical world once.
-/// Otherwise preserve the world with every pending target completed, while keeping
-/// physical target approval independent so miniatures grant no support.
+/// Every structural read, including dependent searches, is bounded by the edit's
+/// support cube. Chunk occupancy is a conservative proof: false positives keep
+/// completed-world validation, with at most 27 index lookups and no target scan.
+fn pendingTargetsMayAffectEdit(physical: block_rules.Reader, state: *const blueprint_runtime.State, target: [3]u32) bool {
+    // validationChunks follows the world's compiled topology. A custom reader
+    // with another topology must retain the completed-world path.
+    if (physical.periodic_x != WorldLayout.wrap_x) return true;
+    const window = validationChunks(physical.layout, target);
+    for (window.ids[0..window.count]) |id| if (state.chunkTargets(id).len != 0) return true;
+    return false;
+}
+
+/// Shared client/authority dispatch: when the edit window has no pending targets,
+/// the physical and completed views coincide and need only one ordinary check.
+/// Otherwise keep physical target approval independent of miniature support.
 pub fn validateCompletedEdit(allocator: std.mem.Allocator, physical: block_rules.Reader, state: *const blueprint_runtime.State, constructed: []const block_rules.Cell, operation: BlockOperation) EditResult {
     if (operation.blueprint != null) return validateBlueprintFulfillment(physical, state, operation);
     if (state.instances.count() == 0) return validateEdit(allocator, physical, constructed, operation);
     if (state.targetAt(operation.block) != null) return .{ .status = .target_changed };
     const cell: block_rules.Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
     if (operation.action == .remove and state.boxAt(physical.layout, operation.block) != null) return .{ .status = .constraint_violation, .failure = .{ .reason = .would_remove_support, .subject = cell } };
-    const material = if (operation.action == .put) operation.action.put else BlockType.none;
-    if (mutation_guard.validateWrites(physical, &.{.{ .block = operation.block, .material = material }})) |failure| return .{ .status = .constraint_violation, .failure = failure };
-    const existing = physical.get(cell) orelse return .{ .status = .missing_data };
+    var edit: PhysicalEdit = undefined;
+    if (preflightEdit(physical, operation, &edit)) |rejected| return rejected;
+    if (!pendingTargetsMayAffectEdit(physical, state, operation.block)) return validatePhysicalEdit(allocator, physical, constructed, edit);
+    const material = edit.material;
     if (operation.action == .put) {
-        if (existing != .none) return .{ .status = .already_exists };
         var physical_validator: block_rules.Validator = .{ .allocator = allocator, .reader = physical, .edit = .{ .cell = cell, .material = material } };
         defer physical_validator.deinit();
         const failure = physical_validator.checkPlacement(cell, material);
         if (physical_validator.allocation_failed) return .{ .status = .resource_exhausted };
         if (failure) |reason| return .{ .status = if (reason.reason == .missing_data) .missing_data else .constraint_violation, .failure = reason };
-    } else {
-        if (existing == .none) return .{ .status = .already_removed };
-        if (existing.miningPolicy() == .forbidden or (existing.miningPolicy() == .yields and !existing.miningPolicy().yields.isPlaceable())) return .{ .status = .constraint_violation, .failure = .{ .reason = .mining_forbidden, .subject = cell } };
     }
     var completed: blueprint_runtime.CompletedReader = .{ .physical = physical, .state = state };
     var validator: block_rules.Validator = .{ .allocator = allocator, .reader = completed.reader(), .edit = .{ .cell = cell, .material = material } };
@@ -515,7 +544,7 @@ pub fn validateCompletedEdit(allocator: std.mem.Allocator, physical: block_rules
     }
     if (validator.allocation_failed) return .{ .status = .resource_exhausted };
     if (failure) |reason| return .{ .status = if (reason.reason == .missing_data) .missing_data else .constraint_violation, .failure = reason };
-    return .{ .status = .success, .mined_type = if (operation.action == .remove) existing.minedType() else null };
+    return .{ .status = .success, .mined_type = edit.mined_type };
 }
 
 /// Main-thread cache: authoritative snapshots with unacknowledged local operations replayed
@@ -2486,45 +2515,222 @@ test "client blueprint package preflight is atomic across all allocation failure
     try std.testing.checkAllAllocationFailures(std.testing.allocator, blueprintPackageAllocationScenario, .{});
 }
 
-test "ordinary completed validation matches physical validation work without instances" {
+test "ordinary completed validation matches physical work with no local pending targets" {
     const a = std.testing.allocator;
-    var world = try World.init(a, &test_layout);
-    defer world.deinit();
-    for (6..9) |z| for (9..12) |y| for (9..12) |x| try setTestPhysical(&world, .{ @intCast(x), @intCast(y), @intCast(z) }, .stone);
-    for (9..13) |z| try setTestPhysical(&world, .{ 10, 10, @intCast(z) }, .planks);
-    try setTestPhysical(&world, .{ 11, 10, 11 }, .planks);
-    const constructed = [_]block_rules.Cell{
-        .{ 10, 10, 9 }, .{ 10, 10, 10 }, .{ 10, 10, 11 }, .{ 11, 10, 11 }, .{ 10, 10, 12 },
+    const Site = enum { none, library_only, distant, retired };
+    const AllocationWork = enum { none, structural, exhausted };
+    const Case = struct {
+        operation: BlockOperation,
+        status: OperationStatus,
+        failure_reason: ?block_rules.Reason = null,
+        failure_subject: ?block_rules.Cell = null,
+        exact_failure: bool = false,
+        missing_cell: ?block_rules.Cell = null,
+        mined_type: ?BlockType = null,
+        allocation_work: AllocationWork = .none,
     };
-    const cases = [_]struct { operation: BlockOperation, status: OperationStatus }{
-        .{ .operation = .{ .block = .{ 11, 10, 10 }, .action = .{ .put = .planks } }, .status = .success },
-        .{ .operation = .{ .block = .{ 10, 10, 9 }, .action = .remove }, .status = .constraint_violation },
-        .{ .operation = .{ .block = .{ 11, 10, 11 }, .action = .remove }, .status = .success },
+    const placement: BlockOperation = .{ .block = .{ 11, 10, 10 }, .action = .{ .put = .planks } };
+    const removal: BlockOperation = .{ .block = .{ 11, 10, 11 }, .action = .remove };
+    const cases = [_]Case{
+        .{ .operation = placement, .status = .success, .allocation_work = .structural },
+        .{ .operation = .{ .block = .{ 10, 10, 9 }, .action = .remove }, .status = .constraint_violation, .failure_reason = .would_remove_support, .failure_subject = .{ 10, 10, 10 }, .allocation_work = .structural },
+        .{ .operation = removal, .status = .success, .mined_type = .planks, .allocation_work = .structural },
+        .{ .operation = .{ .block = .{ 10, 10, 10 }, .action = .{ .put = .planks } }, .status = .already_exists },
+        .{ .operation = .{ .block = .{ 12, 10, 10 }, .action = .remove }, .status = .already_removed },
+        .{ .operation = .{ .block = .{ 64, 64, 10 }, .action = .{ .put = .planks } }, .status = .missing_data, .failure_reason = .missing_data, .exact_failure = true },
+        .{ .operation = .{ .block = .{ 70, 70, 32 }, .action = .{ .put = .tree_trunk } }, .status = .missing_data, .failure_reason = .missing_data, .missing_cell = .{ 70, 70, 31 }, .allocation_work = .structural },
+        .{ .operation = .{ .block = .{ 3, 3, 1 }, .action = .remove }, .status = .constraint_violation, .failure_reason = .immutable_cell, .exact_failure = true },
+        .{ .operation = .{ .block = .{ 14, 10, 10 }, .action = .remove }, .status = .constraint_violation, .failure_reason = .mining_forbidden, .exact_failure = true },
+        .{ .operation = placement, .status = .resource_exhausted, .allocation_work = .exhausted },
+        .{ .operation = removal, .status = .resource_exhausted, .allocation_work = .exhausted },
     };
-    var reads: usize = 0;
-    world.physical_read_counter = &reads;
-    for ([_]bool{ false, true }) |library_only| {
-        if (library_only) {
+    for (std.enums.values(Site)) |site| {
+        var world = try World.init(a, &test_layout);
+        defer world.deinit();
+        for (6..9) |z| for (9..12) |y| for (9..12) |x| try setTestPhysical(&world, .{ @intCast(x), @intCast(y), @intCast(z) }, .stone);
+        for (9..13) |z| try setTestPhysical(&world, .{ 10, 10, @intCast(z) }, .planks);
+        try setTestPhysical(&world, .{ 11, 10, 11 }, .planks);
+        try setTestPhysical(&world, .{ 14, 10, 10 }, .limestone);
+        // The edited cell is resident, but the cell directly below it is not.
+        try world.insertChunk(.{ 2, 2, 1 }, WorldChunk.initEmpty());
+        world.immutable_floor = .{ .context = &test_layout, .immutable_at = struct {
+            fn contains(_: *const anyopaque, block: [3]u32) bool {
+                return block[2] < 2;
+            }
+        }.contains };
+        const constructed = [_]block_rules.Cell{
+            .{ 10, 10, 9 }, .{ 10, 10, 10 }, .{ 10, 10, 11 }, .{ 11, 10, 11 }, .{ 10, 10, 12 },
+        };
+        var reads: usize = 0;
+        world.physical_read_counter = &reads;
+        if (site != .none) {
             var saved: blueprint_runtime.SavedDefinition = .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Unused"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(BlockType, &.{.planks}), .target_count = 1 } };
             defer saved.deinit(a);
             try world.applyBlueprintChanges(&.{.{ .definition = saved }});
         }
+        if (site == .distant or site == .retired) {
+            const origin: [3]u32 = if (site == .distant) .{ 160, 160, 10 } else .{ 10, 10, 10 };
+            const instance = try world.blueprints.prepareInstance(a, world.layout, 1, 1, 1, origin, 0);
+            try world.blueprints.insertInstance(a, world.layout, instance);
+            if (site == .retired) try std.testing.expect(world.blueprints.fulfill(world.layout, .{ .instance_id = 1, .cell_index = 0 }));
+        }
         for (cases) |case| {
+            const fail_index: usize = if (case.allocation_work == .exhausted) 0 else std.math.maxInt(usize);
             reads = 0;
-            var ordinary = std.testing.FailingAllocator.init(a, .{});
+            var ordinary = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index });
             const expected = validateEdit(ordinary.allocator(), world.reader(), &constructed, case.operation);
             try std.testing.expectEqual(case.status, expected.status);
+            try std.testing.expectEqual(case.mined_type, expected.mined_type);
+            if (case.failure_reason) |reason| {
+                try std.testing.expect(expected.failure != null);
+                const subject: block_rules.Cell = case.failure_subject orelse .{ case.operation.block[0], case.operation.block[1], case.operation.block[2] };
+                try std.testing.expectEqual(reason, expected.failure.?.reason);
+                try std.testing.expectEqualDeep(subject, expected.failure.?.subject);
+                if (case.exact_failure) try std.testing.expectEqualDeep(block_rules.Failure{ .reason = reason, .subject = subject }, expected.failure.?);
+                if (case.missing_cell) |missing| {
+                    var found = false;
+                    for (expected.failure.?.involved[0..expected.failure.?.involved_count]) |cell| {
+                        found = found or @reduce(.And, cell == missing);
+                    }
+                    try std.testing.expect(found);
+                }
+            } else try std.testing.expect(expected.failure == null);
             const ordinary_reads = reads;
-            try std.testing.expect(ordinary_reads > 2);
-            try std.testing.expect(ordinary.allocations > 0);
+            switch (case.allocation_work) {
+                .none => {
+                    try std.testing.expectEqual(@as(usize, 0), ordinary.allocations);
+                    try std.testing.expectEqual(@as(usize, 0), ordinary.allocated_bytes);
+                },
+                .structural => {
+                    try std.testing.expect(ordinary_reads > 2);
+                    try std.testing.expect(ordinary.allocations > 0);
+                },
+                .exhausted => try std.testing.expect(ordinary.has_induced_failure),
+            }
+            try std.testing.expectEqual(case.allocation_work == .exhausted, ordinary.has_induced_failure);
             reads = 0;
-            var shared = std.testing.FailingAllocator.init(a, .{});
+            var shared = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index });
             const actual = validateCompletedEdit(shared.allocator(), world.reader(), &world.blueprints, &constructed, case.operation);
             try std.testing.expectEqualDeep(expected, actual);
             try std.testing.expectEqual(ordinary_reads, reads);
             try std.testing.expectEqual(ordinary.allocations, shared.allocations);
             try std.testing.expectEqual(ordinary.allocated_bytes, shared.allocated_bytes);
+            try std.testing.expectEqual(ordinary.has_induced_failure, shared.has_induced_failure);
         }
+    }
+}
+
+test "ordinary missing target preserves its diagnostic with nearby pending targets" {
+    const a = std.testing.allocator;
+    var world = try World.init(a, &test_layout);
+    defer world.deinit();
+    try insertTestBlueprint(&world, 1, .{ 64, 64, 10 }, .{ 1, 1, 1 }, &.{.planks});
+    const operation: BlockOperation = .{ .block = .{ 65, 64, 10 }, .action = .{ .put = .planks } };
+    try std.testing.expect(pendingTargetsMayAffectEdit(world.reader(), &world.blueprints, operation.block));
+    var reads: usize = 0;
+    world.physical_read_counter = &reads;
+    var ordinary = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    const expected = validateEdit(ordinary.allocator(), world.reader(), &.{}, operation);
+    try std.testing.expectEqualDeep(EditResult{ .status = .missing_data, .failure = .{ .reason = .missing_data, .subject = .{ 65, 64, 10 } } }, expected);
+    const ordinary_reads = reads;
+    reads = 0;
+    var shared = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    const actual = validateCompletedEdit(shared.allocator(), world.reader(), &world.blueprints, &.{}, operation);
+    try std.testing.expectEqualDeep(expected, actual);
+    try std.testing.expectEqual(ordinary_reads, reads);
+    try std.testing.expectEqual(@as(usize, 0), ordinary.allocations);
+    try std.testing.expectEqual(@as(usize, 0), ordinary.allocated_bytes);
+    try std.testing.expectEqual(ordinary.allocations, shared.allocations);
+    try std.testing.expectEqual(ordinary.allocated_bytes, shared.allocated_bytes);
+    try std.testing.expect(!ordinary.has_induced_failure);
+    try std.testing.expect(!shared.has_induced_failure);
+}
+
+test "pending target locality covers the full edit cube without scanning targets" {
+    const a = std.testing.allocator;
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } });
+    const center = [3]u32{ 80, 80, 80 };
+    for (1..4) |z| for (1..4) |y| for (1..4) |x| {
+        var world = try World.init(a, &layout);
+        defer world.deinit();
+        // Include each of the 27 intersecting chunks, even when the chosen cell
+        // is outside the exact cube: chunk-level false positives are intentional.
+        try insertTestBlueprint(&world, 1, .{ @intCast(x * CHUNK_SIZE), @intCast(y * CHUNK_SIZE), @intCast(z * CHUNK_SIZE) }, .{ 1, 1, 1 }, &.{.planks});
+        try std.testing.expect(pendingTargetsMayAffectEdit(world.reader(), &world.blueprints, center));
+    };
+    for (0..3) |axis| for ([_]i64{ -28, 28 }) |offset| {
+        var world = try World.init(a, &layout);
+        defer world.deinit();
+        var target = center;
+        target[axis] = @intCast(@as(i64, center[axis]) + offset);
+        try insertTestBlueprint(&world, 1, target, .{ 1, 1, 1 }, &.{.planks});
+        try std.testing.expect(pendingTargetsMayAffectEdit(world.reader(), &world.blueprints, center));
+    };
+    var world = try World.init(a, &layout);
+    defer world.deinit();
+    try insertTestBlueprint(&world, 1, .{ 160, 160, 160 }, .{ 1, 1, 1 }, &.{.planks});
+    try std.testing.expect(!pendingTargetsMayAffectEdit(world.reader(), &world.blueprints, center));
+    var custom_reader = world.reader();
+    custom_reader.periodic_x = !WorldLayout.wrap_x;
+    try std.testing.expect(pendingTargetsMayAffectEdit(custom_reader, &world.blueprints, center));
+}
+
+test "ordinary removal still checks planned dependents and their planned support" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |planned_support| {
+        var world = try World.init(a, &test_layout);
+        defer world.deinit();
+        try setTestPhysical(&world, .{ 10, 10, 9 }, .limestone);
+        try setTestPhysical(&world, .{ 10, 10, 10 }, .planks);
+        const operation: BlockOperation = .{ .block = .{ 10, 10, 10 }, .action = .remove };
+        if (planned_support) {
+            try setTestPhysical(&world, .{ 11, 10, 10 }, .planks);
+            try setTestPhysical(&world, .{ 12, 10, 9 }, .limestone);
+            try insertTestBlueprint(&world, 1, .{ 12, 10, 10 }, .{ 1, 1, 1 }, &.{.planks});
+        } else {
+            try insertTestBlueprint(&world, 1, .{ 10, 10, 11 }, .{ 1, 1, 1 }, &.{.planks});
+        }
+        const constructed: []const block_rules.Cell = if (planned_support) &.{.{ 11, 10, 10 }} else &.{};
+        const physical = validateEdit(a, world.reader(), constructed, operation);
+        const completed = validateCompletedEdit(a, world.reader(), &world.blueprints, constructed, operation);
+        try std.testing.expectEqual(if (planned_support) OperationStatus.constraint_violation else .success, physical.status);
+        try std.testing.expectEqual(if (planned_support) OperationStatus.success else .constraint_violation, completed.status);
+        if (!planned_support) try std.testing.expectEqual(block_rules.Reason.would_remove_support, completed.failure.?.reason);
+    }
+}
+
+test "remote pending targets cannot bypass active cavity extraction guards" {
+    var world = try World.init(std.testing.allocator, &test_layout);
+    defer world.deinit();
+    var cells = [_]BlockType{.none} ** 128;
+    cells[0] = .planks;
+    cells[127] = .planks;
+    try insertTestBlueprint(&world, 1, .{ 0, 10, 10 }, .{ 128, 1, 1 }, &cells);
+    try setTestPhysical(&world, .{ 64, 10, 10 }, .planks);
+    const operation: BlockOperation = .{ .block = .{ 64, 10, 10 }, .action = .remove };
+    try std.testing.expect(!pendingTargetsMayAffectEdit(world.reader(), &world.blueprints, operation.block));
+    try std.testing.expectEqual(OperationStatus.success, validateEdit(std.testing.allocator, world.reader(), &.{}, operation).status);
+    const result = validateCompletedEdit(std.testing.allocator, world.reader(), &world.blueprints, &.{}, operation);
+    try std.testing.expectEqual(OperationStatus.constraint_violation, result.status);
+    try std.testing.expectEqual(block_rules.Reason.would_remove_support, result.failure.?.reason);
+}
+
+test "pending target locality preserves wrapped seam and finite edge protection" {
+    const a = std.testing.allocator;
+    for ([_][3]u32{ .{ 8, 8, 8 }, .{ 2, 2, 2 } }) |size| {
+        const layout = try WorldLayout.init(.{ .size_in_chunks = size });
+        var world = try World.init(a, &layout);
+        defer world.deinit();
+        const edge = layout.size_in_blocks[0] - 1;
+        try setTestPhysical(&world, .{ 0, 10, 9 }, .limestone);
+        try setTestPhysical(&world, .{ 0, 10, 10 }, .planks);
+        try world.insertChunk(.{ @intCast(size[0] - 1), 0, 0 }, WorldChunk.initEmpty());
+        try insertTestBlueprint(&world, 1, .{ edge, 10, 10 }, .{ 1, 1, 1 }, &.{.planks});
+        const operation: BlockOperation = .{ .block = .{ 0, 10, 10 }, .action = .remove };
+        try std.testing.expectEqual(WorldLayout.wrap_x, pendingTargetsMayAffectEdit(world.reader(), &world.blueprints, operation.block));
+        const result = validateCompletedEdit(a, world.reader(), &world.blueprints, &.{}, operation);
+        try std.testing.expectEqual(if (WorldLayout.wrap_x) OperationStatus.constraint_violation else .success, result.status);
+        try std.testing.expect(!pendingTargetsMayAffectEdit(world.reader(), &world.blueprints, .{ 0, layout.size_in_blocks[1] - 1, layout.size_in_blocks[2] - 1 }));
     }
 }
 

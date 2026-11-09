@@ -116,6 +116,21 @@ types excluded from capture. Water/snow have no support dependencies. [R39/R40](
 record composition examples, and the [constraints](../specs/features/blueprints.md#constraints)
 define cache separation and safe approval reuse. These checks add no work to blueprint fulfillment.
 
+Ordinary edits far from pending targets reuse one physical-world validation. Target identity
+and active-box extraction guards run first, followed by shared physical preflight for
+immutable cells, unknown target data, occupancy and mining policy. Refused edits return
+before the locality query or structural allocations. Successful preflight carries the
+resolved edit into either structural path without repeating its physical reads. Then
+inspect pending-target occupancy in the chunks
+intersecting the edit's inclusive ±28-cell cube: at most 27 chunk-index lookups, without
+scanning target lists or sites. Every structural read is bounded by this edit cube, including
+reads made while checking dependents; dependent roots only intersect that bound. When all
+these chunks have no pending targets, physical and completed reads coincide throughout the
+check, so removals also reuse ordinary real-dependent validation. A target anywhere in an
+intersecting chunk conservatively retains completed-world validation. Wrapped X and finite
+Y/Z bounds use the same chunk window as construction collection; custom readers with a
+different topology retain the completed path. Empty active-box cavities remain protected.
+
 ### Blueprint world-mutation invariant
 
 Every gameplay world modification must preserve ordinary structural validity of affected

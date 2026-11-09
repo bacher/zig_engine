@@ -20,6 +20,7 @@ const ReadCounter = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
+    try @import("ordinary_edit_benchmark.zig").run(init);
     const allocator = init.gpa;
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 8 } });
     var world = try world_module.World.init(allocator, &layout);
