@@ -40,6 +40,16 @@ Client threads that provide the player experience may use a more balanced throug
 
 The simulation needs its own index and may also maintain state distinct from the data currently stored in chunks. Opening a world must resume simulation in all areas containing active event emitters without scanning the whole world. The index, stored state, and recovery mechanism have not been designed.
 
+## World time and no offline progress
+
+The world simulates while it is running and not paused. Closing the world or stopping its server stops simulation time. On opening a saved world, resume from its saved simulation time without adding time for the real-world interval while it was closed. There is no offline progress or offline catch-up.
+
+Accepted work retains its saved progress and remaining simulation-time duration. If a saved delivery has one simulation minute remaining, loading that save after a day still leaves one simulation minute. Closing the world does not complete work or age resources through elapsed real time.
+
+A future dedicated server can keep simulating without connected players while it is running and not paused. Disconnecting a client is distinct from closing or pausing the server's world. Downtime of the server itself earns no progress.
+
+These rules settle the pause/closed-world distinction and offline-progress part of **SIM-04**. The normal real-time/simulation-time ratio, clock precision, ordering of equal-time events, multiplayer pause controls, and handling of a long processing stall remain open. Pausing and closing are distinct from the already accepted coordinated slowdown under overload. This records intended behavior without selecting a clock or persistence implementation.
+
 ## Consistency of condition checks
 
 Not every condition check requires a coherent world snapshot. For explicitly discussed cases, recent observations obtained at different moments may be sufficient, even when their combination describes a state that never existed simultaneously. A block already checked need not be checked again merely because it changed before the rest of the validation finished.

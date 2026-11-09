@@ -17,6 +17,7 @@ These decisions are already recorded and are not open questions:
 - Stopping rejects new work, completes accepted obligations, and leaves the object intact. Reactivation and dismantling are separate actions; dismantling waits for obligations to finish.
 - Simulation edits win concurrent conflicts with player edits. Eligible condition checks may use recent mixed observations only after individual discussion; resource accounting and memory safety remain strict.
 - Support activity throughout the world and startup without a full-world scan. Sustained overload may slow simulation time coherently and must be visible to players.
+- Simulation runs while the world is running and not paused. Closed worlds and stopped servers earn no offline progress; loading resumes saved simulation time and task progress. A running dedicated server may continue without connected players. See the [world-time decision](simulation-notes.md#world-time-and-no-offline-progress).
 
 ## Core scope and performance
 
@@ -26,7 +27,7 @@ These decisions are already recorded and are not open questions:
 
 ## Time, scheduling, and overload
 
-- [ ] **SIM-04 — Meaning of simulation time.** What is the normal relationship between real and simulation time? What precision and ordering are required for equal-time or dependent events? What happens during pause, save/load, server downtime, or a long processing stall? Is offline catch-up supported in the first version?
+- [ ] **SIM-04 — Meaning of simulation time (partially resolved).** [Decided](simulation-notes.md#world-time-and-no-offline-progress): time advances only while the world is running and not paused; loading resumes saved time and progress without offline catch-up; a running dedicated server may continue without players, but server downtime earns no progress. Still open: what is the normal relationship between real and simulation time, what precision and ordering are required for equal-time or dependent events, who can pause a multiplayer world, and how is a long processing stall handled? Late processing and slowdown also depend on **SIM-05**.
 - [ ] **SIM-05 — Delayed processing and causality.** If a completion is processed late, when can dependent work start and which timestamp determines its duration and cost? How is coordinated slowdown applied so industries retain their relative rates and already accepted deliveries retain their simulation-time schedules?
 - [ ] **SIM-06 — Bounded work and fairness.** What are the limits for pending events, task admission, routing requests, and other deferred work? Which notifications can be combined, and what must be retained? How are client requests and subscriptions budgeted so they cannot overload the world-data service and delay simulation work? How are work budgets and priorities chosen without indefinitely starving regions or making economic outcomes depend on observation?
 - [ ] **SIM-07 — Overload feedback.** What sustained shortage triggers a warning? How is effective simulation speed measured, over which interval, and how is recovery reported? What information should a player receive when a new operation is delayed by system capacity rather than missing gameplay prerequisites?

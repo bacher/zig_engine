@@ -87,6 +87,8 @@ Consider service areas, limited candidate searches, approximate choices, and sel
 
 ## Define time independently of processing delays
 
+Simulation advances while the world is running and not paused. Closing the world or stopping its server stops simulation time; reopening resumes from the saved simulation time without offline progress or catch-up for elapsed real time. A running dedicated server may continue simulating with no connected players. An absent client does not make a running server offline. See the [world-time rules](docs/simulation-notes.md#world-time-and-no-offline-progress).
+
 Each feature must define when an action takes effect in simulation time, when dependent actions become eligible, and how late processing is handled. Processing a completion late must not accidentally change production rates, operating costs, or the relative speeds of different industries.
 
 Distinguish delayed knowledge of an event from a deliberate delay to the event itself. Specify how dependent work preserves causality when updates arrive late. Any slowdown of simulation time or delay to new work under load must follow an explicit policy, rather than emerge from whichever subsystem falls behind first.

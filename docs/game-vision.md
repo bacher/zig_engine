@@ -292,6 +292,8 @@ The initial performance target is 100,000 simultaneous work and delivery tasks, 
 
 ### Persistent work independent of observation
 
+Simulation time advances while the world is running and not paused. Closed worlds and stopped servers have no offline progress; loading resumes saved time and task progress without catching up to real time. A running dedicated server may continue with no connected players. The [world-time rules](simulation-notes.md#world-time-and-no-offline-progress) distinguish server downtime from a player's absence.
+
 Deliveries have persistent task state that moves goods through the world; they do not require persistent individual couriers between jobs. Saving and loading must preserve enough state to resume work, including active tasks, cargo, the fact that required resources were already consumed at departure, and travel progress. Resuming started work must not charge those resources again. A saved world must represent the ongoing economy, not just its terrain and buildings.
 
 Travel time must not depend on whether a player sees the courier. Observation must have no effects that modify authoritative world state. Rendering may adapt the visual movement to be plausible, but cannot change production, delivery outcomes, or the underlying schedule. The same principle applies when several players observe the same activity.
