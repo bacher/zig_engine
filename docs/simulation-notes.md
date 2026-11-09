@@ -48,7 +48,15 @@ Accepted work retains its saved progress and remaining simulation-time duration.
 
 A future dedicated server can keep simulating without connected players while it is running and not paused. Disconnecting a client is distinct from closing or pausing the server's world. Downtime of the server itself earns no progress.
 
-These rules settle the pause/closed-world distinction and offline-progress part of **SIM-04**. The normal real-time/simulation-time ratio, clock precision, ordering of equal-time events, multiplayer pause controls, and handling of a long processing stall remain open. Pausing and closing are distinct from the already accepted coordinated slowdown under overload. This records intended behavior without selecting a clock or persistence implementation.
+At normal load, one real second advances the simulation clock by one second. A 30-second production operation therefore takes approximately 30 real seconds. Under overload, the previously agreed coordinated slowdown may make simulation time advance more slowly. The length of an in-game day is a separate balance setting and does not redefine the seconds used by production and delivery tasks.
+
+Task timestamps and durations use millisecond resolution. This specifies how precisely time is expressed, not how often the simulation runs: work may be processed in batches, and an event may be handled after its scheduled timestamp. Allowable lateness and its effects on dependent work belong to **SIM-05**.
+
+Events must preserve causality and consistent resource accounting. Independent events with the same timestamp may run in any convenient order or in parallel; a dependent action cannot use an output before the preceding action has completed. If two tasks contend for the same last unit of food, only one may start. In the absence of a gameplay priority, the winner may depend on processing order. A global total ordering of independent events and identical replay of every concurrent outcome are not required. This does not remove already agreed priorities, including simulation precedence over conflicting player edits.
+
+Single-player pause stops simulation time. Opening an individual player's menu in multiplayer does not pause the shared world; its owner or an administrator may explicitly pause it for everyone. A whole-process suspension, such as computer sleep or a debugger stop, likewise contributes no simulation time. Resume from the stopped simulation time without accelerated catch-up for the suspension interval, retaining already scheduled events and their simulation-time deadlines.
+
+An individual worker falling behind or a task being processed late is not a suspension of the whole world. Handling those delays and implementing coordinated slowdown remain under **SIM-05**. These gameplay rules resolve **SIM-04** without selecting a clock representation, a scheduler, or the mechanism for detecting process suspension.
 
 ## Consistency of condition checks
 
