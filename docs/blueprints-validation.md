@@ -124,6 +124,28 @@ Formatting and `git diff --check` pass. The queue fixture and renderer transacti
 are component evidence; they do not measure the complete client update/render loop or
 establish full-game throughput/frame time.
 
+### Construction visual component timings (2026-11-09)
+
+The [measurement report](validation/construction-visuals.md) and linked raw logs separate
+dynamic versus cached miniature rendering from immediate versus budgeted CPU preparation.
+All 60 CPU replays converged to matching final mesh/source/world state. All 27 renderer
+dynamic/cache final image pairs matched, with no GPU validation errors. For 320,000
+unchanged miniatures, renderer CPU p95 fell from 2.158 to 0.030 ms and repeated source
+uploads from 15,360,000 bytes/frame to zero on Apple M4 Max/Metal. At 512 accepted fills/s,
+CPU replay p95 fell from 0.588 ms with immediate cached preparation to 0.261 ms with
+current budgets, while first-dirty scheduled age p95 increased from 15.8 to 110.0 ms.
+The two-frame age saved only four builds beyond the age-zero budget in that trace.
+These component measurements exclude the full deferred-publication lifecycle and do not
+establish full-game smoothness or simulation throughput. Scheduling defaults are unchanged.
+
+The large dynamic renderer path also exposed an inferred narrow integer overflow in
+buffer byte sizing. Its capacity now has explicit `usize` type; the comparison includes
+that correction in both baselines. The GPU readback suite adds a 320,000-instance dynamic
+upload compared against the same two visible instances without offscreen padding.
+`zig build test-gpu -Doptimize=ReleaseFast -j2` passed in both wrapping modes.
+`zig build test -Doptimize=Debug -j4 --summary all` passed all 49 steps with 1,942 tests
+passed and one existing skip. Formatting and diff checks pass.
+
 ### Persisted unfinished-work verification and measurements
 
 `zig build test -Doptimize=Debug --summary all` passed all 47 build steps with

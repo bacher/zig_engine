@@ -235,6 +235,16 @@ Per-chunk caching adds draw/resource overhead for spatially spread miniatures. M
 or lifetime hooks could leave stale geometry, so integration coverage must exercise local
 prediction, authoritative replacement, cleanup, and representation handoffs explicitly.
 
+### Measured tradeoffs
+
+The [2026-11-09 component measurements](../../docs/validation/construction-visuals.md)
+separate cached miniature rendering from CPU preparation scheduling. They support the
+cache's reduction in repeated packing/uploads and the count budget's reduction in busy
+rebuild work. The two-frame minimum age adds latency with almost no further work saving
+in those traces. Neither harness measures the full client lifecycle or demonstrates a
+performance benefit from persistent paired publication; R2 and R9–R13 impose that visual
+coherence policy independently. Defaults remain unchanged pending the design discussion.
+
 ## Tasks
 
 ### Phase 1 — Queue and cache
