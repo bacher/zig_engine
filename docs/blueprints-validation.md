@@ -4,9 +4,10 @@ This report accompanies the implementation of [the blueprint specification](../s
 
 ## Implemented paths
 
-- The selected capture frame, including the unconfirmed anchor frame, uses a faint `.greater` pass without depth writes before the normal opaque `.less_equal` depth-writing pass. Miniatures, diagnostics, and rails share one dynamic opaque instanced draw. A full-size application preview uses a separate cached instanced draw. The occluded-frame draw reuses the dynamic instances and adds only the selected frame's twelve rails, 144 triangles, in one extra draw. Miniatures, full-size application previews, and other active sites' frames receive no occluded-frame draw.
+- The selected capture frame, including the unconfirmed anchor frame, uses a faint `.greater` pass without depth writes before the normal opaque `.less_equal` depth-writing pass. Diagnostics and rails share one dynamic opaque instanced draw. Pending-target miniatures use cached sources with one draw per visible nonempty chunk; a full-size application preview uses its separate cached instanced draw. The occluded-frame draw reuses the dynamic instances and adds only the selected frame's twelve rails, 144 triangles, in one extra draw. Miniatures, full-size application previews, and other active sites' frames receive no occluded-frame draw.
 - All frames choose one continuous periodic X image using their middle cell. The renderer reuses its single chunk-relative conversion and subtracts the middle-cell offset before emitting the same twelve rails. There is no block traversal, second wrap calculation, split geometry, extra upload, or extra draw. Simultaneously visible opposite images of one site are outside this rendering scope; miniature and cached-preview coordinate policies retain their existing behavior.
-- Full-size application previews upload packed local cell coordinates/materials once per selected immutable definition and tool generation. Camera/origin changes and quarter-turn rotations update uniforms without rebuilding or uploading source geometry; rotations move cell offsets while preserving world-aligned cube faces and texture orientation. An unavailable placement origin hides the preview while retaining its cache; replacement or leaving preview releases it. Miniatures, diagnostics, and rails retain their dynamic path.
+- Full-size application previews upload packed local cell coordinates/materials once per selected immutable definition and tool generation. Camera/origin changes and quarter-turn rotations update uniforms without rebuilding or uploading source geometry; rotations move cell offsets while preserving world-aligned cube faces and texture orientation. An unavailable placement origin hides the preview while retaining its cache; replacement or leaving preview releases it. Diagnostics and rails retain their dynamic path; miniatures use the per-chunk cache described below.
+- Pending-target miniatures cache compact local coordinates/materials per chunk. Camera movement and neighbor-only terrain invalidation do not repack or upload sources. Effective blueprint commits, own occupancy changes and prediction reconciliation dirty affected chunks; unloaded sources are released. Replacements finish synchronously and independently of terrain uploads, so brief missing/overlapping visuals are permitted while both converge. Physics, resources, target identity and progress keep their existing immediate paths. FIFO preparation budgeting is a separate follow-up.
 - Capture immediately previews a 1×1×1 striped frame at the eligible unconfirmed anchor target. Hover and first-click confirmation share ordinary putting-target selection with 30-metre camera-to-nearest-cube-vertex reach, including adjacent physical placement and full-cell miniature targets. Hover does not create draft anchor/bounds, so Escape still opens the menu. Ordinary placement/mining remains at four metres; XY/height retain their raw-contact-from-feet metric.
 - Escape while capture awaits its first anchor with the chooser closed leaves the tool and opens the ordinary game menu; Resume returns to ordinary play. After anchor selection, Escape discards the whole draft and stays in capture awaiting an anchor, where the next fresh Escape with the chooser closed opens the menu.
 - B opens the saved-blueprint chooser from ordinary play or unanchored capture, or dismisses chooser/placement preview. A chooser over capture preserves capture mode/selection/generation; Cancel/Escape/B closes only that chooser, selecting a definition exits capture into placement preview, and an empty library leaves the current mode unchanged. Z controls capture, and Enter opens the validated capture name dialog; Enter in that dialog confirms the name and saves. B is ignored after anchor selection outside name entry. Ctrl+B toggles SSAO blur during ordinary play, capture outside name entry, and placement preview while modal/map input blocking remains in force. Bare B does not toggle blur, and F has no blueprint-tool binding.
@@ -44,15 +45,51 @@ These are technical budgets rather than additional material/geometry rules. Reso
 | Library/active-instance wire budgets | 4,096 definitions, 4,096 instances, 64 MiB durable state |
 | Pending blueprint journal | 16 MiB, at most 1,048,576 operations; backpressure drains earlier accepted work |
 | Save working memory | 64 MiB by default; includes journal capacity/growth, encoded changes, preparation, source encoding, and capture bookkeeping. Admission may drain before the wire/count limits. |
-| Visible GPU instances | Combined dynamic and full-size preview limit of 1,100,000; miniatures use visible-chunk collection |
-| Dynamic GPU instances | Lazy growth from 1,024, 48 bytes each; miniatures, diagnostics, and rails |
+| Visible GPU instances | Combined miniature, dynamic and full-size preview limit of 1,100,000; miniatures use visible-chunk collection |
+| Dynamic GPU instances | Lazy growth from 1,024, 48 bytes each; diagnostics and rails |
 | Cached full-size preview | 16 bytes per occupied cell, uploaded once per selection; separate transform uniforms |
+| Cached miniature sources | 16 bytes per cell; 1,100,000 resident cells and 4,096 nonempty chunks; one temporary replacement of at most 32,768 cells (18,124,288 accounted source bytes resident plus replacement), excluding transforms, bindings, containers and driver/in-flight overhead |
+| Dirty miniature work | One entry per affected loaded chunk, drained immediately; failed replacements retain retryable dirtiness |
 
 The independent horizontal limit remains `min(world_block_size_x / 2 - 1, world_block_size_y)` for each horizontal dimension. The 100×100×32 reference scenario fits the volume/source/snapshot budgets where world dimensions permit it.
 
-For a dense 100×100×32 placement preview, packed source storage/upload is 5,120,000 bytes once per selection, replacing 15,360,000 bytes of full-size dynamic instances rebuilt/uploaded per frame. Warm draws update a 128-byte preview transform; dynamic rails and miniatures retain their separate uploads. These are representation/upload calculations, not measured FPS improvements. Each preview cube still submits 36 vertices; exposed-face culling remains deferred.
+For a dense 100×100×32 placement preview, packed source storage/upload is 5,120,000 bytes once per selection, replacing 15,360,000 bytes of full-size dynamic instances rebuilt/uploaded per frame. Warm preview draws update a 128-byte transform; cached miniatures update per-chunk transforms and dynamic rails/diagnostics retain their uploads. These are representation/upload calculations, not measured FPS improvements. Each preview cube still submits 36 vertices; exposed-face culling remains deferred.
 
 ## Automated coverage
+
+### Immediate construction miniature cache (2026-11-09)
+
+The [incremental visual spec](../specs/features/incremental-construction-visuals.md)
+splits immediate miniature caching from a pending FIFO preparation PR. The cache uses a
+single resident source per chunk and one synchronous temporary replacement. Source/chunk
+limits, subscription identity, resource lifetime and exact invalidation remain required;
+terrain/miniature paired staging is removed. Terrain keeps its existing extraction,
+service-mesh and upload paths. Cache maintenance runs before terrain-capacity early returns.
+
+The [measurement report](validation/construction-visuals.md) separates fresh synchronous-API
+renderer verification from historical prepared-API timings. On Apple M4 Max/Metal,
+320,000 unchanged miniatures in 16 chunks reduce CPU-side renderer p95 from 2.0673 to
+0.0325 ms and source uploads from 15,360,000 bytes/frame to zero. All 27 fresh final
+color-image pairs matched and were nonempty, with no GPU validation errors. The harness
+fences every frame and excludes the full client; these are not game FPS measurements.
+`zig build test-gpu -Doptimize=ReleaseFast -j2 --summary all` passed all 19 steps and 108
+tests across both wrapping modes. Readbacks cover cache/dynamic color/depth parity,
+camera reuse, empty replacement, allocation/capacity failures and resource release.
+The dynamic buffer-size fix uses explicit `usize` capacity arithmetic and retains its
+320,000-instance upload check. Historical CPU scheduling results motivate the follow-up;
+they are not measurements of its new implementation.
+
+`zig build install test -Doptimize=ReleaseFast -j4 --summary all` passed all 55 steps with
+1,909 tests passed and eight existing skips. `zig build test -Doptimize=Debug -j4 --summary all`
+passed all 47 steps with 1,916 tests and one existing skip. Formatting and diff checks pass.
+Client coverage includes exact dirty hooks, blueprint no-ops/commit order/preflight,
+prediction rejection/cross-chunk replay, mesh-only fulfillment, stale/accepted snapshots,
+retryable failure with shrinking progress and eviction/reload.
+
+The second PR will add FIFO, at most four whole chunk preparations and a two-millisecond
+soft elapsed budget checked between chunks, with no minimum age. It is pending; the
+current cache drains dirty sources immediately and does not defer terrain/miniature
+publication as a pair.
 
 ### Persisted unfinished-work verification and measurements
 

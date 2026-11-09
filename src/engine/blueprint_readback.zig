@@ -26,6 +26,7 @@ pub fn check(device: wgpu.Device, mapping: *callbacks.MapResponse) !void {
     defer inline for (pools) |name| @field(gctx, name).pool.deinit();
     try checkDraw(&gctx, mapping);
     try checkCachedPreview(&gctx, mapping);
+    try checkCachedMiniatures(&gctx, mapping);
     // Renderer owns both pipelines and every transient binding/buffer it creates.
     inline for (pools) |name| try std.testing.expectEqual(@as(usize, 0), @field(gctx, name).pool.liveHandleCount());
 }
@@ -163,6 +164,176 @@ fn checkDraw(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse) !void
 
 const BlockType = @import("voxel/voxel_chunk.zig").BlockType;
 const WorldLayout = @import("world_layout.zig").WorldLayout;
+
+fn checkCachedMiniatures(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse) !void {
+    const allocator = std.testing.allocator;
+    const device = gctx.device;
+    var atlas_layout = @import("bind_group_layouts/regular.zig").RegularBindGroupLayout.init(gctx, .tvdim_2d);
+    defer atlas_layout.deinit(gctx);
+    var reference = blueprint.Renderer.initWithAllocator(gctx, atlas_layout.bind_group_layout_handle, .rgba8_unorm, allocator);
+    defer reference.deinit(gctx);
+    var renderer = blueprint.Renderer.initWithAllocator(gctx, atlas_layout.bind_group_layout_handle, .rgba8_unorm, allocator);
+    defer renderer.deinit(gctx);
+    const extent = wgpu.Extent3D{ .width = 1, .height = 1, .depth_or_array_layers = 1 };
+    const atlas = device.createTexture(.{ .size = extent, .format = .rgba8_unorm, .usage = .{ .texture_binding = true, .copy_dst = true } });
+    defer atlas.release();
+    const atlas_view = atlas.createView(.{});
+    defer atlas_view.release();
+    const sampler = device.createSampler(.{});
+    defer sampler.release();
+    const entries = [_]wgpu.BindGroupEntry{ .{ .binding = 0, .texture_view = atlas_view, .size = 0 }, .{ .binding = 1, .sampler = sampler, .size = 0 } };
+    const atlas_binding = device.createBindGroup(.{ .layout = gctx.lookupResource(atlas_layout.bind_group_layout_handle).?, .entries = &entries, .entry_count = entries.len });
+    defer atlas_binding.release();
+    gctx.queue.writeTexture(.{ .texture = atlas }, .{ .bytes_per_row = 4, .rows_per_image = 1 }, extent, u8, &.{ 255, 255, 255, 255 });
+    const target = PreviewTarget.init(device);
+    defer target.deinit();
+    var dynamic: std.ArrayList(blueprint.Instance) = .empty;
+    defer dynamic.deinit(allocator);
+    var extras: std.ArrayList(blueprint.Instance) = .empty;
+    defer extras.deinit(allocator);
+    const visible = [_]blueprint.ChunkId{ 0, 1 };
+    var pair_index: usize = 0;
+    for (preview_scenes, 0..) |scene, scene_index| {
+        const layout = try WorldLayout.init(.{ .size_in_chunks = scene.size_in_chunks });
+        const camera = previewCamera(&layout, scene);
+        const origin = previewOriginCell(scene.origin);
+        var chunk: @Vector(3, i32) = undefined;
+        var next_chunk: @Vector(3, i32) = undefined;
+        var cells: [2]blueprint.MiniatureCell = undefined;
+        for (&cells, 0..) |*cell, index| {
+            const position = origin + blueprint.Cell{ @intCast(index), 0, 0 };
+            inline for (0..3) |axis| {
+                cell.local[axis] = @intCast(@mod(position[axis], 32));
+                next_chunk[axis] = @intCast(@divFloor(position[axis], 32));
+            }
+            if (WorldLayout.wrap_x) next_chunk[0] = @intCast(@as(u32, @bitCast(next_chunk[0])) & layout.id_masks[0]);
+            if (index == 0) chunk = next_chunk;
+            cell.material = @intFromEnum(if (index == 0) BlockType.planks else BlockType.rebar);
+        }
+        const split = !@reduce(.And, chunk == next_chunk);
+        const revision: u64 = @intCast(scene_index + 1);
+        try renderer.replaceMiniatureChunk(gctx, 0, chunk, revision, cells[0..if (split) 1 else 2]);
+        try renderer.replaceMiniatureChunk(gctx, 1, next_chunk, revision, if (split) cells[1..] else &.{});
+        try std.testing.expectEqual(@as(u32, 2), renderer.miniatureCacheStats().cached_instances);
+        dynamic.clearRetainingCapacity();
+        extras.clearRetainingCapacity();
+        for (0..2) |index| try dynamic.append(allocator, blueprint.blockInstance(&camera, origin + blueprint.Cell{ @intCast(index), 0, 0 }, if (index == 0) .planks else .rebar, true, false));
+        try blueprint.appendFrame(&extras, allocator, &camera, origin, .{ 2, 2, 2 });
+        try extras.append(allocator, blueprint.blockInstance(&camera, origin + blueprint.Cell{ 4, 2, 0 }, .dirt, false, true));
+        try dynamic.appendSlice(allocator, extras.items);
+        const clear_depth: f32 = if (scene_index % 2 == 0) 1 else 0.25;
+        try target.draw(gctx, &reference, atlas_binding, &camera, dynamic.items, 2, null, false, allocator, clear_depth, pair_index * 2);
+        try target.drawWithMiniatures(gctx, &renderer, atlas_binding, &camera, extras.items, 0, null, false, allocator, clear_depth, pair_index * 2 + 1, &visible);
+        pair_index += 1;
+        const stats = renderer.miniatureCacheStats();
+        // A repeated publication key does not inspect cells or upload source.
+        try renderer.replaceMiniatureChunk(gctx, 0, chunk, revision, &.{.{ .local = .{ 99, 99, 99 }, .material = 0 }});
+        var moved = camera;
+        moved.chunk[0] +%= 1;
+        try target.drawWithMiniatures(gctx, &renderer, atlas_binding, &moved, &.{}, null, null, false, allocator, 1, null, &visible);
+        try std.testing.expectEqual(stats.cache_builds, renderer.miniatureCacheStats().cache_builds);
+        try std.testing.expectEqual(stats.source_upload_bytes, renderer.miniatureCacheStats().source_upload_bytes);
+    }
+
+    // Replacement, failure, empty removal, unload and ID reuse happen before
+    // readback waits, exercising release of resources still referenced by draws.
+    renderer.clearMiniatures(gctx);
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } });
+    const camera = previewCamera(&layout, preview_scenes[0]);
+    const original = [_]blueprint.MiniatureCell{.{ .local = .{ 0, 0, 0 }, .material = @intFromEnum(BlockType.planks) }};
+    const replacement = [_]blueprint.MiniatureCell{.{ .local = .{ 1, 0, 0 }, .material = @intFromEnum(BlockType.rebar) }};
+    for (0..4) |stage| {
+        switch (stage) {
+            0 => try renderer.replaceMiniatureChunk(gctx, 0, .{ 4, 4, 4 }, 100, &original),
+            1 => try renderer.replaceMiniatureChunk(gctx, 0, .{ 4, 4, 4 }, 101, &replacement),
+            2 => try std.testing.expectError(error.InvalidMiniatureChunk, renderer.replaceMiniatureChunk(gctx, 0, .{ 4, 4, 4 }, 102, &.{.{ .local = .{ 32, 0, 0 }, .material = 10 }})),
+            3 => try renderer.replaceMiniatureChunk(gctx, 0, .{ 4, 4, 4 }, 101, &.{}), // Empty removes even with the same revision.
+            else => unreachable,
+        }
+        try std.testing.expectEqual(@as(u32, if (stage == 3) 0 else 1), renderer.miniatureChunkCount(0));
+        dynamic.clearRetainingCapacity();
+        if (stage != 3) try dynamic.append(allocator, blueprint.blockInstance(&camera, if (stage == 0) .{ 128, 128, 128 } else .{ 129, 128, 128 }, if (stage == 0) .planks else .rebar, true, false));
+        try target.draw(gctx, &reference, atlas_binding, &camera, dynamic.items, null, null, false, allocator, 1, pair_index * 2);
+        try target.drawWithMiniatures(gctx, &renderer, atlas_binding, &camera, &.{}, null, null, false, allocator, 1, pair_index * 2 + 1, &visible);
+        pair_index += 1;
+    }
+    try renderer.replaceMiniatureChunk(gctx, 0, .{ 4, 4, 4 }, 110, &original);
+    renderer.removeMiniatureChunk(gctx, 0);
+    renderer.removeMiniatureChunk(gctx, 0);
+    try std.testing.expectEqual(@as(u32, 0), renderer.miniatureChunkCount(0));
+    // Unload/clear must allow an ID and revision to refer to fresh source data.
+    try renderer.replaceMiniatureChunk(gctx, 0, .{ 4, 4, 4 }, 110, &replacement);
+    renderer.clearMiniatures(gctx);
+    try renderer.replaceMiniatureChunk(gctx, 0, .{ 4, 4, 4 }, 110, &original);
+    try std.testing.expectEqual(@as(u32, 1), renderer.miniatureChunkCount(0));
+    try std.testing.expectError(error.MiniatureCapacityExceeded, target.drawWithMiniaturesLimit(gctx, &renderer, atlas_binding, &camera, &.{}, null, null, false, allocator, 1, null, &.{0}, 0));
+    try std.testing.expectError(error.InvalidMiniatureChunk, renderer.replaceMiniatureChunk(gctx, 0, .{ 4, 4, 4 }, 111, &.{.{ .local = .{ 0, 0, 0 }, .material = 0 }}));
+    try std.testing.expectEqual(@as(u32, 1), renderer.miniatureChunkCount(0));
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    var allocation_failure = blueprint.Renderer.initWithAllocator(gctx, atlas_layout.bind_group_layout_handle, .rgba8_unorm, failing.allocator());
+    defer allocation_failure.deinit(gctx);
+    try std.testing.expectError(error.OutOfMemory, allocation_failure.replaceMiniatureChunk(gctx, 2, .{ 4, 4, 4 }, 1, &original));
+    try std.testing.expectEqual(@as(u64, 0), allocation_failure.miniatureCacheStats().source_upload_bytes);
+    try std.testing.expectEqual(@as(u32, 0), allocation_failure.miniatureCacheStats().cached_chunks);
+
+    // A full cache can replace an existing source without counting it twice.
+    // Shrinking releases capacity immediately for another resident chunk.
+    renderer.clearMiniatures(gctx);
+    const chunk_volume = 32 * 32 * 32;
+    const dense = try allocator.alloc(blueprint.MiniatureCell, chunk_volume);
+    defer allocator.free(dense);
+    for (dense, 0..) |*cell, index| cell.* = .{ .local = .{ @intCast(index % 32), @intCast((index / 32) % 32), @intCast(index / (32 * 32)) }, .material = @intFromEnum(BlockType.planks) };
+    const dense_chunk_count = (blueprint.capacity + chunk_volume - 1) / chunk_volume;
+    for (0..dense_chunk_count) |index| {
+        const count = @min(chunk_volume, blueprint.capacity - index * chunk_volume);
+        try renderer.replaceMiniatureChunk(gctx, @intCast(index), .{ @intCast(index), 4, 4 }, 1000, dense[0..count]);
+    }
+    try std.testing.expectEqual(@as(u32, blueprint.capacity), renderer.miniatureCacheStats().cached_instances);
+    try std.testing.expectError(error.MiniatureCapacityExceeded, renderer.replaceMiniatureChunk(gctx, dense_chunk_count, .{ 0, 0, 0 }, 1000, &original));
+    const last_count = blueprint.capacity - (dense_chunk_count - 1) * chunk_volume;
+    try std.testing.expectError(error.MiniatureCapacityExceeded, renderer.replaceMiniatureChunk(gctx, dense_chunk_count - 1, .{ dense_chunk_count - 1, 4, 4 }, 1001, dense));
+    try std.testing.expectEqual(@as(u32, last_count), renderer.miniatureChunkCount(dense_chunk_count - 1));
+    try std.testing.expectEqual(@as(u32, blueprint.capacity), renderer.miniatureCacheStats().cached_instances);
+    try renderer.replaceMiniatureChunk(gctx, 0, .{ 0, 4, 4 }, 1001, dense);
+    try std.testing.expectEqual(@as(u32, blueprint.capacity), renderer.miniatureCacheStats().cached_instances);
+    try renderer.replaceMiniatureChunk(gctx, 0, .{ 0, 4, 4 }, 1002, dense[0..1]);
+    try renderer.replaceMiniatureChunk(gctx, dense_chunk_count, .{ 0, 0, 0 }, 1000, &original);
+    try std.testing.expectEqual(@as(u32, blueprint.capacity - chunk_volume + 2), renderer.miniatureCacheStats().cached_instances);
+    renderer.clearMiniatures(gctx);
+    // @min(capacity, usize) narrows its inferred result to u21. Keep buffer
+    // byte arithmetic wide: a valid 320k dynamic batch previously wrapped its
+    // allocation to zero in ReleaseFast (and overflowed in checked builds).
+    const large = try allocator.alloc(blueprint.Instance, 320_000);
+    defer allocator.free(large);
+    @memset(large, .{ .position = .{ 10000, 10000, 10000, 0 }, .scale = .{ 0.25, 0.25, 0.25, 0 }, .material = .{ @intFromEnum(BlockType.planks), 0, 0, 0 } });
+    large[0] = blueprint.blockInstance(&camera, .{ 128, 128, 128 }, .planks, true, false);
+    large[1] = blueprint.blockInstance(&camera, .{ 129, 128, 128 }, .rebar, true, false);
+    try target.draw(gctx, &reference, atlas_binding, &camera, large[0..2], null, null, false, allocator, 1, pair_index * 2);
+    try target.draw(gctx, &renderer, atlas_binding, &camera, large, null, null, false, allocator, 1, pair_index * 2 + 1);
+    try std.testing.expect(renderer.allocated_capacity >= large.len);
+    pair_index += 1;
+    mapping.* = .{};
+    target.readback.mapAsync(.{ .read = true }, 0, image_bytes * 4 * pair_index, callbacks.MapResponse.callback, mapping);
+    defer target.readback.unmap();
+    try callbacks.waitForCallback(device, &mapping.done);
+    try std.testing.expectEqual(wgpu.BufferMapAsyncStatus.success, mapping.status);
+    for (0..pair_index) |index| {
+        errdefer std.debug.print("cached miniature readback mismatch in pair {d}\n", .{index});
+        const expected = try target.image(index * 2);
+        const actual = try target.image(index * 2 + 1);
+        try std.testing.expectEqualSlices([4]u8, expected.pixels, actual.pixels);
+        try std.testing.expectEqualSlices(f32, expected.depths, actual.depths);
+        if (index == 0) {
+            var changed: usize = 0;
+            for (expected.pixels) |pixel| if (!std.meta.eql(pixel, background)) {
+                changed += 1;
+            };
+            try std.testing.expect(changed > 4);
+        }
+    }
+}
+
 const PreviewScene = struct {
     origin: [3]u32,
     camera_chunk: @Vector(3, i32),
@@ -218,6 +389,14 @@ const PreviewTarget = struct {
     }
 
     fn draw(self: PreviewTarget, gctx: *zgpu.GraphicsContext, renderer: *blueprint.Renderer, atlas: wgpu.BindGroup, camera: *const Camera, instances: []const blueprint.Instance, selected_start: ?u32, preview: ?blueprint.Preview, cached: bool, allocator: std.mem.Allocator, clear_depth: f32, capture_index: ?usize) !void {
+        return self.drawWithMiniatures(gctx, renderer, atlas, camera, instances, selected_start, preview, cached, allocator, clear_depth, capture_index, null);
+    }
+
+    fn drawWithMiniatures(self: PreviewTarget, gctx: *zgpu.GraphicsContext, renderer: *blueprint.Renderer, atlas: wgpu.BindGroup, camera: *const Camera, instances: []const blueprint.Instance, selected_start: ?u32, preview: ?blueprint.Preview, cached: bool, allocator: std.mem.Allocator, clear_depth: f32, capture_index: ?usize, miniature_ids: ?[]const blueprint.ChunkId) !void {
+        return self.drawWithMiniaturesLimit(gctx, renderer, atlas, camera, instances, selected_start, preview, cached, allocator, clear_depth, capture_index, miniature_ids, blueprint.capacity - @as(u32, @intCast(instances.len)));
+    }
+
+    fn drawWithMiniaturesLimit(self: PreviewTarget, gctx: *zgpu.GraphicsContext, renderer: *blueprint.Renderer, atlas: wgpu.BindGroup, camera: *const Camera, instances: []const blueprint.Instance, selected_start: ?u32, preview: ?blueprint.Preview, cached: bool, allocator: std.mem.Allocator, clear_depth: f32, capture_index: ?usize, miniature_ids: ?[]const blueprint.ChunkId, miniature_limit: u32) !void {
         const encoder = gctx.device.createCommandEncoder(null);
         defer encoder.release();
         const attachments = [_]wgpu.RenderPassColorAttachment{.{ .view = self.color_view, .load_op = .clear, .store_op = .store, .clear_value = .{ .r = 32.0 / 255.0, .g = 64.0 / 255.0, .b = 96.0 / 255.0, .a = 1 } }};
@@ -235,6 +414,9 @@ const PreviewTarget = struct {
         } else {
             renderer.draw(gctx, pass, atlas, camera, instances, selected_start);
         }
+        if (miniature_ids) |ids| renderer.drawMiniatures(gctx, pass, atlas, camera, ids, miniature_limit) catch |err| {
+            draw_error = err;
+        };
         pass.end();
         if (capture_index) |index| {
             const extent = wgpu.Extent3D{ .width = side, .height = side, .depth_or_array_layers = 1 };
