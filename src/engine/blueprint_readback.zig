@@ -321,6 +321,18 @@ fn checkCachedMiniatures(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapRes
     try std.testing.expectEqual(@as(u32, 0), renderer.miniatureCacheStats().pending_chunks);
     try std.testing.expectEqual(@as(u32, blueprint.capacity), renderer.miniatureCacheStats().projected_instances);
     renderer.clearMiniatures(gctx);
+    // @min(capacity, usize) narrows its inferred result to u21. Keep buffer
+    // byte arithmetic wide: a valid 320k dynamic batch previously wrapped its
+    // allocation to zero in ReleaseFast (and overflowed in checked builds).
+    const large = try allocator.alloc(blueprint.Instance, 320_000);
+    defer allocator.free(large);
+    @memset(large, .{ .position = .{ 10000, 10000, 10000, 0 }, .scale = .{ 0.25, 0.25, 0.25, 0 }, .material = .{ @intFromEnum(BlockType.planks), 0, 0, 0 } });
+    large[0] = blueprint.blockInstance(&camera, .{ 128, 128, 128 }, .planks, true, false);
+    large[1] = blueprint.blockInstance(&camera, .{ 129, 128, 128 }, .rebar, true, false);
+    try target.draw(gctx, &reference, atlas_binding, &camera, large[0..2], null, null, false, allocator, 1, pair_index * 2);
+    try target.draw(gctx, &renderer, atlas_binding, &camera, large, null, null, false, allocator, 1, pair_index * 2 + 1);
+    try std.testing.expect(renderer.allocated_capacity >= large.len);
+    pair_index += 1;
     mapping.* = .{};
     target.readback.mapAsync(.{ .read = true }, 0, image_bytes * 4 * pair_index, callbacks.MapResponse.callback, mapping);
     defer target.readback.unmap();

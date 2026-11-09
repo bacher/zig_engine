@@ -533,7 +533,7 @@ pub const Renderer = struct {
         };
         if (instances.len > 0) {
             if (instances.len > self.allocated_capacity) {
-                const next_capacity = @min(capacity, std.math.ceilPowerOfTwoAssert(usize, instances.len));
+                const next_capacity: usize = @min(capacity, std.math.ceilPowerOfTwoAssert(usize, instances.len));
                 gctx.releaseResource(self.binding);
                 gctx.releaseResource(self.instances);
                 self.instances = gctx.createBuffer(.{ .label = "visible blueprint instances", .usage = .{ .storage = true, .copy_dst = true }, .size = @sizeOf(Instance) * next_capacity });
