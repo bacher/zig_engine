@@ -12,11 +12,20 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
 
+    // Compile out cumulative renderer counters unless explicitly requested.
+    // Test artifacts always collect them for their lifecycle assertions.
+    const engine_options = b.addOptions();
+    engine_options.addOption(bool, "blueprint_render_stats", b.option(bool, "blueprint-render-stats", "Collect blueprint renderer counters in applications and benchmarks") orelse false);
+    const engine_options_module = engine_options.createModule();
+
     // Each application compiles an engine module with its own static topology.
     const engine_lib = createEngineLibrary(b, target, optimize, "engine", "src/demo_app/engine_config.zig");
     const voxel_engine_lib = createEngineLibrary(b, target, optimize, "engine_wrapped", "src/voxel_app/engine_config.zig");
     const engines = [_]*std.Build.Step.Compile{ engine_lib, voxel_engine_lib };
-    for (engines) |library| b.installArtifact(library);
+    for (engines) |library| {
+        library.root_module.addImport("engine_options", engine_options_module);
+        b.installArtifact(library);
+    }
 
     // debug app
 
@@ -434,6 +443,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
+                .{ .name = "engine_options", .module = engine_options_module },
                 .{ .name = "engine_config", .module = voxel_engine_lib.root_module.import_table.get("engine_config").? },
                 .{ .name = "zgpu", .module = zgpu.module("root") },
                 .{ .name = "zglfw", .module = zglfw.module("root") },
@@ -477,6 +487,7 @@ pub fn build(b: *std.Build) void {
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
+                    .{ .name = "engine_options", .module = engine_options_module },
                     .{ .name = "engine_config", .module = engine_config },
                     .{ .name = "zgpu", .module = zgpu.module("root") },
                     .{ .name = "zglfw", .module = zglfw.module("root") },

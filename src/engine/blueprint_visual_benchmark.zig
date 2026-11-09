@@ -1,5 +1,7 @@
 //! Offscreen component benchmark, not application FPS or presentation latency.
 //! `zig build bench-blueprint-visual-gpu -Doptimize=ReleaseFast`
+//! Sparse fixed-target sweep: append `-- --fixture sparse` (optionally `--chunks 343`).
+//! Dense fixtures and their scenarios remain the default.
 const std = @import("std");
 const builtin = @import("builtin");
 const zgpu = @import("zgpu");
@@ -106,6 +108,10 @@ fn complete(io: std.Io, gctx: *zgpu.GraphicsContext) !void {
     if (response.status != .success) return error.GpuCompletionFailed;
 }
 
+const FixtureKind = enum { dense, sparse };
+const sparse_targets = 512;
+const sparse_chunk_counts = [_]usize{ 1, 8, 27, 125, 343 };
+
 const TargetCell = struct { local: [3]u32, active: bool = true };
 const Chunk = struct { coords: @Vector(3, i32), cells: std.ArrayList(TargetCell) = .empty, active_count: usize = 0 };
 const Fixture = struct {
@@ -113,6 +119,7 @@ const Fixture = struct {
     ids: std.ArrayList(blueprint.ChunkId) = .empty,
     initial_targets: usize,
     offset: usize,
+    kind: FixtureKind = .dense,
 
     fn init(allocator: std.mem.Allocator, targets: usize, offset: usize) !Fixture {
         // Exact 100x100x32 and 100x80x4 definitions retain realistic chunk-edge
@@ -139,6 +146,41 @@ const Fixture = struct {
         var actual: usize = 0;
         for (self.chunks.items) |chunk| actual += chunk.cells.items.len;
         if (actual != targets) return error.InvalidFixture;
+        return self;
+    }
+    fn initSparse(allocator: std.mem.Allocator, chunk_count: usize) !Fixture {
+        const width: usize = switch (chunk_count) {
+            1 => 1,
+            8 => 2,
+            27 => 3,
+            125 => 5,
+            343 => 7,
+            else => return error.InvalidSparseChunkCount,
+        };
+        var self: Fixture = .{ .initial_targets = sparse_targets, .offset = 0, .kind = .sparse };
+        errdefer self.deinit(allocator);
+        for (0..chunk_count) |index| {
+            try self.chunks.append(allocator, .{ .coords = .{ @intCast(2 + index % width), @intCast(2 + (index / width) % width), @intCast(2 + index / (width * width)) } });
+            const chunk = &self.chunks.items[index];
+            // Keep every supplied chunk nonempty, sharing exactly 512 cells as
+            // evenly as possible. All sources fit within an 8x8x8 local box.
+            const count = sparse_targets / chunk_count + @intFromBool(index < sparse_targets % chunk_count);
+            for (0..count) |cell| try chunk.cells.append(allocator, .{ .local = .{ @intCast(12 + cell % 8), @intCast(12 + (cell / 8) % 8), @intCast(12 + cell / 64) } });
+            chunk.active_count = count;
+            try self.ids.append(allocator, @intCast(index));
+        }
+        // Validate the intended experiment independently of timed code: fixed
+        // occupancy, unique chunk coordinates, and no accidental empty draws.
+        var actual: usize = 0;
+        for (self.chunks.items, 0..) |chunk, index| {
+            if (chunk.active_count == 0 or chunk.active_count != chunk.cells.items.len) return error.InvalidFixture;
+            for (chunk.cells.items) |cell| for (cell.local) |axis| {
+                if (axis >= 32) return error.InvalidFixture;
+            };
+            for (self.chunks.items[0..index]) |other| if (@reduce(.And, chunk.coords == other.coords)) return error.InvalidFixture;
+            actual += chunk.cells.items.len;
+        }
+        if (actual != sparse_targets or self.ids.items.len != chunk_count) return error.InvalidFixture;
         return self;
     }
     fn deinit(self: *Fixture, allocator: std.mem.Allocator) void {
@@ -184,7 +226,7 @@ const Offscreen = struct {
         self.color_view.release();
         self.color.release();
     }
-    fn checksum(self: Offscreen, io: std.Io, gctx: *zgpu.GraphicsContext) !u64 {
+    fn checksum(self: Offscreen, io: std.Io, gctx: *zgpu.GraphicsContext) !struct { hash: u64, colored_pixels: usize } {
         const encoder = gctx.device.createCommandEncoder(null);
         defer encoder.release();
         encoder.copyTextureToBuffer(.{ .texture = self.color }, .{ .buffer = self.readback, .layout = .{ .bytes_per_row = self.side * 4, .rows_per_image = self.side } }, .{ .width = self.side, .height = self.side, .depth_or_array_layers = 1 });
@@ -202,7 +244,7 @@ const Offscreen = struct {
             colored += 1;
         };
         if (colored == 0) return error.EmptyBenchmarkImage;
-        return std.hash.Wyhash.hash(0, pixels);
+        return .{ .hash = std.hash.Wyhash.hash(0, pixels), .colored_pixels = colored };
     }
 };
 
@@ -216,6 +258,7 @@ const Report = struct {
     scanned_cells: u64,
     cold_pack_upload_ns: u64,
     checksum: u64,
+    colored_pixels: usize,
     draw_calls: u64,
 };
 const metric_names = .{ "pack", "source", "draw", "cpu", "completion", "total" };
@@ -245,6 +288,37 @@ fn cameraFor(layout: *const WorldLayout, frame: usize, motion: bool, origin_offs
     camera.clip_from_world_chunked[2] = .{ 0.002, 0.002, -0.008, 0 };
     camera.clip_from_world_chunked[3] = .{ -0.9 - local * 0.016 - anchor * 0.002, -0.9 - anchor * 0.02, 0.8 + anchor * 0.008, 1 };
     return camera;
+}
+
+fn sparseCameraFor(layout: *const WorldLayout, frame: usize, motion: bool) Camera {
+    // The same wide view and 1024-square target are used for every sparse case.
+    // It contains the full 7x7x7 chunk footprint; individual cubes can occlude
+    // one another, but no supplied chunk is culled by the benchmark.
+    var camera = Camera.init(layout, 1);
+    const offset: f32 = if (motion) @sin(@as(f32, @floatFromInt(frame)) * 0.065) * 4 else 0;
+    const dx: i32 = @intFromFloat(@floor(offset / 32));
+    camera.chunk = .{ 2 + dx, 2, 2 };
+    const local = offset - @as(f32, @floatFromInt(dx)) * 32;
+    camera.clip_from_world_chunked = zmath.identity();
+    camera.clip_from_world_chunked[0] = .{ 0.0075, 0, 0, 0 };
+    camera.clip_from_world_chunked[1] = .{ 0, 0.0075, 0, 0 };
+    camera.clip_from_world_chunked[2] = .{ 0.00075, 0.0006, -0.003, 0 };
+    camera.clip_from_world_chunked[3] = .{ -0.9 - local * 0.0075, -0.9, 0.8, 1 };
+    return camera;
+}
+
+fn validateCacheCounters(renderer: *blueprint.Renderer, fixture: *const Fixture, expected_draws: u64) !void {
+    const stats = renderer.miniatureCacheStats();
+    var expected_cells: usize = 0;
+    var expected_chunks: usize = 0;
+    for (fixture.chunks.items) |chunk| {
+        expected_cells += chunk.active_count;
+        expected_chunks += @intFromBool(chunk.active_count != 0);
+    }
+    if (stats.counters_enabled != blueprint.cache_counters_enabled or stats.cached_instances != expected_cells or stats.cached_chunks != expected_chunks) return error.InvalidCacheCounters;
+    if (stats.counters_enabled) {
+        if (stats.cache_builds == 0 or stats.source_upload_bytes == 0 or stats.draw_calls != expected_draws or stats.uniform_upload_bytes != expected_draws * 128) return error.InvalidCacheCounters;
+    } else if (stats.cache_builds != 0 or stats.source_upload_bytes != 0 or stats.cache_releases != 0 or stats.uniform_upload_bytes != 0 or stats.draw_calls != 0) return error.InvalidCacheCounters;
 }
 
 fn packChunk(chunk: Chunk, source_cells: *std.ArrayList(blueprint.MiniatureCell)) void {
@@ -282,9 +356,10 @@ fn run(io: std.Io, allocator: std.mem.Allocator, gctx: *zgpu.GraphicsContext, at
     var upload_bytes: u64 = 0;
     var scanned_cells: u64 = 0;
     var draw_calls: u64 = 0;
+    var all_cached_draws: u64 = 0;
     for (0..warmup + frames) |frame| {
         fixture.applyTrace(frame, changed);
-        const camera = cameraFor(&layout, frame, scenario != .stationary, fixture.offset);
+        const camera = if (fixture.kind == .sparse) sparseCameraFor(&layout, frame, scenario != .stationary) else cameraFor(&layout, frame, scenario != .stationary, fixture.offset);
         var sample: Sample = .{};
         const started = std.Io.Clock.awake.now(io);
         if (mode == .dynamic) {
@@ -335,6 +410,9 @@ fn run(io: std.Io, allocator: std.mem.Allocator, gctx: *zgpu.GraphicsContext, at
         sample.completion = elapsed(io, waiting);
         sample.total = elapsed(io, started);
         sample.cpu = sample.pack + sample.source + sample.draw;
+        if (mode == .cached) for (fixture.chunks.items) |chunk| {
+            all_cached_draws += @intFromBool(chunk.active_count != 0);
+        };
         if (frame >= warmup) {
             samples[frame - warmup] = sample;
             if (mode == .dynamic) draw_calls += 1 else for (fixture.chunks.items) |chunk| {
@@ -342,31 +420,90 @@ fn run(io: std.Io, allocator: std.mem.Allocator, gctx: *zgpu.GraphicsContext, at
             }
         }
     }
-    return .{ .times = try statistics(allocator, samples), .upload_bytes = upload_bytes, .scanned_cells = scanned_cells, .cold_pack_upload_ns = cold_ns, .checksum = try offscreen.checksum(io, gctx), .draw_calls = draw_calls };
+    const checked_image = try offscreen.checksum(io, gctx);
+    if (mode == .cached) {
+        try validateCacheCounters(&renderer, fixture, all_cached_draws);
+        renderer.clearMiniatures(gctx);
+        const cleared = renderer.miniatureCacheStats();
+        if (cleared.cached_instances != 0 or cleared.cached_chunks != 0 or
+            (cleared.counters_enabled and cleared.cache_releases != cleared.cache_builds) or
+            (!cleared.counters_enabled and cleared.cache_releases != 0)) return error.InvalidCacheCounters;
+    }
+    return .{ .times = try statistics(allocator, samples), .upload_bytes = upload_bytes, .scanned_cells = scanned_cells, .cold_pack_upload_ns = cold_ns, .checksum = checked_image.hash, .colored_pixels = checked_image.colored_pixels, .draw_calls = draw_calls };
 }
 
-const Options = struct { frames: usize = 100, warmup: usize = 12, repeats: usize = 3, targets: ?usize = null, offset: usize = 0, scenario: ?Scenario = null };
+const Options = struct { frames: usize = 100, warmup: usize = 12, repeats: usize = 3, targets: ?usize = null, offset: usize = 0, scenario: ?Scenario = null, fixture: FixtureKind = .dense, chunks: ?usize = null };
 fn options(init: std.process.Init) !Options {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     var result: Options = .{};
     var index: usize = 1;
     while (index < args.len) : (index += 1) {
         if (index + 1 == args.len) return error.InvalidArguments;
+        if (std.mem.eql(u8, args[index], "--fixture")) {
+            result.fixture = std.meta.stringToEnum(FixtureKind, args[index + 1]) orelse return error.InvalidArguments;
+            index += 1;
+            continue;
+        }
         if (std.mem.eql(u8, args[index], "--scenario")) {
             result.scenario = std.meta.stringToEnum(Scenario, args[index + 1]) orelse return error.InvalidArguments;
             index += 1;
             continue;
         }
         const value = try std.fmt.parseInt(usize, args[index + 1], 10);
-        if (std.mem.eql(u8, args[index], "--frames")) result.frames = value else if (std.mem.eql(u8, args[index], "--warmup")) result.warmup = value else if (std.mem.eql(u8, args[index], "--repeats")) result.repeats = value else if (std.mem.eql(u8, args[index], "--targets")) result.targets = value else if (std.mem.eql(u8, args[index], "--offset")) result.offset = value else return error.InvalidArguments;
+        if (std.mem.eql(u8, args[index], "--frames")) result.frames = value else if (std.mem.eql(u8, args[index], "--warmup")) result.warmup = value else if (std.mem.eql(u8, args[index], "--repeats")) result.repeats = value else if (std.mem.eql(u8, args[index], "--targets")) result.targets = value else if (std.mem.eql(u8, args[index], "--offset")) result.offset = value else if (std.mem.eql(u8, args[index], "--chunks")) result.chunks = value else return error.InvalidArguments;
         index += 1;
     }
     if (result.frames == 0 or result.frames > 1000 or result.repeats == 0 or result.repeats > 9 or result.warmup > 1000 or result.offset > 31) return error.InvalidArguments;
-    if (result.targets) |targets| if (targets != 32_000 and targets != 320_000) return error.InvalidTargetCount;
+    switch (result.fixture) {
+        .dense => {
+            if (result.targets) |targets| if (targets != 32_000 and targets != 320_000) return error.InvalidTargetCount;
+            if (result.chunks != null) return error.InvalidArguments;
+        },
+        .sparse => {
+            if (result.targets) |targets| if (targets != sparse_targets) return error.InvalidTargetCount;
+            if (result.offset != 0) return error.InvalidArguments;
+            if (result.scenario) |scenario| if (scenario != .stationary and scenario != .camera) return error.InvalidArguments;
+            if (result.chunks) |count| if (std.mem.indexOfScalar(usize, &sparse_chunk_counts, count) == null) return error.InvalidSparseChunkCount;
+        },
+    }
     return result;
 }
 fn ms(ns: u64) f64 {
     return @as(f64, @floatFromInt(ns)) / 1_000_000;
+}
+
+fn measureFixture(init: std.process.Init, config: Options, gctx: *zgpu.GraphicsContext, atlas_layout: zgpu.BindGroupLayoutHandle, binding: wgpu.BindGroup, offscreen: Offscreen, fixture: *Fixture) !void {
+    for (std.enums.values(Scenario)) |scenario| {
+        if (config.scenario != null and config.scenario.? != scenario) continue;
+        if (config.scenario == null and fixture.kind == .sparse and scenario != .camera) continue;
+        var reports: [2][9]Report = undefined;
+        for (0..config.repeats) |repeat| {
+            for (0..2) |order| {
+                const mode: Mode = @enumFromInt((order + repeat) % 2);
+                const report = try run(init.io, init.gpa, gctx, atlas_layout, binding, offscreen, fixture, mode, scenario, config.frames, config.warmup);
+                reports[@intFromEnum(mode)][repeat] = report;
+                std.debug.print("sample fixture={s} targets={d} chunks={d} offset={d} scenario={s} mode={s} repeat={d} cpu_p50_ms={d:.4} cpu_p95_ms={d:.4} total_p50_ms={d:.4} total_p95_ms={d:.4} checksum={x} colored_pixels={d}\n", .{ @tagName(fixture.kind), fixture.initial_targets, fixture.chunks.items.len, config.offset, @tagName(scenario), @tagName(mode), repeat, ms(report.times[3].p50), ms(report.times[3].p95), ms(report.times[5].p50), ms(report.times[5].p95), report.checksum, report.colored_pixels });
+            }
+            if (reports[0][repeat].checksum != reports[1][repeat].checksum) return error.DynamicCachedImageMismatch;
+        }
+        for (std.enums.values(Mode)) |mode| {
+            const selected = reports[@intFromEnum(mode)][0..config.repeats];
+            const draws = selected[0].draw_calls / config.frames;
+            var cold_values: [9]u64 = undefined;
+            for (selected, 0..) |report, index| cold_values[index] = report.cold_pack_upload_ns;
+            std.mem.sort(u64, cold_values[0..config.repeats], {}, std.sort.asc(u64));
+            std.debug.print("summary fixture={s} targets={d} chunks={d} offset={d} scenario={s} mode={s} source_bytes/frame={d} scanned_cells/frame={d} draws/frame={d} uniform_bytes/frame={d} cold_cache_seed_ms={d:.4}", .{ @tagName(fixture.kind), fixture.initial_targets, fixture.chunks.items.len, config.offset, @tagName(scenario), @tagName(mode), selected[0].upload_bytes / config.frames, selected[0].scanned_cells / config.frames, draws, draws * 128, ms(cold_values[config.repeats / 2]) });
+            inline for (metric_names, 0..) |metric, metric_index| {
+                inline for (.{ "p50", "p95", "p99" }) |percentile| {
+                    var values: [9]u64 = undefined;
+                    for (selected, 0..) |report, index| values[index] = @field(report.times[metric_index], percentile);
+                    std.mem.sort(u64, values[0..config.repeats], {}, std.sort.asc(u64));
+                    std.debug.print(" {s}_{s}_ms={d:.4}", .{ metric, percentile, ms(values[config.repeats / 2]) });
+                }
+            }
+            std.debug.print("\n", .{});
+        }
+    }
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -380,7 +517,7 @@ pub fn main(init: std.process.Init) !void {
     gctx.queue = gpu.device.getQueue();
     defer gctx.queue.release();
     const pools = .{ "buffer_pool", "bind_group_pool", "bind_group_layout_pool", "pipeline_layout_pool", "render_pipeline_pool" };
-    inline for (pools) |name| @field(gctx, name) = .{ .pool = try @TypeOf(@field(gctx, name).pool).initCapacity(init.gpa, 256) };
+    inline for (pools) |name| @field(gctx, name) = .{ .pool = try @TypeOf(@field(gctx, name).pool).initCapacity(init.gpa, if (config.fixture == .sparse) 1024 else 256) };
     defer inline for (pools) |name| @field(gctx, name).pool.deinit();
     var atlas_layout = @import("bind_group_layouts/regular.zig").RegularBindGroupLayout.init(&gctx, .tvdim_2d);
     defer atlas_layout.deinit(&gctx);
@@ -394,44 +531,25 @@ pub fn main(init: std.process.Init) !void {
     const binding = gpu.device.createBindGroup(.{ .layout = gctx.lookupResource(atlas_layout.bind_group_layout_handle).?, .entries = &entries, .entry_count = entries.len });
     defer binding.release();
     gctx.queue.writeTexture(.{ .texture = atlas }, .{ .bytes_per_row = 4, .rows_per_image = 1 }, .{ .width = 1, .height = 1, .depth_or_array_layers = 1 }, u8, &.{ 255, 255, 255, 255 });
-    const offscreen = Offscreen.init(gpu.device, 256);
+    const render_side: u32 = if (config.fixture == .sparse) 1024 else 256;
+    const offscreen = Offscreen.init(gpu.device, render_side);
     defer offscreen.deinit();
-    std.debug.print("offscreen=256x256 frames={d} warmup={d} repeats={d} origin_offset_xyz={d}; serialized completion fence each frame; no window/present; no world hash lookups, terrain, rails, UI, queue scheduling or deferred publication\n", .{ config.frames, config.warmup, config.repeats, config.offset });
+    std.debug.print("fixture={s} offscreen={d}x{d} counters_enabled={} frames={d} warmup={d} repeats={d} origin_offset_xyz={d}; serialized completion fence each frame; no window/present; no world hash lookups, terrain, rails, UI, queue scheduling or deferred publication\n", .{ @tagName(config.fixture), render_side, render_side, blueprint.cache_counters_enabled, config.frames, config.warmup, config.repeats, config.offset });
+    if (config.fixture == .sparse) std.debug.print("sparse: fixed 512 targets; supplied visible chunk set; individual cubes may occlude each other; fixed wide camera and resolution across cases; no removals; do not compare dense/sparse GPU wall times directly\n", .{});
     std.debug.print("pack=synthetic grouped target scan+coordinate packing; source=cache replace/upload calls; draw=production source/uniform uploads+encode+submit; completion=wall wait, NOT GPU timestamp; total=serialized component wall\n", .{});
-    for ([_]usize{ 32_000, 320_000 }) |targets| {
-        if (config.targets != null and config.targets.? != targets) continue;
-        var fixture = try Fixture.init(init.gpa, targets, config.offset);
-        defer fixture.deinit(init.gpa);
-        for (std.enums.values(Scenario)) |scenario| {
-            if (config.scenario != null and config.scenario.? != scenario) continue;
-            var reports: [2][9]Report = undefined;
-            for (0..config.repeats) |repeat| {
-                for (0..2) |order| {
-                    const mode: Mode = @enumFromInt((order + repeat) % 2);
-                    const report = try run(init.io, init.gpa, &gctx, atlas_layout.bind_group_layout_handle, binding, offscreen, &fixture, mode, scenario, config.frames, config.warmup);
-                    reports[@intFromEnum(mode)][repeat] = report;
-                    std.debug.print("sample targets={d} chunks={d} offset={d} scenario={s} mode={s} repeat={d} cpu_p50_ms={d:.4} cpu_p95_ms={d:.4} total_p50_ms={d:.4} total_p95_ms={d:.4} checksum={x}\n", .{ targets, fixture.chunks.items.len, config.offset, @tagName(scenario), @tagName(mode), repeat, ms(report.times[3].p50), ms(report.times[3].p95), ms(report.times[5].p50), ms(report.times[5].p95), report.checksum });
-                }
-                if (reports[0][repeat].checksum != reports[1][repeat].checksum) return error.DynamicCachedImageMismatch;
-            }
-            for (std.enums.values(Mode)) |mode| {
-                const selected = reports[@intFromEnum(mode)][0..config.repeats];
-                const draws = selected[0].draw_calls / config.frames;
-                var cold_values: [9]u64 = undefined;
-                for (selected, 0..) |report, index| cold_values[index] = report.cold_pack_upload_ns;
-                std.mem.sort(u64, cold_values[0..config.repeats], {}, std.sort.asc(u64));
-                std.debug.print("summary targets={d} chunks={d} offset={d} scenario={s} mode={s} source_bytes/frame={d} scanned_cells/frame={d} draws/frame={d} uniform_bytes/frame={d} cold_cache_seed_ms={d:.4}", .{ targets, fixture.chunks.items.len, config.offset, @tagName(scenario), @tagName(mode), selected[0].upload_bytes / config.frames, selected[0].scanned_cells / config.frames, draws, draws * 128, ms(cold_values[config.repeats / 2]) });
-                inline for (metric_names, 0..) |metric, metric_index| {
-                    inline for (.{ "p50", "p95", "p99" }) |percentile| {
-                        var values: [9]u64 = undefined;
-                        for (selected, 0..) |report, index| values[index] = @field(report.times[metric_index], percentile);
-                        std.mem.sort(u64, values[0..config.repeats], {}, std.sort.asc(u64));
-                        std.debug.print(" {s}_{s}_ms={d:.4}", .{ metric, percentile, ms(values[config.repeats / 2]) });
-                    }
-                }
-                std.debug.print("\n", .{});
-            }
-        }
+    switch (config.fixture) {
+        .dense => for ([_]usize{ 32_000, 320_000 }) |targets| {
+            if (config.targets != null and config.targets.? != targets) continue;
+            var fixture = try Fixture.init(init.gpa, targets, config.offset);
+            defer fixture.deinit(init.gpa);
+            try measureFixture(init, config, &gctx, atlas_layout.bind_group_layout_handle, binding, offscreen, &fixture);
+        },
+        .sparse => for (sparse_chunk_counts) |count| {
+            if (config.chunks != null and config.chunks.? != count) continue;
+            var fixture = try Fixture.initSparse(init.gpa, count);
+            defer fixture.deinit(init.gpa);
+            try measureFixture(init, config, &gctx, atlas_layout.bind_group_layout_handle, binding, offscreen, &fixture);
+        },
     }
     if (validation.errors != 0) return error.GpuValidationFailed;
 }

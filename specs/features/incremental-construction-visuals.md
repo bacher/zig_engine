@@ -91,9 +91,12 @@ frame smoothness.
   PR, failed work yields to other eligible queued chunks. Convergence requires available
   capacity; sustained limits remain visible through existing render-limit feedback.
 - R14: Expose component counters for source builds/uploads/releases, resident occupancy and
-  transform/draw work; add queue marks, coalescing, pending peaks, completed work and head
-  inspections in the second PR. Label historical scheduling counts, renderer correctness
-  checks and component timings separately from full-client performance measurements.
+  transform/draw work. Tests collect renderer counters automatically; applications and
+  benchmarks opt in with `-Dblueprint-render-stats=true`. Returned stats explicitly mark
+  disabled cumulative counters, while live occupancy stays available. Add queue marks,
+  coalescing, pending peaks, completed work and head inspections in the second PR. Label
+  historical scheduling counts, renderer correctness checks and component timings
+  separately from full-client performance measurements.
 
 ## Clarifications
 

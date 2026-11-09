@@ -42,12 +42,12 @@ from the historical prepared-API runs do not isolate an API simplification speed
 
 All 27 final dynamic/cache color-image pairs matched and were nonempty, with no GPU
 validation errors. `zig build test-gpu -Doptimize=ReleaseFast -j2 --summary all` passed
-all 19 steps and 108 tests across both wrapping modes. Readbacks cover color/depth parity,
+all 20 steps and 108 tests across both wrapping modes after the review follow-up. Readbacks cover color/depth parity,
 camera reuse, full-cache replacement and shrink, empty removal, invalid/allocation
 failures and resource release, including the dynamic 320k allocation regression.
 
-The cache-first branch passed `zig build install test -Doptimize=ReleaseFast -j4 --summary all`:
-55/55 steps, 1,909 tests passed and eight existing skips. `zig build test -Doptimize=Debug -j4 --summary all` passed 47/47 steps, 1,916 tests and one existing skip. Formatting and
+The cache-first branch passed `zig build install test -Doptimize=ReleaseFast -Dblueprint-render-stats=true -j4 --summary all`:
+56/56 steps, 1,909 tests passed and eight existing skips. `zig build test -Doptimize=Debug -j4 --summary all` passed 48/48 steps, 1,916 tests and one existing skip. Formatting and
 `git diff --check` passed. Client regressions cover own versus neighbor/camera changes,
 committed/no-op blueprint events, prediction rejection and cross-chunk replay, accepted
 versus stale snapshots, mesh-only fulfillment, failure/shrink progress and eviction/reload.
@@ -67,6 +67,67 @@ after every frame: completion/total are serialized component wall times, not GPU
 timestamps, pipelined frame times or application FPS. Packing is a synthetic grouped
 cell scan, without world hash lookups, terrain, site frames, UI or service work. A final
 color-image match is a sanity check, not per-frame visual correctness proof.
+
+### Sparse remaining targets
+
+The review follow-up adds `--fixture sparse`: exactly 512 unchanged targets distributed
+over 1, 8, 27, 125 or 343 nonempty chunks. Every case uses the same wide camera and
+1024×1024 target so quarter-size blocks remain visible across the full 7×7×7 footprint.
+All chunks are supplied to the draw call; individual cubes may occlude each other.
+This isolates the cost of increasing source/draw count within the sparse sweep, rather
+than claiming those chunks are simultaneously unobstructed in a running game.
+
+Fresh ReleaseFast results on the same M4 Max/Metal machine, with counters disabled,
+12 warmup frames, 100 measured frames and three alternating-order repetitions. Entries
+are medians of the per-run p95 values:
+
+| Nonempty chunks | Dynamic CPU p95, ms | Cached CPU p95, ms | Dynamic/cached draws per frame | Dynamic/cached uniform bytes per frame |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.0205 | 0.0193 | 1 / 1 | 128 / 128 |
+| 8 | 0.0189 | 0.0223 | 1 / 8 | 128 / 1,024 |
+| 27 | 0.0204 | 0.0377 | 1 / 27 | 128 / 3,456 |
+| 125 | 0.0190 | 0.1234 | 1 / 125 | 128 / 16,000 |
+| 343 | 0.0195 | 0.3170 | 1 / 343 | 128 / 43,904 |
+
+Dynamic source uploads remain 24,576 bytes per frame; cached source uploads are zero.
+At 343 chunks, transform bytes exceed the dynamic source-plus-transform bytes, and
+CPU p95 is about 0.30 ms higher. Cold cache seeding costs 0.025–1.618 ms across the sweep.
+Caching is therefore not a universal speedup: sparse sources expose per-chunk uniform,
+binding and draw overhead. These measurements guide a later batching decision if
+representative full-client workloads make that cost material; this PR keeps chunk caching.
+
+All 15 final image pairs matched and were nonempty, with no GPU validation errors.
+Raw data and the exact command are in [the sparse log](../benchmarks/construction-visuals-2026-11-09/gpu-sparse-results.log).
+The same serialization and synthetic-packing limits apply. At 343 chunks, dynamic/cached
+serialized total p95 is 0.2337/0.7020 ms; these are not game frame times. Sparse and dense
+GPU wall times should not be compared directly because their resolutions/views differ.
+
+```sh
+zig build bench-blueprint-visual-gpu -Doptimize=ReleaseFast -- --fixture sparse
+zig build bench-blueprint-visual-gpu -Doptimize=ReleaseFast -- --fixture sparse --chunks 343
+```
+
+### Optional renderer counters
+
+`zig build -Doptimize=ReleaseFast -Dblueprint-render-stats=true` enables cumulative
+blueprint renderer counters in either application; the option works in Debug too.
+`miniatureCacheStats()` then measures source builds, source bytes, releases, uniform
+bytes and draws. `previewCacheStats()` measures preview source builds, bytes and releases.
+These are renderer events, not GPU timestamps or end-to-end client timings.
+
+Both snapshots expose `counters_enabled`. Without the option this flag is false and
+cumulative fields are unavailable, rather than measured zeros; live cached instance/chunk
+counts remain valid. Counter storage and increments are compiled out of ordinary builds.
+GPU tests always enable counters for lifecycle assertions. The benchmark checks enabled
+and disabled counter semantics in its ordinary executable; performance runs omit the
+option unless explicitly marked as instrumented.
+
+All eight ordinary-executable smoke checks passed: Debug/ReleaseFast × default/enabled
+counters × dense changing sources/sparse 343-chunk camera movement. Each includes one
+warmup and three measured frames. Assertions check the gate, disabled cumulative fields,
+enabled build/upload activity, exact draw/uniform totals including warmup, live occupancy
+and balanced releases after clear. Their [correctness-only log](../benchmarks/construction-visuals-2026-11-09/gpu-counter-checks.log)
+is separate from performance evidence.
 
 ## Historical prepared-API measurements (2026-11-09)
 

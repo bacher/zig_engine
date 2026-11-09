@@ -1,6 +1,9 @@
 //! Noncolliding instanced blueprint blocks and twelve square-section hazard rails.
 const std = @import("std");
 const builtin = @import("builtin");
+/// Tests always collect lifecycle counters. Ordinary builds opt in explicitly;
+/// the counter storage and increments disappear entirely when disabled.
+pub const cache_counters_enabled = builtin.is_test or @import("engine_options").blueprint_render_stats;
 const WorldLayout = @import("world_layout.zig").WorldLayout;
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;
@@ -21,6 +24,8 @@ pub const MiniatureCell = extern struct {
 };
 pub const MiniatureError = error{ OutOfMemory, InvalidMiniatureChunk, MiniatureCapacityExceeded };
 pub const MiniatureCacheStats = struct {
+    /// When false, only occupancy is measured; cumulative fields are unavailable.
+    counters_enabled: bool = cache_counters_enabled,
     cache_builds: u64 = 0,
     source_upload_bytes: u64 = 0,
     cache_releases: u64 = 0,
@@ -98,6 +103,7 @@ const Transform = extern struct {
 pub const PreviewError = error{ OutOfMemory, InvalidPreviewDefinition, PreviewCapacityExceeded };
 
 pub const PreviewCacheStats = struct {
+    counters_enabled: bool = cache_counters_enabled,
     cache_builds: u64 = 0,
     source_upload_bytes: u64 = 0,
     cache_releases: u64 = 0,
@@ -207,10 +213,10 @@ pub const Renderer = struct {
     occluded_pipeline: zgpu.RenderPipelineHandle,
     allocated_capacity: usize = 1024,
     preview_cache: ?PreviewCache = null,
-    preview_stats: if (builtin.is_test) PreviewCacheStats else void = if (builtin.is_test) .{} else {},
+    preview_stats: if (cache_counters_enabled) PreviewCacheStats else void = if (cache_counters_enabled) .{} else {},
     miniature_chunks: std.AutoHashMap(ChunkId, MiniatureChunkCache),
     miniature_cached_instances: u32 = 0,
-    miniature_stats: if (builtin.is_test) MiniatureCacheStats else void = if (builtin.is_test) .{} else {},
+    miniature_stats: if (cache_counters_enabled) MiniatureCacheStats else void = if (cache_counters_enabled) .{} else {},
 
     pub fn init(gctx: *zgpu.GraphicsContext, atlas_layout: zgpu.BindGroupLayoutHandle, format: wgpu.TextureFormat) Renderer {
         return initWithAllocator(gctx, atlas_layout, format, std.heap.page_allocator);
@@ -297,7 +303,7 @@ pub const Renderer = struct {
         self.miniature_chunks.putAssumeCapacity(id, .{ .chunk = chunk, .revision = revision, .instance_count = count, .uniform = uniform, .instances = instances, .binding = binding });
         self.miniature_cached_instances = next_count;
         if (previous) |source| self.releaseMiniatureSource(gctx, source);
-        if (builtin.is_test) {
+        if (cache_counters_enabled) {
             self.miniature_stats.cache_builds += 1;
             self.miniature_stats.source_upload_bytes += byte_size;
         }
@@ -305,7 +311,7 @@ pub const Renderer = struct {
 
     fn releaseMiniatureSource(self: *Renderer, gctx: *zgpu.GraphicsContext, source: MiniatureChunkCache) void {
         source.release(gctx);
-        if (builtin.is_test) self.miniature_stats.cache_releases += 1;
+        if (cache_counters_enabled) self.miniature_stats.cache_releases += 1;
     }
 
     pub fn removeMiniatureChunk(self: *Renderer, gctx: *zgpu.GraphicsContext, id: ChunkId) void {
@@ -327,7 +333,7 @@ pub const Renderer = struct {
     }
 
     pub fn miniatureCacheStats(self: *const Renderer) MiniatureCacheStats {
-        var result: MiniatureCacheStats = if (builtin.is_test) self.miniature_stats else .{};
+        var result: MiniatureCacheStats = if (cache_counters_enabled) self.miniature_stats else .{};
         result.cached_instances = self.miniature_cached_instances;
         result.cached_chunks = self.miniature_chunks.count();
         return result;
@@ -350,7 +356,7 @@ pub const Renderer = struct {
             gctx.queue.writeBuffer(gctx.lookupResource(source.uniform).?, 0, Transform, &.{transform});
             pass.setBindGroup(0, gctx.lookupResource(source.binding).?, null);
             pass.draw(36, source.instance_count, 0, 0);
-            if (builtin.is_test) {
+            if (cache_counters_enabled) {
                 self.miniature_stats.uniform_upload_bytes += @sizeOf(Transform);
                 self.miniature_stats.draw_calls += 1;
             }
@@ -361,14 +367,14 @@ pub const Renderer = struct {
         if (self.preview_cache) |cache| {
             cache.release(gctx);
             self.preview_cache = null;
-            if (builtin.is_test) self.preview_stats.cache_releases += 1;
+            if (cache_counters_enabled) self.preview_stats.cache_releases += 1;
         }
     }
 
-    /// Counters are stored only in test builds. The live instance count also
-    /// allows lifecycle tests to distinguish a hidden source from a released one.
+    /// Check counters_enabled before interpreting cumulative counters. Live
+    /// occupancy remains available even when instrumentation is compiled out.
     pub fn previewCacheStats(self: *const Renderer) PreviewCacheStats {
-        var result: PreviewCacheStats = if (builtin.is_test) self.preview_stats else .{};
+        var result: PreviewCacheStats = if (cache_counters_enabled) self.preview_stats else .{};
         result.cached_instances = if (self.preview_cache) |cache| cache.instance_count else 0;
         return result;
     }
@@ -387,7 +393,7 @@ pub const Renderer = struct {
         const binding = gctx.createBindGroup(self.layout, &.{ .{ .binding = 0, .buffer_handle = uniform, .size = @sizeOf(Transform) }, .{ .binding = 1, .buffer_handle = instances, .size = byte_size } });
         gctx.queue.writeBuffer(gctx.lookupResource(instances).?, 0, PreviewInstance, source);
         self.preview_cache = .{ .definition_id = selected.definition_id, .generation = selected.generation, .size = selected.size, .instance_count = selected.target_count, .uniform = uniform, .instances = instances, .binding = binding };
-        if (builtin.is_test) {
+        if (cache_counters_enabled) {
             self.preview_stats.cache_builds += 1;
             self.preview_stats.source_upload_bytes += byte_size;
         }

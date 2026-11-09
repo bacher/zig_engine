@@ -226,6 +226,7 @@ fn checkCachedMiniatures(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapRes
         try target.drawWithMiniatures(gctx, &renderer, atlas_binding, &camera, extras.items, 0, null, false, allocator, clear_depth, pair_index * 2 + 1, &visible);
         pair_index += 1;
         const stats = renderer.miniatureCacheStats();
+        try std.testing.expect(stats.counters_enabled);
         // A repeated publication key does not inspect cells or upload source.
         try renderer.replaceMiniatureChunk(gctx, 0, chunk, revision, &.{.{ .local = .{ 99, 99, 99 }, .material = 0 }});
         var moved = camera;
@@ -591,6 +592,7 @@ fn checkCachedPreview(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapRespon
             try target.draw(gctx, &reference, atlas_binding, &camera, dynamic.items, 1, null, false, allocator, 1, pair_index * 2);
             try target.draw(gctx, &renderer, atlas_binding, &camera, dynamic.items[0..extras], 1, preview, true, if (pair_index == 0) allocator else failing.allocator(), 1, pair_index * 2 + 1);
             const stats = renderer.previewCacheStats();
+            try std.testing.expect(stats.counters_enabled);
             try std.testing.expectEqual(@as(u64, 1), stats.cache_builds);
             try std.testing.expectEqual(@as(u64, 8 * 16), stats.source_upload_bytes);
             try std.testing.expectEqual(@as(u64, 0), stats.cache_releases);
