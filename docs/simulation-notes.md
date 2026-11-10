@@ -58,6 +58,18 @@ Single-player pause stops simulation time. Opening an individual player's menu i
 
 An individual worker falling behind or a task being processed late is not a suspension of the whole world. Handling those delays and implementing coordinated slowdown remain under **SIM-05**. These gameplay rules resolve **SIM-04** without selecting a clock representation, a scheduler, or the mechanism for detecting process suspension.
 
+## Late processing and dependent work
+
+The default for new work is to start at the current simulation time when processing successfully accepts it and consumes the required resources. If a predecessor was scheduled to complete at second 10 but is processed at second 12, a new five-second operation normally starts at 12 and is scheduled to complete at 17. The predecessor retains its scheduled completion time and paid cost; the delay affects when dependent work is accepted. This can reduce production rates, with different effects on short and long operations. Acceptable deviations remain open under **SIM-05**.
+
+Use an earlier assigned start for a narrow, cheap-to-evaluate dependency: the produced or delivered good is the sole prerequisite for the next operation, apart from food. Derive that start from the predecessor's scheduled completion, without placing it before the good's logical production or arrival. In the example above, an eligible five-second operation is assigned start 10 and completion 15 even though it is accepted at 12. This exception is not a general permission to backdate any operation whose last missing ingredient has arrived; more complex resource dependencies always use the default start-at-processing rule.
+
+Food is deliberately treated differently: check and consume the full food payment at actual acceptance, without checking whether it existed at the assigned earlier start. Food arriving at 11 may therefore pay at processing time 12 for the operation assigned start 10. Inputs and food are still consumed consistently and exactly once before accepting the task or publishing its result. No payment means no accepted task; no resource may fund two tasks. The exception relaxes historical food availability, not resource ownership or accounting.
+
+Do not introduce historical food-availability tracking, world-state reconstruction, or costly event ordering to support earlier starts. Only use dependency timing that is straightforward to derive from readily available information. If establishing eligibility requires complex resource reasoning, choose the default. Existing lifecycle rules, including rejection of new work by stopped objects, still apply. Destination-capacity requirements remain deferred to the warehouse specification; this exception does not waive them.
+
+The start policy and food exception partially resolve **SIM-05**. Still open: how far a start may be shifted back; how to handle an eligible operation whose assigned completion is already overdue, including a chain of such operations; whether an earlier start remains eligible after a failed attempt caused by missing food; acceptable production-rate deviations; and the coordinated slowdown policy. Do not infer permission for unbounded catch-up or a numeric tolerance from the separate 1–2 second allowance for selected condition checks. No scheduling architecture is selected.
+
 ## Consistency of condition checks
 
 Not every condition check requires a coherent world snapshot. For explicitly discussed cases, recent observations obtained at different moments may be sufficient, even when their combination describes a state that never existed simultaneously. A block already checked need not be checked again merely because it changed before the rest of the validation finished.
@@ -76,6 +88,8 @@ Logical inconsistency also does not permit memory races, torn reads of compound 
 ## Consume resources at start
 
 All inputs and operating resources required for an operation or delivery are consumed in full at its successful start. For production, this includes the recipe ingredients and the full food cost. For delivery, the full food cost and any other required operating consumables are paid at departure. If the necessary resources are unavailable, the work cannot start.
+
+The [late-processing exception](#late-processing-and-dependent-work) permits an assigned simulation-time start earlier than actual acceptance. In that case, consumption occurs at acceptance, before the task or its result is committed, and food need only be available at that processing moment. This is an explicit exception to historical payment timing, not permission to defer payment after acceptance.
 
 Consumption and cargo transfers must remain consistent under concurrent work and player actions. A recent positive condition check does not entitle a task to resources that have already been spent or transferred elsewhere. The relaxed validation policy above does not permit double spending, duplicate cargo ownership, or partial accounting that starts unpaid work.
 
