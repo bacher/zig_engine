@@ -80,9 +80,11 @@ These limits prevent the simulation's compensation policy from skipping a new op
 
 Food is deliberately treated differently: check and consume the full food payment at actual acceptance, without checking whether it existed at the assigned earlier start. Food arriving at 11 may therefore pay at processing time 12 for the operation assigned start 10. Inputs and food are still consumed consistently and exactly once before accepting the task or publishing its result. No payment means no accepted task; no resource may fund two tasks. The exception relaxes historical food availability, not resource ownership or accounting.
 
+If processing cannot start the operation because food is missing, waiting for food becomes a separate cause of delay. When food later becomes available, start normally at successful processing/acceptance time with no compensation; assigned and actual start times are equal. Do not retain compensation credit from the earlier production or delivery. This differs from food already being available at the first processing attempt, where its historical availability remains irrelevant.
+
 Do not introduce historical food-availability tracking, world-state reconstruction, or costly event ordering to support earlier starts. Only use dependency timing that is straightforward to derive from readily available information. If establishing eligibility requires complex resource reasoning, choose the default. Existing lifecycle rules, including rejection of new work by stopped objects, still apply. Destination-capacity requirements remain deferred to the warehouse specification; this exception does not waive them.
 
-The start policy, food exception, compensation limits, and two start timestamps partially resolve **SIM-05**. Still open: whether an earlier start remains eligible after a failed attempt caused by missing food; acceptable production-rate deviations; and the coordinated slowdown policy. The 5-second compensation limit is separate from the 1–2 second allowance for selected condition checks. No scheduling architecture is selected.
+The start policy, food exception, compensation limits, and two start timestamps partially resolve **SIM-05**. Still open: acceptable production-rate deviations and the coordinated slowdown policy. The 5-second compensation limit is separate from the 1–2 second allowance for selected condition checks. No scheduling architecture is selected.
 
 ## Consistency of condition checks
 
