@@ -130,9 +130,40 @@ The blueprint capture workflow follows these ownership boundaries:
 
 Capture uses ordinary full-block subscriptions rather than persistence mutation-freezing holds.
 Jobs, memory, source retention, and cancellation/shutdown cleanup must remain bounded, and stale
-results must not affect a newer draft. Large application admission prepares a versioned dependency
-snapshot and resources before atomic publication. Blueprint dialogs block controls while simulation
-and service processing continue. These responsibilities are implemented by the capture helper, runtime indexes, and service admission pipeline.
+results must not affect a newer draft. The current application admission pipeline prepares a
+versioned dependency snapshot and resources, then rechecks dependency versions before atomic
+publication. Blueprint dialogs block controls while simulation and service processing continue.
+These responsibilities are implemented by the capture helper, runtime indexes, and service
+admission pipeline.
+
+This PR describes the protected-input application option. The independent
+[inconsistent-read/nonblocking proposal](https://github.com/bacher/zig_engine/pull/55) is the other option;
+selection and runtime implementation are deferred pending measurements, external review and further
+requirements. The following protocol belongs only to this protected-input option.
+
+Apply remains player-initiated, with one bounded active preparation;
+NPC simulation assembles published sites. The service worker owns admission protection and all
+authoritative mutation. Before copying, it acquires the entire input set D: canonical whole chunks
+covering the rotated box expanded by one cell in X/Y and three cells downward, including every
+whole box/index chunk P. Conservative writes into D wait, including indirect effects and cleanup;
+eligible independent work outside D continues under producer and persistence gates. A helper
+prepares a candidate from owned immutable copies. Uninterrupted protection keeps its checked
+empty targets, complete real platforms and index sources current through publication. Only P's
+prepared index records are swapped; unrelated global accounting remains live.
+
+Protection has a bounded hold lifetime. Non-storage hold expiry terminates Apply; prolonged
+storage waits or failures release D and retain the request under existing bounded storage-retry
+rules. Every new or recovered acquisition gives already queued eligible independent conflicting
+writers a fair opportunity. Release invalidates the candidate without waiting synchronously for
+its helper; an invalidated helper cannot publish, and its buffers remain owned until it finishes
+or relinquishes them. Submitted operations retain their ownership independently of tool UI.
+
+Admission protection and persistence `source_holds` have separate owners and lifetimes; releasing
+one cannot clear the other. The spec's [Protected-input admission protocol](../specs/features/blueprints.md#protected-input-admission-protocol)
+defines protection scope, scheduling, hold expiry/recovery and publication checks. The
+[construction contract](block-placement.md#protected-blueprint-application-follow-up) describes the
+world-rule consequences. Existing implementation and validation reports describe the current
+FIFO/version-checked pipeline; they do not verify this pending follow-up.
 
 The [feature plan](../specs/features/blueprints.md#plan) defines the detailed capture/helper/Save
 protocol and retains the rejected service-owned capture alternative. Selection geometry and
