@@ -170,6 +170,24 @@ Started work does not reserve these resources for later consumption, consume the
 
 Transported goods remain cargo: at departure they leave available source stock and belong to the delivery until handed over. They are distinct from resources consumed to perform transport. Saving and loading must preserve started work and its paid status without charging those resources again. This is a gameplay and persistence requirement; no resource coordination mechanism is selected here.
 
+## Consistent task start and completion
+
+Discovering eligible work and preparing a plan do not create an accepted obligation. Resource observations and a proposed route are preliminary: resources may be taken by other work before acceptance. Planning does not consume inputs or food, transfer cargo, or require an object to service the proposed operation. It may be deferred under capacity pressure. Confirm actual resource availability as part of successful acceptance; other condition checks retain their individually agreed consistency policies rather than requiring a new strict recheck of the whole world.
+
+For the first version, accepting an obligation and starting the task form one logical transition. Do not introduce a separate accepted-but-not-started task state. A production start combines full input and food consumption, task creation with its timing, and registration of the participating objects' obligations. A delivery start combines full operating payment, removal of cargo from available source stock into the delivery's custody, task creation, and its obligations. The capacity guarantees required for acceptance remain subject to the warehouse specification.
+
+Authoritative decisions must not treat a partially applied start as successful. A failed start must leave no partial consumption or cargo transfer; it must not leave paid resources without a task or create a task whose cargo remains available to another delivery. Resource contention may cause an unaccepted attempt to wait and retry. Existing simulation precedence over conflicting player edits remains in force. A compensated start still performs this transition at actual processing/acceptance time, even when its assigned simulation-time start is earlier.
+
+Scheduled completion and application of its result are distinct: the scheduled time may have passed while the completion is still awaiting processing. Successfully applying completion is another coherent transition that accounts for the output or cargo handover, marks the task completed, and releases the obligations that were fulfilled. Do not charge inputs again. Successful cargo handover cannot leave the same goods owned by both the delivery and the recipient, or lose them between the two. Warehouse rules determine when handover is possible and what happens when destination conditions are not met; this decision does not settle destination capacity or which downstream obligations belong to a production task under **SIM-15**.
+
+Repeated processing is allowed, but repeated effects are not. Retrying the same logical start must not create another task or spend resources again; retrying the same completion must not produce another output or transfer cargo twice. Distinguish a retry from a new independent operation. The requirement applies to duplicate notifications and retries after an uncertain previous outcome; neither a message-delivery guarantee nor a concrete deduplication mechanism is selected here.
+
+These are logical consistency requirements, including operations spanning ownership boundaries, not a requirement for a universal world transaction system or any particular lock or queue. Their implementation must preserve authoritative accounting while retaining the already allowed lag in client publication and eligible condition checks.
+
+Saved and recovered task state, paid status, resources, cargo, and results must describe a coherent outcome of these transitions. This does not require synchronous disk persistence after every start or completion. Save frequency, crash recovery, and any allowed loss of recent progress remain under **SIM-13**; no crash-loss policy is selected here.
+
+These task-boundary and duplicate-effect rules partially resolve **SIM-09**. Coordination across components and chunks, recognition of retries, and recovery from partial implementation failures remain to be designed with **SIM-08** and **SIM-13**. Destination capacity stays under **WH-01**, and cancellation or exceptional gameplay failures under **SIM-16**.
+
 ## Workstation example
 
 Every simulation action has prerequisites. Producing a concrete block at a workstation requires:
