@@ -98,6 +98,18 @@ Do not promise a fixed percentage of production-rate accuracy before the prototy
 
 Numeric production-rate tolerances are deferred to prototype acceptance criteria in **SIM-03**. Overload/recovery thresholds and measurement windows belong to **SIM-07**, while work budgets and the implementation of the shared slowdown policy remain design work under **SIM-06** and **SIM-08**. Revisit these before accepting the simulation prototype or committing to the corresponding scheduling design.
 
+## Global overload feedback
+
+Provide a world-level simulation-speed indicator and an unobtrusive warning for sustained overload. The speed indicator reports measured simulation-clock advancement relative to real time, averaged over a suitable interval: 75% means approximately 0.75 simulation seconds per real second. Show it separately from rendering FPS, and use measured advancement rather than only the requested clock-speed multiplier. Clock speed alone does not establish that every event is being processed promptly.
+
+Brief delays should not trigger warnings. Use stable conditions for entering and leaving the overload state so the interface does not repeatedly switch between warning and normal states. Warn once when sustained overload begins and retain an indicator while it persists, without interrupting play or repeatedly displaying notifications. After sustained recovery, return the indicator to normal; a separate recovery popup is not required. Thresholds, averaging windows, and the mechanism for stabilizing state changes remain to be selected and validated with the prototype.
+
+Keep this feedback inexpensive through aggregate measurements; do not scan all objects or trigger additional prerequisite checks to explain overload. Detailed attribution to CPU, memory, disk, or world-data service contention is left to debugging tools for now, rather than promised as a player-facing diagnosis.
+
+At this stage, overload feedback does not require object panels or per-object explanations of why an operation has not started automatically. Future panels may show missing gameplay resources, but their design is not selected here. Capacity-waiting statuses and distinctions between unchecked prerequisites and known shortages are not requirements for the current UI scope; reconsider them only when designing the corresponding interfaces.
+
+These global feedback and scope rules partially resolve **SIM-07**. Numeric thresholds for slowdown, warning, and recovery, measurement windows, and treatment of sustained event-processing lag even when clock speed reads 100% remain open for overload-control design and prototype validation. No concrete UI layout or diagnostics implementation is selected.
+
 ## Bounded work and fairness
 
 When processing capacity is insufficient, defer accepting new operations. Deferred work has not started: do not consume its resources or advance its operation progress while it waits. Preserve a way to reconsider it later so a capacity-related deferral cannot silently lose work. At eventual acceptance, apply the existing prerequisite, payment, and SIM-05 timing rules; waiting alone does not complete an operation. The representation of deferred work and its wake-up mechanism remain unselected.
