@@ -36,9 +36,112 @@ The world-data service and simulation will remain together in one server process
 
 Client threads that provide the player experience may use a more balanced throughput/latency policy and prioritize responsiveness where it does not degrade overall system performance or sustainable simulation throughput. This applies to current in-process clients as well as future network clients. Their requests and subscriptions must not overload the world-data service: client pressure on that shared layer can delay simulation work even when the simulation itself has not changed. Specific budgets and coordination mechanisms remain open; the [design principles](../DESIGN_PRINCIPLES.md#prioritize-throughput-over-latency) define the priority.
 
+## State ownership and publication
+
+Each mutable fact needs a clear authoritative source and a defined way to coordinate changes. This does not require a single global owner or a total order for independent events. The agreed responsibility split is:
+
+| State | Responsible component |
+| --- | --- |
+| Blocks, chunks, their loading and publication of changes | World-data service |
+| Accepted operations and deliveries, their timing, paid costs, and obligations | Simulation |
+| Indexes for discovering work, dependencies, and routing | Simulation, updated from relevant world changes |
+| NPC models, animation, and visual movement separation | Client |
+
+Simulation should process its own task state without repeatedly querying the world-data service for information already established. A delivery can retain its completion time and paid status without reading the route's blocks again while it progresses. Query world data when a decision actually needs it, subject to the existing condition-check policies. Inventory authority and its relationship to physical stored goods remain deferred to the warehouse specification. Do not introduce independently writable copies of the same resource count.
+
+Exclusive mutation access for a batch of work is an accepted design direction: an executor may receive the right to modify a defined set of data, perform several changes, and publish the result with less per-edit coordination. This does not select chunks as the ownership unit, permanently bind data to a thread, or choose a lock or messaging mechanism. Component responsibility remains distinct from temporary write access; a simulation executor may modify world-data service data through such a grant without creating a second authoritative copy.
+
+Before granting exclusive mutation, account for all users of the data, including persistence, loading, and other simulation tasks. Player distance alone does not establish exclusivity. Safe readers, data lifetime, unloading, cross-boundary operations, and transfer or revocation of access still need a concrete design. The earlier distant-chunk proposal remains a candidate within these constraints.
+
+Client publication may batch multiple changes; each operation need not wait for synchronization with clients. Resource ownership and accepted obligations must remain coherent in authoritative state while publication lags. Delayed client views cannot authorize duplicate consumption or duplicate results. This permission does not select a publication format or relax the established per-feature consistency rules.
+
+Compare a simple execution baseline with parallel processing of independent regions under exclusive write access in the prototype. Central orchestration and message-only worker communication remain candidates to measure, rather than mandatory boundaries. These responsibility and access principles partially resolve **SIM-08**; ownership units, threading, cross-boundary coordination, safe access, publication, and the clock/scheduling mechanism remain open.
+
 ## Simulation state and startup
 
-The simulation needs its own index and may also maintain state distinct from the data currently stored in chunks. Opening a world must resume simulation in all areas containing active event emitters without scanning the whole world. The index, stored state, and recovery mechanism have not been designed.
+The simulation maintains its own task state and indexes, distinct from the block data stored in chunks, according to the responsibility split above. Opening a world must resume simulation in all areas containing active event emitters without scanning the whole world. The concrete representations and recovery mechanism have not been designed.
+
+## World time and no offline progress
+
+The world simulates while it is running and not paused. Closing the world or stopping its server stops simulation time. On opening a saved world, resume from its saved simulation time without adding time for the real-world interval while it was closed. There is no offline progress or offline catch-up.
+
+Accepted work retains its saved progress and remaining simulation-time duration. If a saved delivery has one simulation minute remaining, loading that save after a day still leaves one simulation minute. Closing the world does not complete work or age resources through elapsed real time.
+
+A future dedicated server can keep simulating without connected players while it is running and not paused. Disconnecting a client is distinct from closing or pausing the server's world. Downtime of the server itself earns no progress.
+
+At normal load, one real second advances the simulation clock by one second. A 30-second production operation therefore takes approximately 30 real seconds. Under overload, the previously agreed coordinated slowdown may make simulation time advance more slowly. The length of an in-game day is a separate balance setting and does not redefine the seconds used by production and delivery tasks.
+
+Task timestamps and durations use millisecond resolution. This specifies how precisely time is expressed, not how often the simulation runs: work may be processed in batches, and an event may be handled after its scheduled timestamp. The [late-processing rules](#late-processing-and-dependent-work) define dependent-work timing; numeric acceptance tolerances will be selected from prototype measurements under **SIM-03**.
+
+Events must preserve causality and consistent resource accounting. Independent events with the same timestamp may run in any convenient order or in parallel; a dependent action cannot use an output before the preceding action has completed. If two tasks contend for the same last unit of food, only one may start. In the absence of a gameplay priority, the winner may depend on processing order. A global total ordering of independent events and identical replay of every concurrent outcome are not required. This does not remove already agreed priorities, including simulation precedence over conflicting player edits.
+
+Single-player pause stops simulation time. Opening an individual player's menu in multiplayer does not pause the shared world; its owner or an administrator may explicitly pause it for everyone. A whole-process suspension, such as computer sleep or a debugger stop, likewise contributes no simulation time. Resume from the stopped simulation time without accelerated catch-up for the suspension interval, retaining already scheduled events and their simulation-time deadlines.
+
+An individual worker falling behind or a task being processed late is not a suspension of the whole world. The following sections define delayed-work and coordinated-slowdown behavior; implementation mechanisms remain unselected. These gameplay rules resolve **SIM-04** without selecting a clock representation, a scheduler, or the mechanism for detecting process suspension.
+
+## Late processing and dependent work
+
+The default for new work is to start at the current simulation time when processing successfully accepts it and consumes the required resources. If a predecessor was scheduled to complete at second 10 but is processed at second 12, a new five-second operation normally starts at 12 and is scheduled to complete at 17. The predecessor retains its scheduled completion time and paid cost; the delay affects when dependent work is accepted. This can reduce production rates, with different effects on short and long operations. Acceptable numeric deviations will be selected from prototype measurements under **SIM-03**.
+
+Use an earlier assigned start for a narrow, cheap-to-evaluate dependency: the produced or delivered good is the sole prerequisite for the next operation, apart from food. Derive that start from the predecessor's scheduled completion, subject to the compensation limits below and without placing it before the good's logical production or arrival. In the example above, an eligible five-second operation is assigned start 10 and completion 15 even though it is accepted at 12. This exception is not a general permission to backdate any operation whose last missing ingredient has arrived; more complex resource dependencies always use the default start-at-processing rule.
+
+Compensate at most **5 simulation seconds** and at most **half the new operation's duration**. For an eligible operation of positive duration `D`, accepted at simulation time `A` after its predecessor's scheduled completion `P`, use:
+
+```text
+compensation = min(A - P, 5 seconds, D / 2)
+assigned_start = A - compensation
+scheduled_completion = assigned_start + D
+```
+
+This applies when the prerequisite has completed and `A >= P`; it never anticipates a future prerequisite. Round compensation down if clock precision requires rounding, so neither limit is exceeded. At least half the operation's duration remains after actual acceptance. Compensation cannot make newly accepted work instantly complete or create a chain of already-overdue new operations. Uncompensated delay is not carried into that operation as additional catch-up credit. For example, a three-second operation accepted at 20 after its prerequisite completed at 10 gets only 1.5 seconds of compensation: assigned start 18.5, completion 21.5. A 30-second operation with the same delay gets 5 seconds: assigned start 15, completion 45.
+
+Retain both the assigned simulation-time start and the actual acceptance/start time in task state, preserving the distinction through save/load and making it available to client presentation. A newly accepted compensated task must be visualized from its beginning, rather than seeking forward based on its assigned start. For a delivery, this includes the pickup at the source; compensation alone must not make a courier appear already carrying cargo partway along the route. Fit the normal operation animation into the remaining `D - compensation` simulation seconds, giving a compensation-induced playback factor of `D / (D - compensation)`, at most 2. Both timestamps let clients distinguish this case from work that was already running before they observed it. Purely cosmetic approach/departure remains governed by the existing visualization rules and cannot delay the authoritative schedule.
+
+These limits prevent the simulation's compensation policy from skipping a new operation's visible beginning. They do not guarantee that a client receives its notification immediately. Presentation for late network updates, newly observed areas, and joining clients remains under **SIM-19**, without changing authoritative timing or making simulation depend on observers.
+
+Food is deliberately treated differently: check and consume the full food payment at actual acceptance, without checking whether it existed at the assigned earlier start. Food arriving at 11 may therefore pay at processing time 12 for the operation assigned start 10. Inputs and food are still consumed consistently and exactly once before accepting the task or publishing its result. No payment means no accepted task; no resource may fund two tasks. The exception relaxes historical food availability, not resource ownership or accounting.
+
+If processing cannot start the operation because food is missing, waiting for food becomes a separate cause of delay. When food later becomes available, start normally at successful processing/acceptance time with no compensation; assigned and actual start times are equal. Do not retain compensation credit from the earlier production or delivery. This differs from food already being available at the first processing attempt, where its historical availability remains irrelevant.
+
+Do not introduce historical food-availability tracking, world-state reconstruction, or costly event ordering to support earlier starts. Only use dependency timing that is straightforward to derive from readily available information. If establishing eligibility requires complex resource reasoning, choose the default. Existing lifecycle rules, including rejection of new work by stopped objects, still apply. Destination-capacity requirements remain deferred to the warehouse specification; this exception does not waive them.
+
+The start policy, food exception, compensation limits, two start timestamps, and overload rules below resolve the gameplay semantics of **SIM-05**. The 5-second compensation limit is separate from the 1–2 second allowance for selected condition checks. No scheduling architecture is selected.
+
+## Coordinated slowdown and recovery
+
+Keep normal simulation speed during brief processing delays and apply the late-processing rules above. Do not slow the entire world for every late event. Under a sustained capacity shortage, slow the common simulation clock throughout the world. Production, deliveries, and other processes governed by simulation time use that same time scale. This does not require simultaneous processing of events or a global barrier after each step.
+
+At a sustained speed of 0.5x, ten simulation seconds take approximately twenty real seconds. Accepted tasks retain their simulation-time timestamps, durations, and paid costs; slowdown neither recalculates nor charges them again. The compensation cap remains five simulation seconds, which corresponds to ten real seconds at 0.5x, and the half-duration limit still applies. Camera, input, and interface responsiveness remain independent of the slowed world clock, subject to the existing shared-resource budgets.
+
+When capacity recovers, return to normal 1x speed without accelerating the clock above 1x to catch up to elapsed real time. Simulation time not advanced during slowdown creates no debt. Accepted tasks and pending events remain intact and still require processing; recovery does not discard them. The bounded compensation rule continues to apply where eligible, but there is no additional recovery catch-up allowance.
+
+Do not promise a fixed percentage of production-rate accuracy before the prototype is measured. At the target workload, compare expected and actual output for short operations, long operations, and complete production chains. Measure output relative to simulation time as well as effective simulation speed relative to real time, so intentional slowdown can be distinguished from inter-operation delays. Shared slowdown does not guarantee equal losses across industries; evaluate those differences separately.
+
+Numeric production-rate tolerances are deferred to prototype acceptance criteria in **SIM-03**. Overload/recovery thresholds and measurement windows belong to **SIM-07**, while work budgets and the implementation of the shared slowdown policy remain design work under **SIM-06** and **SIM-08**. Revisit these before accepting the simulation prototype or committing to the corresponding scheduling design.
+
+## Global overload feedback
+
+Provide a world-level simulation-speed indicator and an unobtrusive warning for sustained overload. The speed indicator reports measured simulation-clock advancement relative to real time, averaged over a suitable interval: 75% means approximately 0.75 simulation seconds per real second. Show it separately from rendering FPS, and use measured advancement rather than only the requested clock-speed multiplier. Clock speed alone does not establish that every event is being processed promptly.
+
+Brief delays should not trigger warnings. Use stable conditions for entering and leaving the overload state so the interface does not repeatedly switch between warning and normal states. Warn once when sustained overload begins and retain an indicator while it persists, without interrupting play or repeatedly displaying notifications. After sustained recovery, return the indicator to normal; a separate recovery popup is not required. Thresholds, averaging windows, and the mechanism for stabilizing state changes remain to be selected and validated with the prototype.
+
+Keep this feedback inexpensive through aggregate measurements; do not scan all objects or trigger additional prerequisite checks to explain overload. Detailed attribution to CPU, memory, disk, or world-data service contention is left to debugging tools for now, rather than promised as a player-facing diagnosis.
+
+At this stage, overload feedback does not require object panels or per-object explanations of why an operation has not started automatically. Future panels may show missing gameplay resources, but their design is not selected here. Capacity-waiting statuses and distinctions between unchecked prerequisites and known shortages are not requirements for the current UI scope; reconsider them only when designing the corresponding interfaces.
+
+These global feedback and scope rules partially resolve **SIM-07**. Numeric thresholds for slowdown, warning, and recovery, measurement windows, and treatment of sustained event-processing lag even when clock speed reads 100% remain open for overload-control design and prototype validation. No concrete UI layout or diagnostics implementation is selected.
+
+## Bounded work and fairness
+
+When processing capacity is insufficient, defer accepting new operations. Deferred work has not started: do not consume its resources or advance its operation progress while it waits. Preserve a way to reconsider it later so a capacity-related deferral cannot silently lose work. At eventual acceptance, apply the existing prerequisite, payment, and SIM-05 timing rules; waiting alone does not complete an operation. The representation of deferred work and its wake-up mechanism remain unselected.
+
+Already accepted operations and deliveries remain obligations. Queue pressure must not discard their cargo, completion, or production results. Give processing of accepted work, including completion and result handover, preference over accepting additional work, while ensuring that new eligible work continues to receive opportunities for admission. This is not an absolute priority that can indefinitely starve new work. Processing opportunity does not waive gameplay prerequisites or guarantee access to scarce materials.
+
+Repeated notifications may be combined when their meaning is preserved. Several material arrivals at a workstation can often produce one pending request to reconsider its prerequisites. Every inventory change and completion must still be accounted for, and timing information required by SIM-05 compensation must remain available. Coalescing a request to recheck state must not discard the underlying resource transfers or accepted obligations.
+
+All active regions must receive processing regardless of player presence. A large industrial area may legitimately need more CPU time than a single workstation; equal CPU allocation per chunk is not required. Continuous load in one region must not leave others without processing indefinitely. Player presence may prioritize delivery of visual data, but must not accelerate nearby production. Client requests and subscriptions to the world-data service need bounded budgets so they cannot displace simulation work.
+
+These admission, obligation, notification, and fairness rules partially resolve **SIM-06**. Concrete limits for events, routing and deferred work, budget distribution between work classes and regions, bounded representation and retry of deferred admission, and client-request budgets remain to be designed and measured. Coordinate them with the common-clock slowdown policy and **SIM-03**, **SIM-08**, and **SIM-12**. No queue structure, threading model, or numeric limit is selected.
 
 ## Consistency of condition checks
 
@@ -59,11 +162,31 @@ Logical inconsistency also does not permit memory races, torn reads of compound 
 
 All inputs and operating resources required for an operation or delivery are consumed in full at its successful start. For production, this includes the recipe ingredients and the full food cost. For delivery, the full food cost and any other required operating consumables are paid at departure. If the necessary resources are unavailable, the work cannot start.
 
+The [late-processing exception](#late-processing-and-dependent-work) permits an assigned simulation-time start earlier than actual acceptance. In that case, consumption occurs at acceptance, before the task or its result is committed, and food need only be available at that processing moment. This is an explicit exception to historical payment timing, not permission to defer payment after acceptance.
+
 Consumption and cargo transfers must remain consistent under concurrent work and player actions. A recent positive condition check does not entitle a task to resources that have already been spent or transferred elsewhere. The relaxed validation policy above does not permit double spending, duplicate cargo ownership, or partial accounting that starts unpaid work.
 
 Started work does not reserve these resources for later consumption, consume them gradually, or pay again at completion. Later depletion of the dispenser cannot interrupt already paid work. Food already consumed as payment can no longer spoil and invalidate that payment. This does not change spoilage rules for food still stored or carried as cargo.
 
 Transported goods remain cargo: at departure they leave available source stock and belong to the delivery until handed over. They are distinct from resources consumed to perform transport. Saving and loading must preserve started work and its paid status without charging those resources again. This is a gameplay and persistence requirement; no resource coordination mechanism is selected here.
+
+## Consistent task start and completion
+
+Discovering eligible work and preparing a plan do not create an accepted obligation. Resource observations and a proposed route are preliminary: resources may be taken by other work before acceptance. Planning does not consume inputs or food, transfer cargo, or require an object to service the proposed operation. It may be deferred under capacity pressure. Confirm actual resource availability as part of successful acceptance; other condition checks retain their individually agreed consistency policies rather than requiring a new strict recheck of the whole world.
+
+For the first version, accepting an obligation and starting the task form one logical transition. Do not introduce a separate accepted-but-not-started task state. A production start combines full input and food consumption, task creation with its timing, and registration of the participating objects' obligations. A delivery start combines full operating payment, removal of cargo from available source stock into the delivery's custody, task creation, and its obligations. The capacity guarantees required for acceptance remain subject to the warehouse specification.
+
+Authoritative decisions must not treat a partially applied start as successful. A failed start must leave no partial consumption or cargo transfer; it must not leave paid resources without a task or create a task whose cargo remains available to another delivery. Resource contention may cause an unaccepted attempt to wait and retry. Existing simulation precedence over conflicting player edits remains in force. A compensated start still performs this transition at actual processing/acceptance time, even when its assigned simulation-time start is earlier.
+
+Scheduled completion and application of its result are distinct: the scheduled time may have passed while the completion is still awaiting processing. Successfully applying completion is another coherent transition that accounts for the output or cargo handover, marks the task completed, and releases the obligations that were fulfilled. Do not charge inputs again. Successful cargo handover cannot leave the same goods owned by both the delivery and the recipient, or lose them between the two. Warehouse rules determine when handover is possible and what happens when destination conditions are not met; this decision does not settle destination capacity or which downstream obligations belong to a production task under **SIM-15**.
+
+Repeated processing is allowed, but repeated effects are not. Retrying the same logical start must not create another task or spend resources again; retrying the same completion must not produce another output or transfer cargo twice. Distinguish a retry from a new independent operation. The requirement applies to duplicate notifications and retries after an uncertain previous outcome; neither a message-delivery guarantee nor a concrete deduplication mechanism is selected here.
+
+These are logical consistency requirements, including operations spanning ownership boundaries, not a requirement for a universal world transaction system or any particular lock or queue. Their implementation must preserve authoritative accounting while retaining the already allowed lag in client publication and eligible condition checks.
+
+Saved and recovered task state, paid status, resources, cargo, and results must describe a coherent outcome of these transitions. This does not require synchronous disk persistence after every start or completion. Save frequency, crash recovery, and any allowed loss of recent progress remain under **SIM-13**; no crash-loss policy is selected here.
+
+These task-boundary and duplicate-effect rules partially resolve **SIM-09**. Coordination across components and chunks, recognition of retries, and recovery from partial implementation failures remain to be designed with **SIM-08** and **SIM-13**. Destination capacity stays under **WH-01**, and cancellation or exceptional gameplay failures under **SIM-16**.
 
 ## Workstation example
 
@@ -112,7 +235,7 @@ The author has not chosen a simulation architecture. Candidates include:
 - A separate world-data service and simulation worker threads without an orchestrator.
 - Another approach if it better serves the requirements.
 
-One possible structural simplification is to ensure that only one simulation worker can modify a particular chunk at a time, reducing synchronization with other simulation workers and ideally with the world-data service. This is an exploratory idea. No chunk ownership, partitioning, worker topology, or cross-chunk coordination scheme has been selected.
+One possible structural simplification is to ensure that only one simulation worker can modify a particular chunk at a time, reducing synchronization with other simulation workers and ideally with the world-data service. The [ownership principles](#state-ownership-and-publication) accept exclusive access for batches as a design direction; using chunks as the unit remains exploratory. No partitioning, worker topology, or cross-chunk coordination scheme has been selected.
 
 ### Direct mutation of distant chunks
 
@@ -124,4 +247,4 @@ This remains an architecture idea, not a selected mechanism. Acquiring and relea
 
 Simulation must support active work across the entire world, including distant areas. When system resources are insufficient, processing may be throttled and prioritized according to a policy still to be designed. This must preserve the [principles for time, observation, and overload](../DESIGN_PRINCIPLES.md#budget-memory-and-define-overload-behavior), including coordinated slowdown under sustained overload.
 
-Persistent resource shortages must be communicated to the player. Ideally the game should also report how much the simulation is currently slowed, expressed relative to its normal pace. Exact notification thresholds, measurement windows, and UI are not selected.
+Persistent capacity shortages must be communicated through the [global overload feedback](#global-overload-feedback), including measured simulation speed and an unobtrusive warning. Exact notification thresholds, measurement windows, and UI layout are not selected.
