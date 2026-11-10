@@ -98,6 +98,18 @@ Do not promise a fixed percentage of production-rate accuracy before the prototy
 
 Numeric production-rate tolerances are deferred to prototype acceptance criteria in **SIM-03**. Overload/recovery thresholds and measurement windows belong to **SIM-07**, while work budgets and the implementation of the shared slowdown policy remain design work under **SIM-06** and **SIM-08**. Revisit these before accepting the simulation prototype or committing to the corresponding scheduling design.
 
+## Bounded work and fairness
+
+When processing capacity is insufficient, defer accepting new operations. Deferred work has not started: do not consume its resources or advance its operation progress while it waits. Preserve a way to reconsider it later so a capacity-related deferral cannot silently lose work. At eventual acceptance, apply the existing prerequisite, payment, and SIM-05 timing rules; waiting alone does not complete an operation. The representation of deferred work and its wake-up mechanism remain unselected.
+
+Already accepted operations and deliveries remain obligations. Queue pressure must not discard their cargo, completion, or production results. Give processing of accepted work, including completion and result handover, preference over accepting additional work, while ensuring that new eligible work continues to receive opportunities for admission. This is not an absolute priority that can indefinitely starve new work. Processing opportunity does not waive gameplay prerequisites or guarantee access to scarce materials.
+
+Repeated notifications may be combined when their meaning is preserved. Several material arrivals at a workstation can often produce one pending request to reconsider its prerequisites. Every inventory change and completion must still be accounted for, and timing information required by SIM-05 compensation must remain available. Coalescing a request to recheck state must not discard the underlying resource transfers or accepted obligations.
+
+All active regions must receive processing regardless of player presence. A large industrial area may legitimately need more CPU time than a single workstation; equal CPU allocation per chunk is not required. Continuous load in one region must not leave others without processing indefinitely. Player presence may prioritize delivery of visual data, but must not accelerate nearby production. Client requests and subscriptions to the world-data service need bounded budgets so they cannot displace simulation work.
+
+These admission, obligation, notification, and fairness rules partially resolve **SIM-06**. Concrete limits for events, routing and deferred work, budget distribution between work classes and regions, bounded representation and retry of deferred admission, and client-request budgets remain to be designed and measured. Coordinate them with the common-clock slowdown policy and **SIM-03**, **SIM-08**, and **SIM-12**. No queue structure, threading model, or numeric limit is selected.
+
 ## Consistency of condition checks
 
 Not every condition check requires a coherent world snapshot. For explicitly discussed cases, recent observations obtained at different moments may be sufficient, even when their combination describes a state that never existed simultaneously. A block already checked need not be checked again merely because it changed before the rest of the validation finished.
