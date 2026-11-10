@@ -673,7 +673,8 @@ pub const WorldDataService = struct {
     captured_work_generation: u64 = 0,
     processing_deferred_work: bool = false,
     deferred_work_log: DeferredWorkLog = .{},
-    pending: std.ArrayList(Pending) = .empty,
+    /// Retained mutations stay FIFO without shifting request payloads on drain/retry.
+    pending: std.Deque(Pending) = .empty,
     next_intent: std.atomic.Value(u64) = .init(1),
     outstanding_operations: std.atomic.Value(usize) = .init(0),
     outstanding_loads: std.atomic.Value(usize) = .init(0),
@@ -848,7 +849,7 @@ pub const WorldDataService = struct {
     fn lifecycleObservations(self: *WorldDataService) save_lifecycle.Observations {
         return .{
             .source_holds = self.source_holds.count(),
-            .pending_commands = self.pending.items.len + @as(usize, if (self.blueprint_task != null) 1 else 0),
+            .pending_commands = self.pending.len + @as(usize, if (self.blueprint_task != null) 1 else 0),
             .pending_reads = self.read_pending.count() - self.deferred_reads.count(),
             .waiting_queries = self.waiting_reads.items.len,
             .compactor_active = self.compactor != null,
@@ -1146,7 +1147,7 @@ pub const WorldDataService = struct {
     /// operation immediately, so the fence must already belong to this attempt.
     fn requestSaveTransition(self: *WorldDataService, id: u64, final: bool) void {
         defer self.updateSimulationPause();
-        const commands = self.pending.items.len + @as(usize, if (self.blueprint_task != null) 1 else 0);
+        const commands = self.pending.len + @as(usize, if (self.blueprint_task != null) 1 else 0);
         if (self.lifecycle.request(.{ .id = id, .final = final }, commands) == .none) {
             // Keep the original intent/fence. A running writer owns the next
             // wake; an idle drain may retain FIFO work without an Apply.
@@ -1157,7 +1158,7 @@ pub const WorldDataService = struct {
                 self.retryPending();
             } else if (self.blueprint_task != null) {
                 self.retryWaitingBlueprintApplication();
-            } else if (self.pending.items.len != 0) {
+            } else if (self.pending.len != 0) {
                 self.retryPending();
             }
             return;
@@ -1265,11 +1266,11 @@ pub const WorldDataService = struct {
         // Discover and prioritize the player's dependencies even behind a FIFO head.
         const dependencies_ready = if (ordered) self.dependenciesReady(request) else true;
         const admission_ready = if (ordered) self.admissible(request) else true;
-        if (ordered and (self.blueprint_task != null or self.pending.items.len != 0 or !dependencies_ready or !admission_ready)) {
+        if (ordered and (self.blueprint_task != null or self.pending.len != 0 or !dependencies_ready or !admission_ready)) {
             if (!requestClient(request).simulation) {
                 if (self.source_holds.count() != 0) self.status.capture_waited_operations +%= 1 else if (self.read_pending.count() != 0) self.status.dependency_waited_operations +%= 1;
             }
-            self.pending.append(self.allocator, .{ .request = request, .since = persistence.now(self.io) }) catch @panic("OOM");
+            self.pending.pushBack(self.allocator, .{ .request = request, .since = persistence.now(self.io) }) catch @panic("OOM");
             return;
         }
         self.processAdmitted(request);
@@ -1426,7 +1427,7 @@ pub const WorldDataService = struct {
                 self.read_discovered = false;
                 self.operation_deferred = false;
                 edit.client.pending.responses.ensureUnusedCapacity(self.allocator, 1) catch {
-                    self.pending.insert(self.allocator, 0, .{ .request = request, .since = self.processing_since orelse persistence.now(self.io) }) catch @panic("OOM");
+                    self.pending.pushFront(self.allocator, .{ .request = request, .since = self.processing_since orelse persistence.now(self.io) }) catch @panic("OOM");
                     self.operation_deferred = true;
                     self.failPersistence(error.OutOfMemory);
                     return;
@@ -1435,7 +1436,7 @@ pub const WorldDataService = struct {
                 var reply_moved = false;
                 defer if (!reply_moved) result.chunk.deinit(self.allocator);
                 if (self.read_discovered or self.operation_deferred) {
-                    self.pending.insert(self.allocator, 0, .{ .request = request, .since = self.processing_since orelse persistence.now(self.io) }) catch @panic("OOM");
+                    self.pending.pushFront(self.allocator, .{ .request = request, .since = self.processing_since orelse persistence.now(self.io) }) catch @panic("OOM");
                     return;
                 }
                 if (result.status == .success) {
@@ -1527,7 +1528,7 @@ pub const WorldDataService = struct {
             if (err == error.OutOfMemory or err == error.JournalBackpressure) {
                 // Finalization transferred ownership to this command. Keep its payload
                 // for a retry instead of destroying a checked, finalized design.
-                self.pending.insert(self.allocator, 0, .{ .request = .{ .blueprint_save = save }, .since = self.processing_since orelse persistence.now(self.io), .waiting_for_journal = err == error.JournalBackpressure }) catch @panic("OOM retaining blueprint Save");
+                self.pending.pushFront(self.allocator, .{ .request = .{ .blueprint_save = save }, .since = self.processing_since orelse persistence.now(self.io), .waiting_for_journal = err == error.JournalBackpressure }) catch @panic("OOM retaining blueprint Save");
                 self.operation_deferred = true;
                 self.failPersistence(err);
                 if (err == error.JournalBackpressure) self.drainBlueprintJournal();
@@ -1645,7 +1646,8 @@ pub const WorldDataService = struct {
     }
 
     fn discardPendingBlueprintSaves(self: *WorldDataService) void {
-        for (self.pending.items) |pending| if (pending.request == .blueprint_save) {
+        var pending_commands = self.pending.iterator();
+        while (pending_commands.next()) |pending| if (pending.request == .blueprint_save) {
             var candidate = pending.request.blueprint_save.candidate;
             candidate.deinit(self.allocator);
             self.allocator.free(pending.request.blueprint_save.name);
@@ -1997,14 +1999,14 @@ pub const WorldDataService = struct {
         const coords, const local = world_module.splitBlockCoords(edit.operation.block);
         const id = self.layout.encodeChunkCoords(coords);
         edit.client.pending.responses.ensureUnusedCapacity(self.allocator, 1) catch {
-            self.pending.insert(self.allocator, 0, .{ .request = .{ .operation = edit }, .since = self.processing_since orelse persistence.now(self.io) }) catch @panic("OOM");
+            self.pending.pushFront(self.allocator, .{ .request = .{ .operation = edit }, .since = self.processing_since orelse persistence.now(self.io) }) catch @panic("OOM");
             self.operation_deferred = true;
             self.failPersistence(error.OutOfMemory);
             return;
         };
         const result = self.tryCommitBlueprintFulfillment(edit.operation) catch |err| blk: {
             if (err == error.DependencyPending or err == error.CapturePending or err == error.RoadUpdatesFull or err == error.JournalBackpressure) {
-                self.pending.insert(self.allocator, 0, .{ .request = .{ .operation = edit }, .since = self.processing_since orelse persistence.now(self.io), .waiting_for_journal = err == error.JournalBackpressure }) catch @panic("OOM");
+                self.pending.pushFront(self.allocator, .{ .request = .{ .operation = edit }, .since = self.processing_since orelse persistence.now(self.io), .waiting_for_journal = err == error.JournalBackpressure }) catch @panic("OOM");
                 self.operation_deferred = true;
                 if (err == error.JournalBackpressure) self.drainBlueprintJournal();
                 return;
@@ -2312,7 +2314,7 @@ pub const WorldDataService = struct {
         }
         self.scheduleWatchdog();
         self.status.overdue = self.lifecycle.overdue;
-        self.status.pending_commands = self.pending.items.len + @as(usize, if (self.blueprint_task != null) 1 else 0) + self.blueprint_road_queue.count;
+        self.status.pending_commands = self.pending.len + @as(usize, if (self.blueprint_task != null) 1 else 0) + self.blueprint_road_queue.count;
         self.status.resident_chunks = self.worker_state.modified_chunks.count();
         self.status.source_count = self.source_holds.count();
         self.status_mutex.lockUncancelable(self.io);
@@ -2382,15 +2384,15 @@ pub const WorldDataService = struct {
     fn retryPending(self: *WorldDataService) void {
         while (true) {
             self.advanceSaveDrain();
-            if (self.pending.items.len == 0) break;
-            if (self.internal_capture_suspended and self.pending.items[0].waiting_for_journal) break;
+            if (self.pending.len == 0) break;
+            if (self.internal_capture_suspended and self.pending.frontPtr().?.waiting_for_journal) break;
             self.blocked_dependency_error = null;
-            if (!self.dependenciesReady(self.pending.items[0].request)) {
+            if (!self.dependenciesReady(self.pending.frontPtr().?.request)) {
                 if (self.blocked_dependency_error) |err| self.noteDrainFailure(err);
                 break;
             }
-            if (!self.admissible(self.pending.items[0].request)) break;
-            const pending = self.pending.orderedRemove(0);
+            if (!self.admissible(self.pending.frontPtr().?.request)) break;
+            const pending = self.pending.popFront().?;
             self.processing_since = pending.since;
             self.processAdmitted(pending.request);
             self.processing_since = null;
@@ -2701,7 +2703,7 @@ pub const WorldDataService = struct {
                 // An uncommitted failure cannot free journal space. Retrying
                 // blocked mutations would start another failing prefix writer.
                 if (committed) {
-                    if (self.pending.items.len != 0) self.pending.items[0].waiting_for_journal = false;
+                    if (self.pending.len != 0) self.pending.frontPtr().?.waiting_for_journal = false;
                     self.retryWaitingBlueprintApplication();
                     self.retryPending();
                 } else if (handoff) {
@@ -2715,7 +2717,8 @@ pub const WorldDataService = struct {
     }
 
     fn oldestPlayerWait(self: *WorldDataService) ?i96 {
-        for (self.pending.items) |pending| if (!requestClient(pending.request).simulation) return pending.since;
+        var pending_commands = self.pending.iterator();
+        while (pending_commands.next()) |pending| if (!requestClient(pending.request).simulation) return pending.since;
         return null;
     }
 
@@ -2931,7 +2934,7 @@ pub const WorldDataService = struct {
     }
 
     fn evictEligible(self: *WorldDataService) void {
-        if (self.pending.items.len != 0 or self.waiting_reads.items.len != 0 or self.read_pending.count() != 0) return;
+        if (self.pending.len != 0 or self.waiting_reads.items.len != 0 or self.read_pending.count() != 0) return;
         var candidates: std.ArrayList(ChunkId) = .empty;
         defer candidates.deinit(self.allocator);
         var chunks = self.worker_state.modified_chunks.iterator();
@@ -6808,7 +6811,7 @@ test "permanent blueprint library limits reject terminally and preserve later co
         defer fixture.deinit();
         if (exhausted_ids) fixture.service.worker_state.blueprints.max_definition_id = std.math.maxInt(u64) else fixture.service.blueprint_library_bytes = (blueprint_wire.Limits{}).max_state_bytes;
         fixture.service.saveBlueprint(try fixture.request(1));
-        try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.items.len);
+        try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.len);
         try std.testing.expectEqual(@as(u32, 0), fixture.service.worker_state.blueprints.definitions.count());
         try std.testing.expectEqual(@as(u64, 1), fixture.client.resolved_request);
         fixture.service.worker_state.blueprints.max_definition_id = 0;
@@ -6824,24 +6827,75 @@ test "permanent blueprint library limits reject terminally and preserve later co
     }
 }
 
-test "shutdown refuses new blueprint submissions and frees retained unpublished Save payloads" {
+test "shutdown frees only live blueprint Save payloads across a wrapped retained queue" {
+    const a = std.testing.allocator;
     var fixture: BlueprintSaveFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
-    const retained = try fixture.request(1);
-    try fixture.service.pending.append(std.testing.allocator, .{ .request = .{ .blueprint_save = retained }, .since = 0 });
-    fixture.service.is_shutting_down.store(true, .release);
-    var another = try fixture.request(2);
+    const service = &fixture.service;
+    try service.pending.ensureTotalCapacityPrecise(a, 4);
+    // Real completed Saves leave stale, already-transferred payloads in the ring.
+    for (1..4) |id| {
+        try service.pending.pushBack(a, .{ .request = .{ .blueprint_save = try fixture.request(id) }, .since = 0 });
+        service.retryPending();
+    }
+    for (4..7) |id| try service.pending.pushBack(a, .{ .request = .{ .blueprint_save = try fixture.request(id) }, .since = 0 });
+    try std.testing.expect(service.pending.head + service.pending.len > service.pending.buffer.len);
+    service.is_shutting_down.store(true, .release);
+    var another = try fixture.request(7);
     defer {
-        another.candidate.deinit(std.testing.allocator);
-        std.testing.allocator.free(another.name);
+        another.candidate.deinit(a);
+        a.free(another.name);
     }
     try std.testing.expectError(error.ServiceStopped, fixture.client.trySaveBlueprint(1, "Stopped", &another.candidate));
     try std.testing.expectEqual(rules.BlockType.planks, another.candidate.definition.cells[0]);
     try std.testing.expectError(error.ServiceStopped, fixture.client.tryApplyBlueprint(1, 1, .{ 0, 0, 48 }, 0));
-    try std.testing.expectEqual(@as(usize, 0), fixture.service.requests.items.items.len);
-    // The fixture uses the same retained-payload cleanup as destroy; the testing
-    // allocator verifies ownership is released even without publication or reply.
+    try std.testing.expectEqual(@as(usize, 0), service.requests.items.items.len);
+    // Fixture shutdown must free both wrapped live spans exactly once, while
+    // stale slots and the library's transferred payloads retain their own owners.
+}
+
+test "wrapped retained Saves preserve FIFO identity wait age and fence through allocation failure" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    try service.pending.ensureTotalCapacityPrecise(a, 4);
+    for (1..4) |id| {
+        try service.pending.pushBack(a, .{ .request = .{ .blueprint_save = try fixture.request(id) }, .since = 0 });
+        service.retryPending();
+    }
+    for (4..7) |id| try service.pending.pushBack(a, .{ .request = .{ .blueprint_save = try fixture.request(id) }, .since = @intCast(id * 10) });
+    try std.testing.expect(service.pending.head + service.pending.len > service.pending.buffer.len);
+    _ = service.lifecycle.request(.{ .id = 100, .final = false }, service.pending.len);
+    // Reserving publication fails after popping the head. Retaining that owned
+    // command must reuse its slot without moving it behind the later Saves.
+    {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+        service.allocator = failing.allocator();
+        defer service.allocator = a;
+        service.retryPending();
+        try std.testing.expect(failing.has_induced_failure);
+    }
+    try std.testing.expectEqual(@as(usize, 3), service.pending.len);
+    try std.testing.expectEqual(@as(usize, 3), service.lifecycle.queued.?.fence_remaining);
+    try std.testing.expectEqual(@as(u64, 4), service.pending.front().?.request.blueprint_save.request_id);
+    try std.testing.expectEqual(@as(?i96, 40), service.oldestPlayerWait());
+    try std.testing.expectEqual(@as(u64, 3), fixture.client.resolved_request);
+    service.retryPending();
+    try std.testing.expectEqual(@as(usize, 0), service.pending.len);
+    try std.testing.expect(service.lifecycle.queued == null);
+    try std.testing.expectEqual(@as(?i96, null), service.oldestPlayerWait());
+    var results: std.ArrayList(BlueprintResult) = .empty;
+    defer results.deinit(a);
+    fixture.client.takeBlueprintResults(&results);
+    try std.testing.expectEqual(@as(usize, 6), results.items.len);
+    for (results.items, 1..) |result, id| {
+        try std.testing.expectEqual(id, result.request_id);
+        try std.testing.expectEqual(.success, result.status);
+        try std.testing.expectEqual(id, result.definition_id.?);
+    }
 }
 
 test "blueprint journal backpressure drains accepted prefix before a queued final Save" {
@@ -6869,7 +6923,7 @@ test "blueprint journal backpressure drains accepted prefix before a queued fina
     try std.testing.expect(fixture.service.operation_deferred);
     try std.testing.expect(fixture.service.job != null);
     fixture.service.requestSaveTransition(100, true);
-    try std.testing.expectEqual(@as(usize, 1), fixture.service.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 1), fixture.service.pending.len);
     const end = persistence.now(io) + 10 * std.time.ns_per_s;
     while (persistence.now(io) < end) {
         fixture.service.drainPersistenceEvents();
@@ -6878,7 +6932,7 @@ test "blueprint journal backpressure drains accepted prefix before a queued fina
     }
     try std.testing.expectEqual(@as(u64, 100), fixture.service.status.intent_id);
     try std.testing.expectEqual(persistence.Phase.complete, fixture.service.status.phase);
-    try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.len);
     try std.testing.expectEqual(@as(u32, 2), store.blueprints.definitions.count());
     try std.testing.expectEqual(@as(usize, 0), fixture.service.blueprint_journal.items.len);
 }
@@ -7270,7 +7324,7 @@ const BlueprintRoadThroughputTest = struct {
         service.processRequest(replay);
         service.processRequest(npc_replay);
         const retained_replays: usize = if (has_road_capture_gate) 2 else 0;
-        try std.testing.expectEqual(retained_replays, service.pending.items.len);
+        try std.testing.expectEqual(retained_replays, service.pending.len);
         const drain_start = persistence.now(io);
         const drain_cpu_start = if (cpu_clock_available) Io.Clock.cpu_thread.now(io).toNanoseconds() else 0;
         var turns: usize = 0;
@@ -7281,7 +7335,7 @@ const BlueprintRoadThroughputTest = struct {
             try std.testing.expectEqual(has_road_capture_gate, !service.admissible(replay));
             try std.testing.expectEqual(has_road_capture_gate, !service.admissible(npc_replay));
             try std.testing.expectEqual(has_road_capture_gate, service.simulationPaused());
-            try std.testing.expectEqual(retained_replays, service.pending.items.len);
+            try std.testing.expectEqual(retained_replays, service.pending.len);
             try std.testing.expectEqual(fills + @as(usize, if (has_road_capture_gate) 0 else 1), client.pending.responses.items.len);
             try std.testing.expectEqual(@as(usize, if (has_road_capture_gate) 0 else 1), npc.pending.responses.items.len);
             const processed = if (@hasDecl(WorldDataService, "processBlueprintRoadUpdatesWithBudget"))
@@ -7303,7 +7357,7 @@ const BlueprintRoadThroughputTest = struct {
         try std.testing.expectEqual(site_count * 4 + chunk_count, work_units);
         try std.testing.expectEqual((work_units + batch_budget - 1) / batch_budget, turns);
         try std.testing.expectEqual(@as(usize, 0), service.blueprint_road_queue.count);
-        try std.testing.expectEqual(@as(usize, 0), service.pending.items.len);
+        try std.testing.expectEqual(@as(usize, 0), service.pending.len);
         try std.testing.expect(service.admissible(replay) and service.admissible(npc_replay));
         try std.testing.expect(!service.simulationPaused());
         try std.testing.expectEqual(fills + 1, client.pending.responses.items.len);
@@ -7571,7 +7625,7 @@ test "blueprint singleton journal limits reject before publication or an empty d
         try std.testing.expectEqual(.resource_exhausted, replies.items[0].status);
         try std.testing.expectEqual(@as(u32, 0), fixture.service.worker_state.blueprints.definitions.count());
         try std.testing.expectEqual(@as(usize, 0), fixture.service.blueprint_journal.items.len);
-        try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.items.len);
+        try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.len);
         try std.testing.expectEqual(null, fixture.service.job);
     }
 }
@@ -7588,7 +7642,7 @@ test "small encoder queues retain journal admission when working memory is avail
     try std.testing.expectEqual(@as(u32, 1), fixture.service.worker_state.blueprints.definitions.count());
     try std.testing.expectEqual(@as(usize, 1), fixture.service.blueprint_journal.items.len);
     try std.testing.expectEqual(@as(usize, 1), fixture.service.blueprint_journal_summary.operation_count);
-    try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.len);
 }
 
 const BlueprintJournalBudgetTest = struct {
@@ -7704,7 +7758,7 @@ test "blueprint journal memory backpressure preserves physical inventory and pro
     defer fixture.service.job = null;
     BlueprintJournalBudgetTest.fill(&fixture, 1, 0, .planks);
     try std.testing.expect(fixture.service.operation_deferred);
-    try std.testing.expectEqual(@as(usize, 1), fixture.service.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 1), fixture.service.pending.len);
     try std.testing.expectEqual(@as(usize, 0), fixture.client.pending.responses.items.len);
     try std.testing.expectEqualDeep(before, fixture.service.blueprint_journal_summary);
     try std.testing.expectEqual(@as(u32, 3), fixture.service.worker_state.blueprints.instances.get(1).?.remaining);
@@ -7817,7 +7871,7 @@ test "budgeted blueprint writer drains prefixes retries fills and restores an at
     try BlueprintJournalBudgetTest.allowance(&fixture.service, (try fixture.service.blueprintJournalMemory(one, std.ArrayList(blueprint_wire.Op).growCapacity(1))) + 128);
     BlueprintJournalBudgetTest.fill(&fixture, 4, 2, .planks);
     try std.testing.expect(fixture.service.operation_deferred);
-    try std.testing.expectEqual(@as(usize, 1), fixture.service.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 1), fixture.service.pending.len);
     try std.testing.expectEqualDeep(accepted_suffix, fixture.service.blueprint_journal_summary);
     try std.testing.expectEqual(@as(u32, 1), fixture.service.worker_state.blueprints.instances.get(1).?.remaining);
     try std.testing.expectEqual(@as(?u8, @intFromEnum(rules.BlockType.planks)), fixture.service.players.get(1).?.inventory);
@@ -7825,7 +7879,7 @@ test "budgeted blueprint writer drains prefixes retries fills and restores an at
     fixture.service.limits.working_bytes = 64 * 1024 * 1024;
     gate.released.set(io);
     try BlueprintJournalBudgetTest.waitJob(&fixture.service);
-    try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 0), fixture.service.pending.len);
     try std.testing.expectEqual(OperationStatus.success, fixture.client.pending.responses.items[3].operation.?.status);
     try std.testing.expectEqual(@as(u32, 2), store.blueprints.instances.get(1).?.remaining);
     try std.testing.expectEqual(@as(u32, 0), fixture.service.worker_state.blueprints.instances.get(1).?.remaining);
@@ -8013,7 +8067,7 @@ const PreparedBlueprintDrainTest = struct {
         try std.testing.expectEqual(intent, service.status.intent_id);
         try std.testing.expectEqual(persistence.Phase.complete, service.status.phase);
         try std.testing.expect(!service.status.active);
-        try std.testing.expectEqual(@as(usize, 0), service.pending.items.len);
+        try std.testing.expectEqual(@as(usize, 0), service.pending.len);
     }
 
     fn reopen(self: *@This(), definitions: u32, instance: bool) !void {
@@ -8052,7 +8106,7 @@ test "prepared blueprint Apply retries synchronous journal drain failure before 
     service.processRequest(.{ .blueprint_save = try f.fixture.request(3) });
     service.requestSaveTransition(100, true);
     try f.expectWaiting(task, 100, 2, error.ManifestCapacityExceeded, false);
-    try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 1), service.pending.len);
     try std.testing.expectEqual(@as(u32, 1), service.worker_state.blueprints.definitions.count());
     try std.testing.expect(service.lifecycle.queued.?.retry == .available);
     try f.expectNoOrdinaryRetry();
@@ -8149,6 +8203,55 @@ test "prepared blueprint Apply revalidates dependencies after synchronous journa
     try f.reopen(1, false);
 }
 
+test "wrapped retained edits validate in order and Save freezes only its selected prefix" {
+    const a = std.testing.allocator;
+    var f: PreparedBlueprintDrainTest = undefined;
+    try f.init();
+    defer f.deinit();
+    const service = &f.fixture.service;
+    const client = &f.fixture.client;
+    const id = PreparedBlueprintDrainTest.chunk_id;
+    const block: [3]u32 = .{ 10, 10, 70 };
+    var chunk = WorldChunk.initEmpty();
+    try std.testing.expectEqual(OperationStatus.success, try chunk.tryApply(a, .{ 10, 10, 5 }, .{ .put = .stone }));
+    chunk.chunk_revision = 1;
+    try service.worker_state.modified_chunks.put(a, id, chunk);
+    try service.pending.ensureTotalCapacityPrecise(a, 4);
+    // Three actual conflict results advance the ring without changing terrain.
+    for (2..5) |request_id| {
+        try service.source_holds.put(a, id, 1);
+        service.processRequest(.{ .operation = .{ .client = client, .request_id = request_id, .operation = .{ .block = block, .action = .remove } } });
+        try std.testing.expect(service.source_holds.remove(id));
+        service.retryPending();
+    }
+    try service.source_holds.put(a, id, 1);
+    for (5..7) |request_id| service.processRequest(.{ .operation = .{ .client = client, .request_id = request_id, .operation = .{ .block = block, .action = .{ .put = .snow } } } });
+    service.requestSaveTransition(100, false);
+    try std.testing.expectEqual(@as(usize, 2), service.lifecycle.queued.?.fence_remaining);
+    // This later Remove must observe the preceding Put, but belongs after Save.
+    service.processRequest(.{ .operation = .{ .client = client, .request_id = 7, .operation = .{ .block = block, .action = .remove } } });
+    try std.testing.expect(service.pending.head + service.pending.len > service.pending.buffer.len);
+    try std.testing.expect(service.source_holds.remove(id));
+    service.retryPending();
+    try f.waitSave(100);
+    try std.testing.expectEqual(@as(usize, 0), service.pending.len);
+    const replies = client.pending.responses.items;
+    try std.testing.expectEqual(@as(usize, 6), replies.len);
+    const statuses = [_]OperationStatus{ .already_removed, .already_removed, .already_removed, .success, .already_exists, .success };
+    for (replies, statuses, 2..) |reply, expected, request_id| {
+        try std.testing.expectEqual(request_id, reply.operation.?.request_id);
+        try std.testing.expectEqual(expected, reply.operation.?.status);
+    }
+    try std.testing.expectEqual(rules.BlockType.none, service.worker_state.modified_chunks.get(id).?.content.getBlock(.{ 10, 10, 6 }));
+    // Install the committed WAL prefix without capturing the later live edit.
+    try f.store.compact();
+    const encoded = (try f.store.readChunk(a, id)).?;
+    defer a.free(encoded);
+    var saved = try format.decodeChunk(a, f.store.world_uuid, encoded, f.store.dimensions);
+    defer saved.deinit(a);
+    try std.testing.expectEqual(@intFromEnum(rules.BlockType.snow), saved.blocks[transformations.index(.{ 10, 10, 6 })]);
+}
+
 test "coalesced ordinary Save retries a prepared blueprint without widening its original fence" {
     const a = std.testing.allocator;
     const io = std.testing.io;
@@ -8190,8 +8293,8 @@ test "coalesced ordinary Save retries a prepared blueprint without widening its 
         try std.testing.expectEqual(next + 2, service.next_intent.load(.monotonic));
         try std.testing.expectEqual(progress + 1, service.status.progress_generation);
         try f.expectWaiting(task, original, 1, error.ManifestCapacityExceeded, false);
-        try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
-        try std.testing.expectEqual(@as(u64, 3), service.pending.items[0].request.blueprint_save.request_id);
+        try std.testing.expectEqual(@as(usize, 1), service.pending.len);
+        try std.testing.expectEqual(@as(u64, 3), service.pending.frontPtr().?.request.blueprint_save.request_id);
         try std.testing.expectEqual(prepared_blocks, task.snapshot.chunks.get(PreparedBlueprintDrainTest.chunk_id).?.blocks);
         try std.testing.expectEqual(prepared_fulfilled, (try task.result.?).prepared.publication.instance.fulfilled.ptr);
         try std.testing.expect(service.lifecycle.queued.?.retry == .available);
@@ -8232,7 +8335,7 @@ test "coalesced ordinary Save retries a prepared blueprint without widening its 
         try std.testing.expectEqual(progress, service.status.progress_generation);
         try std.testing.expectEqual(original, service.lifecycle.queued.?.intent.id);
         try std.testing.expectEqual(@as(usize, 1), service.lifecycle.queued.?.fence_remaining);
-        try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
+        try std.testing.expectEqual(@as(usize, 1), service.pending.len);
         try std.testing.expect(service.read_failed.contains(PreparedBlueprintDrainTest.chunk_id));
         try std.testing.expect(service.blueprint_task == task);
         try std.testing.expect(task.waiting_for_journal);
@@ -8358,7 +8461,7 @@ test "failed ordinary and canceled final blueprint prefixes wait for explicit Sa
         try std.testing.expectEqual(next, service.next_intent.load(.monotonic));
         try std.testing.expectEqual(@as(u64, 0), f.store.sequence);
         try std.testing.expect(service.lifecycle.queued.?.retry == .available);
-        try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
+        try std.testing.expectEqual(@as(usize, 1), service.pending.len);
         try std.testing.expectEqual(blocks, task.snapshot.chunks.get(PreparedBlueprintDrainTest.chunk_id).?.blocks);
         try std.testing.expectEqual(fulfilled, (try task.result.?).prepared.publication.instance.fulfilled.ptr);
         try AsyncBlueprintPrefixTest.expectSleeping(&f);
@@ -8641,7 +8744,7 @@ test "queued Save handoff respects read gates without retrying later journal wor
     try std.testing.expect(service.status.error_name == null);
     try std.testing.expect(service.lifecycle.queued.?.retry == .available);
     try std.testing.expectEqual(@as(usize, 0), service.lifecycle.queued.?.fence_remaining);
-    try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 1), service.pending.len);
     try std.testing.expectEqual(epoch, service.capture_epoch);
     try std.testing.expectEqual(next, service.next_intent.load(.monotonic));
     // Releasing the remaining gate uses the existing save-readiness path.
@@ -8777,8 +8880,8 @@ test "freeing road queue capacity resumes a retained fill while capture is suspe
         .action = .{ .put = .country_road_solid },
         .blueprint = .{ .instance_id = 1, .cell_index = 0 },
     } } });
-    try std.testing.expectEqual(@as(usize, 1), service.pending.items.len);
-    try std.testing.expect(!service.pending.items[0].waiting_for_journal);
+    try std.testing.expectEqual(@as(usize, 1), service.pending.len);
+    try std.testing.expect(!service.pending.frontPtr().?.waiting_for_journal);
     try std.testing.expectEqual(@as(usize, 0), client.pending.responses.items.len);
     try std.testing.expectEqual(@as(u32, 1), service.worker_state.blueprints.instances.get(1).?.remaining);
     service.noteDrainFailure(error.Io);
@@ -8786,7 +8889,7 @@ test "freeing road queue capacity resumes a retained fill while capture is suspe
     // The head has no resident roads, so one real processor turn frees a slot
     // and must wake the capacity-blocked fill despite the suspended capture.
     _ = service.processBlueprintRoadUpdatesWithBudget(1);
-    try std.testing.expectEqual(@as(usize, 0), service.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 0), service.pending.len);
     try std.testing.expectEqual(@as(usize, 1), client.pending.responses.items.len);
     try std.testing.expectEqual(OperationStatus.success, client.pending.responses.items[0].operation.?.status);
     try std.testing.expectEqual(@as(u32, 0), service.worker_state.blueprints.instances.get(1).?.remaining);
@@ -9334,7 +9437,7 @@ test "pending roads allow player NPC and timer progress while source holds still
     try std.testing.expect(service.admissible(npc));
     service.processRequest(player);
     service.processRequest(npc);
-    try std.testing.expectEqual(@as(usize, 0), service.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 0), service.pending.len);
     try std.testing.expectEqual(OperationStatus.success, f.fixture.client.pending.responses.items[0].operation.?.status);
     try std.testing.expectEqual(OperationStatus.success, simulation.pending.responses.items[0].operation.?.status);
     service.processTransformations();
@@ -9554,4 +9657,11 @@ test "background work warnings stay bounded across bursts, error changes, and re
     try std.testing.expect(!log.failure(2 * interval + 1));
     try std.testing.expect(!log.recover());
     try std.testing.expect(log.failure(3 * interval));
+}
+
+// The benchmark uses the exact private Request/Pending layout without exposing it
+// as a service API. The dedicated build step filters out all other tests.
+test "retained command queue benchmark" {
+    if (@import("builtin").mode != .ReleaseFast) return error.SkipZigTest;
+    try @import("pending_command_benchmark.zig").run(WorldDataService.Pending, (persistence.Limits{}).pending_commands);
 }

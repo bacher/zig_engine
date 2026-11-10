@@ -181,7 +181,9 @@ Commands carry intent, never replacement chunk snapshots. A put requires air and
 
 Structural validation reads only the inclusive 28-cell cube around the edited target. Recursive support searches keep that center, and revalidated dependents must also stay within their own 28-cell cubes. Construction indices are collected from at most 27 intersecting chunk IDs in deterministic target-relative order. Support outside the bounds cannot justify approval; edits are rejected conservatively if no remaining route can be proved inside them. This requires no persistent support/dependency metadata. See [placement windows](block-placement.md#fixed-support-window).
 
-The service sends independently owned snapshots/face arrays. Consumers must free rejected or unused payloads. Client endpoints remain owned by the service until it is destroyed. Request/reply mailboxes are unbounded: producers briefly lock to enqueue, but there is no queue-size backpressure policy.
+The service sends independently owned snapshots/face arrays. Consumers must free rejected or unused payloads. Client endpoints remain owned by the service until it is destroyed. The underlying request/reply mailboxes are unbounded and transfer queued buffers by swapping. Operation and terrain-load submission retain their `pending_commands` admission limits; an operation slot remains held until the client collects its result.
+
+Mutations deferred by loading, capture, blueprint admission, or journal pressure stay in a worker-owned `std.Deque` FIFO. Removing or retrying its head does not shift later request payloads. This retains the existing admission, per-command ordering, save-prefix, and payload ownership rules; see the [queue measurements](validation/retained-command-queue.md).
 
 ## Revisions and invalidation
 
