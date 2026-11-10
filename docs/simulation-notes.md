@@ -36,9 +36,30 @@ The world-data service and simulation will remain together in one server process
 
 Client threads that provide the player experience may use a more balanced throughput/latency policy and prioritize responsiveness where it does not degrade overall system performance or sustainable simulation throughput. This applies to current in-process clients as well as future network clients. Their requests and subscriptions must not overload the world-data service: client pressure on that shared layer can delay simulation work even when the simulation itself has not changed. Specific budgets and coordination mechanisms remain open; the [design principles](../DESIGN_PRINCIPLES.md#prioritize-throughput-over-latency) define the priority.
 
+## State ownership and publication
+
+Each mutable fact needs a clear authoritative source and a defined way to coordinate changes. This does not require a single global owner or a total order for independent events. The agreed responsibility split is:
+
+| State | Responsible component |
+| --- | --- |
+| Blocks, chunks, their loading and publication of changes | World-data service |
+| Accepted operations and deliveries, their timing, paid costs, and obligations | Simulation |
+| Indexes for discovering work, dependencies, and routing | Simulation, updated from relevant world changes |
+| NPC models, animation, and visual movement separation | Client |
+
+Simulation should process its own task state without repeatedly querying the world-data service for information already established. A delivery can retain its completion time and paid status without reading the route's blocks again while it progresses. Query world data when a decision actually needs it, subject to the existing condition-check policies. Inventory authority and its relationship to physical stored goods remain deferred to the warehouse specification. Do not introduce independently writable copies of the same resource count.
+
+Exclusive mutation access for a batch of work is an accepted design direction: an executor may receive the right to modify a defined set of data, perform several changes, and publish the result with less per-edit coordination. This does not select chunks as the ownership unit, permanently bind data to a thread, or choose a lock or messaging mechanism. Component responsibility remains distinct from temporary write access; a simulation executor may modify world-data service data through such a grant without creating a second authoritative copy.
+
+Before granting exclusive mutation, account for all users of the data, including persistence, loading, and other simulation tasks. Player distance alone does not establish exclusivity. Safe readers, data lifetime, unloading, cross-boundary operations, and transfer or revocation of access still need a concrete design. The earlier distant-chunk proposal remains a candidate within these constraints.
+
+Client publication may batch multiple changes; each operation need not wait for synchronization with clients. Resource ownership and accepted obligations must remain coherent in authoritative state while publication lags. Delayed client views cannot authorize duplicate consumption or duplicate results. This permission does not select a publication format or relax the established per-feature consistency rules.
+
+Compare a simple execution baseline with parallel processing of independent regions under exclusive write access in the prototype. Central orchestration and message-only worker communication remain candidates to measure, rather than mandatory boundaries. These responsibility and access principles partially resolve **SIM-08**; ownership units, threading, cross-boundary coordination, safe access, publication, and the clock/scheduling mechanism remain open.
+
 ## Simulation state and startup
 
-The simulation needs its own index and may also maintain state distinct from the data currently stored in chunks. Opening a world must resume simulation in all areas containing active event emitters without scanning the whole world. The index, stored state, and recovery mechanism have not been designed.
+The simulation maintains its own task state and indexes, distinct from the block data stored in chunks, according to the responsibility split above. Opening a world must resume simulation in all areas containing active event emitters without scanning the whole world. The concrete representations and recovery mechanism have not been designed.
 
 ## World time and no offline progress
 
@@ -196,7 +217,7 @@ The author has not chosen a simulation architecture. Candidates include:
 - A separate world-data service and simulation worker threads without an orchestrator.
 - Another approach if it better serves the requirements.
 
-One possible structural simplification is to ensure that only one simulation worker can modify a particular chunk at a time, reducing synchronization with other simulation workers and ideally with the world-data service. This is an exploratory idea. No chunk ownership, partitioning, worker topology, or cross-chunk coordination scheme has been selected.
+One possible structural simplification is to ensure that only one simulation worker can modify a particular chunk at a time, reducing synchronization with other simulation workers and ideally with the world-data service. The [ownership principles](#state-ownership-and-publication) accept exclusive access for batches as a design direction; using chunks as the unit remains exploratory. No partitioning, worker topology, or cross-chunk coordination scheme has been selected.
 
 ### Direct mutation of distant chunks
 
@@ -208,4 +229,4 @@ This remains an architecture idea, not a selected mechanism. Acquiring and relea
 
 Simulation must support active work across the entire world, including distant areas. When system resources are insufficient, processing may be throttled and prioritized according to a policy still to be designed. This must preserve the [principles for time, observation, and overload](../DESIGN_PRINCIPLES.md#budget-memory-and-define-overload-behavior), including coordinated slowdown under sustained overload.
 
-Persistent resource shortages must be communicated to the player. Ideally the game should also report how much the simulation is currently slowed, expressed relative to its normal pace. Exact notification thresholds, measurement windows, and UI are not selected.
+Persistent capacity shortages must be communicated through the [global overload feedback](#global-overload-feedback), including measured simulation speed and an unobtrusive warning. Exact notification thresholds, measurement windows, and UI layout are not selected.

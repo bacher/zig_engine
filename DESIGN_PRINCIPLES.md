@@ -12,6 +12,12 @@ When players are not intervening, simulation work should not incur synchronizati
 
 Player interaction must remain compatible with asynchronous messages from future network clients and cannot depend on shared in-process synchronization with those clients. The world-data service and simulation will remain in the same server process and may use in-process synchronization with each other. These boundaries do not select their threads or require them to communicate only through messages. The [simulation notes](docs/simulation-notes.md) preserve the requirements and unselected architecture ideas.
 
+## Define state ownership and permit batched access
+
+Give each mutable fact a clear authoritative source and a defined mutation protocol. The world-data service is responsible for blocks, chunks, loading, and publication; simulation owns task timing, paid status, obligations, and work/dependency/routing indexes; clients own visual presentation. Inventory authority and its relationship to physical goods remain for the warehouse specification. Avoid independent writable copies of resource counts and unnecessary world-data service queries for established task state.
+
+Allow exclusive mutation rights to be granted for batches of work and client updates to be published in batches while preserving authoritative resource accounting and obligations. Account for persistence, loading, readers, and other simulation tasks when establishing exclusive access; player distance alone is insufficient. Ownership units, thread assignment, synchronization, and publication mechanisms remain unselected. The [ownership principles](docs/simulation-notes.md#state-ownership-and-publication) guide prototype comparison without mandating an orchestrator, message-only communication, or chunk-based ownership.
+
 ## Prioritize throughput over latency
 
 This priority applies primarily to world simulation and the world-data service as the layer directly supporting it. Shape world rules and execution conditions to minimize waiting and coordination for the simulation thread or threads, so the mature automated economy can sustain activity throughout the world at its intended pace. Immediate propagation of every world change is not a default requirement for this path. Prefer batching, asynchronous processing, deferred updates, and reuse of computed results when they substantially increase simulation throughput. Any relaxation of consistency remains subject to the per-check rules below and consistent resource accounting.
