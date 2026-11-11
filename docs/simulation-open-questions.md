@@ -35,6 +35,16 @@ These decisions are already recorded and are not open questions:
 - [ ] **SIM-02 — Representative load.** What mix of production, extraction, construction, and delivery tasks makes up the 100,000-task target? What task durations, starts/completions per second, travel distances, spatial concentrations, and player-edit rates should the workload exercise? Concurrent task count alone does not define throughput.
 - [ ] **SIM-03 — Resource and acceptance budgets.** Which reference CPU models represent the 4- and 8-core ends? How much CPU time and memory may simulation use alongside rendering, world data, streaming, persistence, and the OS? Which sustained throughput, backlog, startup, and memory measurements demonstrate acceptable operation on 32 GB and, ideally, 16 GB machines? Which client-latency goals and combined client/simulation workloads demonstrate responsiveness without reducing sustainable simulation throughput? Which assertions and failure scenarios must the headless prototype check? From prototype measurements at the target workload, what deviations from expected production rates are acceptable for short operations, long operations, and complete chains, distinguishing processing losses from intentional clock slowdown?
 
+Concrete validation follow-up for **SIM-03** and **SIM-06**: before enabling bulk
+simulation producers on the queued batch path, run the
+[deferred mixed-load benchmark](validation/world-command-batches.md#deferred-mixed-load-validation)
+with concurrent single/batch endpoints, the actual worker, and result consumers.
+Measure single-operation p95/p99 submission latency, Busy/retry rates and time to
+admission alongside sustained throughput and producer progress as packet size varies.
+This is deferred from the preparatory API PR; its uncontended benchmark and admission
+tests do not resolve responsiveness or fairness under load. Use the selected mutation
+path if simulation integration chooses another approach.
+
 ## Time, scheduling, and overload
 
 - [x] **SIM-04 — Meaning of simulation time.** [Resolved](simulation-notes.md#world-time-and-no-offline-progress): normal 1:1 time, millisecond task-time resolution without millisecond ticks, causal/resource ordering without a required global total order or deterministic replay, explicit single-player and owner/admin multiplayer pause, and no offline or whole-process-suspension catch-up. A running unpaused server may continue without players; saved and scheduled work retains its progress and deadlines. Ordinary processing delays, dependent-task timestamps, and coordinated slowdown are defined by **SIM-05**. In-game day length is a separate balance choice.

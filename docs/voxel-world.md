@@ -174,6 +174,7 @@ workload and measured scope.
 | Load a column/range in mesh mode | Subscribe each chunk to exposed-face geometry or unreachable status. |
 | Evict a chunk with its token | End that subscription only if the supplied token is still current. |
 | Submit a block operation | Apply one `put(type)` or `remove` at validated global storage block coordinates. |
+| Submit up to 64 block operations | Admit the entire packet and execute its individually identified operations in order. |
 
 A load is a continuing subscription, not just a one-time fetch. Its request ID becomes the subscription token for the requested chunks. Loading a different representation or reloading replaces the token; delayed replies and eviction requests from an older generation must not affect the new subscription.
 
@@ -184,6 +185,39 @@ Structural validation reads only the inclusive 28-cell cube around the edited ta
 The service sends independently owned snapshots/face arrays. Consumers must free rejected or unused payloads. Client endpoints remain owned by the service until it is destroyed. The underlying request/reply mailboxes are unbounded and transfer queued buffers by swapping. Operation and terrain-load submission retain their `pending_commands` admission limits; an operation slot remains held until the client collects its result.
 
 Mutations deferred by loading, capture, blueprint admission, or journal pressure stay in a worker-owned `std.Deque` FIFO. Removing or retrying its head does not shift later request payloads. This retains the existing admission, per-command ordering, save-prefix, and payload ownership rules; see the [queue measurements](validation/retained-command-queue.md).
+
+### Bounded operation submission
+
+`Client.trySubmitOperations([]const BlockOperation)` copies **1–64** intents into
+the shared request mailbox under one lock, reserves one slot for every operation,
+and signals the consumer once. `Client.max_operation_batch` exposes the bound.
+It returns `SubmittedOperations { first_request_id, count }`; `requestId(index)`
+selects the corresponding per-operation result. Existing single submission stays
+available and uses the same enqueue helper. The endpoint still belongs to one
+producer/consumer thread.
+
+Enqueue admission is all-or-nothing. `Busy`, `OutOfMemory`, and `ServiceStopped`
+leave all requests, slots, and request IDs unchanged, so the same input may be
+retried after the condition clears. Empty input returns `EmptyBatch`, more than
+64 operations returns `BatchTooLarge`, and an unrepresentable next request ID
+returns `RequestIdExhausted`. Size/ID validation precedes service admission checks;
+ordinary block-coordinate/material preconditions remain required. Single
+submission retains its checked request-ID exhaustion precondition.
+
+A successful return admits the intents for processing; it does not promise that
+all edits will succeed. Commands validate against current accepted physical state,
+including preceding successful commands, and return individual success/conflict
+results. Do not retry an already submitted packet as a new submission merely
+because its results are still pending: that creates new command identities.
+Each operation holds its admission slot until its result is collected. The last
+batch ID gates subsequent player checkpoints; existing save fences, loading,
+journal retries, snapshot/mesh publication, and shutdown rules apply per command.
+The caller may immediately reuse/free its input slice after submission.
+
+This optional transport path reduces producer synchronization and counter work.
+It does not provide an atomic gameplay transaction or implement simulation task
+acceptance, payment, logistics, or scheduling. Future exclusive mutation access
+remains a separate option. See [submission validation and measurements](validation/world-command-batches.md).
 
 ## Revisions and invalidation
 
