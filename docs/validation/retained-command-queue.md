@@ -26,6 +26,8 @@ zig build --summary all
 ```
 
 `zig build test` includes the persistence suite.
+Only `bench-pending-commands` opts into the timing workload through its benchmark
+root and build option. Ordinary test roots do not register the timing test, even with `-Doptimize=ReleaseFast`.
 
 Measured with Zig 0.16.0, native arm64, macOS 26.7.1 (25G241). The benchmark
 uses the production private `Pending` type and compares the previous ArrayList
@@ -83,6 +85,8 @@ Executed validation: `zig build test --summary all` passed 48/48 build steps
 with 1,920 tests passed and three skipped; `zig build --summary all` passed all
 25 steps and built both applications. The refreshed ReleaseFast benchmark passed
 all 16 build steps and all three test entries.
+
+After isolating the benchmark target, `zig build test -Doptimize=ReleaseFast --summary all` passed all 48 steps with no retained-queue timing output. The dedicated ReleaseFast benchmark target passed all 17 steps and ran the workload exactly once (36 timing samples).
 
 See [raw benchmark output](retained-command-queue-benchmark.txt). Future bounded
 batch submission and simulation resource/task integration are separate changes.

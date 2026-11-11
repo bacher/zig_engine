@@ -9659,9 +9659,10 @@ test "background work warnings stay bounded across bursts, error changes, and re
     try std.testing.expect(log.failure(3 * interval));
 }
 
-// The benchmark uses the exact private Request/Pending layout without exposing it
-// as a service API. The dedicated build step filters out all other tests.
-test "retained command queue benchmark" {
-    if (@import("builtin").mode != .ReleaseFast) return error.SkipZigTest;
-    try @import("pending_command_benchmark.zig").run(WorldDataService.Pending, (persistence.Limits{}).pending_commands);
-}
+// The dedicated benchmark target can use the private payload layout in test
+// builds. Importing the service never registers or runs the timing workload.
+pub const PendingCommandBenchmark = if (@import("builtin").is_test) struct {
+    pub fn run() !void {
+        try @import("pending_command_benchmark.zig").run(WorldDataService.Pending, (persistence.Limits{}).pending_commands);
+    }
+} else void;

@@ -295,13 +295,16 @@ pub fn build(b: *std.Build) void {
     const pending_command_benchmark = b.addTest(.{
         .name = "pending-command-benchmark",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/voxel_app/world_data_service.zig"),
+            .root_source_file = b.path("src/voxel_app/pending_command_benchmark.zig"),
             .target = target,
             .optimize = optimize,
             .link_libc = true,
         }),
         .filters = &.{"retained command queue benchmark"},
     });
+    const pending_command_benchmark_options = b.addOptions();
+    pending_command_benchmark_options.addOption(bool, "enabled", true);
+    pending_command_benchmark.root_module.addOptions("benchmark_options", pending_command_benchmark_options);
     pending_command_benchmark.root_module.linkLibrary(voxel_engine_lib);
     pending_command_benchmark.root_module.addImport("engine", voxel_engine_lib.root_module);
     pending_command_benchmark.root_module.addImport("zmath", zmath.module("root"));

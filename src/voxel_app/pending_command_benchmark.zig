@@ -2,6 +2,12 @@
 //! Both containers reserve the same capacity before timing; no terrain, threads,
 //! persistence I/O, or client publication runs inside these measurements.
 const std = @import("std");
+
+test "retained command queue benchmark" {
+    if (!@import("benchmark_options").enabled or @import("builtin").mode != .ReleaseFast) return error.SkipZigTest;
+    try @import("world_data_service.zig").PendingCommandBenchmark.run();
+}
+
 const Mode = enum { drain, retry, rotate };
 const operations = 65_536;
 
