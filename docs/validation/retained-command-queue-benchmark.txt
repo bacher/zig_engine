@@ -1,0 +1,81 @@
+Command: zig build bench-pending-commands -Doptimize=ReleaseFast --summary all
+Environment: Zig 0.16.0, macOS 26.7.1 (25G241), arm64, native target
+Both runs: all 3 benchmark test entries passed. Measurements exclude compilation.
+Initial timing run (three samples):
+
+retained_queue pending_bytes=976 default_depth=256 default_buffer_bytes=249856 operations=65536 samples=3
+retained_queue mode=drain depth=1 sample=1 array_ms=2.724 deque_ms=2.936 ratio=0.93 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=drain depth=1 sample=2 array_ms=2.684 deque_ms=2.895 ratio=0.93 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=drain depth=1 sample=3 array_ms=2.648 deque_ms=2.574 ratio=1.03 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=retry depth=1 sample=1 array_ms=6.278 deque_ms=5.618 ratio=1.12 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=retry depth=1 sample=2 array_ms=5.083 deque_ms=5.032 ratio=1.01 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=retry depth=1 sample=3 array_ms=5.025 deque_ms=4.333 ratio=1.16 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=rotate depth=1 sample=1 array_ms=1.730 deque_ms=1.849 ratio=0.94 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=rotate depth=1 sample=2 array_ms=1.705 deque_ms=1.723 ratio=0.99 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=rotate depth=1 sample=3 array_ms=1.672 deque_ms=1.642 ratio=1.02 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=drain depth=64 sample=1 array_ms=19.222 deque_ms=1.453 ratio=13.23 shifted_bytes=2014838784 digest=1233833241850327555
+retained_queue mode=drain depth=64 sample=2 array_ms=18.361 deque_ms=1.471 ratio=12.48 shifted_bytes=2014838784 digest=1233833241850327555
+retained_queue mode=drain depth=64 sample=3 array_ms=18.302 deque_ms=1.459 ratio=12.55 shifted_bytes=2014838784 digest=1233833241850327555
+retained_queue mode=retry depth=64 sample=1 array_ms=27.801 deque_ms=2.098 ratio=13.25 shifted_bytes=3070230528 digest=1233833241850327555
+retained_queue mode=retry depth=64 sample=2 array_ms=27.836 deque_ms=2.125 ratio=13.10 shifted_bytes=3070230528 digest=1233833241850327555
+retained_queue mode=retry depth=64 sample=3 array_ms=27.712 deque_ms=2.139 ratio=12.95 shifted_bytes=3070230528 digest=1233833241850327555
+retained_queue mode=rotate depth=64 sample=1 array_ms=34.888 deque_ms=1.302 ratio=26.79 shifted_bytes=4029677568 digest=1233833241850327555
+retained_queue mode=rotate depth=64 sample=2 array_ms=34.396 deque_ms=1.345 ratio=25.57 shifted_bytes=4029677568 digest=1233833241850327555
+retained_queue mode=rotate depth=64 sample=3 array_ms=34.608 deque_ms=1.354 ratio=25.55 shifted_bytes=4029677568 digest=1233833241850327555
+retained_queue mode=drain depth=256 sample=1 array_ms=104.336 deque_ms=1.745 ratio=59.80 shifted_bytes=8155299840 digest=1233833241850327555
+retained_queue mode=drain depth=256 sample=2 array_ms=104.728 deque_ms=1.722 ratio=60.83 shifted_bytes=8155299840 digest=1233833241850327555
+retained_queue mode=drain depth=256 sample=3 array_ms=104.574 deque_ms=2.011 ratio=52.00 shifted_bytes=8155299840 digest=1233833241850327555
+retained_queue mode=retry depth=256 sample=1 array_ms=146.472 deque_ms=2.313 ratio=63.33 shifted_bytes=12280922112 digest=1233833241850327555
+retained_queue mode=retry depth=256 sample=2 array_ms=146.518 deque_ms=2.277 ratio=64.34 shifted_bytes=12280922112 digest=1233833241850327555
+retained_queue mode=retry depth=256 sample=3 array_ms=145.125 deque_ms=2.248 ratio=64.56 shifted_bytes=12280922112 digest=1233833241850327555
+retained_queue mode=rotate depth=256 sample=1 array_ms=231.751 deque_ms=1.595 ratio=145.29 shifted_bytes=16310599680 digest=1233833241850327555
+retained_queue mode=rotate depth=256 sample=2 array_ms=233.210 deque_ms=1.598 ratio=145.92 shifted_bytes=16310599680 digest=1233833241850327555
+retained_queue mode=rotate depth=256 sample=3 array_ms=233.442 deque_ms=1.622 ratio=143.95 shifted_bytes=16310599680 digest=1233833241850327555
+retained_queue mode=drain depth=1024 sample=1 array_ms=461.143 deque_ms=1.825 ratio=252.70 shifted_bytes=32717144064 digest=1233833241850327555
+retained_queue mode=drain depth=1024 sample=2 array_ms=459.655 deque_ms=1.824 ratio=251.98 shifted_bytes=32717144064 digest=1233833241850327555
+retained_queue mode=drain depth=1024 sample=3 array_ms=476.970 deque_ms=1.960 ratio=243.34 shifted_bytes=32717144064 digest=1233833241850327555
+retained_queue mode=retry depth=1024 sample=1 array_ms=673.466 deque_ms=2.411 ratio=279.38 shifted_bytes=49123688448 digest=1233833241850327555
+retained_queue mode=retry depth=1024 sample=2 array_ms=674.100 deque_ms=2.359 ratio=285.76 shifted_bytes=49123688448 digest=1233833241850327555
+retained_queue mode=retry depth=1024 sample=3 array_ms=672.050 deque_ms=2.409 ratio=278.98 shifted_bytes=49123688448 digest=1233833241850327555
+retained_queue mode=rotate depth=1024 sample=1 array_ms=935.539 deque_ms=1.693 ratio=552.61 shifted_bytes=65434288128 digest=1233833241850327555
+retained_queue mode=rotate depth=1024 sample=2 array_ms=934.201 deque_ms=1.622 ratio=576.07 shifted_bytes=65434288128 digest=1233833241850327555
+retained_queue mode=rotate depth=1024 sample=3 array_ms=965.981 deque_ms=1.670 ratio=578.39 shifted_bytes=65434288128 digest=1233833241850327555
+
+Refreshed run with explicit metadata sizes (three samples):
+retained_queue pending_bytes=976 default_depth=256 default_buffer_bytes=249856 array_metadata_bytes=24 deque_metadata_bytes=32 operations=65536 samples=3
+retained_queue mode=drain depth=1 sample=1 array_ms=3.548 deque_ms=2.129 ratio=1.67 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=drain depth=1 sample=2 array_ms=2.905 deque_ms=2.345 ratio=1.24 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=drain depth=1 sample=3 array_ms=2.256 deque_ms=2.397 ratio=0.94 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=retry depth=1 sample=1 array_ms=6.114 deque_ms=5.205 ratio=1.17 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=retry depth=1 sample=2 array_ms=5.286 deque_ms=5.030 ratio=1.05 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=retry depth=1 sample=3 array_ms=4.980 deque_ms=4.346 ratio=1.15 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=rotate depth=1 sample=1 array_ms=1.817 deque_ms=1.708 ratio=1.06 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=rotate depth=1 sample=2 array_ms=1.707 deque_ms=1.705 ratio=1.00 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=rotate depth=1 sample=3 array_ms=1.684 deque_ms=1.658 ratio=1.02 shifted_bytes=0 digest=1233833241850327555
+retained_queue mode=drain depth=64 sample=1 array_ms=19.357 deque_ms=1.442 ratio=13.42 shifted_bytes=2014838784 digest=1233833241850327555
+retained_queue mode=drain depth=64 sample=2 array_ms=18.072 deque_ms=1.444 ratio=12.51 shifted_bytes=2014838784 digest=1233833241850327555
+retained_queue mode=drain depth=64 sample=3 array_ms=18.077 deque_ms=1.475 ratio=12.26 shifted_bytes=2014838784 digest=1233833241850327555
+retained_queue mode=retry depth=64 sample=1 array_ms=27.491 deque_ms=2.153 ratio=12.77 shifted_bytes=3070230528 digest=1233833241850327555
+retained_queue mode=retry depth=64 sample=2 array_ms=27.372 deque_ms=2.065 ratio=13.26 shifted_bytes=3070230528 digest=1233833241850327555
+retained_queue mode=retry depth=64 sample=3 array_ms=27.087 deque_ms=2.150 ratio=12.60 shifted_bytes=3070230528 digest=1233833241850327555
+retained_queue mode=rotate depth=64 sample=1 array_ms=37.222 deque_ms=1.348 ratio=27.61 shifted_bytes=4029677568 digest=1233833241850327555
+retained_queue mode=rotate depth=64 sample=2 array_ms=35.209 deque_ms=1.356 ratio=25.96 shifted_bytes=4029677568 digest=1233833241850327555
+retained_queue mode=rotate depth=64 sample=3 array_ms=34.153 deque_ms=1.324 ratio=25.80 shifted_bytes=4029677568 digest=1233833241850327555
+retained_queue mode=drain depth=256 sample=1 array_ms=102.357 deque_ms=1.726 ratio=59.32 shifted_bytes=8155299840 digest=1233833241850327555
+retained_queue mode=drain depth=256 sample=2 array_ms=101.806 deque_ms=1.774 ratio=57.40 shifted_bytes=8155299840 digest=1233833241850327555
+retained_queue mode=drain depth=256 sample=3 array_ms=102.413 deque_ms=1.714 ratio=59.76 shifted_bytes=8155299840 digest=1233833241850327555
+retained_queue mode=retry depth=256 sample=1 array_ms=143.291 deque_ms=2.234 ratio=64.15 shifted_bytes=12280922112 digest=1233833241850327555
+retained_queue mode=retry depth=256 sample=2 array_ms=142.262 deque_ms=2.305 ratio=61.71 shifted_bytes=12280922112 digest=1233833241850327555
+retained_queue mode=retry depth=256 sample=3 array_ms=143.375 deque_ms=2.281 ratio=62.87 shifted_bytes=12280922112 digest=1233833241850327555
+retained_queue mode=rotate depth=256 sample=1 array_ms=228.239 deque_ms=1.563 ratio=146.06 shifted_bytes=16310599680 digest=1233833241850327555
+retained_queue mode=rotate depth=256 sample=2 array_ms=231.080 deque_ms=1.613 ratio=143.23 shifted_bytes=16310599680 digest=1233833241850327555
+retained_queue mode=rotate depth=256 sample=3 array_ms=231.076 deque_ms=1.538 ratio=150.22 shifted_bytes=16310599680 digest=1233833241850327555
+retained_queue mode=drain depth=1024 sample=1 array_ms=451.544 deque_ms=1.820 ratio=248.14 shifted_bytes=32717144064 digest=1233833241850327555
+retained_queue mode=drain depth=1024 sample=2 array_ms=455.312 deque_ms=1.848 ratio=246.38 shifted_bytes=32717144064 digest=1233833241850327555
+retained_queue mode=drain depth=1024 sample=3 array_ms=451.232 deque_ms=1.800 ratio=250.70 shifted_bytes=32717144064 digest=1233833241850327555
+retained_queue mode=retry depth=1024 sample=1 array_ms=660.376 deque_ms=2.302 ratio=286.88 shifted_bytes=49123688448 digest=1233833241850327555
+retained_queue mode=retry depth=1024 sample=2 array_ms=671.756 deque_ms=2.401 ratio=279.74 shifted_bytes=49123688448 digest=1233833241850327555
+retained_queue mode=retry depth=1024 sample=3 array_ms=662.117 deque_ms=2.419 ratio=273.73 shifted_bytes=49123688448 digest=1233833241850327555
+retained_queue mode=rotate depth=1024 sample=1 array_ms=907.328 deque_ms=1.585 ratio=572.63 shifted_bytes=65434288128 digest=1233833241850327555
+retained_queue mode=rotate depth=1024 sample=2 array_ms=909.675 deque_ms=1.590 ratio=572.20 shifted_bytes=65434288128 digest=1233833241850327555
+retained_queue mode=rotate depth=1024 sample=3 array_ms=917.593 deque_ms=1.560 ratio=588.39 shifted_bytes=65434288128 digest=1233833241850327555
