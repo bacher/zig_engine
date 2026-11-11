@@ -60,6 +60,32 @@ establishes neither whole-service throughput nor NPC capacity. A packet holds th
 producer lock while copying at most 64 intents; scheduling/fairness under contention
 has not been benchmarked. No timing threshold is asserted.
 
+## Deferred mixed-load validation
+
+The [PR #62 review follow-up](https://github.com/bacher/zig_engine/pull/62#discussion_r4537167593)
+is deferred until integration of bulk simulation producers, before enabling their
+use of this queued batch path. The preparatory API currently has no gameplay batch
+callers; its tests cover admission correctness, and its benchmark measures only
+uncontended submission savings. Neither establishes fairness or interactive
+latency under concurrent load.
+
+Run an ordinary single-operation endpoint alongside one or more batch endpoints,
+with the actual world-data service worker and result consumers running concurrently.
+Compare a single-operation-only baseline with packet sizes 1, 4, 16, and 64 under
+documented offered loads and retry policies, including near-capacity pressure.
+Report the ordinary endpoint's p95/p99 submission latency, Busy/retry rate, and
+elapsed time from its first attempt to successful admission, so quick Busy returns
+cannot hide prolonged waiting. Also report sustained completed-operation throughput
+and progress of each producer class. Longer mailbox critical sections and whole-packet
+slot reservations may affect these independently of uncontended submission cost.
+
+Use the results to choose packet sizes and admission/retry budgets under **SIM-03**
+and **SIM-06** in the [simulation question list](../simulation-open-questions.md).
+Client latency improvements must preserve sustainable simulation throughput; this
+follow-up establishes no player-priority rule or numeric latency target. If the
+simulation selects a different mutation path, validate that path's mixed workload
+before enabling it rather than treating this queued-path benchmark as evidence.
+
 ## Correctness coverage
 
 Executed validation: the focused `zig build test-blueprint-service --summary all`
