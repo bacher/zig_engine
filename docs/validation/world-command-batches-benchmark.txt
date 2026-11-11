@@ -1,0 +1,17 @@
+Command: zig build bench-command-submission -Doptimize=ReleaseFast --summary all
+Environment: Zig 0.16.0, macOS 26.7.1 (25G241), arm64 native target
+Result: 17/17 build steps succeeded; 5/5 tests passed; measurement executable runtime 3s
+
+command_submission operations=131072 window=256 samples=3 producer_threads=1 worker=manual_between_timed_windows
+command_submission batch=1 sample=1 single_ms=1.654 batch_ms=1.791 ratio=0.92 single_locks_signals_reservations=131072 batch_locks_signals_reservations=131072 digest=131072
+command_submission batch=1 sample=2 single_ms=1.690 batch_ms=1.617 ratio=1.05 single_locks_signals_reservations=131072 batch_locks_signals_reservations=131072 digest=131072
+command_submission batch=1 sample=3 single_ms=1.538 batch_ms=1.489 ratio=1.03 single_locks_signals_reservations=131072 batch_locks_signals_reservations=131072 digest=131072
+command_submission batch=4 sample=1 single_ms=1.479 batch_ms=0.928 ratio=1.59 single_locks_signals_reservations=131072 batch_locks_signals_reservations=32768 digest=131072
+command_submission batch=4 sample=2 single_ms=1.460 batch_ms=0.836 ratio=1.75 single_locks_signals_reservations=131072 batch_locks_signals_reservations=32768 digest=131072
+command_submission batch=4 sample=3 single_ms=1.552 batch_ms=0.818 ratio=1.90 single_locks_signals_reservations=131072 batch_locks_signals_reservations=32768 digest=131072
+command_submission batch=16 sample=1 single_ms=1.598 batch_ms=0.605 ratio=2.64 single_locks_signals_reservations=131072 batch_locks_signals_reservations=8192 digest=131072
+command_submission batch=16 sample=2 single_ms=1.499 batch_ms=0.624 ratio=2.40 single_locks_signals_reservations=131072 batch_locks_signals_reservations=8192 digest=131072
+command_submission batch=16 sample=3 single_ms=1.471 batch_ms=0.670 ratio=2.20 single_locks_signals_reservations=131072 batch_locks_signals_reservations=8192 digest=131072
+command_submission batch=64 sample=1 single_ms=1.443 batch_ms=0.562 ratio=2.57 single_locks_signals_reservations=131072 batch_locks_signals_reservations=2048 digest=131072
+command_submission batch=64 sample=2 single_ms=1.496 batch_ms=0.552 ratio=2.71 single_locks_signals_reservations=131072 batch_locks_signals_reservations=2048 digest=131072
+command_submission batch=64 sample=3 single_ms=1.468 batch_ms=0.567 ratio=2.59 single_locks_signals_reservations=131072 batch_locks_signals_reservations=2048 digest=131072

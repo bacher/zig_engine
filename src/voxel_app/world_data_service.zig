@@ -501,25 +501,64 @@ pub const Client = struct {
     /// a snapshot, including failures. Mesh-mode results share packages with mesh changes.
     /// Commands from this endpoint are processed in submission order.
     pub const SubmitError = error{ Busy, OutOfMemory, ServiceStopped };
+    /// Transport bound only; every constituent still uses one admission slot and
+    /// the existing authoritative validation, retry, result, and publication path.
+    pub const max_operation_batch = 64;
+    pub const BatchSubmitError = SubmitError || error{ EmptyBatch, BatchTooLarge, RequestIdExhausted };
+    pub const SubmittedOperations = struct {
+        first_request_id: u64,
+        count: usize,
+
+        pub fn requestId(self: SubmittedOperations, index: usize) u64 {
+            std.debug.assert(index < self.count);
+            return self.first_request_id + @as(u64, @intCast(index));
+        }
+    };
+
     pub fn trySubmitOperation(self: *Client, operation: BlockOperation) SubmitError!u64 {
         operation.validate(self.service.layout);
-        if (self.service.is_shutting_down.load(.acquire)) return error.ServiceStopped;
-        const previous = self.service.outstanding_operations.fetchAdd(1, .acq_rel);
-        if (previous >= self.service.limits.pending_commands) {
-            _ = self.service.outstanding_operations.fetchSub(1, .release);
-            return error.Busy;
-        }
-        errdefer _ = self.service.outstanding_operations.fetchSub(1, .release);
         const id = self.next_request_id;
-        try self.service.requests.tryPush(self.service.io, self.service.allocator, .{ .operation = .{
+        const next = std.math.add(u64, id, 1) catch @panic("endpoint request IDs exhausted");
+        try self.enqueueOperations(&.{operation}, next);
+        return id;
+    }
+
+    /// Copies 1..max_operation_batch intents before returning. Enqueue admission
+    /// is all-or-nothing; execution is ordered, per-operation, and not atomic as a
+    /// batch. A failed submission changes no IDs, slots, or queued requests.
+    /// This endpoint still belongs to one producer/consumer thread.
+    pub fn trySubmitOperations(self: *Client, operations: []const BlockOperation) BatchSubmitError!SubmittedOperations {
+        if (operations.len == 0) return error.EmptyBatch;
+        if (operations.len > max_operation_batch) return error.BatchTooLarge;
+        for (operations) |operation| operation.validate(self.service.layout);
+        const first = self.next_request_id;
+        const next = std.math.add(u64, first, @intCast(operations.len)) catch return error.RequestIdExhausted;
+        try self.enqueueOperations(operations, next);
+        return .{ .first_request_id = first, .count = operations.len };
+    }
+
+    fn enqueueOperations(self: *Client, operations: []const BlockOperation, next: u64) SubmitError!void {
+        const service = self.service;
+        const queue = &service.requests;
+        queue.mutex.lockUncancelable(service.io);
+        defer queue.mutex.unlock(service.io);
+        if (queue.is_closed or service.is_shutting_down.load(.acquire)) return error.ServiceStopped;
+        // All operation reservations share this mailbox lock. Concurrent result
+        // collection only subtracts, so neither the check nor addition can wrap.
+        const used = service.outstanding_operations.load(.monotonic);
+        if (operations.len > service.limits.pending_commands -| used) return error.Busy;
+        // Complete all fallible work before reserving slots or exposing requests.
+        try queue.items.ensureUnusedCapacity(service.allocator, operations.len);
+        _ = service.outstanding_operations.fetchAdd(operations.len, .acq_rel);
+        for (operations, 0..) |operation, index| queue.items.appendAssumeCapacity(.{ .operation = .{
             .client = self,
-            .request_id = id,
+            .request_id = self.next_request_id + @as(u64, @intCast(index)),
             .operation = operation,
             .counted = true,
         } });
-        self.next_request_id += 1;
-        self.last_operation_id = id;
-        return id;
+        self.next_request_id = next;
+        self.last_operation_id = next - 1;
+        queue.not_empty.signal(service.io);
     }
     pub fn submitOperation(self: *Client, operation: BlockOperation) u64 {
         return self.trySubmitOperation(operation) catch @panic("operation submission requires available endpoint capacity");
@@ -5589,6 +5628,80 @@ test "public service bounds unread terminal operations and reopens admission whe
     try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = .{ 11, 10, 48 }, .action = .{ .put = .snow } }));
 }
 
+test "public batches validate preceding physical edits and release each result slot on wait" {
+    const f = try PersistenceFixture.init(.{ .pending_commands = 7 });
+    defer f.deinit();
+    const client = try f.service.createClient();
+    const other = try f.service.createClient();
+    const low: [3]u32 = .{ 10, 10, 48 };
+    const high: [3]u32 = .{ 10, 10, 49 };
+    const operations = [_]BlockOperation{
+        .{ .block = low, .action = .{ .put = .planks } },
+        .{ .block = high, .action = .{ .put = .planks } },
+        .{ .block = high, .action = .{ .put = .planks } },
+        .{ .block = low, .action = .remove },
+        .{ .block = high, .action = .remove },
+        .{ .block = low, .action = .remove },
+        .{ .block = low, .action = .remove },
+    };
+    const batch = try client.trySubmitOperations(&operations);
+    try std.testing.expectError(error.Busy, other.trySubmitOperations(operations[0..1]));
+    var replies: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&replies);
+    try waitForResponses(client, &replies, operations.len);
+    const statuses = [_]OperationStatus{ .success, .success, .already_exists, .constraint_violation, .success, .success, .already_removed };
+    for (replies.items, statuses, 0..) |reply, status, index| {
+        try std.testing.expectEqual(batch.requestId(index), reply.operation.?.request_id);
+        try std.testing.expectEqual(status, reply.operation.?.status);
+    }
+    try std.testing.expectEqual(@as(usize, 0), f.service.outstanding_operations.load(.monotonic));
+    for (replies.items) |reply| reply.deinit(std.testing.allocator);
+    replies.clearRetainingCapacity();
+    // Retrying the rejected packet uses the same endpoint's unconsumed identity.
+    const retry = try other.trySubmitOperations(operations[0..1]);
+    try std.testing.expectEqual(@as(u64, 1), retry.first_request_id);
+    try waitForResponses(other, &replies, 1);
+    try std.testing.expectEqual(retry.requestId(0), replies.items[0].operation.?.request_id);
+    try std.testing.expectEqual(OperationStatus.success, replies.items[0].operation.?.status);
+}
+
+test "batch checkpoint and final Save include every command while unread results retain slots" {
+    const f = try PersistenceFixture.init(.{ .pending_commands = 3 });
+    defer f.deinit();
+    const client = try f.service.createClient();
+    client.publishCheckpoint(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+    const block: [3]u32 = .{ 10, 10, 48 };
+    const operations = [_]BlockOperation{
+        .{ .block = block, .action = .{ .put = .snow } },
+        .{ .block = block, .action = .remove },
+        .{ .block = block, .action = .{ .put = .dirt } },
+    };
+    const batch = try client.trySubmitOperations(&operations);
+    client.publishCheckpoint(.{ .id = 1, .feet = .{ 1.5, 2.5, 3 }, .yaw = 0.5, .pitch = 0.25 });
+    const status = try f.waitSave(f.service.requestSave(true));
+    try std.testing.expectEqual(persistence.Phase.complete, status.phase);
+    try std.testing.expectEqual(@as(usize, 3), f.service.outstanding_operations.load(.monotonic));
+    try std.testing.expectError(error.Busy, client.trySubmitOperation(operations[1]));
+    var player_reader: format.Reader = .{ .bytes = f.store.players };
+    const player = try format.readPlayer(&player_reader);
+    try std.testing.expectEqualDeep([3]f64{ 1.5, 2.5, 3 }, player.feet);
+    const encoded = (try f.store.readChunk(std.testing.allocator, f.layout.encodeChunkCoords(.{ 0, 0, 1 }))).?;
+    defer std.testing.allocator.free(encoded);
+    var saved = try format.decodeChunk(std.testing.allocator, f.store.world_uuid, encoded, f.store.dimensions);
+    defer saved.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@intFromEnum(rules.BlockType.dirt), saved.blocks[transformations.index(.{ 10, 10, 16 })]);
+    var replies: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&replies);
+    client.takeResponses(&replies);
+    try std.testing.expectEqual(@as(usize, 3), replies.items.len);
+    for (replies.items, 0..) |reply, index| {
+        try std.testing.expectEqual(batch.requestId(index), reply.operation.?.request_id);
+        try std.testing.expectEqual(OperationStatus.success, reply.operation.?.status);
+    }
+    try std.testing.expectEqual(@as(usize, 0), f.service.outstanding_operations.load(.monotonic));
+    try std.testing.expectEqual(batch.requestId(2) + 1, try client.trySubmitOperation(operations[1]));
+}
+
 test "public service restore reports failed persisted dependency instead of hanging" {
     const f = try PersistenceFixture.init(.{});
     defer f.deinit();
@@ -6802,6 +6915,137 @@ fn exerciseBlueprintSavePublication(allocator: std.mem.Allocator) !void {
 test "blueprint Save publication reserves its retry ledger before ownership transfer" {
     try exerciseBlueprintSavePublication(std.testing.allocator);
     try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseBlueprintSavePublication, .{});
+}
+
+const BatchSubmissionTest = struct {
+    const operation: BlockOperation = .{ .block = .{ 10, 10, 70 }, .action = .{ .put = .snow } };
+
+    fn expectOne(f: *BlueprintSaveFixture) !void {
+        try std.testing.expectEqual(@as(u64, 2), f.client.next_request_id);
+        try std.testing.expectEqual(@as(u64, 1), f.client.last_operation_id);
+        try std.testing.expectEqual(@as(usize, 1), f.service.outstanding_operations.load(.monotonic));
+        try std.testing.expectEqual(@as(usize, 1), f.service.requests.items.items.len);
+        try std.testing.expectEqual(@as(u64, 1), f.service.requests.items.items[0].operation.request_id);
+    }
+};
+
+test "batch submission failures leave prior requests IDs and admission slots intact" {
+    const a = std.testing.allocator;
+    var f: BlueprintSaveFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const op = BatchSubmissionTest.operation;
+    const pair = [_]BlockOperation{ op, op };
+    const full: [Client.max_operation_batch]BlockOperation = @splat(op);
+    const oversized: [Client.max_operation_batch + 1]BlockOperation = @splat(op);
+    try std.testing.expectEqual(@as(u64, 1), try f.client.trySubmitOperation(op));
+    try std.testing.expectError(error.EmptyBatch, f.client.trySubmitOperations(&.{}));
+    try std.testing.expectError(error.BatchTooLarge, f.client.trySubmitOperations(&oversized));
+    try BatchSubmissionTest.expectOne(&f);
+    f.service.limits.pending_commands = 2;
+    try std.testing.expectError(error.Busy, f.client.trySubmitOperations(&pair));
+    try BatchSubmissionTest.expectOne(&f);
+    // Near-usize-max admission must reject without wrapping the atomic count.
+    f.service.limits.pending_commands = std.math.maxInt(usize);
+    f.service.outstanding_operations.store(std.math.maxInt(usize) - 1, .monotonic);
+    try std.testing.expectError(error.Busy, f.client.trySubmitOperations(&pair));
+    try std.testing.expectEqual(std.math.maxInt(usize) - 1, f.service.outstanding_operations.load(.monotonic));
+    f.service.outstanding_operations.store(1, .monotonic);
+    f.service.limits.pending_commands = 256;
+    {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+        f.service.allocator = failing.allocator();
+        defer f.service.allocator = a;
+        try std.testing.expectError(error.OutOfMemory, f.client.trySubmitOperations(&full));
+        try std.testing.expect(failing.has_induced_failure);
+    }
+    try BatchSubmissionTest.expectOne(&f);
+    f.client.next_request_id = std.math.maxInt(u64) - 1;
+    try std.testing.expectError(error.RequestIdExhausted, f.client.trySubmitOperations(&pair));
+    try std.testing.expectEqual(std.math.maxInt(u64) - 1, f.client.next_request_id);
+    f.client.next_request_id = 2;
+    f.service.is_shutting_down.store(true, .release);
+    try std.testing.expectError(error.ServiceStopped, f.client.trySubmitOperations(&pair));
+    try BatchSubmissionTest.expectOne(&f);
+    f.service.is_shutting_down.store(false, .release);
+    f.service.requests.close(f.service.io);
+    try std.testing.expectError(error.ServiceStopped, f.client.trySubmitOperations(&pair));
+    try std.testing.expectError(error.ServiceStopped, f.client.trySubmitOperation(op));
+    try BatchSubmissionTest.expectOne(&f);
+}
+
+test "batch submission copies caller intents and preserves mixed single and checkpoint identities" {
+    var f: BlueprintSaveFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const op = BatchSubmissionTest.operation;
+    try std.testing.expectEqual(@as(u64, 1), try f.client.trySubmitOperation(op));
+    var operations = [_]BlockOperation{ op, .{ .block = op.block, .action = .remove } };
+    const expected = operations;
+    const batch = try f.client.trySubmitOperations(&operations);
+    @memset(&operations, .{ .block = .{ 20, 20, 80 }, .action = .remove });
+    try std.testing.expectEqual(@as(usize, 2), batch.count);
+    try std.testing.expectEqual(@as(u64, 2), batch.requestId(0));
+    try std.testing.expectEqual(@as(u64, 3), batch.requestId(1));
+    f.client.registered_player_id = 1;
+    f.client.publishCheckpoint(.{ .id = 1, .feet = .{ 1, 2, 3 }, .yaw = 0, .pitch = 0 });
+    try std.testing.expectEqual(@as(u64, 3), f.client.latest_checkpoint.?.after_request);
+    try std.testing.expectEqual(@as(u64, 4), try f.client.trySubmitOperation(op));
+    const requests = f.service.requests.items.items;
+    try std.testing.expectEqual(@as(usize, 5), requests.len);
+    for (expected, 1..) |value, index| {
+        try std.testing.expectEqualDeep(value, requests[index].operation.operation);
+        try std.testing.expectEqual(batch.requestId(index - 1), requests[index].operation.request_id);
+    }
+    try std.testing.expect(requests[3] == .checkpoint);
+    try std.testing.expectEqual(@as(u64, 4), requests[4].operation.request_id);
+    try std.testing.expectEqual(@as(u64, 4), f.client.last_operation_id);
+}
+
+test "concurrent endpoints admit whole maximum batches without exceeding operation limits" {
+    const Producer = struct {
+        client: Client,
+        result: ?Client.BatchSubmitError!Client.SubmittedOperations = null,
+        fn run(self: *@This()) void {
+            const operations: [Client.max_operation_batch]BlockOperation = @splat(BatchSubmissionTest.operation);
+            self.result = self.client.trySubmitOperations(&operations);
+        }
+    };
+    var f: BlueprintSaveFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.service.limits.pending_commands = 2 * Client.max_operation_batch + 1;
+    var producers: [4]Producer = undefined;
+    var group: Io.Group = .init;
+    defer group.cancel(std.testing.io);
+    for (&producers) |*producer| {
+        producer.* = .{ .client = .{ .service = &f.service } };
+        try group.concurrent(std.testing.io, Producer.run, .{producer});
+    }
+    try group.await(std.testing.io);
+    var accepted: usize = 0;
+    for (&producers) |*producer| {
+        if (producer.result.?) |batch| {
+            accepted += 1;
+            try std.testing.expectEqual(@as(usize, Client.max_operation_batch), batch.count);
+            try std.testing.expectEqual(@as(u64, Client.max_operation_batch + 1), producer.client.next_request_id);
+        } else |err| {
+            try std.testing.expectEqual(error.Busy, err);
+            try std.testing.expectEqual(@as(u64, 1), producer.client.next_request_id);
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), accepted);
+    try std.testing.expectEqual(@as(usize, 128), f.service.outstanding_operations.load(.monotonic));
+    const requests = f.service.requests.items.items;
+    try std.testing.expectEqual(@as(usize, 128), requests.len);
+    for (0..2) |packet| {
+        const client = requests[packet * Client.max_operation_batch].operation.client;
+        for (0..Client.max_operation_batch) |index| {
+            const request = requests[packet * Client.max_operation_batch + index].operation;
+            try std.testing.expectEqual(client, request.client);
+            try std.testing.expectEqual(@as(u64, index + 1), request.request_id);
+        }
+    }
 }
 
 test "permanent blueprint library limits reject terminally and preserve later command progress" {
@@ -8203,7 +8447,7 @@ test "prepared blueprint Apply revalidates dependencies after synchronous journa
     try f.reopen(1, false);
 }
 
-test "wrapped retained edits validate in order and Save freezes only its selected prefix" {
+test "batched wrapped retained edits validate in order and Save freezes only its selected prefix" {
     const a = std.testing.allocator;
     var f: PreparedBlueprintDrainTest = undefined;
     try f.init();
@@ -8225,7 +8469,13 @@ test "wrapped retained edits validate in order and Save freezes only its selecte
         service.retryPending();
     }
     try service.source_holds.put(a, id, 1);
-    for (5..7) |request_id| service.processRequest(.{ .operation = .{ .client = client, .request_id = request_id, .operation = .{ .block = block, .action = .{ .put = .snow } } } });
+    client.next_request_id = 5;
+    const operations: [2]BlockOperation = @splat(.{ .block = block, .action = .{ .put = .snow } });
+    _ = try client.trySubmitOperations(&operations);
+    var submitted: std.ArrayList(Request) = .empty;
+    defer submitted.deinit(a);
+    service.requests.takeAll(service.io, &submitted);
+    for (submitted.items) |request| service.processRequest(request);
     service.requestSaveTransition(100, false);
     try std.testing.expectEqual(@as(usize, 2), service.lifecycle.queued.?.fence_remaining);
     // This later Remove must observe the preceding Put, but belongs after Save.
@@ -9664,5 +9914,64 @@ test "background work warnings stay bounded across bursts, error changes, and re
 pub const PendingCommandBenchmark = if (@import("builtin").is_test) struct {
     pub fn run() !void {
         try @import("pending_command_benchmark.zig").run(WorldDataService.Pending, (persistence.Limits{}).pending_commands);
+    }
+} else void;
+
+// Dedicated benchmark roots alone call this adapter. All timed submissions use
+// the actual Client API; normal service tests never register timing workloads.
+pub const CommandSubmissionBenchmark = if (@import("builtin").is_test) struct {
+    pub const Fixture = struct {
+        base: BlueprintSaveFixture,
+        requests: std.ArrayList(Request) = .empty,
+        packages: std.ArrayList(ResponsePackage) = .empty,
+    };
+
+    pub fn init(f: *Fixture, capacity: usize) !void {
+        f.* = .{ .base = undefined };
+        try f.base.init();
+        errdefer deinit(f);
+        f.base.service.limits.pending_commands = capacity;
+        // Both swapped request buffers are preallocated outside the timer.
+        try f.base.service.requests.items.ensureTotalCapacityPrecise(std.testing.allocator, capacity);
+        try f.requests.ensureTotalCapacityPrecise(std.testing.allocator, capacity);
+    }
+
+    pub fn deinit(f: *Fixture) void {
+        for (f.packages.items) |*package| package.deinit(std.testing.allocator);
+        f.packages.deinit(std.testing.allocator);
+        f.requests.deinit(std.testing.allocator);
+        f.base.deinit();
+    }
+
+    pub fn client(f: *Fixture) *Client {
+        return &f.base.client;
+    }
+
+    pub fn finishWindow(f: *Fixture, first: u64, count: usize, previous_digest: u64) !u64 {
+        const service = &f.base.service;
+        service.requests.takeAll(service.io, &f.requests);
+        try std.testing.expectEqual(count, f.requests.items.len);
+        for (f.requests.items) |request| service.processRequest(request);
+        f.requests.clearRetainingCapacity();
+        service.flushPackages();
+        f.base.client.takePackages(&f.packages);
+        var seen: usize = 0;
+        var digest = previous_digest;
+        for (f.packages.items) |package| for (package.responses.items) |response| {
+            const result = response.operation orelse continue;
+            try std.testing.expectEqual(first + seen, result.request_id);
+            try std.testing.expectEqual(OperationStatus.already_removed, result.status);
+            digest = std.math.rotl(u64, digest, 7) ^ result.request_id;
+            seen += 1;
+        };
+        try std.testing.expectEqual(count, seen);
+        try std.testing.expectEqual(@as(usize, 0), service.outstanding_operations.load(.monotonic));
+        for (f.packages.items) |*package| package.deinit(std.testing.allocator);
+        f.packages.clearRetainingCapacity();
+        return digest;
+    }
+
+    pub fn run() !void {
+        try @import("command_submission_benchmark.zig").run(@This());
     }
 } else void;

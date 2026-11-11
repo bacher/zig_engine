@@ -310,6 +310,22 @@ pub fn build(b: *std.Build) void {
     pending_command_benchmark.root_module.addImport("zmath", zmath.module("root"));
     b.step("bench-pending-commands", "Compare retained-command ArrayList and deque overhead (use ReleaseFast)").dependOn(&b.addRunArtifact(pending_command_benchmark).step);
 
+    const command_submission_benchmark = b.addTest(.{
+        .name = "command-submission-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/command_submission_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+        .filters = &.{"bounded command submission benchmark"},
+    });
+    command_submission_benchmark.root_module.addOptions("benchmark_options", pending_command_benchmark_options);
+    command_submission_benchmark.root_module.linkLibrary(voxel_engine_lib);
+    command_submission_benchmark.root_module.addImport("engine", voxel_engine_lib.root_module);
+    command_submission_benchmark.root_module.addImport("zmath", zmath.module("root"));
+    b.step("bench-command-submission", "Compare single and bounded batch endpoint submission (use ReleaseFast)").dependOn(&b.addRunArtifact(command_submission_benchmark).step);
+
     const blueprint_benchmark = b.addExecutable(.{
         .name = "blueprint-benchmark",
         .root_module = b.createModule(.{
