@@ -34,9 +34,13 @@ The subsystem documents describe the current implementation, extracted from exis
 | --- | --- |
 | [Design principles](DESIGN_PRINCIPLES.md) | Shared priorities and tradeoffs for feature design and integration, including consistency and acceptable loopholes. |
 | [Game vision](docs/game-vision.md) | Long-term gameplay, world, logistics, construction, progression, simulation direction, and open decisions. Start here for intent. |
-| [Simulation notes](docs/simulation-notes.md) | Author's intent and constraints for the upcoming simulation, gameplay examples, and unselected architecture ideas. |
-| [Simulation open questions](docs/simulation-open-questions.md) | Decisions before implementation, warehouse questions deferred to the next specification PR, and feature-specific follow-ups. |
+| [Simulation notes](docs/simulation-notes.md) | Intent and constraints for the upcoming simulation, selected warehouse architecture, gameplay examples, and scaling alternatives. |
+| [Simulation open questions](docs/simulation-open-questions.md) | Resolved warehouse contracts, remaining simulation decisions, and feature-specific follow-ups. |
 | [Blueprint specification](specs/features/blueprints.md) | Capture/application, isolated and composed validation, five-neighbor assembly, and the 100×100×32 workload; see [implementation validation](docs/blueprints-validation.md). |
+| [Warehouse specification](specs/features/warehouses.md) | Approved pallet-storage behavior, requirements, acceptance criteria, and implementation review checkpoints; runtime implementation pending. |
+| [Construction state ownership](specs/features/construction-state-ownership.md) | Design follow-up: selected simulation ownership of active target cells, retained alternatives, and open marker, composed-read, and handback choices. |
+| [Packed blocks](docs/packed-blocks.md) | Reusable cargo representation, collision, support, and transfer contracts for upcoming storage features. |
+| [Multiblock structures](docs/multiblock-structures.md) | Shared vocabulary for registration, claims, lifecycle, and visual substitution. |
 | [Architecture and review points](docs/architecture.md) | Subsystem map, engine/application boundaries, state ownership, concurrency, startup, and frame order. Start here for implementation. |
 | [Scenes, objects, and input](docs/scenes.md) | Scene contents, transform hierarchy, instance updates, current visibility index, controls, and lifetime. |
 | [Rendering](docs/rendering.md) | Pass sequence, geometry paths, shadows, SSAO, GPU layouts, and current rendering limitations. |
