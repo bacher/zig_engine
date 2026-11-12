@@ -95,6 +95,7 @@ below was checked against `main` at `d5d95d9`; runtime implementation is separat
   of conflicting claims before publishing the warehouse and its reservation together.
   A stale dialog cannot overwrite newer world changes or create a partial registration.
   R50/Q14 require current coherent confirmation and no temporary dialog reservation.
+  R62 defines the initial stock, capacity, and automatic-work state.
 - R7: An unoccupied active base pallet displays a square selected-material icon centered
   on its top, approximately one-third of its width. An unoccupied disabled base pallet
   displays a red cross instead. Emit neither marker while its column contains cargo;
@@ -410,8 +411,9 @@ below was checked against `main` at `d5d95d9`; runtime implementation is separat
   Display current available warehouse state and refresh action availability as updates arrive.
   Confirmations must revalidate current authoritative preconditions under R6/R22/R19;
   an earlier enabled button or snapshot cannot authorize an invalid change. UI updates
-  follow relevant state changes, without global polling or per-frame warehouse scans.
+  follow relevant state changes, without global polling or repeated scans of unchanged state.
   Opening a dialog adds no pause/resume transition to the world's simulation clock.
+  R63 defines confirmation reach after falling, displacement, or changes to the original hit.
 - R43: Target a loose/member pallet with one axis-aligned 1×1×0.2 box at the bottom of
   its unit cell. Ignore individual plank outlines and gaps; a ray above this box continues
   to the next target instead of hitting the pallet's otherwise empty cell volume. Packed
@@ -486,6 +488,7 @@ below was checked against `main` at `d5d95d9`; runtime implementation is separat
   Blueprint completion releases only that site's restrictions; a registered warehouse remains
   protected. Use local target/claim lookup, without global warehouse/site scans, extra per-stock
   structural validation, or widening the five-neighbor blueprint fulfillment support check.
+  Blueprint capture is a separate operation and follows R64's material/ownership boundary.
 
 ### Changing the footprint
 
@@ -665,6 +668,48 @@ below was checked against `main` at `d5d95d9`; runtime implementation is separat
   lifetime before relocation. No route to the destination or global free-space search is
   required; ordinary gravity resumes after recovery, and no new halo-floor requirement is added.
 
+### Registration defaults
+
+- R62: Successful new registration starts with the chosen material, `C=0`, `I=0`, `A=N`,
+  enabled automatic-work intent, and no accepted incoming/outgoing obligations. All physical
+  columns are active. Registration itself creates no delivery or cargo; automatic work may
+  subsequently start only under normal admission rules. Apply these defaults to every fresh
+  registration after unregister/rebuilding, even at unchanged coordinates; do not inherit
+  stopped intent or disabled columns from the retired object. Restore saved registrations
+  with their saved state instead, and preserve R22's stopped intent on material change.
+
+### Confirmation reach in live dialogs
+
+- R63: Recheck reach when evaluating a new mutating creation/management command, including
+  capacity, Stop/Enable, material change, and unregister. For creation, rediscover the current
+  candidate from the originally clicked pallet cell; that cell must still contain an eligible
+  unregistered pallet. At least one pallet of that current candidate must be within reach.
+  For management, at least one current member pallet or currently occupied cargo cell of
+  the addressed registration must be within reach. Use R43's inclusive four-metre
+  camera-to-nearest-full-cell-vertex metric from the current mode's viewpoint and wrapped X
+  handling. Bound the query to this candidate/registration. The original hit need
+  not survive, and reach is never measured to the layout origin or a formerly occupied slot.
+  Once the dialog is open, confirmation needs no fresh cursor ray, camera facing, or line of
+  sight; opening the dialog and ordinary stock actions retain R41/R43's targeting rules.
+  If out of reach, keep the dialog available for viewing, disable/reject mutations with an
+  out-of-reach reason, and leave world/inventory state unchanged. Missing required data cannot
+  prove reach or identity. Recheck locally before submission and authoritatively at evaluation;
+  update UI availability when the viewpoint or relevant object state changes. Moving after an
+  operation is accepted does not cancel it; Q23 retries replay its result without a new reach
+  test. An open subscription alone never grants remote mutation rights.
+
+### Blueprint capture boundary
+
+- R64: Preserve the blueprint capture allowlist and material view. A selected terrain pallet,
+  registered or loose, rejects capture with an unsupported-material diagnostic; pallet
+  blueprint support is deferred. Derived packed cargo is not captured terrain, even when its
+  stored material is blueprint-eligible. Sample underlying terrain and existing blueprint
+  logical contents under the capture rules, without substituting warehouse collision/render
+  occupancy. Upper cargo cells therefore contribute air; a cargo-only selection without
+  pallets or other content fails as an empty blueprint. Otherwise eligible surrounding
+  construction may be captured with those cells left empty. Capture neither copies inventory,
+  claims, nor registration data, and changes no warehouse state.
+
 ## Clarifications
 
 ### Q1 — One count versus priority draining
@@ -765,7 +810,8 @@ promises; quantities are never discarded. The alternative soft demand-only limit
 unchanged new admission to 6N is not selected because it permits refilling disabled storage.
 These are algorithmic bounds and gameplay tradeoffs, not measured runtime performance.
 
-A scratch enumeration covered all N in 1..25, A in 0..N, C in 0..6N, and I in 0..6N-C:
+The [executable model verifier](../../docs/validation/warehouses.md) covers all N in 1..25,
+A in 0..N, C in 0..6N, and I in 0..6N-C:
 2,053,700 aggregate states. It checked unique slots, contiguous stacks, active-before-disabled
 placement, disabled-first draining, admission/demand bounds, and the N=9 example above.
 The check uses Q5 column ranks and validates this layout/accounting model, not runtime
@@ -816,16 +862,25 @@ failure/cancellation still need their own policies without losing cargo or reser
 ### Q4 — Empty is not obligation-free (WH-04)
 
 **CONFIRMED 2026-11-11: separate stop/enable from unregister and material change.** The
-author accepted the following lifecycle, consistent with the repository's object lifecycle:
+following lifecycle follows that decision and the repository's object lifecycle; R62 adds
+the explicit registration default:
 
 | Action/state | Automatic work | Stock, obligations, and registration |
 | --- | --- | --- |
+| New registration | Enabled; normal admission prerequisites still apply | Chosen material, C=I=0, A=N, no accepted obligations; fresh identity and origin |
 | Stop accepted | Refuse new jobs involving the warehouse, including new inbound/outbound deliveries | Preserve stock and claims; all accepted work/deliveries finish |
 | Stopping with obligations | Process accepted work only | Manual take remains available; unregister/material change are disabled |
 | Stopped, obligations complete | Remain inactive | Retain goods and registration; allow manual draining |
 | Enable | Reopen admission under current prerequisites | Preserve existing stock, registration, and obligations without restarting them |
 | Change material | Require stopped, empty, and obligation-free state | Change selected material; remain registered and stopped |
 | Unregister | Require stopped, empty, and obligation-free state | Release this warehouse's claims and leave ordinary pallets |
+
+R62 makes a newly created warehouse immediately usable at full capacity and eligible for
+automatic supply. The creation chooser need only select the material. A player who wants to
+unregister or change material must first Stop it; accepted work still has to finish. Rebuilding
+creates a fresh enabled warehouse, while load/recovery restores saved settings and a material
+change on an existing object keeps it stopped. These initialization defaults close the gap
+identified in review; they do not add automatic delivery creation to registration.
 
 For the warehouse delivery lifecycle, accepted incoming and outgoing deliveries involving
 it finish before unregister/material change. Cargo already removed by an outgoing delivery
@@ -944,7 +999,8 @@ hashed direction is a preference; absent neighbors, inner-layer priority, and co
 deferral can change the actual second column. The selected first column is the sole
 exception to corner deferral.
 
-A scratch enumeration checked all 25 dimensions times 16 hash-selector combinations,
+The [executable model verifier](../../docs/validation/warehouses.md) checks all 25 dimensions
+times 16 hash-selector combinations,
 covering 196 distinct dimension/center/direction variants: every pallet appears once, the
 selected center is first, depth never increases, remaining corners follow noncorners,
 and a present noncorner in the selected direction is second if it is in the center's
@@ -1173,6 +1229,13 @@ revalidates its footprint and claims under R6/R50/Q14 without temporary preview 
 Update from relevant subscriptions/state changes without polling all
 warehouses per frame. The live world lets the player observe and manage ongoing deliveries;
 it also means inventory and action availability can change while the dialog is open.
+
+R63 keeps confirmation local after movement: current members/cargo establish reach even if
+the originally clicked item has disappeared. Creation still begins from the original pallet
+cell and revalidates its current component. Out-of-range dialogs remain viewable, but cannot
+mutate state until reach is restored. Confirmation uses distance instead of repeating camera
+targeting while the dialog owns the cursor. Falling or displacement never pauses simulation
+or cancels already accepted work.
 
 **CONFIRMED 2026-11-11 — ordinary put/arrival overlap.** Extend the existing repacking
 policy (Q1/R30) to otherwise valid manual puts and accepted delivery arrivals. Apply the
@@ -1905,8 +1968,9 @@ rollback, goods deletion, or arbitrary unknown-space fallback is introduced.
 
 Implementation review remains for bounded candidate ordering, dependency wakeups/pinning,
 and integration with the existing motion reset. The selected destination policy closes the
-last outstanding first-version warehouse gameplay choice; full-body/missing-data checks
-preserve existing recovery constraints rather than reopening the destination choice.
+displacement destination choice; full-body/missing-data checks preserve existing recovery
+constraints. [Model validation](../../docs/validation/warehouses.md) covers the bounded halo
+and body-fit arithmetic, including the vertical chunk-boundary counterexample.
 
 ## Acceptance Criteria
 
@@ -2426,6 +2490,38 @@ that runtime implementation or performance validation has been completed.
   changes THEN the old relocation is not blindly applied and current collision/lifetime checks
   determine whether recovery is still needed.
 
+- AC167: GIVEN a valid N-pallet candidate and selected eligible material WHEN registration
+  succeeds THEN the new object has that material, C=I=0, A=N, enabled intent, and no accepted
+  obligations; registration itself creates no cargo or delivery.
+- AC168: GIVEN a stopped, reduced-capacity warehouse that was drained and unregistered WHEN
+  its rebuilt base is registered again THEN the new identity uses R62's full-capacity enabled
+  defaults even if coordinates are reused; loading an existing registration instead restores
+  its saved settings, and changing its material preserves stopped intent.
+- AC169: GIVEN an open management dialog WHEN falling or displacement moves the viewpoint
+  beyond four metres from every current member/cargo cell THEN new mutations are disabled
+  locally and rejected on authoritative evaluation without side effects, while viewing,
+  physics, and simulation continue; returning within reach permits otherwise valid actions.
+- AC170: GIVEN an open management dialog whose original cargo hit has been removed/repacked
+  WHEN another current member or occupied cargo cell is within the inclusive reach limit
+  THEN that cell establishes reach without requiring a new ray, camera direction, or line of
+  sight; a stale slot or layout origin alone cannot authorize confirmation.
+- AC171: GIVEN a creation dialog WHEN its original pallet is removed or no pallet of the
+  rediscovered candidate is in reach at confirmation THEN creation rejects with no partial
+  object/claims; an otherwise valid current candidate with any member in reach may register.
+- AC172: GIVEN a capture selection containing a loose or registered terrain pallet WHEN
+  compiling the blueprint THEN capture reports unsupported material, copies no warehouse
+  identity/stock, and leaves the source unchanged.
+- AC173: GIVEN a selection containing only upper packed cargo cells and underlying air WHEN
+  capturing THEN cargo is omitted regardless of its material and the empty-blueprint rule
+  rejects the selection, without creating targets or changing inventory.
+- AC174: GIVEN otherwise eligible surrounding construction and upper cargo in one selection,
+  with no pallets or other unsupported source materials WHEN capture validates THEN only
+  ordinary capture materials become targets and cargo cells stay empty; no inventory,
+  registration, or reservation is serialized into the definition.
+- AC175: GIVEN an accepted dialog command followed by movement out of reach WHEN it completes
+  or its retained result is retried THEN Q23 preserves its single outcome without cancellation
+  or a new reach test; a new command still requires current reach.
+
 ## Constraints
 
 - Keep one authoritative stock owner; lookup references, snapshots, caches, and simulation
@@ -2453,8 +2549,9 @@ that runtime implementation or performance validation has been completed.
 
 ## Out of Scope
 
-Runtime implementation in this discussion; pallet crafting; full courier scheduling, route
-search, supplier matching, and production recipes; perishable/partial food crates; workbench
+Runtime implementation in this discussion; pallet crafting and pallet blueprint support;
+full courier scheduling, route search, supplier matching, and production recipes;
+perishable/partial food crates; workbench
 implementation; new road behavior; a universal pattern language; released-save migrations;
 multiplayer networking; liquid storage and handling pending a separate mechanics design.
 The general observer material-selection menu is also deferred; this feature adds key 9

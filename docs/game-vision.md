@@ -202,138 +202,29 @@ Each stage should improve transport throughput and efficiency per block by carry
 
 ### Warehouses and material orders
 
-The [pallet warehouse specification](../specs/features/warehouses.md) defines explicit registration
-of a 1–5 by 1–5 pallet base for one material, with derived packed goods. The selected
-[authority model](../specs/features/warehouses.md#q16--simulation-owned-warehouse-state-versus-pallet-owned-metadata)
-keeps count, incoming promises, active capacity, geometry, and lifecycle in a persistent
-simulation object addressed by WarehouseId. Pallets remain ordinary terrain members;
-world-data keeps their physical state and derived spatial claims. These are design decisions,
-not implemented behavior. Separate notes define [packed blocks](packed-blocks.md) and
-[multiblock structures](multiblock-structures.md).
+Pallet warehouses provide visible, single-material storage between extraction, production,
+and construction. Players assemble a base, register its material, and transfer packed goods;
+automatic logistics can use the same stock. Stored resources remain recognizable from outside.
+Players may reduce capacity or stop new automatic work while existing goods and accepted
+deliveries are preserved. Neighboring warehouses can share an aisle, and compatible buildings
+can be constructed around them.
 
-Registration recognizes the entire connected rectangular base. Its central cell coordinate,
-with the lower-coordinate choice on even axes, becomes a fixed layout origin for bounds and
-hashing. No pallet at that coordinate owns stock or needs to be loaded to obtain the object.
-Separate hash bits choose the first column among equally central candidates and a preferred
-filling direction. Inner layers precede outer ones and remaining corners fill last; a fully
-active 4×4 fills its inner 2×2 to height four before the perimeter. Future expansion retains
-the origin/hash while recomputing the filling center. Repacking may displace an intersecting
-player into free space. Incoming deliveries reserve aggregate capacity at departure and
-consume their own promise at handover. Stop/Enable is separate from unregister/material
-change, which require stopped, empty, obligation-free storage.
+The [warehouse specification](../specs/features/warehouses.md) is the normative source for
+first-version behavior. It settles [capacity and packing](../specs/features/warehouses.md#q2--what-does-active-capacity-restrict),
+[departure reservations](../specs/features/warehouses.md#q3--destination-capacity-and-overflow-wh-01),
+[lifecycle](../specs/features/warehouses.md#q4--empty-is-not-obligation-free-wh-04),
+[controls and reach](../specs/features/warehouses.md#q9--targeting-reach-dialogs-and-actor-overlap),
+[materials](../specs/features/warehouses.md#q10--allowed-materials-and-pallet-selection), and
+[composition with construction](../specs/features/warehouses.md#q8--reservation-overlap-and-blueprint-composition).
+In-place expansion is deferred; current size changes require unregistering and rebuilding.
 
-Warehouse capacity can be reduced to A active columns, including zero, without rebuilding
-its N-pallet base. Normal replenishment targets 4A and subtracts both present and already
-incoming goods; new deliveries and manual/observer additions must fit within 6A after
-accounting for promised incoming space. Earlier accepted deliveries and existing stock
-retain the full 6N physical capacity. Goods pack into active columns first, including their
-buffer levels, then into disabled columns; takes clear the disabled part first. Re-enabling
-columns recalculates layout without unregister or changing stock. Setting A=0 prevents new
-additions but allows manual draining and eligible outgoing work while enabled; it is
-separate from Stop. The [capacity policy](../specs/features/warehouses.md#q2--what-does-active-capacity-restrict)
-preserves accepted work and existing enabled/stopped intent through either capacity change.
-
-Couriers can load or unload from any reachable side-adjacent cell of the base-level
-clearance halo, excluding diagonal-only corners. There are at most twenty potential
-endpoints for a 5×5 warehouse; ordinary routing rules decide which have usable footing
-and routes. These candidates depend on the footprint, not current stock or active columns.
-Couriers interact with the whole warehouse inventory rather than a particular visible item.
-Registration and manual use do not require a courier route, while new automatic deliveries
-do. After departure, route or endpoint loss does not alter the accepted journey or handover.
-The [access decision](../specs/features/warehouses.md#q15--courier-loading-and-unloading-points-wh-02)
-adds no designated entrance, exclusive dock, or NPC-congestion queue.
-
-Material icons and disabled-column crosses appear only on free base pallets. Occupied columns
-emit no marker, while empty columns of the same warehouse retain theirs. Packed cargo leaves
-the resource texture visible between pallet and strap artwork, so the contents are recognizable
-from outside; transparent parts of the packaging show the resource, not the background.
-
-Warehouse visuals update on change without a fixed refresh delay. Multiple changes before
-preparation may be combined into the latest coherent image, usually shown in the next
-available frame. Under load, preparation can span frames without blocking simulation;
-inventory and collision follow current logical state independently. Goods and base markers
-stay consistent within each visual snapshot, and unchanged sources are reused.
-
-Each chunk touched by the warehouse's full reserved envelope keeps a small reference to
-its WarehouseId, registration, and bounds, without copying stock or active capacity. Claims
-remain discoverable across chunk boundaries even when the object snapshot is unavailable.
-A distant warehouse may look empty until that snapshot arrives, independently of central-pallet
-chunk residency. Nearby movement and interaction load required object state and treat unresolved
-possible cargo cells as unknown, while known shared clearance
-remains traversable under ordinary collision rules. The
-[discovery decision](../specs/features/warehouses.md#q12--missing-warehouse-state-discovery-and-streaming-ownership)
-limits this index to at most eight chunk entries per warehouse; ordinary stock changes do
-not rewrite those entries.
-
-In player mode, Mouse2 opens warehouse management through any reachable pallet or packed
-item, including when cargo hides all pallets. Mouse1/E takes with empty hands or puts the
-matching held material; another material is rejected. Transfers take about 100 ms and each
-requires a fresh press. Reach refers to the aimed pallet/item, not the layout origin or
-the slot changed by the layout algorithm. Repacking, manual puts, and accepted delivery
-arrivals displace an intersecting player into known free space; overlap alone does not reject
-a valid warehouse put or make deliveries wait. Recovery preserves the resource transfer and
-layout, and runs only on actual intersection. Warehouse dialogs release the cursor and
-block movement/look/tool input while simulation and player physics continue. Displayed
-values and action availability update as state changes; confirmation rechecks authoritative
-conditions. Escape closes the dialog first, without opening the pause menu on that press.
-Pallet targeting uses a low 1×1×0.2 box and cargo targeting a full unit cube. Rays above
-empty pallets continue; decorative plank gaps do not require precise aiming. Reach uses
-the ordinary inclusive four-metre distance to the nearest vertex of the targeted full
-unit cell. [Q9](../specs/features/warehouses.md#q9--targeting-reach-dialogs-and-actor-overlap)
-records these interaction rules. In observer mode, key 9 selects pallets and keys 1–8
-retain their assignments. Tab switches putting/removing; Mouse1/E adds one unit of the
-selected material in putting mode, and Mouse1/X discards one unit in removing mode.
-Edits are instant and leave player inventory unchanged, while preserving warehouse
-admission and member-protection rules. A selected-material mismatch reports the same
-error as player mode; the warehouse material is never substituted automatically. A general
-observer material-selection menu is planned separately.
-
-Initial warehouse cargo comprises dirt, sand, snow, crushed stone, logs, planks, rebar,
-reinforced concrete, both road item types, and pallets. Water is excluded until liquid mechanics
-are designed. This is an explicit storage capability, separate from terrain placeability;
-future cargo-only resources can be added when their item rules are defined. The
-[material decision](../specs/features/warehouses.md#q10--allowed-materials-and-pallet-selection)
-treats one stored pallet as one packed cargo unit, with roughly 100 ms put/take and no extra
-resource from packaging. Players can recover an unregistered
-pallet as one carried item in three seconds and reinstall it in one second under ordinary
-support rules. Warehouse members require explicit unregister before removal. There is no
-pallet crafting yet; initial pallets come from observer mode and can then be moved and reused.
-
-For this iteration, changing a warehouse footprint requires stopping it, completing accepted
-obligations, emptying it, and explicitly unregistering before rebuilding the pallet base and
-registering anew. The new registration selects its central layout origin again. In-place expansion
-preserving the existing registration/origin is deferred; changing the active-column count
-remains a separate capacity setting within unchanged physical bounds. See the
-[size-change decision](../specs/features/warehouses.md#q11--expansion).
-
-Opening warehouse creation only checks the candidate; it does not temporarily reserve or
-protect its pallets/clearance while material selection is open. Confirmation checks current
-blocks, supports, planned targets, and claims again, then publishes registration and its
-reservation together. Failure reports the reason without partial registration; canceling
-an unsubmitted preview leaves no claim to release. See the
-[confirmation rule](../specs/features/warehouses.md#q14--registration-checks-and-consistency).
-
-Neighboring warehouses may share one empty block of aisle width, including overlapping
-diagonal clearance. Their pallet/cargo volumes remain separate; shared space stays protected
-while either warehouse is registered. The [warehouse clearance rule](../specs/features/warehouses.md#q8--reservation-overlap-and-blueprint-composition)
-defines this independently of stored quantities or materials.
-
-A warehouse can occupy the empty interior of an unfinished blueprint, and construction can
-start around an existing warehouse. Every nonempty blueprint target must avoid the full
-warehouse envelope, including reserved clearance and unused cargo cells; supporting floor
-blocks must already exist. Stock transfers remain available, but real pallets inside the
-active construction box cannot be removed even after warehouse unregister. Completing the
-building releases its extraction ban while preserving a registered warehouse's restrictions.
-The [composition rule](../specs/features/warehouses.md#q8--reservation-overlap-and-blueprint-composition)
-keeps these independent from the prohibition on overlapping two unfinished blueprint boxes.
-
-Each pallet requires an eligible solid block directly below, without a 3×3×3 platform.
-The pallet supplies no construction support of its own. Its necessary floor remains
-protected while the pallet exists, including after warehouse unregister; see the
-[pallet foundation decision](../specs/features/warehouses.md#q7--pallet-support-and-the-floor).
-Eligible floors are existing structural materials (earth/clay, natural rock, crushed stone,
-rebar/concrete, and wood) plus solid country road. Sand, water, snow, leaves, adaptive roads
-in either shape, other pallets, and packed goods do not qualify; the spec lists exact types.
+Warehouse stock and accepted deliveries belong to persistent simulation state, independent
+of client rendering and terrain residency. The specification defines the corresponding
+[ownership](../specs/features/warehouses.md#q16--simulation-owned-warehouse-state-versus-pallet-owned-metadata)
+and [streaming](../specs/features/warehouses.md#q24--warehouse-object-subscriptions-and-client-retention)
+contracts. [Packed blocks](packed-blocks.md) and [multiblock structures](multiblock-structures.md)
+provide reusable concepts for later storage and production features. These are planned
+features; the warehouse implementation is still pending.
 
 The initial material-flow idea is demand-driven:
 
