@@ -1,8 +1,8 @@
 # Simulation notes
 
-These notes capture the author's gameplay intent, constraints, and architecture ideas from 2026-11-05 for the upcoming simulation. They accompany the [game vision](game-vision.md) and [design principles](../DESIGN_PRINCIPLES.md). They are not an implementation design or a description of implemented behavior. Architecture alternatives below remain unselected.
+These notes capture gameplay intent, constraints, and architecture decisions for the upcoming simulation. They accompany the [game vision](game-vision.md) and [design principles](../DESIGN_PRINCIPLES.md). They describe planned behavior and retain alternatives where no choice has been made; the selected first-version warehouse execution does not determine the full economy's scaling architecture.
 
-The [open questions](simulation-open-questions.md) track decisions needed before implementation. Warehouse rules will be developed in a separate specification in the next PR; their questions are explicitly deferred there.
+The [open questions](simulation-open-questions.md) track decisions needed before implementation. The [warehouse specification](../specs/features/warehouses.md) settles first-version storage behavior and execution contracts; logistics allocation, construction ownership mechanisms, and other marked follow-ups remain separate work.
 
 ## Primary scenario and player intervention
 
@@ -38,16 +38,18 @@ Client threads that provide the player experience may use a more balanced throug
 
 ## State ownership and publication
 
-Each mutable fact needs a clear authoritative source and a defined way to coordinate changes. This does not require a single global owner or a total order for independent events. The agreed responsibility split is:
+Each mutable fact needs a clear authoritative source and a defined way to coordinate changes. This does not require a single global owner or a total order for independent events. The selected responsibility split for the planned simulation is:
 
 | State | Responsible component |
 | --- | --- |
-| Blocks, chunks, their loading and publication of changes | World-data service |
+| Base terrain outside simulation-owned construction targets, chunk storage/loading, and terrain publication | World-data service |
+| Active construction target cells, their physical contents, progress, and saved state until handback | Simulation; selected direction, implementation pending |
 | Accepted operations and deliveries, their timing, paid costs, and obligations | Simulation |
+| Persistent warehouse objects, stock, incoming capacity, configuration, geometry, and lifecycle | Simulation |
 | Indexes for discovering work, dependencies, and routing | Simulation, updated from relevant world changes |
 | NPC models, animation, and visual movement separation | Client |
 
-Simulation should process its own task state without repeatedly querying the world-data service for information already established. A delivery can retain its completion time and paid status without reading the route's blocks again while it progresses. Query world data when a decision actually needs it, subject to the existing condition-check policies. Inventory authority and its relationship to physical stored goods remain deferred to the warehouse specification. Do not introduce independently writable copies of the same resource count.
+Simulation should process its own task state without repeatedly querying the world-data service for information already established. A delivery can retain its completion time and paid status without reading the route's blocks again while it progresses. Query world data when a decision actually needs it, subject to the existing condition-check policies. The [warehouse authority decision](../specs/features/warehouses.md#q16--simulation-owned-warehouse-state-versus-pallet-owned-metadata) places stock, aggregate incoming promises, active capacity, geometry, and lifecycle in a persistent simulation object addressed by WarehouseId. World-data retains physical pallets/base terrain and derived per-chunk identity/bounds claims. Accepted deliveries own cargo removed from available stock. The central layout origin serves bounds/hash arithmetic only; no pallet owns inventory. [Q17](../specs/features/warehouses.md#q17--player-inventory-and-manual-warehouse-transfers) retains player inventory in world-data service, preserving ordinary terrain/inventory transitions. Manual warehouse transfers must update both owners coherently. [Q18](../specs/features/warehouses.md#q18--atomic-transfers-and-coherent-durable-capture) accepts coherent live commit and a common durable capture without per-item disk synchronization. Q22 selects the initial shared executor; concrete record, capture, and safe-reader integration remains implementation work. Do not introduce independently writable copies of the same resource count.
 
 Exclusive mutation access for a batch of work is an accepted design direction: an executor may receive the right to modify a defined set of data, perform several changes, and publish the result with less per-edit coordination. This does not select chunks as the ownership unit, permanently bind data to a thread, or choose a lock or messaging mechanism. Component responsibility remains distinct from temporary write access; a simulation executor may modify world-data service data through such a grant without creating a second authoritative copy.
 
@@ -57,9 +59,90 @@ Client publication may batch multiple changes; each operation need not wait for 
 
 Compare a simple execution baseline with parallel processing of independent regions under exclusive write access in the prototype. Central orchestration and message-only worker communication remain candidates to measure, rather than mandatory boundaries. These responsibility and access principles partially resolve **SIM-08**; ownership units, threading, cross-boundary coordination, safe access, publication, and the clock/scheduling mechanism remain open.
 
+### Initial warehouse execution
+
+[Warehouse Q22](../specs/features/warehouses.md#q22--initial-execution-of-simulation-owned-warehouses)
+selects separate world-data/simulation modules on the existing service executor for the first
+warehouse implementation, subject to representative load validation. Independent executors and
+partitioned simulation remain alternatives. This choice keeps canonical simulation records and
+persistence responsibilities separate while executing mutations serially; automatic simulation-only
+operations use local APIs. It does not establish capacity for the full economy.
+
+The current service also handles terrain and mesh publication, so sharing its executor can
+couple simulation progress to that work. Bounded scheduling, explicit conflict precedence,
+safe capture/source holds, and representative mixed-load measurement are necessary. A single
+worker does not provide retry deduplication or protect asynchronous readers automatically.
+Moving to separate executors later still requires access, ordering, and lifetime design.
+
+[Warehouse Q23](../specs/features/warehouses.md#q23--command-identity-and-retry-lifetime)
+selects live-session external command identity and bounded duplicate recognition, with fresh-session
+state resynchronization after restart/reload rather than a durable per-click response history.
+Session changes do not silently cancel admitted commands or automatically replay them with new
+identities. This client protocol does not replace persistent simulation task, cargo, reservation,
+and completion accounting. [Q24](../specs/features/warehouses.md#q24--warehouse-object-subscriptions-and-client-retention)
+selects independent object subscriptions, compact complete snapshots, and functional client
+retention. [Q25](../specs/features/warehouses.md#q25--incremental-publication-follow-up) defers
+evaluation of increment/decrement or hybrid publication while retaining full initialization
+and resynchronization. This is a transport optimization, not a change to stock authority or
+resource effects, and it does not block first-version warehouses.
+
+## Construction storage and accounting tradeoffs
+
+Manual warehouse transfers are expected to be negligible relative to automatic work.
+Frequent construction makes simulation/terrain interaction a primary workload.
+[Q18](../specs/features/warehouses.md#q18--atomic-transfers-and-coherent-durable-capture)
+accepts coherent live transitions plus shared save capture/WAL without disk synchronization
+per item. Its implementation must prioritize automatic work.
+
+The [construction state ownership spec](../specs/features/construction-state-ownership.md)
+records the selected direction: actual simulation ownership of nonempty blueprint targets,
+including physical contents and saved state, followed by integration into world-data chunks.
+Cavities, foundations, and other terrain remain world-data-owned. This planned responsibility
+change is not yet implemented. [Alternatives](../specs/features/construction-state-ownership.md#q2--ownership-and-execution-alternatives)
+preserve whole-box ownership, queued world-data operations, and the earlier proposal that
+site targets define legal actions while a technical access grant covers all data needed for
+a batch. That grant alternative keeps canonical terrain in world-data.
+
+Current application rules require targets to start empty. Without material transitions,
+immutable definition/progress bits may describe their physical state; retained transformations
+need additional state. Ownership persists independently of client residency. The author's
+[static membership proposal](../specs/features/construction-state-ownership.md#q3--static-target-membership-in-chunk-data)
+would mark target ownership in chunk data once at admission and retain it until handback,
+without encoding whether the miniature is fulfilled. Compare an in-cell tag, per-chunk bitset,
+and sparse directory; no encoding is selected. Current pending-target entries disappear on
+fulfillment, so their lifetime cannot serve the new ownership contract unchanged.
+
+All physical consumers must resolve site-owned cells and ordinary terrain into one world;
+planned miniatures remain distinct from real completed cells. Safe reads, bounded spatial
+lookup, cross-site support, publication, and boundary invalidation remain necessary even
+when per-fill terrain mutation becomes local to simulation. Measure those costs alongside
+construction throughput, saves, active-site memory, and large completion bursts. No performance
+advantage of either grants or actual storage transfer has yet been demonstrated.
+
+Ownership admission/handback needs coherent live and saved transitions under Q18. Merge owned
+cells and metadata into current destination chunks, preserving other cells; never restore an
+old whole-chunk snapshot over intervening edits. Retire the site source only after its handoff
+is accepted. Multi-chunk preparation, completion versus consolidation timing, reader lifetimes,
+and any future cancellation remain design work. Simulation-owned records use the common save
+boundary, not independent owner saves. Handback does not add a final structural validation.
+
+[Q21](../specs/features/warehouses.md#q21--optional-soil-transformations) permits discussing
+removal of optional compaction. Current placement-time compaction and grass/coverage changes
+can mutate external soil; removing only the compaction timer would leave such interactions.
+Resolve the replacement behavior before adding coordination solely for that feature. Existing
+soil materials and support rules need not be removed; no gameplay change is selected yet.
+
+[Q20](../specs/features/warehouses.md#q20--measured-exceptions-to-resource-accounting) authorizes
+evaluating a specific best-effort boundary if rare resource discrepancies and useful savings
+can be demonstrated. Conservation remains the baseline until such an exception is selected.
+Report errors per relevant boundary operation and world-hour, accumulated drift, sample size,
+and repeatable failure patterns; exercise retries, contention, capture, and crash recovery.
+Resource loss is distinct from coherent rollback of unsaved progress, and neither licenses
+unsafe concurrent memory access.
+
 ## Simulation state and startup
 
-The simulation maintains its own task state and indexes, distinct from the block data stored in chunks, according to the responsibility split above. Opening a world must resume simulation in all areas containing active event emitters without scanning the whole world. The concrete representations and recovery mechanism have not been designed.
+The simulation maintains task state and indexes plus the selected simulation-owned warehouse and construction-target records, according to the responsibility split above. Ordinary base terrain remains in world-data chunks. Opening a world must resume simulation in all areas containing active event emitters without scanning the whole world. The concrete representations and recovery mechanism have not been designed.
 
 ## World time and no offline progress
 
@@ -174,19 +257,19 @@ Transported goods remain cargo: at departure they leave available source stock a
 
 Discovering eligible work and preparing a plan do not create an accepted obligation. Resource observations and a proposed route are preliminary: resources may be taken by other work before acceptance. Planning does not consume inputs or food, transfer cargo, or require an object to service the proposed operation. It may be deferred under capacity pressure. Confirm actual resource availability as part of successful acceptance; other condition checks retain their individually agreed consistency policies rather than requiring a new strict recheck of the whole world.
 
-For the first version, accepting an obligation and starting the task form one logical transition. Do not introduce a separate accepted-but-not-started task state. A production start combines full input and food consumption, task creation with its timing, and registration of the participating objects' obligations. A delivery start combines full operating payment, removal of cargo from available source stock into the delivery's custody, task creation, and its obligations. The capacity guarantees required for acceptance remain subject to the warehouse specification.
+For the first version, accepting an obligation and starting the task form one logical transition. Do not introduce a separate accepted-but-not-started task state. A production start combines full input and food consumption, task creation with its timing, and registration of the participating objects' obligations. A delivery start combines full operating payment, removal of cargo from available source stock into the delivery's custody, task creation, and its obligations. For a warehouse destination it also reserves aggregate capacity under [warehouse Q3](../specs/features/warehouses.md#q3--destination-capacity-and-overflow-wh-01). Preliminary planning reserves nothing; a failed start leaves no capacity promise, partial payment, or cargo transfer.
 
 Authoritative decisions must not treat a partially applied start as successful. A failed start must leave no partial consumption or cargo transfer; it must not leave paid resources without a task or create a task whose cargo remains available to another delivery. Resource contention may cause an unaccepted attempt to wait and retry. Existing simulation precedence over conflicting player edits remains in force. A compensated start still performs this transition at actual processing/acceptance time, even when its assigned simulation-time start is earlier.
 
-Scheduled completion and application of its result are distinct: the scheduled time may have passed while the completion is still awaiting processing. Successfully applying completion is another coherent transition that accounts for the output or cargo handover, marks the task completed, and releases the obligations that were fulfilled. Do not charge inputs again. Successful cargo handover cannot leave the same goods owned by both the delivery and the recipient, or lose them between the two. Warehouse rules determine when handover is possible and what happens when destination conditions are not met; this decision does not settle destination capacity or which downstream obligations belong to a production task under **SIM-15**.
+Scheduled completion and application of its result are distinct: the scheduled time may have passed while the completion is still awaiting processing. Successfully applying completion is another coherent transition that accounts for the output or cargo handover, marks the task completed, and releases the obligations that were fulfilled. Do not charge inputs again. Successful cargo handover cannot leave the same goods owned by both the delivery and the recipient, or lose them between the two. A warehouse handover consumes that delivery's own capacity reservation while adding its cargo to present stock, preserving their combined capacity use. Service/data delays retain cargo and its promise until successful handover. Exceptional failures and the downstream obligations belonging to a production task remain under **SIM-16** and **SIM-15**.
 
 Repeated processing is allowed, but repeated effects are not. Retrying the same logical start must not create another task or spend resources again; retrying the same completion must not produce another output or transfer cargo twice. Distinguish a retry from a new independent operation. The requirement applies to duplicate notifications and retries after an uncertain previous outcome; neither a message-delivery guarantee nor a concrete deduplication mechanism is selected here.
 
 These are logical consistency requirements, including operations spanning ownership boundaries, not a requirement for a universal world transaction system or any particular lock or queue. Their implementation must preserve authoritative accounting while retaining the already allowed lag in client publication and eligible condition checks.
 
-Saved and recovered task state, paid status, resources, cargo, and results must describe a coherent outcome of these transitions. This does not require synchronous disk persistence after every start or completion. Save frequency, crash recovery, and any allowed loss of recent progress remain under **SIM-13**; no crash-loss policy is selected here.
+Saved and recovered task state, paid status, resources, cargo, and results must describe a coherent outcome of these transitions. This does not require synchronous disk persistence after every start or completion. Warehouse Q18 accepts a common capture cut and shared WAL, with coherent loss of recent unsaved progress permitted and no per-item disk synchronization. Save frequency, integration details, and any numeric crash-loss bound remain under **SIM-13**.
 
-These task-boundary and duplicate-effect rules partially resolve **SIM-09**. Coordination across components and chunks, recognition of retries, and recovery from partial implementation failures remain to be designed with **SIM-08** and **SIM-13**. Destination capacity stays under **WH-01**, and cancellation or exceptional gameplay failures under **SIM-16**.
+These task-boundary and duplicate-effect rules partially resolve **SIM-09**. Coordination across components and chunks, recognition of retries, and recovery from partial implementation failures remain to be designed with **SIM-08** and **SIM-13**. **WH-01** now selects aggregate warehouse capacity reservation at departure and reserved handover. [Warehouse Q2](../specs/features/warehouses.md#q2--what-does-active-capacity-restrict) fixes reduced capacity: target 4A, new admission within 6A including present stock and incoming promises, and preservation of existing stock/promises within the full 6N footprint. Capacity changes do not revoke accepted deliveries; A=0 blocks new additions while enabled outgoing work and manual draining remain possible. Cancellation or exceptional gameplay failures stay under **SIM-16**.
 
 ## Workstation example
 
@@ -196,7 +279,17 @@ Every simulation action has prerequisites. Producing a concrete block at a works
 - Delivered inputs: cement, crushed stone, sand, and water.
 - Coverage by a food dispenser with enough food to pay for the operation.
 
-Whether to require guaranteed destination capacity before starting every delivery is deferred to the warehouse specification in the next PR; see **WH-01** in the [warehouse questions](simulation-open-questions.md#deferred-to-the-warehouse-specification-in-the-next-pr). The output-slot condition above records the workstation example; it does not establish a universal capacity-reservation policy for all work and deliveries.
+Warehouse-bound deliveries require aggregate capacity reserved at departure under [warehouse Q3](../specs/features/warehouses.md#q3--destination-capacity-and-overflow-wh-01). This decision covers warehouse destinations; the output-slot condition above remains a workstation example and does not establish the capacity policy for every other buffer or production output.
+
+Warehouse [Q15](../specs/features/warehouses.md#q15--courier-loading-and-unloading-points-wh-02)
+defines pickup/drop-off candidates along every side of the base-level clearance halo,
+excluding diagonal corners: at most twenty cells, independent of current stock or active
+capacity. A new delivery requires a route to eligible endpoints under ordinary traversal
+rules, while warehouse registration/manual use does not require courier access. The cargo
+transfer addresses the warehouse registration, not the courier's visual position or a
+named storage slot. Subsequent endpoint/route loss follows the existing accepted-journey
+policy and cannot block handover. These are warehouse endpoint contracts; route search,
+endpoint selection, caching, and supplier allocation remain separate logistics design.
 
 Relevant changes, such as input delivery or food arriving at the dispenser, must cause the prerequisites to be reconsidered. When all conditions are met and the workstation is enabled, production can start, consuming all recipe inputs and the full food cost at that moment. This describes the triggering behavior without selecting how checks are scheduled or combined.
 
@@ -208,7 +301,9 @@ Players must be able to withdraw an object from active simulation without destro
 
 Once outstanding operations and deliveries finish, the object remains intact and inactive. The player can later enable it again or explicitly dismantle it. Stopping does not queue automatic deletion, and dismantling is allowed only after the object has stopped and its outstanding obligations are complete. This avoids requiring a continuously busy object to become idle by chance before it can be taken out of service.
 
-These are gameplay rules, not a selected lifecycle implementation. The exact scope of an accepted obligation, including follow-up work for an operation's output, and the handling of stored materials during dismantling still need specification. The [game vision](game-vision.md#stopping-reactivating-and-dismantling-objects) records the same lifecycle.
+The [warehouse lifecycle decision](../specs/features/warehouses.md#q4--empty-is-not-obligation-free-wh-04) applies this rule to both incoming and outgoing automatic deliveries, keeps manual extraction available while stopping/stopped, and requires stopped, empty, obligation-free storage for unregister or material change. Material change preserves registration and stopped status; only explicit Enable reopens automatic admission. Accepted warehouse deliveries finish normally, and save/load retains the stopped intent and outstanding work.
+
+These are gameplay rules, not a selected lifecycle implementation. The scope of general production follow-up obligations, including later output-delivery work, remains under SIM-15. The [game vision](game-vision.md#stopping-reactivating-and-dismantling-objects) records the same lifecycle.
 
 ## Production and outbound delivery are separate jobs
 
@@ -228,7 +323,8 @@ Movement separation will likely be added as a visual effect to reduce overlap be
 
 ## Architecture ideas to revisit later
 
-The author has not chosen a simulation architecture. Candidates include:
+Warehouse Q22 selects a shared executor for the first warehouse implementation. Broader
+simulation execution and scaling remain open; retained alternatives include:
 
 - World-data service and simulation on the same thread.
 - A separate world-data service and a simulation event loop acting as an orchestrator for workers. One variant isolates workers behind inbox communication with the orchestrator; another allows workers to access the world-data service themselves.

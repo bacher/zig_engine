@@ -4,6 +4,13 @@ The voxel application combines deterministic terrain generation with an in-memor
 
 ## Space and contents
 
+The [construction state ownership spec](../specs/features/construction-state-ownership.md)
+selects a future split in which active blueprint targets are stored and saved by simulation
+until handback. Physical queries will compose those cells with ordinary terrain. Its proposed
+static ownership markers do not encode progress and must not be interpreted as material or
+occupancy. The representations and service behavior below describe the current implementation;
+no redirect tag or target-ownership bitset has been added.
+
 Chunks remain fixed at 32 by 32 by 32 blocks. The application chooses world dimensions at scene creation; its current preset is 2048 by 1024 by 32 chunks: 65536 by 32768 by 1024 blocks. Each block occupies one world-coordinate unit, defined as one metre. X wrapping is always enabled by the application's compile-time engine configuration. Positions beyond y/z storage boundaries cannot index terrain; outer faces at those boundaries remain exposed, and the player treats those edges as collision walls.
 
 Natural-world generation currently supports X:Y = 2:1, targeting three chunk-size

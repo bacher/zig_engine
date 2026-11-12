@@ -14,6 +14,14 @@ Runtime implementation is authorized and in progress. Requirements distinguish u
 
 ## Context
 
+The [construction state ownership follow-up](construction-state-ownership.md) selects
+simulation ownership of nonempty active targets for further design, with later integration
+into world-data chunks. It preserves this spec's gameplay, empty-target admission, cavity
+rules, and bounded physical support predicate. Current world-data integration described here
+remains the implemented path until that follow-up is implemented; storage markers, composed
+reads, and handback scheduling are not yet selected. The follow-up records alternatives,
+including world-data-owned terrain with batched technical access.
+
 The voxel app has a one-block player inventory, timed manual placement/extraction, debug spectator tools, a main-thread streamed world cache, and an authoritative `WorldDataService` worker. Client and service currently run ordinary structural validation, including potentially affected constructions. Persistent saves include terrain, construction metadata, roads, block timers, player identity, inventory, blueprint definitions, and active construction progress.
 
 The selected capture design uses the player's current client view, including already-applied optimistic edits, then validates detached contents in isolation. The previous service-owned source-snapshot design is retained under [Rejected alternative: WorldDataService-owned capture](#rejected-alternative-worlddataservice-owned-capture) as decision history. It is superseded and is not a second implementation target. Authoritative destination checks still apply when applying a blueprint.
@@ -124,12 +132,17 @@ Answers distinguish user-confirmed behavior, source-verified current rules, and 
   A2: **CONFIRMED:** require every nonempty target cell to be free, including when its existing block has the correct type. Do not reuse blocks or create prefulfilled targets. Only blueprint-empty cells may retain existing contents.
 - Q3: What is permitted in blueprint-empty cells of the bounding box?
   A3: **CONFIRMED:** these cells need not be cleared; keep their blocks untouched. They are still covered by the active box's extraction ban. Apply the corrected independent-support rule and composed admission/ordinary-edit checks in R38–R40/Q15 rather than a blanket empty-cavity requirement.
+  The planned [warehouse integration](warehouses.md#q8--reservation-overlap-and-blueprint-composition) permits warehouses in these empty cells in either admission order, provided no blueprint target intersects the full warehouse reservation. Pallet support must be real; stock transfers remain simulation inventory operations, while real-pallet removal retains this active-box extraction ban even after warehouse unregister. This extends future admission checks without changing blueprint-instance box exclusivity or the five-neighbor structural fulfillment bound.
 - Q4: May the external foundation change during assembly?
   A4: **CONFIRMED:** no additional foundation extraction locks. Update general extraction validation to include miniatures alongside ordinary blocks and evaluate outside-box removals as if construction were complete. Thus ordinary support checks reject invalid removals, while safe removals remain possible. The original complete platform is required only at application, not as an invariant throughout assembly. Every active instance participates in the logical completed view.
 - Q5: Does cheap XY support mean identical type or compatible structural family?
   A5: **CONFIRMED:** allow the rebar/reinforced-concrete pair for XY support. **DERIVED from ordinary-support coverage:** a crushed_stone target also accepts real `isNaturalRock()` XY neighbors, matching the ordinary crushed-bridge side predicate; this includes stone, metal_ore, limestone, coal, and deeprock, not clay. Other XY neighbors match the logical material. This is directed support eligibility, not interchangeable materials: the target still requires its specified item. It uses the same four XY reads and adds no recursive support checks.
 - Q6: Which captured material/state conversions are supported?
   A6: **CONFIRMED:** allow dirt, sand, crushed stone, tree trunk, planks, rebar, reinforced concrete, and solid country road; first normalize every included stone to crushed stone and grass/packed dirt to dirt, then validate. Only the reinforced-support fallback in R47/Q19/Q21 may change crushed stone to reinforced concrete. Treat dirt/packed dirt/grass as one fulfillment material after placement. Reject leaves, natural resource types, clay, deeprock, water, snow, adaptive roads, and unknown custom blocks with diagnostics. Adaptive-road slope/ownership capture is deferred.
+  Warehouse integration follows [warehouse R64](warehouses.md#blueprint-capture-boundary):
+  terrain pallets remain unsupported, and derived packed cargo contributes no captured
+  material, inventory, or registration. Cargo-only upper selections therefore remain subject
+  to empty-blueprint rejection. Pallet blueprint support is deferred.
 - Q7: What anchors preview, rotates it, and cancels it?
   A7: **ADOPTED DEFAULT:** cursor targets the compact minimum corner, which stays fixed when rotating. Rotate local integer coordinates as `(x,y,z) → (y,width−1−x,z)` and exchange width/depth; rebase to nonnegative offsets. Four turns restore the original contents exactly. Escape/B cancels an unsubmitted preview; successful apply returns to ordinary play if that preview is still open. After submission, Escape/B/Q may dismiss its UI but the frozen application command remains pending, blocks another application submission until resolved, and reports its outcome without reopening dismissed UI. Tool dismissal never implies applied-building cancellation. B opens the chooser while capture awaits an anchor; after anchor selection, ignore B outside name entry rather than discard its draft. Blueprints are player tools; Q switches control mode only after discarding temporary tool state, preserving any submitted command's ownership.
 - Q8: What counts as 100 name characters, and are duplicate names allowed?

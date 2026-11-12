@@ -50,7 +50,24 @@ Version 5 keeps the version-4 byte layouts but requires platform-only direct sto
 foundations and portable blueprint certification. Raising both gates excludes old
 buildings and blueprint libraries certified under the former single-stone shortcut.
 
+## Warehouse command sessions (planned)
+
+[Warehouse Q23](../specs/features/warehouses.md#q23--command-identity-and-retry-lifetime)
+selects duplicate recognition within a live server/world and client session, without requiring
+save records for every user command's response. Restart/reload uses fresh sessions and an
+authoritative state refresh; uncertain old requests are not automatically replayed as new
+commands. A command may be present in the saved state even if its reply was not received.
+This preserves the shared coherent save boundary and does not relax persistent delivery/task
+recovery. Exact bounded acknowledgment/history mechanics remain implementation review.
+
 ## Saving and exit
+
+The planned [construction ownership change](../specs/features/construction-state-ownership.md)
+moves canonical active-target contents/progress into simulation records while keeping them
+in the shared coherent save boundary with terrain and resources. Admission and handback must
+save matching ownership/discovery and cell state; a static chunk marker cannot substitute for
+saved fulfillment. These are future integration requirements. The format and behavior below
+describe the implemented world-data-owned construction path.
 
 Autosave attempts run every 60 seconds and compaction is requested every 10 minutes. Only a durable WAL commit establishes saved progress; the interval is not a maximum loss window. Base compaction allows exact-version dirty chunks to unload and retires covered journals after durable installation.
 
