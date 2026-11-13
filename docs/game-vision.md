@@ -114,7 +114,7 @@ Initial material examples:
 
 | Material | Proposed construction behavior |
 | --- | --- |
-| Loose soil | Requires a filled 3 × 3 support layer immediately beneath the placed cell. Successive layers therefore need wider foundations, producing pyramid-like forms rather than thin soil overhangs. |
+| Loose soil | Requires a filled 3 × 3 support layer immediately beneath the placed cell and supplies no support itself. Compact each supporting layer before adding another; successive layers need wider foundations, producing pyramid-like forms. Hold mouse2 for three seconds to compact one block, or wait for its timer. |
 | Planks | Can rest on a supporting block and extend horizontally through other planks for up to two unsupported steps, including diagonals. The intended examples are a 5 × 5 platform on a central support, or a six-block beam including its two supported endpoints. |
 | Rebar and reinforced concrete | Can extend horizontally in a similar way, with a larger reach X still to be decided for the long-term design. |
 

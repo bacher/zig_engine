@@ -203,3 +203,38 @@ full command passes 1,873 tests with one existing skip (47/47 steps). Formatting
 and `git diff --check` passed. This
 changes validation dispatch only; gameplay rules, world-save format, and the
 five-neighbor fulfillment contract remain the same.
+
+## Loose-soil support revision
+
+The current rules exclude loose soil from upward support and stable platforms.
+Blueprint fulfillment skips a loose block below and tries the same four real XY
+neighbors, preserving the five-read bound. Filling a target leaves loose soil beneath
+it unchanged; manual or timed compaction preserves target identity and adds
+support capabilities without structural revalidation. Covering grass still converts
+it to packed soil and cancels pending surface-growth timers.
+
+Capture still normalizes packed soil and grass to loose dirt before certification.
+A design that depends on those cells supporting higher included blocks therefore
+rejects capture. Laterally supported planks above an included loose-soil cell
+remain valid, and the saved cell remains loose. World format 6 rejects older
+worlds with certificates that relied on loose-soil support.
+
+Verified with:
+
+```sh
+zig build --global-cache-dir /private/tmp/zig-engine-global-cache \
+  test-blueprint test-blueprint-admission
+```
+
+The deterministic admission comparison still accepts 16 of 32 seeded candidates,
+including eight multilayer designs, and checks 128 rotated/wrapped applications
+against 5,184 independent full target validations. Regression cases also cover
+loose platform rejection, acceptance after compaction, and physical lateral
+fulfillment above loose soil.
+
+Final integration validation passed `zig build install test test-world test-blueprint
+test-blueprint-admission -Doptimize=ReleaseFast -j2 --summary all` with the writable
+global cache above: 65/65 build steps, 2,498 tests passed and eight skipped. This
+includes mouse2 hold/cancellation, inventory preservation, stale-target rejection,
+optimistic rollback, restart, unchanged loose-soil deadlines under ordinary and
+blueprint placement, and preserved grass clearing. Formatting and diff checks pass.

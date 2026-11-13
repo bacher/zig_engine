@@ -127,10 +127,11 @@ and any future cancellation remain design work. Simulation-owned records use the
 boundary, not independent owner saves. Handback does not add a final structural validation.
 
 [Q21](../specs/features/warehouses.md#q21--optional-soil-transformations) permits discussing
-removal of optional compaction. Current placement-time compaction and grass/coverage changes
-can mutate external soil; removing only the compaction timer would leave such interactions.
+removal of optional compaction. Placement no longer compacts loose soil; manual compaction and the delayed timer remain.
+Grass/coverage changes can still mutate external soil; removing only the compaction timer
+would leave such interactions.
 Resolve the replacement behavior before adding coordination solely for that feature. Existing
-soil materials and support rules need not be removed; no gameplay change is selected yet.
+soil materials and support rules need not be removed; further changes to soil state ownership remain undecided.
 
 [Q20](../specs/features/warehouses.md#q20--measured-exceptions-to-resource-accounting) authorizes
 evaluating a specific best-effort boundary if rare resource discrepancies and useful savings

@@ -218,8 +218,9 @@ it is not implemented or selected by this spec.
 ### Q6 — Soil and compact physical state
 
 **UNRESOLVED.** [Warehouse Q21](warehouses.md#q21--optional-soil-transformations) records
-permission to simplify optional compaction. Current placement can change earth below a target
-and cancel timers; compaction and grass growth can change the target material itself.
+permission to simplify optional compaction. Placement no longer compacts loose soil, but covering packed soil can clear grass
+and cancel its surface timer. Manual/timed compaction and grass growth can change
+the target material itself.
 Removing only a delayed compaction timer does not remove these interactions.
 
 Resolve automatic compaction, grass coverage, and any remaining timer owner before relying

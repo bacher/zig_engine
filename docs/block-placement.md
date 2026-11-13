@@ -11,7 +11,7 @@ client data produces `missing_data`, never an assumption that the missing cells 
 | --- | --- |
 | Natural stone (`stone`) | Generated rock; cannot be placed. Mining yields `crushed_stone`. |
 | Crushed stone | Placeable masonry; cannot become natural stone. |
-| Loose soil (`dirt`) | The soil placement/mining item. Needs a filled 3x3 support layer. |
+| Loose soil (`dirt`) | The soil placement/mining item. Needs a filled 3x3 support layer and supplies no support. |
 | Packed soil (`packed_dirt`) | Generated soil or compacted loose soil. Mining yields loose soil. |
 | Grass-covered packed soil (`grass`) | A surface appearance/state of packed soil, never a placeable item. |
 | Tree trunk | Vertically supported wood. |
@@ -58,11 +58,11 @@ selection/definition limits in [R54/Q25](../specs/features/blueprints.md#horizon
 
 Full designs are validated at creation and composed with the destination at application.
 Subsequent blueprint-directed structural approval must inspect no more than the real block
-directly below and four immediate XY neighbors. Any real block below passes this cheap rule;
-with air below, an eligible real XY neighbor is required. This deliberately permits temporarily
+directly below and four immediate XY neighbors. Any real block except loose soil below passes
+this cheap rule; with air or loose soil below, an eligible real XY neighbor is required. This deliberately permits temporarily
 unsupported intermediate states without repeating ordinary height/span or dependent searches.
 
-For cheap fulfillment with air below, an eligible real XY neighbor is a matching logical
+For cheap fulfillment with air or loose soil below, an eligible real XY neighbor is a matching logical
 material, either reinforced type for a rebar/concrete target, or natural rock for a
 crushed-stone target. Reuse the ordinary `isNaturalRock()` family: stone, metal_ore,
 limestone, coal, and deeprock; clay is not in that family. This directed support exception
@@ -178,8 +178,8 @@ or final validation pass; the five-neighbor bound remains.
 
 A stable platform is a completely filled 3x3x3 cube immediately below a candidate block.
 The cube covers x/y offsets -1 through +1 and z offsets -1 through -3. The candidate must
-be directly above the center of the cube's top layer. Every cell must contain loose or
-packed soil, natural or crushed stone, rebar, or reinforced concrete. Mixtures are allowed;
+be directly above the center of the cube's top layer. Every cell must contain packed soil,
+natural or crushed stone, rebar, or reinforced concrete. Mixtures are allowed;
 ore, limestone, coal, clay, and deeprock also qualify; wood, water, sand, snow, foliage, and air do not qualify.
 
 A single exposed deeprock cell is also a direct foundation, without requiring a surrounding platform. Soil and sand still require all nine footprint cells. A stable platform supplies a foundation and resets height counters. It can be constructed;
@@ -189,16 +189,23 @@ crushed-stone run at the platform, rather than counting through it.
 
 ## Local support and height
 
-Loose soil and sand need nine qualifying blocks in the 3x3 layer directly beneath them. Earth,
+Loose soil and sand need nine qualifying blocks in the 3x3 layer directly beneath them. Packed earth,
 stone, geological resources, rebar/concrete, trunks, planks, and sand can fill this layer. Water,
 standalone snow, foliage, and air cannot. Sand remains nonstructural despite filling a footprint. A constructed soil block
 retains this footprint requirement after compaction (and constructed sand retains its own footprint), so removing temporary supports cannot
 leave a previously placed soil block floating. Generated terrain is exempt from building
 validation; natural cliffs and hills remain mineable.
 
+Loose soil never fills a footprint, stable platform, road foundation, or direct support route.
+Building another soil layer requires compacting its supporting layer first. Manual and timed
+compaction preserve the soil block's own footprint rule and only add support capabilities;
+neither checks surrounding constructions. Legal lateral routes above loose soil remain valid
+after compaction, including at their height limits. Compaction is allowed inside unfinished
+blueprint boxes and preserves any already fulfilled soil target.
+
 Trunks and planks can rest on structural materials. Crushed stone can rest on crushed
 stone. Rebar and concrete can rest on either reinforced material. A stable platform is
-an additional valid foundation for all these materials. Literal natural `stone`, soil
+an additional valid foundation for all these materials. Literal natural `stone`, packed soil
 and clay provide direct support only through the centered full 3x3x3 stable platform.
 Stone remains a qualifying platform material, and mixtures are allowed. Ore, limestone,
 coal and deeprock retain their single-block natural-foundation shortcut. Wood retains
@@ -418,7 +425,8 @@ cells. Soil depends
 only on its immediate 3x3 footprint; wood and mineral envelopes include horizontal routes
 at each lower level and off-center platform cells. Missing data within an affected envelope
 still blocks client approval; incomplete constructions outside it do not veto edits. Time events
-do not run structural validation because the soil states have the same support properties.
+do not run structural validation: compaction only adds support, and grass has the same
+support properties as packed soil.
 Support states and memoization exist only during validation; no support graph or dependency
 information is added to stored chunk metadata. A dependency index could be a separate future
 optimization, but is not required for correctness.
@@ -437,10 +445,10 @@ time; the service processes monotonic `advanceTo` requests in the same queue as 
 Stopping game-time advancement pauses deadlines. Subscription eviction has no effect.
 
 - Placing loose soil schedules compaction 30 minutes later.
-- Soil placed beneath an existing block is packed immediately, without a pending timer.
-- Placing any block directly above loose soil compacts the covered soil immediately.
-- Newly compacted exposed soil schedules grass 30 minutes after compaction.
-- Covering soil clears grass and cancels its pending surface timer.
+- Loose soil remains loose when placed beneath a block or covered later; covering preserves its compaction deadline.
+- In player mode, holding mouse2 on loose soil for three seconds compacts it, using the action progress bar. Release, changed target or terrain, lost reach, focus loss, and leaving player mode cancel unfinished work. Inventory is unchanged, and the next action waits for acknowledgement and a fresh press.
+- Manual and timed compaction always replace loose soil with packed soil, without environmental validation. Compaction schedules grass 30 minutes later; grass growth checks that the cell above is empty.
+- Covering packed soil clears grass and cancels its pending surface timer.
 - Exposing packed soil schedules grass 30 minutes after the exposure.
 - Generated soil is already packed, with climate cover on its exposed surface immediately.
 - The saved `grass` state renders green in temperate/desert columns, yellow in steppe, and snowy on top in frozen columns. Loose and packed soil retain their ordinary appearance until the existing timer grows cover.
@@ -457,10 +465,8 @@ A large time step can compact soil and grow grass in one update using the origin
 without adding another 30-minute delay at reload or catch-up. Type changes advance chunk
 and mesh revisions and reach both block and mesh subscribers in complete update packages.
 
-Chunks with pending transformations are retained by the service alongside committed edits;
-this retention is independent of client streaming and currently has no separate memory budget.
-There is still no disk save/load system. Deadlines and constructions last for the service's
-lifetime, as do other world edits.
+Pending transformations survive client streaming eviction and persist with the world's
+simulation tick and construction metadata. See [persistence](persistence.md).
 
 ## Tools and validation
 

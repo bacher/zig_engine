@@ -42,7 +42,7 @@ pub fn eligibleHorizontalSupport(required: BlockType, neighbor: BlockType) bool 
 /// `physical` must expose actual terrain only; unknown data supplies no proof.
 pub fn checkFulfillment(physical: rules.Reader, cell: rules.Cell, required: BlockType) bool {
     const below = physical.get(cell - rules.Cell{ 0, 0, 1 }) orelse return false;
-    if (below != .none) return true;
+    if (below != .none and below != .dirt) return true;
     for (directions) |direction| {
         if (physical.get(cell + direction)) |neighbor| {
             if (eligibleHorizontalSupport(required, neighbor)) return true;
@@ -409,6 +409,7 @@ pub fn compile(allocator: std.mem.Allocator, snapshot: Snapshot, options: Option
             const next = isolated.indexOf(position + direction) orelse continue;
             if (cells[next] == .none or reached.isSet(next)) continue;
             if (edge < 4 and !eligibleHorizontalSupport(cells[next], cells[index])) continue;
+            if (edge == 4 and cells[index] == .dirt) continue;
             reached.set(next);
             queue[count] = @intCast(next);
             count += 1;
@@ -459,6 +460,29 @@ test "raw shape and unsupported contents reject before empty layers could rescue
         const result = try compileTest(.{ 1, 1, 1 }, &.{material});
         try std.testing.expectEqual(DiagnosticCode.invalid_contents, result.invalid.code);
         try std.testing.expectEqualDeep(LocalCell{ 0, 0, 0 }, result.invalid.highlights[0]);
+    }
+}
+
+test "laterally supported blueprint planks retain loose soil beneath them" {
+    const source = [_]BlockType{ .rebar, .dirt, .rebar, .planks, .planks, .planks };
+    var result = try compileTest(.{ 3, 1, 2 }, &source);
+    try std.testing.expect(result == .valid);
+    defer result.valid.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(BlockType, &source, result.valid.definition.cells);
+}
+
+test "earth normalization rejects designs that need compacted soil support" {
+    // The bottom layer has a virtual stable platform, but normalizing the real
+    // source earth to loose dirt removes support for the centered upper block.
+    for ([_]BlockType{ .dirt, .packed_dirt, .grass }) |earth| {
+        var source = [_]BlockType{.none} ** 18;
+        @memset(source[0..9], earth);
+        source[13] = earth;
+        const result = try compileTest(.{ 3, 3, 2 }, &source);
+        try std.testing.expect(result == .invalid);
+        try std.testing.expectEqual(DiagnosticCode.structural, result.invalid.code);
+        try std.testing.expectEqualDeep(LocalCell{ 1, 1, 1 }, result.invalid.highlights[0]);
+        try std.testing.expectEqual(earth, source[4]);
     }
 }
 
@@ -581,6 +605,19 @@ test "fulfillment uses at most five physical reads and shared directed material 
     physical.below = .water;
     try std.testing.expect(checkFulfillment(reader, .{ 10, 10, 10 }, .planks));
     try std.testing.expectEqual(@as(usize, 1), physical.reads);
+    physical.below = .dirt;
+    physical.reads = 0;
+    try std.testing.expect(!checkFulfillment(reader, .{ 10, 10, 10 }, .planks));
+    try std.testing.expectEqual(@as(usize, 5), physical.reads);
+    physical.neighbors[0] = .planks;
+    physical.reads = 0;
+    try std.testing.expect(checkFulfillment(reader, .{ 10, 10, 10 }, .planks));
+    try std.testing.expectEqual(@as(usize, 2), physical.reads);
+    physical.neighbors[0] = .none;
+    physical.below = .packed_dirt;
+    physical.reads = 0;
+    try std.testing.expect(checkFulfillment(reader, .{ 10, 10, 10 }, .planks));
+    try std.testing.expectEqual(@as(usize, 1), physical.reads);
     physical.below = .none;
     for ([_]BlockType{ .stone, .metal_ore, .limestone, .coal, .deeprock }) |rock| {
         physical.reads = 0;
@@ -606,7 +643,7 @@ test "cancelled compilation releases allocations without publishing a candidate"
 test "isolated virtual platforms agree across qualifying materials and never wrap geometry" {
     var cells = [_]BlockType{.rebar} ** 20;
     var isolated = Isolated.init(.{ 1, 1, 20 }, &cells);
-    for ([_]BlockType{ .stone, .dirt, .packed_dirt, .grass, .clay, .crushed_stone, .reinforced_concrete }) |material| {
+    for ([_]BlockType{ .stone, .packed_dirt, .grass, .clay, .crushed_stone, .reinforced_concrete }) |material| {
         isolated.virtual_material = material;
         var validator: rules.Validator = .{ .allocator = std.testing.allocator, .reader = isolated.reader() };
         defer validator.deinit();

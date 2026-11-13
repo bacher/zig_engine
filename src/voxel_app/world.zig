@@ -162,7 +162,7 @@ pub const WorldChunk = struct {
     /// detached staging chunks when preparing an authoritative multi-chunk edit.
     pub fn prepareApply(self: *WorldChunk, allocator: std.mem.Allocator, local: [3]u5, action: BlockAction) !OperationStatus {
         const existing = self.content.getBlock(local);
-        if (!mutation_guard.allowsMaterialChange(existing, if (action == .put) action.put else .none)) return .constraint_violation;
+        if (!mutation_guard.allowsMaterialChange(existing, action.replacement())) return .constraint_violation;
         switch (action) {
             .put => |material| {
                 std.debug.assert(material != .none);
@@ -174,6 +174,7 @@ pub const WorldChunk = struct {
                 if (existing == .none) return .already_removed;
                 if (existing.miningPolicy() == .forbidden) return .constraint_violation;
             },
+            .compact => if (existing != .dirt) return .target_changed,
         }
         _ = try self.tryEnsureData(allocator);
         return .success;
@@ -187,7 +188,13 @@ pub const WorldChunk = struct {
 
     fn applyPreparedPolicy(self: *WorldChunk, allocator: std.mem.Allocator, local: [3]u5, action: BlockAction, retain_empty: bool) OperationStatus {
         const existing = self.content.getBlock(local);
-        if (!mutation_guard.allowsMaterialChange(existing, if (action == .put) action.put else .none)) return .constraint_violation;
+        if (!mutation_guard.allowsMaterialChange(existing, action.replacement())) return .constraint_violation;
+        if (action == .compact) {
+            if (existing != .dirt) return .target_changed;
+            self.changeType(local, .packed_dirt);
+            self.metadata.timed.cancel(transformations.index(local));
+            return .success;
+        }
         const block_type: BlockType = switch (action) {
             .put => |block_type| blk: {
                 std.debug.assert(block_type != .none);
@@ -199,6 +206,7 @@ pub const WorldChunk = struct {
                 if (existing.miningPolicy() == .forbidden) return .constraint_violation;
                 break :blk .none;
             },
+            .compact => unreachable,
         };
         std.debug.assert(self.content == .blocks);
         const data = self.content.blocks;
@@ -254,6 +262,15 @@ pub const ChunkNotReceivedError = error{ChunkNotReceived};
 pub const BlockAction = union(enum) {
     put: BlockType,
     remove,
+    compact,
+
+    pub fn replacement(self: BlockAction) BlockType {
+        return switch (self) {
+            .put => |material| material,
+            .remove => .none,
+            .compact => .packed_dirt,
+        };
+    }
 };
 
 pub const OperationStatus = enum { success, already_exists, already_removed, constraint_violation, missing_data, resource_exhausted, inventory_mismatch, target_changed };
@@ -441,7 +458,7 @@ const PhysicalEdit = struct {
 /// edit carries everything needed by either validator without repeating reads.
 fn preflightEdit(reader: block_rules.Reader, operation: BlockOperation, ready: *PhysicalEdit) ?EditResult {
     const cell: block_rules.Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
-    const replacement = if (operation.action == .put) operation.action.put else BlockType.none;
+    const replacement = operation.action.replacement();
     if (mutation_guard.validateWrites(reader, &.{.{ .block = operation.block, .material = replacement }})) |failure|
         return .{ .status = .constraint_violation, .failure = failure };
     const existing = reader.get(cell) orelse return .{ .status = .missing_data, .failure = .{ .reason = .missing_data, .subject = cell } };
@@ -456,6 +473,10 @@ fn preflightEdit(reader: block_rules.Reader, operation: BlockOperation, ready: *
             if (existing.miningPolicy() == .yields and !existing.miningPolicy().yields.isPlaceable())
                 return .{ .status = .constraint_violation, .failure = .{ .reason = .mining_forbidden, .subject = cell } };
             break :blk .none;
+        },
+        .compact => blk: {
+            if (existing != .dirt) return .{ .status = .target_changed };
+            break :blk .packed_dirt;
         },
     };
     ready.* = .{ .cell = cell, .material = material, .removal = operation.action == .remove, .mined_type = if (operation.action == .remove) existing.minedType() else null };
@@ -476,6 +497,7 @@ fn validatePhysicalEdit(allocator: std.mem.Allocator, reader: block_rules.Reader
 pub fn validateEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, constructed: []const block_rules.Cell, operation: BlockOperation) EditResult {
     var edit: PhysicalEdit = undefined;
     if (preflightEdit(reader, operation, &edit)) |rejected| return rejected;
+    if (operation.action == .compact) return .{ .status = .success };
     return validatePhysicalEdit(allocator, reader, constructed, edit);
 }
 
@@ -532,6 +554,7 @@ pub fn validateCompletedEdit(allocator: std.mem.Allocator, physical: block_rules
     if (operation.action == .remove and state.boxAt(physical.layout, operation.block) != null) return .{ .status = .constraint_violation, .failure = .{ .reason = .would_remove_support, .subject = cell } };
     var edit: PhysicalEdit = undefined;
     if (preflightEdit(physical, operation, &edit)) |rejected| return rejected;
+    if (operation.action == .compact) return .{ .status = .success };
     if (!pendingTargetsMayAffectEdit(physical, state, operation.block)) return validatePhysicalEdit(allocator, physical, constructed, edit);
     const material = edit.material;
     if (operation.action == .put) {
@@ -758,9 +781,19 @@ pub const World = struct {
         const coords, const local = splitBlockCoords(pending.operation.block);
         const chunk = self.chunks.getPtr(self.layout.encodeChunkCoords(coords)) orelse return;
         const before = CellState.capture(chunk, local);
+        if (pending.operation.action == .compact) {
+            if (try chunk.tryApply(self.allocator, local, .compact) != .success) return;
+            pending.cell_undo = before;
+            if (stamp_material) {
+                self.validation_revision +%= 1;
+                chunk.validation_revision = self.validation_revision;
+            }
+            return;
+        }
         const can_apply = switch (pending.operation.action) {
             .put => before.material == .none,
             .remove => before.material != .none,
+            .compact => unreachable,
         };
         if (comptime @import("builtin").is_test) if (self.road_plan_counter) |counter| {
             counter.* += 1;
@@ -989,7 +1022,7 @@ pub const World = struct {
     }
 
     fn allowsOperation(self: *const World, operation: BlockOperation) bool {
-        const material = if (operation.action == .put) operation.action.put else BlockType.none;
+        const material = operation.action.replacement();
         if (mutation_guard.validateWrites(self.reader(), &.{.{ .block = operation.block, .material = material }}) != null) return false;
         if (operation.action == .remove and self.blueprints.boxAt(self.layout, operation.block) != null) return false;
         if (self.blueprints.targetAt(operation.block)) |target| {
@@ -1112,7 +1145,7 @@ pub const World = struct {
             &.{};
         defer if (operation.action == .remove) self.allocator.free(cells);
         const result = validateCompletedEdit(self.allocator, self.reader(), &self.blueprints, cells, operation);
-        if (result.status != .success) return result;
+        if (result.status != .success or operation.action == .compact) return result;
         const coords, const local = splitBlockCoords(operation.block);
         const chunk = self.chunks.get(self.layout.encodeChunkCoords(coords)) orelse return .{ .status = .missing_data };
         var changed: std.ArrayList(u32) = .empty;
@@ -1180,6 +1213,20 @@ pub const World = struct {
         const existing = chunk.content.getBlock(local);
         if (operation.action == .put and existing != .none) return .already_exists;
         if (operation.action == .remove and existing == .none) return .already_removed;
+        if (operation.action == .compact) {
+            if (existing != .dirt) return .target_changed;
+            const capacity = @max(self.pending_operations.capacity, self.pending_operations.items.len + 1);
+            if (self.pendingOperationBytes() - self.pending_operations.capacity * @sizeOf(PendingOperation) + capacity * @sizeOf(PendingOperation) > self.pending_byte_limit) return error.Capacity;
+            try self.pending_operations.ensureTotalCapacityPrecise(self.allocator, self.pending_operations.items.len + 1);
+            const before = CellState.capture(chunk, local);
+            const status = try chunk.tryApply(self.allocator, local, .compact);
+            if (status != .success) return status;
+            self.pending_operations.appendAssumeCapacity(.{ .operation = operation, .cell_undo = before });
+            self.pending_accounted_count = self.pending_operations.items.len;
+            self.validation_revision +%= 1;
+            chunk.validation_revision = self.validation_revision;
+            return .success;
+        }
         const before = CellState.capture(chunk, local);
         if (comptime @import("builtin").is_test) if (self.road_plan_counter) |counter| {
             counter.* += 1;
@@ -1456,6 +1503,7 @@ test "edits on both sides of a chunk border preserve neighboring contents and re
     try std.testing.expectEqual(original_upper, world.getChunk(upper).?);
 
     try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = lower_top, .action = .{ .put = .dirt } }).status);
+    try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = lower_top, .action = .compact }).status);
     const upper_bottom = [3]u32{ 3, 4, upper[2] * CHUNK_SIZE };
     try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = upper_bottom, .action = .{ .put = .dirt } }).status);
 
@@ -1464,7 +1512,7 @@ test "edits on both sides of a chunk border preserve neighboring contents and re
     try std.testing.expectEqual(0, upper_chunk.chunk_revision);
     try std.testing.expectEqual(BlockType.dirt, upper_chunk.content.getBlock(.{ 3, 4, 0 }));
     try std.testing.expectEqual(BlockType.none, upper_chunk.content.getBlock(.{ 3, 4, 1 }));
-    try std.testing.expectEqual(3, world.pending_operations.items.len);
+    try std.testing.expectEqual(4, world.pending_operations.items.len);
 }
 
 test "earth placement at the world bottom still needs its footprint" {
@@ -3166,4 +3214,34 @@ test "failed blueprint preflight never notifies or fulfills preceding changes" {
     try log.expect(&.{});
     try std.testing.expect(!client.blueprints.instances.get(1).?.isFulfilled(0));
     try std.testing.expect(client.blueprints.targetAt(.{ 31, 10, 10 }) != null);
+}
+
+test "compaction ignores missing surroundings and restores dirt metadata after rejection" {
+    const a = std.testing.allocator;
+    var world = try World.init(a, &test_layout);
+    defer world.deinit();
+    const coords: ChunkCoords = .{ 1, 1, 1 };
+    const local: [3]u5 = .{ 31, 31, 31 };
+    const block: [3]u32 = .{ 63, 63, 63 };
+    const index = transformations.index(local);
+    var authority = WorldChunk.initEmpty();
+    defer authority.deinit(a);
+    try std.testing.expectEqual(OperationStatus.success, authority.apply(a, local, .{ .put = .dirt }));
+    authority.metadata.markConstructed(a, index);
+    authority.metadata.timed.schedule(a, .{ .block = index, .kind = .compact_dirt, .due_tick = 100 });
+    try world.insertChunk(coords, authority.clone(a));
+    var road_calls: usize = 0;
+    world.road_plan_counter = &road_calls;
+    try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = block, .action = .compact }).status);
+    try std.testing.expectEqual(BlockType.packed_dirt, world.getChunk(coords).?.content.getBlock(local));
+    try std.testing.expectEqual(@as(u16, 1), world.getChunk(coords).?.solid_block_count);
+    try std.testing.expectEqual(@as(usize, 1), world.getChunk(coords).?.metadata.constructed.items.len);
+    try std.testing.expectEqual(@as(usize, 0), road_calls);
+    world.pending_operations.items[0].request_id = 1;
+    world.acknowledgeOperationResult(1, .target_changed);
+    const restored = world.getChunk(coords).?;
+    try std.testing.expectEqual(BlockType.dirt, restored.content.getBlock(local));
+    try std.testing.expectEqualSlices(transformations.Event, authority.metadata.timed.events.items, restored.metadata.timed.events.items);
+    try std.testing.expectEqualSlices(transformations.BlockIndex, authority.metadata.constructed.items, restored.metadata.constructed.items);
+    try std.testing.expectEqual(@as(usize, 0), road_calls);
 }
