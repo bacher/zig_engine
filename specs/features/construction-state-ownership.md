@@ -36,13 +36,16 @@ index drops entries on fulfillment, and the last fill releases the site and its 
 Persistence likewise retires the instance on its last fulfillment. These lifetimes must change:
 filled targets need discovery until handback, and a fully filled site remains active while
 materializing. This spec explicitly supersedes blueprint R32's immediate release and the soil
-transformation exceptions in R36/R58 for the new model; other blueprint contracts remain in force.
+compaction/active-target aging rules. Q6 retains grass covering at admission and moves grass
+initialization for built soil to world-data after completion. Other blueprint contracts remain
+in force except the soil equivalence explicitly described there.
 
 [PR #64](https://github.com/bacher/zig_engine/pull/64) made fulfillment's direct cell mutation
 target-local. Current application still clears grass/cancels surface timers below targets;
-manual compaction, compaction timers, and grass growth remain implemented. Q6 deliberately
-simplifies this design to ordinary soil blocks without those transformations. It does not
-claim that PR #64 already removed them.
+manual compaction, compaction timers, and grass growth remain implemented. Q6 removes the
+loose/compacted soil distinction and compaction mechanics, while retaining grass as surface
+cover under world-data ownership. These are planned changes, not effects already implemented
+by PR #64.
 
 The [shared save baseline](warehouses.md#q18--atomic-transfers-and-coherent-durable-capture)
 captures world, player, and simulation state coherently without a disk sync per item.
@@ -62,8 +65,9 @@ enqueue cost only; it cannot establish the benefit of this ownership change.
   lifetime, and definition-cell identity. Terrain placeholders, cached snapshots, discovery
   records, and prepared materialization copies are not independent writable physical state.
 - R4: Admit site state and discovery coherently after fallible preparation and validation.
-  Initially all targets represent known physical air. Rejection leaves no partial ownership
-  or resource effects; publication cannot expose a partially admitted footprint.
+  Initially all targets represent known physical air. Prepare the Q6 grass clearing and growth
+  cancellation below miniatures as part of the same admission. Rejection leaves no partial
+  ownership, soil/timer, or resource effects; publication cannot expose a partial footprint.
 - R5: Apply fulfillment, its resource outcome, and progress coherently in simulation.
   Repeated processing has one effect. A failed/deferred operation preserves the appropriate
   task/resource state; installing an already-paid result cannot charge the source again.
@@ -90,9 +94,9 @@ enqueue cost only; it cannot establish the benefit of this ownership change.
   Coalesce progress and derived updates; still invalidate affected effective occupancy,
   occlusion, collision, and boundary geometry through their proper paths.
 - R12: Capture definitions, construction progress/lifecycle, ownership transfers, resources/tasks,
-  and terrain at one coherent boundary in the shared save system. Restore sources/discovery
-  before dependent reads. No independent owner saves or per-target disk synchronization are
-  required; recent unsaved progress may be lost coherently.
+  grass timers/initialization obligations, and terrain at one coherent boundary in the shared
+  save system. Restore sources/discovery before dependent reads. No independent owner saves or
+  per-target disk synchronization are required; recent unsaved progress may be lost coherently.
 - R13: Materialize only targets and required constructed provenance into the current destination
   chunk. Preserve other sites and intervening edits to cavities or unrelated cells; never
   replace a current chunk with a whole-chunk snapshot taken at admission.
@@ -107,10 +111,11 @@ enqueue cost only; it cannot establish the benefit of this ownership change.
 - R16: Keep authoritative source lifetime independent of client residency and NPC presentation.
   Retire it only after handoff, safe readers/capture, and publication obligations permit.
   Identity/revision checks reject stale replies and prevent revival of retired lifetimes.
-- R17: For this design, soil behaves as ordinary blocks without manual/timed compaction, grass
-  growth timers, or coverage-driven soil mutations. A target's physical material is exactly
-  its definition material when fulfilled. Reintroducing transformations requires an explicit
-  owner/state extension; it is not a prerequisite for this implementation.
+- R17: Remove the loose/compacted soil distinction and manual/timed compaction, but retain
+  grass surface cover under world-data ownership. Soil targets use bare soil in the immutable
+  definition and remain bare without growth timers throughout building and materializing,
+  including portions already transferred. Definition plus progress still describes all
+  simulation-owned target materials; no per-target grass state is needed there.
 - R18: Measure end-to-end fulfillment, ordinary/target reads, active-site memory, publication,
   saves/recovery, and completion bursts. Include sparse/dense footprints, cold/empty chunks,
   multiple instances of one definition, cross-site support, and mixed player/simulation work.
@@ -144,6 +149,21 @@ enqueue cost only; it cannot establish the benefit of this ownership change.
 - R26: Decouple GPU layout from authority and network encoding. Clients may combine static
   and dynamic geometry or use separate passes; both must render one effective world,
   including miniature removal, full blocks, boundaries, and partial materialization.
+
+- R27: At admission clear grass and cancel pending grass growth on world-data soil immediately
+  below occupied blueprint targets under Q6. Pending targets count as cover for grass, while
+  empty definition cells and frames do not. Scheduling and expiry use composed occupancy and
+  target membership, including chunk boundaries; unknown required data defers the decision.
+- R28: After the whole site completes, world-data initializes ordinary growth for eligible
+  exposed soil targets. Use the existing grass delay from site completion, without counting
+  building time. Prepare candidates during bounded materialization; retain coherent pending
+  work until initialized. Retry/restart cannot lose, duplicate, or reset deadlines, and delayed
+  initialization must respect subsequent ordinary edits and their cell/timer lifetimes.
+- R29: Grass is surface cover, not a change in structural capability. Use one soil support
+  baseline for bare and grassy soil: current packed-soil behavior,
+  including its own footprint/platform requirements. Remove loose-soil exclusions consistently
+  from ordinary rules, blueprint normalization/certification, and the five-neighbor predicate;
+  preserve that predicate's bound and resource identity across cover changes.
 
 ## Clarifications
 
@@ -294,8 +314,10 @@ remove portions still awaiting their static representation. Clients need not loa
 of a large site to make progress.
 
 Server completion never waits for clients. A client may retain its cached definition/final
-snapshot longer than the server retains the site. An old chunk reference to a retired instance
-must trigger current chunk/object resynchronization; it is not a new empty site. Older static
+snapshot longer than the server retains the site. World-data must retain Q6's completion time
+and pending grass-initialization work before the corresponding site data is retired. An old
+chunk reference to a retired instance must trigger current chunk/object resynchronization;
+it is not a new empty site. Older static
 snapshots or delayed construction deltas cannot override post-completion ordinary edits.
 
 Common capture records each partial transfer coherently: either the site owns a portion or
@@ -306,22 +328,67 @@ Applied-site cancellation/refunds remain a separate feature.
 
 ### Q6 — Soil and compact physical state
 
-**CONFIRMED SIMPLIFYING MODEL 2026-11-13.** Treat soil like ordinary blocks: no grass timers,
-manual compaction, timed compaction, or neighbor coverage transformations. Immutable definition
-plus fulfillment bits then determines every target's physical material. Admission needs no
-soil-clearing side effects and fulfillment needs no external soil writes.
+**REFINED 2026-11-13: grass remains; compaction does not.** This replaces the earlier proposal
+to remove all soil transformations. Grass is surface cover on a single soil material; there
+is no loose/compacted gameplay state, manual compaction action, or compaction timer. Blueprint
+capture normalizes grassy soil to bare soil. Material enum/cover encoding is an implementation
+choice; grass is not a separate construction resource or simulation-owned target override.
 
-This selects the model for the ownership implementation; the current runtime still has soil
-mechanics described in [block placement](../../docs/block-placement.md#simulation-time-and-transformations).
-Implementation must explicitly remove/disable those transformation paths for the new model
-and update their tests/docs, rather than silently dropping timers during handoff. Material IDs,
-blueprint normalization, mining yields, and structural support rules are not otherwise redefined
-here; disabling transformations does not make loose soil a supporting block.
+At application, world-data prepares grass removal and cancellation of pending growth directly
+below every occupied blueprint target, including elevated targets over cavity contents.
+Empty definition cells and the surrounding frame do not clear or suppress grass. A miniature
+counts as cover until its real block replaces it. This retains the current coverage footprint
+under blueprint R58, not a whole-box surface clearing pass. Admit these effects, site discovery,
+and initial state atomically after all allocation/dependency checks, including neighboring
+chunks. Grass clearing changes cover only, never structural support or the underlying resource.
 
-Future changing materials require a separately designed state/owner extension. Do not add
-physical override arrays or cross-owner timer coordination solely to preserve these deferred
-mechanics. Road shapes remain derived geometry governed by their existing bounded follow-up
-contract; they do not change the immutable target material.
+Soil inside the blueprint stays bare throughout `building` and `materializing`. Do not schedule
+or execute its grass timers while simulation owns it, or after a portion transfers while the
+site is still active. Ordinary placement over a built target cannot trigger a write back into
+simulation for grass: there is no grass/timer there to clear. Fulfillment remains target-local
+and does not repeat admission's covering work or add per-fill soil coordination.
+
+World-data retains grass scheduling for ordinary terrain. Coverage and exposure use the
+composed physical view plus pending-target membership: base terrain air under a simulation-owned
+block is not proof of exposure. An actual or pending block directly above prevents growth;
+an empty definition cell or frame does not. Unknown dependencies defer work, not imply air.
+This also applies to terrain soil placed in permitted cavities after admission. No whole-site
+scan is needed when a grass timer runs.
+
+During per-chunk materialization prepare soil surface candidates and world-data-owned pending
+initialization work. After **all** portions transfer and the site becomes complete, initialize
+growth for exposed bare-soil targets as for an ordinary newly placed soil block in this new
+model. The deadline is completion time plus the existing grass delay (currently 30 minutes of
+game time), never the target's earlier fulfillment time. There is no intervening compaction
+stage. Covered internal soil receives no growth timer; later ordinary exposure starts the
+ordinary delay. Existing top-surface rules apply, without adding sunlight/sky checks.
+
+Preparation and activation may run in bounded batches. Keep the completion timestamp and any
+unfinished initialization obligation in the shared capture until the resulting timer/no-op
+outcome is accepted. Reopening resumes it without resetting elapsed time, duplicate timers,
+or a full-world scan. Revalidate current cell identity, cover, and newer edit/timer state:
+late initialization must not recreate soil, attach an old deadline to a replacement block,
+or overwrite a newer ordinary exposure deadline. Save the resolved effect and obligation
+retirement coherently. This follows the lifecycle principles of
+[persisted unfinished work](deferred-world-work.md); it does not require the existing road key
+format or a generic job queue. No timer starts in an early transferred portion while another
+portion of the site is still materializing, even if a stall exceeds the growth delay.
+
+Implementation must update [current soil rules](../../docs/block-placement.md#simulation-time-and-transformations)
+and their tests explicitly, with the appropriate ruleset/save gates. Reuse the admission
+preparation and world-data grass scheduler, removing their dependence on compaction. Keep the
+single soil material's resource identity and structural behavior independent of grass cover.
+
+**Confirmed soil support:** use current packed-soil support capabilities
+for both bare and grassy soil, retaining soil's own footprint/platform requirements. Clearing
+grass must not weaken an existing foundation; growing grass must not strengthen it. Remove the
+old loose-soil support exclusion from ordinary rules and the cheap fulfillment predicate, and
+normalize captured grassy soil to the same bare structural material. Recheck certification and
+cross-site support tests under the new ruleset; the five-neighbor bound stays unchanged.
+The author confirmed this support baseline and retained the all-miniature coverage footprint:
+application requires empty target cells, not an empty whole box, so existing soil in cavities
+can also lie immediately below elevated targets.
+Road shapes remain derived geometry under their existing bounded follow-up contract.
 
 ### Q7 — Evidence for the final implementation
 
@@ -332,7 +399,7 @@ contract is selected; numeric tuning is not evidence of a measured speedup.
 Compare completed work and end-to-end latency, CPU, allocations, retained bytes, encoded bytes,
 publication/geometry work, save pauses, and materialization backlog. Include mostly ordinary
 terrain reads, multiple sites per chunk, sparse boxes, large definitions shared by many sites,
-client subscription churn, completion bursts, and cold/empty chunks. Exercise capture/restart
+client subscription churn, completion/grass-initialization bursts, and cold/empty chunks. Exercise capture/restart
 and publication reordering at every lifecycle boundary. Record limits and uncertainty alongside
 Q2 alternatives; revisit the design if composed reads or retained state erase the intended gain.
 
@@ -380,9 +447,9 @@ criteria updated to match Q3/Q5/Q6.
   ownership, and tasks survive independently of client terrain residency.
 - AC19: GIVEN changing progress WHEN published THEN effective occupancy and dependent views
   update without per-fill terrain membership writes or full static chunk payloads solely for the fill.
-- AC20: GIVEN the Q6 soil model WHEN soil is placed, covered, interacted with, or time advances
-  THEN no compaction/grass transformation changes its material or another cell, and a filled
-  soil target remains exactly its definition material.
+- AC20: GIVEN soil targets in a building or materializing site WHEN filled, covered, or time
+  advances THEN they remain bare with no grass timers, no compaction action/event occurs, and
+  simulation-owned contents remain reconstructible from the definition and progress alone.
 - AC21: GIVEN an implementation candidate WHEN performance is compared THEN evidence covers
   ordinary/target reads, fulfillment, memory, publication, saves, and completion bursts.
 - AC22: GIVEN several instances of one blueprint WHEN a client subscribes THEN it can reuse one
@@ -429,6 +496,30 @@ criteria updated to match Q3/Q5/Q6.
 - AC42: GIVEN a reader/capture holding old source data WHEN a portion transfers THEN the held
   data remains valid until released and does not authorize writes through the old owner.
 
+- AC43: GIVEN grass or a pending growth timer directly below an occupied blueprint target,
+  including elevated targets and chunk/seam boundaries WHEN application commits THEN grass
+  is cleared and growth canceled coherently with the site; empty definition cells are unchanged.
+- AC44: GIVEN admission preparation failure or stale dependencies WHEN application is rejected
+  THEN neither grass/timers nor construction discovery/progress change partially.
+- AC45: GIVEN world-data soil with a pending or simulation-owned filled target directly above
+  WHEN ordinary exposure scheduling or a grass deadline runs THEN the composed cover suppresses
+  growth; unavailable required state defers rather than treating base air as exposure.
+- AC46: GIVEN soil in an early transferred portion WHEN another portion remains materializing
+  beyond the grass delay THEN no site soil has begun a growth timer or grown grass.
+- AC47: GIVEN completed materialization with exposed and internally covered soil targets WHEN
+  world-data initializes growth THEN only eligible exposed targets receive a deadline at site
+  completion plus the ordinary grass delay, with no compaction stage or credit for build time.
+- AC48: GIVEN pending grass initialization or scheduled growth WHEN saved, reopened, or retried
+  THEN the deadline and outstanding work survive coherently without duplicate effects or resets.
+- AC49: GIVEN soil removed/replaced or covered/exposed by ordinary edits after completion WHEN
+  delayed initialization is processed THEN it respects the current cell lifetime and newer
+  timer state without resurrecting soil or overwriting a newer exposure deadline.
+- AC50: GIVEN ordinary newly placed bare soil outside active target ownership WHEN exposed
+  THEN world-data schedules grass directly under the same delay/rules, without compaction.
+- AC51: GIVEN bare and grassy versions of the unified soil WHEN checking support, construction
+  certification, collision, or mining THEN cover does not change those outcomes; both use the
+  selected soil baseline, and clearing grass at admission cannot weaken a foundation.
+
 ## Constraints
 
 - Keep one authoritative cell/resource state and shared coherent capture. Safe lifetimes and
@@ -448,7 +539,7 @@ criteria updated to match Q3/Q5/Q6.
 - NPC scheduler/task/cargo decomposition, new cancellation/refund UI, or whole-box ownership.
 - A separate simulation thread, parallel region executor, universal transaction framework,
   independent owner saves, or an adopted best-effort resource-loss exception.
-- Reintroducing soil transformations, removing material IDs, or redesigning structural support.
+- Reintroducing compaction, grass growth in active targets, or unrelated material/support redesign.
 - Mandatory GPU passes/buffer layout, exact delta serialization, numeric scheduling budgets,
   or a guaranteed completion deadline under arbitrary load.
 - Priority materialization and player edit waiting/replay queues.
@@ -463,9 +554,10 @@ chunk discovery, and composed readers; then move fulfillment/progress out of ter
 construction subscriptions before removing the old terrain-based client update path. Complete
 per-chunk materialization and recovery before enabling the new path for persistent worlds.
 
-Apply Q6 explicitly with a ruleset/save gate and update affected soil tests/docs. Keep current
-blueprint admission, logical validation, resource checks, and bounded road obligations. Compare
-Q2 alternatives and Q7 workloads before expanding concurrency or adding discovery caches.
+Apply Q6 explicitly with a ruleset/save gate and update affected soil tests/docs. Preserve
+admission's one-time grass clearing, suppress active-target growth, and integrate bounded
+world-data grass initialization with completion/capture. Keep blueprint logical validation,
+resource checks, and bounded road obligations. Compare Q2 alternatives and Q7 workloads before expanding concurrency or adding discovery caches.
 
 ### Affected Components
 
@@ -475,8 +567,8 @@ Q2 alternatives and Q7 workloads before expanding concurrency or adding discover
   and logical reads, mutation routing, constructed enumeration, admission and materialization.
 - `src/voxel_app/chunk_metadata.zig`, `persistence/blueprints.zig`, and capture modules: chunk
   references/transfer state, constructed provenance, partial handoff capture/recovery.
-- Block/soil rules and timers: remove transformation work from the selected Q6 model; preserve
-  material identities and structural rules unless a separate gameplay decision changes them.
+- Block/soil rules and timers: remove the compaction distinction/actions; retain grass clearing
+  and ordinary growth in world-data, with composed cover and post-completion initialization.
 - Client protocol/cache, collision/targeting, voxel/blueprint rendering: definition cache,
   construction subscriptions, revision reconciliation, prediction, and per-portion switch.
 - Road derived-state processing: route through composed data, preserve bounded obligations
@@ -491,7 +583,8 @@ Q2 alternatives and Q7 workloads before expanding concurrency or adding discover
 | Target chunk group | Target indices for this instance/chunk; current owner/accepted-transfer state |
 | Chunk discovery | Relevant active site references and coherent composition version, including box restrictions |
 | Published snapshot/delta | World/session and lifetime identity, descriptor/progress/phase, compatible revisions |
-| Materialization result | Target-only patch plus constructed provenance, destination version and matching transfer state |
+| Materialization result | Target-only patch plus provenance, destination version, transfer state and grass-initialization obligation |
+| Grass initialization | World-data-owned surface candidates, site completion time and outstanding work; eventual ordinary cell timers |
 
 Do not keep a second mutable voxel array for site contents. Pending and fulfilled materials
 derive from one definition/progress authority. The remaining counter, discovery, grouping,
@@ -521,8 +614,8 @@ state. Measure and fault-test these before claiming a performance improvement.
 - [x] T1: Record target-only ownership and the four storage/execution alternatives.
 - [x] T2: Select chunk discovery without markers and the static/dynamic publication contract;
   record reader lifetimes and revision/resync requirements in Q1/Q3/Q4.
-- [x] T3: Select bounded per-chunk materialization with retained restrictions and the ordinary-soil
-  model in Q5/Q6, explicitly superseding prior completion/soil behavior.
+- [x] T3: Select bounded per-chunk materialization with retained restrictions and Q6's soil
+  model: grass stays world-data-owned, active targets stay bare, compaction is removed.
 - [ ] T4: Define Q7 workload sizes, counters, memory accounting, numeric budgets, and fault cases.
 
 ### Implementation sequence
@@ -531,12 +624,15 @@ state. Measure and fault-test these before claiming a performance improvement.
 - [ ] T6: Add composed reads/enumeration and route fulfillment/resources to the correct owners.
 - [ ] T7: Add materialization phases, per-chunk acceptance, common capture/recovery, and safe retirement.
 - [ ] T8: Integrate prediction, collision, rendering, and per-portion client handoff.
-- [ ] T9: Apply the Q6 soil model with explicit ruleset/save gates and update soil tests/docs.
+- [ ] T9: Apply Q6: remove compaction, retain atomic admission grass clearing, suppress active
+  target growth, and add bounded post-completion world-data timer initialization/recovery;
+  unify bare/grassy soil support in ordinary rules, certification, and cheap fulfillment;
+  update format gates, tests, and documentation.
 - [ ] T10: Add immutable definition caching, initial snapshots, batched deltas, subscriptions, and resync.
 - [ ] T11: Audit ordinary/dependent validation, road obligations, mesh boundaries, and raw-air shortcuts.
 
 ### Validation
 
-- [ ] T-val: Verify AC1–AC42, relevant blueprint/persistence regressions, allocation/fault/reordering
+- [ ] T-val: Verify AC1–AC51, relevant blueprint/persistence regressions, allocation/fault/reordering
   cases, restart during partial materialization, and end-to-end performance under Q7; record
   measured results, selected budgets, and remaining limitations.

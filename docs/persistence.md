@@ -68,6 +68,8 @@ moves canonical active-target progress into simulation, with immutable definitio
 and per-target-chunk transfer state in the shared coherent save boundary. Admission/handback
 must capture matching discovery, resources, and terrain. A fully filled but materializing site
 must remain saved; recovery resumes untransferred portions without repeating accepted effects.
+World-data grass timers and unfinished post-completion initialization share that capture, retaining
+completion-based deadlines without duplicate scheduling or resets after restart.
 No ownership-marker blocks or independently committed simulation saves are required. The format
 and behavior below describe the implemented world-data-owned construction path.
 

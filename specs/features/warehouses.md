@@ -1714,18 +1714,19 @@ more than one resource count. Data-access safety must hold in every candidate.
 
 ### Q21 — Optional soil transformations
 
-**SIMPLIFYING MODEL SELECTED 2026-11-13.** For construction ownership design, treat soil as
-ordinary blocks without manual/timed compaction, grass timers, or coverage-driven mutations.
-[Construction Q6](construction-state-ownership.md#q6--soil-and-compact-physical-state) defines the
-implementation model and separates it from the still-implemented soil mechanics. This avoids
-per-target material overrides and cross-owner timer coordination. Future transformations need
-a separate design; removing material IDs or changing structural support is not selected.
+**REFINED 2026-11-13: retain grass, remove compaction.** The
+[construction soil model](construction-state-ownership.md#q6--soil-and-compact-physical-state)
+uses one soil material without manual/timed compaction. World-data clears grass/cancels growth
+below miniatures atomically with admission. Soil targets remain bare and timer-free throughout
+building and materializing; after the whole site completes, world-data initializes ordinary
+grass growth on exposed soil, preserving pending work and deadlines through saves/retries.
+Simulation still needs only immutable definition materials plus progress, not grass overrides.
 
 [PR #64](https://github.com/bacher/zig_engine/pull/64) already made direct blueprint fulfillment
-writes target-local. Application still clears grass below targets, and other soil/timer paths
-remain; PR #64 did not remove all soil behavior. The new model must remove/disable those paths
-explicitly with the appropriate ruleset/save gate. Current [block placement rules](../../docs/block-placement.md#simulation-time-and-transformations)
-remain implemented until then. No measured claim that compaction was the bottleneck is made.
+writes target-local. Application covering and world-data grass machinery can be reused, with
+composed exposure checks and the removal of compaction prerequisites. Existing runtime rules
+remain described in [block placement](../../docs/block-placement.md#simulation-time-and-transformations)
+until implementation and explicit ruleset/save gates. No measured performance gain is claimed.
 
 ### Q22 — Initial execution of simulation-owned warehouses
 

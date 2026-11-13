@@ -112,10 +112,13 @@ transfer. Client geometry switches per chunk when its static replacement is avai
 completion does not wait for clients. Shared capture preserves partial transfers and resources
 coherently without per-block disk synchronization or a final structural scan.
 
-The first design treats soil as ordinary blocks without compaction, grass timers, or coverage
-mutations under [Q6](../specs/features/construction-state-ownership.md#q6--soil-and-compact-physical-state).
-Current runtime soil behavior remains implemented until that change. Definition plus progress
-can then describe target materials without a separate mutable voxel array.
+[Q6](../specs/features/construction-state-ownership.md#q6--soil-and-compact-physical-state)
+removes the loose/compacted soil distinction but retains world-data grass. Application clears
+grass/cancels growth below miniatures once; soil targets stay bare without timers throughout
+building and materializing. World-data initializes ordinary growth on exposed soil after the
+whole site completes, with coherent pending work and deadlines. Definition plus progress still
+describes simulation-owned target materials. Current runtime compaction remains until this
+planned change is implemented.
 
 [Alternatives](../specs/features/construction-state-ownership.md#q2--ownership-and-execution-alternatives)
 retain whole-box ownership, queued world-data operations, and site-defined legal actions with

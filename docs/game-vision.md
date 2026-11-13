@@ -161,8 +161,9 @@ have ordinary block physics throughout construction. After the last fill, bounde
 work materializes targets into terrain; the frame and active-site restrictions remain until
 all portions finish. A normal-load delay around 5–10 seconds is acceptable, without a forced
 wait or hard deadline. Permitted cavity placements remain available. The design treats soil
-as ordinary blocks without compaction or grass transformations; these changes are pending
-implementation.
+as one material without compaction. Grass disappears beneath miniatures at application;
+soil targets stay bare until the site completes, then world-data starts ordinary growth on
+exposed surfaces. These changes are pending implementation.
 
 ## Production, services, and logistics
 
