@@ -59,6 +59,8 @@ pub fn prepare(a: std.mem.Allocator, source: *const world.WorldChunk, cutoff: ti
 pub const Exposure = struct {
     context: *anyopaque,
     exposed: *const fn (*anyopaque, [3]u5) ?bool,
+    /// Planned cover suppresses grass successors without any physical reads.
+    grass_allowed: ?*const fn (*anyopaque, [3]u5) bool = null,
 };
 
 pub fn prepareWithExposure(a: std.mem.Allocator, source: *const world.WorldChunk, cutoff: timers.Tick, exposure: ?Exposure) !Plan {
@@ -86,6 +88,8 @@ pub fn prepareWithExposure(a: std.mem.Allocator, source: *const world.WorldChunk
                 if (material != .dirt) continue;
                 recordChange(&result, &changed, &positions, event.block, .packed_dirt);
                 result.material_changed = true;
+                // Compaction always succeeds; planned cover only suppresses grass.
+                if (exposure) |check| if (check.grass_allowed) |allowed| if (!allowed(check.context, local)) continue;
                 // The removed event supplies capacity for its sole finite successor.
                 push(queue, .{ .block = event.block, .kind = .grow_grass, .due_tick = event.due_tick +| timers.transformation_delay });
             },
@@ -219,4 +223,24 @@ test "catch-up compacts dirt while unknown exposure defers only grass growth" {
     defer retry.deinit(a);
     try std.testing.expect(!retry.material_changed and !retry.metadata_changed);
     try std.testing.expectEqual(deadline, retry.timed.events.items[0].due_tick);
+}
+
+test "planned cover suppresses grass successors without checking physical exposure" {
+    const a = std.testing.allocator;
+    var source = try fixture(a);
+    defer source.deinit(a);
+    const Covered = struct {
+        fn allowed(_: *anyopaque, _: [3]u5) bool {
+            return false;
+        }
+        fn exposed(_: *anyopaque, _: [3]u5) ?bool {
+            @panic("compaction under planned cover must not query physical exposure");
+        }
+    };
+    var context: u8 = 0;
+    var result = try prepareWithExposure(a, &source, std.math.maxInt(u64), .{ .context = &context, .exposed = Covered.exposed, .grass_allowed = Covered.allowed });
+    defer result.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), result.consumed);
+    try std.testing.expectEqual(BlockType.packed_dirt, result.changes.items[0].material);
+    try std.testing.expectEqual(@as(usize, 0), result.timed.events.items.len);
 }

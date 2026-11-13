@@ -12,6 +12,10 @@ pub const ChunkId = consts.ChunkId;
 pub const Cell = runtime.Cell;
 pub const default_max_snapshot_bytes: usize = 128 * 1024 * 1024;
 
+test {
+    _ = @import("blueprint_soil.zig");
+}
+
 /// Apply this before cloning the next source chunk. Slice clones allocate from
 /// their lengths; the index bound includes its retained hash/list capacities.
 pub fn estimatedChunkBytes(immutable_len: usize, index: runtime.ChunkIndex) usize {
@@ -26,6 +30,9 @@ pub const ChunkSnapshot = struct {
     /// independently of corrupted or hypothetical physical block contents.
     immutable: []const transforms.BlockIndex = &.{},
     index: runtime.ChunkIndex = .{},
+    /// Exact pending grass-growth membership captured with this chunk revision.
+    /// Compaction events remain distinct and never enter this coverage mask.
+    grow_grass: std.StaticBitSet(32768) = .initEmpty(),
 
     pub fn deinit(self: *ChunkSnapshot, allocator: std.mem.Allocator) void {
         allocator.destroy(self.blocks);
@@ -44,6 +51,20 @@ pub const Snapshot = struct {
     chunks: std.AutoHashMapUnmanaged(ChunkId, ChunkSnapshot) = .empty,
     overlay_revision: u64,
     playable_y_inset: u32 = 0,
+
+    /// Canonical protection is independent of the captured physical material.
+    pub fn isImmutable(self: *const Snapshot, cell: Cell) bool {
+        const chunk = self.chunks.getPtr(chunkId(&self.layout, cell)) orelse return false;
+        const target_index = localIndex(cell);
+        var low: usize = 0;
+        var high: usize = chunk.immutable.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            const index = chunk.immutable[middle];
+            if (index < target_index) low = middle + 1 else if (index > target_index) high = middle else return true;
+        }
+        return false;
+    }
 
     pub fn estimatedOwnedBytes(self: *const Snapshot) usize {
         var result = @as(usize, self.chunks.capacity()) *| (@sizeOf(ChunkId) + @sizeOf(ChunkSnapshot) + 1) +| 64;
@@ -106,29 +127,20 @@ const View = struct {
     fn target(self: *const View, cell: Cell) ?runtime.Target {
         const id = chunkId(&self.snapshot.layout, cell);
         if (self.publication) |publication| if (publication.chunks.get(id)) |index| return index.lookup.get(cell);
-        const chunk = self.snapshot.chunks.get(id) orelse return null;
+        const chunk = self.snapshot.chunks.getPtr(id) orelse return null;
         return chunk.index.lookup.get(cell);
     }
 
     fn read(context: *anyopaque, cell: Cell) ?rules.BlockType {
         const self: *View = @ptrCast(@alignCast(context));
-        const chunk = self.snapshot.chunks.get(chunkId(&self.snapshot.layout, cell)) orelse return null;
+        const chunk = self.snapshot.chunks.getPtr(chunkId(&self.snapshot.layout, cell)) orelse return null;
         if (self.publication != null) if (self.target(cell)) |planned| return planned.material;
         return chunk.blocks.blocks[cell[2] % 32][cell[1] % 32][cell[0] % 32];
     }
 
     fn immutable(context: *anyopaque, cell: Cell) bool {
         const self: *View = @ptrCast(@alignCast(context));
-        const chunk = self.snapshot.chunks.get(chunkId(&self.snapshot.layout, cell)) orelse return false;
-        const target_index = localIndex(cell);
-        var low: usize = 0;
-        var high: usize = chunk.immutable.len;
-        while (low < high) {
-            const middle = low + (high - low) / 2;
-            const index = chunk.immutable[middle];
-            if (index < target_index) low = middle + 1 else if (index > target_index) high = middle else return true;
-        }
-        return false;
+        return self.snapshot.isImmutable(cell);
     }
 };
 

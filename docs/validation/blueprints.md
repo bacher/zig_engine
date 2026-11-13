@@ -238,3 +238,57 @@ global cache above: 65/65 build steps, 2,498 tests passed and eight skipped. Thi
 includes mouse2 hold/cancellation, inventory preservation, stale-target rejection,
 optimistic rollback, restart, unchanged loose-soil deadlines under ordinary and
 blueprint placement, and preserved grass clearing. Formatting and diff checks pass.
+
+## Grass coverage at application
+
+Application now clears real grass to packed soil and cancels grass-growth timers
+directly below every occupied miniature target. This includes elevated targets
+over existing cavity contents, rotated definitions, wrapped X, and chunk
+boundaries. Empty definition cells and the box/frame alone do not cover soil.
+Loose dirt and its compaction deadline remain unchanged.
+
+The helper prepares a detached surface plan from the same versioned admission
+snapshot, including a per-chunk grass-timer bitset. Its exact changed-chunk set
+drives source holds, resource reservations, revisions, and publication. Commit
+rechecks dependency revisions and publishes the terrain/timer effects and new
+instance atomically. Allocation or quota failure leaves both unpublished; a
+capture source hold waits without partial writes. An evicted clean source is
+loaded again and the retained plan is reused after the normal revision check.
+Timer cancellation filters each changed chunk's timer list once rather than
+scanning the list separately for each covered cell.
+
+Fulfillment now writes only its target terrain/block metadata, inventory, and
+incremental progress. The authority fill routine shrank from 89 to 50 source
+lines; this is a code-size observation rather than a runtime benchmark. The
+structural path still reads at most five neighbors, and completion remains O(1).
+It can read the soil below but never writes that soil or its timers. R29's
+separate deferred adaptive-road work can still update shapes in other road
+cells; that existing behavior is outside these direct soil writes.
+
+All grass scheduling and execution treat a pending target immediately above as
+cover, even if the target's chunk is not resident. Manual and timed compaction
+remain unconditional with respect to surrounding structure and still complete
+under miniatures. The suppression concerns grass only. This follow-up stays
+within world format 6 and adds no further save-version change.
+
+Focused helper and authority regressions cover target-only soil/timer writes,
+cavities, rotation, wrapping, chunk boundaries, holes, loose-soil preservation,
+allocation/source-read failure, quota denial, capture holds, stale dependency
+rejection, source eviction and reloading, grass suppression, and a save/reopen
+that retains both the cleared surfaces and pending targets. They also preserve
+the separate deferred-road checks. A canonical immutable-floor regression rejects
+the complete application even if captured physical grass or packed soil looks mutable.
+
+Verified with:
+
+```sh
+zig build --global-cache-dir /private/tmp/zig-engine-global-cache \
+  install test test-world test-blueprint test-blueprint-admission \
+  -Doptimize=ReleaseFast -j2 --summary all
+zig build --global-cache-dir /private/tmp/zig-engine-global-cache \
+  test-blueprint-service -Doptimize=ReleaseSafe -j2 --summary all
+```
+
+The integration command passed 65/65 build steps, with 2,550 tests passed and
+eight skipped. The ReleaseSafe authority suite passed 594 tests; the detached
+admission suite also passed with assertions enabled. Formatting and diff checks pass.

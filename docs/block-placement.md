@@ -74,6 +74,18 @@ Miniatures never count as real support. Filling a target and completing the last
 no full-design scan; the detailed structural/performance contract is in
 [R27–R32 and R51](../specs/features/blueprints.md#assembly-and-completion).
 
+Application handles soil covering once, before construction starts. For every new miniature,
+it turns real grass immediately below into packed soil and cancels any grass-growth timer
+there. This includes elevated targets over internal cavities, not just the design's bottom
+layer. Empty blueprint cells do not cover soil. Loose soil and its compaction deadline stay
+unchanged. These terrain updates and publication of the instance commit atomically.
+
+A fill changes only its target's terrain and metadata, plus the associated inventory and
+blueprint progress. It may read the block below for support, but never changes that block or
+its timers. A pending miniature directly above counts as cover when scheduling or executing
+grass growth, so grass cannot reappear between application and fulfillment. This grass rule
+grants miniatures no collision, occupancy, or structural support.
+
 Blueprint fills queue coalesced adaptive-road work by chunk. Road shapes may update after
 a short delay. Formation/reversion preserve structural capabilities, so shape-only updates
 need no completed-world target/dependent validation or queries above the road. Planning still
@@ -447,9 +459,10 @@ Stopping game-time advancement pauses deadlines. Subscription eviction has no ef
 - Placing loose soil schedules compaction 30 minutes later.
 - Loose soil remains loose when placed beneath a block or covered later; covering preserves its compaction deadline.
 - In player mode, holding mouse2 on loose soil for three seconds compacts it, using the action progress bar. Release, changed target or terrain, lost reach, focus loss, and leaving player mode cancel unfinished work. Inventory is unchanged, and the next action waits for acknowledgement and a fresh press.
-- Manual and timed compaction always replace loose soil with packed soil, without environmental validation. Compaction schedules grass 30 minutes later; grass growth checks that the cell above is empty.
+- Manual and timed compaction always replace loose soil with packed soil, without environmental validation. They schedule grass 30 minutes later unless a pending miniature is directly above; suppressing grass never prevents compaction.
 - Covering packed soil clears grass and cancels its pending surface timer.
-- Exposing packed soil schedules grass 30 minutes after the exposure.
+- Applying a blueprint performs these covering updates below every new miniature, including elevated targets. Filling a miniature performs no covering writes to neighboring soil.
+- Exposing packed soil schedules grass 30 minutes after the exposure unless a pending miniature is directly above. Grass growth requires physical air and no pending miniature in that cell above. Blueprint-empty cells and the frame alone do not block growth.
 - Generated soil is already packed, with climate cover on its exposed surface immediately.
 - The saved `grass` state renders green in temperate/desert columns, yellow in steppe, and snowy on top in frozen columns. Loose and packed soil retain their ordinary appearance until the existing timer grows cover.
   Generation schedules no soil transformations, regardless of when a chunk is discovered.
