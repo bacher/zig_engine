@@ -64,11 +64,12 @@ recovery. Exact bounded acknowledgment/history mechanics remain implementation r
 ## Saving and exit
 
 The planned [construction ownership change](../specs/features/construction-state-ownership.md)
-moves canonical active-target contents/progress into simulation records while keeping them
-in the shared coherent save boundary with terrain and resources. Admission and handback must
-save matching ownership/discovery and cell state; a static chunk marker cannot substitute for
-saved fulfillment. These are future integration requirements. The format and behavior below
-describe the implemented world-data-owned construction path.
+moves canonical active-target progress into simulation, with immutable definitions, lifecycle,
+and per-target-chunk transfer state in the shared coherent save boundary. Admission/handback
+must capture matching discovery, resources, and terrain. A fully filled but materializing site
+must remain saved; recovery resumes untransferred portions without repeating accepted effects.
+No ownership-marker blocks or independently committed simulation saves are required. The format
+and behavior below describe the implemented world-data-owned construction path.
 
 Autosave attempts run every 60 seconds and compaction is requested every 10 minutes. Only a durable WAL commit establishes saved progress; the interval is not a maximum loss window. Base compaction allows exact-version dirty chunks to unload and retires covered journals after durable installation.
 

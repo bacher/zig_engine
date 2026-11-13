@@ -38,7 +38,7 @@ The subsystem documents describe the current implementation, extracted from exis
 | [Simulation open questions](docs/simulation-open-questions.md) | Resolved warehouse contracts, remaining simulation decisions, and feature-specific follow-ups. |
 | [Blueprint specification](specs/features/blueprints.md) | Capture/application, isolated and composed validation, five-neighbor assembly, and the 100×100×32 workload; see [implementation validation](docs/blueprints-validation.md). |
 | [Warehouse specification](specs/features/warehouses.md) | Approved pallet-storage behavior, requirements, acceptance criteria, and implementation review checkpoints; runtime implementation pending. |
-| [Construction state ownership](specs/features/construction-state-ownership.md) | Design follow-up: selected simulation ownership of active target cells, retained alternatives, and open marker, composed-read, and handback choices. |
+| [Construction state ownership](specs/features/construction-state-ownership.md) | Approved construction ownership and streaming contract: static terrain, immutable blueprints/progress, and bounded materialization; runtime implementation pending. |
 | [Packed blocks](docs/packed-blocks.md) | Reusable cargo representation, collision, support, and transfer contracts for upcoming storage features. |
 | [Multiblock structures](docs/multiblock-structures.md) | Shared vocabulary for registration, claims, lifecycle, and visual substitution. |
 | [Architecture and review points](docs/architecture.md) | Subsystem map, engine/application boundaries, state ownership, concurrency, startup, and frame order. Start here for implementation. |

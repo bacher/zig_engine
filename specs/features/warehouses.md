@@ -1675,31 +1675,22 @@ baseline does not select a per-item queue, lock, transaction object, or thread h
 
 ### Q19 — Construction storage ownership and handback
 
-**CONFIRMED DIRECTION 2026-11-12: simulation owns target cells, with detailed design open.**
-The author selected actual transfer of storage, mutation, and persistence responsibility for
-nonempty blueprint targets into simulation. Blueprint-empty cells, foundations, and other
-terrain remain world-data-owned. At completion, target contents and required metadata are
-integrated into current world-data chunks and ownership returns to that service. This is
-separate from granting access to world-data-owned arrays.
+**CONFIRMED 2026-11-12; refined 2026-11-13.** The dedicated
+[construction state ownership spec](construction-state-ownership.md) defines actual simulation
+ownership of nonempty blueprint targets, including storage, mutation, and persistence. Cavities,
+foundations, and other terrain stay world-data-owned. Chunk references plus immutable definitions
+identify targets; the earlier in-cell ownership-marker proposal is superseded.
 
-The dedicated [construction state ownership spec](construction-state-ownership.md) is now the
-source for this architecture. It preserves current blueprint gameplay and bounded validation,
-composed physical versus completed logical reads, coherent saves, and the handback questions.
-No runtime change or performance advantage is claimed. This documentation change includes
-related architecture updates; they do not need to wait for a separate warehouse merge.
+Clients subscribe to construction progress separately from terrain. Targets materialize into
+current chunks in bounded portions after the last fill, preserving unrelated edits. The frame
+and active-site restrictions remain until the whole transfer finishes. Composed physical/logical
+reads, bounded structural validation, and coherent shared saves remain required. Runtime changes
+and performance validation are pending; Q21 records the ordinary-soil design assumption.
 
-[Alternatives](construction-state-ownership.md#q2--ownership-and-execution-alternatives) remain
-recorded for comparison: whole-box simulation ownership; world-data-owned terrain with
-site targets defining legal actions and technical access granted for each batch of necessary
-data; and queued world-data operation batches. They have not replaced the selected target-only
-storage direction. Source ownership and safe execution access are separate design dimensions.
-
-The author also proposes a [static ownership marker](construction-state-ownership.md#q3--static-target-membership-in-chunk-data)
-in chunk block data. It would be written at admission, remain through pending and fulfilled
-states, and disappear at handback; current occupancy still comes from simulation. Compare a
-cell tag, an optional per-chunk membership bitset, and sparse target discovery. Encoding and
-lookup are unresolved; a marker must not be treated as a physical material or progress copy.
-Q21 continues to track optional soil transformations that affect this design.
+[Alternatives](construction-state-ownership.md#q2--ownership-and-execution-alternatives) retain
+whole-box ownership, world-data terrain with site-defined legal actions and batched technical
+access, and queued world-data operations. Source ownership and safe execution access remain
+separate design dimensions.
 
 ### Q20 — Measured exceptions to resource accounting
 
@@ -1723,30 +1714,18 @@ more than one resource count. Data-access safety must hold in every candidate.
 
 ### Q21 — Optional soil transformations
 
-**DEFERRED FOLLOW-UP — simplification permitted for discussion 2026-11-12.** The author considers
-soil compaction optional and is open to removing it if it complicates or slows simulation.
-This does not yet select removal of the material `packed_dirt`, every soil timer, or grass
-behavior, and no runtime behavior has changed.
+**SIMPLIFYING MODEL SELECTED 2026-11-13.** For construction ownership design, treat soil as
+ordinary blocks without manual/timed compaction, grass timers, or coverage-driven mutations.
+[Construction Q6](construction-state-ownership.md#q6--soil-and-compact-physical-state) defines the
+implementation model and separates it from the still-implemented soil mechanics. This avoids
+per-target material overrides and cross-owner timer coordination. Future transformations need
+a separate design; removing material IDs or changing structural support is not selected.
 
-Current rules combine delayed dirt-to-packed-dirt conversion, manual compaction after
-three seconds of holding mouse2, grass growth after compaction/exposure, and clearing
-grass/canceling surface timers when covered. Placement no longer compacts loose soil. Blueprint fulfillment can modify the soil immediately below its target, including
-across a chunk or proposed site-ownership boundary. Removing only the delayed compaction timer
-does not remove that external write. Removing only compaction while preserving grass changes
-can also leave cross-owner mutations.
-
-Prefer evaluating removal of automatic compaction, including its placement-time side effects,
-before adding permanent ownership coordination solely to preserve this optional mechanic.
-Separately decide how placed dirt acquires surface cover, whether coverage changes are saved
-state or derived appearance, and who owns any remaining transformation. Existing generated
-packed soil, soil mining yields, earth support equivalence, blueprint material normalization,
-and the warehouse floor allowlist need not disappear with the compaction mechanic. Retaining
-material transitions inside sites requires site-owned state beyond fulfillment bits and safe
-handoff of any timers; eliminating them permits a simpler target representation under Q19.
-
-The current rules in [block placement](../../docs/block-placement.md#simulation-time-and-transformations)
-remain the implemented behavior until a concrete replacement is agreed. Compare the actual
-cost and gameplay consequences; compaction has not been shown to be the performance bottleneck.
+[PR #64](https://github.com/bacher/zig_engine/pull/64) already made direct blueprint fulfillment
+writes target-local. Application still clears grass below targets, and other soil/timer paths
+remain; PR #64 did not remove all soil behavior. The new model must remove/disable those paths
+explicitly with the appropriate ruleset/save gate. Current [block placement rules](../../docs/block-placement.md#simulation-time-and-transformations)
+remain implemented until then. No measured claim that compaction was the bottleneck is made.
 
 ### Q22 — Initial execution of simulation-owned warehouses
 

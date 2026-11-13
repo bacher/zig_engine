@@ -95,43 +95,33 @@ accepts coherent live transitions plus shared save capture/WAL without disk sync
 per item. Its implementation must prioritize automatic work.
 
 The [construction state ownership spec](../specs/features/construction-state-ownership.md)
-records the selected direction: actual simulation ownership of nonempty blueprint targets,
-including physical contents and saved state, followed by integration into world-data chunks.
-Cavities, foundations, and other terrain remain world-data-owned. This planned responsibility
-change is not yet implemented. [Alternatives](../specs/features/construction-state-ownership.md#q2--ownership-and-execution-alternatives)
-preserve whole-box ownership, queued world-data operations, and the earlier proposal that
-site targets define legal actions while a technical access grant covers all data needed for
-a batch. That grant alternative keeps canonical terrain in world-data.
+selects actual simulation ownership of nonempty blueprint targets and later materialization
+into current world-data chunks. Cavities and foundations remain world-data-owned. Targets stay
+air in base terrain while simulation owns them; chunk references plus immutable definitions
+provide discovery without in-cell markers. Full-lifetime membership replaces the current
+pending-only target lookup. This responsibility change is not yet implemented.
 
-Current application rules require targets to start empty. Without material transitions,
-immutable definition/progress bits may describe their physical state; retained transformations
-need additional state. Ownership persists independently of client residency. The author's
-[static membership proposal](../specs/features/construction-state-ownership.md#q3--static-target-membership-in-chunk-data)
-would mark target ownership in chunk data once at admission and retain it until handback,
-without encoding whether the miniature is fulfilled. Compare an in-cell tag, per-chunk bitset,
-and sparse directory; no encoding is selected. Current pending-target entries disappear on
-fulfillment, so their lifetime cannot serve the new ownership contract unchanged.
+Clients fetch shared immutable definitions and subscribe to per-instance progress snapshots
+and batched deltas. Physical reads and constructed-cell enumeration compose both owners;
+missing required state is unknown. Base terrain no longer needs retransmission for each fill.
+GPU representation remains independent of this contract.
 
-All physical consumers must resolve site-owned cells and ordinary terrain into one world;
-planned miniatures remain distinct from real completed cells. Safe reads, bounded spatial
-lookup, cross-site support, publication, and boundary invalidation remain necessary even
-when per-fill terrain mutation becomes local to simulation. Measure those costs alongside
-construction throughput, saves, active-site memory, and large completion bursts. No performance
-advantage of either grants or actual storage transfer has yet been demonstrated.
+The lifecycle is `building → materializing → complete`. Bounded target-chunk patches preserve
+intervening terrain edits, and the frame/active-site restrictions stay until all portions
+transfer. Client geometry switches per chunk when its static replacement is available; server
+completion does not wait for clients. Shared capture preserves partial transfers and resources
+coherently without per-block disk synchronization or a final structural scan.
 
-Ownership admission/handback needs coherent live and saved transitions under Q18. Merge owned
-cells and metadata into current destination chunks, preserving other cells; never restore an
-old whole-chunk snapshot over intervening edits. Retire the site source only after its handoff
-is accepted. Multi-chunk preparation, completion versus consolidation timing, reader lifetimes,
-and any future cancellation remain design work. Simulation-owned records use the common save
-boundary, not independent owner saves. Handback does not add a final structural validation.
+The first design treats soil as ordinary blocks without compaction, grass timers, or coverage
+mutations under [Q6](../specs/features/construction-state-ownership.md#q6--soil-and-compact-physical-state).
+Current runtime soil behavior remains implemented until that change. Definition plus progress
+can then describe target materials without a separate mutable voxel array.
 
-[Q21](../specs/features/warehouses.md#q21--optional-soil-transformations) permits discussing
-removal of optional compaction. Placement no longer compacts loose soil; manual compaction and the delayed timer remain.
-Grass/coverage changes can still mutate external soil; removing only the compaction timer
-would leave such interactions.
-Resolve the replacement behavior before adding coordination solely for that feature. Existing
-soil materials and support rules need not be removed; further changes to soil state ownership remain undecided.
+[Alternatives](../specs/features/construction-state-ownership.md#q2--ownership-and-execution-alternatives)
+retain whole-box ownership, queued world-data operations, and site-defined legal actions with
+technical access to all data needed for a batch. Measure composed reads, publication, saves,
+active-site memory, and completion bursts alongside fulfillment throughput; no advantage over
+those alternatives has yet been demonstrated.
 
 [Q20](../specs/features/warehouses.md#q20--measured-exceptions-to-resource-accounting) authorizes
 evaluating a specific best-effort boundary if rare resource discrepancies and useful savings
