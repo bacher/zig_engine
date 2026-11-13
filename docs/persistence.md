@@ -34,7 +34,7 @@ versions only, not intermediate development builds, including builds between rel
 
 The game runs one current gameplay/construction logic. It does not select historical rules
 from a world or blueprint. Compatibility with older file encodings is separate: the current
-implementation writes and reads format 5. Formats 1–4 are incompatible development
+implementation writes and reads format 6. Formats 1–5 are incompatible development
 saves and are rejected as whole worlds. The base and WAL readers enforce the supported inclusive
 range through `minimum_readable_version` and `current_write_version`.
 
@@ -46,9 +46,10 @@ saved blueprint libraries, and unfinished construction sites together. Generator
 identity/version guards likewise reject unsupported algorithms. All accepted saves use the
 current game logic.
 
-Version 5 keeps the version-4 byte layouts but requires platform-only direct stone
-foundations and portable blueprint certification. Raising both gates excludes old
-buildings and blueprint libraries certified under the former single-stone shortcut.
+Version 6 keeps the version-5 byte layouts but excludes loose soil from support and
+removes placement-triggered compaction. Raising both gates excludes old buildings and
+blueprint libraries that relied on loose soil as a foundation. It retains version 5's
+platform-only direct stone foundations and portable blueprint certification.
 
 ## Warehouse command sessions (planned)
 

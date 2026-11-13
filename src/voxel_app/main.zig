@@ -1374,7 +1374,8 @@ const Game = struct {
         const world = if (game.world) |*world| world else return;
         interaction.finishReconciliation(world.pending_operations.items);
         const camera = game.engine.active_scene.?.camera;
-        const mode = game.blockMode();
+        const compacting = interaction.requested == .secondary_mouse or (if (interaction.holding) |hold| hold.operation.action == .compact else false);
+        const mode: block_targeting.Mode = if (compacting) .removing else game.blockMode();
         const target = (block_targeting.findTarget(world, camera.position, camera.forwardDirection(), mode) catch null);
         if (interaction.requested) |source| {
             interaction.requested = null;
@@ -1383,12 +1384,13 @@ const Game = struct {
             const block = target orelse return;
             const coords, const local = world_module.splitBlockCoords(block);
             const chunk = world.getChunk(coords) orelse return;
+            if (compacting and chunk.content.getBlock(local) != .dirt) return;
             interaction.holding = .{
                 .source = source,
                 .operation = .{
                     .block = block,
-                    .action = if (interaction.inventory) |material| .{ .put = material } else .remove,
-                    .blueprint = if (interaction.inventory != null) (if (world.blueprints.targetAt(block)) |planned_target| .{ .instance_id = planned_target.instance_id, .cell_index = planned_target.cell_index } else null) else null,
+                    .action = if (compacting) .compact else if (interaction.inventory) |material| .{ .put = material } else .remove,
+                    .blueprint = if (!compacting and interaction.inventory != null) (if (world.blueprints.targetAt(block)) |planned_target| .{ .instance_id = planned_target.instance_id, .cell_index = planned_target.cell_index } else null) else null,
                     .player = .{ .id = game.player_id, .expected_sequence = chunk.cell_changes.sequence },
                 },
                 .material = chunk.content.getBlock(local),
@@ -1464,7 +1466,8 @@ const Game = struct {
         if (!input.focused or input.focus_changed) return;
         const world = if (game.world) |*world| world else return;
         const camera = scene.camera;
-        const mode = game.blockMode();
+        const compacting = if (game.block_interaction.holding) |hold| hold.operation.action == .compact else false;
+        const mode: block_targeting.Mode = if (compacting) .removing else game.blockMode();
         const material = game.heldMaterial() orelse game.selected_material;
         const block = (block_targeting.findTarget(world, camera.position, camera.forwardDirection(), mode) catch return) orelse return;
         if (mode == .removing) {
@@ -2219,6 +2222,7 @@ fn handleMouseButtonRelease(game: *Game, params: MouseButtonParams) void {
         game.block_interaction.release(.mouse);
         game.blueprint_tool.press.mouse_down = false;
     }
+    if (params.button == .right) game.block_interaction.release(.secondary_mouse);
 }
 
 fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams, game_opaque: *anyopaque) void {
@@ -2235,6 +2239,7 @@ fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
     }
     if (game.control_mode == .player) {
         if (params.button == .left) game.block_interaction.press(.mouse);
+        if (params.button == .right) game.block_interaction.press(.secondary_mouse);
         return;
     }
     if (params.button == .left) game.queueBlockAction(switch (game.block_mode) {
@@ -5475,6 +5480,110 @@ test "player holds E or mouse for three seconds to extract and one second to pla
         game.updateBlockTool();
         try std.testing.expectEqual(null, game.block_interaction.holding);
     }
+}
+
+test "mouse2 compacts the aimed loose soil in three seconds with either inventory state" {
+    for ([_]?voxel_chunk_module.BlockType{ null, .sand }) |inventory| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        try fixture.preparePlayerToolTest();
+        const game = &fixture.game;
+        const target = StreamingTest.toolTarget();
+        fixture.changeToolMaterial(.dirt);
+        game.block_interaction.inventory = inventory;
+        handleMouseButtonPress(game, .{ .button = .right, .mods = .{} });
+        game.updateBlockTool();
+        try std.testing.expectEqual(.compact, std.meta.activeTag(game.block_interaction.holding.?.operation.action));
+        try std.testing.expectEqual(player_interaction.compaction_seconds, game.block_interaction.holding.?.duration());
+        game.updateBlockFocus();
+        try std.testing.expectEqual(StreamingTest.toolTarget(), fixture.scene.highlighted_block.?);
+        try std.testing.expectEqual(null, game.current_placement_preview);
+        fixture.engine.frame_delta = 2.75;
+        game.updateBlockTool();
+        try std.testing.expectEqual(voxel_chunk_module.BlockType.dirt, game.world.?.reader().get(.{ target[0], target[1], target[2] }).?);
+        try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
+        fixture.engine.frame_delta = 0.25;
+        game.updateBlockTool();
+        try std.testing.expectEqual(voxel_chunk_module.BlockType.packed_dirt, game.world.?.reader().get(.{ target[0], target[1], target[2] }).?);
+        try std.testing.expectEqual(inventory, game.block_interaction.inventory);
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+        try std.testing.expectEqual(.compact, std.meta.activeTag(game.world.?.pending_operations.items[0].operation.action));
+        try fixture.acknowledgePlayer(1, .success, inventory);
+        game.updateBlockTool();
+        try std.testing.expectEqual(null, game.block_interaction.pending);
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+        try std.testing.expectEqual(inventory, game.block_interaction.inventory);
+    }
+}
+
+test "mouse2 work cancels on release target range terrain focus and control changes" {
+    for (0..8) |cause| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        try fixture.preparePlayerToolTest();
+        const game = &fixture.game;
+        var spectator: std.meta.Child(@TypeOf(fixture.scene.spectator_camera)) = .{
+            .camera = &fixture.camera,
+            .input_controller = @ptrCast(&fixture.input),
+        };
+        fixture.scene.spectator_camera = &spectator;
+        fixture.changeToolMaterial(.dirt);
+        handleMouseButtonPress(game, .{ .button = .right, .mods = .{} });
+        game.updateBlockTool();
+        fixture.engine.frame_delta = 2;
+        game.updateBlockTool();
+        switch (cause) {
+            0 => handleMouseButtonRelease(game, .{ .button = .right, .mods = .{} }),
+            1 => fixture.camera.updateView(zmath.rotationY(math.pi / 2.0)),
+            2 => {
+                try game.world.?.insertChunk(test_layout.origin_chunk - ChunkCoords{ 0, 1, 0 }, WorldChunk.initEmpty());
+                fixture.camera.updatePosition(.{ 0.5, -5, 0.5 });
+            },
+            3 => fixture.changeToolMaterial(.packed_dirt),
+            4 => fixture.input.focused = false,
+            5 => fixture.input.focus_changed = true,
+            6 => game.world.?.removeChunk(test_layout.origin_chunk),
+            7 => {
+                game.player = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
+                game.toggleControlMode();
+            },
+            else => unreachable,
+        }
+        game.updateBlockTool();
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+        try std.testing.expectEqual(null, game.block_interaction.inventory);
+        try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
+    }
+}
+
+test "mouse2 ignores non-loose materials and cannot restart after early release without a press" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.preparePlayerToolTest();
+    const game = &fixture.game;
+    for ([_]voxel_chunk_module.BlockType{ .sand, .packed_dirt, .grass, .stone }) |material| {
+        fixture.changeToolMaterial(material);
+        handleMouseButtonPress(game, .{ .button = .right, .mods = .{} });
+        game.updateBlockTool();
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+        handleMouseButtonRelease(game, .{ .button = .right, .mods = .{} });
+    }
+    fixture.changeToolMaterial(.dirt);
+    handleMouseButtonPress(game, .{ .button = .right, .mods = .{} });
+    game.updateBlockTool();
+    fixture.engine.frame_delta = 2.9;
+    game.updateBlockTool();
+    handleMouseButtonRelease(game, .{ .button = .right, .mods = .{} });
+    fixture.engine.frame_delta = 10;
+    game.updateBlockTool();
+    try std.testing.expectEqual(null, game.block_interaction.holding);
+    try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
+    handleMouseButtonPress(game, .{ .button = .right, .mods = .{} });
+    game.updateBlockTool();
+    try std.testing.expectEqual(@as(f64, 0), game.block_interaction.holding.?.elapsed);
 }
 
 test "early release and same-frame repress restart work without editing terrain or inventory" {

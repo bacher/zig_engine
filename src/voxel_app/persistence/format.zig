@@ -1,10 +1,10 @@
 //! Versioned wire codecs. All wire storage is bytes, never native struct layout.
 const std = @import("std");
 const generation_settings = @import("../generation_settings.zig");
-// Version 5 requires platform-only stone foundations and the resulting portable
-// blueprint certificates. Older development worlds use incompatible support rules.
-pub const current_write_version: u32 = 5;
-pub const minimum_readable_version: u32 = 5;
+// Version 6 excludes loose-soil support and placement-triggered compaction.
+// Older development worlds and their blueprint certificates use incompatible rules.
+pub const current_write_version: u32 = 6;
+pub const minimum_readable_version: u32 = 6;
 pub const Uuid = [16]u8;
 pub const Digest = [32]u8;
 pub const cell_count = 32768;

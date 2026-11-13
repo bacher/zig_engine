@@ -1,4 +1,4 @@
-//! One carried block and one timed/authoritative transfer at a time.
+//! One carried block and one timed/authoritative action at a time.
 const std = @import("std");
 const world = @import("world.zig");
 const OperationResult = @import("world_data_service.zig").OperationResult;
@@ -6,7 +6,8 @@ const BlockType = @import("engine").voxel_chunk.BlockType;
 
 pub const extraction_seconds: f64 = 3;
 pub const placement_seconds: f64 = 1;
-pub const Source = enum { key, mouse };
+pub const compaction_seconds: f64 = 3;
+pub const Source = enum { key, mouse, secondary_mouse };
 
 pub const Interaction = struct {
     inventory: ?BlockType = null,
@@ -15,6 +16,7 @@ pub const Interaction = struct {
     requested: ?Source = null,
     key_down: bool = false,
     mouse_down: bool = false,
+    secondary_mouse_down: bool = false,
 
     pub const Hold = struct {
         source: Source,
@@ -23,17 +25,22 @@ pub const Interaction = struct {
         elapsed: f64 = 0,
 
         pub fn duration(self: Hold) f64 {
-            return if (self.operation.action == .remove) extraction_seconds else placement_seconds;
+            return switch (self.operation.action) {
+                .remove => extraction_seconds,
+                .put => placement_seconds,
+                .compact => compaction_seconds,
+            };
         }
     };
 
     pub fn press(self: *Interaction, source: Source) void {
-        const was_down = self.key_down or self.mouse_down;
+        const was_down = self.key_down or self.mouse_down or self.secondary_mouse_down;
         switch (source) {
             .key => self.key_down = true,
             .mouse => self.mouse_down = true,
+            .secondary_mouse => self.secondary_mouse_down = true,
         }
-        // Both controls must be released before a fresh action can start. A press
+        // All controls must be released before a fresh action can start. A press
         // while waiting for authority is consumed, never queued for later.
         if (!was_down and self.pending == null and self.holding == null) self.requested = source;
     }
@@ -42,6 +49,7 @@ pub const Interaction = struct {
         switch (source) {
             .key => self.key_down = false,
             .mouse => self.mouse_down = false,
+            .secondary_mouse => self.secondary_mouse_down = false,
         }
         if (self.requested == source) self.requested = null;
         if (self.holding) |hold| if (hold.source == source) {
@@ -49,13 +57,17 @@ pub const Interaction = struct {
         };
     }
 
-    /// Finish a local attempt. Only a successful terrain edit predicts a transfer.
+    /// Finish a local attempt. Compaction leaves the carried block unchanged.
     pub fn completePrediction(self: *Interaction, result: world.EditResult) void {
         std.debug.assert(self.pending == null);
         const hold = self.holding.?;
         self.holding = null;
         if (result.status != .success) return;
-        self.inventory = if (hold.operation.action == .remove) result.mined_type else null;
+        self.inventory = switch (hold.operation.action) {
+            .remove => result.mined_type,
+            .put => null,
+            .compact => self.inventory,
+        };
         self.pending = .{};
     }
 
@@ -97,6 +109,7 @@ pub const Interaction = struct {
         self.cancelHold();
         self.key_down = false;
         self.mouse_down = false;
+        self.secondary_mouse_down = false;
     }
 };
 
@@ -115,6 +128,30 @@ test "release cancels even between frames and switching controls cannot extend a
     interaction.release(.mouse);
     interaction.press(.mouse);
     try std.testing.expectEqual(Source.mouse, interaction.requested.?);
+}
+
+test "compaction preserves inventory and shares the fresh-press action gate" {
+    for ([_]?BlockType{ null, .sand }) |inventory| {
+        var interaction: Interaction = .{ .inventory = inventory };
+        interaction.press(.secondary_mouse);
+        try std.testing.expectEqual(Source.secondary_mouse, interaction.requested.?);
+        interaction.requested = null;
+        interaction.holding = .{ .source = .secondary_mouse, .operation = .{ .block = .{ 1, 2, 3 }, .action = .compact }, .material = .dirt };
+        try std.testing.expectEqual(@as(f64, 3), interaction.holding.?.duration());
+        interaction.completePrediction(.{ .status = .success });
+        try std.testing.expectEqual(inventory, interaction.inventory);
+        interaction.markSubmitted(7);
+        try std.testing.expect(interaction.acknowledge(1, .{ .request_id = 7, .status = .success, .player_inventory = .{ .player_id = 1, .material = inventory } }));
+        interaction.finishReconciliation(&.{});
+        interaction.press(.key);
+        try std.testing.expectEqual(null, interaction.requested);
+        interaction.release(.secondary_mouse);
+        interaction.press(.secondary_mouse);
+        try std.testing.expectEqual(null, interaction.requested);
+        interaction.loseFocus();
+        interaction.press(.secondary_mouse);
+        try std.testing.expectEqual(Source.secondary_mouse, interaction.requested.?);
+    }
 }
 
 test "presses during acknowledgement wait are consumed and focus loss preserves pending inventory" {

@@ -52,9 +52,24 @@ fn push(list: *std.ArrayList(timers.Event), event: timers.Event) void {
 /// O(N log N), at most two transitions per initial event. All allocations finish
 /// before the first transition; failure leaves source blocks and timers untouched.
 pub fn prepare(a: std.mem.Allocator, source: *const world.WorldChunk, cutoff: timers.Tick) !Plan {
+    return prepareWithExposure(a, source, cutoff, null);
+}
+
+/// Only grass growth depends on exposure. Compaction itself always proceeds.
+pub const Exposure = struct {
+    context: *anyopaque,
+    exposed: *const fn (*anyopaque, [3]u5) ?bool,
+    /// Planned cover suppresses grass successors without any physical reads.
+    grass_allowed: ?*const fn (*anyopaque, [3]u5) bool = null,
+};
+
+pub fn prepareWithExposure(a: std.mem.Allocator, source: *const world.WorldChunk, cutoff: timers.Tick, exposure: ?Exposure) !Plan {
     var result: Plan = .{ .timed = try source.metadata.timed.tryClone(a) };
     errdefer result.deinit(a);
     try result.changes.ensureTotalCapacity(a, source.metadata.timed.events.items.len);
+    var deferred: std.ArrayList(timers.Event) = .empty;
+    defer deferred.deinit(a);
+    try deferred.ensureTotalCapacity(a, source.metadata.timed.events.items.len);
     var changed = std.StaticBitSet(32768).initEmpty();
     var positions: [32768]u16 = undefined;
     const queue = &result.timed.events;
@@ -73,16 +88,28 @@ pub fn prepare(a: std.mem.Allocator, source: *const world.WorldChunk, cutoff: ti
                 if (material != .dirt) continue;
                 recordChange(&result, &changed, &positions, event.block, .packed_dirt);
                 result.material_changed = true;
+                // Compaction always succeeds; planned cover only suppresses grass.
+                if (exposure) |check| if (check.grass_allowed) |allowed| if (!allowed(check.context, local)) continue;
                 // The removed event supplies capacity for its sole finite successor.
                 push(queue, .{ .block = event.block, .kind = .grow_grass, .due_tick = event.due_tick +| timers.transformation_delay });
             },
             .grow_grass => {
                 if (material != .packed_dirt) continue;
+                if (exposure) |check| {
+                    const exposed = check.exposed(check.context, local) orelse {
+                        deferred.appendAssumeCapacity(event);
+                        result.consumed -= 1;
+                        continue;
+                    };
+                    if (!exposed) continue;
+                }
                 recordChange(&result, &changed, &positions, event.block, .grass);
                 result.material_changed = true;
             },
         }
     }
+    for (deferred.items) |event| push(queue, event);
+    result.metadata_changed = result.consumed != 0;
     std.mem.sort(timers.Event, queue.items, {}, less);
     return result;
 }
@@ -168,4 +195,52 @@ test "deadline saturation stays finite and future events keep stable deadline-ce
     defer future.deinit(a);
     try std.testing.expectEqual(@as(timers.BlockIndex, 3), future.timed.events.items[0].block);
     try std.testing.expectEqual(@as(timers.BlockIndex, 4), future.timed.events.items[1].block);
+}
+
+test "catch-up compacts dirt while unknown exposure defers only grass growth" {
+    const a = std.testing.allocator;
+    var source = try fixture(a);
+    defer source.deinit(a);
+    const Unknown = struct {
+        calls: usize = 0,
+        fn exposed(raw: *anyopaque, _: [3]u5) ?bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return null;
+        }
+    };
+    var exposure: Unknown = .{};
+    const deadline = 10 + timers.transformation_delay;
+    var result = try prepareWithExposure(a, &source, deadline, .{ .context = &exposure, .exposed = Unknown.exposed });
+    defer result.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), result.consumed);
+    try std.testing.expectEqual(BlockType.packed_dirt, result.changes.items[0].material);
+    try std.testing.expectEqual(@as(usize, 1), result.timed.events.items.len);
+    try std.testing.expectEqual(timers.Kind.grow_grass, result.timed.events.items[0].kind);
+    try std.testing.expectEqual(deadline, result.timed.events.items[0].due_tick);
+    result.applyPrepared(&source);
+    var retry = try prepareWithExposure(a, &source, deadline, .{ .context = &exposure, .exposed = Unknown.exposed });
+    defer retry.deinit(a);
+    try std.testing.expect(!retry.material_changed and !retry.metadata_changed);
+    try std.testing.expectEqual(deadline, retry.timed.events.items[0].due_tick);
+}
+
+test "planned cover suppresses grass successors without checking physical exposure" {
+    const a = std.testing.allocator;
+    var source = try fixture(a);
+    defer source.deinit(a);
+    const Covered = struct {
+        fn allowed(_: *anyopaque, _: [3]u5) bool {
+            return false;
+        }
+        fn exposed(_: *anyopaque, _: [3]u5) ?bool {
+            @panic("compaction under planned cover must not query physical exposure");
+        }
+    };
+    var context: u8 = 0;
+    var result = try prepareWithExposure(a, &source, std.math.maxInt(u64), .{ .context = &context, .exposed = Covered.exposed, .grass_allowed = Covered.allowed });
+    defer result.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), result.consumed);
+    try std.testing.expectEqual(BlockType.packed_dirt, result.changes.items[0].material);
+    try std.testing.expectEqual(@as(usize, 0), result.timed.events.items.len);
 }

@@ -48,7 +48,7 @@ pub const BlockType = enum(u8) {
     none = 0,
     /// Natural rock. Mining yields crushed stone; players cannot place this type.
     stone = 1,
-    /// Loose soil. Generated soil uses packed_dirt instead.
+    /// Loose soil supplies no support. Generated soil uses packed_dirt instead.
     dirt = 2,
     /// Packed soil with a grass surface; not a separately placeable material.
     grass = 3,
@@ -104,7 +104,7 @@ pub const BlockType = enum(u8) {
     }
 
     pub fn isStablePlatformMaterial(self: BlockType) bool {
-        return self.isEarth() or self == .clay or self.isNaturalRock() or self.isMineralConstruction();
+        return self == .packed_dirt or self == .grass or self == .clay or self.isNaturalRock() or self.isMineralConstruction();
     }
 
     pub fn isStructural(self: BlockType) bool {

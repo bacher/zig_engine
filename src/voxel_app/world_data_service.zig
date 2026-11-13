@@ -30,6 +30,7 @@ const blueprint_runtime = @import("blueprint_runtime.zig");
 const blueprint_wire = @import("persistence/blueprints.zig");
 const deferred_work = @import("deferred_world_work.zig");
 const blueprint_admission = @import("blueprint_admission.zig");
+const blueprint_soil = @import("blueprint_soil.zig");
 const blueprint_admission_region = @import("blueprint_admission_region.zig");
 const blueprint_road_updates = @import("blueprint_road_updates.zig");
 const background_work_log = std.log.scoped(.background_world_work);
@@ -42,8 +43,8 @@ pub const StandingSpaceResponse = struct {
     result: StandingSpaceError!standing_space.Position,
 };
 
-/// Unbounded multi-producer queue. Pushing never waits for the consumer (only for the short
-/// critical section), the consumer takes all queued items at once.
+/// Unbounded multi-producer queue. Queue access is serialized; the consumer
+/// takes all queued items at once. Apply can reserve a result slot through commit.
 fn Mailbox(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -212,11 +213,13 @@ const BlueprintAdmissionTask = struct {
     instance: blueprint_runtime.Instance,
     client_count: usize,
     response_copies: std.ArrayList(blueprint_runtime.Instance) = .empty,
+    soil_plan: ?blueprint_soil.Plan = null,
     chunk_ids: []ChunkId,
     cursor: usize = 0,
     snapshot_bytes: usize = 0,
     waiting_for_data: bool = false,
     waiting_for_journal: bool = false,
+    waiting_for_capture: bool = false,
     cancel: std.atomic.Value(bool) = .init(false),
     future: ?Io.Future(void) = null,
     result: ?(anyerror!blueprint_admission.Result) = null,
@@ -232,6 +235,11 @@ const BlueprintAdmissionTask = struct {
         var result = try blueprint_admission.prepareCertified(allocator, &task.snapshot, task.definition, task.instance, .{ .cancel = &task.cancel });
         errdefer if (result == .prepared) result.prepared.deinit(allocator);
         if (result == .prepared) {
+            task.soil_plan = try blueprint_soil.prepare(allocator, &task.snapshot.layout, task.definition, task.instance, .{ .context = task, .read = soilSurface });
+            for (task.soil_plan.?.changes.items) |change| if (task.snapshot.isImmutable(change.block)) {
+                result.prepared.deinit(allocator);
+                return .{ .rejected = .{ .code = .immutable, .cell = change.block } };
+            };
             try task.response_copies.ensureTotalCapacity(allocator, task.client_count);
             for (0..task.client_count) |_| {
                 if (task.cancel.load(.acquire)) {
@@ -242,6 +250,16 @@ const BlueprintAdmissionTask = struct {
             }
         }
         return result;
+    }
+
+    fn soilSurface(raw: *anyopaque, block: blueprint_soil.Cell) !blueprint_soil.Surface {
+        const task: *BlueprintAdmissionTask = @ptrCast(@alignCast(raw));
+        const coords, const local = world_module.splitBlockCoords(block);
+        const chunk = task.snapshot.chunks.getPtr(task.snapshot.layout.encodeChunkCoords(coords)) orelse return error.MissingData;
+        return .{
+            .material = chunk.blocks.blocks[local[2]][local[1]][local[0]],
+            .timer_kind = if (chunk.grow_grass.isSet(transformations.index(local))) .grow_grass else null,
+        };
     }
 
     fn release(task: *BlueprintAdmissionTask) void {
@@ -255,6 +273,7 @@ const BlueprintAdmissionTask = struct {
         } else |_| {};
         for (task.response_copies.items) |*copy| copy.deinit(allocator);
         task.response_copies.deinit(allocator);
+        if (task.soil_plan) |*plan| plan.deinit(allocator);
         task.snapshot.deinit(allocator);
         task.instance.deinit(allocator);
         allocator.free(task.chunk_ids);
@@ -1005,7 +1024,7 @@ pub const WorldDataService = struct {
                 // ending, including registration and terminal read completions.
                 self.requests.takeAll(self.io, &batch);
                 if (batch.items.len == 0) break;
-            } else if (self.async_progress or (self.blueprint_task != null and self.blueprint_task.?.future == null and !self.blueprint_task.?.waiting_for_data and !self.blueprint_task.?.waiting_for_journal) or (self.blueprint_road_queue.count != 0 and !self.blueprint_road_waiting) or (self.next_mesh_load < self.mesh_loads.items.len and !self.is_shutting_down.load(.monotonic))) {
+            } else if (self.async_progress or (self.blueprint_task != null and self.blueprint_task.?.future == null and !self.blueprint_task.?.waiting_for_data and !self.blueprint_task.?.waiting_for_journal and !self.blueprint_task.?.waiting_for_capture) or (self.blueprint_road_queue.count != 0 and !self.blueprint_road_waiting) or (self.next_mesh_load < self.mesh_loads.items.len and !self.is_shutting_down.load(.monotonic))) {
                 self.requests.takeAll(self.io, &batch);
             } else if (!self.waitForWork(&batch)) break;
             self.drainPersistenceEvents();
@@ -1479,7 +1498,8 @@ pub const WorldDataService = struct {
                     return;
                 }
                 if (result.status == .success) {
-                    if (edit.operation.player) |transfer| {
+                    if (edit.operation.player != null and edit.operation.action != .compact) {
+                        const transfer = edit.operation.player.?;
                         // The player record exists and was checked before the terrain
                         // commit. This part of the same service turn cannot allocate.
                         const player = self.players.getPtr(transfer.id).?;
@@ -1639,9 +1659,13 @@ pub const WorldDataService = struct {
 
     /// Count every resident modified chunk as potentially dirty and reserve the
     /// largest legal metadata scratch. A fill can additionally dirty its target
-    /// chunk and the chunk below. No chunk or journal scan is needed here.
+    /// chunk. No chunk or journal scan is needed here.
     fn blueprintJournalAllowance(self: *const WorldDataService) !usize {
-        const sources = @min(self.limits.manifest_entries, try std.math.add(usize, self.worker_state.modified_chunks.count(), 2));
+        return self.blueprintJournalTerrainAllowance(1);
+    }
+
+    fn blueprintJournalTerrainAllowance(self: *const WorldDataService, additional_chunks: usize) !usize {
+        const sources = @min(self.limits.manifest_entries, try std.math.add(usize, self.worker_state.modified_chunks.count(), additional_chunks));
         const overhead = try self.captureWorkingOverhead(sources, persistence.maximumScratchBound());
         return self.limits.working_bytes -| self.limits.output_bytes -| overhead;
     }
@@ -1649,11 +1673,15 @@ pub const WorldDataService = struct {
     /// Constant-time journal admission precedes terrain/inventory changes. Never
     /// inspect writer-owned persisted state or rescan the journal on a fill.
     fn reserveBlueprintJournal(self: *WorldDataService, operation: blueprint_wire.Op) !void {
+        return self.reserveBlueprintJournalWithTerrain(operation, 1);
+    }
+
+    fn reserveBlueprintJournalWithTerrain(self: *WorldDataService, operation: blueprint_wire.Op, additional_chunks: usize) !void {
         if (self.store == null) return;
         const limits = self.store.?.limits.blueprints;
         var one: blueprint_wire.PrepareSummary = .{};
         try self.addBlueprintSummary(&one, operation);
-        const allowance = try self.blueprintJournalAllowance();
+        const allowance = try self.blueprintJournalTerrainAllowance(additional_chunks);
         const initial_capacity = std.ArrayList(blueprint_wire.Op).growCapacity(1);
         if (one.operation_count > limits.max_operations or one.encoded_bytes > limits.max_changes_bytes or
             (operation == .definition and operation.definition.cells.len > limits.max_cells) or
@@ -1883,9 +1911,13 @@ pub const WorldDataService = struct {
     fn advanceBlueprintAdmission(self: *WorldDataService) void {
         self.reapBlueprintRetirements();
         const task = self.blueprint_task orelse return;
-        if (task.future != null or task.waiting_for_data or task.waiting_for_journal) return;
+        if (task.future != null or task.waiting_for_data or task.waiting_for_journal or task.waiting_for_capture) return;
         if (self.worker_state.blueprints.revision != task.snapshot.overlay_revision) {
             self.rejectBlueprintApplication(task, .stale, null);
+            return;
+        }
+        if (task.result != null) {
+            self.finishBlueprintApplication(task);
             return;
         }
         var copied: usize = 0;
@@ -1921,7 +1953,7 @@ pub const WorldDataService = struct {
             const cell: [3]u32 = .{ @as(u32, @intCast(coords[0])) * CHUNK_SIZE + local[0], @as(u32, @intCast(coords[1])) * CHUNK_SIZE + local[1], local[2] };
             if (cell[2] < self.worker_state.generator.deeprockThickness(cell[0], cell[1])) try immutable.append(self.allocator, @intCast(index));
         };
-        const estimate = blueprint_admission.estimatedChunkBytes(immutable.items.len, source_index);
+        const estimate = blueprint_admission.estimatedChunkBytes(immutable.items.len, source_index) +| @sizeOf(std.StaticBitSet(32768));
         if (estimate > 128 * 1024 * 1024 -| task.snapshot_bytes) return error.Capacity;
         const blocks = try self.allocator.create(@import("world_chunk_data.zig").WorldChunkData);
         errdefer self.allocator.destroy(blocks);
@@ -1930,7 +1962,11 @@ pub const WorldDataService = struct {
         errdefer self.allocator.free(mask);
         var index = try source_index.clone(self.allocator);
         errdefer index.deinit(self.allocator);
-        try task.snapshot.chunks.put(self.allocator, id, .{ .revision = chunk.chunk_revision, .blocks = blocks, .immutable = mask, .index = index });
+        var grow_grass: std.StaticBitSet(32768) = .initEmpty();
+        for (chunk.metadata.timed.events.items) |event| if (event.kind == .grow_grass) {
+            grow_grass.set(event.block);
+        };
+        try task.snapshot.chunks.put(self.allocator, id, .{ .revision = chunk.chunk_revision, .blocks = blocks, .immutable = mask, .index = index, .grow_grass = grow_grass });
         task.snapshot_bytes += estimate;
     }
 
@@ -1954,7 +1990,17 @@ pub const WorldDataService = struct {
                 else => .invalid,
             }, rejection),
             .prepared => {
+                self.read_discovered = false;
+                self.blocked_dependency_error = null;
                 self.commitBlueprintApplication(task) catch |err| {
+                    if (err == error.DependencyPending) {
+                        if (self.blocked_dependency_error != null) self.rejectBlueprintApplication(task, .missing_data, null) else task.waiting_for_data = true;
+                        return;
+                    }
+                    if (err == error.CapturePending) {
+                        task.waiting_for_capture = true;
+                        return;
+                    }
                     if (err == error.JournalBackpressure) {
                         task.waiting_for_journal = true;
                         self.drainBlueprintJournal();
@@ -1975,13 +2021,72 @@ pub const WorldDataService = struct {
         while (dependencies.next()) |dependency| if (self.currentBlueprintDependency(dependency.key_ptr.*) != dependency.value_ptr.revision) return error.StalePreparation;
         const result = if (task.result.?) |*value| value else |err| return err;
         const prepared = &result.prepared;
+        const soil = &task.soil_plan.?;
+        for (soil.chunk_ids.items) |id| if (self.source_holds.contains(id)) {
+            if (self.job) |job| job.prioritize(soil.chunk_ids.items);
+            return error.CapturePending;
+        };
+        // A clean persisted source may have been evicted during detached work.
+        // Reload it and reuse the plan after rechecking every source revision.
+        for (soil.chunk_ids.items) |id| if (!self.requireBase(id)) return error.DependencyPending;
+        var additional_chunks: usize = 0;
+        var additional_sources: usize = 0;
+        for (soil.chunk_ids.items) |id| {
+            if (self.worker_state.modified_chunks.get(id)) |chunk| {
+                if (chunk.chunk_revision == 0 or self.wal_revisions.get(id) == chunk.chunk_revision) additional_sources += 1;
+            } else {
+                additional_chunks += 1;
+                additional_sources += 1;
+            }
+        }
+        if (self.store != null) {
+            if (soil.chunk_ids.items.len > self.limits.manifest_entries) return error.Capacity;
+            var sources = additional_sources;
+            var chunks = self.worker_state.modified_chunks.iterator();
+            while (chunks.next()) |entry| {
+                if (entry.value_ptr.chunk_revision != 0 and self.wal_revisions.get(entry.key_ptr.*) != entry.value_ptr.chunk_revision) sources += 1;
+            }
+            if (sources > self.limits.manifest_entries) return error.JournalBackpressure;
+        }
         const proposed = prepared.publication.instance;
-        try self.reserveBlueprintJournal(.{ .instance = .{ .id = proposed.id, .definition_id = proposed.definition_id, .owner = proposed.owner, .origin = proposed.origin, .rotation = proposed.rotation } });
+        try self.reserveBlueprintJournalWithTerrain(.{ .instance = .{ .id = proposed.id, .definition_id = proposed.definition_id, .owner = proposed.owner, .origin = proposed.origin, .rotation = proposed.rotation } }, additional_chunks);
         try state.reservePublication(self.allocator, self.layout, &prepared.publication);
         for (self.clients.items) |client| {
             try client.pending.blueprint_changes.ensureUnusedCapacity(self.allocator, 1);
         }
         std.debug.assert(task.response_copies.items.len == self.clients.items.len);
+        // Surface writes and instance publication share one commit. Promotion,
+        // revision checks and all capacity growth precede the first soil edit.
+        try self.worker_state.modified_chunks.ensureUnusedCapacity(self.allocator, @intCast(additional_chunks));
+        try self.worker_state.mesh_revisions.ensureUnusedCapacity(self.allocator, @intCast(soil.chunk_ids.items.len));
+        try self.dirty_meshes.ensureUnusedCapacity(self.allocator, @intCast(soil.chunk_ids.items.len));
+        const mesh_revision = if (soil.chunk_ids.items.len == 0) self.worker_state.next_mesh_revision else try std.math.add(u64, self.worker_state.next_mesh_revision, 1);
+        for (soil.chunk_ids.items) |id| {
+            try self.worker_state.ensureResident(self.allocator, self.layout.decodeChunkId(id));
+            _ = try std.math.add(u64, self.worker_state.modified_chunks.get(id).?.chunk_revision, 1);
+        }
+        // The consumer can swap this queue's allocation out while draining it.
+        // Keep the reserved result slot locked until the accepted state is ready.
+        const replies = &task.request.client.blueprint_results;
+        replies.mutex.lockUncancelable(self.io);
+        var replies_locked = true;
+        defer if (replies_locked) replies.mutex.unlock(self.io);
+        std.debug.assert(!replies.is_closed);
+        try replies.items.ensureUnusedCapacity(self.allocator, 1);
+        for (soil.changes.items) |change| {
+            const coords, const local = world_module.splitBlockCoords(change.block);
+            const chunk = self.worker_state.modified_chunks.getPtr(self.layout.encodeChunkCoords(coords)).?;
+            if (change.clear_grass) chunk.changeType(local, .packed_dirt);
+        }
+        self.worker_state.next_mesh_revision = mesh_revision;
+        for (soil.chunk_ids.items) |id| {
+            const chunk = self.worker_state.modified_chunks.getPtr(id).?;
+            cancelBlueprintCoveredGrass(chunk, soil.cancel_grow.getPtr(id).?);
+            chunk.chunk_revision += 1;
+            self.worker_state.mesh_revisions.putAssumeCapacity(id, mesh_revision);
+            if (chunk.metadata.timed.events.items.len == 0) _ = self.worker_state.timed_chunks.remove(id);
+            self.publishMaterialChange(self.layout.decodeChunkId(id));
+        }
         const instance = prepared.publication.instance;
         state.publishPublication(&prepared.publication);
         if (self.store != null) {
@@ -1991,11 +2096,26 @@ pub const WorldDataService = struct {
         task.response_copies.clearRetainingCapacity();
         self.lifecycle.unsaved_work = true;
         task.request.client.resolved_request = @max(task.request.client.resolved_request, task.request.request_id);
-        task.request.client.blueprint_results.push(self.io, self.allocator, .{ .request_id = task.request.request_id, .kind = .apply, .status = .success, .definition_id = instance.definition_id, .instance_id = instance.id });
+        replies.items.appendAssumeCapacity(.{ .request_id = task.request.request_id, .kind = .apply, .status = .success, .definition_id = instance.definition_id, .instance_id = instance.id });
+        replies.not_empty.signal(self.io);
+        replies.mutex.unlock(self.io);
+        replies_locked = false;
         self.applyEligibleCheckpoint(task.request.client);
         self.retireBlueprintTask(task);
         self.lifecycle.commandResolved();
         self.retryPending();
+    }
+
+    /// Filter each affected timer queue once instead of canceling/shifting its
+    /// array separately for every covered cell in a dense blueprint.
+    fn cancelBlueprintCoveredGrass(chunk: *WorldChunk, mask: *const blueprint_soil.GrowthMask) void {
+        var retained: usize = 0;
+        for (chunk.metadata.timed.events.items) |event| {
+            if (event.kind == .grow_grass and mask.isSet(event.block)) continue;
+            chunk.metadata.timed.events.items[retained] = event;
+            retained += 1;
+        }
+        chunk.metadata.timed.events.items.len = retained;
     }
 
     fn rejectBlueprintApplication(self: *WorldDataService, task: *BlueprintAdmissionTask, status: @FieldType(BlueprintResult, "status"), rejection: ?BlueprintRejection) void {
@@ -2065,7 +2185,6 @@ pub const WorldDataService = struct {
             }
             for (self.clients.items) |client| client.pending.blueprint_changes.appendAssumeCapacity(.{ .fulfill = fulfillment });
             self.publishMaterialChange(coords);
-            if (result.changed_below) |below| if (!@reduce(.And, below == coords)) self.publishMaterialChange(below);
             for (std.enums.values(Side)) |side| {
                 const i = @intFromEnum(side);
                 if (local[i / 2] != (if (i % 2 == 0) @as(u5, 0) else CHUNK_SIZE - 1)) continue;
@@ -2119,6 +2238,25 @@ pub const WorldDataService = struct {
             const seed = @import("block_coordinates.zig").fromStorage(self.layout, center + offset + rules.Cell{ 0, 0, @intCast(level) }) orelse continue;
             const coords, _ = world_module.splitBlockCoords(seed);
             const id = self.layout.encodeChunkCoords(coords);
+            const possible = if (self.worker_state.modified_chunks.get(id)) |chunk|
+                chunk.metadata.roads.items.len != 0
+            else if (self.catalog) |catalog|
+                catalog.revision(id) != null
+            else
+                false;
+            if (possible) batch.add(id);
+        };
+        const limit = if (self.store) |saved| saved.limits.max_pending_work else blueprint_road_updates.capacity;
+        try self.blueprint_road_queue.reserveWithLimit(self.allocator, batch, limit);
+        return batch;
+    }
+
+    fn prepareCompactionRoadUpdates(self: *WorldDataService, coords: ChunkCoords) !blueprint_road_updates.Batch {
+        var batch: blueprint_road_updates.Batch = .{};
+        const offsets = [_]ChunkCoords{ .{ 0, 0, 0 }, .{ 1, 0, 0 }, .{ -1, 0, 0 }, .{ 0, 1, 0 }, .{ 0, -1, 0 } };
+        for (0..2) |level| for (offsets) |offset| {
+            const candidate = self.layout.normalizeChunkCoords(coords + offset + ChunkCoords{ 0, 0, @intCast(level) }) orelse continue;
+            const id = self.layout.encodeChunkCoords(candidate);
             const possible = if (self.worker_state.modified_chunks.get(id)) |chunk|
                 chunk.metadata.roads.items.len != 0
             else if (self.catalog) |catalog|
@@ -2257,9 +2395,8 @@ pub const WorldDataService = struct {
     fn blueprintDependencies(self: *WorldDataService, operation: BlockOperation) Dependencies {
         var result: Dependencies = .{ .ids = undefined, .count = 0 };
         const center: rules.Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
-        const offsets = [_]rules.Cell{ .{ 0, 0, 0 }, .{ 0, 0, -1 }, .{ -1, 0, 0 }, .{ 1, 0, 0 }, .{ 0, -1, 0 }, .{ 0, 1, 0 }, .{ 0, 0, 1 } };
-        for (offsets, 0..) |offset, i| {
-            if (i == 6 and (operation.action != .put or operation.action.put != .dirt)) continue;
+        const offsets = [_]rules.Cell{ .{ 0, 0, 0 }, .{ 0, 0, -1 }, .{ -1, 0, 0 }, .{ 1, 0, 0 }, .{ 0, -1, 0 }, .{ 0, 1, 0 } };
+        for (offsets) |offset| {
             const block = @import("block_coordinates.zig").fromStorage(self.layout, center + offset) orelse continue;
             const coords, _ = world_module.splitBlockCoords(block);
             const id = self.layout.encodeChunkCoords(coords);
@@ -2385,7 +2522,7 @@ pub const WorldDataService = struct {
             return !self.lifecycle.overdue;
         }
         const ids = self.operationDependencies(edit.operation);
-        for (self.run_write_ids.items) |id| if (self.source_holds.contains(id)) {
+        for (if (edit.operation.action == .remove) self.run_write_ids.items else &.{}) |id| if (self.source_holds.contains(id)) {
             if (self.job) |job| job.prioritize(self.run_write_ids.items);
             return false;
         };
@@ -2400,6 +2537,11 @@ pub const WorldDataService = struct {
     fn operationDependencies(self: *WorldDataService, operation: BlockOperation) Dependencies {
         const center, _ = world_module.splitBlockCoords(operation.block);
         var result: Dependencies = .{ .ids = undefined, .count = 0 };
+        if (operation.action == .compact) {
+            result.ids[0] = self.layout.encodeChunkCoords(center);
+            result.count = 1;
+            return result;
+        }
         for (0..3) |z| for (0..3) |y| for (0..3) |x| {
             const coords = self.layout.normalizeChunkCoords(center + ChunkCoords{ @as(i32, @intCast(x)) - 1, @as(i32, @intCast(y)) - 1, @as(i32, @intCast(z)) - 1 }) orelse continue;
             const id = self.layout.encodeChunkCoords(coords);
@@ -2654,6 +2796,10 @@ pub const WorldDataService = struct {
                 if (self.source_holds.count() == 0) {
                     self.status.sources_released_ns = persistence.now(self.io);
                 }
+                if (self.blueprint_task) |task| if (task.waiting_for_capture) {
+                    task.waiting_for_capture = false;
+                    self.finishBlueprintApplication(task);
+                };
                 self.retryPending();
             },
             .encoded => |epoch| {
@@ -2946,6 +3092,11 @@ pub const WorldDataService = struct {
                     return ready;
                 }
                 const center, _ = world_module.splitBlockCoords(edit.operation.block);
+                if (edit.operation.action == .compact) {
+                    self.run_gate_failure = null;
+                    self.run_write_ids.clearRetainingCapacity();
+                    return self.requireBase(self.layout.encodeChunkCoords(center));
+                }
                 // Validator rechecks constructed cells within28 and their support within28.
                 for (0..5) |z| for (0..5) |y| for (0..5) |x| {
                     const coords = self.layout.normalizeChunkCoords(center + ChunkCoords{ @as(i32, @intCast(x)) - 2, @as(i32, @intCast(y)) - 2, @as(i32, @intCast(z)) - 2 }) orelse continue;
@@ -3331,7 +3482,7 @@ const WorkerState = struct {
         self.ordinary_validation_calls +%= 1;
         const live = self.liveAllocator(allocator);
         self.road_changes.clearRetainingCapacity();
-        if (self.persistence_service) |service| if (service.run_gate_failure) |err| return err;
+        if (operation.action == .remove) if (self.persistence_service) |service| if (service.run_gate_failure) |err| return err;
         const cells: []const rules.Cell = if (operation.action == .remove)
             try world_module.tryCollectConstructed(allocator, self.layout, &self.modified_chunks, operation.block)
         else
@@ -3350,10 +3501,11 @@ const WorkerState = struct {
             const matches = if (player) |p| switch (operation.action) {
                 .remove => p.inventory == null,
                 .put => |material| p.inventory == @as(?u8, @intFromEnum(material)),
+                .compact => true,
             } else false;
             if (!matches) {
                 diagnostics = .{ .status = .inventory_mismatch };
-            } else if (diagnostics.status == .success and operation.action == .remove) {
+            } else if (diagnostics.status == .success and operation.action != .put) {
                 const history = if (self.modified_chunks.get(position)) |chunk| chunk.cell_changes else @import("cell_changes.zig").History{};
                 if (!history.unchangedSince(transformations.index(local), transfer.expected_sequence)) diagnostics = .{ .status = .target_changed };
             }
@@ -3362,6 +3514,8 @@ const WorkerState = struct {
             const chunk = try (try context.chunkAt(coords)).tryClone(allocator);
             return .{ .status = diagnostics.status, .chunk = chunk, .revealed_neighbors = @splat(null), .changed_below = null, .diagnostics = diagnostics };
         }
+
+        if (operation.action == .compact) return self.tryCompactOperation(allocator, operation, diagnostics);
 
         // Materialize unchanged dependencies before obtaining pointers; rehashing may move headers.
         try self.modified_chunks.ensureUnusedCapacity(allocator, 8);
@@ -3407,14 +3561,14 @@ const WorkerState = struct {
             try self.ensureResident(allocator, bcoords);
             const bchunk = self.modified_chunks.getPtr(self.layout.encodeChunkCoords(bcoords)).?;
             const material = bchunk.content.getBlock(blocal);
-            if (material.isEarth()) {
+            if (material.isEarth() and material != .dirt) {
                 if (operation.action == .put) {
-                    below_changed = material != .packed_dirt;
+                    below_changed = material == .grass;
                     for (bchunk.metadata.timed.events.items) |event| if (event.block == transformations.index(blocal)) {
                         below_metadata = true;
                         break;
                     };
-                } else if (material != .dirt) {
+                } else if (!self.pendingAbove(below)) {
                     below_metadata = true;
                     try bchunk.metadata.timed.reserve(live, 1);
                 }
@@ -3430,13 +3584,6 @@ const WorkerState = struct {
         const timer_growth: usize = if ((operation.action == .put and operation.action.put == .dirt) or (below_coords != null and operation.action == .remove and @reduce(.And, below_coords.? == coords))) 1 else 0;
         try target.metadata.reserve(live, road_growth, constructed_growth, timer_growth);
         _ = try target.prepareApply(live, local, operation.action);
-        const covered = if (operation.action == .put and operation.action.put == .dirt and operation.block[2] + 1 < self.layout.size_in_blocks[2]) blk: {
-            var above = operation.block;
-            above[2] += 1;
-            break :blk (ReadContext.read(&context, above) orelse return context.failure orelse error.DependencyPending) != .none;
-        } else false;
-        if (context.failure) |err| return err;
-        if (self.persistence_service) |service| if (service.read_discovered) return error.DependencyPending;
         // Validate both the target and indirect soil/timer writes as one plan.
         // Road section writes were validated by the shared road planner above.
         var writes: [2]mutation_guard.Write = undefined;
@@ -3480,7 +3627,7 @@ const WorkerState = struct {
         if (operation.action == .put) {
             target.metadata.markConstructedAssumeCapacity(transformations.index(local));
             if (operation.action.put == .dirt) {
-                if (covered) target.changeType(local, .packed_dirt) else target.metadata.timed.scheduleAssumeCapacity(.{
+                target.metadata.timed.scheduleAssumeCapacity(.{
                     .block = transformations.index(local),
                     .kind = .compact_dirt,
                     .due_tick = self.tick +| transformations.transformation_delay,
@@ -3519,7 +3666,44 @@ const WorkerState = struct {
         return .{ .status = .success, .chunk = reply, .revealed_neighbors = revealed, .changed_below = below_coords, .diagnostics = diagnostics };
     }
 
-    const BlueprintCommit = struct { diagnostics: world_module.EditResult, changed_below: ?ChunkCoords = null };
+    fn pendingAbove(self: *const WorkerState, block: [3]u32) bool {
+        if (block[2] + 1 >= self.layout.size_in_blocks[2]) return false;
+        var above = block;
+        above[2] += 1;
+        return self.blueprints.targetAt(above) != null;
+    }
+
+    fn tryCompactOperation(self: *WorkerState, allocator: std.mem.Allocator, operation: BlockOperation, diagnostics: world_module.EditResult) !ApplyResult {
+        const live = self.liveAllocator(allocator);
+        const coords, const local = world_module.splitBlockCoords(operation.block);
+        const id = self.layout.encodeChunkCoords(coords);
+        try self.modified_chunks.ensureUnusedCapacity(allocator, 1);
+        try self.ensureResident(allocator, coords);
+        const road_batch = if (self.persistence_service) |service| try service.prepareBlueprintRoadUpdates(operation.block) else null;
+        const target = self.modified_chunks.getPtr(id).?;
+        try target.metadata.timed.reserve(live, 1);
+        var reply = try target.tryClone(allocator);
+        errdefer reply.deinit(allocator);
+        try reply.metadata.timed.reserve(allocator, 1);
+        const revision = try std.math.add(u64, target.chunk_revision, 1);
+        const next_mesh = try std.math.add(u64, self.next_mesh_revision, 1);
+        try self.mesh_revisions.ensureUnusedCapacity(allocator, 1);
+        try self.timed_chunks.ensureUnusedCapacity(allocator, 1);
+        if (self.persistence_service) |service| try service.dirty_meshes.ensureUnusedCapacity(allocator, 7);
+        // Compaction only adds support capabilities. Neither the target's own
+        // footprint nor any surrounding construction needs to be checked again.
+        std.debug.assert(target.applyPrepared(live, local, .compact) == .success);
+        if (!self.pendingAbove(operation.block)) target.metadata.timed.scheduleAssumeCapacity(.{ .block = transformations.index(local), .kind = .grow_grass, .due_tick = self.tick +| transformations.transformation_delay });
+        target.chunk_revision = revision;
+        self.next_mesh_revision = next_mesh;
+        self.mesh_revisions.putAssumeCapacity(id, next_mesh);
+        if (target.metadata.timed.events.items.len == 0) _ = self.timed_chunks.remove(id) else self.timed_chunks.putAssumeCapacity(id, {});
+        if (road_batch) |batch| self.persistence_service.?.commitBlueprintRoadUpdates(batch);
+        copyPreparedChunk(allocator, target, &reply);
+        return .{ .status = .success, .chunk = reply, .revealed_neighbors = @splat(null), .changed_below = null, .diagnostics = diagnostics };
+    }
+
+    const BlueprintCommit = struct { diagnostics: world_module.EditResult };
 
     fn tryFulfillBlueprint(self: *WorkerState, allocator: std.mem.Allocator, operation: BlockOperation) !BlueprintCommit {
         var context: ReadContext = .{ .state = self, .allocator = allocator };
@@ -3541,70 +3725,35 @@ const WorkerState = struct {
         const live = self.liveAllocator(allocator);
         const coords, const local = world_module.splitBlockCoords(operation.block);
         const id = self.layout.encodeChunkCoords(coords);
-        var below_coords: ?ChunkCoords = null;
-        var below_local: [3]u5 = undefined;
-        var below_changed = false;
-        if (operation.block[2] != 0) {
-            var below = operation.block;
-            below[2] -= 1;
-            const material = ReadContext.read(&context, below) orelse return context.failure orelse error.DependencyPending;
-            if (material.isEarth()) {
-                const bc, const bl = world_module.splitBlockCoords(below);
-                below_coords = bc;
-                below_local = bl;
-                below_changed = material != .packed_dirt;
-            }
-        }
-        const covered = if (operation.action.put == .dirt and operation.block[2] + 1 < self.layout.size_in_blocks[2]) blk: {
-            var above = operation.block;
-            above[2] += 1;
-            break :blk (ReadContext.read(&context, above) orelse return context.failure orelse error.DependencyPending) != .none;
-        } else false;
-        if (context.failure) |err| return err;
-        if (self.persistence_service) |service| if (service.read_discovered) return error.DependencyPending;
-        try self.modified_chunks.ensureUnusedCapacity(allocator, 2);
+        try self.modified_chunks.ensureUnusedCapacity(allocator, 1);
         try self.ensureResident(allocator, coords);
-        if (below_coords) |below| try self.ensureResident(allocator, below);
         const target = self.modified_chunks.getPtr(id).?;
-        try target.metadata.reserve(live, 0, 1, if (operation.action.put == .dirt and !covered) 1 else 0);
+        try target.metadata.reserve(live, 0, 1, if (operation.action.put == .dirt) 1 else 0);
         const prepared = try target.prepareApply(live, local, operation.action);
         if (prepared != .success) return .{ .diagnostics = .{ .status = prepared } };
         _ = try std.math.add(u64, target.chunk_revision, 1);
-        if (below_coords) |below| {
-            const bid = self.layout.encodeChunkCoords(below);
-            if (bid != id) _ = try std.math.add(u64, self.modified_chunks.get(bid).?.chunk_revision, 1);
-        }
         const next_mesh = try std.math.add(u64, self.next_mesh_revision, 1);
         try self.mesh_revisions.ensureUnusedCapacity(allocator, 8);
-        try self.timed_chunks.ensureUnusedCapacity(allocator, 2);
+        try self.timed_chunks.ensureUnusedCapacity(allocator, 1);
         if (self.persistence_service) |service| try service.dirty_meshes.ensureUnusedCapacity(allocator, 8);
-        // Earth aging is structurally equivalent and cannot change target identity.
-        // No road planning, dependent enumeration, or ordinary validator is invoked here.
+        // APPLY handled soil beneath every pending target. Fulfillment changes
+        // only this target; it neither reads nor mutates neighboring soil metadata.
         std.debug.assert(target.applyPrepared(live, local, operation.action) == .success);
         target.metadata.appendConstructedKnownEmptyAssumeCapacity(transformations.index(local));
         if (operation.action.put == .dirt) {
-            if (covered) target.changeType(local, .packed_dirt) else target.metadata.timed.scheduleAssumeCapacity(.{ .block = transformations.index(local), .kind = .compact_dirt, .due_tick = self.tick +| transformations.transformation_delay });
+            target.metadata.timed.scheduleAssumeCapacity(.{ .block = transformations.index(local), .kind = .compact_dirt, .due_tick = self.tick +| transformations.transformation_delay });
         }
         target.chunk_revision += 1;
         self.next_mesh_revision = next_mesh;
         self.mesh_revisions.putAssumeCapacity(id, next_mesh);
         if (target.metadata.timed.events.items.len != 0) self.timed_chunks.putAssumeCapacity(id, {});
-        if (below_coords) |below| {
-            const bid = self.layout.encodeChunkCoords(below);
-            const chunk = self.modified_chunks.getPtr(bid).?;
-            chunk.metadata.timed.cancel(transformations.index(below_local));
-            if (below_changed) chunk.changeType(below_local, .packed_dirt);
-            if (bid != id) chunk.chunk_revision += 1;
-            self.mesh_revisions.putAssumeCapacity(bid, next_mesh);
-            if (chunk.metadata.timed.events.items.len == 0) _ = self.timed_chunks.remove(bid) else self.timed_chunks.putAssumeCapacity(bid, {});
-        }
         for (std.enums.values(Side)) |side| {
             const i = @intFromEnum(side);
             if (local[i / 2] != (if (i % 2 == 0) @as(u5, 0) else CHUNK_SIZE - 1)) continue;
             if (world_module.adjacentChunk(self.layout, coords, side)) |neighbor| self.mesh_revisions.putAssumeCapacity(self.layout.encodeChunkCoords(neighbor), next_mesh);
         }
         std.debug.assert(self.blueprints.fulfill(self.layout, operation.blueprint.?));
-        return .{ .diagnostics = .{ .status = .success }, .changed_below = below_coords };
+        return .{ .diagnostics = .{ .status = .success } };
     }
 
     fn copyPreparedChunk(allocator: std.mem.Allocator, source: *const WorldChunk, target: *WorldChunk) void {
@@ -3638,14 +3787,40 @@ const WorkerState = struct {
         const id = self.layout.encodeChunkCoords(coords);
         const source = self.modified_chunks.getPtr(id) orelse return false;
         const live = self.liveAllocator(allocator);
-        var plan = @import("timer_kernel.zig").prepare(live, source, self.tick) catch |err| {
+        var context: ReadContext = .{ .state = self, .allocator = allocator };
+        defer context.deinit();
+        const GrassExposure = struct {
+            reads: *ReadContext,
+            coords: ChunkCoords,
+            fn allowed(raw: *anyopaque, local: [3]u5) bool {
+                const check: *@This() = @ptrCast(@alignCast(raw));
+                const block: [3]u32 = .{
+                    @as(u32, @intCast(check.coords[0])) * CHUNK_SIZE + local[0],
+                    @as(u32, @intCast(check.coords[1])) * CHUNK_SIZE + local[1],
+                    @as(u32, @intCast(check.coords[2])) * CHUNK_SIZE + local[2],
+                };
+                return !check.reads.state.pendingAbove(block);
+            }
+            fn exposed(raw: *anyopaque, local: [3]u5) ?bool {
+                if (!allowed(raw, local)) return false;
+                const check: *@This() = @ptrCast(@alignCast(raw));
+                const above: [3]u32 = .{
+                    @as(u32, @intCast(check.coords[0])) * CHUNK_SIZE + local[0],
+                    @as(u32, @intCast(check.coords[1])) * CHUNK_SIZE + local[1],
+                    @as(u32, @intCast(check.coords[2])) * CHUNK_SIZE + local[2] + 1,
+                };
+                if (above[2] >= check.reads.state.layout.size_in_blocks[2]) return true;
+                const material = ReadContext.read(check.reads, above) orelse return null;
+                return material == .none;
+            }
+        };
+        var exposure: GrassExposure = .{ .reads = &context, .coords = coords };
+        var plan = @import("timer_kernel.zig").prepareWithExposure(live, source, self.tick, .{ .context = &exposure, .exposed = GrassExposure.exposed, .grass_allowed = GrassExposure.allowed }) catch |err| {
             if (self.persistence_service) |service| service.failPersistence(err);
             return false;
         };
         defer plan.deinit(live);
         if (!plan.metadata_changed and !plan.material_changed) return false;
-        var context: ReadContext = .{ .state = self, .allocator = allocator };
-        defer context.deinit();
         // Consumption/rescheduling is itself a persistent write. Reject the
         // complete timer plan if any due event targets the immutable mask.
         for (source.metadata.timed.events.items) |event| {
@@ -3658,12 +3833,21 @@ const WorkerState = struct {
             };
             if (mutation_guard.validateWrites(context.reader(), &.{.{ .block = block, .material = source.content.getBlock(local) }}) != null) return false;
         }
+        var road_batch: blueprint_road_updates.Batch = .{};
+        if (self.persistence_service) |service| {
+            for (plan.changes.items) |change| {
+                if (source.content.getBlock(transformations.coordinates(change.cell)) != .dirt) continue;
+                road_batch = service.prepareCompactionRoadUpdates(coords) catch return false;
+                break;
+            }
+        }
         const revision = std.math.add(u64, source.chunk_revision, 1) catch return false;
         const mesh_revision = std.math.add(u64, self.next_mesh_revision, 1) catch return false;
         self.mesh_revisions.ensureUnusedCapacity(allocator, 1) catch return false;
         self.timed_chunks.ensureUnusedCapacity(allocator, 1) catch return false;
         if (self.persistence_service) |service| service.dirty_meshes.ensureUnusedCapacity(allocator, 1) catch return false;
         plan.applyPrepared(source);
+        if (self.persistence_service) |service| service.commitBlueprintRoadUpdates(road_batch);
         source.chunk_revision = revision;
         if (plan.material_changed) {
             self.next_mesh_revision = mesh_revision;
@@ -4129,7 +4313,7 @@ test "soil compacts at thirty minutes, grows grass later, and resets exposure af
     try std.testing.expectEqual(.grass, readStateBlock(&state, block));
 }
 
-test "covering loose earth across a chunk boundary compacts it and cancels its old deadline" {
+test "covering loose earth across a chunk boundary preserves its compaction deadline" {
     const allocator = std.testing.allocator;
     var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, allocator, &test_layout) };
     defer state.deinit(allocator);
@@ -4141,16 +4325,20 @@ test "covering loose earth across a chunk boundary compacts it and cancels its o
     lower.metadata.timed.schedule(allocator, .{ .block = transformations.index(.{ 10, 10, 31 }), .kind = .compact_dirt, .due_tick = transformations.transformation_delay });
     try state.modified_chunks.put(allocator, test_layout.encodeChunkCoords(lower_coords), lower);
     const block = [3]u32{ 10, 10, 4 * CHUNK_SIZE };
-    const placed = state.applyOperation(allocator, .{ .block = block, .action = .{ .put = .planks } });
+    const placed = state.applyOperation(allocator, .{ .block = block, .action = .{ .put = .snow } });
     defer placed.chunk.deinit(allocator);
     try std.testing.expectEqual(OperationStatus.success, placed.status);
-    try std.testing.expectEqual(lower_coords, placed.changed_below.?);
+    try std.testing.expectEqual(null, placed.changed_below);
     const packed_chunk = state.modified_chunks.get(test_layout.encodeChunkCoords(lower_coords)).?;
-    try std.testing.expectEqual(.packed_dirt, packed_chunk.content.getBlock(.{ 10, 10, 31 }));
-    try std.testing.expectEqual(0, packed_chunk.metadata.timed.events.items.len);
+    try std.testing.expectEqual(.dirt, packed_chunk.content.getBlock(.{ 10, 10, 31 }));
+    try std.testing.expectEqual(1, packed_chunk.metadata.timed.events.items.len);
+    try std.testing.expectEqual(transformations.transformation_delay, packed_chunk.metadata.timed.events.items[0].due_tick);
     const removed = state.applyOperation(allocator, .{ .block = block, .action = .remove });
     defer removed.chunk.deinit(allocator);
     state.tick = transformations.transformation_delay;
+    try std.testing.expect(state.transformChunk(allocator, lower_coords));
+    try std.testing.expectEqual(.packed_dirt, readStateBlock(&state, .{ 10, 10, 4 * CHUNK_SIZE - 1 }));
+    state.tick += transformations.transformation_delay;
     try std.testing.expect(state.transformChunk(allocator, lower_coords));
     try std.testing.expectEqual(.grass, readStateBlock(&state, .{ 10, 10, 4 * CHUNK_SIZE - 1 }));
 }
@@ -5050,7 +5238,7 @@ test "boundary-only observers are notified before the edit reply without subscri
     try std.testing.expectEqual(1, observed.items.len);
 }
 
-test "soil placed beneath existing sand packs immediately and waits for exposure before growing grass" {
+test "soil placed beneath existing sand remains loose until its deadline and grass needs exposure" {
     const allocator = std.testing.allocator;
     var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, allocator, &test_layout) };
     defer state.deinit(allocator);
@@ -5064,12 +5252,12 @@ test "soil placed beneath existing sand packs immediately and waits for exposure
     const placed = state.applyOperation(allocator, .{ .block = block, .action = .{ .put = .dirt } });
     defer placed.chunk.deinit(allocator);
     try std.testing.expectEqual(OperationStatus.success, placed.status);
-    try std.testing.expectEqual(rules.BlockType.packed_dirt, readStateBlock(&state, block));
-    try std.testing.expectEqual(rules.BlockType.packed_dirt, placed.chunk.content.getBlock(world_module.splitBlockCoords(block)[1]));
-    try std.testing.expectEqual(0, placed.chunk.metadata.timed.events.items.len);
+    try std.testing.expectEqual(rules.BlockType.dirt, readStateBlock(&state, block));
+    try std.testing.expectEqual(rules.BlockType.dirt, placed.chunk.content.getBlock(world_module.splitBlockCoords(block)[1]));
+    try std.testing.expectEqual(1, placed.chunk.metadata.timed.events.items.len);
     const coords, _ = world_module.splitBlockCoords(block);
     state.tick = transformations.transformation_delay * 2;
-    try std.testing.expect(!state.transformChunk(allocator, coords));
+    try std.testing.expect(state.transformChunk(allocator, coords));
     try std.testing.expectEqual(.packed_dirt, readStateBlock(&state, block));
     const uncovered = state.applyOperation(allocator, .{ .block = .{ 10, 10, surface + 1 }, .action = .remove });
     defer uncovered.chunk.deinit(allocator);
@@ -5477,7 +5665,7 @@ test "seeded client reconciliation converges to the authoritative worker after i
     try std.testing.expect(batched_replies and pending_rebases);
 }
 
-test "refilling an underground hole packs soil under a ceiling, including across chunk boundaries" {
+test "refilling an underground hole keeps loose soil and its timer under a ceiling" {
     const allocator = std.testing.allocator;
     var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, allocator, &test_layout) };
     defer state.deinit(allocator);
@@ -5490,8 +5678,8 @@ test "refilling an underground hole packs soil under a ceiling, including across
         const filled = state.applyOperation(allocator, .{ .block = block, .action = .{ .put = .dirt } });
         defer filled.chunk.deinit(allocator);
         try std.testing.expectEqual(OperationStatus.success, filled.status);
-        try std.testing.expectEqual(rules.BlockType.packed_dirt, readStateBlock(&state, block));
-        try std.testing.expectEqual(0, filled.chunk.metadata.timed.events.items.len);
+        try std.testing.expectEqual(rules.BlockType.dirt, readStateBlock(&state, block));
+        try std.testing.expect(filled.chunk.metadata.timed.events.items.len > 0);
     }
 }
 
@@ -7213,13 +7401,20 @@ fn exerciseBlueprintResponsePreparation(allocator: std.mem.Allocator) !void {
     const blocks = try allocator.create(@import("world_chunk_data.zig").WorldChunkData);
     blocks.* = @import("world_chunk_data.zig").WorldChunkData.initEmpty();
     for (0..4) |level| @memset(std.mem.asBytes(&blocks.blocks[level]), @intFromEnum(rules.BlockType.stone));
-    task.snapshot.chunks.put(allocator, id, .{ .revision = 0, .blocks = blocks }) catch |err| {
+    blocks.blocks[3][10][10] = .grass;
+    var grow_grass: std.StaticBitSet(32768) = .initEmpty();
+    grow_grass.set(transformations.index(.{ 10, 10, 3 }));
+    task.snapshot.chunks.put(allocator, id, .{ .revision = 0, .blocks = blocks, .grow_grass = grow_grass }) catch |err| {
         allocator.destroy(blocks);
         return err;
     };
     task.result = try task.prepare();
     const result = try task.result.?;
     try std.testing.expect(result == .prepared);
+    try std.testing.expectEqualDeep(&[_]blueprint_soil.Change{.{ .block = .{ 10, 10, 3 }, .clear_grass = true, .cancel_grow = true }}, task.soil_plan.?.changes.items);
+    try std.testing.expectEqualSlices(ChunkId, &.{id}, task.soil_plan.?.chunk_ids.items);
+    try std.testing.expectEqual(rules.BlockType.grass, blocks.blocks[3][10][10]);
+    try std.testing.expect(task.snapshot.chunks.getPtr(id).?.grow_grass.isSet(transformations.index(.{ 10, 10, 3 })));
     try std.testing.expectEqual(@as(usize, 3), task.response_copies.items.len);
     for (task.response_copies.items, 0..) |copy, index| {
         try std.testing.expect(copy.fulfilled.ptr != task.instance.fulfilled.ptr);
@@ -7720,7 +7915,7 @@ test "ordinary puts agree across dense sites while removals protect lateral plat
     }
     try std.testing.expectEqual(rules.BlockType.none, readStateBlock(&state, operation.block));
     try std.testing.expectEqual(@as(usize, 0), client.pending_operations.items.len);
-    const platform_materials = [_]rules.BlockType{ .stone, .dirt, .packed_dirt, .grass, .clay, .crushed_stone, .rebar, .reinforced_concrete, .metal_ore, .limestone, .coal };
+    const platform_materials = [_]rules.BlockType{ .stone, .packed_dirt, .grass, .clay, .crushed_stone, .rebar, .reinforced_concrete, .metal_ore, .limestone, .coal };
     const platform_chunk = state.modified_chunks.getPtr(id).?;
     var platform_index: usize = 0;
     for (3..6) |z| for (5..8) |y| for (5..8) |x| {
@@ -9975,3 +10170,804 @@ pub const CommandSubmissionBenchmark = if (@import("builtin").is_test) struct {
         try @import("command_submission_benchmark.zig").run(@This());
     }
 } else void;
+
+test "manual compaction upgrades unsupported dirt using only its resident chunk" {
+    const a = std.testing.allocator;
+    var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) };
+    defer state.deinit(a);
+    const coords: ChunkCoords = .{ 1, 1, 3 };
+    const local: [3]u5 = .{ 31, 31, 31 };
+    const block: [3]u32 = .{ 63, 63, 127 };
+    var chunk = WorldChunk.initEmpty();
+    try std.testing.expectEqual(OperationStatus.success, chunk.apply(a, local, .{ .put = .dirt }));
+    chunk.metadata.markConstructed(a, transformations.index(local));
+    chunk.metadata.timed.schedule(a, .{ .block = transformations.index(local), .kind = .compact_dirt, .due_tick = 100 });
+    try state.modified_chunks.put(a, test_layout.encodeChunkCoords(coords), chunk);
+    const compacted = try state.tryApplyOperation(a, .{ .block = block, .action = .compact });
+    defer compacted.chunk.deinit(a);
+    try std.testing.expectEqual(OperationStatus.success, compacted.status);
+    try std.testing.expectEqual(rules.BlockType.packed_dirt, compacted.chunk.content.getBlock(local));
+    try std.testing.expectEqual(@as(usize, 1), state.modified_chunks.count());
+    try std.testing.expectEqual(@as(u64, 0), state.generated_chunk_count);
+    try std.testing.expectEqual(@as(usize, 0), state.road_changes.items.len);
+    try std.testing.expectEqual(null, compacted.changed_below);
+    try std.testing.expectEqual(transformations.Kind.grow_grass, compacted.chunk.metadata.timed.events.items[0].kind);
+    const stale = try state.tryApplyOperation(a, .{ .block = block, .action = .compact });
+    defer stale.chunk.deinit(a);
+    try std.testing.expectEqual(OperationStatus.target_changed, stale.status);
+}
+
+test "player compaction preserves carried inventory rejects replaced dirt and survives restart" {
+    const a = std.testing.allocator;
+    const f = try PersistenceFixture.init(.{});
+    defer f.deinit();
+    const client = try f.service.createClient();
+    client.publishCheckpoint(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+    const block: [3]u32 = .{ 10, 10, 48 };
+    const snow: [3]u32 = .{ 12, 10, 48 };
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = block, .action = .{ .put = .dirt } }));
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = snow, .action = .{ .put = .snow } }));
+    const mined = try PersistenceFixture.operationResult(client, .{ .block = snow, .action = .remove, .player = .{ .id = 1, .expected_sequence = 2 } });
+    try std.testing.expectEqual(OperationStatus.success, mined.status);
+    try std.testing.expectEqual(rules.BlockType.snow, mined.player_inventory.?.material.?);
+    // Replacing dirt with dirt invalidates a hold even though the material matches.
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = block, .action = .remove }));
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = block, .action = .{ .put = .dirt } }));
+    const stale = try PersistenceFixture.operationResult(client, .{ .block = block, .action = .compact, .player = .{ .id = 1, .expected_sequence = 1 } });
+    try std.testing.expectEqual(OperationStatus.target_changed, stale.status);
+    try std.testing.expectEqual(rules.BlockType.snow, stale.player_inventory.?.material.?);
+    const compacted = try PersistenceFixture.operationResult(client, .{ .block = block, .action = .compact, .player = .{ .id = 1, .expected_sequence = 5 } });
+    try std.testing.expectEqual(OperationStatus.success, compacted.status);
+    try std.testing.expectEqual(rules.BlockType.snow, compacted.player_inventory.?.material.?);
+    try std.testing.expectEqual(persistence.Phase.complete, (try f.waitSave(f.service.requestSave(true))).phase);
+    f.service.destroy();
+    f.store.deinit();
+    f.store = try storage.Store.open(a, f.path, .{});
+    f.service = try WorldDataService.createPersistent(std.testing.io, a, &f.layout, .flat, &f.store, .{});
+    try std.testing.expectEqual(@as(?u8, @intFromEnum(rules.BlockType.snow)), f.service.restoredPlayer(1).?.inventory);
+    const coords, const local = world_module.splitBlockCoords(block);
+    const bytes = (try f.store.readChunk(a, f.layout.encodeChunkCoords(coords))).?;
+    defer a.free(bytes);
+    var saved = try format.decodeChunk(a, f.store.world_uuid, bytes, f.store.dimensions);
+    defer saved.deinit(a);
+    try std.testing.expectEqual(@intFromEnum(rules.BlockType.packed_dirt), saved.blocks[transformations.index(local)]);
+    var metadata = try format.decodeMetadata(a, saved.blocks, saved.metadata, f.store.dimensions);
+    defer metadata.deinit(a);
+    try std.testing.expectEqual(@intFromEnum(transformations.Kind.grow_grass), metadata.timers[0].kind);
+}
+
+test "compaction ignores stale removal gates and queues road work without block probes" {
+    const a = std.testing.allocator;
+    var service: WorldDataService = .{ .layout = &test_layout, .io = std.testing.io, .allocator = a, .worker = undefined, .worker_state = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) } };
+    defer service.worker_state.deinit(a);
+    defer service.run_write_ids.deinit(a);
+    defer service.source_holds.deinit(a);
+    defer service.blueprint_road_queue.deinit(a);
+    defer service.dirty_meshes.deinit(a);
+    service.worker_state.persistence_service = &service;
+    const coords: ChunkCoords = .{ 1, 1, 3 };
+    const id = test_layout.encodeChunkCoords(coords);
+    var chunk = WorldChunk.initEmpty();
+    try std.testing.expectEqual(OperationStatus.success, chunk.apply(a, .{ 31, 31, 31 }, .{ .put = .dirt }));
+    // A road record is enough to queue future work; its shape is never planned here.
+    try std.testing.expectEqual(OperationStatus.success, chunk.apply(a, .{ 30, 31, 31 }, .{ .put = .country_road_adaptive }));
+    try service.worker_state.modified_chunks.put(a, id, chunk);
+    service.run_gate_failure = error.StaleRemovalFailure;
+    try service.run_write_ids.append(a, id + 1);
+    try service.source_holds.put(a, id + 1, 1);
+    var client: Client = .{ .service = &service };
+    const operation: BlockOperation = .{ .block = .{ 63, 63, 127 }, .action = .compact };
+    try std.testing.expect(service.admissible(.{ .operation = .{ .client = &client, .request_id = 1, .operation = operation } }));
+    const compacted = try service.worker_state.tryApplyOperation(a, operation);
+    defer compacted.chunk.deinit(a);
+    try std.testing.expectEqual(OperationStatus.success, compacted.status);
+    try std.testing.expectEqual(@as(usize, 1), service.worker_state.modified_chunks.count());
+    try std.testing.expectEqual(@as(u64, 0), service.worker_state.generated_chunk_count);
+    try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
+    try std.testing.expectEqual(id, service.blueprint_road_queue.peek().?.id);
+    try std.testing.expectEqual(@as(usize, 0), service.worker_state.road_changes.items.len);
+}
+
+test "ordinary covering clears packed surfaces while blueprint filling leaves all soil below unchanged" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |directed| for ([_]rules.BlockType{ .dirt, .packed_dirt, .grass }) |soil| {
+        var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) };
+        defer state.deinit(a);
+        const lower_coords: ChunkCoords = .{ 1, 1, 3 };
+        const upper_coords: ChunkCoords = .{ 1, 1, 4 };
+        const local: [3]u5 = .{ 10, 10, 31 };
+        const index = transformations.index(local);
+        const block: [3]u32 = .{ 42, 42, 128 };
+        var lower = WorldChunk.initEmpty();
+        try std.testing.expectEqual(OperationStatus.success, lower.apply(a, local, .{ .put = soil }));
+        try std.testing.expectEqual(OperationStatus.success, lower.apply(a, .{ 11, 10, 31 }, .{ .put = .rebar }));
+        lower.metadata.timed.schedule(a, .{ .block = index, .kind = if (soil == .dirt) .compact_dirt else .grow_grass, .due_tick = 100 });
+        try state.modified_chunks.put(a, test_layout.encodeChunkCoords(lower_coords), lower);
+        var upper = WorldChunk.initEmpty();
+        try std.testing.expectEqual(OperationStatus.success, upper.apply(a, .{ 11, 10, 0 }, .{ .put = .planks }));
+        try state.modified_chunks.put(a, test_layout.encodeChunkCoords(upper_coords), upper);
+        if (directed) try installFulfillmentTestSite(&state, a, block, .{ 1, 1, 1 }, &.{.planks});
+        const operation: BlockOperation = .{ .block = block, .action = .{ .put = .planks }, .blueprint = if (directed) .{ .instance_id = 1, .cell_index = 0 } else null };
+        const changed_below = if (directed) blk: {
+            const result = try state.tryFulfillBlueprint(a, operation);
+            try std.testing.expectEqual(OperationStatus.success, result.diagnostics.status);
+            break :blk @as(?ChunkCoords, null);
+        } else blk: {
+            const result = try state.tryApplyOperation(a, operation);
+            defer result.chunk.deinit(a);
+            try std.testing.expectEqual(OperationStatus.success, result.status);
+            break :blk result.changed_below;
+        };
+        const after = state.modified_chunks.get(test_layout.encodeChunkCoords(lower_coords)).?;
+        if (directed or soil == .dirt) {
+            try std.testing.expectEqual(null, changed_below);
+            try std.testing.expectEqual(soil, after.content.getBlock(local));
+            try std.testing.expectEqual(@as(u64, 0), after.chunk_revision);
+            try std.testing.expectEqual(@as(usize, 1), after.metadata.timed.events.items.len);
+            try std.testing.expectEqual(if (soil == .dirt) transformations.Kind.compact_dirt else .grow_grass, after.metadata.timed.events.items[0].kind);
+            try std.testing.expectEqual(@as(u64, 100), after.metadata.timed.events.items[0].due_tick);
+        } else {
+            try std.testing.expectEqual(lower_coords, changed_below.?);
+            try std.testing.expectEqual(rules.BlockType.packed_dirt, after.content.getBlock(local));
+            try std.testing.expectEqual(@as(u64, 1), after.chunk_revision);
+            try std.testing.expectEqual(@as(usize, 0), after.metadata.timed.events.items.len);
+        }
+        try std.testing.expectEqual(@as(u64, 0), state.generated_chunk_count);
+    };
+}
+
+test "pending miniature prevents manual and timed soil grass without loading its chunk" {
+    const a = std.testing.allocator;
+    for ([_]enum { manual, compact_timer, grass_timer }{ .manual, .compact_timer, .grass_timer }) |path| {
+        var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) };
+        defer state.deinit(a);
+        const coords: ChunkCoords = .{ 1, 1, 3 };
+        const id = test_layout.encodeChunkCoords(coords);
+        const local: [3]u5 = .{ 31, 31, 31 };
+        const block: [3]u32 = .{ 63, 63, 127 };
+        const above: [3]u32 = .{ 63, 63, 128 };
+        var chunk = WorldChunk.initEmpty();
+        const material: rules.BlockType = if (path == .grass_timer) .packed_dirt else .dirt;
+        try std.testing.expectEqual(OperationStatus.success, chunk.apply(a, local, .{ .put = material }));
+        chunk.metadata.timed.schedule(a, .{ .block = transformations.index(local), .kind = if (path == .grass_timer) .grow_grass else .compact_dirt, .due_tick = 1 });
+        try state.modified_chunks.put(a, id, chunk);
+        try state.timed_chunks.put(a, id, {});
+        try installFulfillmentTestSite(&state, a, above, .{ 1, 1, 1 }, &.{.planks});
+        if (path == .manual) {
+            const compacted = try state.tryApplyOperation(a, .{ .block = block, .action = .compact });
+            defer compacted.chunk.deinit(a);
+            try std.testing.expectEqual(OperationStatus.success, compacted.status);
+            try std.testing.expectEqual(@as(usize, 0), compacted.chunk.metadata.timed.events.items.len);
+        } else {
+            state.tick = transformations.transformation_delay * 2;
+            try std.testing.expect(state.transformChunk(a, coords));
+        }
+        const after = state.modified_chunks.get(id).?;
+        try std.testing.expectEqual(rules.BlockType.packed_dirt, after.content.getBlock(local));
+        try std.testing.expectEqual(@as(usize, 0), after.metadata.timed.events.items.len);
+        try std.testing.expectEqual(@as(usize, 0), state.timed_chunks.count());
+        try std.testing.expectEqual(@as(usize, 1), state.modified_chunks.count());
+        try std.testing.expectEqual(@as(u64, 0), state.generated_chunk_count);
+        try std.testing.expect(state.blueprints.targetAt(above) != null);
+    }
+}
+
+test "ordinary and blueprint dirt placement beneath a pending target keep compaction but suppress grass" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |directed| {
+        var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) };
+        defer state.deinit(a);
+        const coords: ChunkCoords = .{ 1, 1, 3 };
+        const id = test_layout.encodeChunkCoords(coords);
+        const local: [3]u5 = .{ 10, 10, 31 };
+        const block: [3]u32 = .{ 42, 42, 127 };
+        const above: [3]u32 = .{ 42, 42, 128 };
+        var chunk = WorldChunk.initEmpty();
+        for (9..12) |y| for (9..12) |x| {
+            try std.testing.expectEqual(OperationStatus.success, chunk.apply(a, .{ @intCast(x), @intCast(y), 30 }, .{ .put = .stone }));
+        };
+        try std.testing.expectEqual(OperationStatus.success, chunk.apply(a, .{ 11, 10, 31 }, .{ .put = .rebar }));
+        try state.modified_chunks.put(a, id, chunk);
+        var upper = WorldChunk.initEmpty();
+        try std.testing.expectEqual(OperationStatus.success, upper.apply(a, .{ 11, 10, 0 }, .{ .put = .planks }));
+        try state.modified_chunks.put(a, test_layout.encodeChunkCoords(.{ 1, 1, 4 }), upper);
+        if (directed) {
+            try installFulfillmentTestSite(&state, a, block, .{ 1, 1, 2 }, &.{ .dirt, .planks });
+            const result = try state.tryFulfillBlueprint(a, .{ .block = block, .action = .{ .put = .dirt }, .blueprint = .{ .instance_id = 1, .cell_index = 0 } });
+            try std.testing.expectEqual(OperationStatus.success, result.diagnostics.status);
+            try std.testing.expect(state.blueprint_last_support_reads <= 5);
+        } else {
+            try installFulfillmentTestSite(&state, a, above, .{ 1, 1, 1 }, &.{.planks});
+            const result = try state.tryApplyOperation(a, .{ .block = block, .action = .{ .put = .dirt } });
+            defer result.chunk.deinit(a);
+            try std.testing.expectEqual(OperationStatus.success, result.status);
+        }
+        const placed = state.modified_chunks.get(id).?;
+        try std.testing.expectEqual(rules.BlockType.dirt, placed.content.getBlock(local));
+        try std.testing.expectEqual(@as(usize, 1), placed.metadata.timed.events.items.len);
+        try std.testing.expectEqual(transformations.Kind.compact_dirt, placed.metadata.timed.events.items[0].kind);
+        state.tick = transformations.transformation_delay * 2;
+        try std.testing.expect(state.transformChunk(a, coords));
+        const compacted = state.modified_chunks.get(id).?;
+        try std.testing.expectEqual(rules.BlockType.packed_dirt, compacted.content.getBlock(local));
+        try std.testing.expectEqual(@as(usize, 0), compacted.metadata.timed.events.items.len);
+        try std.testing.expect(state.blueprints.targetAt(above) != null);
+    }
+}
+
+test "blueprint fills keep cached soil support unpromoted and its metadata unchanged" {
+    const a = std.testing.allocator;
+    for ([_]rules.BlockType{ .dirt, .packed_dirt, .grass }) |soil| {
+        var state: WorkerState = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout) };
+        defer state.deinit(a);
+        const below_coords: ChunkCoords = .{ 1, 1, 3 };
+        const below_id = test_layout.encodeChunkCoords(below_coords);
+        const target_coords: ChunkCoords = .{ 1, 1, 4 };
+        const local: [3]u5 = .{ 10, 10, 31 };
+        const block: [3]u32 = .{ 42, 42, 128 };
+        var below = WorldChunk.initEmpty();
+        try std.testing.expectEqual(OperationStatus.success, below.apply(a, local, .{ .put = soil }));
+        const cached_data = below.content.blocks;
+        try std.testing.expect(try state.generated_chunks.insert(a, below_id, below));
+        var target = WorldChunk.initEmpty();
+        try std.testing.expectEqual(OperationStatus.success, target.apply(a, .{ 11, 10, 0 }, .{ .put = .planks }));
+        try state.modified_chunks.put(a, test_layout.encodeChunkCoords(target_coords), target);
+        try installFulfillmentTestSite(&state, a, block, .{ 1, 1, 1 }, &.{.planks});
+        const result = try state.tryFulfillBlueprint(a, .{ .block = block, .action = .{ .put = .planks }, .blueprint = .{ .instance_id = 1, .cell_index = 0 } });
+        try std.testing.expectEqual(OperationStatus.success, result.diagnostics.status);
+        try std.testing.expect(state.blueprint_last_support_reads <= 5);
+        try std.testing.expectEqual(@as(usize, 1), state.modified_chunks.count());
+        try std.testing.expect(!state.modified_chunks.contains(below_id));
+        const unchanged = state.generated_chunks.peek(below_id).?;
+        try std.testing.expectEqual(cached_data, unchanged.content.blocks);
+        try std.testing.expectEqual(soil, unchanged.content.getBlock(local));
+        try std.testing.expectEqual(@as(u64, 0), unchanged.chunk_revision);
+        try std.testing.expectEqual(@as(usize, 0), unchanged.metadata.timed.events.items.len);
+        try std.testing.expectEqual(@as(u64, 0), state.generated_chunk_count);
+    }
+}
+
+test "prepared soil masks cancel growth only and retain hole and compaction timers" {
+    const a = std.testing.allocator;
+    var chunk = WorldChunk.initEmpty();
+    defer chunk.deinit(a);
+    const removed = transformations.index(.{ 10, 10, 31 });
+    const hole = transformations.index(.{ 11, 10, 31 });
+    const compacting = transformations.index(.{ 12, 10, 31 });
+    const events = [_]transformations.Event{
+        .{ .block = removed, .kind = .grow_grass, .due_tick = 10 },
+        .{ .block = hole, .kind = .grow_grass, .due_tick = 20 },
+        .{ .block = compacting, .kind = .compact_dirt, .due_tick = 30 },
+    };
+    try chunk.metadata.timed.events.appendSlice(a, &events);
+    var mask: blueprint_soil.GrowthMask = .initEmpty();
+    mask.set(removed);
+    mask.set(compacting);
+    WorldDataService.cancelBlueprintCoveredGrass(&chunk, &mask);
+    try std.testing.expectEqualSlices(transformations.Event, events[1..], chunk.metadata.timed.events.items);
+}
+
+const BlueprintSoilApplyTest = struct {
+    const lower_id = test_layout.encodeChunkCoords(.{ 1, 1, 3 });
+    const upper_id = test_layout.encodeChunkCoords(.{ 1, 1, 4 });
+    const origin: [3]u32 = .{ 42, 42, 128 };
+    base: BlueprintSaveFixture,
+
+    fn init(self: *@This()) !*BlueprintAdmissionTask {
+        return self.initWithSources(false);
+    }
+
+    fn initWithSources(self: *@This(), generated: bool) !*BlueprintAdmissionTask {
+        const a = std.testing.allocator;
+        try self.base.init();
+        errdefer self.deinit();
+        const service = &self.base.service;
+        service.worker_state.persistence_service = service;
+        const compiled = try blueprint.compile(a, .{ .size = .{ 5, 1, 2 }, .cells = &.{
+            .planks, .none,   .none,   .none, .planks,
+            .planks, .planks, .planks, .none, .planks,
+        } }, .{ .horizontal_limit = blueprint.horizontalLimit(&test_layout) });
+        if (compiled != .valid) return error.InvalidTestBlueprint;
+        const save: @FieldType(Request, "blueprint_save") = .{ .client = &self.base.client, .owner = 1, .request_id = 1, .name = try a.dupe(u8, "Soil Apply"), .candidate = compiled.valid };
+        service.saveBlueprint(save);
+        const data = try a.create(@import("world_chunk_data.zig").WorldChunkData);
+        data.* = @import("world_chunk_data.zig").WorldChunkData.initFilled(.stone);
+        data.blocks[31][10][10] = .grass;
+        data.blocks[31][10][14] = .packed_dirt;
+        var lower = WorldChunk.initBlocks(data);
+        lower.chunk_revision = 7;
+        lower.metadata.timed.schedule(a, .{ .block = transformations.index(.{ 10, 10, 31 }), .kind = .grow_grass, .due_tick = 100 });
+        lower.metadata.timed.schedule(a, .{ .block = transformations.index(.{ 14, 10, 31 }), .kind = .grow_grass, .due_tick = 100 });
+        try service.worker_state.modified_chunks.put(a, lower_id, lower);
+        try service.worker_state.timed_chunks.put(a, lower_id, {});
+        var upper = WorldChunk.initEmpty();
+        try std.testing.expectEqual(OperationStatus.success, upper.apply(a, .{ 11, 10, 0 }, .{ .put = .dirt }));
+        try std.testing.expectEqual(OperationStatus.success, upper.apply(a, .{ 12, 10, 0 }, .{ .put = .grass }));
+        try std.testing.expectEqual(OperationStatus.success, upper.apply(a, .{ 13, 10, 0 }, .{ .put = .grass }));
+        upper.metadata.timed.schedule(a, .{ .block = transformations.index(.{ 11, 10, 0 }), .kind = .compact_dirt, .due_tick = 200 });
+        upper.metadata.timed.schedule(a, .{ .block = transformations.index(.{ 12, 10, 0 }), .kind = .grow_grass, .due_tick = 300 });
+        upper.metadata.timed.schedule(a, .{ .block = transformations.index(.{ 13, 10, 0 }), .kind = .grow_grass, .due_tick = 400 });
+        upper.chunk_revision = 11;
+        try service.worker_state.modified_chunks.put(a, upper_id, upper);
+        try service.worker_state.timed_chunks.put(a, upper_id, {});
+        if (generated) {
+            // Generated cache entries cannot own mutation metadata. Capture both
+            // soil sources at revision zero, before either becomes resident.
+            for ([_]ChunkId{ lower_id, upper_id }) |id| {
+                var source = service.worker_state.modified_chunks.fetchRemove(id).?.value;
+                source.metadata.deinit(a);
+                source.metadata = .{};
+                source.chunk_revision = 0;
+                source.cell_changes = .{};
+                _ = service.worker_state.timed_chunks.remove(id);
+                try std.testing.expect(try service.worker_state.generated_chunks.insert(a, id, source));
+            }
+            service.worker_state.modified_chunks.deinit(a);
+            service.worker_state.modified_chunks = .empty;
+        }
+        try self.base.client.subscriptions.put(a, lower_id, .{ .id = 1, .mode = .blocks });
+        try self.base.client.subscriptions.put(a, upper_id, .{ .id = 2, .mode = .blocks });
+        try service.tryBeginBlueprintApplication(.{ .client = &self.base.client, .request_id = 2, .owner = 1, .definition_id = 1, .origin = origin, .rotation = 0 });
+        const task = service.blueprint_task.?;
+        for (task.chunk_ids) |id| try service.copyBlueprintDependency(task, id);
+        task.cursor = task.chunk_ids.len;
+        task.result = try task.prepare();
+        try std.testing.expect((try task.result.?) == .prepared);
+        return task;
+    }
+
+    fn awaitRetirements(self: *@This()) void {
+        const service = &self.base.service;
+        for (service.blueprint_retired.items) |task| if (task.future) |*future| future.await(service.io);
+    }
+
+    fn deinit(self: *@This()) void {
+        const a = std.testing.allocator;
+        const service = &self.base.service;
+        // Helpers read service.allocator when releasing their owned snapshots.
+        // Join them before replacing its two-word allocator value.
+        if (service.blueprint_task) |task| if (task.future) |*future| future.await(service.io);
+        self.awaitRetirements();
+        service.allocator = a;
+        if (service.blueprint_task) |task| {
+            service.blueprint_task = null;
+            if (!task.retired.load(.acquire)) task.release();
+            a.destroy(task);
+        }
+        for (service.blueprint_retired.items) |task| {
+            if (!task.retired.load(.acquire)) task.release();
+            a.destroy(task);
+        }
+        service.blueprint_retired.deinit(a);
+        service.dirty_meshes.deinit(a);
+        service.blueprint_road_queue.deinit(a);
+        service.read_requests.deinit(a);
+        service.read_pending.deinit(a);
+        service.read_failed.deinit(a);
+        service.deferred_reads.deinit(a);
+        service.loaded_ring.deinit(a);
+        self.base.client.subscriptions.deinit(a);
+        self.base.deinit();
+    }
+
+    fn soilSource(self: *const @This(), id: ChunkId) WorldChunk {
+        const state = &self.base.service.worker_state;
+        return state.modified_chunks.get(id) orelse state.generated_chunks.peek(id).?.*;
+    }
+
+    const AllocationBaseline = struct {
+        lower: WorldChunk,
+        upper: WorldChunk,
+        lower_sub: Subscription,
+        upper_sub: Subscription,
+        overlay_revision: u64,
+        resolved_request: u64,
+        generated_chunk_count: u64,
+
+        fn init(fixture: *const BlueprintSoilApplyTest) !@This() {
+            const lower = try fixture.soilSource(lower_id).tryClone(std.testing.allocator);
+            errdefer lower.deinit(std.testing.allocator);
+            return .{
+                .lower = lower,
+                .upper = try fixture.soilSource(upper_id).tryClone(std.testing.allocator),
+                .lower_sub = fixture.base.client.subscriptions.get(lower_id).?,
+                .upper_sub = fixture.base.client.subscriptions.get(upper_id).?,
+                .overlay_revision = fixture.base.service.worker_state.blueprints.revision,
+                .resolved_request = fixture.base.client.resolved_request,
+                .generated_chunk_count = fixture.base.service.worker_state.generated_chunk_count,
+            };
+        }
+
+        fn deinit(self: @This()) void {
+            self.lower.deinit(std.testing.allocator);
+            self.upper.deinit(std.testing.allocator);
+        }
+
+        fn expectChunkUnchanged(before: WorldChunk, after: WorldChunk) !void {
+            try std.testing.expectEqual(before.chunk_revision, after.chunk_revision);
+            try std.testing.expectEqual(before.validation_revision, after.validation_revision);
+            try std.testing.expectEqualDeep(before.cell_changes, after.cell_changes);
+            try std.testing.expectEqualDeep(before.flags, after.flags);
+            try std.testing.expectEqualDeep(before.boundaries, after.boundaries);
+            try std.testing.expectEqual(before.solid_block_count, after.solid_block_count);
+            try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before.content.blocks.blocks), std.mem.asBytes(&after.content.blocks.blocks));
+            try std.testing.expectEqualSlices(transformations.Event, before.metadata.timed.events.items, after.metadata.timed.events.items);
+            try std.testing.expectEqualDeep(before.metadata.roads.items, after.metadata.roads.items);
+            try std.testing.expectEqualSlices(transformations.BlockIndex, before.metadata.constructed.items, after.metadata.constructed.items);
+        }
+
+        fn expectUnpublished(self: @This(), fixture: *const BlueprintSoilApplyTest, task: *BlueprintAdmissionTask) !void {
+            const service = &fixture.base.service;
+            const state = &service.worker_state;
+            // Promotion and spare collection capacity may survive a failed
+            // reservation; authoritative cells, histories and revisions may not.
+            try expectChunkUnchanged(self.lower, fixture.soilSource(lower_id));
+            try expectChunkUnchanged(self.upper, fixture.soilSource(upper_id));
+            try std.testing.expectEqual(self.lower.metadata.timed.events.items.len != 0, state.timed_chunks.contains(lower_id));
+            try std.testing.expectEqual(self.upper.metadata.timed.events.items.len != 0, state.timed_chunks.contains(upper_id));
+            try std.testing.expectEqual(self.generated_chunk_count, state.generated_chunk_count);
+            try std.testing.expectEqual(@as(u64, 0), state.next_mesh_revision);
+            try std.testing.expectEqual(@as(u32, 0), state.mesh_revisions.count());
+            try std.testing.expectEqual(@as(u32, 0), service.dirty_meshes.count());
+            try std.testing.expectEqual(self.overlay_revision, state.blueprints.revision);
+            try std.testing.expectEqual(@as(u64, 0), state.blueprints.max_instance_id);
+            try std.testing.expectEqual(@as(u32, 0), state.blueprints.instances.count());
+            try std.testing.expectEqual(@as(u32, 0), state.blueprints.chunks.count());
+            try std.testing.expect(state.blueprints.targetAt(origin) == null);
+            try std.testing.expectEqual(@as(usize, 0), service.blueprint_journal.items.len);
+            try std.testing.expectEqual(@as(usize, 0), service.blueprint_journal_bytes);
+            try std.testing.expectEqualDeep(blueprint_wire.PrepareSummary{}, service.blueprint_journal_summary);
+            try std.testing.expectEqualDeep(self.lower_sub, fixture.base.client.subscriptions.get(lower_id).?);
+            try std.testing.expectEqualDeep(self.upper_sub, fixture.base.client.subscriptions.get(upper_id).?);
+            try std.testing.expectEqual(@as(usize, 0), fixture.base.client.pending.blueprint_changes.items.len);
+            try std.testing.expectEqual(@as(usize, 0), fixture.base.client.pending.responses.items.len);
+            try std.testing.expectEqual(@as(usize, 0), fixture.base.client.blueprint_results.items.items.len);
+            try std.testing.expectEqual(self.resolved_request, fixture.base.client.resolved_request);
+            try std.testing.expect(!service.lifecycle.unsaved_work);
+            try std.testing.expect(service.blueprint_task == task);
+            try std.testing.expectEqual(@as(usize, 1), task.response_copies.items.len);
+        }
+
+        fn expectCommitted(self: @This(), fixture: *const BlueprintSoilApplyTest) !void {
+            const service = &fixture.base.service;
+            const state = &service.worker_state;
+            const lower = state.modified_chunks.get(lower_id).?;
+            const upper = state.modified_chunks.get(upper_id).?;
+            try std.testing.expectEqual(self.lower.chunk_revision + 1, lower.chunk_revision);
+            try std.testing.expectEqual(self.upper.chunk_revision + 1, upper.chunk_revision);
+            try std.testing.expectEqual(rules.BlockType.packed_dirt, lower.content.getBlock(.{ 10, 10, 31 }));
+            try std.testing.expectEqual(rules.BlockType.packed_dirt, upper.content.getBlock(.{ 12, 10, 0 }));
+            try std.testing.expectEqual(rules.BlockType.dirt, upper.content.getBlock(.{ 11, 10, 0 }));
+            try std.testing.expectEqual(rules.BlockType.grass, upper.content.getBlock(.{ 13, 10, 0 }));
+            try std.testing.expectEqual(@as(usize, 0), lower.metadata.timed.events.items.len);
+            const expected_upper_timers: []const transformations.Event = if (self.upper.metadata.timed.events.items.len == 0) &.{} else &.{ self.upper.metadata.timed.events.items[0], self.upper.metadata.timed.events.items[2] };
+            try std.testing.expectEqualSlices(transformations.Event, expected_upper_timers, upper.metadata.timed.events.items);
+            try std.testing.expectEqual(self.overlay_revision + 1, state.blueprints.revision);
+            try std.testing.expectEqual(@as(u32, 1), state.blueprints.instances.count());
+            try std.testing.expect(state.blueprints.targetAt(origin) != null);
+            try std.testing.expectEqual(@as(usize, 1), service.blueprint_journal.items.len);
+            try std.testing.expect(service.blueprint_journal.items[0] == .instance);
+            try std.testing.expectEqual(@as(usize, 1), service.blueprint_journal_summary.operation_count);
+            try std.testing.expectEqual(@as(usize, 64), service.blueprint_journal_bytes);
+            try std.testing.expect(fixture.base.client.subscriptions.get(lower_id).?.blocks_pending);
+            try std.testing.expect(fixture.base.client.subscriptions.get(upper_id).?.blocks_pending);
+            try std.testing.expectEqual(@as(usize, 1), fixture.base.client.pending.blueprint_changes.items.len);
+            try std.testing.expectEqual(@as(usize, 1), fixture.base.client.blueprint_results.items.items.len);
+            const reply = fixture.base.client.blueprint_results.items.items[0];
+            try std.testing.expectEqual(@as(u64, 2), reply.request_id);
+            try std.testing.expectEqual(.success, reply.status);
+            try std.testing.expectEqual(.apply, reply.kind);
+            try std.testing.expectEqual(@as(u64, 2), fixture.base.client.resolved_request);
+            try std.testing.expect(service.lifecycle.unsaved_work);
+            try std.testing.expect(service.blueprint_task == null);
+        }
+    };
+
+    fn expectUncommitted(self: *@This()) !void {
+        const service = &self.base.service;
+        const lower = service.worker_state.modified_chunks.get(lower_id).?;
+        const upper = service.worker_state.modified_chunks.get(upper_id).?;
+        try std.testing.expectEqual(rules.BlockType.grass, lower.content.getBlock(.{ 10, 10, 31 }));
+        try std.testing.expectEqual(@as(usize, 2), lower.metadata.timed.events.items.len);
+        try std.testing.expectEqual(@as(u64, 7), lower.chunk_revision);
+        try std.testing.expectEqual(rules.BlockType.grass, upper.content.getBlock(.{ 12, 10, 0 }));
+        try std.testing.expectEqual(@as(usize, 3), upper.metadata.timed.events.items.len);
+        try std.testing.expectEqual(@as(u64, 11), upper.chunk_revision);
+        try std.testing.expectEqual(@as(u32, 0), service.worker_state.blueprints.instances.count());
+        try std.testing.expect(!self.base.client.subscriptions.get(lower_id).?.blocks_pending);
+        try std.testing.expect(!self.base.client.subscriptions.get(upper_id).?.blocks_pending);
+    }
+};
+
+test "Apply atomically clears only covered grass and growth timers before target-local fills" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintSoilApplyTest = undefined;
+    const task = try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.base.service;
+    try std.testing.expectEqual(@as(usize, 3), task.soil_plan.?.changes.items.len);
+    try std.testing.expectEqual(@as(usize, 2), task.soil_plan.?.chunk_ids.items.len);
+    try std.testing.expect(task.snapshot.chunks.get(BlueprintSoilApplyTest.lower_id).?.grow_grass.isSet(transformations.index(.{ 14, 10, 31 })));
+    try fixture.expectUncommitted();
+    try service.commitBlueprintApplication(task);
+    const lower = service.worker_state.modified_chunks.get(BlueprintSoilApplyTest.lower_id).?;
+    const upper = service.worker_state.modified_chunks.get(BlueprintSoilApplyTest.upper_id).?;
+    try std.testing.expectEqual(rules.BlockType.packed_dirt, lower.content.getBlock(.{ 10, 10, 31 }));
+    try std.testing.expectEqual(@as(usize, 0), lower.metadata.timed.events.items.len);
+    try std.testing.expectEqual(@as(u64, 8), lower.chunk_revision);
+    try std.testing.expectEqual(rules.BlockType.packed_dirt, upper.content.getBlock(.{ 12, 10, 0 }));
+    try std.testing.expectEqual(rules.BlockType.dirt, upper.content.getBlock(.{ 11, 10, 0 }));
+    try std.testing.expectEqual(rules.BlockType.grass, upper.content.getBlock(.{ 13, 10, 0 })); // Blueprint hole.
+    try std.testing.expectEqual(@as(u64, 12), upper.chunk_revision);
+    try std.testing.expectEqual(@as(usize, 2), upper.metadata.timed.events.items.len);
+    try std.testing.expectEqual(transformations.Kind.compact_dirt, upper.metadata.timed.events.items[0].kind);
+    try std.testing.expectEqual(@as(u64, 200), upper.metadata.timed.events.items[0].due_tick);
+    try std.testing.expectEqual(@as(u64, 400), upper.metadata.timed.events.items[1].due_tick);
+    try std.testing.expect(service.worker_state.blueprints.targetAt(BlueprintSoilApplyTest.origin) != null);
+    try std.testing.expect(!service.worker_state.timed_chunks.contains(BlueprintSoilApplyTest.lower_id));
+    try std.testing.expect(fixture.base.client.subscriptions.get(BlueprintSoilApplyTest.lower_id).?.blocks_pending);
+    try std.testing.expect(fixture.base.client.subscriptions.get(BlueprintSoilApplyTest.upper_id).?.blocks_pending);
+    const baseline = try lower.tryClone(a);
+    defer baseline.deinit(a);
+    const filled = try service.worker_state.tryFulfillBlueprint(a, .{ .block = BlueprintSoilApplyTest.origin, .action = .{ .put = .planks }, .blueprint = .{ .instance_id = 1, .cell_index = 0 } });
+    try std.testing.expectEqual(OperationStatus.success, filled.diagnostics.status);
+    const after = service.worker_state.modified_chunks.get(BlueprintSoilApplyTest.lower_id).?;
+    try std.testing.expectEqual(baseline.chunk_revision, after.chunk_revision);
+    try std.testing.expectEqualDeep(baseline.cell_changes, after.cell_changes);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&baseline.content.blocks.blocks), std.mem.asBytes(&after.content.blocks.blocks));
+    try std.testing.expectEqualSlices(transformations.Event, baseline.metadata.timed.events.items, after.metadata.timed.events.items);
+}
+
+test "Apply source capture and allocation denial leave soil and overlay unpublished" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |allocation_failure| {
+        var fixture: BlueprintSoilApplyTest = undefined;
+        const task = try fixture.init();
+        defer fixture.deinit();
+        const service = &fixture.base.service;
+        if (allocation_failure) {
+            var failure = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+            service.allocator = failure.allocator();
+            try std.testing.expectError(error.OutOfMemory, service.commitBlueprintApplication(task));
+            service.allocator = a;
+        } else {
+            try service.source_holds.put(a, BlueprintSoilApplyTest.lower_id, 7);
+            try std.testing.expectError(error.CapturePending, service.commitBlueprintApplication(task));
+            _ = service.source_holds.remove(BlueprintSoilApplyTest.lower_id);
+        }
+        try fixture.expectUncommitted();
+        try service.commitBlueprintApplication(task);
+        try std.testing.expectEqual(@as(u32, 1), service.worker_state.blueprints.instances.count());
+    }
+}
+
+test "Apply allocation sweep leaves resident and generated soil unpublished until every reservation succeeds" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |generated| {
+        var failures: usize = 0;
+        var partial_promotion_failure = false;
+        var complete_promotion_failure = false;
+        var committed = false;
+        for (0..64) |fail_index| {
+            var fixture: BlueprintSoilApplyTest = undefined;
+            const task = try fixture.initWithSources(generated);
+            defer fixture.deinit();
+            const service = &fixture.base.service;
+            // Journal admission reads only store limits; no writer runs here.
+            var store: storage.Store = undefined;
+            store.limits = .{};
+            service.store = &store;
+            // Simulate the consumer having drained Save notifications. Every
+            // fresh attempt must reserve both Apply queues, including its reply.
+            for (fixture.base.client.pending.blueprint_changes.items) |*change| change.deinit(a);
+            fixture.base.client.pending.blueprint_changes.deinit(a);
+            fixture.base.client.pending.blueprint_changes = .empty;
+            fixture.base.client.blueprint_results.items.deinit(a);
+            fixture.base.client.blueprint_results.items = .empty;
+            service.lifecycle.unsaved_work = false;
+            const baseline = try BlueprintSoilApplyTest.AllocationBaseline.init(&fixture);
+            defer baseline.deinit();
+            var failure = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index, .resize_fail_index = 0 });
+            service.allocator = failure.allocator();
+            // A distinct live allocation domain makes both generated-source
+            // promotions clone, while the same failure sweep covers their data.
+            var live = std.testing.FailingAllocator.init(failure.allocator(), .{});
+            if (generated) service.worker_state.live_allocator = live.allocator();
+            const attempt = service.commitBlueprintApplication(task);
+            if (attempt) |_| fixture.awaitRetirements() else |_| {}
+            service.allocator = a;
+            service.worker_state.live_allocator = null;
+            if (attempt) |_| {
+                try std.testing.expect(!failure.has_induced_failure);
+                try baseline.expectCommitted(&fixture);
+                committed = true;
+                break;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expect(failure.has_induced_failure);
+                try std.testing.expectEqual(fail_index, failure.alloc_index);
+                try baseline.expectUnpublished(&fixture, task);
+                const resident_count = service.worker_state.modified_chunks.count();
+                if (generated) {
+                    try std.testing.expectEqual(@as(usize, 2), resident_count + service.worker_state.generated_chunks.count());
+                    partial_promotion_failure = partial_promotion_failure or resident_count == 1;
+                    complete_promotion_failure = complete_promotion_failure or resident_count == 2;
+                }
+                failures += 1;
+                // The same detached result must remain retryable after every
+                // failed reservation, including failure after source promotion.
+                try service.commitBlueprintApplication(task);
+                fixture.awaitRetirements();
+                try baseline.expectCommitted(&fixture);
+            }
+        }
+        try std.testing.expect(committed);
+        try std.testing.expect(failures >= 6);
+        if (generated) {
+            try std.testing.expect(partial_promotion_failure);
+            try std.testing.expect(complete_promotion_failure);
+        }
+    }
+}
+
+test "Apply surface resource denial leaves soil and overlay unpublished" {
+    var durable: PreparedBlueprintDrainTest = undefined;
+    try durable.init();
+    defer durable.deinit();
+    var fixture: BlueprintSoilApplyTest = undefined;
+    const task = try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.base.service;
+    service.store = &durable.store;
+    service.limits.manifest_entries = 0;
+    try std.testing.expectError(error.Capacity, service.commitBlueprintApplication(task));
+    service.store = null;
+    try fixture.expectUncommitted();
+}
+
+test "Apply soil effects and pending targets survive the same save and reopen" {
+    const a = std.testing.allocator;
+    var durable: PreparedBlueprintDrainTest = undefined;
+    try durable.init();
+    defer durable.deinit();
+    durable.cleanupFixture();
+    durable.store.limits.blueprints.max_operations = 16;
+    var fixture: BlueprintSoilApplyTest = undefined;
+    const task = try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.base.service;
+    service.store = &durable.store;
+    const saved = service.worker_state.blueprints.definitions.get(1).?;
+    const definition: blueprint_wire.Op = .{ .definition = .{ .id = saved.id, .owner = saved.owner, .name = saved.name, .size = saved.definition.size, .cells = std.mem.sliceAsBytes(saved.definition.cells), .target_count = saved.definition.target_count } };
+    try service.reserveBlueprintJournal(definition);
+    service.appendBlueprintJournal(definition);
+    try service.commitBlueprintApplication(task);
+    try service.beginCapture(100, true);
+    try BlueprintJournalBudgetTest.waitJob(service);
+    try std.testing.expectEqual(@as(u32, 1), durable.store.blueprints.instances.count());
+    durable.store.deinit();
+    durable.store_open = false;
+    durable.store = try storage.Store.open(a, durable.path, .{});
+    durable.store_open = true;
+    try std.testing.expectEqual(@as(u32, 1), durable.store.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u32, 6), durable.store.blueprints.instances.get(1).?.remaining);
+    const lower_bytes = (try durable.store.readChunk(a, BlueprintSoilApplyTest.lower_id)).?;
+    defer a.free(lower_bytes);
+    var lower = try format.decodeChunk(a, durable.store.world_uuid, lower_bytes, durable.store.dimensions);
+    defer lower.deinit(a);
+    var lower_metadata = try format.decodeMetadata(a, lower.blocks, lower.metadata, durable.store.dimensions);
+    defer lower_metadata.deinit(a);
+    try std.testing.expectEqual(@intFromEnum(rules.BlockType.packed_dirt), lower.blocks[transformations.index(.{ 10, 10, 31 })]);
+    try std.testing.expectEqual(@as(usize, 0), lower_metadata.timers.len);
+    try std.testing.expectEqual(@as(u64, 8), lower.revision);
+    const upper_bytes = (try durable.store.readChunk(a, BlueprintSoilApplyTest.upper_id)).?;
+    defer a.free(upper_bytes);
+    var upper = try format.decodeChunk(a, durable.store.world_uuid, upper_bytes, durable.store.dimensions);
+    defer upper.deinit(a);
+    var upper_metadata = try format.decodeMetadata(a, upper.blocks, upper.metadata, durable.store.dimensions);
+    defer upper_metadata.deinit(a);
+    try std.testing.expectEqual(@intFromEnum(rules.BlockType.none), upper.blocks[transformations.index(.{ 10, 10, 0 })]);
+    try std.testing.expectEqual(@intFromEnum(rules.BlockType.dirt), upper.blocks[transformations.index(.{ 11, 10, 0 })]);
+    try std.testing.expectEqual(@intFromEnum(rules.BlockType.packed_dirt), upper.blocks[transformations.index(.{ 12, 10, 0 })]);
+    try std.testing.expectEqual(@intFromEnum(rules.BlockType.grass), upper.blocks[transformations.index(.{ 13, 10, 0 })]);
+    try std.testing.expectEqual(@as(usize, 2), upper_metadata.timers.len);
+    try std.testing.expectEqual(@intFromEnum(transformations.Kind.compact_dirt), upper_metadata.timers[0].kind);
+    try std.testing.expectEqual(@as(u64, 200), upper_metadata.timers[0].deadline);
+    try std.testing.expectEqual(@as(u64, 400), upper_metadata.timers[1].deadline);
+    try std.testing.expectEqual(@as(u64, 12), upper.revision);
+}
+
+test "prepared Apply reloads an evicted clean soil source and reuses its prepared plan" {
+    const a = std.testing.allocator;
+    var durable: PreparedBlueprintDrainTest = undefined;
+    try durable.init();
+    defer durable.deinit();
+    durable.cleanupFixture();
+    durable.store.limits.blueprints.max_operations = 16;
+    var fixture: BlueprintSoilApplyTest = undefined;
+    const task = try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.base.service;
+    service.store = &durable.store;
+    const saved = service.worker_state.blueprints.definitions.get(1).?;
+    const definition: blueprint_wire.Op = .{ .definition = .{ .id = saved.id, .owner = saved.owner, .name = saved.name, .size = saved.definition.size, .cells = std.mem.sliceAsBytes(saved.definition.cells), .target_count = saved.definition.target_count } };
+    try service.reserveBlueprintJournal(definition);
+    service.appendBlueprintJournal(definition);
+    // Persist the unchanged pre-Apply soil while retaining the detached result.
+    try service.beginCapture(99, true);
+    try BlueprintJournalBudgetTest.waitJob(service);
+    try std.testing.expectEqual(@as(u32, 0), service.worker_state.blueprints.instances.count());
+    try std.testing.expect(service.catalog != null);
+    const evicted = service.worker_state.modified_chunks.fetchRemove(BlueprintSoilApplyTest.lower_id).?;
+    evicted.value.deinit(a);
+    _ = service.worker_state.timed_chunks.remove(BlueprintSoilApplyTest.lower_id);
+    service.finishBlueprintApplication(task);
+    try std.testing.expect(service.blueprint_task == task);
+    try std.testing.expect(task.waiting_for_data);
+    try std.testing.expect(task.result != null);
+    try std.testing.expectEqual(@as(usize, 3), task.soil_plan.?.changes.items.len);
+    try std.testing.expectEqual(@as(u32, 0), service.worker_state.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u64, 11), service.worker_state.modified_chunks.get(BlueprintSoilApplyTest.upper_id).?.chunk_revision);
+    var reads: std.ArrayList(storage.BaseRead) = .empty;
+    defer {
+        for (reads.items) |*read| read.deinit();
+        reads.deinit(a);
+    }
+    service.read_requests.takeAll(service.io, &reads);
+    try std.testing.expectEqual(@as(usize, 1), reads.items.len);
+    const read = &reads.items[0];
+    try std.testing.expectEqual(BlueprintSoilApplyTest.lower_id, read.id);
+    const loaded = try service.readPersisted(read);
+    service.processRequest(.{ .chunk_loaded = .{ .id = read.id, .revision = read.revision, .result = loaded } });
+    try std.testing.expect(!task.waiting_for_data);
+    // A prepared retry commits synchronously, without starting helper work again.
+    service.advanceBlueprintAdmission();
+    try std.testing.expect(service.blueprint_task == null);
+    try std.testing.expectEqual(@as(u32, 1), service.worker_state.blueprints.instances.count());
+    const lower = service.worker_state.modified_chunks.get(BlueprintSoilApplyTest.lower_id).?;
+    try std.testing.expectEqual(rules.BlockType.packed_dirt, lower.content.getBlock(.{ 10, 10, 31 }));
+    try std.testing.expectEqual(@as(usize, 0), lower.metadata.timed.events.items.len);
+    try std.testing.expectEqual(@as(u64, 8), lower.chunk_revision);
+    try std.testing.expectEqual(@as(u64, 12), service.worker_state.modified_chunks.get(BlueprintSoilApplyTest.upper_id).?.chunk_revision);
+}
+
+test "Apply rejects canonical immutable soil writes even when physical soil looks mutable" {
+    const a = std.testing.allocator;
+    for ([_]rules.BlockType{ .grass, .packed_dirt }) |material| {
+        var fixture: BlueprintSoilApplyTest = undefined;
+        const task = try fixture.init();
+        defer fixture.deinit();
+        const service = &fixture.base.service;
+        // Reprepare the detached input with a canonical floor mask that conflicts
+        // with its physical material. Protection must not depend on that material.
+        var previous = try task.result.?;
+        task.result = null;
+        previous.prepared.deinit(a);
+        for (task.response_copies.items) |*copy| copy.deinit(a);
+        task.response_copies.clearRetainingCapacity();
+        if (task.soil_plan) |*plan| plan.deinit(a);
+        task.soil_plan = null;
+        const block: [3]u32 = .{ 42, 42, 127 };
+        const index = transformations.index(.{ 10, 10, 31 });
+        const captured = task.snapshot.chunks.getPtr(BlueprintSoilApplyTest.lower_id).?;
+        captured.blocks.blocks[31][10][10] = material;
+        captured.immutable = try a.dupe(transformations.BlockIndex, &.{index});
+        const lower = service.worker_state.modified_chunks.getPtr(BlueprintSoilApplyTest.lower_id).?;
+        if (material != .grass) lower.changeType(.{ 10, 10, 31 }, material);
+        task.result = try task.prepare();
+        const rejected = try task.result.?;
+        try std.testing.expect(rejected == .rejected);
+        try std.testing.expectEqual(blueprint_admission.RejectCode.immutable, rejected.rejected.code);
+        try std.testing.expectEqual(block, rejected.rejected.cell.?);
+        try std.testing.expectEqual(@as(usize, 0), task.response_copies.items.len);
+        service.finishBlueprintApplication(task);
+        try std.testing.expect(service.blueprint_task == null);
+        try std.testing.expectEqual(@as(u32, 0), service.worker_state.blueprints.instances.count());
+        const unchanged = service.worker_state.modified_chunks.getPtr(BlueprintSoilApplyTest.lower_id).?;
+        try std.testing.expectEqual(material, unchanged.content.getBlock(.{ 10, 10, 31 }));
+        try std.testing.expectEqual(@as(u64, 7), unchanged.chunk_revision);
+        try std.testing.expectEqual(@as(usize, 2), unchanged.metadata.timed.events.items.len);
+        try std.testing.expectEqual(transformations.Kind.grow_grass, unchanged.metadata.timed.events.items[0].kind);
+        try std.testing.expect(!fixture.base.client.subscriptions.get(BlueprintSoilApplyTest.lower_id).?.blocks_pending);
+    }
+}

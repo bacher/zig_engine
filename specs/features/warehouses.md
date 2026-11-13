@@ -1728,9 +1728,9 @@ soil compaction optional and is open to removing it if it complicates or slows s
 This does not yet select removal of the material `packed_dirt`, every soil timer, or grass
 behavior, and no runtime behavior has changed.
 
-Current rules combine delayed dirt-to-packed-dirt conversion, immediate conversion when
-covered, grass growth after compaction/exposure, and clearing grass/canceling timers when
-covered. Blueprint fulfillment can modify the soil immediately below its target, including
+Current rules combine delayed dirt-to-packed-dirt conversion, manual compaction after
+three seconds of holding mouse2, grass growth after compaction/exposure, and clearing
+grass/canceling surface timers when covered. Placement no longer compacts loose soil. Blueprint fulfillment can modify the soil immediately below its target, including
 across a chunk or proposed site-ownership boundary. Removing only the delayed compaction timer
 does not remove that external write. Removing only compaction while preserving grass changes
 can also leave cross-owner mutations.
