@@ -305,6 +305,12 @@ is a correctness fix, not a cache performance benefit.
 
 ## Conclusions and remaining work
 
+An opt-in [windowed-client A/B harness](client-construction-visuals.md) now automates
+construction, camera motion, frame timings and per-representation submission latency.
+Its immediate baseline retains the FIFO/cache and isolates the preparation budget.
+Successful full-client performance results remain pending; keep them separate from
+the component measurements below.
+
 Fresh synchronous renderer results support removing repeated miniature packing/uploads.
 The fresh CPU replay supports a count budget to combine busy preparation work while
 showing the resulting increase in scheduled visual age. Historical and comparison runs

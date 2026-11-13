@@ -41,6 +41,7 @@ const terrain_collision = @import("terrain_collision.zig");
 const consts = @import("./consts.zig");
 const world_engine = @import("./world_engine_glue.zig");
 const chunk_visual_queue = @import("chunk_visual_queue.zig");
+const client_visual_benchmark = @import("client_visual_benchmark.zig");
 const transformations = @import("block_transformations.zig");
 const block_targeting = @import("block_targeting.zig");
 const block_coordinates = @import("block_coordinates.zig");
@@ -152,6 +153,8 @@ const Game = struct {
     chunk_visuals: chunk_visual_queue.Queue = .{},
     visual_budget: chunk_visual_queue.FrameBudget = .{},
     visual_frame: u64 = 0,
+    visual_benchmark: ?*client_visual_benchmark.Runner = null,
+    benchmark_mode: bool = false,
     last_camera_chunk_coords: ?ChunkCoords = null,
     saved_game_objects: std.StringHashMapUnmanaged(*GameObject) = .empty,
     saved_game_object_groups: std.StringHashMapUnmanaged(*GameObjectGroup) = .empty,
@@ -806,7 +809,9 @@ const Game = struct {
         game.flushBlockOperations();
         game.updateMapTeleport();
         game.updateChunksAroundCamera(false);
+        const receive_started = if (game.visual_benchmark != null) client_visual_benchmark.Runner.now(game) else 0;
         const has_new_chunks = game.receiveChunks();
+        if (game.visual_benchmark) |benchmark| benchmark.receive_ns = client_visual_benchmark.Runner.now(game) - receive_started;
         // Retire client metadata even on empty-package frames, outside fulfillment.
         game.world.?.blueprints.cleanup(game.allocator, 4);
         // Synchronize blocks first, then resolve local movement against that cache.
@@ -819,7 +824,9 @@ const Game = struct {
         if (!game.engine.gameplay_input_blocked and game.blueprint_tool.mode == .none) game.updateBlockFocus();
         // Preparation is budgeted before draw collection and terrain capacity
         // checks. Terrain and miniature updates may complete independently.
+        const prepare_started = if (game.visual_benchmark != null) client_visual_benchmark.Runner.now(game) else 0;
         game.rebuildDirtyChunks();
+        if (game.visual_benchmark) |benchmark| benchmark.prepare_ns = client_visual_benchmark.Runner.now(game) - prepare_started;
         game.buildBlueprintRenderInstances();
         const grid = game.engine.active_scene.?.voxel_grid;
         if (!grid.hasUploadCapacity() and game.render_radius > 2) {
@@ -833,7 +840,12 @@ const Game = struct {
             return;
         }
         game.gpu_capacity_warning = false;
+        const upload_started = if (game.visual_benchmark != null) client_visual_benchmark.Runner.now(game) else 0;
+        if (game.visual_benchmark) |benchmark| for (grid.chunks_to_upload.items) |upload| {
+            benchmark.terrainUploaded(game.layout().encodeChunkCoords(upload.chunk_coords));
+        };
         grid.uploadToGPU(game.engine.gctx);
+        if (game.visual_benchmark) |benchmark| benchmark.upload_ns = client_visual_benchmark.Runner.now(game) - upload_started;
     }
 
     fn advanceWorldClock(game: *Game) void {
@@ -1071,6 +1083,7 @@ const Game = struct {
     fn observeBlueprintFulfilled(context: *anyopaque, cell: [3]u32) void {
         const game: *Game = @ptrCast(@alignCast(context));
         game.markMiniatureChunkDirty(game.layout().encodeChunkCoords(world_module.splitBlockCoords(cell)[0]));
+        if (game.visual_benchmark) |benchmark| benchmark.received(cell, client_visual_benchmark.Runner.now(game), game.layout());
     }
 
     fn applyPackage(game: *Game, package: *world_data_service.ResponsePackage) bool {
@@ -1176,6 +1189,10 @@ const Game = struct {
                         game.clearTerrainDirty(id);
                     }
                     _ = game.boundary_snapshots.remove(id);
+                    if (game.visual_benchmark) |benchmark| {
+                        benchmark.terrainPrepared(id);
+                        if (response.data == .unreachable_chunk) benchmark.terrainUploaded(id);
+                    }
                     // Empty mesh streams must not spend local preparation visits.
                     // Keep clears/retries after the final target has disappeared.
                     if (world.blueprints.chunkTargets(id).len != 0 or
@@ -1202,7 +1219,13 @@ const Game = struct {
             if (chunk.chunk_revision == response.chunk_revision and
                 installed.chunk_revision == response.chunk_revision and installed.mesh_revision == response.mesh_revision and
                 !world.hasPendingMeshDependency(response.coords))
+            {
                 game.clearTerrainDirty(id);
+                if (game.visual_benchmark) |benchmark| {
+                    benchmark.terrainPreparedFromBlocks(id, chunk);
+                    benchmark.terrainUploaded(id);
+                }
+            }
         }
         for (game.package_pending_cells.items) |before| {
             const block = before.block;
@@ -1645,6 +1668,7 @@ const Game = struct {
         fn replace(self: @This(), id: u32, coords: ChunkCoords, revision: u64, cells: []const blueprint_renderer.MiniatureCell) !void {
             const renderer = if (self.game.blueprint_renderer) |*renderer| renderer else return error.MiniatureRendererUnavailable;
             try renderer.replaceMiniatureChunk(self.game.engine.gctx, id, coords, revision, cells);
+            if (self.game.visual_benchmark) |benchmark| benchmark.miniaturePrepared(id);
         }
     };
 
@@ -1768,6 +1792,10 @@ const Game = struct {
             grid.appendChunk(upload);
             replacement = null;
         }
+        if (game.visual_benchmark) |benchmark| {
+            benchmark.terrainPreparedFromBlocks(id, chunk);
+            if (chunk.content != .blocks or chunk.flags.is_unreachable) benchmark.terrainUploaded(id);
+        }
     }
     fn meshNeighbors(game: *const Game, coords: ChunkCoords) world_engine.BoundaryMasks {
         const cached = game.boundary_snapshots.get(game.layout().encodeChunkCoords(coords));
@@ -1815,7 +1843,7 @@ const BlockAction = union(enum) {
 };
 
 fn initWorld(game: *Game) !void {
-    const generator = if (game.persistence_store) |store| try savedGenerator(store.descriptor) else world_generator.WorldGenerator{ .natural = .{ .seed = 12345 } };
+    const generator = if (game.persistence_store) |store| try savedGenerator(store.descriptor) else if (game.benchmark_mode) world_generator.WorldGenerator.flat else world_generator.WorldGenerator{ .natural = .{ .seed = 12345 } };
     game.world_data = if (game.persistence_store) |store|
         try WorldDataService.createPersistent(game.engine.io, game.allocator, game.engine.active_scene.?.layout, generator, store, .{})
     else
@@ -1918,12 +1946,14 @@ fn fitBoxIntoWorld(layout: *const WorldLayout, box: ChunkBox) ChunkBox {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    const options = persistence_launch.parse(args[1..]) catch |err| {
+    var benchmark_options = try client_visual_benchmark.Options.parse(args[1..]);
+    const options = if (benchmark_options != null) persistence_launch.Options{ .mode = .ephemeral } else persistence_launch.parse(args[1..]) catch |err| {
         std.debug.print("Invalid arguments: {s}\n{s}\n", .{ @errorName(err), persistence_launch.usage });
         return err;
     };
     if (options.help) {
         std.debug.print("{s}\n", .{persistence_launch.usage});
+        std.debug.print("Benchmark: --benchmark-visuals OUTPUT_PREFIX [--visual-policy immediate|budgeted] [--benchmark-rate N] [--benchmark-duration SECONDS] [--benchmark-camera orbit|travel]\nUses a fresh ephemeral flat world; duration is an integer in 1..60 seconds.\n", .{});
         return;
     }
     // Resolve before asset startup changes cwd; opening and creation remain distinct.
@@ -1933,6 +1963,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(resolved_path);
     const save_path = try allocator.dupeZ(u8, resolved_path);
     defer allocator.free(save_path);
+    if (benchmark_options) |*benchmark| benchmark.output_prefix = try std.fs.path.resolve(init.arena.allocator(), &.{ original_cwd, benchmark.output_prefix });
     var store: ?persistence_storage.Store = if (options.mode == .ephemeral) null else openSelectedWorld(init, options, save_path) catch |err| {
         std.debug.print("Cannot {s} world at {s}: {s}. Existing save files are retained.\nUse --create-world PATH only to create a new world.\n", .{ if (options.mode == .create) "create" else "open", save_path, @errorName(err) });
         return err;
@@ -1955,10 +1986,12 @@ pub fn main(init: std.process.Init) !void {
 
     var window_context = try WindowContext.init(allocator);
     defer window_context.deinit();
+    if (benchmark_options != null) window_context.window.setSize(960, 540);
 
     const game: *Game = try .init(allocator);
     defer game.deinit();
     game.player_id = options.player_id;
+    game.benchmark_mode = benchmark_options != null;
     game.persistence_store = if (store) |*saved| saved else null;
 
     const engine = Engine.init(
@@ -1983,6 +2016,7 @@ pub fn main(init: std.process.Init) !void {
             .onCloseRequest = onCloseRequest,
             .onPauseChanged = onPauseChanged,
             .onGameplayInputChanged = onGameplayInputChanged,
+            .onFrameComplete = if (benchmark_options != null) onBenchmarkFrame else null,
         },
     );
     game.engine = engine;
@@ -2012,11 +2046,12 @@ pub fn main(init: std.process.Init) !void {
         });
     };
 
-    const settings: @import("engine").WorldSettings = if (store) |*saved|
+    const settings: @import("engine").WorldSettings = if (benchmark_options != null) .{ .size_in_chunks = .{ 16, 16, 4 } } else if (store) |*saved|
         .{ .size_in_chunks = (try persistence_format.decodeDescriptor(saved.descriptor)).dimensions }
     else
         consts.WORLD_SETTINGS;
     const scene = try engine.createScene(settings);
+    if (benchmark_options != null) scene.voxel_grid.log_uploads = false;
     defer scene.deinit();
     defer game.stopWorkers();
 
@@ -2044,10 +2079,18 @@ pub fn main(init: std.process.Init) !void {
         // Fresh controller state discards velocity, climbing, and transient history.
     } else game.player.?.grounded = true;
     game.checkpoint();
-    game.simulation = try SimulationWorker.create(game.world_data.?);
+    if (benchmark_options == null) game.simulation = try SimulationWorker.create(game.world_data.?);
     scene.spectator_enabled = false;
     engine.input_controller.cursor_capture = .always;
     game.player.?.applyCamera(scene.camera);
+    var benchmark: ?client_visual_benchmark.Runner = null;
+    defer if (benchmark) |*active| active.deinit();
+    if (benchmark_options) |benchmark_config| {
+        benchmark = try client_visual_benchmark.Runner.init(allocator, init.io, benchmark_config, game.world_data.?, game.player_id);
+        game.visual_benchmark = &benchmark.?;
+        game.visual_budget = benchmark_config.budget();
+        engine.setGameplayInputBlocked(true);
+    }
     // edge of the world:
     // scene.camera.updatePosition(.{ -8192.0, -4096.0, 0 });
 
@@ -2150,6 +2193,15 @@ pub fn main(init: std.process.Init) !void {
     // -- Game loop --
 
     try engine.runLoop();
+    if (benchmark) |*active| {
+        try active.exportResults();
+        if (active.invalid_reason != null) return error.ClientVisualBenchmarkInvalid;
+    }
+}
+
+fn onBenchmarkFrame(_: *Engine, game_opaque: *anyopaque, measurement: Engine.FrameMeasurement) void {
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
+    if (game.visual_benchmark) |benchmark| benchmark.endFrame(game, measurement);
 }
 
 fn onCloseRequest(_: *Engine, game_opaque: *anyopaque) bool {
@@ -2181,6 +2233,7 @@ fn onPauseChanged(engine: *Engine, game_opaque: *anyopaque) void {
 
 fn onUpdate(engine: *Engine, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
+    if (game.visual_benchmark) |benchmark| benchmark.beginUpdate(game);
 
     if (game.saved_game_objects.get("man_1")) |obj| {
         obj.setRotation(zmath.quatFromRollPitchYaw(0, 0, @floatCast(engine.time)));
@@ -2342,7 +2395,12 @@ fn onRenderWorldOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_op
     if (game.blueprint_renderer) |*renderer| if (engine.active_scene) |scene| {
         renderer.drawWithPreview(engine.gctx, pass, engine.bind_group_minecraft_texture.wgpu_bind_group, scene.camera, game.blueprint_render_instances.items, game.blueprint_selection_frame_start, game.allocator, game.blueprint_render_preview) catch game.blueprintRenderLimit();
         const preview_count = if (game.blueprint_render_preview) |preview| (if (preview.origin != null) preview.target_count else @as(u32, 0)) else @as(u32, 0);
-        renderer.drawMiniatures(engine.gctx, pass, engine.bind_group_minecraft_texture.wgpu_bind_group, scene.camera, game.blueprint_visible_chunks.items, @intCast(@as(usize, blueprint_renderer.capacity) -| game.blueprint_render_instances.items.len -| preview_count)) catch game.blueprintRenderLimit();
+        var miniatures_encoded = true;
+        renderer.drawMiniatures(engine.gctx, pass, engine.bind_group_minecraft_texture.wgpu_bind_group, scene.camera, game.blueprint_visible_chunks.items, @intCast(@as(usize, blueprint_renderer.capacity) -| game.blueprint_render_instances.items.len -| preview_count)) catch {
+            miniatures_encoded = false;
+            game.blueprintRenderLimit();
+        };
+        if (game.visual_benchmark) |benchmark| benchmark.miniatures_encoded = miniatures_encoded;
     };
 }
 
