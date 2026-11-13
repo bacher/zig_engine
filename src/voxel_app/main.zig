@@ -1176,7 +1176,14 @@ const Game = struct {
                         game.clearTerrainDirty(id);
                     }
                     _ = game.boundary_snapshots.remove(id);
-                    game.markMiniatureChunkDirty(id);
+                    // Empty mesh streams must not spend local preparation visits.
+                    // Keep clears/retries after the final target has disappeared.
+                    if (world.blueprints.chunkTargets(id).len != 0 or
+                        game.miniature_dirty_chunks.contains(id) or
+                        (if (game.blueprint_renderer) |*renderer| renderer.miniatureChunkCount(id) != 0 else false))
+                    {
+                        game.markMiniatureChunkDirty(id);
+                    }
                 },
             }
         }
@@ -7395,7 +7402,7 @@ test "chunk visual stale subscriptions refresh at the tail and eviction cancels 
     try std.testing.expectEqual(@as(usize, 0), game.chunk_visuals.count());
 }
 
-test "chunk visual budget leaves received service mesh uploads direct" {
+test "chunk visual budget leaves empty service mesh uploads direct without queued work" {
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
@@ -7410,9 +7417,116 @@ test "chunk visual budget leaves received service mesh uploads direct" {
     var updates: ChunkVisualTestUpdater = .{};
     game.processChunkVisuals(&updates, .{}, false);
     try std.testing.expectEqual(@as(usize, 0), updates.terrain_count);
-    try std.testing.expectEqual(@as(usize, 4), updates.miniature_count);
-    try std.testing.expectEqual(@as(usize, 4), game.chunk_visuals.count());
+    try std.testing.expectEqual(@as(usize, 0), updates.miniature_count);
+    try std.testing.expectEqual(@as(usize, 0), game.miniature_dirty_chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), game.chunk_visuals.count());
+    try std.testing.expectEqual(@as(u64, 0), game.chunk_visuals.stats.taken);
     try std.testing.expectEqual(@as(usize, 8), fixture.grid.chunks_to_upload.items.len);
+}
+
+test "empty streamed mesh ring does not delay a local terrain edit" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const center: ChunkCoords = .{ 4, 4, 4 };
+    const center_id = game.layout().encodeChunkCoords(center);
+    try fixture.subscribe(center, 1, .blocks);
+    try game.world.?.insertChunk(center, singleTestBlock(.{ 8, 8, 8 }, 0));
+    game.loadChunkIfNeeded(center[0], center[1], center[2]);
+    game.drainChunkVisualsForTesting();
+    const initial_uploads = fixture.grid.chunks_to_upload.items.len;
+
+    // A normal 7x7x7 neighborhood has a 3x3x3 local block core and
+    // 316 outer mesh subscriptions. No preparation runs between responses.
+    var streamed: usize = 0;
+    for (1..8) |z| for (1..8) |y| for (1..8) |x| {
+        if (x >= 3 and x <= 5 and y >= 3 and y <= 5 and z >= 3 and z <= 5) continue;
+        const coords: ChunkCoords = .{ @intCast(x), @intCast(y), @intCast(z) };
+        const token = @as(u64, game.layout().encodeChunkCoords(coords)) + 2;
+        try fixture.subscribe(coords, token, .mesh);
+        try fixture.apply(&.{.{ .coords = coords, .subscription_id = token, .mesh_revision = 1, .data = .{ .mesh = .{} } }});
+        streamed += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 316), streamed);
+    try std.testing.expectEqual(initial_uploads + streamed, fixture.grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(@as(usize, 0), game.miniature_dirty_chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), game.chunk_visuals.count());
+
+    game.world.?.chunks.getPtr(center_id).?.changeType(.{ 8, 8, 8 }, .dirt);
+    const block: [3]u32 = .{ 4 * consts.CHUNK_SIZE + 8, 4 * consts.CHUNK_SIZE + 8, 4 * consts.CHUNK_SIZE + 8 };
+    game.markChunksAroundBlockDirty(block);
+    const Updater = struct {
+        game: *Game,
+        visits: ChunkVisualTestUpdater = .{},
+        fn terrain(self: *@This(), id: u32) !void {
+            try self.visits.terrain(id);
+            try self.game.rebuildTerrainChunk(id);
+        }
+        fn replace(self: *@This(), id: u32, coords: ChunkCoords, revision: u64, cells: []const blueprint_renderer.MiniatureCell) !void {
+            try self.visits.replace(id, coords, revision, cells);
+        }
+    };
+    var updates: Updater = .{ .game = game };
+    game.processChunkVisuals(&updates, .{}, false);
+    try std.testing.expectEqual(@as(usize, 1), updates.visits.terrain_count);
+    try std.testing.expectEqual(center_id, updates.visits.terrain_ids[0]);
+    // Generic local-edit invalidation still shares this one terrain visit.
+    try std.testing.expectEqual(@as(usize, 1), updates.visits.miniature_count);
+    try std.testing.expectEqual(center_id, updates.visits.miniature_ids[0]);
+    try std.testing.expectEqual(@as(usize, 0), game.chunk_visuals.count());
+    try std.testing.expectEqual(@as(usize, 0), game.miniature_dirty_chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), game.dirty_chunk_ids.count());
+    try std.testing.expectEqual(voxel_chunk_module.RenderMaterial.dirt, fixture.upload(center).chunk_side_data.blocks_grouped_by_side[0].items[0].block_type);
+    try std.testing.expectEqual(initial_uploads + streamed, fixture.grid.chunks_to_upload.items.len);
+}
+
+test "service mesh updates preserve cached miniature clears and pending retries" {
+    for ([_]bool{ false, true }) |cached_source| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        const game = &fixture.game;
+        const coords: ChunkCoords = .{ 1, 1, 1 };
+        const id = game.layout().encodeChunkCoords(coords);
+        try fixture.subscribe(coords, 1, .mesh);
+        try game.loaded_chunk_ids.put(game.allocator, id, {});
+        if (cached_source) {
+            // Only source-count metadata is read. No GPU handles are created,
+            // released or passed to the production graphics updater here.
+            var renderer: blueprint_renderer.Renderer = undefined;
+            renderer.miniature_chunks = .init(game.allocator);
+            errdefer renderer.miniature_chunks.deinit();
+            try renderer.miniature_chunks.put(id, .{ .chunk = coords, .revision = 1, .instance_count = 1, .uniform = undefined, .instances = undefined, .binding = undefined });
+            game.blueprint_renderer = renderer;
+        } else {
+            // A previously queued clear may now have neither targets nor a
+            // cached source; a response must still preserve its obligation.
+            game.markMiniatureChunkDirty(id);
+        }
+        defer if (game.blueprint_renderer) |*renderer| {
+            renderer.miniature_chunks.deinit();
+            game.blueprint_renderer = null;
+        };
+        try std.testing.expectEqual(@as(usize, 0), game.world.?.blueprints.chunkTargets(id).len);
+        const old_revision = game.miniature_revision;
+        try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .mesh_revision = 1, .data = .{ .mesh = .{} } }});
+        try std.testing.expect(game.miniature_revision > old_revision);
+        try std.testing.expect(game.miniature_dirty_chunks.contains(id));
+        try std.testing.expect(game.chunk_visuals.contains(id));
+        var updates: MiniatureUpdateTest = .{ .failed_id = id };
+        game.drainChunkVisualsWithMiniaturesForTesting(&updates);
+        try std.testing.expect(game.miniature_dirty_chunks.contains(id));
+        try std.testing.expect(game.chunk_visuals.contains(id));
+        try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .mesh_revision = 2, .data = .unreachable_chunk }});
+        updates.failed_id = null;
+        game.drainChunkVisualsWithMiniaturesForTesting(&updates);
+        try std.testing.expectEqual(@as(usize, 1), updates.count);
+        try std.testing.expectEqual(id, updates.records[0].id);
+        try std.testing.expectEqual(@as(usize, 0), updates.records[0].count);
+        try std.testing.expectEqual(@as(usize, 0), game.miniature_dirty_chunks.count());
+        try std.testing.expectEqual(@as(usize, 0), game.chunk_visuals.count());
+    }
 }
 
 test "chunk visual terrain allocation failure preserves queued geometry while miniatures complete" {

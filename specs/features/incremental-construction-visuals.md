@@ -60,6 +60,9 @@ frame smoothness.
   The budget covers local terrain extraction and miniature source preparation/replacement.
   Authoritative reconciliation, direct service-mesh acceptance and terrain GPU uploads
   remain outside it. Neither phase promises a hard frame-time bound or maximum visual delay.
+  Accepted service meshes create miniature work only when indexed targets, a cached source
+  or an existing miniature obligation require it. Use constant-time metadata lookups;
+  targetless/cacheless streaming must not fill the FIFO with new empty work.
 - R7: Store miniature sources as compact, camera-independent 16-byte `MiniatureCell`
   records in per-chunk GPU buffers. Camera movement and wrapped coordinate changes update
   transforms without rebuilding/uploading sources. Preserve quarter-size geometry,
@@ -166,6 +169,13 @@ frame smoothness.
   second-PR queue fixture drains and then handles 1,024 idle frames THEN at most four builds
   start per frame, occupancy stays within the chunk population, repeated changes coalesce
   and idle head inspections stay zero; report these as queue counts, not game throughput.
+- AC13: GIVEN 316 targetless/cacheless mesh responses in a 7x7x7 neighborhood's outer ring
+  and one local interior edit WHEN the default preparation pass runs THEN streaming has
+  admitted no miniature jobs, the local terrain rebuild runs in the first pass and direct
+  service-mesh uploads remain available.
+- AC14: GIVEN an accepted service mesh with no remaining targets but a cached miniature
+  source or an existing dirty obligation WHEN empty replacement fails and later retries
+  THEN the obligation remains queued until the empty replacement succeeds.
 
 ## Constraints
 
@@ -267,6 +277,8 @@ and simulation throughput remain unmeasured.
   without paired staging or VoxelGrid changes (AC3, AC6, AC11).
 - [x] T6: Run deterministic queue fixtures and CPU replay; report scheduling, CPU work and
   nominal publication ages with their exclusions (AC12).
+- [x] T7: Skip new empty service-mesh miniature jobs; cover mixed streaming/local edits
+  and preserve cached-source removal and pending retries (AC13, AC14).
 
 ### Validation
 
@@ -275,10 +287,13 @@ readbacks and fresh synchronous-API renderer measurements are recorded in the
 [validation report](../../docs/validation/construction-visuals.md). Overall acceptance
 verification is complete for both phases. Read-only
 integration review confirms independent dirty-flag completion, bounded retries, active
-subscription ownership and direct service-mesh handling; six focused client policy tests
-are included in the passing Debug aggregate (49/49 steps, 1,946 tests and one existing
-skip). ReleaseFast install/test passed 57/57 steps, 1,939 tests and eight existing skips,
-building both applications. Fresh queue fixtures and all 60 CPU replay runs passed with
+subscription ownership and direct service-mesh handling. Eight focused client policy
+tests include the 316-response streaming/local-edit regression and preservation of
+cached-source clears and pending retries. After rebasing onto main `211f3d4` and adding
+the empty-stream guard, Debug passed 50/50 steps, 2,041 tests and one existing skip;
+ReleaseFast install/test passed 58/58 steps, 2,034 tests and eight existing skips,
+building both applications. The regression verifies scheduling, not wall-clock latency
+or FPS. Fresh queue fixtures and all 60 CPU replay runs passed with
 scope and scheduling-age limits recorded in the report. Renderer code is unchanged from
 PR #58; its existing GPU readbacks remain applicable. Formatting and whitespace checks pass.
 

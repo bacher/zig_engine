@@ -145,6 +145,19 @@ It therefore bounds work started in this preparation pass, not complete frame ti
 visual age. Unload and new subscription identities cancel obsolete queue membership;
 failed dirty flags remain retryable and yield to other chunks.
 
+Accepted service meshes use constant-time checks of indexed blueprint targets, cached
+miniature count and existing miniature dirtiness before admitting miniature work. When
+all three are empty, the mesh still enters its direct upload path but creates no new
+FIFO entry. Generic edit, snapshot and blueprint invalidation is unchanged; cached-source
+clears and existing retries remain required work.
+
+A deterministic integration regression accepts all 316 outer mesh responses in a
+7x7x7 neighborhood before applying one local interior edit. The responses admit zero
+miniature jobs, and the real terrain extraction runs in the first default preparation
+pass. Separate cases preserve cached-source clears and existing empty retries through
+a failed replacement and a later successful retry. These verify scheduling and
+correctness, not wall-clock latency or FPS.
+
 The [fresh CPU replay](../benchmarks/construction-visuals-2026-11-09/cpu-budget-age0-results.log)
 uses the current queue, World and extraction code atop `0df6e85`. All 60 runs converged to
 matching final mesh/source/world checksums. The fixture remains 27 chunks with 19,872
@@ -165,14 +178,16 @@ zero, and is not product policy. The count limit drives this fixture; four prepa
 fit well below two milliseconds. This is a throughput-versus-freshness tradeoff within
 preparation work, not evidence of improved whole-game smoothness.
 
-Six focused client tests cover immediate count-limited FIFO/fairness and idle handling,
+Eight focused client tests cover immediate count-limited FIFO/fairness and idle handling,
 one whole visit beyond a soft zero time limit, initial-count retry bounds and independent
 completion in both failure directions, stale subscriptions/eviction, direct service meshes
-outside the budget and extraction allocation failure preserving older queued geometry.
+outside the budget, empty streaming admission, retained empty replacements and extraction
+allocation failure preserving older queued geometry.
 Read-only review of the production integration and queue helper found no issue.
-The branch's Debug aggregate passed **49/49 steps, 1,946 tests and one existing skip**.
-ReleaseFast install/test passed **57/57 steps, 1,939 tests and eight existing skips**,
-building both applications. Aggregate counts include imported queue cases in multiple
+After rebasing onto main `211f3d4` and adding the empty-stream guard, the Debug aggregate
+passed **50/50 steps, 2,041 tests and one existing skip**. ReleaseFast install/test passed
+**58/58 steps, 2,034 tests and eight existing skips**, building both applications.
+Aggregate counts include imported queue cases in multiple
 runners. Formatting and whitespace checks passed.
 Renderer code is unchanged from PR #58, whose **19/19 GPU steps and 108 passing tests**
 remain the renderer evidence; those GPU tests were not rerun for scheduling alone.
