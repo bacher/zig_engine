@@ -254,8 +254,15 @@ rechecks dependency revisions and publishes the terrain/timer effects and new
 instance atomically. Allocation or quota failure leaves both unpublished; a
 capture source hold waits without partial writes. An evicted clean source is
 loaded again and the retained plan is reused after the normal revision check.
-Timer cancellation filters each changed chunk's timer list once rather than
-scanning the list separately for each covered cell.
+The plan also retains exact per-chunk cancellation masks. Commit consumes those
+decisions in one timer-list pass per changed chunk, without reconstructing cover
+from terrain or blueprint indexes. Each mask uses 4 KiB, with bounded hash-table
+capacity over at most the admitted source chunks.
+
+The success-result queue reserves its slot before the first soil write and keeps
+the queue locked through publication. A consumer cannot drain away that reserved
+allocation. The result read may wait for this commit; publishing accepted terrain
+and then allocating the response would permit a late OOM failure.
 
 Fulfillment now writes only its target terrain/block metadata, inventory, and
 incremental progress. The authority fill routine shrank from 89 to 50 source
@@ -278,17 +285,23 @@ rejection, source eviction and reloading, grass suppression, and a save/reopen
 that retains both the cleared surfaces and pending targets. They also preserve
 the separate deferred-road checks. A canonical immutable-floor regression rejects
 the complete application even if captured physical grass or packed soil looks mutable.
+The commit allocation sweep tries every failure index through a successful commit
+for resident soil and two initially nonresident generated chunks. Each failure
+preserves terrain, timers, cell histories, revisions, overlay, journal and subscriber
+notifications, then retries the same prepared task successfully. It also covers
+failure after one or both generated chunks have been promoted without changing
+their authoritative contents, and joins detached cleanup before allocator teardown.
 
 Verified with:
 
 ```sh
-zig build --global-cache-dir /private/tmp/zig-engine-global-cache \
+ZIG_GLOBAL_CACHE_DIR=/private/tmp/zig-engine-global-cache zig build \
   install test test-world test-blueprint test-blueprint-admission \
-  -Doptimize=ReleaseFast -j2 --summary all
+  -Doptimize=ReleaseSafe -j2 --summary all
 zig build --global-cache-dir /private/tmp/zig-engine-global-cache \
   test-blueprint-service -Doptimize=ReleaseSafe -j2 --summary all
 ```
 
-The integration command passed 65/65 build steps, with 2,550 tests passed and
-eight skipped. The ReleaseSafe authority suite passed 594 tests; the detached
-admission suite also passed with assertions enabled. Formatting and diff checks pass.
+The integration command passed 65/65 build steps, with 2,560 tests passed and
+eight skipped. The standalone ReleaseSafe authority suite passed 597 tests.
+Formatting and diff checks pass.

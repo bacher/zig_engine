@@ -43,8 +43,8 @@ pub const StandingSpaceResponse = struct {
     result: StandingSpaceError!standing_space.Position,
 };
 
-/// Unbounded multi-producer queue. Pushing never waits for the consumer (only for the short
-/// critical section), the consumer takes all queued items at once.
+/// Unbounded multi-producer queue. Queue access is serialized; the consumer
+/// takes all queued items at once. Apply can reserve a result slot through commit.
 fn Mailbox(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -2065,6 +2065,14 @@ pub const WorldDataService = struct {
             try self.worker_state.ensureResident(self.allocator, self.layout.decodeChunkId(id));
             _ = try std.math.add(u64, self.worker_state.modified_chunks.get(id).?.chunk_revision, 1);
         }
+        // The consumer can swap this queue's allocation out while draining it.
+        // Keep the reserved result slot locked until the accepted state is ready.
+        const replies = &task.request.client.blueprint_results;
+        replies.mutex.lockUncancelable(self.io);
+        var replies_locked = true;
+        defer if (replies_locked) replies.mutex.unlock(self.io);
+        std.debug.assert(!replies.is_closed);
+        try replies.items.ensureUnusedCapacity(self.allocator, 1);
         for (soil.changes.items) |change| {
             const coords, const local = world_module.splitBlockCoords(change.block);
             const chunk = self.worker_state.modified_chunks.getPtr(self.layout.encodeChunkCoords(coords)).?;
@@ -2073,7 +2081,7 @@ pub const WorldDataService = struct {
         self.worker_state.next_mesh_revision = mesh_revision;
         for (soil.chunk_ids.items) |id| {
             const chunk = self.worker_state.modified_chunks.getPtr(id).?;
-            cancelBlueprintCoveredGrass(self.layout, self.layout.decodeChunkId(id), chunk, &prepared.publication);
+            cancelBlueprintCoveredGrass(chunk, soil.cancel_grow.getPtr(id).?);
             chunk.chunk_revision += 1;
             self.worker_state.mesh_revisions.putAssumeCapacity(id, mesh_revision);
             if (chunk.metadata.timed.events.items.len == 0) _ = self.worker_state.timed_chunks.remove(id);
@@ -2088,7 +2096,10 @@ pub const WorldDataService = struct {
         task.response_copies.clearRetainingCapacity();
         self.lifecycle.unsaved_work = true;
         task.request.client.resolved_request = @max(task.request.client.resolved_request, task.request.request_id);
-        task.request.client.blueprint_results.push(self.io, self.allocator, .{ .request_id = task.request.request_id, .kind = .apply, .status = .success, .definition_id = instance.definition_id, .instance_id = instance.id });
+        replies.items.appendAssumeCapacity(.{ .request_id = task.request.request_id, .kind = .apply, .status = .success, .definition_id = instance.definition_id, .instance_id = instance.id });
+        replies.not_empty.signal(self.io);
+        replies.mutex.unlock(self.io);
+        replies_locked = false;
         self.applyEligibleCheckpoint(task.request.client);
         self.retireBlueprintTask(task);
         self.lifecycle.commandResolved();
@@ -2097,24 +2108,10 @@ pub const WorldDataService = struct {
 
     /// Filter each affected timer queue once instead of canceling/shifting its
     /// array separately for every covered cell in a dense blueprint.
-    fn cancelBlueprintCoveredGrass(layout: *const WorldLayout, coords: ChunkCoords, chunk: *WorldChunk, publication: *const blueprint_runtime.PreparedPublication) void {
+    fn cancelBlueprintCoveredGrass(chunk: *WorldChunk, mask: *const blueprint_soil.GrowthMask) void {
         var retained: usize = 0;
         for (chunk.metadata.timed.events.items) |event| {
-            const local = transformations.coordinates(event.block);
-            const material = chunk.content.getBlock(local);
-            const covered = if (event.kind == .grow_grass and (material == .packed_dirt or material == .grass)) blk: {
-                const above: [3]u32 = .{
-                    @as(u32, @intCast(coords[0])) * CHUNK_SIZE + local[0],
-                    @as(u32, @intCast(coords[1])) * CHUNK_SIZE + local[1],
-                    @as(u32, @intCast(coords[2])) * CHUNK_SIZE + local[2] + 1,
-                };
-                if (above[2] >= layout.size_in_blocks[2]) break :blk false;
-                const above_coords, _ = world_module.splitBlockCoords(above);
-                const index = publication.chunks.get(layout.encodeChunkCoords(above_coords)) orelse break :blk false;
-                const target = index.lookup.get(above) orelse break :blk false;
-                break :blk target.instance_id == publication.instance.id;
-            } else false;
-            if (covered) continue;
+            if (event.kind == .grow_grass and mask.isSet(event.block)) continue;
             chunk.metadata.timed.events.items[retained] = event;
             retained += 1;
         }
@@ -10430,6 +10427,26 @@ test "blueprint fills keep cached soil support unpromoted and its metadata uncha
     }
 }
 
+test "prepared soil masks cancel growth only and retain hole and compaction timers" {
+    const a = std.testing.allocator;
+    var chunk = WorldChunk.initEmpty();
+    defer chunk.deinit(a);
+    const removed = transformations.index(.{ 10, 10, 31 });
+    const hole = transformations.index(.{ 11, 10, 31 });
+    const compacting = transformations.index(.{ 12, 10, 31 });
+    const events = [_]transformations.Event{
+        .{ .block = removed, .kind = .grow_grass, .due_tick = 10 },
+        .{ .block = hole, .kind = .grow_grass, .due_tick = 20 },
+        .{ .block = compacting, .kind = .compact_dirt, .due_tick = 30 },
+    };
+    try chunk.metadata.timed.events.appendSlice(a, &events);
+    var mask: blueprint_soil.GrowthMask = .initEmpty();
+    mask.set(removed);
+    mask.set(compacting);
+    WorldDataService.cancelBlueprintCoveredGrass(&chunk, &mask);
+    try std.testing.expectEqualSlices(transformations.Event, events[1..], chunk.metadata.timed.events.items);
+}
+
 const BlueprintSoilApplyTest = struct {
     const lower_id = test_layout.encodeChunkCoords(.{ 1, 1, 3 });
     const upper_id = test_layout.encodeChunkCoords(.{ 1, 1, 4 });
@@ -10437,6 +10454,10 @@ const BlueprintSoilApplyTest = struct {
     base: BlueprintSaveFixture,
 
     fn init(self: *@This()) !*BlueprintAdmissionTask {
+        return self.initWithSources(false);
+    }
+
+    fn initWithSources(self: *@This(), generated: bool) !*BlueprintAdmissionTask {
         const a = std.testing.allocator;
         try self.base.init();
         errdefer self.deinit();
@@ -10469,6 +10490,21 @@ const BlueprintSoilApplyTest = struct {
         upper.chunk_revision = 11;
         try service.worker_state.modified_chunks.put(a, upper_id, upper);
         try service.worker_state.timed_chunks.put(a, upper_id, {});
+        if (generated) {
+            // Generated cache entries cannot own mutation metadata. Capture both
+            // soil sources at revision zero, before either becomes resident.
+            for ([_]ChunkId{ lower_id, upper_id }) |id| {
+                var source = service.worker_state.modified_chunks.fetchRemove(id).?.value;
+                source.metadata.deinit(a);
+                source.metadata = .{};
+                source.chunk_revision = 0;
+                source.cell_changes = .{};
+                _ = service.worker_state.timed_chunks.remove(id);
+                try std.testing.expect(try service.worker_state.generated_chunks.insert(a, id, source));
+            }
+            service.worker_state.modified_chunks.deinit(a);
+            service.worker_state.modified_chunks = .empty;
+        }
         try self.base.client.subscriptions.put(a, lower_id, .{ .id = 1, .mode = .blocks });
         try self.base.client.subscriptions.put(a, upper_id, .{ .id = 2, .mode = .blocks });
         try service.tryBeginBlueprintApplication(.{ .client = &self.base.client, .request_id = 2, .owner = 1, .definition_id = 1, .origin = origin, .rotation = 0 });
@@ -10480,18 +10516,25 @@ const BlueprintSoilApplyTest = struct {
         return task;
     }
 
+    fn awaitRetirements(self: *@This()) void {
+        const service = &self.base.service;
+        for (service.blueprint_retired.items) |task| if (task.future) |*future| future.await(service.io);
+    }
+
     fn deinit(self: *@This()) void {
         const a = std.testing.allocator;
         const service = &self.base.service;
+        // Helpers read service.allocator when releasing their owned snapshots.
+        // Join them before replacing its two-word allocator value.
+        if (service.blueprint_task) |task| if (task.future) |*future| future.await(service.io);
+        self.awaitRetirements();
         service.allocator = a;
         if (service.blueprint_task) |task| {
             service.blueprint_task = null;
-            if (task.future) |*future| future.await(service.io);
             if (!task.retired.load(.acquire)) task.release();
             a.destroy(task);
         }
         for (service.blueprint_retired.items) |task| {
-            if (task.future) |*future| future.await(service.io);
             if (!task.retired.load(.acquire)) task.release();
             a.destroy(task);
         }
@@ -10506,6 +10549,119 @@ const BlueprintSoilApplyTest = struct {
         self.base.client.subscriptions.deinit(a);
         self.base.deinit();
     }
+
+    fn soilSource(self: *const @This(), id: ChunkId) WorldChunk {
+        const state = &self.base.service.worker_state;
+        return state.modified_chunks.get(id) orelse state.generated_chunks.peek(id).?.*;
+    }
+
+    const AllocationBaseline = struct {
+        lower: WorldChunk,
+        upper: WorldChunk,
+        lower_sub: Subscription,
+        upper_sub: Subscription,
+        overlay_revision: u64,
+        resolved_request: u64,
+        generated_chunk_count: u64,
+
+        fn init(fixture: *const BlueprintSoilApplyTest) !@This() {
+            const lower = try fixture.soilSource(lower_id).tryClone(std.testing.allocator);
+            errdefer lower.deinit(std.testing.allocator);
+            return .{
+                .lower = lower,
+                .upper = try fixture.soilSource(upper_id).tryClone(std.testing.allocator),
+                .lower_sub = fixture.base.client.subscriptions.get(lower_id).?,
+                .upper_sub = fixture.base.client.subscriptions.get(upper_id).?,
+                .overlay_revision = fixture.base.service.worker_state.blueprints.revision,
+                .resolved_request = fixture.base.client.resolved_request,
+                .generated_chunk_count = fixture.base.service.worker_state.generated_chunk_count,
+            };
+        }
+
+        fn deinit(self: @This()) void {
+            self.lower.deinit(std.testing.allocator);
+            self.upper.deinit(std.testing.allocator);
+        }
+
+        fn expectChunkUnchanged(before: WorldChunk, after: WorldChunk) !void {
+            try std.testing.expectEqual(before.chunk_revision, after.chunk_revision);
+            try std.testing.expectEqual(before.validation_revision, after.validation_revision);
+            try std.testing.expectEqualDeep(before.cell_changes, after.cell_changes);
+            try std.testing.expectEqualDeep(before.flags, after.flags);
+            try std.testing.expectEqualDeep(before.boundaries, after.boundaries);
+            try std.testing.expectEqual(before.solid_block_count, after.solid_block_count);
+            try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before.content.blocks.blocks), std.mem.asBytes(&after.content.blocks.blocks));
+            try std.testing.expectEqualSlices(transformations.Event, before.metadata.timed.events.items, after.metadata.timed.events.items);
+            try std.testing.expectEqualDeep(before.metadata.roads.items, after.metadata.roads.items);
+            try std.testing.expectEqualSlices(transformations.BlockIndex, before.metadata.constructed.items, after.metadata.constructed.items);
+        }
+
+        fn expectUnpublished(self: @This(), fixture: *const BlueprintSoilApplyTest, task: *BlueprintAdmissionTask) !void {
+            const service = &fixture.base.service;
+            const state = &service.worker_state;
+            // Promotion and spare collection capacity may survive a failed
+            // reservation; authoritative cells, histories and revisions may not.
+            try expectChunkUnchanged(self.lower, fixture.soilSource(lower_id));
+            try expectChunkUnchanged(self.upper, fixture.soilSource(upper_id));
+            try std.testing.expectEqual(self.lower.metadata.timed.events.items.len != 0, state.timed_chunks.contains(lower_id));
+            try std.testing.expectEqual(self.upper.metadata.timed.events.items.len != 0, state.timed_chunks.contains(upper_id));
+            try std.testing.expectEqual(self.generated_chunk_count, state.generated_chunk_count);
+            try std.testing.expectEqual(@as(u64, 0), state.next_mesh_revision);
+            try std.testing.expectEqual(@as(u32, 0), state.mesh_revisions.count());
+            try std.testing.expectEqual(@as(u32, 0), service.dirty_meshes.count());
+            try std.testing.expectEqual(self.overlay_revision, state.blueprints.revision);
+            try std.testing.expectEqual(@as(u64, 0), state.blueprints.max_instance_id);
+            try std.testing.expectEqual(@as(u32, 0), state.blueprints.instances.count());
+            try std.testing.expectEqual(@as(u32, 0), state.blueprints.chunks.count());
+            try std.testing.expect(state.blueprints.targetAt(origin) == null);
+            try std.testing.expectEqual(@as(usize, 0), service.blueprint_journal.items.len);
+            try std.testing.expectEqual(@as(usize, 0), service.blueprint_journal_bytes);
+            try std.testing.expectEqualDeep(blueprint_wire.PrepareSummary{}, service.blueprint_journal_summary);
+            try std.testing.expectEqualDeep(self.lower_sub, fixture.base.client.subscriptions.get(lower_id).?);
+            try std.testing.expectEqualDeep(self.upper_sub, fixture.base.client.subscriptions.get(upper_id).?);
+            try std.testing.expectEqual(@as(usize, 0), fixture.base.client.pending.blueprint_changes.items.len);
+            try std.testing.expectEqual(@as(usize, 0), fixture.base.client.pending.responses.items.len);
+            try std.testing.expectEqual(@as(usize, 0), fixture.base.client.blueprint_results.items.items.len);
+            try std.testing.expectEqual(self.resolved_request, fixture.base.client.resolved_request);
+            try std.testing.expect(!service.lifecycle.unsaved_work);
+            try std.testing.expect(service.blueprint_task == task);
+            try std.testing.expectEqual(@as(usize, 1), task.response_copies.items.len);
+        }
+
+        fn expectCommitted(self: @This(), fixture: *const BlueprintSoilApplyTest) !void {
+            const service = &fixture.base.service;
+            const state = &service.worker_state;
+            const lower = state.modified_chunks.get(lower_id).?;
+            const upper = state.modified_chunks.get(upper_id).?;
+            try std.testing.expectEqual(self.lower.chunk_revision + 1, lower.chunk_revision);
+            try std.testing.expectEqual(self.upper.chunk_revision + 1, upper.chunk_revision);
+            try std.testing.expectEqual(rules.BlockType.packed_dirt, lower.content.getBlock(.{ 10, 10, 31 }));
+            try std.testing.expectEqual(rules.BlockType.packed_dirt, upper.content.getBlock(.{ 12, 10, 0 }));
+            try std.testing.expectEqual(rules.BlockType.dirt, upper.content.getBlock(.{ 11, 10, 0 }));
+            try std.testing.expectEqual(rules.BlockType.grass, upper.content.getBlock(.{ 13, 10, 0 }));
+            try std.testing.expectEqual(@as(usize, 0), lower.metadata.timed.events.items.len);
+            const expected_upper_timers: []const transformations.Event = if (self.upper.metadata.timed.events.items.len == 0) &.{} else &.{ self.upper.metadata.timed.events.items[0], self.upper.metadata.timed.events.items[2] };
+            try std.testing.expectEqualSlices(transformations.Event, expected_upper_timers, upper.metadata.timed.events.items);
+            try std.testing.expectEqual(self.overlay_revision + 1, state.blueprints.revision);
+            try std.testing.expectEqual(@as(u32, 1), state.blueprints.instances.count());
+            try std.testing.expect(state.blueprints.targetAt(origin) != null);
+            try std.testing.expectEqual(@as(usize, 1), service.blueprint_journal.items.len);
+            try std.testing.expect(service.blueprint_journal.items[0] == .instance);
+            try std.testing.expectEqual(@as(usize, 1), service.blueprint_journal_summary.operation_count);
+            try std.testing.expectEqual(@as(usize, 64), service.blueprint_journal_bytes);
+            try std.testing.expect(fixture.base.client.subscriptions.get(lower_id).?.blocks_pending);
+            try std.testing.expect(fixture.base.client.subscriptions.get(upper_id).?.blocks_pending);
+            try std.testing.expectEqual(@as(usize, 1), fixture.base.client.pending.blueprint_changes.items.len);
+            try std.testing.expectEqual(@as(usize, 1), fixture.base.client.blueprint_results.items.items.len);
+            const reply = fixture.base.client.blueprint_results.items.items[0];
+            try std.testing.expectEqual(@as(u64, 2), reply.request_id);
+            try std.testing.expectEqual(.success, reply.status);
+            try std.testing.expectEqual(.apply, reply.kind);
+            try std.testing.expectEqual(@as(u64, 2), fixture.base.client.resolved_request);
+            try std.testing.expect(service.lifecycle.unsaved_work);
+            try std.testing.expect(service.blueprint_task == null);
+        }
+    };
 
     fn expectUncommitted(self: *@This()) !void {
         const service = &self.base.service;
@@ -10582,6 +10738,75 @@ test "Apply source capture and allocation denial leave soil and overlay unpublis
         try fixture.expectUncommitted();
         try service.commitBlueprintApplication(task);
         try std.testing.expectEqual(@as(u32, 1), service.worker_state.blueprints.instances.count());
+    }
+}
+
+test "Apply allocation sweep leaves resident and generated soil unpublished until every reservation succeeds" {
+    const a = std.testing.allocator;
+    for ([_]bool{ false, true }) |generated| {
+        var failures: usize = 0;
+        var partial_promotion_failure = false;
+        var complete_promotion_failure = false;
+        var committed = false;
+        for (0..64) |fail_index| {
+            var fixture: BlueprintSoilApplyTest = undefined;
+            const task = try fixture.initWithSources(generated);
+            defer fixture.deinit();
+            const service = &fixture.base.service;
+            // Journal admission reads only store limits; no writer runs here.
+            var store: storage.Store = undefined;
+            store.limits = .{};
+            service.store = &store;
+            // Simulate the consumer having drained Save notifications. Every
+            // fresh attempt must reserve both Apply queues, including its reply.
+            for (fixture.base.client.pending.blueprint_changes.items) |*change| change.deinit(a);
+            fixture.base.client.pending.blueprint_changes.deinit(a);
+            fixture.base.client.pending.blueprint_changes = .empty;
+            fixture.base.client.blueprint_results.items.deinit(a);
+            fixture.base.client.blueprint_results.items = .empty;
+            service.lifecycle.unsaved_work = false;
+            const baseline = try BlueprintSoilApplyTest.AllocationBaseline.init(&fixture);
+            defer baseline.deinit();
+            var failure = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index, .resize_fail_index = 0 });
+            service.allocator = failure.allocator();
+            // A distinct live allocation domain makes both generated-source
+            // promotions clone, while the same failure sweep covers their data.
+            var live = std.testing.FailingAllocator.init(failure.allocator(), .{});
+            if (generated) service.worker_state.live_allocator = live.allocator();
+            const attempt = service.commitBlueprintApplication(task);
+            if (attempt) |_| fixture.awaitRetirements() else |_| {}
+            service.allocator = a;
+            service.worker_state.live_allocator = null;
+            if (attempt) |_| {
+                try std.testing.expect(!failure.has_induced_failure);
+                try baseline.expectCommitted(&fixture);
+                committed = true;
+                break;
+            } else |err| {
+                try std.testing.expectEqual(error.OutOfMemory, err);
+                try std.testing.expect(failure.has_induced_failure);
+                try std.testing.expectEqual(fail_index, failure.alloc_index);
+                try baseline.expectUnpublished(&fixture, task);
+                const resident_count = service.worker_state.modified_chunks.count();
+                if (generated) {
+                    try std.testing.expectEqual(@as(usize, 2), resident_count + service.worker_state.generated_chunks.count());
+                    partial_promotion_failure = partial_promotion_failure or resident_count == 1;
+                    complete_promotion_failure = complete_promotion_failure or resident_count == 2;
+                }
+                failures += 1;
+                // The same detached result must remain retryable after every
+                // failed reservation, including failure after source promotion.
+                try service.commitBlueprintApplication(task);
+                fixture.awaitRetirements();
+                try baseline.expectCommitted(&fixture);
+            }
+        }
+        try std.testing.expect(committed);
+        try std.testing.expect(failures >= 6);
+        if (generated) {
+            try std.testing.expect(partial_promotion_failure);
+            try std.testing.expect(complete_promotion_failure);
+        }
     }
 }
 

@@ -9,6 +9,7 @@ const consts = @import("consts.zig");
 
 pub const Cell = runtime.Cell;
 pub const ChunkId = consts.ChunkId;
+pub const GrowthMask = std.StaticBitSet(32768);
 pub const Surface = struct {
     material: blueprint.BlockType,
     timer_kind: ?transformations.Kind = null,
@@ -31,10 +32,14 @@ pub const Plan = struct {
     changes: std.ArrayList(Change) = .empty,
     /// Canonical unique chunks with an actual material or timer change.
     chunk_ids: std.ArrayList(ChunkId) = .empty,
+    /// Exact prepared grass-growth cancellations, including empty masks for
+    /// changed chunks whose grass is cleared without a pending growth timer.
+    cancel_grow: std.AutoHashMapUnmanaged(ChunkId, GrowthMask) = .empty,
 
     pub fn deinit(self: *Plan, allocator: std.mem.Allocator) void {
         self.changes.deinit(allocator);
         self.chunk_ids.deinit(allocator);
+        self.cancel_grow.deinit(allocator);
         self.* = undefined;
     }
 };
@@ -46,8 +51,6 @@ pub const Plan = struct {
 pub fn prepare(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, definition: blueprint.Definition, instance: runtime.Instance, source: Source) !Plan {
     var result: Plan = .{};
     errdefer result.deinit(allocator);
-    var chunks: std.AutoHashMapUnmanaged(ChunkId, void) = .empty;
-    defer chunks.deinit(allocator);
     for (definition.cells, 0..) |material, index| {
         if (material == .none) continue;
         var block = runtime.worldCell(layout, instance.origin, definition.size, instance.rotation, blueprint.cellAtIndex(definition.size, index)) orelse return error.InvalidBlueprint;
@@ -55,17 +58,20 @@ pub fn prepare(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, 
         block[2] -= 1;
         const surface = try source.read(source.context, block);
         if (surface.material != .grass and surface.material != .packed_dirt) continue;
-        const clear_grass = surface.material == .grass;
-        const cancel_grow = surface.timer_kind == .grow_grass;
-        if (!clear_grass and !cancel_grow) continue;
-        try result.changes.append(allocator, .{ .block = block, .clear_grass = clear_grass, .cancel_grow = cancel_grow });
+        const change: Change = .{ .block = block, .clear_grass = surface.material == .grass, .cancel_grow = surface.timer_kind == .grow_grass };
+        if (!change.clear_grass and !change.cancel_grow) continue;
+        try result.changes.append(allocator, change);
         const id = layout.encodeChunkCoords(.{
             @intCast(block[0] / consts.CHUNK_SIZE),
             @intCast(block[1] / consts.CHUNK_SIZE),
             @intCast(block[2] / consts.CHUNK_SIZE),
         });
-        const entry = try chunks.getOrPut(allocator, id);
-        if (!entry.found_existing) try result.chunk_ids.append(allocator, id);
+        const entry = try result.cancel_grow.getOrPut(allocator, id);
+        if (!entry.found_existing) {
+            entry.value_ptr.* = .initEmpty();
+            try result.chunk_ids.append(allocator, id);
+        }
+        if (change.cancel_grow) entry.value_ptr.set(transformations.index(.{ @truncate(block[0]), @truncate(block[1]), @truncate(block[2]) }));
     }
     return result;
 }
@@ -125,6 +131,9 @@ test "miniature coverage clears only target-below grass and cancels only surface
         .{ .block = .{ 15, 10, 31 }, .clear_grass = true, .cancel_grow = false },
     }, plan.changes.items);
     try std.testing.expectEqualSlices(ChunkId, &.{layout.encodeChunkCoords(.{ 0, 0, 0 })}, plan.chunk_ids.items);
+    const mask = plan.cancel_grow.getPtr(plan.chunk_ids.items[0]).?;
+    try std.testing.expectEqual(@as(usize, 1), mask.count());
+    for (0..surfaces.len) |x| try std.testing.expectEqual(x == 1, mask.isSet(transformations.index(.{ 10 + @as(u5, @intCast(x)), 10, 31 })));
     // Preparation itself changes no material or timer, even for planned effects.
     for (surfaces, 0..) |surface, x| try std.testing.expectEqualDeep(surface, fixture.surfaces.get(.{ 10 + @as(u32, @intCast(x)), 10, 31 }).?);
 }
@@ -153,6 +162,28 @@ test "coverage uses rotated wrapped targets and deduplicates changed chunks acro
     try std.testing.expectEqual(@as(usize, 10), fixture.reads);
     try std.testing.expectEqual(@as(usize, 6), plan.chunk_ids.items.len);
     for (plan.chunk_ids.items, 0..) |id, i| try std.testing.expect(std.mem.indexOfScalar(ChunkId, plan.chunk_ids.items[0..i], id) == null);
+    try std.testing.expectEqual(plan.chunk_ids.items.len, plan.cancel_grow.count());
+    for (plan.chunk_ids.items) |id| try std.testing.expectEqual(@as(usize, 1), plan.cancel_grow.getPtr(id).?.count());
+    for (expected) |block| {
+        const id = layout.encodeChunkCoords(.{ @intCast(block[0] / consts.CHUNK_SIZE), @intCast(block[1] / consts.CHUNK_SIZE), @intCast(block[2] / consts.CHUNK_SIZE) });
+        try std.testing.expect(plan.cancel_grow.getPtr(id).?.isSet(transformations.index(.{ @truncate(block[0]), @truncate(block[1]), @truncate(block[2]) })));
+    }
+}
+
+test "clearing grass without a growth event prepares an empty cancellation mask" {
+    const a = std.testing.allocator;
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
+    const definition: blueprint.Definition = .{ .size = .{ 1, 1, 1 }, .cells = &.{.planks}, .target_count = 1 };
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    try fixture.put(.{ 10, 10, 31 }, .{ .material = .grass });
+    var plan = try prepare(a, &layout, definition, Fixture.instance(.{ 10, 10, 32 }, 0), fixture.source());
+    defer plan.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), plan.changes.items.len);
+    try std.testing.expect(plan.changes.items[0].clear_grass);
+    try std.testing.expect(!plan.changes.items[0].cancel_grow);
+    try std.testing.expectEqual(@as(usize, 1), plan.chunk_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 0), plan.cancel_grow.getPtr(plan.chunk_ids.items[0]).?.count());
 }
 
 test "coverage skips cells without a below block and has no effects for loose soil" {
@@ -167,6 +198,7 @@ test "coverage skips cells without a below block and has no effects for loose so
     try std.testing.expectEqual(@as(usize, 1), fixture.reads);
     try std.testing.expectEqual(@as(usize, 0), plan.changes.items.len);
     try std.testing.expectEqual(@as(usize, 0), plan.chunk_ids.items.len);
+    try std.testing.expectEqual(@as(usize, 0), plan.cancel_grow.count());
     try std.testing.expectEqualDeep(Surface{ .material = .dirt, .timer_kind = .compact_dirt }, fixture.surfaces.get(.{ 10, 10, 0 }).?);
 }
 
