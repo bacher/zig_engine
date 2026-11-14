@@ -2,7 +2,7 @@
 
 These notes capture gameplay intent, constraints, and architecture decisions for the upcoming simulation. They accompany the [game vision](game-vision.md) and [design principles](../DESIGN_PRINCIPLES.md). They describe planned behavior and retain alternatives where no choice has been made; the selected first-version warehouse execution does not determine the full economy's scaling architecture.
 
-The [open questions](simulation-open-questions.md) track decisions needed before implementation. The [warehouse specification](../specs/features/warehouses.md) settles first-version storage behavior and execution contracts; logistics allocation, construction ownership mechanisms, and other marked follow-ups remain separate work.
+The [open questions](simulation-open-questions.md) track remaining decisions. Implement [construction ownership first, then warehouses](../specs/features/construction-state-ownership.md#q8--construction-first-then-warehouse-integration), sharing the simulation-state and capture boundary while retaining distinct records, world-query semantics, and publication policies. The [warehouse specification](../specs/features/warehouses.md) settles first-version storage behavior; full logistics allocation and other marked follow-ups remain separate work.
 
 ## Primary scenario and player intervention
 

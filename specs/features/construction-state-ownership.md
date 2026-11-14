@@ -56,8 +56,9 @@ enqueue cost only; it cannot establish the benefit of this ownership change.
 ## Requirements
 
 - R1: Transfer actual storage, mutation, and persistence responsibility for nonempty blueprint
-  target cells to simulation for their owned lifetime. Cavities and external foundations
-  remain world-data-owned. This responsibility is independent of executor/thread assignment.
+  target cells to simulation for their owned lifetime. Ordinary terrain outside those targets
+  stays world-data-owned; existing other owners are unchanged. A real supporting cell may itself
+  belong to another construction. Responsibility is independent of executor/thread assignment.
 - R2: Preserve empty-target admission, box exclusion, cavity compatibility, and whole-active-box
   extraction restrictions. Storage scope and gameplay restrictions have different extents.
   R15 explicitly extends active-site restrictions through materialization.
@@ -170,6 +171,26 @@ enqueue cost only; it cannot establish the benefit of this ownership change.
   including its own footprint/platform requirements. Remove loose-soil exclusions consistently
   from ordinary rules, blueprint normalization/certification, and the five-neighbor predicate;
   preserve that predicate's bound and resource identity across cover changes.
+
+- R30: Implement construction ownership before warehouses, establishing the simulation-state
+  domain, local mutation APIs, shared capture/restore boundary, and typed discovery/subscription
+  lifetimes that warehouses extend under Q8. No warehouse runtime, supplier selection, or NPC
+  scheduler is a prerequisite for construction ownership; adding warehouses must not introduce
+  independent owner saves or a second mutation executor in this initial baseline.
+- R31: Keep object types and registration lifetimes distinguishable in shared identity, command,
+  discovery, and publication paths. Reuse warehouse Q23's live-session external-intent retry and
+  state-resynchronization contract; persistent internal tasks retain their own recovery identity.
+  Construction deltas and warehouse full snapshots keep their type-specific update semantics.
+- R32: Separate material/support/capture reads from movement collision, targeting, and reservation
+  lookup. Fulfilled construction targets are real blocks; warehouse cargo is packed inventory
+  with collision but no structural support or capturable terrain. Pallets retain their own
+  non-support policy. Integration must preserve these distinctions without widening the
+  five-neighbor structural predicate or scanning every simulation object per query.
+- R33: Apply warehouse R48's target/envelope rule through building and materializing, including
+  already transferred target chunks. Materialization patches only construction targets and
+  retires only that site's state/claims; it cannot materialize warehouse cargo, remove member
+  pallets, or change warehouse stock, reservations, configuration, or lifecycle. Common capture
+  includes both domains and their resource/claim outcomes before dependent operations resume.
 
 ## Clarifications
 
@@ -427,6 +448,72 @@ client subscription churn, completion/grass-initialization bursts, and cold/empt
 and publication reordering at every lifecycle boundary. Record limits and uncertainty alongside
 Q2 alternatives; revisit the design if composed reads or retained state erase the intended gain.
 
+### Q8 — Construction first, then warehouse integration
+
+**CONFIRMED SEQUENCE 2026-11-14.** Implement this spec first, then implement
+[warehouses](warehouses.md) on the resulting simulation-state boundary. Warehouse Q16–Q18 and
+Q22–Q24 supply already agreed contracts, not a dependency on implemented warehouse code.
+Construction creates the first records in this domain; warehouses add a separate record type
+and operations. Both initially run on the existing service executor with bounded turns,
+coherent prepared commits, immutable held snapshots, and one coordinated capture/WAL path.
+Reuse these boundaries without requiring one generic object struct, universal transaction
+framework, or a full economy scheduler before either feature can work.
+
+| State | Authority and lifecycle |
+| --- | --- |
+| Construction progress/lifecycle and untransferred targets | Simulation; targets move to world-data at accepted materialization |
+| Immutable blueprint definitions | Shared world-scoped data retained by library/instance references; no writable per-instance copy |
+| Warehouse material, C, I, A, bounds and enabled/stopped intent | Simulation; persist while registered, independent of construction completion |
+| Ordinary terrain and warehouse member pallets | World-data; existing other simulation-owned supports remain with their current owner |
+| Player inventory | World-data; player fulfillment and warehouse transfers use coherent cross-domain commits |
+| Accepted task cargo and delivery promises, once integrated | Simulation task state, coherent with source stock, destination reservations and installed results |
+| Chunk discovery, presentation and collision caches | Derived references/views; never a second inventory or target-state authority |
+
+Shared infrastructure must distinguish object kind, identity/lifetime, session, and relevant
+revision. A ConstructionId and WarehouseId may have the same numeric value without aliasing;
+retiring one cannot invalidate the other's reference/subscription. External commands follow
+[warehouse Q23](warehouses.md#q23--command-identity-and-retry-lifetime): one live-session sequence
+identity binds the whole typed intent, including target and payload; reuse with different
+contents is rejected. An old command cannot affect a new registration. Automatic simulation
+work uses task transitions rather than a player-command cache lookup for each item.
+
+Snapshots retain type-specific meaning. Construction sends an immutable definition, initial
+progress, and revisioned batched bit/index updates. Warehouse Q24 sends compact complete object
+snapshots and may coalesce intermediate revisions; count deltas remain its Q25 follow-up.
+Share routing, retention, unknown-data and stale-lifetime handling without making a warehouse
+wait for a construction-style delta chain, or sending a full construction bitmap per fill.
+Neither object depends on client/GPU residency for authority or persistence. The warehouse's
+permitted distant visual omission does not weaken either feature's nearby-data guards.
+
+The composed world has several consumers, not a universal "occupied material" result:
+physical material and completed logical reads include built/planned construction as appropriate,
+while blueprint capture excludes packed goods under warehouse R64. Movement/rays also see
+packed inventory; structural support must ignore that cargo and pallets. Warehouse admission
+uses both composed physical contents and the complete construction target set. Require
+`warehouse envelope E ∩ construction targets T = ∅` even when base terrain is air, C=0, columns
+are disabled, or a portion has already materialized. Keep active membership until full site
+completion; storage-owner transfer alone does not release restrictions.
+
+An eligible fulfilled floor may support pallets before it materializes, despite air in its
+base chunk. A pending floor cannot. During handback, preserve pallets and warehouse claims in
+cavities and the floor's physical support; afterward world-data enforces the same pallet
+support-loss guards. Stock transfers remain inventory operations while building/materializing;
+warehouse unregister does not bypass active-box extraction guards. Completing the site does
+not unregister or materialize the warehouse. Use the single-soil model from Q6 for real floors
+and stored resource identity. Stored soil stays packed inventory with no grass timer; a real
+floor's grass scheduling checks composed cover, including its physical pallet above.
+
+Capture/restore must include partial construction transfers, warehouse objects/claims, player
+inventory, and any accepted tasks/cargo/reservations in the same coherent cut. Restore sources
+and typed indexes before accepting dependent work. A future builder installs its task-owned,
+already-paid cargo without charging the source warehouse again; publication snapshots never
+perform resource accounting. Full supplier/route/task scheduling remains separate work.
+
+Construction validation uses the existing player path and controlled internal operations;
+it need not implement warehouses or deliveries early. Verify the common boundaries in this
+stage, then run the mixed warehouse cases below during warehouse implementation. Mixed cases
+are future integration obligations, not claims that unimplemented warehouses already pass.
+
 ## Acceptance Criteria
 
 These criteria specify future implementation behavior; they do not claim runtime verification
@@ -434,7 +521,8 @@ in this documentation change. Existing IDs are retained, with superseded marker/
 criteria updated to match Q3/Q5/Q6.
 
 - AC1: GIVEN an admissible blueprint WHEN applied THEN only nonempty targets become
-  simulation-owned physical air and cavity/foundation contents stay world-data-owned.
+  simulation-owned physical air; ordinary cavity/foundation terrain stays world-data-owned
+  and any existing other simulation owners retain their state and responsibilities.
 - AC2: GIVEN failed/conflicting admission WHEN rejected THEN no partial site/discovery or
   resource effects become authoritative and no target terrain cells are replaced with markers.
 - AC3: GIVEN an accepted automatic fulfillment WHEN applied or retried THEN contents, progress,
@@ -555,6 +643,29 @@ criteria updated to match Q3/Q5/Q6.
   geometry installation it switches without a hole or duplicate, and superseded jobs cannot
   activate stale geometry.
 
+- AC54: GIVEN construction ownership implemented before warehouses WHEN exercising player
+  fulfillment, controlled internal results, materialization, and save/reopen THEN the path
+  works without a warehouse runtime or NPC scheduler and establishes the reusable Q8 boundary.
+- AC55: GIVEN construction and warehouse records with equal numeric IDs WHEN commands, snapshots,
+  or retirement are routed THEN type/lifetime isolation is preserved; reusing a live command
+  identity for a different typed intent is rejected rather than affecting either object twice.
+- AC56: GIVEN an eligible fulfilled construction block and packed cargo of the same material
+  WHEN queried THEN both can collide, only the real block supplies support/capture contents, and
+  pallets remain non-supporting; missing required owner data cannot authorize an action.
+- AC57: GIVEN a warehouse in a site's empty cavity on an eligible fulfilled simulation-owned
+  floor WHEN the site partially materializes and completes THEN support, pallets, warehouse
+  state and claims survive; stock transfers remain legal, only site restrictions retire, and
+  every target remains excluded from the warehouse envelope until site completion.
+- AC58: GIVEN partial materialization and accepted warehouse/player or task-resource mutations
+  WHEN a shared capture is restored THEN target ownership, warehouse stock/promises, cargo,
+  player inventory and claims agree at one cut without repeated charges or duplicate results.
+- AC59: GIVEN subscriptions to a construction and a warehouse WHEN warehouse full snapshots
+  skip intermediate revisions and construction deltas have a gap THEN the latest valid full
+  snapshot installs while the construction resynchronizes; neither policy is imposed on the other.
+- AC60: GIVEN soil stored as warehouse cargo and real soil supporting a pallet WHEN construction
+  completes or grass work runs THEN cargo gains no grass timer or support capability, while
+  the real floor uses Q6's support and composed-cover rules without changing warehouse inventory.
+
 ## Constraints
 
 - Keep one authoritative cell/resource state and shared coherent capture. Safe lifetimes and
@@ -583,7 +694,8 @@ criteria updated to match Q3/Q5/Q6.
 
 ### Approach
 
-Implement one complete path on the existing service executor with separate ownership domains,
+Implement construction first and expose Q8's extension boundaries for the subsequent warehouse
+feature. Implement one complete path on the existing service executor with separate ownership domains,
 immutable published snapshots, and coherent capture. Begin with definition/instance identity,
 chunk discovery, and composed readers; then move fulfillment/progress out of terrain. Introduce
 construction subscriptions before removing the old terrain-based client update path. Complete
@@ -667,10 +779,14 @@ state. Measure and fault-test these before claiming a performance improvement.
   update format gates, tests, and documentation.
 - [ ] T10: Add immutable definition caching, initial snapshots, batched deltas, subscriptions, and resync.
 - [ ] T11: Audit ordinary/dependent validation, road obligations, mesh boundaries, and raw-air shortcuts.
+- [ ] T12: Establish Q8's reusable simulation-state/capture and typed command/discovery boundaries
+  during construction implementation; record AC55–AC60 as mixed integration checks for the
+  subsequent warehouse implementation, without implementing warehouse gameplay in this stage.
 
 ### Validation
 
-- [ ] T-val: Verify AC1–AC53, relevant blueprint/persistence regressions, allocation/fault/reordering
+- [ ] T-val: Verify AC1–AC54 and the common-boundary portions of AC55–AC60; complete mixed
+  warehouse cases when that feature is implemented. Run blueprint/persistence regressions, allocation/fault/reordering
   cases, blocked-site fairness/recovery, delayed/failed geometry installation, restart during
   partial materialization, and end-to-end performance under Q7; record
   measured results, selected budgets, and remaining limitations.

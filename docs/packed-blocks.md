@@ -22,7 +22,11 @@ define its count-only inventory and repacking policy.
 Capture and serialization consumers must distinguish cargo from terrain: movement collision
 alone does not make a packed item a capturable building block. The warehouse
 [capture boundary](../specs/features/warehouses.md#blueprint-capture-boundary) preserves the
-blueprint material view and excludes derived cargo and inventory.
+blueprint material view and excludes derived cargo and inventory. A fulfilled
+[simulation-owned construction target](../specs/features/construction-state-ownership.md#q8--construction-first-then-warehouse-integration)
+is a real building block with its ordinary support/capture semantics; sharing the simulation
+state domain does not make it packed cargo. Stored soil has no terrain grass timer. Construction
+materialization affects target cells only and cannot convert nearby packed stock into terrain.
 
 ## Appearance
 
