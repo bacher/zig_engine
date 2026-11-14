@@ -1953,7 +1953,7 @@ pub fn main(init: std.process.Init) !void {
     };
     if (options.help) {
         std.debug.print("{s}\n", .{persistence_launch.usage});
-        std.debug.print("Benchmark: --benchmark-visuals OUTPUT_PREFIX [--visual-policy immediate|budgeted] [--benchmark-rate N] [--benchmark-duration SECONDS] [--benchmark-camera orbit|travel]\nUses a fresh ephemeral flat world; duration is an integer in 1..60 seconds.\n", .{});
+        std.debug.print("Benchmark: --benchmark-visuals OUTPUT_PREFIX [--visual-policy immediate|budgeted] [--benchmark-rate N] [--benchmark-duration SECONDS] [--benchmark-camera orbit|travel] [--benchmark-render-radius 3..5]\nUses a fresh ephemeral flat world; duration is an integer in 1..60 seconds.\n", .{});
         return;
     }
     // Resolve before asset startup changes cwd; opening and creation remain distinct.
@@ -2089,6 +2089,7 @@ pub fn main(init: std.process.Init) !void {
         benchmark = try client_visual_benchmark.Runner.init(allocator, init.io, benchmark_config, game.world_data.?, game.player_id);
         game.visual_benchmark = &benchmark.?;
         game.visual_budget = benchmark_config.budget();
+        game.render_radius = @intCast(benchmark_config.render_radius);
         engine.setGameplayInputBlocked(true);
     }
     // edge of the world:

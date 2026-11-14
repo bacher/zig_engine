@@ -17,6 +17,7 @@ pub const Options = struct {
     camera: enum { orbit, travel } = .orbit,
     rate: u32 = 512,
     duration_seconds: u32 = 8,
+    render_radius: u32 = 3,
 
     pub fn parse(args: []const []const u8) !?Options {
         var enabled = false;
@@ -31,7 +32,7 @@ pub const Options = struct {
             if (index + 1 == args.len) return error.MissingBenchmarkValue;
             const key = args[index];
             const value = args[index + 1];
-            const bit: u3 = if (std.mem.eql(u8, key, "--benchmark-visuals")) 0 else if (std.mem.eql(u8, key, "--visual-policy")) 1 else if (std.mem.eql(u8, key, "--benchmark-camera")) 2 else if (std.mem.eql(u8, key, "--benchmark-rate")) 3 else if (std.mem.eql(u8, key, "--benchmark-duration")) 4 else return error.UnknownBenchmarkOption;
+            const bit: u3 = if (std.mem.eql(u8, key, "--benchmark-visuals")) 0 else if (std.mem.eql(u8, key, "--visual-policy")) 1 else if (std.mem.eql(u8, key, "--benchmark-camera")) 2 else if (std.mem.eql(u8, key, "--benchmark-rate")) 3 else if (std.mem.eql(u8, key, "--benchmark-duration")) 4 else if (std.mem.eql(u8, key, "--benchmark-render-radius")) 5 else return error.UnknownBenchmarkOption;
             if (seen & (@as(u8, 1) << bit) != 0) return error.DuplicateBenchmarkOption;
             seen |= @as(u8, 1) << bit;
             switch (bit) {
@@ -43,10 +44,12 @@ pub const Options = struct {
                 2 => result.camera = std.meta.stringToEnum(@TypeOf(result.camera), value) orelse return error.InvalidBenchmarkCamera,
                 3 => result.rate = try std.fmt.parseInt(u32, value, 10),
                 4 => result.duration_seconds = try std.fmt.parseInt(u32, value, 10),
+                5 => result.render_radius = try std.fmt.parseInt(u32, value, 10),
                 else => unreachable,
             }
         }
         if (result.rate == 0 or result.rate > 8192 or result.duration_seconds == 0 or result.duration_seconds > 60 or @as(u64, result.rate) * result.duration_seconds > max_events) return error.InvalidBenchmarkSize;
+        if (result.render_radius < 3 or result.render_radius > 5) return error.InvalidBenchmarkRenderRadius;
         return result;
     }
 
@@ -230,7 +233,7 @@ pub const Runner = struct {
         const at = timing.finished_ns;
         const scene = game.engine.active_scene.?;
         const resolution: [2]u32 = .{ game.engine.gctx.swapchain_descriptor.width, game.engine.gctx.swapchain_descriptor.height };
-        if (game.render_radius != 3) self.fail("RenderRadiusReduced");
+        if (game.render_radius != @as(i32, @intCast(self.options.render_radius))) self.fail("RenderRadiusChanged");
         if (self.phase == .warmup) {
             const source_count = game.blueprint_renderer.?.miniatureCacheStats().cached_instances;
             if (self.ready(game) and source_count == self.scenario.target_count and game.engine.window_context.window.getAttribute(.focused)) {
@@ -240,7 +243,7 @@ pub const Runner = struct {
                     self.start_ns = at;
                     self.scenario.start(at);
                     self.phase = .active;
-                    std.debug.print("client visual benchmark ready: policy={s} resolution={d}x{d} targets={d}\n", .{ @tagName(self.options.policy), resolution[0], resolution[1], source_count });
+                    std.debug.print("client visual benchmark ready: policy={s} render_radius={d} loaded_chunks={d} resolution={d}x{d} targets={d}\n", .{ @tagName(self.options.policy), self.options.render_radius, game.loaded_chunk_ids.count(), resolution[0], resolution[1], source_count });
                 }
             } else self.ready_since_ns = null;
             if (at - self.warmup_ns > 60 * ns_s) self.fail("WarmupTimeout");
@@ -357,6 +360,7 @@ pub const Runner = struct {
             .camera = @tagName(self.options.camera),
             .rate = self.options.rate,
             .duration_seconds = self.options.duration_seconds,
+            .render_radius = self.options.render_radius,
             .resolution = self.resolution,
             .frame_count = self.frames.items.len,
             .planned_edits = self.progress.len,
@@ -394,10 +398,20 @@ test "client benchmark options are opt-in bounded and reject ambiguous flags" {
     try std.testing.expectEqual(@as(?Options, null), try Options.parse(&.{"--ephemeral"}));
     const options = (try Options.parse(&.{ "--benchmark-visuals", "/tmp/result", "--visual-policy", "immediate", "--benchmark-rate", "512" })).?;
     try std.testing.expectEqual(@as(u32, 512), options.rate);
+    try std.testing.expectEqual(@as(u32, 3), options.render_radius);
     try std.testing.expectEqual(std.math.maxInt(u32), options.budget().max_items);
     try std.testing.expectError(error.DuplicateBenchmarkOption, Options.parse(&.{ "--benchmark-visuals", "a", "--benchmark-rate", "2", "--benchmark-rate", "3" }));
     try std.testing.expectError(error.InvalidBenchmarkSize, Options.parse(&.{ "--benchmark-visuals", "a", "--benchmark-rate", "0" }));
     try std.testing.expectError(error.UnknownBenchmarkOption, Options.parse(&.{ "--benchmark-visuals", "a", "--world", "save" }));
+}
+
+test "client benchmark render radius is configurable and bounded" {
+    const options = (try Options.parse(&.{ "--benchmark-visuals", "/tmp/result", "--benchmark-render-radius", "5" })).?;
+    try std.testing.expectEqual(@as(u32, 5), options.render_radius);
+    for ([_][]const u8{ "0", "2", "6" }) |value| {
+        try std.testing.expectError(error.InvalidBenchmarkRenderRadius, Options.parse(&.{ "--benchmark-visuals", "a", "--benchmark-render-radius", value }));
+    }
+    try std.testing.expectError(error.DuplicateBenchmarkOption, Options.parse(&.{ "--benchmark-visuals", "a", "--benchmark-render-radius", "3", "--benchmark-render-radius", "5" }));
 }
 
 test "client latency watermarks preserve independently prepared coalesced events" {

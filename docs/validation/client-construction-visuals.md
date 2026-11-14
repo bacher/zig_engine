@@ -35,6 +35,14 @@ Input bounds are 1–8,192 fills/second, 1–60 integer seconds, and at most 65,
 fills (`rate * duration`). Repetitions must be positive. The client also reserves
 at most 65,536 active frame samples and rejects a run that exhausts them.
 
+`--render-radius` selects a benchmark-only chunk radius from 3 to 5 (default 3).
+For the wider-distance comparison, use `--render-radius 5`; the driver passes
+`--benchmark-render-radius 5` to each client. Reports record the requested radius,
+and any runtime radius change invalidates the measurement. Normal gameplay keeps
+its existing radius. In the four-chunk-high fixture, this expands the resident box
+from 7×7×4 to 11×11×4 chunks (196 to 484); the local block-data radius stays 1,
+so the added distance primarily increases the service-mesh streaming/render ring.
+
 The equivalent single-client command is:
 
 ```sh
@@ -64,7 +72,7 @@ subscriptions satisfied, no pending packages/preparations/uploads, current-token
 block snapshots backed by client chunks, and all 132,300 target miniature sources
 cached. Readiness resets when these conditions change. Warmup times out after
 60 seconds; fixture setup has a separate 60-second deadline. Losing focus,
-changing physical resolution, or reducing the render radius invalidates the run.
+changing physical resolution, or changing the requested render radius invalidates the run.
 
 Arrivals follow elapsed wall time rather than frame count. Busy admission retains
 the due backlog; at most 256 operations are outstanding. After input duration,
@@ -125,9 +133,10 @@ watermarks, and actual block contents after representation handoffs.
 python3 -m unittest discover -s scripts -p 'test_benchmark_client_visuals.py' -v
 ```
 
-All 22 Python tests pass. They cover strict summary validation, complete workloads
+All 30 Python tests pass. They cover strict summary validation, complete workloads
 and latency observations, acknowledgement-window throughput, checksum/resolution
-equivalence, medians, execution order, and client argument bounds/formatting.
+equivalence, medians, execution order, client argument bounds/formatting, and
+render-radius forwarding, validation and report metadata.
 
 ## Windowed results — 2026-11-14
 

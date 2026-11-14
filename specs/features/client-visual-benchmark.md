@@ -36,6 +36,10 @@ they do not establish complete-client frame pacing or edit-to-display latency.
 - R7: Run sequential alternating repetitions with fixed resolution/settings and
   readiness-based warmup. Reject invalid workloads, incomplete publication, changed
   resolution/focus, or differing final checksums before calculating A/B aggregates.
+- R8: Allow an explicit benchmark-only render radius of 3–5 chunks, default 3.
+  Record it in reports and reject effective-radius changes or mismatched A/B radii.
+  This varies the outer mesh ring while keeping the local block-data radius and
+  normal gameplay defaults unchanged.
 
 ## Clarifications
 

@@ -1,17 +1,22 @@
 """Pure summary validation/aggregation tests; no client processes or windows."""
 
 import copy
+import contextlib
+import io
+import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import benchmark_client_visuals as benchmark
 
 
-def summary(policy="immediate", frame_p95=5.0):
+def summary(policy="immediate", frame_p95=5.0, render_radius=3):
     return {
         "schema_version": 1, "valid": True, "invalid_reason": None,
         "policy": policy, "rate": 512, "duration_seconds": 8.0, "camera": "orbit",
-        "resolution": [1280, 720], "frame_count": 100,
+        "render_radius": render_radius, "resolution": [1280, 720], "frame_count": 100,
         "planned_edits": 4096, "admitted_edits": 4096, "accepted_edits": 4096,
         "acceptance_window_seconds": 8.0, "accepted_edits_per_second": 512.0,
         "rejected_edits": 0, "final_checksum": "0123456789abcdef", "unresolved_visuals": 0,
@@ -24,7 +29,7 @@ def summary(policy="immediate", frame_p95=5.0):
 
 
 def validate(value, **kwargs):
-    options = dict(policy="immediate", rate=512, duration=8.0, camera="orbit")
+    options = dict(policy="immediate", rate=512, duration=8.0, camera="orbit", render_radius=3)
     options.update(kwargs)
     benchmark.validate_summary(value, **options)
 
@@ -32,6 +37,18 @@ def validate(value, **kwargs):
 class ValidationTests(unittest.TestCase):
     def test_accepts_complete_run(self):
         validate(summary())
+
+    def test_accepts_requested_render_radius(self):
+        validate(summary(render_radius=5), render_radius=5)
+
+    def test_rejects_missing_or_wrong_render_radius(self):
+        for wrong in (None, 3, 5.0, True):
+            with self.subTest(render_radius=wrong):
+                value = summary(render_radius=wrong)
+                if wrong is None:
+                    del value["render_radius"]
+                with self.assertRaisesRegex(ValueError, "render_radius"):
+                    validate(value, render_radius=5)
 
     def test_rejects_client_invalidity(self):
         value = summary()
@@ -117,6 +134,7 @@ class ValidationTests(unittest.TestCase):
 
     def test_rejects_checksum_resolution_or_workload_mismatch(self):
         for key, wrong in (("final_checksum", "different"), ("resolution", [640, 480]),
+                           ("render_radius", 5),
                            ("admitted_edits", 4000), ("accepted_edits", 4000),
                            ("rejected_edits", 1), ("planned_edits", 4000)):
             with self.subTest(key=key):
@@ -177,9 +195,75 @@ class AggregationTests(unittest.TestCase):
 class WorkloadTests(unittest.TestCase):
     def test_command_passes_duration_as_integer_seconds(self):
         command = benchmark.build_command(Path("/tmp/client"), Path("/tmp/output"),
-                                          policy="budgeted", rate=512, duration=8, camera="orbit")
+                                          policy="budgeted", rate=512, duration=8, camera="orbit",
+                                          render_radius=5)
         self.assertEqual(command[command.index("--benchmark-duration") + 1], "8")
         self.assertEqual(command[command.index("--benchmark-rate") + 1], "512")
+        self.assertEqual(command[command.index("--benchmark-render-radius") + 1], "5")
+
+    def test_command_defaults_to_render_radius_three(self):
+        command = benchmark.build_command(Path("/tmp/client"), Path("/tmp/output"),
+                                          policy="budgeted", rate=512, duration=8, camera="orbit")
+        self.assertEqual(command[command.index("--benchmark-render-radius") + 1], "3")
+
+    def test_rejects_render_radii_outside_client_limits(self):
+        for render_radius in (2, 6, 0, -1, 3.0, True):
+            with self.subTest(render_radius=render_radius):
+                with self.assertRaisesRegex(ValueError, "render_radius"):
+                    benchmark.build_command(Path("/tmp/client"), Path("/tmp/output"),
+                                            policy="budgeted", rate=512, duration=8,
+                                            camera="orbit", render_radius=render_radius)
+
+    def test_accepts_supported_render_radii(self):
+        for render_radius in (3, 4, 5):
+            with self.subTest(render_radius=render_radius):
+                benchmark.validate_render_radius(render_radius)
+
+    def test_cli_defaults_to_render_radius_three_and_accepts_five(self):
+        for arguments, expected in (([], 3), (["--render-radius", "5"], 5)):
+            with self.subTest(arguments=arguments):
+                with mock.patch("sys.argv", ["benchmark_client_visuals.py", *arguments]), \
+                        mock.patch.object(benchmark, "run", return_value=0) as run:
+                    self.assertEqual(benchmark.main(), 0)
+                    self.assertEqual(run.call_args.args[0].render_radius, expected)
+
+    def test_cli_rejects_unsupported_or_noninteger_render_radius(self):
+        for render_radius in ("2", "6", "3.5"):
+            with self.subTest(render_radius=render_radius):
+                with mock.patch("sys.argv", ["benchmark_client_visuals.py", "--render-radius", render_radius]), \
+                        contextlib.redirect_stderr(io.StringIO()), \
+                        mock.patch.object(benchmark, "run") as run:
+                    with self.assertRaises(SystemExit) as error:
+                        benchmark.main()
+                    self.assertEqual(error.exception.code, 2)
+                    run.assert_not_called()
+
+    def test_run_records_requested_render_radius_and_passes_it_to_client(self):
+        def fake_client(command, **kwargs):
+            prefix = command[command.index("--benchmark-visuals") + 1]
+            policy = command[command.index("--visual-policy") + 1]
+            render_radius = int(command[command.index("--benchmark-render-radius") + 1])
+            Path(prefix + ".summary.json").write_text(json.dumps(summary(policy, render_radius=render_radius)))
+            for suffix in (".frames.csv", ".events.csv"):
+                Path(prefix + suffix).touch()
+            return mock.Mock(returncode=0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            binary = root / "client"
+            binary.touch()
+            output = root / "output"
+            with mock.patch("sys.argv", ["benchmark_client_visuals.py", "--binary", str(binary),
+                                        "--output-dir", str(output), "--camera", "orbit",
+                                        "--repetitions", "1", "--render-radius", "5"]), \
+                    mock.patch.object(benchmark.subprocess, "run", side_effect=fake_client) as client, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(benchmark.main(), 0)
+            report = json.loads((output / "report.json").read_text())
+            self.assertTrue(report["valid"])
+            self.assertEqual(report["render_radius"], 5)
+            self.assertEqual(client.call_count, 2)
+            self.assertTrue(all(record["summary"]["render_radius"] == 5 for record in report["runs"]))
 
     def test_rejects_workloads_outside_client_limits(self):
         for rate, duration in ((8193, 1), (1, 61), (8192, 9), (0, 8), (512, 0), (512, 8.0)):

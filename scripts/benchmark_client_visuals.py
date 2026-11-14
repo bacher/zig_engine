@@ -43,14 +43,16 @@ def number(value: Any, label: str, *, integer: bool = False) -> int | float:
 
 
 def validate_summary(summary: Any, *, policy: str, rate: int,
-                     duration: float, camera: str) -> None:
+                     duration: float, camera: str, render_radius: int = 3) -> None:
     """Reject incomplete workloads before producing performance comparisons."""
     if (not isinstance(summary, dict) or type(summary.get("schema_version")) is not int
             or summary["schema_version"] != 1):
         raise ValueError("unsupported or missing summary schema_version")
     if summary.get("valid") is not True:
         raise ValueError(f"client marked run invalid: {summary.get('invalid_reason')}")
-    for key, expected in (("policy", policy), ("rate", rate), ("camera", camera)):
+    number(summary.get("render_radius"), "render_radius", integer=True)
+    for key, expected in (("policy", policy), ("rate", rate), ("camera", camera),
+                          ("render_radius", render_radius)):
         if summary.get(key) != expected:
             raise ValueError(f"{key}: expected {expected!r}, got {summary.get(key)!r}")
     actual_duration = number(summary.get("duration_seconds"), "duration_seconds")
@@ -108,7 +110,7 @@ def validate_equivalence(summaries: list[dict[str, Any]]) -> None:
         raise ValueError("no runs to compare")
     reference = summaries[0]
     for summary in summaries[1:]:
-        for key in ("camera", "rate", "duration_seconds", "resolution", "planned_edits",
+        for key in ("camera", "rate", "duration_seconds", "render_radius", "resolution", "planned_edits",
                     "admitted_edits", "accepted_edits", "rejected_edits", "final_checksum"):
             if summary[key] != reference[key]:
                 raise ValueError(
@@ -164,12 +166,20 @@ def validate_workload(rate: int, duration: int) -> None:
         raise ValueError("rate * duration must not exceed 65536 edits")
 
 
+def validate_render_radius(render_radius: int) -> None:
+    number(render_radius, "render_radius", integer=True)
+    if not 3 <= render_radius <= 5:
+        raise ValueError("render_radius must be between 3 and 5 chunks")
+
+
 def build_command(binary: Path, prefix: Path, *, policy: str, rate: int,
-                  duration: int, camera: str) -> list[str]:
+                  duration: int, camera: str, render_radius: int = 3) -> list[str]:
     validate_workload(rate, duration)
+    validate_render_radius(render_radius)
     return [str(binary), "--benchmark-visuals", str(prefix),
             "--visual-policy", policy, "--benchmark-rate", str(rate),
-            "--benchmark-duration", str(duration), "--benchmark-camera", camera]
+            "--benchmark-duration", str(duration), "--benchmark-camera", camera,
+            "--benchmark-render-radius", str(render_radius)]
 
 
 def save_report(root: Path, report: dict[str, Any]) -> None:
@@ -178,6 +188,7 @@ def save_report(root: Path, report: dict[str, Any]) -> None:
 
 def run(args: argparse.Namespace) -> int:
     validate_workload(args.rate, args.duration)
+    validate_render_radius(args.render_radius)
     binary = args.binary.expanduser().resolve()
     if not binary.is_file():
         raise ValueError(f"client binary does not exist: {binary}; build ReleaseFast first")
@@ -193,6 +204,7 @@ def run(args: argparse.Namespace) -> int:
     report: dict[str, Any] = {
         "schema_version": 1, "valid": False, "status": "running", "binary": str(binary),
         "rate": args.rate, "duration_seconds": args.duration, "cameras": cameras,
+        "render_radius": args.render_radius,
         "repetitions": args.repetitions, "timeout_seconds": timeout, "runs": [],
         "aggregation": "median of per-run statistics; frames are not pooled",
         "baseline": "immediate: same visual FIFO, unlimited per-frame admission",
@@ -204,7 +216,8 @@ def run(args: argparse.Namespace) -> int:
         for camera, repetition, policy in execution_order(args.repetitions, cameras):
             prefix = root / f"{len(report['runs']) + 1:02d}-{camera}-r{repetition:02d}-{policy}"
             command = build_command(binary, prefix, policy=policy, rate=args.rate,
-                                    duration=args.duration, camera=camera)
+                                    duration=args.duration, camera=camera,
+                                    render_radius=args.render_radius)
             paths = {kind: str(prefix) + suffix for kind, suffix in (
                 ("summary", ".summary.json"), ("frames", ".frames.csv"),
                 ("events", ".events.csv"), ("log", ".log"))}
@@ -227,7 +240,8 @@ def run(args: argparse.Namespace) -> int:
                         raise ValueError(f"client did not write {paths[kind]}")
                 summary = json.loads(Path(paths["summary"]).read_text())
                 validate_summary(summary, policy=policy, rate=args.rate,
-                                 duration=args.duration, camera=camera)
+                                 duration=args.duration, camera=camera,
+                                 render_radius=args.render_radius)
                 record["summary"] = summary
                 comparable = [item["summary"] for item in report["runs"]
                               if item["camera"] == camera and "summary" in item]
@@ -302,6 +316,8 @@ def main() -> int:
     parser.add_argument("--duration", type=positive_int, default=8,
                         help="whole workload seconds per launch, at most 60 (default: 8); rate * duration <= 65536")
     parser.add_argument("--camera", choices=("orbit", "travel", "both"), default="both")
+    parser.add_argument("--render-radius", type=int, choices=range(3, 6), default=3,
+                        help="benchmark render radius in chunks (default: 3)")
     parser.add_argument("--timeout", type=positive_float, help="maximum seconds per process, including startup and drain")
     args = parser.parse_args()
     try:
