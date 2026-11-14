@@ -5,11 +5,14 @@ The voxel application combines deterministic terrain generation with an in-memor
 ## Space and contents
 
 The [construction state ownership spec](../specs/features/construction-state-ownership.md)
-selects a future split in which active blueprint targets are stored and saved by simulation
-until handback. Physical queries will compose those cells with ordinary terrain. Its proposed
-static ownership markers do not encode progress and must not be interpreted as material or
-occupancy. The representations and service behavior below describe the current implementation;
-no redirect tag or target-ownership bitset has been added.
+selects a future static/dynamic split: simulation owns active targets, while base terrain stays
+air at those cells until materialization. Chunk references and immutable blueprint definitions
+resolve membership without ownership-marker blocks. Clients compose terrain with separately
+subscribed progress and switch each visible portion only when matching static geometry is
+installed for display, retaining dynamic geometry through build/upload delays. Collision and
+interaction may adopt coherent chunk data before that visual handoff.
+Physical queries, collision, and constructed-cell enumeration must compose both sources too.
+The representations and service behavior below describe the current implementation.
 
 Chunks remain fixed at 32 by 32 by 32 blocks. The application chooses world dimensions at scene creation; its current preset is 2048 by 1024 by 32 chunks: 65536 by 32768 by 1024 blocks. Each block occupies one world-coordinate unit, defined as one metre. X wrapping is always enabled by the application's compile-time engine configuration. Positions beyond y/z storage boundaries cannot index terrain; outer faces at those boundaries remain exposed, and the player treats those edges as collision walls.
 

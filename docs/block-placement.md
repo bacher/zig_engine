@@ -452,6 +452,12 @@ lowest-height rules while avoiding repeated overlapping searches during synchron
 
 ## Simulation time and transformations
 
+The planned [construction soil model](../specs/features/construction-state-ownership.md#q6--soil-and-compact-physical-state)
+removes the loose/compacted distinction and compaction mechanics while retaining grass. It keeps
+one-time grass clearing below miniatures, holds site soil bare through materialization, and
+starts ordinary world-data growth only after the whole site completes. The rules below describe
+the current implementation; the new model and its ruleset/save changes are pending.
+
 Simulation time uses 60 ticks per second. The application advances it from frame elapsed
 time; the service processes monotonic `advanceTo` requests in the same queue as edits.
 Stopping game-time advancement pauses deadlines. Subscription eviction has no effect.

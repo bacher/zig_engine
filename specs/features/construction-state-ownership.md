@@ -1,7 +1,8 @@
 ---
 service: zig_engine
 created: 2026-11-12
-status: draft
+updated: 2026-11-14
+status: approved
 ---
 
 # Move active construction targets into simulation state
@@ -9,368 +10,783 @@ status: draft
 ## Intent
 
 Make simulation the authoritative owner of active construction target cells, including their
-physical contents, progress, and saved state. Integrate completed targets into world-data
-chunks when returning ownership, so routine automatic fulfillment can update resources and
-construction state within simulation.
+physical contents, progress, and saved state. Clients compose an almost static terrain layer
+with immutable blueprint definitions and compact construction progress. Completed constructions
+materialize into world-data chunks in bounded background work.
 
-Target-only ownership is the selected direction for further design. Marker encoding, safe
-reads, handback scheduling, and soil transformations remain open. This specification records
-alternatives and implementation checkpoints; it does not claim a runtime implementation or
-measured performance improvement.
+The ownership, publication, and lifecycle contracts below are approved for implementation.
+This is a documentation change: runtime implementation and performance measurements remain
+pending. Exact wire encoding, scheduling budgets, and GPU representation are engineering
+choices to validate against these contracts.
 
 ## Context
 
-The author selected this direction on 2026-11-12 during the [warehouse discussion](warehouses.md#q19--construction-storage-ownership-and-handback)
-and authorized related architecture/specification changes in the same documentation change.
-Warehouse and simulation decisions in this change are dependencies for this design; it is
-not necessary to wait for a separate warehouse merge before describing their consequences.
+The direction originated in the [warehouse discussion](warehouses.md#q19--construction-storage-ownership-and-handback).
+Construction is expected to dominate world modifications in the automated economy. Optimize
+that frequent simulation path, while retaining world-data ownership of player inventory.
 
 Current [blueprints](blueprints.md) require all nonempty target cells to be physically empty
 at application, prohibit extraction throughout an active box, and allow compatible real
 content and ordinary placements in blueprint-empty cavities. Boxes cannot overlap, but
-different sites can occupy the same chunk and rely on each other's fulfilled targets.
+multiple sites can occupy the same chunk and use each other's fulfilled targets as support.
 Fulfillment checks at most five physical neighbors and needs no final structural scan.
 
-Today `world_data_service.zig` writes each completed block into terrain and updates blueprint
-progress. `blueprint_runtime.zig` already maintains chunk-local target lookups containing
-instance identity, definition-cell index, and material; fulfillment removes the target entry.
-This index describes pending miniatures, not the full lifetime of future simulation ownership.
+Today `world_data_service.zig` writes completed blocks into terrain. The runtime's pending-target
+index drops entries on fulfillment, and the last fill releases the site and its restrictions.
+Persistence likewise retires the instance on its last fulfillment. These lifetimes must change:
+filled targets need discovery until handback, and a fully filled site remains active while
+materializing. This spec explicitly supersedes blueprint R32's immediate release and the soil
+compaction/active-target aging rules. Q6 retains grass covering at admission and moves grass
+initialization for built soil to world-data after completion. Other blueprint contracts remain
+in force except the soil equivalence explicitly described there.
 
-Chunks contain 32³ byte-sized block cells. `BlockType.custom = 255` already represents custom
-blocks; it is not a free ownership flag. Empty chunks can omit the 32 KiB dense cell array.
-Existing raw occupancy shortcuts frequently treat non-air as occupied. A new redirect marker
-would therefore require explicit decoding and an audit of these shortcuts.
+[PR #64](https://github.com/bacher/zig_engine/pull/64) made fulfillment's direct cell mutation
+target-local. Current application still clears grass/cancels surface timers below targets;
+manual compaction, compaction timers, and grass growth remain implemented. Q6 removes the
+loose/compacted soil distinction and compaction mechanics, while retaining grass as surface
+cover under world-data ownership. These are planned changes, not effects already implemented
+by PR #64.
 
 The [shared save baseline](warehouses.md#q18--atomic-transfers-and-coherent-durable-capture)
 captures world, player, and simulation state coherently without a disk sync per item.
-Player inventory remains world-data-owned. [Design principles](../../DESIGN_PRINCIPLES.md)
-prioritize frequent automatic work and simulation precedence. The current
-[submission benchmark](../../docs/validation/world-command-batches.md) measures enqueue cost
-only and cannot select this architecture.
+[Design principles](../../DESIGN_PRINCIPLES.md) prioritize automatic throughput and simulation
+precedence. The [submission benchmark](../../docs/validation/world-command-batches.md) measures
+enqueue cost only; it cannot establish the benefit of this ownership change.
 
 ## Requirements
 
-- R1: Transfer actual storage, mutation, and persistence responsibility for nonempty
-  blueprint target cells to simulation for their owned lifetime. This is ownership of the
-  cells, not a temporary grant to mutate world-data-owned block arrays.
-- R2: Keep blueprint-empty cells, external foundations, and other terrain in world-data.
-  Preserve existing application validation, empty-target requirements, box exclusion,
-  cavity compatibility, and whole-active-box extraction restrictions. Storage scope and
-  gameplay restrictions have different extents.
-- R3: Give every owned cell one current authority, identified by site/registration lifetime
-  and target identity. Raw terrain bytes, discovery records, snapshots, and prepared merge
-  copies must not become independent writable copies of its physical state.
-- R4: Admit site state and its ownership discovery coherently after fallible preparation
-  and validation. Initially all targets represent known physical air. A rejected application
-  leaves no active ownership or resource effects; publish no partially admitted footprint.
-- R5: Apply accepted fulfillment, its resource outcome, and progress coherently in simulation.
-  Repeated processing has one effect. A failed or deferred operation preserves the appropriate
-  resource/task state. Concrete construction task division and cargo representation remain
-  separate design; installing an already-paid result must not charge the source again.
-- R6: Resolve owned cells into a physical world view: pending targets are air, fulfilled
-  targets are real blocks with ordinary collision, material, and support semantics. Preserve
-  a separate completed logical view that also substitutes planned targets where blueprint
-  validation requires it. Storage location does not make constructed blocks packed goods.
-- R7: Use the appropriate composed view for collision, targeting, structural checks, blueprint
-  capture, warehouse admission, routing, transformations, and rendering. Missing required
-  owner state is unknown, never stale base terrain or assumed air. Keep the five-neighbor
-  structural fulfillment bound and permitted cross-site support.
-- R8: Resolve target ownership through bounded spatial discovery without scanning all sites
-  for each cell or requiring a service message for each neighbor read. Chunk-local records
-  may name multiple sites. Select snapshot/access lifetimes and consistency under Q4 before
-  implementation; material reads do not authorize resource consumption.
-- R9: Keep ownership membership distinct from fulfillment. Any chunk-local membership mark
-  selected under Q3 remains present for pending and fulfilled targets until handback. It
-  identifies redirection, not occupancy or progress. Its presence alone cannot supply
-  collision, support, occlusion, a mineable item, or permission for ordinary placement.
+- R1: Transfer actual storage, mutation, and persistence responsibility for nonempty blueprint
+  target cells to simulation for their owned lifetime. Ordinary terrain outside those targets
+  stays world-data-owned; existing other owners are unchanged. A real supporting cell may itself
+  belong to another construction. Responsibility is independent of executor/thread assignment.
+- R2: Preserve empty-target admission, box exclusion, cavity compatibility, and whole-active-box
+  extraction restrictions. Storage scope and gameplay restrictions have different extents.
+  R15 explicitly extends active-site restrictions through materialization.
+- R3: Give every target one current authority, identified by world/session, construction
+  lifetime, and definition-cell identity. Terrain placeholders, cached snapshots, discovery
+  records, and prepared materialization copies are not independent writable physical state.
+- R4: Admit site state and discovery coherently after fallible preparation and validation.
+  Initially all targets represent known physical air. Prepare the Q6 grass clearing and growth
+  cancellation below miniatures as part of the same admission. Rejection leaves no partial
+  ownership, soil/timer, or resource effects; publication cannot expose a partial footprint.
+- R5: Apply fulfillment, its resource outcome, and progress coherently in simulation.
+  Repeated processing has one effect. A failed/deferred operation preserves the appropriate
+  task/resource state; installing an already-paid result cannot charge the source again.
+- R6: Compose physical reads: an unfulfilled target is air; a fulfilled target is its immutable
+  definition material with ordinary collision/support semantics. The separate completed logical
+  view substitutes planned targets for blueprint validation. These blocks are not packed goods.
+- R7: Use composed views for collision, targeting, structural checks, blueprint capture,
+  warehouse admission, routing, and rendering. Missing required state is unknown, never assumed
+  air. Preserve the five-neighbor structural fulfillment bound and cross-site support, without
+  a service message per neighbor or a final structural scan.
+- R8: Discover relevant sites through chunk-level references and immutable definition/transform
+  data, with no global site scan per cell query. Support multiple sites per chunk, wrapped X,
+  rotated instances, and blueprint-empty cavities. Derived lookup caches may accelerate this.
+- R9: Keep base terrain air at simulation-owned targets; do not write ownership-marker blocks
+  or a canonical per-cell ownership mask at admission. Membership derives from the definition
+  and transform, persists through fulfillment, and remains distinct from progress and current
+  storage owner. Raw base air never authorizes an ordinary edit to an owned target.
 - R10: Route edits to the current owner and preserve simulation precedence. Player fulfillment
-  still crosses the world-data-owned inventory boundary and must retain a coherent outcome.
-  Ordinary edits outside the target set retain their existing guards, including restrictions
-  inside the active box and support from nearby sites.
-- R11: Publish effective physical/progress changes independently of the static membership
-  encoding. Reuse and coalesce derived data where possible, but update logical occupancy and
-  dependent views through their proper paths. An unchanged ownership mark does not permit
-  stale physical state or eliminate boundary/mesh invalidation.
-- R12: Save site definitions/state, ownership discovery, resources/tasks, and terrain at a
-  common coherent capture boundary in the existing coordinated save system. Restore ownership
-  and required sources before dependent queries. No independently committed owner saves or
-  per-item disk synchronization are required; recent unsaved progress can be lost coherently.
-- R13: At handback, integrate only the owned cells and required metadata into current destination
-  chunks. Preserve intervening changes to other cells; never overwrite a current chunk with
-  a snapshot captured at site admission. Preserve constructed provenance and relevant remaining
-  timers/downstream obligations under their selected policies.
-- R14: Keep the simulation source authoritative until a prepared ownership handoff is accepted.
-  Installation, discovery retirement, and recovery must identify one coherent owner/outcome;
-  retry cannot duplicate blocks. Bound preparation and transient memory across large or
-  simultaneous handbacks. Multi-chunk handoff granularity remains Q5.
-- R15: Preserve blueprint R32's gameplay completion contract, including removal of site-specific
-  restrictions, without a new final structural scan. Resolve how completion relates to delayed
-  storage consolidation before implementation; do not silently extend restrictions while a
-  merge waits or discard an authoritative source that still serves readers/edits.
-- R16: Keep source lifetime independent of client terrain residency or NPC models. A site may
-  span chunks and survive restart without observation. Any delayed physical/visual handoff
-  must retain enough identity/version information to reject stale updates.
-- R17: Treat retained material transformations and their side effects explicitly. Definition
-  plus progress bits are sufficient only if no unrepresented physical material changes occur.
-  Optional compaction is under Q6; removal of it or grass behavior is not selected here.
-- R18: Compare the selected ownership direction and Q2 alternatives using end-to-end automatic
-  construction, common non-target reads, target reads, contention, active-site memory, save/load,
-  and completion bursts. Report cold/empty chunks and sparse/dense target footprints as well
-  as mixed player/simulation work. Marker and batching microbenchmarks alone are insufficient.
+  crosses the world-data-owned inventory boundary and has one coherent resource outcome.
+  Ordinary edits retain existing guards, including support from other sites and active boxes.
+- R11: Publish construction changes independently of base terrain payloads. A fill must not
+  require rewriting static terrain cells or sending a full static chunk payload solely to
+  convey that fill. Client geometry may be recomposed under R26.
+  Coalesce progress and derived updates; still invalidate affected effective occupancy,
+  occlusion, collision, and boundary geometry through their proper paths.
+- R12: Capture definitions, construction progress/lifecycle, ownership transfers, resources/tasks,
+  grass timers/initialization obligations, and terrain at one coherent boundary in the shared
+  save system. Restore sources/discovery before dependent reads. No independent owner saves or
+  per-target disk synchronization are required; recent unsaved progress may be lost coherently.
+- R13: Materialize only targets and required constructed provenance into the current destination
+  chunk. Preserve other sites and intervening edits to cavities or unrelated cells; never
+  replace a current chunk with a whole-chunk snapshot taken at admission.
+- R14: Transfer ownership coherently per construction and target-bearing chunk after fallible
+  preparation. Before acceptance simulation owns that portion; afterward world-data owns it.
+  Matching cell data and transfer metadata become visible together. Retry has one effect.
+  Bound preparation, transient memory, and queued materialization work.
+- R15: Use `building → materializing → complete`. The last fill detects remaining=0 in O(1)
+  and starts materialization; it does not remove the frame or active-site restrictions.
+  Release those only after all target-bearing chunks transfer. Do not add priority handback
+  or a queue of blocked player edits. Completion requires no client acknowledgment.
+- R16: Keep authoritative source lifetime independent of client residency and NPC presentation.
+  Retire it only after handoff, safe readers/capture, and publication obligations permit.
+  Identity/revision checks reject stale replies and prevent revival of retired lifetimes.
+- R17: Remove the loose/compacted soil distinction and manual/timed compaction, but retain
+  grass surface cover under world-data ownership. Soil targets use bare soil in the immutable
+  definition and remain bare without growth timers throughout building and materializing,
+  including portions already transferred. Definition plus progress still describes all
+  simulation-owned target materials; no per-target grass state is needed there.
+- R18: Measure end-to-end fulfillment, ordinary/target reads, active-site memory, publication,
+  saves/recovery, and completion bursts. Include sparse/dense footprints, cold/empty chunks,
+  multiple instances of one definition, cross-site support, and mixed player/simulation work.
+  Compare Q2 alternatives without inferring throughput from enqueue timing alone.
+- R19: Give immutable blueprint contents a stable `BlueprintId` scoped to the world. Cache a
+  full definition once and reuse it across instances. Instance identity, origin, rotation,
+  lifecycle, and progress are separate; a changed definition receives a different identity.
+- R20: Discover sites in chunk metadata and subscribe by construction identity. On initial
+  subscription or resynchronization send the instance descriptor and full progress snapshot;
+  fetch its definition if absent. Cover visible sites and sites needed for local gameplay,
+  including collision/support, even when their models are not drawn.
+- R21: Send batched progress deltas with a defined base/result revision and lifetime/session
+  identity. Changed indices or bitmap sections are both allowed. Detect gaps, ignore duplicates
+  and stale lifetimes, and resynchronize from a snapshot. Do not require a whole-site bitmap
+  or a separate message per fulfilled block.
+- R22: Keep construction membership, current storage ownership per target chunk, and terrain
+  snapshot versions distinguishable. Chunk metadata/snapshots must identify a coherent
+  composition state, including during partial materialization and discovery retirement.
+- R23: Distinguish terrain-data readiness from render readiness. For a portion still selected
+  for display, retain its dynamic presentation until matching static geometry is installed
+  and ready to draw; receiving a snapshot or queuing a mesh build/upload is insufficient.
+  Activate the replacement and remove the old presentation in the same displayed frame,
+  without a hole or duplicate. Collision/interaction may adopt newer coherent authoritative
+  data independently of GPU readiness. Completion notices and stale data/jobs cannot erase
+  the retained display, reopen a site, or overwrite a newer post-completion edit.
+- R24: Build target groups by chunk and schedule materialization over those groups, without
+  repeatedly scanning the full definition or transferring every chunk in a sparse box.
+  About 5–10 seconds is an acceptable normal-load completion delay, not a forced wait or
+  hard deadline. Backpressure/retry cannot discard targets or release restrictions early.
+  Blocked portions must yield so other ready portions/sites receive fair service. Retain a
+  bounded retry/wake path; finite admitted work must finish once dependencies and processing
+  capacity remain available. Later arrivals cannot indefinitely displace ready admitted work.
+- R25: Preserve constructed-cell enumeration and affected-construction validation across both
+  owners. Changing a low-level block getter alone is insufficient if a caller enumerates
+  only terrain metadata. Preserve bounded/coalesced road follow-up obligations and their
+  ownership/derived-state consistency without synchronous road rebuilds on each fill.
+- R26: Decouple GPU layout from authority and network encoding. Clients may combine static
+  and dynamic geometry or use separate passes; both must render one effective world,
+  including miniature removal, full blocks, boundaries, and partial materialization.
+
+- R27: At admission clear grass and cancel pending grass growth on world-data soil immediately
+  below occupied blueprint targets under Q6. Pending targets count as cover for grass, while
+  empty definition cells and frames do not. Scheduling and expiry use composed occupancy and
+  target membership, including chunk boundaries; unknown required data defers the decision.
+- R28: After the whole site completes, world-data initializes ordinary growth for eligible
+  exposed soil targets. Use the existing grass delay from site completion, without counting
+  building time. Prepare candidates during bounded materialization; retain coherent pending
+  work until initialized. Retry/restart cannot lose, duplicate, or reset deadlines, and delayed
+  initialization must respect subsequent ordinary edits and their cell/timer lifetimes.
+- R29: Grass is surface cover, not a change in structural capability. Use one soil support
+  baseline for bare and grassy soil: current packed-soil behavior,
+  including its own footprint/platform requirements. Remove loose-soil exclusions consistently
+  from ordinary rules, blueprint normalization/certification, and the five-neighbor predicate;
+  preserve that predicate's bound and resource identity across cover changes.
+
+- R30: Implement construction ownership before warehouses, establishing the simulation-state
+  domain, local mutation APIs, shared capture/restore boundary, and typed discovery/subscription
+  lifetimes that warehouses extend under Q8. No warehouse runtime, supplier selection, or NPC
+  scheduler is a prerequisite for construction ownership; adding warehouses must not introduce
+  independent owner saves or a second mutation executor in this initial baseline.
+- R31: Keep object types and registration lifetimes distinguishable in shared identity, command,
+  discovery, and publication paths. Reuse warehouse Q23's live-session external-intent retry and
+  state-resynchronization contract; persistent internal tasks retain their own recovery identity.
+  Construction deltas and warehouse full snapshots keep their type-specific update semantics.
+- R32: Separate material/support/capture reads from movement collision, targeting, and reservation
+  lookup. Fulfilled construction targets are real blocks; warehouse cargo is packed inventory
+  with collision but no structural support or capturable terrain. Pallets retain their own
+  non-support policy. Integration must preserve these distinctions without widening the
+  five-neighbor structural predicate or scanning every simulation object per query.
+- R33: Apply warehouse R48's target/envelope rule through building and materializing, including
+  already transferred target chunks. Materialization patches only construction targets and
+  retires only that site's state/claims; it cannot materialize warehouse cargo, remove member
+  pallets, or change warehouse stock, reservations, configuration, or lifecycle. Common capture
+  includes both domains and their resource/claim outcomes before dependent operations resume.
 
 ## Clarifications
 
 ### Q1 — Selected scope and authority
 
-**CONFIRMED 2026-11-12: target-only simulation ownership for further design.** Nonempty
-blueprint cells are simulation-owned physical cells until handback. Cavities and foundations
-remain world-data-owned. Registration establishes known empty targets; it does not copy
-existing target blocks because current admission forbids them.
+**CONFIRMED 2026-11-13.** Actual simulation ownership covers only nonempty blueprint cells.
+Application validates them as physically empty; no existing blocks are copied into the site.
+Terrain stays air underneath simulation-owned targets. Empty blueprint cells retain their
+ordinary world-data contents and permitted placement behavior. The whole active box continues
+to prohibit extraction, including during materialization.
 
-The author authorizes recording the broader architecture work alongside the warehouse spec.
-This selection does not settle encodings, threads, safe-read protocol, cancellation, or final
-merge scheduling. Existing runtime documentation remains descriptive of current code until
-implementation; it links this spec as the intended change.
+This is an ownership and publication change, not a requirement for another server thread.
+Start with separate state domains on the existing service executor, following
+[warehouse Q22](warehouses.md#q22--initial-execution-of-simulation-owned-warehouses).
+Read/mutation turns must not interleave halfway through an accepted transition. Published
+snapshots are immutable and held through their use; capture and asynchronous preparation hold
+sources or validate their versions before acceptance. A later parallel executor must preserve
+these guarantees, but is not a prerequisite.
 
 ### Q2 — Ownership and execution alternatives
 
-**RECORDED 2026-11-12.** Preserve these choices for prototype comparison and later review.
+**RECORDED 2026-11-12; selected baseline refined 2026-11-13.** Retain alternatives for comparison.
 
 | Alternative | Canonical target state | Routine fulfillment | Main tradeoff / status |
 | --- | --- | --- | --- |
-| Target-only simulation ownership | Simulation, then world-data at handback | Resources and target/progress update within simulation | Selected for further design; composed reads and lifecycle handoff remain necessary |
-| Whole-box simulation ownership | Simulation owns terrain and metadata throughout the box | Region-local work, plus boundary coordination | Broader transfer includes unrelated contents, cavities, and potentially warehouse pallets; not selected |
-| Target-defined actions with batched technical access | World-data retains terrain; simulation retains tasks/resources | Acquire access to all data needed for a batch, including shared metadata/side effects, and commit each result coherently | Preserves one terrain store; access and record lifetimes need coordination; retained alternative |
-| Queued world-data operations | World-data retains terrain; simulation retains tasks/resources | Submit bounded batches to the service and coordinate task/resource outcomes | Existing transport baseline; enqueue batching alone does not make cross-owner outcomes coherent |
+| Target-only simulation ownership | Simulation, then world-data at materialization | Resources and target/progress update within simulation | Selected; requires composed reads and bounded lifecycle transfer |
+| Whole-box simulation ownership | Simulation owns terrain/metadata throughout the box | Region-local work plus boundary coordination | Includes unrelated contents, cavities, and potentially warehouse pallets; not selected |
+| Target-defined actions with batched technical access | World-data retains terrain; simulation retains tasks/resources | Access all data needed for a batch and commit each result coherently | One terrain store; access and source lifetimes need coordination; retained alternative |
+| Queued world-data operations | World-data retains terrain; simulation retains tasks/resources | Submit bounded batches and coordinate resource/task outcomes | Existing transport baseline; batching alone does not settle cross-owner outcomes |
 
-The batched-access alternative preserves the earlier proposal: **site targets define the
-permitted construction actions, while technical access covers the data required for a batch
-of work**. The access set can include neighboring cells, shared metadata, progress records,
-and publication bookkeeping. It is not limited to target coordinates. The grant does not
-move terrain storage or save responsibility into simulation, and a batch need not be an
-all-or-nothing gameplay transaction. Compare bounded/renewable grants and coarser region
-access without prescribing a lock, thread topology, or permanent site-lifetime lock.
+The third alternative preserves the proposal: **site targets define permitted construction
+actions, while technical access covers the data required for a batch of work**. That may
+include neighbors, shared metadata, progress, and publication bookkeeping. It does not transfer
+storage/persistence ownership or require an all-or-nothing gameplay transaction for the batch.
 
 Best-effort resource accounting is a separate axis under
-[warehouse Q20](warehouses.md#q20--measured-exceptions-to-resource-accounting), not an inherent
-property of any ownership choice. No loss/duplication exception is selected.
+[warehouse Q20](warehouses.md#q20--measured-exceptions-to-resource-accounting).
+No loss/duplication exception is selected.
 
 ### Q3 — Static target membership in chunk data
 
-**UNRESOLVED — author proposal 2026-11-12.** At admission, write a persistent indication
-that each target belongs to simulation. Leave it unchanged when the miniature is fulfilled;
-read current occupancy/material from simulation. Clear or replace it only at accepted
-handback. This avoids mirroring progress into canonical chunk cells on every placement.
+**CONFIRMED 2026-11-13: chunk references plus definitions; no in-cell markers.** The earlier
+proposal to write a special ownership block into every target is superseded. Admission already
+requires air, and the immutable definition/transform already describes the target set.
+Avoid a second canonical per-cell membership representation and an admission write over all
+target terrain cells.
 
-The marker means **simulation-owned target**, including an already built block; it does not
-mean **remaining miniature**. Owner lookup must resolve site lifetime and target index. A
-single marker byte or membership bit cannot also encode an arbitrary site identity, and a
-chunk may intersect several nonoverlapping sites. Do not assume one owner for the whole chunk.
+For a query, find candidate sites in the chunk, transform the world coordinate into definition
+space, and test whether that cell is nonempty. A bounding box match alone does not establish
+ownership: its cavities remain terrain. Resolve wrapping/rotation with existing blueprint
+coordinate rules. Chunks without sites take the ordinary terrain path. A chunk can reference
+several sites; discovery must not assume one owner for the chunk.
 
-| Encoding candidate | Ordinary-cell read | Storage / integration cost |
-| --- | --- | --- |
-| Dedicated tag in the cell byte | Load cell and branch; ordinary material needs no per-cell owner lookup | No extra cell bytes in an already dense chunk, but a previously empty chunk may need its full 32 KiB array; tag decode, save/wire gates, counts and material-only consumers need revision |
-| Separate membership bitset in affected chunks | Chunk presence check and bit test, then resolve marked cells | 4,096 bytes for 32³ bits, excluding owner references/metadata; can preserve allocation-free base air; compare sparse footprints |
-| Sparse chunk-local target directory | Skip chunks with no sites; lookup within affected chunks | Scales with targets but has lookup/entry overhead; reuse concepts from the existing index, with different retention rules |
+Chunk references discover active restrictions and required construction data, including in
+box-only chunks. Target groups identify the subset with simulation-owned cells. Fulfillment
+may remove a miniature from pending traversal, but cannot erase ownership discovery. During
+materialization, a per-(construction, target chunk) transfer record selects the current physical
+owner while active-box membership persists until the whole site completes.
 
-These are raw payload calculations, not measured whole-process memory. A tag in the existing
-byte format does not provide a free high bit: `custom = 255` already uses it, and all codecs
-and raw material assumptions need review. The tag must be an internal storage reference,
-never a selectable, mineable, colliding, supporting, or rendered material by itself. A decoded
-physical read returns the owner's real material, air, or unknown.
+Earlier candidates were an in-cell tag, a separate 4 KiB membership bitset per 32³ chunk, and a
+sparse target directory. They are not required storage formats. A derived bitset or sparse
+lookup cache remains an optimization to measure; it must be rebuildable from site data and
+cannot become another progress authority. A cell tag would also force some empty chunks to
+allocate their otherwise omitted 32 KiB block array and change material-only consumers.
 
-The current pending-target index removes entries on fulfillment. Ownership lookup must retain
-fulfilled entries until handback, while miniature traversal may still remove them. Decide
-whether to split these indexes or derive one from another; do not keep two authoritative
-progress counts. Persist/rebuild the chosen discovery representation coherently with site
-identity. Loaded markers with unavailable owner state block dependent reads until resolved.
-
-Static membership removes per-fill membership writes, not the need to publish changing site
-state and invalidate effective occupancy/occlusion/collision or neighboring geometry. This
-also matters for mesh-only subscriptions that never receive the raw block array. Encoding,
-whether it is saved verbatim or rebuilt from canonical sites, and lookup layout remain open.
-Prototype the in-cell tag and compare it with bitsets and sparse discovery before selection.
+Persist or coherently rebuild chunk discovery from the saved active-site index without a
+whole-world scan. Discovery and instance publication must describe one admitted state.
+Unresolved required definitions/instances make affected reads unknown; raw air cannot grant
+placement permission or imply safe collision traversal.
 
 ### Q4 — Safe composed reads and publication
 
-**UNRESOLVED.** Select reader lifetimes, snapshot ownership, revisions, subscription behavior,
-and update ordering without per-cell messaging. A reader must not combine an old ownership
-generation with a new unrelated site or a released source. Current physical/progress semantics
-must remain separate from allowed visual lag and individually approved stale condition checks.
+**CONFIRMED 2026-11-13: static terrain plus construction subscriptions.**
 
-Preserve bounded structural validation, cross-site support, and ordinary extraction guards.
-Account for hidden faces between base terrain and site blocks, origin/chunk wrapping,
-unknown sources, client prediction, and the switch from site drawing to terrain drawing.
-Separate site geometry and merged chunk geometry are alternatives, not a selected renderer.
+| Source | Contents | Update pattern |
+| --- | --- | --- |
+| World-data | Ordinary terrain, constructed metadata, construction discovery and transfer state | Ordinary edits, admission/discovery changes, materialization |
+| Immutable blueprint | Dimensions and nonempty target materials with stable cell identities | Fetch/cache once per definition; reuse for every instance |
+| Simulation construction | Identity/transform, progress bits, lifecycle, revision, untransferred portions | Initial snapshot, batched progress/lifecycle updates, resync |
+
+A client loads the full definition and an instance snapshot when a relevant site is discovered.
+Several instances reuse the same definition. Bit 0 means a pending miniature/physical air;
+bit 1 means a full block of the defined material. Empty definition cells do not participate.
+The wire format may index definition cells or a canonical ordered target list, provided the
+mapping is stable and shared by snapshots/deltas. Definition/material data cannot be inferred
+from a bitmap alone.
+
+Initial/resync snapshots carry all progress. Routine updates carry changed indices or bitmap
+sections, batched by publication interval/budget. A dense 100×100×32 definition would require
+320,000 bits, or 40,000 bytes, for a full bitmap; sending it per fill would defeat the intended
+saving. These are payload arithmetic, not bandwidth measurements. Choose sparse/dense delta
+encoding from measured workloads rather than fixing the encoding here.
+
+Progress is monotone 0→1 while building, but OR-ing bits alone is not a protocol: receivers must
+check world/session, construction lifetime, and base/result revisions. Apply a compatible
+snapshot plus subsequent deltas; reject old/duplicate updates, detect gaps, and request current
+state rather than guessing. Admission, completion, subscription removal, and materialization
+are separately versioned lifecycle changes. A lost or reordered reply cannot resurrect a site.
+
+Collision/interaction needs may retain a subscription outside the visible set. A mesh-only
+terrain subscriber also needs construction discovery and snapshots. If required data is
+missing, defer dependent actions and use existing missing-world collision behavior rather
+than walking through assumed air. Server support, routing, and validation likewise compose
+both domains through local reads/held snapshots, not a round trip per cell. Enumerators of
+constructed blocks must include site-owned filled targets.
+
+Base/dynamic hidden-face decisions and chunk boundaries must converge with the effective
+physical view. Derived geometry work may be coalesced; a fill must not cause a full static
+chunk payload solely to update the site. Separate rendering passes and combined GPU buffers
+are both allowed. This specification does not mandate a particular renderer or unmeasured
+latency target.
 
 ### Q5 — Completion and handback
 
-**UNRESOLVED.** Decide whether transfer is prepared before accepting the last target, uses
-a distinct storage-consolidation phase, or has another bounded schedule. Account for current
-immediate gameplay completion, edits after completion, multiple destination chunks, retries,
-memory pressure, and capture races. No proposal may lose the source or expose two owners.
+**CONFIRMED 2026-11-13: keep restrictions until materialization finishes.** This deliberately
+replaces immediate completion in blueprint R32. It avoids priority materialization on player
+edits and a separate edit-wait/replay queue.
 
-Admission and handback are lifecycle transitions; common saves need not synchronize disk
-after either individual event. Keep stale whole-chunk replacement out of every candidate.
-Future cancellation must retain already built blocks under its separate gameplay design;
-it is not implemented or selected by this spec.
+| Phase | Physical source | Frame and active-site restrictions |
+| --- | --- | --- |
+| `building` | Simulation for all targets; pending targets are physical air | Present |
+| `materializing` | Simulation for untransferred target chunks; world-data for accepted portions | Present across the entire site |
+| `complete` | World-data for all targets | Released; ordinary rules apply |
+
+The last fill changes phase in O(1), with no final structural scan. Schedule bounded background
+work over precomputed target-bearing chunk groups. A small site may finish immediately; a
+normal-load delay around 5–10 seconds is acceptable, and the frame makes the retained site
+state visible. This is not a guaranteed deadline under overload and does not introduce a
+mandatory delay. Failed work retries while the source and restrictions remain intact.
+
+A portion waiting for chunk data, a source hold, or retryable resource failure yields its
+scheduling turn instead of repeatedly blocking the queue head. Other ready portions, including
+those of other sites, continue receiving fair service. Keep blocked work discoverable through
+a bounded retry/wake mechanism so it resumes after recovery; new arrivals cannot starve ready
+admitted work. Finite admitted materialization completes once dependencies and processing
+capacity remain available. This refines the existing [fairness principles](../../docs/simulation-notes.md#bounded-work-and-fairness)
+without prescribing a queue layout, equal CPU shares, a hard deadline, or priority handback.
+
+For each portion, prepare a target-only patch and required provenance, validate destination
+versions/holds, then accept it into the current chunk together with its ownership-transfer
+record. Other sites and cavity edits survive. Each accepted portion has one physical owner;
+the site record may retain immutable progress/definition data for readers without authorizing
+a second writer. Previously transferred chunks are not written again on retry.
+
+Materialization does not freeze all cavity edits: existing permitted placements remain
+permitted and go through completed-world checks. Target changes/extraction stay rejected under
+active-site rules even in portions already owned by world-data. An attempted edit does not
+accelerate the transfer or enter a future replay queue. After every portion is accepted, release
+the frame/restrictions and retire discovery/source records subject to safe lifetimes.
+
+Clients reconcile matching terrain data and composition state per chunk, then switch visual
+presentation only when the corresponding static geometry is installed and ready for display.
+If a transfer notice arrives first, retain the dynamic portion while awaiting terrain data.
+If static data arrives first, use its composition metadata to prepare the replacement, but do
+not hide the dynamic portion merely because a mesh build/upload has been queued. Delayed or
+retryably failed geometry preparation/upload retains the previous presentation for portions
+still selected for display, while collision/interaction can adopt newer coherent data without
+waiting for the GPU.
+
+At successful visual handoff, activate static geometry and hide the replaced dynamic portion
+in the same displayed frame. Check chunk/subscription incarnation and composition/geometry
+revisions before activation; superseded jobs cannot install an obsolete replacement. This
+contract applies to combined buffers as well as separate passes. Normal visibility eviction
+still applies and does not pin off-screen sites indefinitely. Other visible portions remain
+dynamic until their own replacement is ready. A global completion notice alone cannot retire
+their presentation. Clients need not load every chunk of a large site to make progress.
+
+Server completion never waits for clients. A client may retain its cached definition/final
+snapshot longer than the server retains the site. World-data must retain Q6's completion time
+and pending grass-initialization work before the corresponding site data is retired. An old
+chunk reference to a retired instance must trigger current chunk/object resynchronization;
+it is not a new empty site. Older static
+snapshots or delayed construction deltas cannot override post-completion ordinary edits.
+
+Common capture records each partial transfer coherently: either the site owns a portion or
+the current chunk does. Reopening resumes remaining materialization without rebuilding,
+charging, or installing completed portions twice. Keep source holds for readers/capture;
+remaining=0 alone is never permission to drop saved instance state. No per-chunk fsync is needed.
+Applied-site cancellation/refunds remain a separate feature.
 
 ### Q6 — Soil and compact physical state
 
-**UNRESOLVED.** [Warehouse Q21](warehouses.md#q21--optional-soil-transformations) records
-permission to simplify optional compaction. Placement no longer compacts loose soil, but covering packed soil can clear grass
-and cancel its surface timer. Manual/timed compaction and grass growth can change
-the target material itself.
-Removing only a delayed compaction timer does not remove these interactions.
+**REFINED 2026-11-13: grass remains; compaction does not.** This replaces the earlier proposal
+to remove all soil transformations. Grass is surface cover on a single soil material; there
+is no loose/compacted gameplay state, manual compaction action, or compaction timer. Blueprint
+capture normalizes grassy soil to bare soil. Material enum/cover encoding is an implementation
+choice; grass is not a separate construction resource or simulation-owned target override.
 
-Resolve automatic compaction, grass coverage, and any remaining timer owner before relying
-on definition plus fulfillment bits as the complete physical state. Existing generated packed
-soil, earth support equivalence, mining yields, and blueprint normalization need not disappear.
-No runtime rule is changed by this architecture choice.
+At application, world-data prepares grass removal and cancellation of pending growth directly
+below every occupied blueprint target, including elevated targets over cavity contents.
+Empty definition cells and the surrounding frame do not clear or suppress grass. A miniature
+counts as cover until its real block replaces it. This retains the current coverage footprint
+under blueprint R58, not a whole-box surface clearing pass. Admit these effects, site discovery,
+and initial state atomically after all allocation/dependency checks, including neighboring
+chunks. Grass clearing changes cover only, never structural support or the underlying resource.
+
+Soil inside the blueprint stays bare throughout `building` and `materializing`. Do not schedule
+or execute its grass timers while simulation owns it, or after a portion transfers while the
+site is still active. Ordinary placement over a built target cannot trigger a write back into
+simulation for grass: there is no grass/timer there to clear. Fulfillment remains target-local
+and does not repeat admission's covering work or add per-fill soil coordination.
+
+World-data retains grass scheduling for ordinary terrain. Coverage and exposure use the
+composed physical view plus pending-target membership: base terrain air under a simulation-owned
+block is not proof of exposure. An actual or pending block directly above prevents growth;
+an empty definition cell or frame does not. Unknown dependencies defer work, not imply air.
+This also applies to terrain soil placed in permitted cavities after admission. No whole-site
+scan is needed when a grass timer runs.
+
+During per-chunk materialization prepare soil surface candidates and world-data-owned pending
+initialization work. After **all** portions transfer and the site becomes complete, initialize
+growth for exposed bare-soil targets as for an ordinary newly placed soil block in this new
+model. The deadline is completion time plus the existing grass delay (currently 30 minutes of
+game time), never the target's earlier fulfillment time. There is no intervening compaction
+stage. Covered internal soil receives no growth timer; later ordinary exposure starts the
+ordinary delay. Existing top-surface rules apply, without adding sunlight/sky checks.
+
+Preparation and activation may run in bounded batches. Keep the completion timestamp and any
+unfinished initialization obligation in the shared capture until the resulting timer/no-op
+outcome is accepted. Reopening resumes it without resetting elapsed time, duplicate timers,
+or a full-world scan. Revalidate current cell identity, cover, and newer edit/timer state:
+late initialization must not recreate soil, attach an old deadline to a replacement block,
+or overwrite a newer ordinary exposure deadline. Save the resolved effect and obligation
+retirement coherently. This follows the lifecycle principles of
+[persisted unfinished work](deferred-world-work.md); it does not require the existing road key
+format or a generic job queue. No timer starts in an early transferred portion while another
+portion of the site is still materializing, even if a stall exceeds the growth delay.
+
+Implementation must update [current soil rules](../../docs/block-placement.md#simulation-time-and-transformations)
+and their tests explicitly, with the appropriate ruleset/save gates. Reuse the admission
+preparation and world-data grass scheduler, removing their dependence on compaction. Keep the
+single soil material's resource identity and structural behavior independent of grass cover.
+
+**Confirmed soil support:** use current packed-soil support capabilities
+for both bare and grassy soil, retaining soil's own footprint/platform requirements. Clearing
+grass must not weaken an existing foundation; growing grass must not strengthen it. Remove the
+old loose-soil support exclusion from ordinary rules and the cheap fulfillment predicate, and
+normalize captured grassy soil to the same bare structural material. Recheck certification and
+cross-site support tests under the new ruleset; the five-neighbor bound stays unchanged.
+The author confirmed this support baseline and retained the all-miniature coverage footprint:
+application requires empty target cells, not an empty whole box, so existing soil in cavities
+can also lie immediately below elevated targets.
+Road shapes remain derived geometry under their existing bounded follow-up contract.
 
 ### Q7 — Evidence for the final implementation
 
-**UNRESOLVED.** Establish representative active-site counts and footprint densities, read/write
-ratios, observation load, cross-site boundaries, and save/handback pressure. Measure completed
-work and end-to-end latency alongside CPU, allocations, retained bytes, publication work,
-and save pause/backpressure. Include mostly ordinary terrain reads to test the marker fast
-path. Record uncertainty and compare equivalent gameplay outcomes. No speedup is assumed.
+**ENGINEERING CHECKPOINT.** Choose representative site counts, footprint densities, read/write
+ratios, observer counts, and budgets before the prototype measurements. The architectural
+contract is selected; numeric tuning is not evidence of a measured speedup.
+
+Compare completed work and end-to-end latency, CPU, allocations, retained bytes, encoded bytes,
+publication/geometry work, save pauses, and materialization backlog. Include mostly ordinary
+terrain reads, multiple sites per chunk, sparse boxes, large definitions shared by many sites,
+client subscription churn, completion/grass-initialization bursts, and cold/empty chunks. Exercise capture/restart
+and publication reordering at every lifecycle boundary. Record limits and uncertainty alongside
+Q2 alternatives; revisit the design if composed reads or retained state erase the intended gain.
+
+### Q8 — Construction first, then warehouse integration
+
+**CONFIRMED SEQUENCE 2026-11-14.** Implement this spec first, then implement
+[warehouses](warehouses.md) on the resulting simulation-state boundary. Warehouse Q16–Q18 and
+Q22–Q24 supply already agreed contracts, not a dependency on implemented warehouse code.
+Construction creates the first records in this domain; warehouses add a separate record type
+and operations. Both initially run on the existing service executor with bounded turns,
+coherent prepared commits, immutable held snapshots, and one coordinated capture/WAL path.
+Reuse these boundaries without requiring one generic object struct, universal transaction
+framework, or a full economy scheduler before either feature can work.
+
+| State | Authority and lifecycle |
+| --- | --- |
+| Construction progress/lifecycle and untransferred targets | Simulation; targets move to world-data at accepted materialization |
+| Immutable blueprint definitions | Shared world-scoped data retained by library/instance references; no writable per-instance copy |
+| Warehouse material, C, I, A, bounds and enabled/stopped intent | Simulation; persist while registered, independent of construction completion |
+| Ordinary terrain and warehouse member pallets | World-data; existing other simulation-owned supports remain with their current owner |
+| Player inventory | World-data; player fulfillment and warehouse transfers use coherent cross-domain commits |
+| Accepted task cargo and delivery promises, once integrated | Simulation task state, coherent with source stock, destination reservations and installed results |
+| Chunk discovery, presentation and collision caches | Derived references/views; never a second inventory or target-state authority |
+
+Shared infrastructure must distinguish object kind, identity/lifetime, session, and relevant
+revision. A ConstructionId and WarehouseId may have the same numeric value without aliasing;
+retiring one cannot invalidate the other's reference/subscription. External commands follow
+[warehouse Q23](warehouses.md#q23--command-identity-and-retry-lifetime): one live-session sequence
+identity binds the whole typed intent, including target and payload; reuse with different
+contents is rejected. An old command cannot affect a new registration. Automatic simulation
+work uses task transitions rather than a player-command cache lookup for each item.
+
+Snapshots retain type-specific meaning. Construction sends an immutable definition, initial
+progress, and revisioned batched bit/index updates. Warehouse Q24 sends compact complete object
+snapshots and may coalesce intermediate revisions; count deltas remain its Q25 follow-up.
+Share routing, retention, unknown-data and stale-lifetime handling without making a warehouse
+wait for a construction-style delta chain, or sending a full construction bitmap per fill.
+Neither object depends on client/GPU residency for authority or persistence. The warehouse's
+permitted distant visual omission does not weaken either feature's nearby-data guards.
+
+The composed world has several consumers, not a universal "occupied material" result:
+physical material and completed logical reads include built/planned construction as appropriate,
+while blueprint capture excludes packed goods under warehouse R64. Movement/rays also see
+packed inventory; structural support must ignore that cargo and pallets. Warehouse admission
+uses both composed physical contents and the complete construction target set. Require
+`warehouse envelope E ∩ construction targets T = ∅` even when base terrain is air, C=0, columns
+are disabled, or a portion has already materialized. Keep active membership until full site
+completion; storage-owner transfer alone does not release restrictions.
+
+An eligible fulfilled floor may support pallets before it materializes, despite air in its
+base chunk. A pending floor cannot. During handback, preserve pallets and warehouse claims in
+cavities and the floor's physical support; afterward world-data enforces the same pallet
+support-loss guards. Stock transfers remain inventory operations while building/materializing;
+warehouse unregister does not bypass active-box extraction guards. Completing the site does
+not unregister or materialize the warehouse. Use the single-soil model from Q6 for real floors
+and stored resource identity. Stored soil stays packed inventory with no grass timer; a real
+floor's grass scheduling checks composed cover, including its physical pallet above.
+
+Capture/restore must include partial construction transfers, warehouse objects/claims, player
+inventory, and any accepted tasks/cargo/reservations in the same coherent cut. Restore sources
+and typed indexes before accepting dependent work. A future builder installs its task-owned,
+already-paid cargo without charging the source warehouse again; publication snapshots never
+perform resource accounting. Full supplier/route/task scheduling remains separate work.
+
+Construction validation uses the existing player path and controlled internal operations;
+it need not implement warehouses or deliveries early. Verify the common boundaries in this
+stage, then run the mixed warehouse cases below during warehouse implementation. Mixed cases
+are future integration obligations, not claims that unimplemented warehouses already pass.
 
 ## Acceptance Criteria
 
-These are contracts for future implementation of the selected direction, including conditional
-marker contracts; their presence does not settle the open mechanisms or claim tests have run.
+These criteria specify future implementation behavior; they do not claim runtime verification
+in this documentation change. Existing IDs are retained, with superseded marker/completion/soil
+criteria updated to match Q3/Q5/Q6.
 
-- AC1: GIVEN an admissible blueprint WHEN applied THEN only nonempty target cells become
-  simulation-owned, initially as physical air, and existing cavity/foundation contents remain
-  world-data-owned under their existing edit restrictions.
-- AC2: GIVEN failed or conflicting admission WHEN rejected THEN no partial site ownership,
-  target markers, or resource effects become authoritative.
-- AC3: GIVEN an accepted automatic fulfillment WHEN applied THEN target contents, progress,
-  and its resource outcome agree, and replay does not build or charge a second block.
-- AC4: GIVEN a pending target and a fulfilled target WHEN queried physically THEN the first
-  is air and the second has its actual block's collision/support; planned logical reads retain
-  their separate blueprint semantics.
-- AC5: GIVEN a fulfilled target supporting another site WHEN that site validates placement
-  THEN it can use the real neighbor without waiting for handback and without exceeding the
-  existing five-neighbor structural predicate.
-- AC6: GIVEN unavailable required site state WHEN a marked cell is queried THEN its physical
-  result is unknown, not a base-air fallback or an occupied marker material.
-- AC7: GIVEN two sites sharing a chunk WHEN their targets are resolved THEN each resolves to
-  the correct site lifetime and target; neither cavity cells nor the other site are acquired.
-- AC8: GIVEN an encoding under Q3 WHEN one target is fulfilled THEN its ownership membership
-  remains until handback while progress/physical views change and miniature traversal can retire it.
-- AC9: GIVEN an in-cell marker candidate WHEN storage is decoded for occupancy, rendering,
-  support, inventory, or targeting THEN the marker itself is never treated as a gameplay material.
-- AC10: GIVEN an empty base chunk containing owned targets WHEN base storage is compacted or
-  unloaded THEN ownership is retained/discoverable and required state is loaded before use.
-- AC11: GIVEN a player fulfills a target WHEN accepted THEN the world-data-owned carried item
-  and simulation-owned result have one coherent resource outcome, including retry and recovery.
-- AC12: GIVEN ordinary edits to cavity cells during construction WHEN target handback occurs
-  THEN those intervening edits survive and only owned cells/required metadata are integrated.
-- AC13: GIVEN a prepared handback fails before acceptance WHEN work resumes THEN simulation
-  remains the authoritative source and no duplicate destination result is exposed.
-- AC14: GIVEN a handback racing save capture or interrupted persistence WHEN recovery succeeds
-  THEN site, ownership discovery, terrain, and resources describe the same coherent boundary.
-- AC15: GIVEN an old snapshot or reply after ownership changes WHEN it arrives THEN it cannot
-  restore retired ownership, overwrite current cells, or address a reused site lifetime.
-- AC16: GIVEN the last target is accepted WHEN gameplay completion occurs THEN the existing
-  completion restrictions/frame behavior is preserved and no full structural scan is added;
-  any remaining storage phase keeps valid readers and edit routing.
-- AC17: GIVEN a large multi-chunk site or many simultaneous completions WHEN handback runs
-  THEN preparation, retained source/destination memory, and scheduling obey the selected bounds.
-- AC18: GIVEN an unobserved active site WHEN saved and reopened THEN its physical contents,
-  progress, ownership, and tasks survive independently of client terrain residency.
-- AC19: GIVEN static membership and changing progress WHEN updates are published THEN physical
-  collision/support and required invalidation reflect accepted state without rewriting membership
-  for each fill; visual lag does not change authoritative occupancy.
-- AC20: GIVEN retained soil transformations WHEN they change a site-owned cell or an external
-  neighbor THEN the selected owner/state protocol accounts for the change; definition/progress
-  decoding cannot silently erase the resulting material or timer.
-- AC21: GIVEN a proposed encoding or ownership implementation WHEN performance is compared
-  THEN results include ordinary and target reads, full fulfillment, memory, saves, and completion
-  bursts rather than extrapolating whole-world throughput from enqueue timing.
+- AC1: GIVEN an admissible blueprint WHEN applied THEN only nonempty targets become
+  simulation-owned physical air; ordinary cavity/foundation terrain stays world-data-owned
+  and any existing other simulation owners retain their state and responsibilities.
+- AC2: GIVEN failed/conflicting admission WHEN rejected THEN no partial site/discovery or
+  resource effects become authoritative and no target terrain cells are replaced with markers.
+- AC3: GIVEN an accepted automatic fulfillment WHEN applied or retried THEN contents, progress,
+  and resource outcome agree and the block is neither built nor charged twice.
+- AC4: GIVEN pending and fulfilled targets WHEN read physically THEN they resolve to air and
+  the definition material respectively, while planned logical reads retain blueprint semantics.
+- AC5: GIVEN a filled target supporting another site WHEN that site validates a fill THEN it
+  can use that support before handback with at most five physical neighbor checks.
+- AC6: GIVEN discovery but missing required definition/instance state WHEN an affected query
+  runs THEN it reports unknown rather than treating base air as free space.
+- AC7: GIVEN multiple sites in a chunk WHEN resolving targets THEN each maps to its own
+  lifetime/index and no blueprint-empty cavity is acquired by simulation.
+- AC8: GIVEN a pending target WHEN fulfilled THEN membership persists until handback while its
+  miniature disappears and physical/progress state changes.
+- AC9: GIVEN a newly admitted site WHEN raw terrain storage is inspected THEN its owned targets
+  remain air with no ownership-marker cells or canonical per-cell ownership mask written.
+- AC10: GIVEN an empty base chunk with owned targets WHEN compacted/unloaded THEN site discovery
+  survives or is rebuilt coherently and required state is available before dependent use.
+- AC11: GIVEN player fulfillment WHEN accepted THEN carried inventory and the simulation-owned
+  result have one coherent resource outcome across retry and recovery.
+- AC12: GIVEN cavity edits and another site sharing a chunk WHEN a target portion materializes
+  THEN only its targets/required metadata change and other contents survive.
+- AC13: GIVEN preparation failure before transfer acceptance WHEN work resumes THEN simulation
+  still owns the portion and retry does not expose a duplicate destination result.
+- AC14: GIVEN partial materialization racing capture/interrupted persistence WHEN reopened
+  THEN terrain, site, resources, discovery, and transfer state agree at one saved boundary.
+- AC15: GIVEN an old snapshot/reply after handoff WHEN delivered THEN it cannot restore retired
+  ownership, overwrite current cells, or address a reused lifetime.
+- AC16: GIVEN the last target is accepted WHEN remaining reaches zero THEN the site becomes
+  materializing in O(1), retains its frame/restrictions, and adds no final structural scan.
+- AC17: GIVEN large/many simultaneous completions WHEN materialization runs THEN preparation,
+  source/destination memory, and work per scheduling turn obey measured configured bounds.
+- AC18: GIVEN an unobserved site WHEN saved/reopened THEN its contents, progress, phase,
+  ownership, and tasks survive independently of client terrain residency.
+- AC19: GIVEN changing progress WHEN published THEN effective occupancy and dependent views
+  update without per-fill terrain membership writes or full static chunk payloads solely for the fill.
+- AC20: GIVEN soil targets in a building or materializing site WHEN filled, covered, or time
+  advances THEN they remain bare with no grass timers, no compaction action/event occurs, and
+  simulation-owned contents remain reconstructible from the definition and progress alone.
+- AC21: GIVEN an implementation candidate WHEN performance is compared THEN evidence covers
+  ordinary/target reads, fulfillment, memory, publication, saves, and completion bursts.
+- AC22: GIVEN several instances of one blueprint WHEN a client subscribes THEN it can reuse one
+  immutable definition while maintaining separate transforms, lifetimes, and progress.
+- AC23: GIVEN a new/reconnected subscriber WHEN snapshot plus updates are applied THEN it
+  reconstructs current targets from the definition and a compatible progress revision.
+- AC24: GIVEN a batched delta WHEN duplicated, reordered, or delivered with a gap THEN duplicate
+  effects are ignored, incompatible updates do not apply, and gaps trigger resynchronization.
+- AC25: GIVEN many fills in a large site WHEN a publication batch is produced THEN routine
+  updates need neither a whole-site bitmap per fill nor a message per block.
+- AC26: GIVEN rotated/seam-crossing sites and cavities WHEN ownership is queried THEN definition
+  mapping is correct without scanning every world site or writing target markers.
+- AC27: GIVEN an owned target whose base terrain is air WHEN ordinary placement is attempted
+  THEN it is rejected or routed to valid blueprint fulfillment under existing action rules.
+- AC28: GIVEN some portions materialized WHEN an allowed cavity placement or target extraction
+  is attempted THEN cavity placement retains normal validation and target extraction remains
+  rejected, without priority transfer or deferred edit replay.
+- AC29: GIVEN all target portions transferred WHEN server completion commits THEN the frame
+  and site restrictions release without awaiting any client acknowledgment.
+- AC30: GIVEN materialization exceeds the normal-load delay or encounters failure WHEN work is
+  delayed THEN source/restrictions persist and no timeout discards contents or completes early.
+- AC31: GIVEN a transfer/completion notice before its terrain snapshot WHEN a client composes
+  the world THEN it retains the visible dynamic portion until matching static geometry is
+  installed and ready for display, not merely until its data arrives.
+- AC32: GIVEN the matching static snapshot before a separate lifecycle notification WHEN applied
+  THEN composition metadata permits data reconciliation, while visual replacement waits for
+  render readiness and switches in one displayed frame without holes or duplicate rendering.
+- AC33: GIVEN a client observing only some site chunks WHEN they materialize THEN it can switch
+  those portions without loading or acknowledging the rest of the construction.
+- AC34: GIVEN a stale chunk reference after server retirement WHEN the client requests the site
+  THEN it resynchronizes current chunk/object state rather than treating the reference as empty.
+- AC35: GIVEN an ordinary post-completion edit WHEN older terrain or construction data arrives
+  THEN the newer authoritative version remains effective and the old block is not resurrected.
+- AC36: GIVEN partial transfers saved before restart WHEN materialization resumes THEN only
+  remaining portions install and already transferred blocks/resources are not applied again.
+- AC37: GIVEN a sparse blueprint spanning box-only chunks WHEN scheduled for materialization
+  THEN work visits target-bearing groups without rescanning its entire definition per chunk.
+- AC38: GIVEN a terrain edit affecting a simulation-owned constructed neighbor WHEN dependencies
+  are enumerated/validated THEN that neighbor participates despite absence from terrain metadata.
+- AC39: GIVEN required collision/support state outside the visible set WHEN a client needs it
+  THEN it retains/loads the relevant construction state or uses missing-data behavior, never air.
+- AC40: GIVEN a mesh-only terrain subscription WHEN a site changes or transfers THEN discovery
+  and construction updates still provide the effective world independent of GPU pass choice.
+- AC41: GIVEN a fill affecting road geometry WHEN accepted THEN its bounded deferred follow-up
+  remains coherent with current owners and captures without a synchronous per-fill road rebuild.
+- AC42: GIVEN a reader/capture holding old source data WHEN a portion transfers THEN the held
+  data remains valid until released and does not authorize writes through the old owner.
+
+- AC43: GIVEN grass or a pending growth timer directly below an occupied blueprint target,
+  including elevated targets and chunk/seam boundaries WHEN application commits THEN grass
+  is cleared and growth canceled coherently with the site; empty definition cells are unchanged.
+- AC44: GIVEN admission preparation failure or stale dependencies WHEN application is rejected
+  THEN neither grass/timers nor construction discovery/progress change partially.
+- AC45: GIVEN world-data soil with a pending or simulation-owned filled target directly above
+  WHEN ordinary exposure scheduling or a grass deadline runs THEN the composed cover suppresses
+  growth; unavailable required state defers rather than treating base air as exposure.
+- AC46: GIVEN soil in an early transferred portion WHEN another portion remains materializing
+  beyond the grass delay THEN no site soil has begun a growth timer or grown grass.
+- AC47: GIVEN completed materialization with exposed and internally covered soil targets WHEN
+  world-data initializes growth THEN only eligible exposed targets receive a deadline at site
+  completion plus the ordinary grass delay, with no compaction stage or credit for build time.
+- AC48: GIVEN pending grass initialization or scheduled growth WHEN saved, reopened, or retried
+  THEN the deadline and outstanding work survive coherently without duplicate effects or resets.
+- AC49: GIVEN soil removed/replaced or covered/exposed by ordinary edits after completion WHEN
+  delayed initialization is processed THEN it respects the current cell lifetime and newer
+  timer state without resurrecting soil or overwriting a newer exposure deadline.
+- AC50: GIVEN ordinary newly placed bare soil outside active target ownership WHEN exposed
+  THEN world-data schedules grass directly under the same delay/rules, without compaction.
+- AC51: GIVEN bare and grassy versions of the unified soil WHEN checking support, construction
+  certification, collision, or mining THEN cover does not change those outcomes; both use the
+  selected soil baseline, and clearing grass at admission cannot weaken a foundation.
+- AC52: GIVEN materializing sites A and B with A's destination held/unavailable and B ready
+  WHEN the scheduler runs THEN A yields, B completes without waiting for A, and A resumes and
+  completes after its dependencies and processing capacity remain available; later arrivals
+  cannot indefinitely starve either site's ready work.
+- AC53: GIVEN matching terrain data/composition metadata but a delayed or retryably failed
+  mesh build/upload for a visible portion WHEN client frames advance THEN dynamic presentation
+  remains while collision/interaction can use the newer coherent data; on successful current
+  geometry installation it switches without a hole or duplicate, and superseded jobs cannot
+  activate stale geometry.
+
+- AC54: GIVEN construction ownership implemented before warehouses WHEN exercising player
+  fulfillment, controlled internal results, materialization, and save/reopen THEN the path
+  works without a warehouse runtime or NPC scheduler and establishes the reusable Q8 boundary.
+- AC55: GIVEN construction and warehouse records with equal numeric IDs WHEN commands, snapshots,
+  or retirement are routed THEN type/lifetime isolation is preserved; reusing a live command
+  identity for a different typed intent is rejected rather than affecting either object twice.
+- AC56: GIVEN an eligible fulfilled construction block and packed cargo of the same material
+  WHEN queried THEN both can collide, only the real block supplies support/capture contents, and
+  pallets remain non-supporting; missing required owner data cannot authorize an action.
+- AC57: GIVEN a warehouse in a site's empty cavity on an eligible fulfilled simulation-owned
+  floor WHEN the site partially materializes and completes THEN support, pallets, warehouse
+  state and claims survive; stock transfers remain legal, only site restrictions retire, and
+  every target remains excluded from the warehouse envelope until site completion.
+- AC58: GIVEN partial materialization and accepted warehouse/player or task-resource mutations
+  WHEN a shared capture is restored THEN target ownership, warehouse stock/promises, cargo,
+  player inventory and claims agree at one cut without repeated charges or duplicate results.
+- AC59: GIVEN subscriptions to a construction and a warehouse WHEN warehouse full snapshots
+  skip intermediate revisions and construction deltas have a gap THEN the latest valid full
+  snapshot installs while the construction resynchronizes; neither policy is imposed on the other.
+- AC60: GIVEN soil stored as warehouse cargo and real soil supporting a pallet WHEN construction
+  completes or grass work runs THEN cargo gains no grass timer or support capability, while
+  the real floor uses Q6's support and composed-cover rules without changing warehouse inventory.
 
 ## Constraints
 
-- Keep one authoritative cell/resource state. Preserve simulation precedence and the shared
-  capture boundary; an ownership choice is not permission for unsafe concurrent access.
-- Preserve wrapped X, finite Y/Z, current blueprint gameplay, bounded validation, and world
-  resource budgets. Do not allocate whole-world marker arrays or scan all sites per query.
-- Separate raw storage, physical material, completed logical material, and visual geometry.
-  Existing `BlockType != none` shortcuts cannot decode a redirect marker correctly by themselves.
-- Existing saves may be rejected under the development compatibility policy. Choose explicit
-  format/version gates if storage changes; do not silently reinterpret old material bytes.
+- Keep one authoritative cell/resource state and shared coherent capture. Safe lifetimes and
+  simulation precedence remain required; no accounting exception is implied by batching.
+- Preserve wrapped X, finite Y/Z, world resource budgets, bounded structural validation, and
+  existing blueprint gameplay except Q5's delayed release and Q6's soil simplification.
+- Separate raw storage, resolved physical material, completed logical material, and geometry.
+  Raw base-air shortcuts cannot answer effective occupancy inside a simulation-owned footprint.
+- Budget definitions, site snapshots, lookup caches, delta histories, and transfer queues.
+  Backpressure/resync must not silently drop accepted progress or make simulation observation-dependent.
+- Existing saves may be rejected under the development compatibility policy. Use explicit
+  format/ruleset gates for the new ownership/soil model; do not reinterpret old saves silently.
 
 ## Out of Scope
 
-- Runtime implementation, benchmarking, deployment, or changes to the current save format in
-  this documentation change.
-- NPC scheduler/task decomposition, new cancellation UI/refunds, or permanent whole-box ownership.
-- Selecting marker encoding, thread topology, renderer, or handback scheduling before review.
-- Removing compaction, grass, or material types without the separate gameplay decision.
-- Independent simulation save files, a universal transaction framework, or an adopted best-effort
-  accounting exception.
+- Runtime implementation, benchmarks, deployment, or save-format changes in this documentation PR.
+- NPC scheduler/task/cargo decomposition, new cancellation/refund UI, or whole-box ownership.
+- A separate simulation thread, parallel region executor, universal transaction framework,
+  independent owner saves, or an adopted best-effort resource-loss exception.
+- Reintroducing compaction, grass growth in active targets, or unrelated material/support redesign.
+- Mandatory GPU passes/buffer layout, exact delta serialization, numeric scheduling budgets,
+  or a guaranteed completion deadline under arbitrary load.
+- Priority materialization and player edit waiting/replay queues.
 
 ## Plan
 
 ### Approach
 
-Record the selected ownership contract and alternatives now. Resolve Q3–Q6, then prototype
-the smallest complete admission/fulfillment/handback path with safe composed reads and saves.
-Compare Q2 and Q3 candidates using Q7's workloads before choosing optimizations. The steps
-below are provisional implementation planning, not an instruction to change runtime now.
+Implement construction first and expose Q8's extension boundaries for the subsequent warehouse
+feature. Implement one complete path on the existing service executor with separate ownership domains,
+immutable published snapshots, and coherent capture. Begin with definition/instance identity,
+chunk discovery, and composed readers; then move fulfillment/progress out of terrain. Introduce
+construction subscriptions before removing the old terrain-based client update path. Complete
+per-chunk materialization and recovery before enabling the new path for persistent worlds.
+
+Apply Q6 explicitly with a ruleset/save gate and update affected soil tests/docs. Preserve
+admission's one-time grass clearing, suppress active-target growth, and integrate bounded
+world-data grass initialization with completion/capture. Keep blueprint logical validation,
+resource checks, and bounded road obligations. Compare Q2 alternatives and Q7 workloads before expanding concurrency or adding discovery caches.
 
 ### Affected Components
 
-- `src/voxel_app/blueprint_runtime.zig`: site state, progress, ownership discovery and retirement.
-- `src/voxel_app/world_data_service.zig`, `world.zig`, and `world_chunk_data.zig`: admission,
-  composed physical reads, mutation routing, destination integration and chunk lifecycle.
-- `src/voxel_app/chunk_metadata.zig` and persistence modules: target references, constructed
-  provenance, retained transformations, coherent capture and restoration.
-- Block rules/targeting, warehouse queries, client snapshots and voxel/blueprint rendering:
-  resolved physical contents, missing-data behavior, prediction and boundary publication.
+- `src/voxel_app/blueprint_runtime.zig`: persistent site phases, progress, full-lifetime discovery,
+  target groups, and retirement instead of dropping the instance on its last fill.
+- `src/voxel_app/world_data_service.zig`, `world.zig`, `world_chunk_data.zig`: composed physical
+  and logical reads, mutation routing, constructed enumeration, admission and materialization.
+- `src/voxel_app/chunk_metadata.zig`, `persistence/blueprints.zig`, and capture modules: chunk
+  references/transfer state, constructed provenance, partial handoff capture/recovery.
+- Block/soil rules and timers: remove the compaction distinction/actions; retain grass clearing
+  and ordinary growth in world-data, with composed cover and post-completion initialization.
+- Client protocol/cache, collision/targeting, voxel/blueprint rendering: definition cache,
+  construction subscriptions, revision reconciliation, prediction, and per-portion switch.
+- Road derived-state processing: route through composed data, preserve bounded obligations
+  and capture consistency across the ownership transition.
 
 ### Data Model Changes
 
-Canonical site identity/lifetime, definition/transform, progress, and any required physical
-overrides live in simulation. Spatial references or marks locate this owner and remain distinct
-from progress. Site/material representation and record widths are open; a dense duplicate voxel
-array is not required by the contract. Keep pending-miniature traversal and ownership retention
-semantically separate even if an implementation shares storage.
+| Record | Required meaning; concrete layout remains an implementation choice |
+| --- | --- |
+| Blueprint definition | World-scoped immutable ID, dimensions, material cells, stable target-index mapping |
+| Construction instance | Lifetime ID, definition reference, origin/rotation, progress bits, remaining count, phase, revision |
+| Target chunk group | Target indices for this instance/chunk; current owner/accepted-transfer state |
+| Chunk discovery | Relevant active site references and coherent composition version, including box restrictions |
+| Published snapshot/delta | World/session and lifetime identity, descriptor/progress/phase, compatible revisions |
+| Materialization result | Target-only patch plus provenance, destination version, transfer state and grass-initialization obligation |
+| Grass initialization | World-data-owned surface candidates, site completion time and outstanding work; eventual ordinary cell timers |
+
+Do not keep a second mutable voxel array for site contents. Pending and fulfilled materials
+derive from one definition/progress authority. The remaining counter, discovery, grouping,
+and optional caches must agree with or be reconstructible from canonical state. Reference
+lifetimes must retain definitions through materialization and safe publication/capture.
 
 ### API Changes
 
-Distinguish raw chunk storage reads from resolved physical and completed logical reads.
-Define owner-aware edit routing, prepared admission/handback, and versioned publication.
-Choose concrete synchronization and wire APIs after the unresolved questions; a local lookup
-does not require a message round trip per cell.
+Distinguish raw terrain reads from composed physical and completed logical reads. Add coherent
+admission, local simulation fulfillment, target-chunk materialization, and owner-aware mutation
+routing. Publish definitions and versioned construction snapshots/deltas separately from static
+terrain payloads, with resync and retirement semantics. Preserve the future network boundary;
+clients cannot depend on shared in-process synchronization.
 
 ### Risks
 
-Per-read overhead may outweigh saved writes; tags may materialize sparse empty chunks;
-ownership retention may enlarge indexes; stale snapshots may misroute cells; completion may
-create merge/memory spikes. Current soil side effects and post-completion edits complicate
-ownership boundaries. Measure and resolve these rather than assuming storage transfer is free.
+Per-read composition and retained source state may offset cheaper writes. Large shared
+definitions, subscription churn, partial handoffs, and completion bursts may dominate memory or
+publication work. Missing enumeration paths can bypass structural validation even when direct
+reads are correct. Out-of-order terrain/lifecycle updates can expose gaps or resurrect retired
+state. Measure and fault-test these before claiming a performance improvement.
 
 ## Tasks
 
 ### Design and validation planning
 
-- [x] T1: Record target-only ownership, the four execution/storage alternatives, and static
-  membership encoding candidates separately from selected contracts.
-- [ ] T2: Resolve Q3/Q4 encoding, owner discovery, reader lifetimes, and publication semantics.
-- [ ] T3: Resolve Q5/Q6 handback scheduling, completion/edit routing, and soil behavior.
-- [ ] T4: Define Q7 workload sizes, counters, memory accounting, and fault scenarios.
+- [x] T1: Record target-only ownership and the four storage/execution alternatives.
+- [x] T2: Select chunk discovery without markers and the static/dynamic publication contract;
+  record reader lifetimes and revision/resync requirements in Q1/Q3/Q4.
+- [x] T3: Select bounded per-chunk materialization with retained restrictions and Q6's soil
+  model: grass stays world-data-owned, active targets stay bare, compaction is removed.
+- [ ] T4: Define Q7 workload sizes, counters, memory accounting, numeric budgets, and fault cases.
 
-### Provisional implementation sequence
+### Implementation sequence
 
-- [ ] T5: Add simulation-owned site records and coherent admission/discovery.
-- [ ] T6: Add resolved world reads and route fulfillment/resources to their owners.
-- [ ] T7: Add coherent handback, capture/recovery, and bounded source retirement.
-- [ ] T8: Integrate client prediction, physical occupancy, and rendering handoff.
+- [ ] T5: Add simulation-owned records, target groups, full-lifetime discovery, and coherent admission.
+- [ ] T6: Add composed reads/enumeration and route fulfillment/resources to the correct owners.
+- [ ] T7: Add materialization phases, per-chunk acceptance, fair scheduling with blocked-work
+  yielding/recovery, common capture, and safe retirement.
+- [ ] T8: Integrate prediction, collision, rendering, and per-portion client handoff; separate
+  data readiness from successful geometry installation and retain display through upload retries.
+- [ ] T9: Apply Q6: remove compaction, retain atomic admission grass clearing, suppress active
+  target growth, and add bounded post-completion world-data timer initialization/recovery;
+  unify bare/grassy soil support in ordinary rules, certification, and cheap fulfillment;
+  update format gates, tests, and documentation.
+- [ ] T10: Add immutable definition caching, initial snapshots, batched deltas, subscriptions, and resync.
+- [ ] T11: Audit ordinary/dependent validation, road obligations, mesh boundaries, and raw-air shortcuts.
+- [ ] T12: Establish Q8's reusable simulation-state/capture and typed command/discovery boundaries
+  during construction implementation; record AC55–AC60 as mixed integration checks for the
+  subsequent warehouse implementation, without implementing warehouse gameplay in this stage.
 
 ### Validation
 
-- [ ] T-val: Run acceptance criteria verification, fault/recovery cases, and representative
-  end-to-end comparison; record measured results and remaining limitations.
+- [ ] T-val: Verify AC1–AC54 and the common-boundary portions of AC55–AC60; complete mixed
+  warehouse cases when that feature is implemented. Run blueprint/persistence regressions, allocation/fault/reordering
+  cases, blocked-site fairness/recovery, delayed/failed geometry installation, restart during
+  partial materialization, and end-to-end performance under Q7; record
+  measured results, selected budgets, and remaining limitations.

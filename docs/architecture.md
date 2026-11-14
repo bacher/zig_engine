@@ -141,6 +141,18 @@ horizontal limits belong to the [capture rules](../specs/features/blueprints.md#
 The [resource accounting](../specs/features/blueprints.md#reference-workload-and-resource-accounting)
 defines the supported workload, memory considerations, and required measurements.
 
+The planned [construction ownership change](../specs/features/construction-state-ownership.md)
+keeps separate simulation and terrain state domains on the current service executor initially.
+Simulation owns active targets; world-data keeps ordinary terrain and player inventory. Chunk
+references and immutable definitions replace the proposed in-cell markers. Separate construction
+subscriptions carry progress, and bounded per-chunk materialization returns cells to terrain
+before releasing site restrictions. Composed reads, safe immutable snapshots, and shared capture
+are required across both domains. [Warehouses follow construction](../specs/features/construction-state-ownership.md#q8--construction-first-then-warehouse-integration)
+and extend that simulation-state/capture boundary with distinct inventory records and full-object
+snapshots. Common identity and query paths must distinguish real built targets from packed cargo;
+a construction's completion never materializes or retires a warehouse in its cavity. This plan
+does not change the current execution described above.
+
 The general [save compatibility policy](persistence.md#save-compatibility) applies to the
 whole world, including blueprints. There is one current game logic; blueprint definitions
 and unfinished instances do not select historical rules. Before the first release,

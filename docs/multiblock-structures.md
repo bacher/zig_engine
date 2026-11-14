@@ -40,8 +40,11 @@ of overlap can be decided from bounding-box intersection alone.
 
 Warehouse [Q8](../specs/features/warehouses.md#q8--reservation-overlap-and-blueprint-composition)
 settles shared aisles and composition with blueprint-empty cavities. It preserves independent
-warehouse and active-site restrictions. Unregister releases only structure claims; ordinary
-material dependencies, such as the pallet's required floor, still apply to surviving members.
+warehouse and active-site restrictions, including the construction's materializing phase.
+[Construction Q8](../specs/features/construction-state-ownership.md#q8--construction-first-then-warehouse-integration)
+allows eligible real support to come from a fulfilled simulation-owned target. Its handback
+preserves support and other structures' claims/state. Unregister releases only structure claims;
+ordinary material dependencies, such as the pallet's required floor, still apply to surviving members.
 
 Use bounded spatial lookup from members, claimed space, and derived-content hits. Claims must
 remain discoverable after reload even if canonical owner state is not resident. Missing owner

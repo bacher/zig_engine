@@ -1,6 +1,7 @@
 ---
 service: zig_engine
 created: 2026-11-11
+updated: 2026-11-14
 status: approved
 ---
 
@@ -16,7 +17,7 @@ with cargo voxels.
 Define warehouse capacity, delivery promises, lifecycle, spatial protection, and courier
 access while keeping packed-block rendering and multiblock-structure concepts reusable.
 Q1–Q18 record the agreed behavior, inventory authorities, and live-commit/save baseline.
-Q19 selects target-only construction ownership for further design in a separate spec.
+Q19 links the selected construction ownership design; Q27 places its implementation before warehouses.
 Q22 selects separate state domains on the existing service executor for the first warehouse
 implementation. Q23 fixes live-session command retries and resynchronization after a session
 change. Q24 selects independent object subscriptions with complete snapshots. Q20–Q21
@@ -33,7 +34,11 @@ live transfers and shared save capture without per-item disk synchronization.
 ## Context
 
 This specification records decisions agreed on 2026-11-11/12. The implementation context
-below was checked against `main` at `d5d95d9`; runtime implementation is separate work.
+below was originally checked against `main` at `d5d95d9`. The selected implementation baseline
+now includes the [construction ownership change](construction-state-ownership.md#q8--construction-first-then-warehouse-integration)
+first, including its composed readers, shared simulation/capture boundary, and unified soil.
+These features remain unimplemented; references to old terrain/soil representations below are
+historical context, not a requirement to restore them for warehouses.
 
 - [Design principles](../../DESIGN_PRINCIPLES.md) prioritize whole-world simulation
   throughput, coherent resource ownership, simulation precedence over conflicting player
@@ -349,8 +354,9 @@ below was checked against `main` at `d5d95d9`; runtime implementation is separat
 
 ### Pallet foundation
 
-- R37: Each pallet, registered or unregistered, requires one eligible solid terrain
-  block directly below it. Its own support predicate reads that one neighboring cell;
+- R37: Each pallet, registered or unregistered, requires one eligible real block directly
+  below it, whether world-data-owned or a fulfilled simulation-owned construction target.
+  Its own support predicate reads that one neighboring cell;
   it requires no 3×3×3 platform, horizontal support path, or inherited plank height/span
   checks. The supporting block remains subject to its ordinary validity rules. Pallets
   themselves supply no construction support, including platform/road support and the
@@ -475,18 +481,21 @@ below was checked against `main` at `d5d95d9`; runtime implementation is separat
 
 - R48: Permit a warehouse envelope E to overlap an unfinished blueprint's bounding box
   if E contains no nonempty blueprint target. Let T contain all target cells of the active
-  instance, including pending and fulfilled targets; require `E ∩ T = ∅`. Bounding-box
+  instance through building and materializing, including pending, fulfilled, and already
+  transferred targets; require `E ∩ T = ∅`. Bounding-box
   overlap alone is not a conflict. Apply the rule symmetrically when registering a warehouse
   inside an existing site or applying a blueprint around an existing warehouse, with coherent
   admission against current claims/targets. Evaluate the full envelope, including all six
   potential cargo levels, disabled columns, and side/diagonal clearance, regardless of stock.
   Preserve every ordinary terrain, foundation, composed-world, and blueprint-instance check.
-  Pallet support must already exist physically; a pending floor target cannot supply it.
+  Pallet support must already exist physically; a fulfilled simulation-owned floor qualifies
+  by R37's material predicate, but a pending floor target cannot supply it.
   Warehouse put/take changes simulation inventory and remains available under normal warehouse rules,
   including within a site whose real-block extraction is forbidden. Unregister releases only
   warehouse restrictions; the active blueprint still forbids terrain-pallet extraction.
-  Blueprint completion releases only that site's restrictions; a registered warehouse remains
-  protected. Use local target/claim lookup, without global warehouse/site scans, extra per-stock
+  Only completion after all materialization releases that site's restrictions; a registered
+  warehouse remains protected and its cargo/state is never materialized with the building.
+  Use local target/claim lookup, without global warehouse/site scans, extra per-stock
   structural validation, or widening the five-neighbor blueprint fulfillment support check.
   Blueprint capture is a separate operation and follows R64's material/ownership boundary.
 
@@ -616,10 +625,9 @@ below was checked against `main` at `d5d95d9`; runtime implementation is separat
   durable write of their individual outcome. Recent unsaved progress may be lost coherently;
   no fixed crash-loss window is selected. Optimize coordination for frequent simulation
   work, including construction, and amortize access across batches where appropriate.
-  Exact execution rights, retry lifetimes, and capture integration remain implementation
-  design. Q19 selects target-only construction storage ownership for further design; Q20
-  permits evaluating narrowly defined
-  accounting exceptions but adopts no exception or error budget.
+  Exact execution rights and capture integration remain implementation design; Q23 fixes retry
+  lifetime. Q19/Q27 select construction ownership as the preceding integration baseline; Q20
+  permits evaluating narrowly defined accounting exceptions but adopts no exception or error budget.
 
 ### Initial warehouse execution
 
@@ -709,6 +717,19 @@ below was checked against `main` at `d5d95d9`; runtime implementation is separat
   pallets or other content fails as an empty blueprint. Otherwise eligible surrounding
   construction may be captured with those cells left empty. Capture neither copies inventory,
   claims, nor registration data, and changes no warehouse state.
+
+### Integration after construction ownership
+
+- R65: Implement warehouses after the construction ownership feature, extending its simulation
+  state, mutation/capture boundary, typed discovery, and client/session lifetimes under Q27.
+  Keep warehouse records distinct, player inventory world-data-owned, and one common save cut.
+  Do not add a separate warehouse save coordinator/mutation executor or route each internal
+  stock operation through a terrain command merely because it uses a different record type.
+- R66: Keep warehouse-specific semantics on those shared boundaries: packed stock has collision
+  but no terrain/support/capture identity, Q24 full snapshots may coalesce intermediate revisions,
+  and registered warehouses outlive surrounding construction materialization. A site's transfer
+  or retirement cannot rewrite warehouse state, member pallets, or claims; partial handoff/save
+  recovery and soil behavior follow construction Q8 and R48/R64.
 
 ## Clarifications
 
@@ -1067,23 +1088,26 @@ The selected floor-material allowlist is:
 
 | Family | Eligible existing terrain materials |
 | --- | --- |
-| Earth and clay | `dirt`, `packed_dirt`, `grass`, `clay` |
+| Earth and clay | Unified soil, bare or grass-covered, and `clay` |
 | Natural rock | `stone`, `metal_ore`, `limestone`, `coal`, `deeprock` |
 | Mineral construction | `crushed_stone`, `rebar`, `reinforced_concrete` |
 | Wood | `tree_trunk`, `planks` |
 | Solid road | `country_road_solid` |
 
-At the reviewed main baseline, this is exactly `isStructural()` plus solid country road.
-The named materials define the selected policy; newly introduced materials/custom types
-need an explicit eligibility decision. Air, `sand`, `water`, `snow`, `leaves`, adaptive roads
+The original reviewed baseline named `dirt`, `packed_dirt`, and `grass` as eligible soil.
+Construction Q6 now replaces the loose/compacted distinction with one soil support baseline;
+its bare and grassy forms remain eligible. This does not require keeping `packed_dirt` as a
+separate material/state. The listed families define the policy; newly introduced materials
+or custom types need an explicit eligibility decision. Air, `sand`, `water`, `snow`, `leaves`, adaptive roads
 in both unformed and formed states, generic `custom` cells, other pallets, and derived
 packed goods are ineligible. Planned material in a miniature is not real floor support.
 
 Sand retains its existing lack of construction support. Excluding the entire adaptive-road
 type avoids pallets above sloped surfaces while preserving the rule that road formation
 and reversion do not change structural capabilities. No shape/geometry lookup is needed
-to classify the supporting cell. Ground material states `dirt`, `packed_dirt`, and `grass`
-are all eligible; this does not alter the ordinary timing/preconditions of soil transitions.
+to classify the supporting cell. Read a fulfilled simulation-owned floor through the composed
+material view, not raw base air; pending miniatures and packed soil cargo remain ineligible.
+Real soil uses construction Q6's grass rules, without compaction; stock soil has no grass timers.
 Placement, registration, and later floor changes use the same material predicate. Movement
 collision alone is insufficient to establish eligibility.
 
@@ -1120,12 +1144,14 @@ both orders: register within an active site or apply a building around a registe
 Empty cavities mean cells absent from the blueprint's target set, not unfulfilled targets
 that are merely still air. The active instance's complete target set is considered; filled
 target cells do not become cavities. This fits the existing blueprint cavity policy while
-adding warehouse reservation checks.
+adding warehouse reservation checks. Building and materializing both remain active, including
+parts already transferred to world-data; the last fill alone does not release box restrictions.
 
 For example, construction walls and a roof may surround the warehouse if their target cells
 remain outside E. The roof must be above z0+5 over E, and walls outside its reserved cells.
-Only current real terrain can support pallets: a floor miniature is insufficient, while
-an already-real eligible floor can be used even if other parts of the building are unfinished.
+Only current real blocks can support pallets: a floor miniature is insufficient, while an
+eligible fulfilled simulation-owned floor can be used even before it materializes and while
+other parts of the building remain unfinished.
 Footprint recognition, physical air clearance, compatible claims, and ordinary construction
 validity still apply. Empty stock or disabled columns do not make reserved cells buildable.
 Blueprint application retains its foundation, target-emptiness, composed-world, and active
@@ -1285,9 +1311,9 @@ terrain-water behavior or decide future tanks, containers, or other liquid logis
 Liquid storage is outside this warehouse iteration until its mechanics receive a separate
 design. No assumption that liquid can simply be represented as packed solid cargo is adopted.
 
-Natural stone remains a terrain source for crushed stone, and grass/packed dirt for the dirt
-item. Ores, coal, limestone, clay, and deeprock do not acquire new extraction/item-use rules
-from this feature. Taking warehouse cargo preserves its stored identity without invoking
+Natural stone remains a terrain source for crushed stone, and bare/grassy soil for the unified
+dirt item under construction Q6. Ores, coal, limestone, clay, and deeprock do not acquire new
+extraction/item-use rules from this feature. Taking warehouse cargo preserves its stored identity without invoking
 terrain-mining conversions. The client chooser and all mutation paths share R44's contract.
 
 **CONFIRMED 2026-11-11 — pallets as carried items.** A player with empty hands can recover
@@ -1548,7 +1574,9 @@ No pallet or terrain-chunk record owns a second stock/configuration copy. Stoppe
 remain available to manual interaction, and object lifetime does not depend on visible
 terrain residency or whether automatic work is currently enabled.
 
-World-data authority owns terrain, member pallets, and their real supports. Every chunk
+World-data authority owns ordinary terrain and member pallets. A real supporting floor may
+still be a simulation-owned construction target; composed reads resolve its current owner,
+and handback preserves its physical/support meaning. Every chunk
 intersecting a warehouse envelope has a derived identity/bounds lookup entry, including
 warehouses wholly inside one chunk. Registration/unregister coordinate object existence,
 member protection, and claims before publishing success; ordinary logistics and active-count
@@ -1675,31 +1703,22 @@ baseline does not select a per-item queue, lock, transaction object, or thread h
 
 ### Q19 — Construction storage ownership and handback
 
-**CONFIRMED DIRECTION 2026-11-12: simulation owns target cells, with detailed design open.**
-The author selected actual transfer of storage, mutation, and persistence responsibility for
-nonempty blueprint targets into simulation. Blueprint-empty cells, foundations, and other
-terrain remain world-data-owned. At completion, target contents and required metadata are
-integrated into current world-data chunks and ownership returns to that service. This is
-separate from granting access to world-data-owned arrays.
+**CONFIRMED 2026-11-12; refined 2026-11-13.** The dedicated
+[construction state ownership spec](construction-state-ownership.md) defines actual simulation
+ownership of nonempty blueprint targets, including storage, mutation, and persistence. Cavities,
+foundations, and other terrain stay world-data-owned. Chunk references plus immutable definitions
+identify targets; the earlier in-cell ownership-marker proposal is superseded.
 
-The dedicated [construction state ownership spec](construction-state-ownership.md) is now the
-source for this architecture. It preserves current blueprint gameplay and bounded validation,
-composed physical versus completed logical reads, coherent saves, and the handback questions.
-No runtime change or performance advantage is claimed. This documentation change includes
-related architecture updates; they do not need to wait for a separate warehouse merge.
+Clients subscribe to construction progress separately from terrain. Targets materialize into
+current chunks in bounded portions after the last fill, preserving unrelated edits. The frame
+and active-site restrictions remain until the whole transfer finishes. Composed physical/logical
+reads, bounded structural validation, and coherent shared saves remain required. Runtime changes
+and performance validation are pending; Q21 records the ordinary-soil design assumption.
 
-[Alternatives](construction-state-ownership.md#q2--ownership-and-execution-alternatives) remain
-recorded for comparison: whole-box simulation ownership; world-data-owned terrain with
-site targets defining legal actions and technical access granted for each batch of necessary
-data; and queued world-data operation batches. They have not replaced the selected target-only
-storage direction. Source ownership and safe execution access are separate design dimensions.
-
-The author also proposes a [static ownership marker](construction-state-ownership.md#q3--static-target-membership-in-chunk-data)
-in chunk block data. It would be written at admission, remain through pending and fulfilled
-states, and disappear at handback; current occupancy still comes from simulation. Compare a
-cell tag, an optional per-chunk membership bitset, and sparse target discovery. Encoding and
-lookup are unresolved; a marker must not be treated as a physical material or progress copy.
-Q21 continues to track optional soil transformations that affect this design.
+[Alternatives](construction-state-ownership.md#q2--ownership-and-execution-alternatives) retain
+whole-box ownership, world-data terrain with site-defined legal actions and batched technical
+access, and queued world-data operations. Source ownership and safe execution access remain
+separate design dimensions.
 
 ### Q20 — Measured exceptions to resource accounting
 
@@ -1723,30 +1742,19 @@ more than one resource count. Data-access safety must hold in every candidate.
 
 ### Q21 — Optional soil transformations
 
-**DEFERRED FOLLOW-UP — simplification permitted for discussion 2026-11-12.** The author considers
-soil compaction optional and is open to removing it if it complicates or slows simulation.
-This does not yet select removal of the material `packed_dirt`, every soil timer, or grass
-behavior, and no runtime behavior has changed.
+**REFINED 2026-11-13: retain grass, remove compaction.** The
+[construction soil model](construction-state-ownership.md#q6--soil-and-compact-physical-state)
+uses one soil material without manual/timed compaction. World-data clears grass/cancels growth
+below miniatures atomically with admission. Soil targets remain bare and timer-free throughout
+building and materializing; after the whole site completes, world-data initializes ordinary
+grass growth on exposed soil, preserving pending work and deadlines through saves/retries.
+Simulation still needs only immutable definition materials plus progress, not grass overrides.
 
-Current rules combine delayed dirt-to-packed-dirt conversion, manual compaction after
-three seconds of holding mouse2, grass growth after compaction/exposure, and clearing
-grass/canceling surface timers when covered. Placement no longer compacts loose soil. Blueprint fulfillment can modify the soil immediately below its target, including
-across a chunk or proposed site-ownership boundary. Removing only the delayed compaction timer
-does not remove that external write. Removing only compaction while preserving grass changes
-can also leave cross-owner mutations.
-
-Prefer evaluating removal of automatic compaction, including its placement-time side effects,
-before adding permanent ownership coordination solely to preserve this optional mechanic.
-Separately decide how placed dirt acquires surface cover, whether coverage changes are saved
-state or derived appearance, and who owns any remaining transformation. Existing generated
-packed soil, soil mining yields, earth support equivalence, blueprint material normalization,
-and the warehouse floor allowlist need not disappear with the compaction mechanic. Retaining
-material transitions inside sites requires site-owned state beyond fulfillment bits and safe
-handoff of any timers; eliminating them permits a simpler target representation under Q19.
-
-The current rules in [block placement](../../docs/block-placement.md#simulation-time-and-transformations)
-remain the implemented behavior until a concrete replacement is agreed. Compare the actual
-cost and gameplay consequences; compaction has not been shown to be the performance bottleneck.
+[PR #64](https://github.com/bacher/zig_engine/pull/64) already made direct blueprint fulfillment
+writes target-local. Application covering and world-data grass machinery can be reused, with
+composed exposure checks and the removal of compaction prerequisites. Existing runtime rules
+remain described in [block placement](../../docs/block-placement.md#simulation-time-and-transformations)
+until implementation and explicit ruleset/save gates. No measured performance gain is claimed.
 
 ### Q22 — Initial execution of simulation-owned warehouses
 
@@ -1762,10 +1770,11 @@ for comparison if the shared executor limits the target workload.
 | Partitioned simulation executors | Independent simulation partitions progress concurrently | Potential use of more cores for automatic work | Partition identity, cross-partition transfers, scheduling, readers, and save barriers add design work |
 
 The selected first warehouse baseline is the first choice, scoped to warehouse integration
-and its representative tests. Introduce a distinct simulation-state module/record domain and
-operation API; do not put stock back into pallet metadata or make chunks its persistence owner.
-Executing both modules on one worker does not merge their data ownership. Future construction
-targets likewise remain simulation records under the selected construction spec.
+and its representative tests. Extend the simulation-state domain and operation boundary already
+introduced by construction ownership under Q27, adding warehouse-specific records/APIs. Do not
+put stock into pallet metadata, make chunks its persistence owner, or add independently
+committed warehouse saves. Executing both domains on one worker does not merge their data ownership;
+construction and warehouse records retain distinct semantics and lifecycles.
 
 In this baseline, automatic operations on simulation-owned records call their local API
 within bounded work batches. Do not enqueue a world-data command, acquire a player-specific
@@ -1972,11 +1981,34 @@ displacement destination choice; full-body/missing-data checks preserve existing
 constraints. [Model validation](../../docs/validation/warehouses.md) covers the bounded halo
 and body-fit arithmetic, including the vertical chunk-boundary counterexample.
 
+### Q27 — Integration after construction ownership
+
+**CONFIRMED SEQUENCE 2026-11-14: construction ownership first, warehouses next.**
+[Construction Q8](construction-state-ownership.md#q8--construction-first-then-warehouse-integration)
+defines the shared boundary and comparison of authorities. Reuse its simulation-state domain,
+service executor, coherent capture/WAL integration, typed discovery/session lifetimes, and
+composed world consumers. This supersedes the earlier plan to implement warehouses independently
+of construction ownership/soil changes. It does not require warehouses to exist before that
+construction work; the construction stage can use player inventory and controlled internal work.
+
+Warehouse objects add C/I/A, configuration and lifecycle under Q16, not construction progress
+bits. Keep Q24 full snapshots in the first warehouse version even though constructions use
+deltas; Q25 remains an optional later evaluation. Both preserve typed identities, unknown-data
+guards, functional retention, and safe source lifetimes. One shared capture includes partial
+construction handoff, stock/reservations/cargo, player inventory, and both types' claims.
+
+R48 applies until the building's full materialization completes. Pallets may rest on eligible
+fulfilled construction targets, and handback preserves those supports. Site retirement releases
+only site guards; registered warehouse pallets/claims and C/I/A survive unchanged. Warehouse
+cargo stays packed, with no structural support, blueprint capture identity, or grass timers.
+Unified real soil follows construction Q6. Use Q8's mixed acceptance cases together with this
+spec's criteria; no complete supplier/courier scheduler or generic object framework is required.
+
 ## Acceptance Criteria
 
-These criteria cover Q1–Q18, Q22–Q24, and Q26, including inventory authorities, shared execution,
-retries, subscriptions, displacement recovery, and
-the save baseline, plus repository invariants. Concrete
+These criteria cover Q1–Q18, Q22–Q24, and Q26–Q27, including inventory authorities, shared
+execution, retries, subscriptions, displacement recovery, construction integration, and the
+save baseline, plus repository invariants. Concrete
 data/API integration and implementation phases still require review; they do not claim
 that runtime implementation or performance validation has been completed.
 
@@ -2522,6 +2554,22 @@ that runtime implementation or performance validation has been completed.
   or its retained result is retried THEN Q23 preserves its single outcome without cancellation
   or a new reach test; a new command still requires current reach.
 
+- AC176: GIVEN the construction ownership baseline WHEN warehouses are implemented THEN they
+  extend its simulation-state and coherent capture/execution boundary with typed records rather
+  than introducing an independent owner save/executor or per-item terrain-command round trips.
+- AC177: GIVEN a warehouse on an eligible fulfilled simulation-owned floor inside a site's cavity
+  WHEN the site partially materializes and completes THEN its pallets, C/I/A, lifecycle and
+  claims survive, floor support remains valid, and only the site's own guards retire.
+- AC178: GIVEN mixed construction/warehouse state during partial handoff and stock/resource
+  changes WHEN saving and reopening THEN all authorities and claims recover at one coherent cut,
+  without missing support, duplicate inventory, lost reservations, or cargo converted to terrain.
+- AC179: GIVEN shared client infrastructure WHEN warehouse snapshots coalesce revisions beside
+  construction progress deltas THEN each follows its own update/resync policy and typed identity;
+  a construction retirement cannot retire a same-numbered warehouse or accept its commands.
+- AC180: GIVEN real bare/grassy soil floors and stored soil cargo WHEN querying support/capture
+  or running grass work THEN only eligible real floors can support pallets, cargo is excluded
+  from structural/capture reads and timers, and no loose/compacted state is reintroduced.
+
 ## Constraints
 
 - Keep one authoritative stock owner; lookup references, snapshots, caches, and simulation
@@ -2567,6 +2615,8 @@ failure/cancellation remain separate work rather than being implied by excluding
 
 ### Approach
 
+The implementation starts after construction ownership and its Q6 soil model under Q27.
+Reuse that feature's state/capture/read boundaries; its runtime does not depend on warehouses.
 Implementation sequence under the agreed contracts:
 
 1. Preserve confirmed Q1 count-only/repacking, Q3 departure reservations, Q4 lifecycle,
@@ -2579,8 +2629,8 @@ Implementation sequence under the agreed contracts:
    list, the support allowlist, and shared-air rules. Q12 selects envelope-wide chunk references
    and unknown-data guards; Q24 selects independent object subscriptions with full snapshots.
    Finalize concrete subscription/retention mechanics during implementation.
-3. Specify the compact simulation object record and Q12 chunk-reference protocol under Q22's
-   shared service executor; preserve separate state domains and bounded local mutation batches.
+3. Add compact warehouse records and Q12 chunk references to the construction-established
+   simulation boundary under Q22/Q27; preserve typed state, shared capture and bounded batches.
 4. Integrate authoritative operations, persistence, predictions, collision, and reusable packed
    rendering in dependency order. Reuse road/custom and miniature patterns where appropriate.
 5. Validate gameplay invariants and resource conservation, then measure representative scale
@@ -2609,10 +2659,10 @@ publication, persistence, and mixed streaming costs before declaring the impleme
 Numeric acceptance budgets and renderer representation can be refined through implementation
 measurements; they do not require settling the entire future economy upfront.
 
-First-version warehouses do not depend on construction-target ownership implementation, Q21
-soil simplification, full routing/supplier allocation/NPC scheduling, or Q25 incremental
-publication. Keep strict accounting as the baseline while Q20 remains unselected. Expose and
-verify reservation/handover contracts through controlled scenarios without adding the full
+First-version warehouses use the implemented construction-ownership and Q21 soil baseline
+under Q27. They do not depend on full routing/supplier allocation/NPC scheduling or Q25
+incremental publication. Keep strict accounting as the baseline while Q20 remains unselected.
+Expose and verify reservation/handover contracts through controlled scenarios without adding the full
 courier scheduler to this feature.
 
 ### Implementation review checkpoints
@@ -2620,9 +2670,9 @@ courier scheduler to this feature.
 Q1–Q18 settle warehouse behavior, simulation authority, world-data-owned player inventory,
 and the coherent live-commit/shared-capture baseline. First-version execution and retry
 contracts follow Q22/Q23; concrete access/capture integration remains implementation work;
-Q19 selects target-only construction ownership for further design; Q20–Q21 discuss measured
-accounting tradeoffs and soil transformations. Q22 selects initial shared execution; Q23
-fixes external command retry lifetimes. Q24 selects object subscriptions and complete snapshots; Q25 defers incremental publication evaluation. Review the concrete
+Q19/Q27 select the preceding construction ownership implementation; Q20 keeps accounting
+exceptions unselected and Q21 adopts construction's soil model. Q22 selects initial shared
+execution; Q23 fixes external command retry lifetimes. Q24 selects object subscriptions and complete snapshots; Q25 defers incremental publication evaluation. Review the concrete
 implementation choices below against those contracts:
 
 - Specify pallet encoding, simulation object and chunk-reference records, registration/revision
@@ -2653,8 +2703,8 @@ handover, lifecycle, and endpoint contracts without selecting that scheduler.
   `player_interaction.zig`, `main.zig`: derived occupancy, targeting, quick actions, and UI.
 - `src/engine/voxel/`, `src/engine/shaders/voxel/`: reusable pallets/packed geometry,
   instancing, markers, shadows, and independent source updates.
-- Simulation object storage (new, exact module placement pending): warehouse state,
-  identity lookup, stock/configuration mutations, reservations, and task coordination.
+- Simulation-state domain established by construction ownership: add warehouse records,
+  typed identity lookup, stock/configuration APIs, reservations, and task coordination.
 - `src/voxel_app/persistence/`: explicit object records and coherent world/simulation/player
   capture, recovery, and version gates.
 
@@ -2759,14 +2809,17 @@ late replies, floor changes, and restored claims require explicit ownership/avai
 - [x] T20: Select Q26 reserved-halo recovery after local failure, including loaded full-body
   preference and bounded missing-data handling without delaying resource operations.
 
+- [x] T21: Align construction-first sequencing, shared simulation/capture boundaries, composed
+  support/claims, typed subscriptions, and soil rules in Q27/R65/R66.
+
 ### Implementation preparation
 
 - [ ] T5: Finalize concrete data/API changes and implementation phases against the accepted
   resource-accounting and readiness contracts; no warehouse gameplay decision remains open.
 - [ ] T15: Finalize warehouse preparation/commit, bounded Q23 retry bookkeeping, failure
   handling, save integration, and Q24 subscription implementation under selected Q22 execution.
-  Keep construction handback, Q20 accounting exceptions, and Q21 soil simplification in their
-  separate design work; they do not block the initial warehouse implementation.
+  Integrate with the already implemented construction handback and Q21 soil model under Q27;
+  Q20 accounting exceptions and the full logistics scheduler remain separate follow-ups.
 
 ### Phase 1 — Authority and shared semantics
 
@@ -2789,5 +2842,6 @@ late replies, floor changes, and restored claims require explicit ownership/avai
 
 ### Validation
 
-- [ ] T-val: Verify resolved acceptance criteria, cross-client/authority agreement,
-  failure/retry/save/load conservation, bounded work, and CPU/GPU/resource measurements.
+- [ ] T-val: Verify resolved acceptance criteria, including AC176–AC180 and construction
+  AC55–AC60 for mixed identities, reads, handback, capture and publication; verify cross-client/
+  authority agreement, failure/retry/save/load conservation, bounded work, and measured resources.
