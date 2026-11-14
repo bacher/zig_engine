@@ -106,3 +106,11 @@ The [windowed report](../../docs/validation/client-construction-visuals.md) reco
 lower preparation spikes but no demonstrated whole-client pacing benefit, alongside
 increased submission latency. These observations do not establish maximum simulation
 throughput or physical display latency; they do not authorize merging PR #59.
+
+The radius-5 follow-up at `01696cd` also passed all 12 runs, with 484 resident
+chunks in every readiness log, the same final checksum/resolution, and independently
+recomputed raw timing quantiles. ReleaseFast install/test passed 58/58 steps and
+2,042 tests with eight skips; all 30 Python runner tests pass. Lower preparation tails again
+come with added submission latency and no demonstrated material frame-pacing gain.
+The [validation report](../../docs/validation/client-construction-visuals.md#wider-render-radius--2026-11-14)
+retains the comparison and its limits.

@@ -1,0 +1,22 @@
+Artifacts: /private/tmp/client-visual-ab-radius5-2026-11-14
+Launching the real windowed client sequentially; leave its windows running.
+  orbit repetition 1/3: immediate
+  orbit repetition 1/3: budgeted
+  orbit repetition 2/3: budgeted
+  orbit repetition 2/3: immediate
+  orbit repetition 3/3: immediate
+  orbit repetition 3/3: budgeted
+  travel repetition 1/3: immediate
+  travel repetition 1/3: budgeted
+  travel repetition 2/3: budgeted
+  travel repetition 2/3: immediate
+  travel repetition 3/3: immediate
+  travel repetition 3/3: budgeted
+
+Median per-run timings (ms; negative comparison deltas mean lower):
+camera   policy       frames accepted/s interval p95 interval p99  frame p95  frame p99  frame max  upload p95  terrain p95   mini p95
+orbit    immediate       960    511.031       10.804       12.507     10.803     12.507     17.152       0.015       10.691     10.691
+orbit    budgeted        961    511.019       10.798       12.491     10.794     12.490     14.810       0.010       24.742     24.742
+travel   immediate       960    511.139       10.851       12.492     10.851     12.491     16.598       0.016       10.740     10.736
+travel   budgeted        960    511.440       10.850       12.570     10.847     12.570     15.787       0.013       41.141     56.160
+Equivalent admitted/accepted workloads and final checksums verified. Report: /private/tmp/client-visual-ab-radius5-2026-11-14/report.json

@@ -315,6 +315,15 @@ roughly 10–11 to 25–27 ms. Keep these results separate from the component re
 They support deferring the scheduling PR until a representative workload establishes
 a material client benefit; the already merged miniature cache remains independent.
 
+A second 12-run windowed series expands render radius from 3 to 5, increasing the
+resident scene from 196 to 484 chunks with the same construction targets. It again
+shows lower preparation p95 (23.4–27.7%) and almost unchanged whole-frame interval
+p95/p99. Travel miniature submission latency p95 increases from 10.7 ms immediate
+to 56.2 ms budgeted. Rare long-frame counts are mixed; these short series do not
+establish a general smoothness benefit or regression. The
+[wider-distance report](client-construction-visuals.md#wider-render-radius--2026-11-14)
+retains raw evidence and keeps the earlier recommendation to defer scheduling.
+
 Fresh synchronous renderer results support removing repeated miniature packing/uploads.
 The fresh CPU replay supports a count budget to combine busy preparation work while
 showing the resulting increase in scheduled visual age. Historical and comparison runs

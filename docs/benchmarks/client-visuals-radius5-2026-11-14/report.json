@@ -1,0 +1,2197 @@
+{
+  "schema_version": 1,
+  "valid": true,
+  "status": "complete",
+  "binary": "/Users/ilia.lebedev/.codex/worktrees/fc29/zig_engine/zig-out/bin/zig_engine_voxel_app",
+  "rate": 512,
+  "duration_seconds": 8,
+  "cameras": [
+    "orbit",
+    "travel"
+  ],
+  "render_radius": 5,
+  "repetitions": 3,
+  "timeout_seconds": 120.0,
+  "runs": [
+    {
+      "camera": "orbit",
+      "repetition": 1,
+      "policy": "immediate",
+      "command": [
+        "/Users/ilia.lebedev/.codex/worktrees/fc29/zig_engine/zig-out/bin/zig_engine_voxel_app",
+        "--benchmark-visuals",
+        "/private/tmp/client-visual-ab-radius5-2026-11-14/01-orbit-r01-immediate",
+        "--visual-policy",
+        "immediate",
+        "--benchmark-rate",
+        "512",
+        "--benchmark-duration",
+        "8",
+        "--benchmark-camera",
+        "orbit",
+        "--benchmark-render-radius",
+        "5"
+      ],
+      "artifacts": {
+        "summary": "/private/tmp/client-visual-ab-radius5-2026-11-14/01-orbit-r01-immediate.summary.json",
+        "frames": "/private/tmp/client-visual-ab-radius5-2026-11-14/01-orbit-r01-immediate.frames.csv",
+        "events": "/private/tmp/client-visual-ab-radius5-2026-11-14/01-orbit-r01-immediate.events.csv",
+        "log": "/private/tmp/client-visual-ab-radius5-2026-11-14/01-orbit-r01-immediate.log"
+      },
+      "status": "valid",
+      "returncode": 0,
+      "summary": {
+        "schema_version": 1,
+        "valid": true,
+        "invalid_reason": null,
+        "policy": "immediate",
+        "camera": "orbit",
+        "rate": 512,
+        "duration_seconds": 8,
+        "render_radius": 5,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "frame_count": 962,
+        "planned_edits": 4096,
+        "admitted_edits": 4096,
+        "accepted_edits": 4096,
+        "rejected_edits": 0,
+        "acceptance_window_seconds": 8.013556459,
+        "accepted_edits_per_second": 511.1338543574863,
+        "busy_events": 0,
+        "final_checksum": "5f17fb35aea0ce85",
+        "unresolved_visuals": 0,
+        "frames_over_16_7ms": 0,
+        "frames_over_33_3ms": 0,
+        "peak_queue": 0,
+        "drain_ms": 21.853709,
+        "metrics": {
+          "frame": {
+            "count": 962,
+            "p50_ms": 8.28675,
+            "p95_ms": 10.590792,
+            "p99_ms": 11.768541,
+            "max_ms": 12.553,
+            "mean_ms": 8.329535737006237
+          },
+          "interval": {
+            "count": 962,
+            "p50_ms": 8.287625,
+            "p95_ms": 10.628,
+            "p99_ms": 11.769291,
+            "max_ms": 12.553459,
+            "mean_ms": 8.335579781704782
+          },
+          "update": {
+            "count": 962,
+            "p50_ms": 1.971292,
+            "p95_ms": 2.543459,
+            "p99_ms": 2.930708,
+            "max_ms": 3.836667,
+            "mean_ms": 2.071615607068607
+          },
+          "draw": {
+            "count": 962,
+            "p50_ms": 6.141459,
+            "p95_ms": 8.569208,
+            "p99_ms": 9.516875,
+            "max_ms": 10.416417,
+            "mean_ms": 6.154147828482329
+          },
+          "prepare": {
+            "count": 962,
+            "p50_ms": 1.923208,
+            "p95_ms": 2.485083,
+            "p99_ms": 2.867708,
+            "max_ms": 3.750792,
+            "mean_ms": 2.0221895
+          },
+          "upload": {
+            "count": 962,
+            "p50_ms": 0.009208,
+            "p95_ms": 0.013291,
+            "p99_ms": 0.015625,
+            "max_ms": 0.017167,
+            "mean_ms": 0.009914634095634095
+          },
+          "terrain_submit_latency": {
+            "count": 4096,
+            "p50_ms": 8.155291,
+            "p95_ms": 10.450083,
+            "p99_ms": 11.636667,
+            "max_ms": 12.422792,
+            "mean_ms": 8.205478498535156
+          },
+          "miniature_submit_latency": {
+            "count": 4096,
+            "p50_ms": 8.155291,
+            "p95_ms": 10.450083,
+            "p99_ms": 11.636667,
+            "max_ms": 12.422792,
+            "mean_ms": 8.205478498535156
+          }
+        },
+        "latency_scope": "client fulfillment receipt to first submitted chunk representation; may be clipped or occluded; not physical display latency",
+        "comparison_scope": "budget limits only; immediate retains FIFO and miniature cache"
+      }
+    },
+    {
+      "camera": "orbit",
+      "repetition": 1,
+      "policy": "budgeted",
+      "command": [
+        "/Users/ilia.lebedev/.codex/worktrees/fc29/zig_engine/zig-out/bin/zig_engine_voxel_app",
+        "--benchmark-visuals",
+        "/private/tmp/client-visual-ab-radius5-2026-11-14/02-orbit-r01-budgeted",
+        "--visual-policy",
+        "budgeted",
+        "--benchmark-rate",
+        "512",
+        "--benchmark-duration",
+        "8",
+        "--benchmark-camera",
+        "orbit",
+        "--benchmark-render-radius",
+        "5"
+      ],
+      "artifacts": {
+        "summary": "/private/tmp/client-visual-ab-radius5-2026-11-14/02-orbit-r01-budgeted.summary.json",
+        "frames": "/private/tmp/client-visual-ab-radius5-2026-11-14/02-orbit-r01-budgeted.frames.csv",
+        "events": "/private/tmp/client-visual-ab-radius5-2026-11-14/02-orbit-r01-budgeted.events.csv",
+        "log": "/private/tmp/client-visual-ab-radius5-2026-11-14/02-orbit-r01-budgeted.log"
+      },
+      "status": "valid",
+      "returncode": 0,
+      "summary": {
+        "schema_version": 1,
+        "valid": true,
+        "invalid_reason": null,
+        "policy": "budgeted",
+        "camera": "orbit",
+        "rate": 512,
+        "duration_seconds": 8,
+        "render_radius": 5,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "frame_count": 960,
+        "planned_edits": 4096,
+        "admitted_edits": 4096,
+        "accepted_edits": 4096,
+        "rejected_edits": 0,
+        "acceptance_window_seconds": 8.00945525,
+        "accepted_edits_per_second": 511.3955783697025,
+        "busy_events": 0,
+        "final_checksum": "5f17fb35aea0ce85",
+        "unresolved_visuals": 0,
+        "frames_over_16_7ms": 0,
+        "frames_over_33_3ms": 0,
+        "peak_queue": 5,
+        "drain_ms": 26.623875,
+        "metrics": {
+          "frame": {
+            "count": 960,
+            "p50_ms": 8.244416,
+            "p95_ms": 10.893375,
+            "p99_ms": 12.419417,
+            "max_ms": 14.810167,
+            "mean_ms": 8.342556955208334
+          },
+          "interval": {
+            "count": 960,
+            "p50_ms": 8.247542,
+            "p95_ms": 10.893833,
+            "p99_ms": 12.42,
+            "max_ms": 14.811292,
+            "mean_ms": 8.345168836458333
+          },
+          "update": {
+            "count": 960,
+            "p50_ms": 1.991209,
+            "p95_ms": 2.086209,
+            "p99_ms": 2.210917,
+            "max_ms": 2.702792,
+            "mean_ms": 1.9809899895833332
+          },
+          "draw": {
+            "count": 960,
+            "p50_ms": 6.128625,
+            "p95_ms": 8.858417,
+            "p99_ms": 10.352417,
+            "max_ms": 12.575583,
+            "mean_ms": 6.2574778250000005
+          },
+          "prepare": {
+            "count": 960,
+            "p50_ms": 1.94275,
+            "p95_ms": 2.034666,
+            "p99_ms": 2.156542,
+            "max_ms": 2.61375,
+            "mean_ms": 1.9308716499999998
+          },
+          "upload": {
+            "count": 960,
+            "p50_ms": 0.008875,
+            "p95_ms": 0.01025,
+            "p99_ms": 0.011334,
+            "max_ms": 0.014417,
+            "mean_ms": 0.008967680208333334
+          },
+          "terrain_submit_latency": {
+            "count": 4096,
+            "p50_ms": 16.429542,
+            "p95_ms": 24.513834,
+            "p99_ms": 26.436791,
+            "max_ms": 32.1,
+            "mean_ms": 15.92014251220703
+          },
+          "miniature_submit_latency": {
+            "count": 4096,
+            "p50_ms": 16.429542,
+            "p95_ms": 24.513834,
+            "p99_ms": 26.436791,
+            "max_ms": 32.1,
+            "mean_ms": 15.92014251220703
+          }
+        },
+        "latency_scope": "client fulfillment receipt to first submitted chunk representation; may be clipped or occluded; not physical display latency",
+        "comparison_scope": "budget limits only; immediate retains FIFO and miniature cache"
+      }
+    },
+    {
+      "camera": "orbit",
+      "repetition": 2,
+      "policy": "budgeted",
+      "command": [
+        "/Users/ilia.lebedev/.codex/worktrees/fc29/zig_engine/zig-out/bin/zig_engine_voxel_app",
+        "--benchmark-visuals",
+        "/private/tmp/client-visual-ab-radius5-2026-11-14/03-orbit-r02-budgeted",
+        "--visual-policy",
+        "budgeted",
+        "--benchmark-rate",
+        "512",
+        "--benchmark-duration",
+        "8",
+        "--benchmark-camera",
+        "orbit",
+        "--benchmark-render-radius",
+        "5"
+      ],
+      "artifacts": {
+        "summary": "/private/tmp/client-visual-ab-radius5-2026-11-14/03-orbit-r02-budgeted.summary.json",
+        "frames": "/private/tmp/client-visual-ab-radius5-2026-11-14/03-orbit-r02-budgeted.frames.csv",
+        "events": "/private/tmp/client-visual-ab-radius5-2026-11-14/03-orbit-r02-budgeted.events.csv",
+        "log": "/private/tmp/client-visual-ab-radius5-2026-11-14/03-orbit-r02-budgeted.log"
+      },
+      "status": "valid",
+      "returncode": 0,
+      "summary": {
+        "schema_version": 1,
+        "valid": true,
+        "invalid_reason": null,
+        "policy": "budgeted",
+        "camera": "orbit",
+        "rate": 512,
+        "duration_seconds": 8,
+        "render_radius": 5,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "frame_count": 961,
+        "planned_edits": 4096,
+        "admitted_edits": 4096,
+        "accepted_edits": 4096,
+        "rejected_edits": 0,
+        "acceptance_window_seconds": 8.015528125,
+        "accepted_edits_per_second": 511.0081252443987,
+        "busy_events": 0,
+        "final_checksum": "5f17fb35aea0ce85",
+        "unresolved_visuals": 0,
+        "frames_over_16_7ms": 0,
+        "frames_over_33_3ms": 0,
+        "peak_queue": 5,
+        "drain_ms": 31.3165,
+        "metrics": {
+          "frame": {
+            "count": 961,
+            "p50_ms": 8.246709,
+            "p95_ms": 10.793791,
+            "p99_ms": 12.591083,
+            "max_ms": 15.662792,
+            "mean_ms": 8.340221348595213
+          },
+          "interval": {
+            "count": 961,
+            "p50_ms": 8.247125,
+            "p95_ms": 10.79775,
+            "p99_ms": 12.5915,
+            "max_ms": 15.663667,
+            "mean_ms": 8.342994667013528
+          },
+          "update": {
+            "count": 961,
+            "p50_ms": 1.991042,
+            "p95_ms": 2.079334,
+            "p99_ms": 2.166167,
+            "max_ms": 2.686542,
+            "mean_ms": 1.984559399583767
+          },
+          "draw": {
+            "count": 961,
+            "p50_ms": 6.147625,
+            "p95_ms": 8.717291,
+            "p99_ms": 10.46275,
+            "max_ms": 13.546708,
+            "mean_ms": 6.2508935473465135
+          },
+          "prepare": {
+            "count": 961,
+            "p50_ms": 1.943959,
+            "p95_ms": 2.029458,
+            "p99_ms": 2.112833,
+            "max_ms": 2.612666,
+            "mean_ms": 1.9367982185223724
+          },
+          "upload": {
+            "count": 961,
+            "p50_ms": 0.008916,
+            "p95_ms": 0.010167,
+            "p99_ms": 0.011125,
+            "max_ms": 0.0125,
+            "mean_ms": 0.0089636680541103
+          },
+          "terrain_submit_latency": {
+            "count": 4096,
+            "p50_ms": 16.451375,
+            "p95_ms": 24.807041,
+            "p99_ms": 26.372,
+            "max_ms": 33.050333,
+            "mean_ms": 16.13959398461914
+          },
+          "miniature_submit_latency": {
+            "count": 4096,
+            "p50_ms": 16.451375,
+            "p95_ms": 24.807041,
+            "p99_ms": 26.372,
+            "max_ms": 33.050333,
+            "mean_ms": 16.13959398461914
+          }
+        },
+        "latency_scope": "client fulfillment receipt to first submitted chunk representation; may be clipped or occluded; not physical display latency",
+        "comparison_scope": "budget limits only; immediate retains FIFO and miniature cache"
+      }
+    },
+    {
+      "camera": "orbit",
+      "repetition": 2,
+      "policy": "immediate",
+      "command": [
+        "/Users/ilia.lebedev/.codex/worktrees/fc29/zig_engine/zig-out/bin/zig_engine_voxel_app",
+        "--benchmark-visuals",
+        "/private/tmp/client-visual-ab-radius5-2026-11-14/04-orbit-r02-immediate",
+        "--visual-policy",
+        "immediate",
+        "--benchmark-rate",
+        "512",
+        "--benchmark-duration",
+        "8",
+        "--benchmark-camera",
+        "orbit",
+        "--benchmark-render-radius",
+        "5"
+      ],
+      "artifacts": {
+        "summary": "/private/tmp/client-visual-ab-radius5-2026-11-14/04-orbit-r02-immediate.summary.json",
+        "frames": "/private/tmp/client-visual-ab-radius5-2026-11-14/04-orbit-r02-immediate.frames.csv",
+        "events": "/private/tmp/client-visual-ab-radius5-2026-11-14/04-orbit-r02-immediate.events.csv",
+        "log": "/private/tmp/client-visual-ab-radius5-2026-11-14/04-orbit-r02-immediate.log"
+      },
+      "status": "valid",
+      "returncode": 0,
+      "summary": {
+        "schema_version": 1,
+        "valid": true,
+        "invalid_reason": null,
+        "policy": "immediate",
+        "camera": "orbit",
+        "rate": 512,
+        "duration_seconds": 8,
+        "render_radius": 5,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "frame_count": 960,
+        "planned_edits": 4096,
+        "admitted_edits": 4096,
+        "accepted_edits": 4096,
+        "rejected_edits": 0,
+        "acceptance_window_seconds": 8.016509208,
+        "accepted_edits_per_second": 510.945586629207,
+        "busy_events": 0,
+        "final_checksum": "5f17fb35aea0ce85",
+        "unresolved_visuals": 0,
+        "frames_over_16_7ms": 1,
+        "frames_over_33_3ms": 0,
+        "peak_queue": 0,
+        "drain_ms": 28.864625,
+        "metrics": {
+          "frame": {
+            "count": 960,
+            "p50_ms": 8.26275,
+            "p95_ms": 10.971791,
+            "p99_ms": 12.506542,
+            "max_ms": 17.152291,
+            "mean_ms": 8.349947717708334
+          },
+          "interval": {
+            "count": 960,
+            "p50_ms": 8.263084,
+            "p95_ms": 10.972125,
+            "p99_ms": 12.507042,
+            "max_ms": 17.153041,
+            "mean_ms": 8.350754644791666
+          },
+          "update": {
+            "count": 960,
+            "p50_ms": 1.979417,
+            "p95_ms": 2.866,
+            "p99_ms": 3.228291,
+            "max_ms": 4.394708,
+            "mean_ms": 2.07709830625
+          },
+          "draw": {
+            "count": 960,
+            "p50_ms": 6.073709,
+            "p95_ms": 8.873208,
+            "p99_ms": 10.573417,
+            "max_ms": 14.4495,
+            "mean_ms": 6.167068410416666
+          },
+          "prepare": {
+            "count": 960,
+            "p50_ms": 1.934084,
+            "p95_ms": 2.810583,
+            "p99_ms": 3.1495,
+            "max_ms": 4.305583,
+            "mean_ms": 2.0286526541666667
+          },
+          "upload": {
+            "count": 960,
+            "p50_ms": 0.009125,
+            "p95_ms": 0.015292,
+            "p99_ms": 0.019083,
+            "max_ms": 0.025667,
+            "mean_ms": 0.009929557291666667
+          },
+          "terrain_submit_latency": {
+            "count": 4096,
+            "p50_ms": 8.110916,
+            "p95_ms": 10.882875,
+            "p99_ms": 12.318541,
+            "max_ms": 17.002958,
+            "mean_ms": 8.23417427758789
+          },
+          "miniature_submit_latency": {
+            "count": 4096,
+            "p50_ms": 8.110916,
+            "p95_ms": 10.882875,
+            "p99_ms": 12.318541,
+            "max_ms": 17.002958,
+            "mean_ms": 8.23417427758789
+          }
+        },
+        "latency_scope": "client fulfillment receipt to first submitted chunk representation; may be clipped or occluded; not physical display latency",
+        "comparison_scope": "budget limits only; immediate retains FIFO and miniature cache"
+      }
+    },
+    {
+      "camera": "orbit",
+      "repetition": 3,
+      "policy": "immediate",
+      "command": [
+        "/Users/ilia.lebedev/.codex/worktrees/fc29/zig_engine/zig-out/bin/zig_engine_voxel_app",
+        "--benchmark-visuals",
+        "/private/tmp/client-visual-ab-radius5-2026-11-14/05-orbit-r03-immediate",
+        "--visual-policy",
+        "immediate",
+        "--benchmark-rate",
+        "512",
+        "--benchmark-duration",
+        "8",
+        "--benchmark-camera",
+        "orbit",
+        "--benchmark-render-radius",
+        "5"
+      ],
+      "artifacts": {
+        "summary": "/private/tmp/client-visual-ab-radius5-2026-11-14/05-orbit-r03-immediate.summary.json",
+        "frames": "/private/tmp/client-visual-ab-radius5-2026-11-14/05-orbit-r03-immediate.frames.csv",
+        "events": "/private/tmp/client-visual-ab-radius5-2026-11-14/05-orbit-r03-immediate.events.csv",
+        "log": "/private/tmp/client-visual-ab-radius5-2026-11-14/05-orbit-r03-immediate.log"
+      },
+      "status": "valid",
+      "returncode": 0,
+      "summary": {
+        "schema_version": 1,
+        "valid": true,
+        "invalid_reason": null,
+        "policy": "immediate",
+        "camera": "orbit",
+        "rate": 512,
+        "duration_seconds": 8,
+        "render_radius": 5,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "frame_count": 960,
+        "planned_edits": 4096,
+        "admitted_edits": 4096,
+        "accepted_edits": 4096,
+        "rejected_edits": 0,
+        "acceptance_window_seconds": 8.015175792,
+        "accepted_edits_per_second": 511.03058826086436,
+        "busy_events": 0,
+        "final_checksum": "5f17fb35aea0ce85",
+        "unresolved_visuals": 0,
+        "frames_over_16_7ms": 1,
+        "frames_over_33_3ms": 0,
+        "peak_queue": 0,
+        "drain_ms": 24.124417,
+        "metrics": {
+          "frame": {
+            "count": 960,
+            "p50_ms": 8.191459,
+            "p95_ms": 10.803417,
+            "p99_ms": 12.654708,
+            "max_ms": 17.506917,
+            "mean_ms": 8.348566378125
+          },
+          "interval": {
+            "count": 960,
+            "p50_ms": 8.193917,
+            "p95_ms": 10.803833,
+            "p99_ms": 12.654916,
+            "max_ms": 17.508,
+            "mean_ms": 8.351812672916667
+          },
+          "update": {
+            "count": 960,
+            "p50_ms": 1.988542,
+            "p95_ms": 2.876584,
+            "p99_ms": 3.307708,
+            "max_ms": 4.318,
+            "mean_ms": 2.0862981260416666
+          },
+          "draw": {
+            "count": 960,
+            "p50_ms": 6.030584,
+            "p95_ms": 8.710792,
+            "p99_ms": 10.433625,
+            "max_ms": 15.874083,
+            "mean_ms": 6.161119654166667
+          },
+          "prepare": {
+            "count": 960,
+            "p50_ms": 1.939916,
+            "p95_ms": 2.819167,
+            "p99_ms": 3.248,
+            "max_ms": 4.207167,
+            "mean_ms": 2.0374482375
+          },
+          "upload": {
+            "count": 960,
+            "p50_ms": 0.009292,
+            "p95_ms": 0.015084,
+            "p99_ms": 0.019417,
+            "max_ms": 0.027542,
+            "mean_ms": 0.010077344791666666
+          },
+          "terrain_submit_latency": {
+            "count": 4096,
+            "p50_ms": 8.086458,
+            "p95_ms": 10.691333,
+            "p99_ms": 12.428792,
+            "max_ms": 17.354041,
+            "mean_ms": 8.261089912597656
+          },
+          "miniature_submit_latency": {
+            "count": 4096,
+            "p50_ms": 8.086458,
+            "p95_ms": 10.691333,
+            "p99_ms": 12.428792,
+            "max_ms": 17.354041,
+            "mean_ms": 8.261089912597656
+          }
+        },
+        "latency_scope": "client fulfillment receipt to first submitted chunk representation; may be clipped or occluded; not physical display latency",
+        "comparison_scope": "budget limits only; immediate retains FIFO and miniature cache"
+      }
+    },
+    {
+      "camera": "orbit",
+      "repetition": 3,
+      "policy": "budgeted",
+      "command": [
+        "/Users/ilia.lebedev/.codex/worktrees/fc29/zig_engine/zig-out/bin/zig_engine_voxel_app",
+        "--benchmark-visuals",
+        "/private/tmp/client-visual-ab-radius5-2026-11-14/06-orbit-r03-budgeted",
+        "--visual-policy",
+        "budgeted",
+        "--benchmark-rate",
+        "512",
+        "--benchmark-duration",
+        "8",
+        "--benchmark-camera",
+        "orbit",
+        "--benchmark-render-radius",
+        "5"
+      ],
+      "artifacts": {
+        "summary": "/private/tmp/client-visual-ab-radius5-2026-11-14/06-orbit-r03-budgeted.summary.json",
+        "frames": "/private/tmp/client-visual-ab-radius5-2026-11-14/06-orbit-r03-budgeted.frames.csv",
+        "events": "/private/tmp/client-visual-ab-radius5-2026-11-14/06-orbit-r03-budgeted.events.csv",
+        "log": "/private/tmp/client-visual-ab-radius5-2026-11-14/06-orbit-r03-budgeted.log"
+      },
+      "status": "valid",
+      "returncode": 0,
+      "summary": {
+        "schema_version": 1,
+        "valid": true,
+        "invalid_reason": null,
+        "policy": "budgeted",
+        "camera": "orbit",
+        "rate": 512,
+        "duration_seconds": 8,
+        "render_radius": 5,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "frame_count": 962,
+        "planned_edits": 4096,
+        "admitted_edits": 4096,
+        "accepted_edits": 4096,
+        "rejected_edits": 0,
+        "acceptance_window_seconds": 8.015356334,
+        "accepted_edits_per_second": 511.0190775456047,
+        "busy_events": 0,
+        "final_checksum": "5f17fb35aea0ce85",
+        "unresolved_visuals": 0,
+        "frames_over_16_7ms": 0,
+        "frames_over_33_3ms": 0,
+        "peak_queue": 5,
+        "drain_ms": 22.412959,
+        "metrics": {
+          "frame": {
+            "count": 962,
+            "p50_ms": 8.214334,
+            "p95_ms": 10.764292,
+            "p99_ms": 12.490417,
+            "max_ms": 13.736625,
+            "mean_ms": 8.331336725571726
+          },
+          "interval": {
+            "count": 962,
+            "p50_ms": 8.214667,
+            "p95_ms": 10.780042,
+            "p99_ms": 12.490958,
+            "max_ms": 13.737125,
+            "mean_ms": 8.334662638253638
+          },
+          "update": {
+            "count": 962,
+            "p50_ms": 1.983959,
+            "p95_ms": 2.086416,
+            "p99_ms": 2.185875,
+            "max_ms": 2.386084,
+            "mean_ms": 1.9576702120582121
+          },
+          "draw": {
+            "count": 962,
+            "p50_ms": 6.151875,
+            "p95_ms": 8.717167,
+            "p99_ms": 10.463583,
+            "max_ms": 11.620167,
+            "mean_ms": 6.269876461538462
+          },
+          "prepare": {
+            "count": 962,
+            "p50_ms": 1.935958,
+            "p95_ms": 2.03325,
+            "p99_ms": 2.102625,
+            "max_ms": 2.318916,
+            "mean_ms": 1.9076405727650727
+          },
+          "upload": {
+            "count": 962,
+            "p50_ms": 0.008791,
+            "p95_ms": 0.010333,
+            "p99_ms": 0.011416,
+            "max_ms": 0.012459,
+            "mean_ms": 0.008870758835758835
+          },
+          "terrain_submit_latency": {
+            "count": 4096,
+            "p50_ms": 16.451125,
+            "p95_ms": 24.741667,
+            "p99_ms": 26.389334,
+            "max_ms": 29.221208,
+            "mean_ms": 16.09862095605469
+          },
+          "miniature_submit_latency": {
+            "count": 4096,
+            "p50_ms": 16.451125,
+            "p95_ms": 24.741667,
+            "p99_ms": 26.389334,
+            "max_ms": 29.221208,
+            "mean_ms": 16.09862095605469
+          }
+        },
+        "latency_scope": "client fulfillment receipt to first submitted chunk representation; may be clipped or occluded; not physical display latency",
+        "comparison_scope": "budget limits only; immediate retains FIFO and miniature cache"
+      }
+    },
+    {
+      "camera": "travel",
+      "repetition": 1,
+      "policy": "immediate",
+      "command": [
+        "/Users/ilia.lebedev/.codex/worktrees/fc29/zig_engine/zig-out/bin/zig_engine_voxel_app",
+        "--benchmark-visuals",
+        "/private/tmp/client-visual-ab-radius5-2026-11-14/07-travel-r01-immediate",
+        "--visual-policy",
+        "immediate",
+        "--benchmark-rate",
+        "512",
+        "--benchmark-duration",
+        "8",
+        "--benchmark-camera",
+        "travel",
+        "--benchmark-render-radius",
+        "5"
+      ],
+      "artifacts": {
+        "summary": "/private/tmp/client-visual-ab-radius5-2026-11-14/07-travel-r01-immediate.summary.json",
+        "frames": "/private/tmp/client-visual-ab-radius5-2026-11-14/07-travel-r01-immediate.frames.csv",
+        "events": "/private/tmp/client-visual-ab-radius5-2026-11-14/07-travel-r01-immediate.events.csv",
+        "log": "/private/tmp/client-visual-ab-radius5-2026-11-14/07-travel-r01-immediate.log"
+      },
+      "status": "valid",
+      "returncode": 0,
+      "summary": {
+        "schema_version": 1,
+        "valid": true,
+        "invalid_reason": null,
+        "policy": "immediate",
+        "camera": "travel",
+        "rate": 512,
+        "duration_seconds": 8,
+        "render_radius": 5,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "frame_count": 958,
+        "planned_edits": 4096,
+        "admitted_edits": 4096,
+        "accepted_edits": 4096,
+        "rejected_edits": 0,
+        "acceptance_window_seconds": 8.00986275,
+        "accepted_edits_per_second": 511.3695612324943,
+        "busy_events": 0,
+        "final_checksum": "5f17fb35aea0ce85",
+        "unresolved_visuals": 0,
+        "frames_over_16_7ms": 1,
+        "frames_over_33_3ms": 0,
+        "peak_queue": 0,
+        "drain_ms": 34.43475,
+        "metrics": {
+          "frame": {
+            "count": 958,
+            "p50_ms": 8.257667,
+            "p95_ms": 10.850584,
+            "p99_ms": 11.864416,
+            "max_ms": 16.788875,
+            "mean_ms": 8.360237935281837
+          },
+          "interval": {
+            "count": 958,
+            "p50_ms": 8.257041,
+            "p95_ms": 10.850875,
+            "p99_ms": 11.864916,
+            "max_ms": 16.789791,
+            "mean_ms": 8.36002109498956
+          },
+          "update": {
+            "count": 958,
+            "p50_ms": 1.932458,
+            "p95_ms": 2.752167,
+            "p99_ms": 3.731125,
+            "max_ms": 5.097916,
+            "mean_ms": 1.9616144237995825
+          },
+          "draw": {
+            "count": 958,
+            "p50_ms": 6.223833,
+            "p95_ms": 8.9155,
+            "p99_ms": 10.0525,
+            "max_ms": 13.996458,
+            "mean_ms": 6.28423343006263
+          },
+          "prepare": {
+            "count": 958,
+            "p50_ms": 1.874917,
+            "p95_ms": 2.697208,
+            "p99_ms": 3.625,
+            "max_ms": 4.993083,
+            "mean_ms": 1.9035082066805844
+          },
+          "upload": {
+            "count": 958,
+            "p50_ms": 0.009834,
+            "p95_ms": 0.015917,
+            "p99_ms": 0.02175,
+            "max_ms": 0.059875,
+            "mean_ms": 0.010690932150313153
+          },
+          "terrain_submit_latency": {
+            "count": 4096,
+            "p50_ms": 8.09625,
+            "p95_ms": 10.739875,
+            "p99_ms": 11.907875,
+            "max_ms": 24.602458,
+            "mean_ms": 8.233070120361328
+          },
+          "miniature_submit_latency": {
+            "count": 4096,
+            "p50_ms": 8.094583,
+            "p95_ms": 10.735542,
+            "p99_ms": 11.789416,
+            "max_ms": 16.65875,
+            "mean_ms": 8.22263196923828
+          }
+        },
+        "latency_scope": "client fulfillment receipt to first submitted chunk representation; may be clipped or occluded; not physical display latency",
+        "comparison_scope": "budget limits only; immediate retains FIFO and miniature cache"
+      }
+    },
+    {
+      "camera": "travel",
+      "repetition": 1,
+      "policy": "budgeted",
+      "command": [
+        "/Users/ilia.lebedev/.codex/worktrees/fc29/zig_engine/zig-out/bin/zig_engine_voxel_app",
+        "--benchmark-visuals",
+        "/private/tmp/client-visual-ab-radius5-2026-11-14/08-travel-r01-budgeted",
+        "--visual-policy",
+        "budgeted",
+        "--benchmark-rate",
+        "512",
+        "--benchmark-duration",
+        "8",
+        "--benchmark-camera",
+        "travel",
+        "--benchmark-render-radius",
+        "5"
+      ],
+      "artifacts": {
+        "summary": "/private/tmp/client-visual-ab-radius5-2026-11-14/08-travel-r01-budgeted.summary.json",
+        "frames": "/private/tmp/client-visual-ab-radius5-2026-11-14/08-travel-r01-budgeted.frames.csv",
+        "events": "/private/tmp/client-visual-ab-radius5-2026-11-14/08-travel-r01-budgeted.events.csv",
+        "log": "/private/tmp/client-visual-ab-radius5-2026-11-14/08-travel-r01-budgeted.log"
+      },
+      "status": "valid",
+      "returncode": 0,
+      "summary": {
+        "schema_version": 1,
+        "valid": true,
+        "invalid_reason": null,
+        "policy": "budgeted",
+        "camera": "travel",
+        "rate": 512,
+        "duration_seconds": 8,
+        "render_radius": 5,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "frame_count": 960,
+        "planned_edits": 4096,
+        "admitted_edits": 4096,
+        "accepted_edits": 4096,
+        "rejected_edits": 0,
+        "acceptance_window_seconds": 8.008396333,
+        "accepted_edits_per_second": 511.46319808395526,
+        "busy_events": 0,
+        "final_checksum": "5f17fb35aea0ce85",
+        "unresolved_visuals": 0,
+        "frames_over_16_7ms": 0,
+        "frames_over_33_3ms": 0,
+        "peak_queue": 91,
+        "drain_ms": 216.546167,
+        "metrics": {
+          "frame": {
+            "count": 960,
+            "p50_ms": 8.276125,
+            "p95_ms": 10.706417,
+            "p99_ms": 12.57,
+            "max_ms": 15.78725,
+            "mean_ms": 8.34136449375
+          },
+          "interval": {
+            "count": 960,
+            "p50_ms": 8.276667,
+            "p95_ms": 10.70675,
+            "p99_ms": 12.570375,
+            "max_ms": 15.788167,
+            "mean_ms": 8.343273567708334
+          },
+          "update": {
+            "count": 960,
+            "p50_ms": 1.79625,
+            "p95_ms": 2.107125,
+            "p99_ms": 2.259333,
+            "max_ms": 2.312666,
+            "mean_ms": 1.7053292927083334
+          },
+          "draw": {
+            "count": 960,
+            "p50_ms": 6.401959,
+            "p95_ms": 8.871958,
+            "p99_ms": 10.738125,
+            "max_ms": 13.821708,
+            "mean_ms": 6.51336881875
+          },
+          "prepare": {
+            "count": 960,
+            "p50_ms": 1.743084,
+            "p95_ms": 2.047417,
+            "p99_ms": 2.1975,
+            "max_ms": 2.243708,
+            "mean_ms": 1.6500566791666667
+          },
+          "upload": {
+            "count": 960,
+            "p50_ms": 0.008958,
+            "p95_ms": 0.013042,
+            "p99_ms": 0.015625,
+            "max_ms": 0.030666,
+            "mean_ms": 0.00912409375
+          },
+          "terrain_submit_latency": {
+            "count": 4096,
+            "p50_ms": 16.311583,
+            "p95_ms": 41.5175,
+            "p99_ms": 107.177208,
+            "max_ms": 190.052958,
+            "mean_ms": 18.163187833984374
+          },
+          "miniature_submit_latency": {
+            "count": 4096,
+            "p50_ms": 16.485083,
+            "p95_ms": 56.15975,
+            "p99_ms": 107.809375,
+            "max_ms": 190.052958,
+            "mean_ms": 19.937853737060546
+          }
+        },
+        "latency_scope": "client fulfillment receipt to first submitted chunk representation; may be clipped or occluded; not physical display latency",
+        "comparison_scope": "budget limits only; immediate retains FIFO and miniature cache"
+      }
+    },
+    {
+      "camera": "travel",
+      "repetition": 2,
+      "policy": "budgeted",
+      "command": [
+        "/Users/ilia.lebedev/.codex/worktrees/fc29/zig_engine/zig-out/bin/zig_engine_voxel_app",
+        "--benchmark-visuals",
+        "/private/tmp/client-visual-ab-radius5-2026-11-14/09-travel-r02-budgeted",
+        "--visual-policy",
+        "budgeted",
+        "--benchmark-rate",
+        "512",
+        "--benchmark-duration",
+        "8",
+        "--benchmark-camera",
+        "travel",
+        "--benchmark-render-radius",
+        "5"
+      ],
+      "artifacts": {
+        "summary": "/private/tmp/client-visual-ab-radius5-2026-11-14/09-travel-r02-budgeted.summary.json",
+        "frames": "/private/tmp/client-visual-ab-radius5-2026-11-14/09-travel-r02-budgeted.frames.csv",
+        "events": "/private/tmp/client-visual-ab-radius5-2026-11-14/09-travel-r02-budgeted.events.csv",
+        "log": "/private/tmp/client-visual-ab-radius5-2026-11-14/09-travel-r02-budgeted.log"
+      },
+      "status": "valid",
+      "returncode": 0,
+      "summary": {
+        "schema_version": 1,
+        "valid": true,
+        "invalid_reason": null,
+        "policy": "budgeted",
+        "camera": "travel",
+        "rate": 512,
+        "duration_seconds": 8,
+        "render_radius": 5,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "frame_count": 960,
+        "planned_edits": 4096,
+        "admitted_edits": 4096,
+        "accepted_edits": 4096,
+        "rejected_edits": 0,
+        "acceptance_window_seconds": 8.008757334,
+        "accepted_edits_per_second": 511.44014348031686,
+        "busy_events": 0,
+        "final_checksum": "5f17fb35aea0ce85",
+        "unresolved_visuals": 0,
+        "frames_over_16_7ms": 0,
+        "frames_over_33_3ms": 0,
+        "peak_queue": 93,
+        "drain_ms": 215.797667,
+        "metrics": {
+          "frame": {
+            "count": 960,
+            "p50_ms": 8.281875,
+            "p95_ms": 10.934041,
+            "p99_ms": 12.512584,
+            "max_ms": 15.191916,
+            "mean_ms": 8.341823778125
+          },
+          "interval": {
+            "count": 960,
+            "p50_ms": 8.2825,
+            "p95_ms": 10.934458,
+            "p99_ms": 12.512959,
+            "max_ms": 15.193125,
+            "mean_ms": 8.342641276041666
+          },
+          "update": {
+            "count": 960,
+            "p50_ms": 1.828208,
+            "p95_ms": 2.085667,
+            "p99_ms": 2.23175,
+            "max_ms": 2.401917,
+            "mean_ms": 1.7336942947916665
+          },
+          "draw": {
+            "count": 960,
+            "p50_ms": 6.361791,
+            "p95_ms": 9.0545,
+            "p99_ms": 10.908375,
+            "max_ms": 13.480584,
+            "mean_ms": 6.49367798125
+          },
+          "prepare": {
+            "count": 960,
+            "p50_ms": 1.77675,
+            "p95_ms": 2.024541,
+            "p99_ms": 2.158083,
+            "max_ms": 2.312208,
+            "mean_ms": 1.6807701166666666
+          },
+          "upload": {
+            "count": 960,
+            "p50_ms": 0.009416,
+            "p95_ms": 0.013125,
+            "p99_ms": 0.014375,
+            "max_ms": 0.030417,
+            "mean_ms": 0.009399992708333334
+          },
+          "terrain_submit_latency": {
+            "count": 4096,
+            "p50_ms": 16.322917,
+            "p95_ms": 41.141,
+            "p99_ms": 107.890416,
+            "max_ms": 193.146125,
+            "mean_ms": 17.88826608691406
+          },
+          "miniature_submit_latency": {
+            "count": 4096,
+            "p50_ms": 16.471667,
+            "p95_ms": 57.545083,
+            "p99_ms": 108.892833,
+            "max_ms": 201.219375,
+            "mean_ms": 19.876178254882813
+          }
+        },
+        "latency_scope": "client fulfillment receipt to first submitted chunk representation; may be clipped or occluded; not physical display latency",
+        "comparison_scope": "budget limits only; immediate retains FIFO and miniature cache"
+      }
+    },
+    {
+      "camera": "travel",
+      "repetition": 2,
+      "policy": "immediate",
+      "command": [
+        "/Users/ilia.lebedev/.codex/worktrees/fc29/zig_engine/zig-out/bin/zig_engine_voxel_app",
+        "--benchmark-visuals",
+        "/private/tmp/client-visual-ab-radius5-2026-11-14/10-travel-r02-immediate",
+        "--visual-policy",
+        "immediate",
+        "--benchmark-rate",
+        "512",
+        "--benchmark-duration",
+        "8",
+        "--benchmark-camera",
+        "travel",
+        "--benchmark-render-radius",
+        "5"
+      ],
+      "artifacts": {
+        "summary": "/private/tmp/client-visual-ab-radius5-2026-11-14/10-travel-r02-immediate.summary.json",
+        "frames": "/private/tmp/client-visual-ab-radius5-2026-11-14/10-travel-r02-immediate.frames.csv",
+        "events": "/private/tmp/client-visual-ab-radius5-2026-11-14/10-travel-r02-immediate.events.csv",
+        "log": "/private/tmp/client-visual-ab-radius5-2026-11-14/10-travel-r02-immediate.log"
+      },
+      "status": "valid",
+      "returncode": 0,
+      "summary": {
+        "schema_version": 1,
+        "valid": true,
+        "invalid_reason": null,
+        "policy": "immediate",
+        "camera": "travel",
+        "rate": 512,
+        "duration_seconds": 8,
+        "render_radius": 5,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "frame_count": 960,
+        "planned_edits": 4096,
+        "admitted_edits": 4096,
+        "accepted_edits": 4096,
+        "rejected_edits": 0,
+        "acceptance_window_seconds": 8.013472791,
+        "accepted_edits_per_second": 511.1391910633618,
+        "busy_events": 0,
+        "final_checksum": "5f17fb35aea0ce85",
+        "unresolved_visuals": 0,
+        "frames_over_16_7ms": 0,
+        "frames_over_33_3ms": 0,
+        "peak_queue": 0,
+        "drain_ms": 40.085416,
+        "metrics": {
+          "frame": {
+            "count": 960,
+            "p50_ms": 8.229,
+            "p95_ms": 10.890792,
+            "p99_ms": 12.7385,
+            "max_ms": 16.598417,
+            "mean_ms": 8.346726567708332
+          },
+          "interval": {
+            "count": 960,
+            "p50_ms": 8.229458,
+            "p95_ms": 10.891417,
+            "p99_ms": 12.739209,
+            "max_ms": 16.599584,
+            "mean_ms": 8.350029122916666
+          },
+          "update": {
+            "count": 960,
+            "p50_ms": 1.945334,
+            "p95_ms": 2.715875,
+            "p99_ms": 3.491084,
+            "max_ms": 5.061125,
+            "mean_ms": 1.96638238125
+          },
+          "draw": {
+            "count": 960,
+            "p50_ms": 6.20425,
+            "p95_ms": 8.955917,
+            "p99_ms": 10.942791,
+            "max_ms": 14.984625,
+            "mean_ms": 6.278336223958333
+          },
+          "prepare": {
+            "count": 960,
+            "p50_ms": 1.897125,
+            "p95_ms": 2.642666,
+            "p99_ms": 3.407959,
+            "max_ms": 4.9755,
+            "mean_ms": 1.9133713645833332
+          },
+          "upload": {
+            "count": 960,
+            "p50_ms": 0.00975,
+            "p95_ms": 0.016083,
+            "p99_ms": 0.023417,
+            "max_ms": 0.053334,
+            "mean_ms": 0.010683590625000001
+          },
+          "terrain_submit_latency": {
+            "count": 4096,
+            "p50_ms": 8.103875,
+            "p95_ms": 10.766417,
+            "p99_ms": 12.612791,
+            "max_ms": 18.748125,
+            "mean_ms": 8.248130430419922
+          },
+          "miniature_submit_latency": {
+            "count": 4096,
+            "p50_ms": 8.103583,
+            "p95_ms": 10.765292,
+            "p99_ms": 12.59575,
+            "max_ms": 16.407375,
+            "mean_ms": 8.241589577880859
+          }
+        },
+        "latency_scope": "client fulfillment receipt to first submitted chunk representation; may be clipped or occluded; not physical display latency",
+        "comparison_scope": "budget limits only; immediate retains FIFO and miniature cache"
+      }
+    },
+    {
+      "camera": "travel",
+      "repetition": 3,
+      "policy": "immediate",
+      "command": [
+        "/Users/ilia.lebedev/.codex/worktrees/fc29/zig_engine/zig-out/bin/zig_engine_voxel_app",
+        "--benchmark-visuals",
+        "/private/tmp/client-visual-ab-radius5-2026-11-14/11-travel-r03-immediate",
+        "--visual-policy",
+        "immediate",
+        "--benchmark-rate",
+        "512",
+        "--benchmark-duration",
+        "8",
+        "--benchmark-camera",
+        "travel",
+        "--benchmark-render-radius",
+        "5"
+      ],
+      "artifacts": {
+        "summary": "/private/tmp/client-visual-ab-radius5-2026-11-14/11-travel-r03-immediate.summary.json",
+        "frames": "/private/tmp/client-visual-ab-radius5-2026-11-14/11-travel-r03-immediate.frames.csv",
+        "events": "/private/tmp/client-visual-ab-radius5-2026-11-14/11-travel-r03-immediate.events.csv",
+        "log": "/private/tmp/client-visual-ab-radius5-2026-11-14/11-travel-r03-immediate.log"
+      },
+      "status": "valid",
+      "returncode": 0,
+      "summary": {
+        "schema_version": 1,
+        "valid": true,
+        "invalid_reason": null,
+        "policy": "immediate",
+        "camera": "travel",
+        "rate": 512,
+        "duration_seconds": 8,
+        "render_radius": 5,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "frame_count": 962,
+        "planned_edits": 4096,
+        "admitted_edits": 4096,
+        "accepted_edits": 4096,
+        "rejected_edits": 0,
+        "acceptance_window_seconds": 8.017366125,
+        "accepted_edits_per_second": 510.8909754324086,
+        "busy_events": 0,
+        "final_checksum": "5f17fb35aea0ce85",
+        "unresolved_visuals": 0,
+        "frames_over_16_7ms": 0,
+        "frames_over_33_3ms": 0,
+        "peak_queue": 0,
+        "drain_ms": 42.224375,
+        "metrics": {
+          "frame": {
+            "count": 962,
+            "p50_ms": 8.244792,
+            "p95_ms": 10.741875,
+            "p99_ms": 12.491375,
+            "max_ms": 13.82825,
+            "mean_ms": 8.333471098752598
+          },
+          "interval": {
+            "count": 962,
+            "p50_ms": 8.242625,
+            "p95_ms": 10.742167,
+            "p99_ms": 12.492,
+            "max_ms": 13.829209,
+            "mean_ms": 8.333711148648648
+          },
+          "update": {
+            "count": 962,
+            "p50_ms": 1.932208,
+            "p95_ms": 2.679875,
+            "p99_ms": 3.353041,
+            "max_ms": 6.773542,
+            "mean_ms": 1.952586944906445
+          },
+          "draw": {
+            "count": 962,
+            "p50_ms": 6.227,
+            "p95_ms": 8.806708,
+            "p99_ms": 10.187666,
+            "max_ms": 12.031916,
+            "mean_ms": 6.275938487525988
+          },
+          "prepare": {
+            "count": 962,
+            "p50_ms": 1.884333,
+            "p95_ms": 2.612167,
+            "p99_ms": 3.291666,
+            "max_ms": 6.65625,
+            "mean_ms": 1.9023013575883576
+          },
+          "upload": {
+            "count": 962,
+            "p50_ms": 0.0095,
+            "p95_ms": 0.015708,
+            "p99_ms": 0.021959,
+            "max_ms": 0.038042,
+            "mean_ms": 0.010378554054054053
+          },
+          "terrain_submit_latency": {
+            "count": 4096,
+            "p50_ms": 8.104208,
+            "p95_ms": 10.649334,
+            "p99_ms": 12.355709,
+            "max_ms": 13.611833,
+            "mean_ms": 8.221780544921875
+          },
+          "miniature_submit_latency": {
+            "count": 4096,
+            "p50_ms": 8.103875,
+            "p95_ms": 10.648417,
+            "p99_ms": 12.355167,
+            "max_ms": 13.611833,
+            "mean_ms": 8.219838823242187
+          }
+        },
+        "latency_scope": "client fulfillment receipt to first submitted chunk representation; may be clipped or occluded; not physical display latency",
+        "comparison_scope": "budget limits only; immediate retains FIFO and miniature cache"
+      }
+    },
+    {
+      "camera": "travel",
+      "repetition": 3,
+      "policy": "budgeted",
+      "command": [
+        "/Users/ilia.lebedev/.codex/worktrees/fc29/zig_engine/zig-out/bin/zig_engine_voxel_app",
+        "--benchmark-visuals",
+        "/private/tmp/client-visual-ab-radius5-2026-11-14/12-travel-r03-budgeted",
+        "--visual-policy",
+        "budgeted",
+        "--benchmark-rate",
+        "512",
+        "--benchmark-duration",
+        "8",
+        "--benchmark-camera",
+        "travel",
+        "--benchmark-render-radius",
+        "5"
+      ],
+      "artifacts": {
+        "summary": "/private/tmp/client-visual-ab-radius5-2026-11-14/12-travel-r03-budgeted.summary.json",
+        "frames": "/private/tmp/client-visual-ab-radius5-2026-11-14/12-travel-r03-budgeted.frames.csv",
+        "events": "/private/tmp/client-visual-ab-radius5-2026-11-14/12-travel-r03-budgeted.events.csv",
+        "log": "/private/tmp/client-visual-ab-radius5-2026-11-14/12-travel-r03-budgeted.log"
+      },
+      "status": "valid",
+      "returncode": 0,
+      "summary": {
+        "schema_version": 1,
+        "valid": true,
+        "invalid_reason": null,
+        "policy": "budgeted",
+        "camera": "travel",
+        "rate": 512,
+        "duration_seconds": 8,
+        "render_radius": 5,
+        "resolution": [
+          1920,
+          1080
+        ],
+        "frame_count": 961,
+        "planned_edits": 4096,
+        "admitted_edits": 4096,
+        "accepted_edits": 4096,
+        "rejected_edits": 0,
+        "acceptance_window_seconds": 8.014365875,
+        "accepted_edits_per_second": 511.08223206742485,
+        "busy_events": 0,
+        "final_checksum": "5f17fb35aea0ce85",
+        "unresolved_visuals": 0,
+        "frames_over_16_7ms": 1,
+        "frames_over_33_3ms": 0,
+        "peak_queue": 95,
+        "drain_ms": 225.465542,
+        "metrics": {
+          "frame": {
+            "count": 961,
+            "p50_ms": 8.2165,
+            "p95_ms": 10.847084,
+            "p99_ms": 12.806917,
+            "max_ms": 17.264084,
+            "mean_ms": 8.339018431841831
+          },
+          "interval": {
+            "count": 961,
+            "p50_ms": 8.218458,
+            "p95_ms": 10.850333,
+            "p99_ms": 12.807375,
+            "max_ms": 17.265167,
+            "mean_ms": 8.342863856399584
+          },
+          "update": {
+            "count": 961,
+            "p50_ms": 1.830709,
+            "p95_ms": 2.071625,
+            "p99_ms": 2.180708,
+            "max_ms": 2.351042,
+            "mean_ms": 1.7335602528616025
+          },
+          "draw": {
+            "count": 961,
+            "p50_ms": 6.285083,
+            "p95_ms": 9.145583,
+            "p99_ms": 11.056375,
+            "max_ms": 15.48825,
+            "mean_ms": 6.497948318418315
+          },
+          "prepare": {
+            "count": 961,
+            "p50_ms": 1.777166,
+            "p95_ms": 2.019208,
+            "p99_ms": 2.128125,
+            "max_ms": 2.300667,
+            "mean_ms": 1.6822667367325703
+          },
+          "upload": {
+            "count": 961,
+            "p50_ms": 0.008917,
+            "p95_ms": 0.012583,
+            "p99_ms": 0.014208,
+            "max_ms": 0.097125,
+            "mean_ms": 0.009167391259105099
+          },
+          "terrain_submit_latency": {
+            "count": 4096,
+            "p50_ms": 16.287458,
+            "p95_ms": 40.323959,
+            "p99_ms": 100.758125,
+            "max_ms": 183.003958,
+            "mean_ms": 18.05002306225586
+          },
+          "miniature_submit_latency": {
+            "count": 4096,
+            "p50_ms": 16.511417,
+            "p95_ms": 50.034417,
+            "p99_ms": 107.08325,
+            "max_ms": 183.003958,
+            "mean_ms": 19.836854700195314
+          }
+        },
+        "latency_scope": "client fulfillment receipt to first submitted chunk representation; may be clipped or occluded; not physical display latency",
+        "comparison_scope": "budget limits only; immediate retains FIFO and miniature cache"
+      }
+    }
+  ],
+  "aggregation": "median of per-run statistics; frames are not pooled",
+  "baseline": "immediate: same visual FIFO, unlimited per-frame admission",
+  "results": {
+    "orbit": {
+      "policies": {
+        "immediate": {
+          "runs": 3,
+          "frame_count": 960,
+          "planned_edits": 4096,
+          "admitted_edits": 4096,
+          "accepted_edits": 4096,
+          "rejected_edits": 0,
+          "unresolved_visuals": 0,
+          "frames_over_16_7ms": 1,
+          "frames_over_33_3ms": 0,
+          "peak_queue": 0,
+          "drain_ms": 24.124417,
+          "acceptance_window_seconds": 8.015175792,
+          "accepted_edits_per_second": 511.03058826086436,
+          "metrics": {
+            "frame": {
+              "count": 960,
+              "p50_ms": 8.26275,
+              "p95_ms": 10.803417,
+              "p99_ms": 12.506542,
+              "max_ms": 17.152291,
+              "mean_ms": 8.348566378125
+            },
+            "interval": {
+              "count": 960,
+              "p50_ms": 8.263084,
+              "p95_ms": 10.803833,
+              "p99_ms": 12.507042,
+              "max_ms": 17.153041,
+              "mean_ms": 8.350754644791666
+            },
+            "update": {
+              "count": 960,
+              "p50_ms": 1.979417,
+              "p95_ms": 2.866,
+              "p99_ms": 3.228291,
+              "max_ms": 4.318,
+              "mean_ms": 2.07709830625
+            },
+            "draw": {
+              "count": 960,
+              "p50_ms": 6.073709,
+              "p95_ms": 8.710792,
+              "p99_ms": 10.433625,
+              "max_ms": 14.4495,
+              "mean_ms": 6.161119654166667
+            },
+            "prepare": {
+              "count": 960,
+              "p50_ms": 1.934084,
+              "p95_ms": 2.810583,
+              "p99_ms": 3.1495,
+              "max_ms": 4.207167,
+              "mean_ms": 2.0286526541666667
+            },
+            "upload": {
+              "count": 960,
+              "p50_ms": 0.009208,
+              "p95_ms": 0.015084,
+              "p99_ms": 0.019083,
+              "max_ms": 0.025667,
+              "mean_ms": 0.009929557291666667
+            },
+            "terrain_submit_latency": {
+              "count": 4096,
+              "p50_ms": 8.110916,
+              "p95_ms": 10.691333,
+              "p99_ms": 12.318541,
+              "max_ms": 17.002958,
+              "mean_ms": 8.23417427758789
+            },
+            "miniature_submit_latency": {
+              "count": 4096,
+              "p50_ms": 8.110916,
+              "p95_ms": 10.691333,
+              "p99_ms": 12.318541,
+              "max_ms": 17.002958,
+              "mean_ms": 8.23417427758789
+            }
+          }
+        },
+        "budgeted": {
+          "runs": 3,
+          "frame_count": 961,
+          "planned_edits": 4096,
+          "admitted_edits": 4096,
+          "accepted_edits": 4096,
+          "rejected_edits": 0,
+          "unresolved_visuals": 0,
+          "frames_over_16_7ms": 0,
+          "frames_over_33_3ms": 0,
+          "peak_queue": 5,
+          "drain_ms": 26.623875,
+          "acceptance_window_seconds": 8.015356334,
+          "accepted_edits_per_second": 511.0190775456047,
+          "metrics": {
+            "frame": {
+              "count": 961,
+              "p50_ms": 8.244416,
+              "p95_ms": 10.793791,
+              "p99_ms": 12.490417,
+              "max_ms": 14.810167,
+              "mean_ms": 8.340221348595213
+            },
+            "interval": {
+              "count": 961,
+              "p50_ms": 8.247125,
+              "p95_ms": 10.79775,
+              "p99_ms": 12.490958,
+              "max_ms": 14.811292,
+              "mean_ms": 8.342994667013528
+            },
+            "update": {
+              "count": 961,
+              "p50_ms": 1.991042,
+              "p95_ms": 2.086209,
+              "p99_ms": 2.185875,
+              "max_ms": 2.686542,
+              "mean_ms": 1.9809899895833332
+            },
+            "draw": {
+              "count": 961,
+              "p50_ms": 6.147625,
+              "p95_ms": 8.717291,
+              "p99_ms": 10.46275,
+              "max_ms": 12.575583,
+              "mean_ms": 6.2574778250000005
+            },
+            "prepare": {
+              "count": 961,
+              "p50_ms": 1.94275,
+              "p95_ms": 2.03325,
+              "p99_ms": 2.112833,
+              "max_ms": 2.612666,
+              "mean_ms": 1.9308716499999998
+            },
+            "upload": {
+              "count": 961,
+              "p50_ms": 0.008875,
+              "p95_ms": 0.01025,
+              "p99_ms": 0.011334,
+              "max_ms": 0.0125,
+              "mean_ms": 0.0089636680541103
+            },
+            "terrain_submit_latency": {
+              "count": 4096,
+              "p50_ms": 16.451125,
+              "p95_ms": 24.741667,
+              "p99_ms": 26.389334,
+              "max_ms": 32.1,
+              "mean_ms": 16.09862095605469
+            },
+            "miniature_submit_latency": {
+              "count": 4096,
+              "p50_ms": 16.451125,
+              "p95_ms": 24.741667,
+              "p99_ms": 26.389334,
+              "max_ms": 32.1,
+              "mean_ms": 16.09862095605469
+            }
+          }
+        }
+      },
+      "budgeted_minus_immediate": {
+        "frame": {
+          "p50_ms": {
+            "delta": -0.018334000000001183,
+            "percent": -0.22188738616079062
+          },
+          "p95_ms": {
+            "delta": -0.009625999999999024,
+            "percent": -0.08910143892436606
+          },
+          "p99_ms": {
+            "delta": -0.016124999999998835,
+            "percent": -0.12893252187534676
+          },
+          "max_ms": {
+            "delta": -2.342124000000002,
+            "percent": -13.65487560816221
+          },
+          "mean_ms": {
+            "delta": -0.008345029529786885,
+            "percent": -0.09995763526121637
+          }
+        },
+        "interval": {
+          "p50_ms": {
+            "delta": -0.015958999999998724,
+            "percent": -0.1931361220580463
+          },
+          "p95_ms": {
+            "delta": -0.006082999999998506,
+            "percent": -0.05630409133497993
+          },
+          "p99_ms": {
+            "delta": -0.016084000000001097,
+            "percent": -0.12859955215630547
+          },
+          "max_ms": {
+            "delta": -2.341749000000002,
+            "percent": -13.652092360765655
+          },
+          "mean_ms": {
+            "delta": -0.007759977778137639,
+            "percent": -0.0929254673166291
+          }
+        },
+        "update": {
+          "p50_ms": {
+            "delta": 0.011624999999999996,
+            "percent": 0.5872941376172891
+          },
+          "p95_ms": {
+            "delta": -0.7797909999999999,
+            "percent": -27.208339148639215
+          },
+          "p99_ms": {
+            "delta": -1.0424160000000002,
+            "percent": -32.29002589915222
+          },
+          "max_ms": {
+            "delta": -1.6314579999999994,
+            "percent": -37.78272348309402
+          },
+          "mean_ms": {
+            "delta": -0.09610831666666675,
+            "percent": -4.627047086672609
+          }
+        },
+        "draw": {
+          "p50_ms": {
+            "delta": 0.07391599999999965,
+            "percent": 1.2169829012222966
+          },
+          "p95_ms": {
+            "delta": 0.0064989999999998105,
+            "percent": 0.07460860045791495
+          },
+          "p99_ms": {
+            "delta": 0.02912500000000051,
+            "percent": 0.27914555104291416
+          },
+          "max_ms": {
+            "delta": -1.8739170000000005,
+            "percent": -12.968732482092804
+          },
+          "mean_ms": {
+            "delta": 0.09635817083333365,
+            "percent": 1.5639717493259209
+          }
+        },
+        "prepare": {
+          "p50_ms": {
+            "delta": 0.008666000000000063,
+            "percent": 0.44806740555218827
+          },
+          "p95_ms": {
+            "delta": -0.777333,
+            "percent": -27.657357921826186
+          },
+          "p99_ms": {
+            "delta": -1.036667,
+            "percent": -32.91528814097475
+          },
+          "max_ms": {
+            "delta": -1.5945010000000002,
+            "percent": -37.899636501237055
+          },
+          "mean_ms": {
+            "delta": -0.09778100416666691,
+            "percent": -4.819997349759886
+          }
+        },
+        "upload": {
+          "p50_ms": {
+            "delta": -0.00033299999999999996,
+            "percent": -3.6164205039096453
+          },
+          "p95_ms": {
+            "delta": -0.004834,
+            "percent": -32.04720233359851
+          },
+          "p99_ms": {
+            "delta": -0.007748999999999999,
+            "percent": -40.60682282659959
+          },
+          "max_ms": {
+            "delta": -0.013166999999999998,
+            "percent": -51.29933377488604
+          },
+          "mean_ms": {
+            "delta": -0.0009658892375563662,
+            "percent": -9.727414920773803
+          }
+        },
+        "terrain_submit_latency": {
+          "p50_ms": {
+            "delta": 8.340209000000002,
+            "percent": 102.82696800213445
+          },
+          "p95_ms": {
+            "delta": 14.050334,
+            "percent": 131.4179812751132
+          },
+          "p99_ms": {
+            "delta": 14.070793000000002,
+            "percent": 114.2245092174471
+          },
+          "max_ms": {
+            "delta": 15.097042000000002,
+            "percent": 88.79067983347369
+          },
+          "mean_ms": {
+            "delta": 7.864446678466798,
+            "percent": 95.50984000754718
+          }
+        },
+        "miniature_submit_latency": {
+          "p50_ms": {
+            "delta": 8.340209000000002,
+            "percent": 102.82696800213445
+          },
+          "p95_ms": {
+            "delta": 14.050334,
+            "percent": 131.4179812751132
+          },
+          "p99_ms": {
+            "delta": 14.070793000000002,
+            "percent": 114.2245092174471
+          },
+          "max_ms": {
+            "delta": 15.097042000000002,
+            "percent": 88.79067983347369
+          },
+          "mean_ms": {
+            "delta": 7.864446678466798,
+            "percent": 95.50984000754718
+          }
+        }
+      }
+    },
+    "travel": {
+      "policies": {
+        "immediate": {
+          "runs": 3,
+          "frame_count": 960,
+          "planned_edits": 4096,
+          "admitted_edits": 4096,
+          "accepted_edits": 4096,
+          "rejected_edits": 0,
+          "unresolved_visuals": 0,
+          "frames_over_16_7ms": 0,
+          "frames_over_33_3ms": 0,
+          "peak_queue": 0,
+          "drain_ms": 40.085416,
+          "acceptance_window_seconds": 8.013472791,
+          "accepted_edits_per_second": 511.1391910633618,
+          "metrics": {
+            "frame": {
+              "count": 960,
+              "p50_ms": 8.244792,
+              "p95_ms": 10.850584,
+              "p99_ms": 12.491375,
+              "max_ms": 16.598417,
+              "mean_ms": 8.346726567708332
+            },
+            "interval": {
+              "count": 960,
+              "p50_ms": 8.242625,
+              "p95_ms": 10.850875,
+              "p99_ms": 12.492,
+              "max_ms": 16.599584,
+              "mean_ms": 8.350029122916666
+            },
+            "update": {
+              "count": 960,
+              "p50_ms": 1.932458,
+              "p95_ms": 2.715875,
+              "p99_ms": 3.491084,
+              "max_ms": 5.097916,
+              "mean_ms": 1.9616144237995825
+            },
+            "draw": {
+              "count": 960,
+              "p50_ms": 6.223833,
+              "p95_ms": 8.9155,
+              "p99_ms": 10.187666,
+              "max_ms": 13.996458,
+              "mean_ms": 6.278336223958333
+            },
+            "prepare": {
+              "count": 960,
+              "p50_ms": 1.884333,
+              "p95_ms": 2.642666,
+              "p99_ms": 3.407959,
+              "max_ms": 4.993083,
+              "mean_ms": 1.9035082066805844
+            },
+            "upload": {
+              "count": 960,
+              "p50_ms": 0.00975,
+              "p95_ms": 0.015917,
+              "p99_ms": 0.021959,
+              "max_ms": 0.053334,
+              "mean_ms": 0.010683590625000001
+            },
+            "terrain_submit_latency": {
+              "count": 4096,
+              "p50_ms": 8.103875,
+              "p95_ms": 10.739875,
+              "p99_ms": 12.355709,
+              "max_ms": 18.748125,
+              "mean_ms": 8.233070120361328
+            },
+            "miniature_submit_latency": {
+              "count": 4096,
+              "p50_ms": 8.103583,
+              "p95_ms": 10.735542,
+              "p99_ms": 12.355167,
+              "max_ms": 16.407375,
+              "mean_ms": 8.22263196923828
+            }
+          }
+        },
+        "budgeted": {
+          "runs": 3,
+          "frame_count": 960,
+          "planned_edits": 4096,
+          "admitted_edits": 4096,
+          "accepted_edits": 4096,
+          "rejected_edits": 0,
+          "unresolved_visuals": 0,
+          "frames_over_16_7ms": 0,
+          "frames_over_33_3ms": 0,
+          "peak_queue": 93,
+          "drain_ms": 216.546167,
+          "acceptance_window_seconds": 8.008757334,
+          "accepted_edits_per_second": 511.44014348031686,
+          "metrics": {
+            "frame": {
+              "count": 960,
+              "p50_ms": 8.276125,
+              "p95_ms": 10.847084,
+              "p99_ms": 12.57,
+              "max_ms": 15.78725,
+              "mean_ms": 8.34136449375
+            },
+            "interval": {
+              "count": 960,
+              "p50_ms": 8.276667,
+              "p95_ms": 10.850333,
+              "p99_ms": 12.570375,
+              "max_ms": 15.788167,
+              "mean_ms": 8.342863856399584
+            },
+            "update": {
+              "count": 960,
+              "p50_ms": 1.828208,
+              "p95_ms": 2.085667,
+              "p99_ms": 2.23175,
+              "max_ms": 2.351042,
+              "mean_ms": 1.7335602528616025
+            },
+            "draw": {
+              "count": 960,
+              "p50_ms": 6.361791,
+              "p95_ms": 9.0545,
+              "p99_ms": 10.908375,
+              "max_ms": 13.821708,
+              "mean_ms": 6.497948318418315
+            },
+            "prepare": {
+              "count": 960,
+              "p50_ms": 1.77675,
+              "p95_ms": 2.024541,
+              "p99_ms": 2.158083,
+              "max_ms": 2.300667,
+              "mean_ms": 1.6807701166666666
+            },
+            "upload": {
+              "count": 960,
+              "p50_ms": 0.008958,
+              "p95_ms": 0.013042,
+              "p99_ms": 0.014375,
+              "max_ms": 0.030666,
+              "mean_ms": 0.009167391259105099
+            },
+            "terrain_submit_latency": {
+              "count": 4096,
+              "p50_ms": 16.311583,
+              "p95_ms": 41.141,
+              "p99_ms": 107.177208,
+              "max_ms": 190.052958,
+              "mean_ms": 18.05002306225586
+            },
+            "miniature_submit_latency": {
+              "count": 4096,
+              "p50_ms": 16.485083,
+              "p95_ms": 56.15975,
+              "p99_ms": 107.809375,
+              "max_ms": 190.052958,
+              "mean_ms": 19.876178254882813
+            }
+          }
+        }
+      },
+      "budgeted_minus_immediate": {
+        "frame": {
+          "p50_ms": {
+            "delta": 0.031333000000000055,
+            "percent": 0.3800338443953555
+          },
+          "p95_ms": {
+            "delta": -0.0034999999999989484,
+            "percent": -0.03225632832296599
+          },
+          "p99_ms": {
+            "delta": 0.07862500000000061,
+            "percent": 0.6294343096736821
+          },
+          "max_ms": {
+            "delta": -0.8111670000000011,
+            "percent": -4.887014225513198
+          },
+          "mean_ms": {
+            "delta": -0.005362073958332658,
+            "percent": -0.06424163910050407
+          }
+        },
+        "interval": {
+          "p50_ms": {
+            "delta": 0.03404199999999946,
+            "percent": 0.41299949955262427
+          },
+          "p95_ms": {
+            "delta": -0.0005420000000011527,
+            "percent": -0.004994988883399998
+          },
+          "p99_ms": {
+            "delta": 0.07837499999999942,
+            "percent": 0.6274015369836627
+          },
+          "max_ms": {
+            "delta": -0.8114170000000005,
+            "percent": -4.888176715753845
+          },
+          "mean_ms": {
+            "delta": -0.0071652665170827134,
+            "percent": -0.08581127576450243
+          }
+        },
+        "update": {
+          "p50_ms": {
+            "delta": -0.10424999999999995,
+            "percent": -5.3946838689379
+          },
+          "p95_ms": {
+            "delta": -0.6302080000000001,
+            "percent": -23.204602568233078
+          },
+          "p99_ms": {
+            "delta": -1.259334,
+            "percent": -36.07286447418624
+          },
+          "max_ms": {
+            "delta": -2.7468739999999996,
+            "percent": -53.88229229355681
+          },
+          "mean_ms": {
+            "delta": -0.22805417093797997,
+            "percent": -11.625840846757573
+          }
+        },
+        "draw": {
+          "p50_ms": {
+            "delta": 0.13795800000000025,
+            "percent": 2.216608318378732
+          },
+          "p95_ms": {
+            "delta": 0.13900000000000112,
+            "percent": 1.5590824967752992
+          },
+          "p99_ms": {
+            "delta": 0.7207089999999994,
+            "percent": 7.074328899278792
+          },
+          "max_ms": {
+            "delta": -0.1747500000000013,
+            "percent": -1.2485301638457513
+          },
+          "mean_ms": {
+            "delta": 0.21961209445998175,
+            "percent": 3.4979345900898906
+          }
+        },
+        "prepare": {
+          "p50_ms": {
+            "delta": -0.10758299999999998,
+            "percent": -5.709341183325877
+          },
+          "p95_ms": {
+            "delta": -0.618125,
+            "percent": -23.390205194299995
+          },
+          "p99_ms": {
+            "delta": -1.249876,
+            "percent": -36.675206479890164
+          },
+          "max_ms": {
+            "delta": -2.6924160000000006,
+            "percent": -53.92291696332707
+          },
+          "mean_ms": {
+            "delta": -0.22273809001391776,
+            "percent": -11.701451521574347
+          }
+        },
+        "upload": {
+          "p50_ms": {
+            "delta": -0.0007919999999999993,
+            "percent": -8.12307692307691
+          },
+          "p95_ms": {
+            "delta": -0.002875000000000001,
+            "percent": -18.062448953948618
+          },
+          "p99_ms": {
+            "delta": -0.007583999999999999,
+            "percent": -34.53709185299877
+          },
+          "max_ms": {
+            "delta": -0.022668,
+            "percent": -42.50196872539094
+          },
+          "mean_ms": {
+            "delta": -0.0015161993658949022,
+            "percent": -14.191851963579916
+          }
+        },
+        "terrain_submit_latency": {
+          "p50_ms": {
+            "delta": 8.207707999999998,
+            "percent": 101.28127593280989
+          },
+          "p95_ms": {
+            "delta": 30.401125,
+            "percent": 283.0677731351622
+          },
+          "p99_ms": {
+            "delta": 94.82149899999999,
+            "percent": 767.4306589771579
+          },
+          "max_ms": {
+            "delta": 171.30483299999997,
+            "percent": 913.7171477147714
+          },
+          "mean_ms": {
+            "delta": 9.816952941894533,
+            "percent": 119.23805820159457
+          }
+        },
+        "miniature_submit_latency": {
+          "p50_ms": {
+            "delta": 8.381499999999999,
+            "percent": 103.4295570243434
+          },
+          "p95_ms": {
+            "delta": 45.424208,
+            "percent": 423.1198387561616
+          },
+          "p99_ms": {
+            "delta": 95.45420800000001,
+            "percent": 772.5853321124677
+          },
+          "max_ms": {
+            "delta": 173.645583,
+            "percent": 1058.3386007816607
+          },
+          "mean_ms": {
+            "delta": 11.653546285644532,
+            "percent": 141.72525694013376
+          }
+        }
+      }
+    }
+  }
+}

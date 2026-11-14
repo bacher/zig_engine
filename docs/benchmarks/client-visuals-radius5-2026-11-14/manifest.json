@@ -1,0 +1,254 @@
+{
+  "measured_commit": "01696cd780a5ec1f306243dd3413a2c6117c3a9f",
+  "binary_sha256": "d6fd76846f3443e85cc37a961e81e3b0ef105ad4a643b698af521307b1c2b2af",
+  "date": "2026-11-14",
+  "command": "python3 scripts/benchmark_client_visuals.py --render-radius 5 --output-dir /private/tmp/client-visual-ab-radius5-2026-11-14",
+  "files": [
+    {
+      "name": "01-orbit-r01-immediate.events.csv",
+      "bytes": 371727,
+      "sha256": "baf53905683e885f14de1f57a7f04ddc8acebfcbc42d3e26a2f7185c08f65fb4"
+    },
+    {
+      "name": "01-orbit-r01-immediate.frames.csv",
+      "bytes": 83427,
+      "sha256": "4fb81fba3f0bd60a193aaf0e7c7d798328ad66dc4c0fa75c8ee95eec78ec7aa4"
+    },
+    {
+      "name": "01-orbit-r01-immediate.log",
+      "bytes": 456,
+      "sha256": "f2f6e4998e1225b9f8f5f868b31c57ce3d1b96d7a221f5b05f0a0b431441fcd9"
+    },
+    {
+      "name": "01-orbit-r01-immediate.summary.json",
+      "bytes": 2366,
+      "sha256": "d98421a6c442cb55d2b9f29c7994d9ccea83901b01586c24ad28f588a57aacc3"
+    },
+    {
+      "name": "02-orbit-r01-budgeted.events.csv",
+      "bytes": 371727,
+      "sha256": "7e68a2cf901448da2697db00c0c61d4a251e4233b5e5253ea88c8e39ea73617d"
+    },
+    {
+      "name": "02-orbit-r01-budgeted.frames.csv",
+      "bytes": 83227,
+      "sha256": "fa88057bf9420ee2bf22598e5e8a3d5c7c41c5a4e0adc6f70a93dd37dd04d8d8"
+    },
+    {
+      "name": "02-orbit-r01-budgeted.log",
+      "bytes": 455,
+      "sha256": "dae3370f98fd932f02bb3abd382ae0913ff270632baa135bbbc4412f757f66d7"
+    },
+    {
+      "name": "02-orbit-r01-budgeted.summary.json",
+      "bytes": 2368,
+      "sha256": "2c0977b9d379d1d720edb9478a026f0d271181286870f443764d62ad8f2f3db6"
+    },
+    {
+      "name": "03-orbit-r02-budgeted.events.csv",
+      "bytes": 371727,
+      "sha256": "c8b2d084c009f651913803c1759c5c81f8acb973b54d532e17919e0b3a0f22c3"
+    },
+    {
+      "name": "03-orbit-r02-budgeted.frames.csv",
+      "bytes": 83131,
+      "sha256": "2cf4c783b80cd8b209d9b48ca7873fdb70590dbd4592bca7590749c181e7a05b"
+    },
+    {
+      "name": "03-orbit-r02-budgeted.log",
+      "bytes": 455,
+      "sha256": "dae3370f98fd932f02bb3abd382ae0913ff270632baa135bbbc4412f757f66d7"
+    },
+    {
+      "name": "03-orbit-r02-budgeted.summary.json",
+      "bytes": 2369,
+      "sha256": "58b7989eed6e5e6287562e04400d6748a267e49ad791d7c54cc9bd670ff8253c"
+    },
+    {
+      "name": "04-orbit-r02-immediate.events.csv",
+      "bytes": 371727,
+      "sha256": "00e16fcf8e0e2dc2dfe0ed7efe84c65238d8011d749ce243012fa1d7da416e73"
+    },
+    {
+      "name": "04-orbit-r02-immediate.frames.csv",
+      "bytes": 83226,
+      "sha256": "5e036540f7929a9f9a4889c432338672b283dcfa02760741a12d720ae058a349"
+    },
+    {
+      "name": "04-orbit-r02-immediate.log",
+      "bytes": 456,
+      "sha256": "f2f6e4998e1225b9f8f5f868b31c57ce3d1b96d7a221f5b05f0a0b431441fcd9"
+    },
+    {
+      "name": "04-orbit-r02-immediate.summary.json",
+      "bytes": 2368,
+      "sha256": "13747fd01fe2f365edcd16a1f154df0b1a72517fd65f9621c367a06abe3f76a2"
+    },
+    {
+      "name": "05-orbit-r03-immediate.events.csv",
+      "bytes": 371727,
+      "sha256": "214ebba9a6af706acc6b057a70d136022dff2057f264f31376ec9d37b6a1764d"
+    },
+    {
+      "name": "05-orbit-r03-immediate.frames.csv",
+      "bytes": 83239,
+      "sha256": "5a31b860c4060a53308213eea0219b4b7d655033bc898c0a874dec93efaf643b"
+    },
+    {
+      "name": "05-orbit-r03-immediate.log",
+      "bytes": 456,
+      "sha256": "f2f6e4998e1225b9f8f5f868b31c57ce3d1b96d7a221f5b05f0a0b431441fcd9"
+    },
+    {
+      "name": "05-orbit-r03-immediate.summary.json",
+      "bytes": 2367,
+      "sha256": "22c483f1945599590a59379b1d0dd88d5073332607d03ac272357624db84a556"
+    },
+    {
+      "name": "06-orbit-r03-budgeted.events.csv",
+      "bytes": 371727,
+      "sha256": "9c1cb978cb88039473a7c9143d8f7d3f2c2e59ec739e483ffa03313539324fc5"
+    },
+    {
+      "name": "06-orbit-r03-budgeted.frames.csv",
+      "bytes": 83345,
+      "sha256": "cf3f26f5c7be4783e39b482bfb33de24c4e52026fc1651d4c492f96e0eb69304"
+    },
+    {
+      "name": "06-orbit-r03-budgeted.log",
+      "bytes": 455,
+      "sha256": "dae3370f98fd932f02bb3abd382ae0913ff270632baa135bbbc4412f757f66d7"
+    },
+    {
+      "name": "06-orbit-r03-budgeted.summary.json",
+      "bytes": 2384,
+      "sha256": "fc136f678cb8db6158fefe6e85ffdd6172fd198ea6bb4e1cea9be2e2ba23898a"
+    },
+    {
+      "name": "07-travel-r01-immediate.events.csv",
+      "bytes": 371727,
+      "sha256": "376fdcb69537933f4945dbc879bbb16a8408f20de582090ce60458d637970f35"
+    },
+    {
+      "name": "07-travel-r01-immediate.frames.csv",
+      "bytes": 83683,
+      "sha256": "6c3ef10488ef5fe8df5f013ded2d6cb703ed6e8cbcff7536597be2925b015368"
+    },
+    {
+      "name": "07-travel-r01-immediate.log",
+      "bytes": 456,
+      "sha256": "f2f6e4998e1225b9f8f5f868b31c57ce3d1b96d7a221f5b05f0a0b431441fcd9"
+    },
+    {
+      "name": "07-travel-r01-immediate.summary.json",
+      "bytes": 2370,
+      "sha256": "51e029beab429946d46a10819cdf839389d5d0a539f717203335273edba5b577"
+    },
+    {
+      "name": "08-travel-r01-budgeted.events.csv",
+      "bytes": 371727,
+      "sha256": "36b703b3a2c8f9e9a4aeb161e1f7aa05bae888b3d4541344be00d36c27ef9f36"
+    },
+    {
+      "name": "08-travel-r01-budgeted.frames.csv",
+      "bytes": 83576,
+      "sha256": "1b47e0b540fb5b6caf44a11a2b4872161ddf5ebd96dc0ae799ec4cba187b83af"
+    },
+    {
+      "name": "08-travel-r01-budgeted.log",
+      "bytes": 455,
+      "sha256": "dae3370f98fd932f02bb3abd382ae0913ff270632baa135bbbc4412f757f66d7"
+    },
+    {
+      "name": "08-travel-r01-budgeted.summary.json",
+      "bytes": 2368,
+      "sha256": "cdb92138947a9f1a245afc64a54d038432a8414931d1193d80c6d640758293e3"
+    },
+    {
+      "name": "09-travel-r02-budgeted.events.csv",
+      "bytes": 371727,
+      "sha256": "8ee1e26474e50051de41f8d6426e1ffd8b6f056e664a0f99dfe65a363c8d9c75"
+    },
+    {
+      "name": "09-travel-r02-budgeted.frames.csv",
+      "bytes": 83439,
+      "sha256": "7b1a4f6fb8fe0dbc6d2bd547c38e4c6c97addba47fed7375491c45d1af1c843f"
+    },
+    {
+      "name": "09-travel-r02-budgeted.log",
+      "bytes": 455,
+      "sha256": "dae3370f98fd932f02bb3abd382ae0913ff270632baa135bbbc4412f757f66d7"
+    },
+    {
+      "name": "09-travel-r02-budgeted.summary.json",
+      "bytes": 2378,
+      "sha256": "5e16412928d13fccdce1630f525d8643def9b524438091e17b4e7fb7bee9b49f"
+    },
+    {
+      "name": "10-travel-r02-immediate.events.csv",
+      "bytes": 371727,
+      "sha256": "d39e6c8237f502cd79bc8020aaa2a35a5caa51a7a99fd03cf8149a8751c3e98f"
+    },
+    {
+      "name": "10-travel-r02-immediate.frames.csv",
+      "bytes": 83566,
+      "sha256": "07c5c77324e28f8f9da3b91f6567cf01e683d7785f1d86f475b4992ad28b7e29"
+    },
+    {
+      "name": "10-travel-r02-immediate.log",
+      "bytes": 456,
+      "sha256": "f2f6e4998e1225b9f8f5f868b31c57ce3d1b96d7a221f5b05f0a0b431441fcd9"
+    },
+    {
+      "name": "10-travel-r02-immediate.summary.json",
+      "bytes": 2370,
+      "sha256": "cd613a82d808a7fae5a98f06b50b675ca9608b74e1e94175a07f10ed435c6e78"
+    },
+    {
+      "name": "11-travel-r03-immediate.events.csv",
+      "bytes": 371727,
+      "sha256": "b245251a5f364316f205f96be5195b4510657ab9190cd2409e80394d31bf5151"
+    },
+    {
+      "name": "11-travel-r03-immediate.frames.csv",
+      "bytes": 83418,
+      "sha256": "63c7f5577011d244c49b789732331c039a45368d3bf097071589aac469c6ca02"
+    },
+    {
+      "name": "11-travel-r03-immediate.log",
+      "bytes": 456,
+      "sha256": "f2f6e4998e1225b9f8f5f868b31c57ce3d1b96d7a221f5b05f0a0b431441fcd9"
+    },
+    {
+      "name": "11-travel-r03-immediate.summary.json",
+      "bytes": 2374,
+      "sha256": "61578823e6f860f293f2be200e5a18f40ace7a16a2b1faa775dbc20c06ac8024"
+    },
+    {
+      "name": "12-travel-r03-budgeted.events.csv",
+      "bytes": 371727,
+      "sha256": "35e155ac1c08afc55a0594b728e91cbe9d4ff83599f797f95129bdf2b5397edb"
+    },
+    {
+      "name": "12-travel-r03-budgeted.frames.csv",
+      "bytes": 83353,
+      "sha256": "d65dba476776c7bc3b66b76a62d00570e7aee577b5d90536f68bf8d6892c459d"
+    },
+    {
+      "name": "12-travel-r03-budgeted.log",
+      "bytes": 455,
+      "sha256": "dae3370f98fd932f02bb3abd382ae0913ff270632baa135bbbc4412f757f66d7"
+    },
+    {
+      "name": "12-travel-r03-budgeted.summary.json",
+      "bytes": 2390,
+      "sha256": "db7721fe05454c9e7dd254fba93b8ebca222ebed741d86e133f65d30417eae50"
+    },
+    {
+      "name": "report.json",
+      "bytes": 68949,
+      "sha256": "95848ccbbb8fe6b9ad44ce4e9e56271c6555719b7572c481c5324364445d4800"
+    }
+  ],
+  "archive_sha256": "4b431d297a035ae77787eb22249032c757b095995522305c846ffffbaebd1155"
+}

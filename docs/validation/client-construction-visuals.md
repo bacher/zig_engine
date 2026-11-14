@@ -193,3 +193,72 @@ Raw CSVs, individual summaries and logs are in the checksummed
 [run table](../benchmarks/client-visuals-2026-11-14/runs.csv),
 [manifest](../benchmarks/client-visuals-2026-11-14/manifest.json) and
 [runner output](../benchmarks/client-visuals-2026-11-14/runner.log) accompany it.
+
+## Wider render radius — 2026-11-14
+
+The follow-up [report](../benchmarks/client-visuals-radius5-2026-11-14/report.json)
+uses radius 5 instead of 3, at commit `01696cd`. Run it with:
+
+```sh
+python3 scripts/benchmark_client_visuals.py --render-radius 5 --output-dir /private/tmp/client-visual-ab-radius5-2026-11-14
+```
+
+All other scenario settings match the initial series: the same nine sites, 512
+intended fills/second for eight seconds, three repetitions per policy/camera,
+AB/BA/AB ordering, the same hardware, and 1920×1080. Normal gameplay's default
+radius is unchanged. Every readiness log confirms 484 loaded chunks and all
+132,300 target miniature sources, with no effective-radius fallback. This increases
+the resident box from 196 to 484 chunks; local block-data radius 1 stays unchanged.
+The extra chunks exercise distant meshes, subscription scans, streaming and drawing,
+while the actual construction targets remain the same.
+
+The unlocked radius-5 smoke and all 12 measured runs passed. Every measured run
+accepted all 4,096 commands, rejected none, resolved both representations and
+matched checksum `5f17fb35aea0ce85`. Independent verification recomputed every
+reported timing quantile from 11,526 frame rows and 49,152 event rows, checked
+acknowledgement windows, timestamp ordering and thresholds, and confirmed all summaries and
+aggregates. No builds or tests ran concurrently with measurements.
+
+Medians of per-run statistics, in milliseconds:
+
+| Camera | Policy | Preparation mean | Preparation p95 | Interval p95 | Interval p99 | Terrain latency p95 | Miniature latency p95 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Orbit | Immediate | 2.029 | 2.811 | 10.804 | 12.507 | 10.691 | 10.691 |
+| Orbit | Budgeted | 1.931 | 2.033 | 10.798 | 12.491 | 24.742 | 24.742 |
+| Travel | Immediate | 1.904 | 2.643 | 10.851 | 12.492 | 10.740 | 10.736 |
+| Travel | Budgeted | 1.681 | 2.025 | 10.850 | 12.570 | 41.141 | 56.160 |
+
+Preparation p95 falls 27.7% in orbit and 23.4% in travel; preparation p99 falls
+32.9% and 36.7%. Mean savings are about 0.10/0.22 ms per frame (4.8%/11.7%).
+Both policies still run near 120 host frames/second. Whole-frame interval p95/p99
+are almost unchanged. Across all three repetitions, orbit frames over 16.67 ms
+total two immediate versus zero budgeted; travel totals one for each policy.
+No frame exceeds 33.33 ms. Worst travel frames across the three runs are
+16.789 ms immediate and 17.264 ms budgeted. These rare, mixed tail observations
+do not establish a general smoothness improvement or regression.
+
+Graphical delay increases. Budgeted travel terrain/miniature latency p99 is
+107.2/107.8 ms; the worst miniature observation across the three runs is 201.2 ms.
+Median final drain is 40.1 ms immediate versus 216.5 ms budgeted, and the median
+end-of-frame sampled queue peak is 0 versus 93. All queues converge; observed
+accepted throughput remains about 511 edits/second for either policy on this
+finite stream. These remain host receipt-to-submission measurements.
+
+The historical radius-3 budgeted travel miniature p95/p99 was 27.3/77.4 ms, compared
+with 56.2/107.8 ms here; orbit latency stays near 24.7 ms. Cross-series timing
+differences are descriptive: sequential short series cannot separate the radius
+effect from run-to-run system variation. The A/B arms within each series retain
+the same workload and radius.
+
+The wider-distance result preserves the earlier recommendation: preparation tails
+improve, while the complete client still shows no material pacing benefit in this
+scenario. Defer merging the scheduler until representative load or reference
+hardware demonstrates that benefit. The experiment changes no production policy.
+
+The radius-configurable client passed 58/58 ReleaseFast install/test steps,
+2,042 tests with eight existing skips, and all 30 Python runner tests. The
+[raw archive](../benchmarks/client-visuals-radius5-2026-11-14/raw.tar.gz),
+[per-run table](../benchmarks/client-visuals-radius5-2026-11-14/runs.csv),
+[manifest](../benchmarks/client-visuals-radius5-2026-11-14/manifest.json), and
+[runner output](../benchmarks/client-visuals-radius5-2026-11-14/runner.log)
+retain the complete evidence.
