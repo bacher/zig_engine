@@ -129,7 +129,58 @@ All 22 Python tests pass. They cover strict summary validation, complete workloa
 and latency observations, acknowledgement-window throughput, checksum/resolution
 equivalence, medians, execution order, and client argument bounds/formatting.
 
-No successful full-client A/B measurement is recorded yet. The initial smoke run
-occurred with the Mac locked and correctly failed `WarmupTimeout`. Build and test
-passes establish correctness checks; a valid focused-window comparison is still
-required before reporting performance results.
+## Windowed results — 2026-11-14
+
+The [retained report](../benchmarks/client-visuals-2026-11-14/report.json) contains
+12 successful ReleaseFast runs at commit `4ece726`, on Apple M4 Max, 16 CPU cores,
+64 GiB RAM, Metal, macOS 26.7.1, Zig 0.16.0, and a 1920×1080 framebuffer. The default
+driver command ran sequentially with no concurrent builds or tests. Each camera used
+three repetitions per policy in AB/BA/AB order, with 512 intended fills/second for
+eight seconds. These are medians of per-run statistics; each reported maximum is
+the median of the three run maxima.
+
+Every run accepted all 4,096 planned commands, rejected none, and resolved all 4,096
+terrain and 4,096 miniature latency observations. All final checksums were
+`5f17fb35aea0ce85`; resolution and logical/miniature final state matched. Independent
+raw-data verification recomputed all reported quantiles from 11,520 frame rows and
+49,152 event rows and checked timestamp ordering, frame nesting and threshold counts.
+There were no focus, resolution, timeout or render-radius invalidations. The earlier
+locked-desktop smoke failure was excluded; a fresh unlocked smoke run also passed.
+
+| Camera | Policy | Preparation mean, ms | Preparation p95, ms | Interval p95, ms | Interval p99, ms | Terrain latency p95, ms | Miniature latency p95, ms |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Orbit | Immediate | 2.068 | 2.820 | 10.814 | 12.443 | 10.706 | 10.706 |
+| Orbit | Budgeted | 1.957 | 2.069 | 10.993 | 12.438 | 24.758 | 24.758 |
+| Travel | Immediate | 1.932 | 2.551 | 10.572 | 11.039 | 10.462 | 10.424 |
+| Travel | Budgeted | 1.752 | 2.080 | 10.976 | 12.556 | 26.140 | 27.314 |
+
+Budgeting reduced preparation p95 by 26.6% in orbit and 18.5% in travel; mean
+preparation fell by 5.4% and 9.3%, respectively (about 0.11/0.18 ms per frame).
+The complete client showed no pacing improvement: both policies ran near 120 host
+frames/second, orbit interval p99 was effectively unchanged, and travel interval
+p99 was higher with budgeting. All immediate runs had zero active frames over
+16.67 ms; every budgeted travel run had one. No arm had frames over 33.33 ms.
+Three short repetitions do not establish a general frame-pacing regression either.
+
+Receipt-to-submission p95 increased from roughly 10–11 ms to 25–27 ms. In travel,
+budgeted terrain/miniature p99 reached 75.7/77.4 ms; the medians of run maxima were
+135.2/156.6 ms. These tails also occurred during active travel, not only at its end.
+The median final drain was 24.8 ms immediate versus 183.7 ms budgeted; the median
+end-of-frame sampled queue peak was 0 versus 73. All queues converged.
+
+Observed accepted throughput was about 511.4 commands/second for both policies on
+this finite input stream. This does not measure maximum service capacity. Host
+draw/submit timings also do not identify a GPU bottleneck or physical display rate.
+
+The result supports smaller preparation spikes with added graphical delay. It does
+not demonstrate improved whole-client smoothness or simulation throughput. On this
+evidence, defer merging the scheduling PR until a representative workload demonstrates
+a material client benefit, particularly on the proposed 4–8-core reference hardware.
+The GPU miniature cache already merged in PR #58 has separate component evidence.
+This recommendation does not change the proposed default budget in the open PR.
+
+Raw CSVs, individual summaries and logs are in the checksummed
+[archive](../benchmarks/client-visuals-2026-11-14/raw.tar.gz); the
+[run table](../benchmarks/client-visuals-2026-11-14/runs.csv),
+[manifest](../benchmarks/client-visuals-2026-11-14/manifest.json) and
+[runner output](../benchmarks/client-visuals-2026-11-14/runner.log) accompany it.

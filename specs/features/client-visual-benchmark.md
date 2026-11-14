@@ -88,10 +88,17 @@ validation, then run sequential ReleaseFast A/B measurements on the local GPU.
 - [x] T2: Add certified public-service construction fixture and wall-time arrivals (AC2).
 - [x] T3: Integrate CLI, warmup, camera paths, per-representation tracking and reports (AC4).
 - [x] T4: Add alternating automation and validation tests (AC3, AC5).
-- [ ] T-val: Verify automatic runs and publish raw results with practical limits.
+- [x] T-val: Verify automatic runs and publish raw results with practical limits.
 
 Debug passed 50/50 build steps and 2,048 tests with one existing skip; ReleaseFast
 install/test passed 58/58 steps and 2,041 tests with eight existing skips. Python
-runner tests pass. The first windowed smoke run reached Metal but correctly failed
-warmup while the Mac was locked. AC2–AC4 still require successful windowed runs;
-no full-client performance conclusion is recorded before those runs succeed.
+runner tests pass. After an excluded locked-desktop smoke failure, the unlocked
+smoke and all 12 default windowed A/B runs succeeded on 2026-11-14. Every measured
+run accepted 4,096 commands, resolved both representations and matched checksum
+`5f17fb35aea0ce85` at 1920×1080. All frame/event statistics were independently
+recomputed from raw CSVs. This verifies AC2–AC4, including travel handoffs.
+
+The [windowed report](../../docs/validation/client-construction-visuals.md) records
+lower preparation spikes but no demonstrated whole-client pacing benefit, alongside
+increased submission latency. These observations do not establish maximum simulation
+throughput or physical display latency; they do not authorize merging PR #59.

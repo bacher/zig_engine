@@ -308,8 +308,12 @@ is a correctness fix, not a cache performance benefit.
 An opt-in [windowed-client A/B harness](client-construction-visuals.md) now automates
 construction, camera motion, frame timings and per-representation submission latency.
 Its immediate baseline retains the FIFO/cache and isolates the preparation budget.
-Successful full-client performance results remain pending; keep them separate from
-the component measurements below.
+The 2026-11-14 series completed all 12 runs with matching final states. Preparation
+p95 fell by 18.5–26.6%, but mean preparation saved only about 0.11–0.18 ms/frame and
+whole-client frame pacing did not improve. Submission latency p95 increased from
+roughly 10–11 to 25–27 ms. Keep these results separate from the component replay.
+They support deferring the scheduling PR until a representative workload establishes
+a material client benefit; the already merged miniature cache remains independent.
 
 Fresh synchronous renderer results support removing repeated miniature packing/uploads.
 The fresh CPU replay supports a count budget to combine busy preparation work while
@@ -320,9 +324,8 @@ rather than carrying its unmeasured complexity into either PR.
 
 Neither component harness establishes complete-client smoothness, actual edit-to-visible
 latency or whole-world simulation throughput. The M4 Max is faster than the proposed
-4–8-core reference PC. A full-client comparison should hold accepted edits/camera motion
-fixed and measure whole-frame CPU/GPU percentiles, missed deadlines, event-to-visible age,
-backlog convergence and peak retained memory under realistic simulation/service load.
-Include quiet manual edits, busy local construction, the streamed mesh ring, travel,
-representation handoffs and capacity pressure. The ordinary local block core contains
+4–8-core reference PC. The windowed comparison measures host timings, submission age
+and queue convergence for finite construction with orbit/travel. Future comparisons
+should add reference hardware, realistic simulation load, GPU/presentation diagnostics,
+quiet manual edits, capacity pressure and retained memory. The ordinary local block core contains
 27 chunks; treating 343 locally meshed chunks as the default would overstate that workload.
