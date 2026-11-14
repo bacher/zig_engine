@@ -23,10 +23,11 @@ the loose/compacted distinction and active-target aging with Q6's single-soil mo
 retains R58's grass-covering footprint; soil targets stay bare until world-data resumes ordinary
 growth after full materialization. Bare/grassy soil share the selected support baseline, so
 R19/R28's loose-soil exclusions also change; the five-neighbor bound is retained. Filled sites
-remain saved through partial materialization, extending R33. Corresponding existing acceptance criteria below
-describe the current runtime until the follow-up is implemented; the new spec defines their
-replacement behavior. Terrain stays air under owned targets, without marker blocks. Current
-world-data integration described here remains implemented; the ownership change is pending.
+remain saved through partial materialization, extending R33. The construction ownership implementation supersedes the corresponding older acceptance
+criteria below; its spec and validation reports define the replacement behavior. Terrain stays
+air under owned targets, without marker blocks. World format 7 gates these changes. External
+Save/Apply and block operations now share the construction Q8 live-session retry ledger; the
+older endpoint-lifetime Save-key contract below is superseded after acknowledgment.
 
 The voxel app has a one-block player inventory, timed manual placement/extraction, debug spectator tools, a main-thread streamed world cache, and an authoritative `WorldDataService` worker. Client and service currently run ordinary structural validation, including potentially affected constructions. Persistent saves include terrain, construction metadata, roads, block timers, player identity, inventory, blueprint definitions, and active construction progress.
 

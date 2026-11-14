@@ -13,6 +13,8 @@ const calculateDataSlotSizeLevel = @import("./voxel_utils.zig").calculateDataSlo
 const GPU_ChunkInfo = @import("./voxel_chunk.zig").GPU_ChunkInfo;
 const VoxelChunk = @import("./voxel_chunk.zig").VoxelChunk;
 const VoxelChunkUpload = @import("./voxel_chunk.zig").VoxelChunkUpload;
+const Layer = @import("./voxel_chunk.zig").Layer;
+const GeometryStamp = @import("./voxel_chunk.zig").GeometryStamp;
 const Side = @import("./voxel_chunk.zig").Side;
 const GPU_BlockInfo = @import("./voxel_chunk.zig").GPU_BlockInfo;
 const DynamicSlotBufferManager = @import("./DynamicSlotBufferManager.zig").DynamicSlotBufferManager;
@@ -30,7 +32,9 @@ const ChunkList = std.ArrayList(VoxelChunk);
 const ChunkUploadList = std.ArrayList(VoxelChunkUpload);
 
 const SideDataPosition = struct {
-    index: u16,
+    // A six-list prefix can exceed 65,535 even though each packed perspective
+    // count/offset remains at most 3 * 16,384 for culled opaque 32³ geometry.
+    index: u32,
     count: u16,
 };
 
@@ -163,22 +167,46 @@ pub const VoxelGrid = struct {
     }
 
     pub fn appendChunk(self: *Self, chunk: VoxelChunkUpload) void {
-        self.chunks_to_upload.append(self.allocator, chunk) catch @panic("OOM");
+        self.tryAppendChunk(chunk) catch @panic("OOM");
+    }
+
+    /// Takes ownership only after all fallible queue growth has succeeded.
+    pub fn tryAppendChunk(self: *Self, chunk: VoxelChunkUpload) !void {
+        try self.chunks_to_upload.ensureUnusedCapacity(self.allocator, 1);
+        // Superseded CPU jobs never reach the GPU. Keep resident geometry until
+        // the complete replacement batch passes capacity/allocation preflight.
+        self.removeQueuedLayer(chunk.chunk_coords, chunk.layer);
+        self.chunks_to_upload.appendAssumeCapacity(chunk);
     }
 
     /// Removes a chunk (if it's loaded) from the voxel grid and releases the GPU memory slot.
     pub fn removeChunk(self: *Self, chunk_coords: ChunkCoords) void {
-        // Multiple packages can replace a mesh before the frame's upload. Cancel the
-        // previous queued ownership as well as any resident geometry.
+        self.removeChunkLayer(chunk_coords, .terrain);
+        self.removeChunkLayer(chunk_coords, .construction);
+    }
+
+    pub fn removeChunkLayer(self: *Self, chunk_coords: ChunkCoords, layer: Layer) void {
+        self.removeQueuedLayer(chunk_coords, layer);
+        self.removeResidentLayer(chunk_coords, layer);
+    }
+
+    pub fn cancelPendingChunkLayer(self: *Self, chunk_coords: ChunkCoords, layer: Layer) void {
+        self.removeQueuedLayer(chunk_coords, layer);
+    }
+
+    fn removeQueuedLayer(self: *Self, chunk_coords: ChunkCoords, layer: Layer) void {
         var queued: usize = 0;
         while (queued < self.chunks_to_upload.items.len) {
-            if (@reduce(.And, self.chunks_to_upload.items[queued].chunk_coords == chunk_coords)) {
+            if (self.chunks_to_upload.items[queued].layer == layer and @reduce(.And, self.chunks_to_upload.items[queued].chunk_coords == chunk_coords)) {
                 var obsolete = self.chunks_to_upload.orderedRemove(queued);
                 obsolete.chunk_side_data.deinit(self.allocator);
             } else queued += 1;
         }
+    }
+
+    fn removeResidentLayer(self: *Self, chunk_coords: ChunkCoords, layer: Layer) void {
         for (self.chunks.items, 0..) |*chunk, i| {
-            if (@reduce(.And, chunk.chunk_origin == chunk_coords)) {
+            if (chunk.layer == layer and @reduce(.And, chunk.chunk_origin == chunk_coords)) {
                 if (chunk.gpu_residence_info) |info| {
                     self.gpu_chunk_info_buffer_manager.freeBlock(info.chunk_index);
                     self.gpu_block_buffer_manager.freeBlock(info.data_slot_index);
@@ -192,13 +220,48 @@ pub const VoxelGrid = struct {
         }
     }
 
+    pub fn installedGeometry(self: *const Self, coords: ChunkCoords, layer: Layer) ?GeometryStamp {
+        for (self.chunks.items) |chunk| {
+            if (chunk.layer == layer and @reduce(.And, chunk.chunk_origin == coords)) return chunk.geometry_stamp;
+        }
+        return null;
+    }
+
+    /// Discovery-only changes can certify already installed, identical bytes.
+    /// Content/mesh revisions and subscription incarnation must all still match.
+    pub fn certifyInstalledGeometry(self: *Self, coords: ChunkCoords, layer: Layer, stamp: GeometryStamp) bool {
+        for (self.chunks.items) |*chunk| {
+            if (chunk.layer != layer or !@reduce(.And, chunk.chunk_origin == coords)) continue;
+            const installed = chunk.geometry_stamp;
+            if (installed.subscription_id != stamp.subscription_id or installed.chunk_revision != stamp.chunk_revision or installed.mesh_revision != stamp.mesh_revision) return false;
+            if (stamp.composition_revision < installed.composition_revision) return false;
+            chunk.geometry_stamp = stamp;
+            return true;
+        }
+        return false;
+    }
+
+    fn isReplaced(self: *const Self, chunk: VoxelChunk) bool {
+        for (self.chunks_to_upload.items) |upload| {
+            if (chunk.layer == upload.layer and @reduce(.And, chunk.chunk_origin == upload.chunk_coords)) return true;
+        }
+        return false;
+    }
+
     /// Simulate the exact allocation sequence, including span fragmentation and rounding,
     /// before writing any part of the frame's uploads. Also usable without a GPU device.
     pub fn hasUploadCapacity(self: *const Self) bool {
         var blocks = self.gpu_block_buffer_manager;
         var chunks = self.gpu_chunk_info_buffer_manager;
         var custom_count: usize = 0;
-        for (self.chunks.items) |chunk| custom_count += chunk.custom_blocks.items.len;
+        for (self.chunks.items) |chunk| {
+            if (self.isReplaced(chunk)) {
+                if (chunk.gpu_residence_info) |info| {
+                    chunks.freeBlock(info.chunk_index);
+                    blocks.freeBlock(info.data_slot_index);
+                }
+            } else custom_count += chunk.custom_blocks.items.len;
+        }
         for (self.chunks_to_upload.items) |upload| {
             custom_count += upload.chunk_side_data.custom_blocks.items.len;
             if (custom_count > VOXEL_GRID_BUFFER_SIZE / @sizeOf(custom.GPU_CustomBlock)) return false;
@@ -214,6 +277,14 @@ pub const VoxelGrid = struct {
     }
 
     pub fn uploadToGPU(self: *Self, gctx: *zgpu.GraphicsContext) void {
+        _ = self.tryUploadToGPU(gctx);
+    }
+
+    /// Replacements and their removals take effect together after every bounded
+    /// buffer allocation is known to fit. A retry preserves the displayed frame.
+    pub fn tryUploadToGPU(self: *Self, gctx: *zgpu.GraphicsContext) bool {
+        if (!self.hasUploadCapacity()) return false;
+        self.chunks.ensureUnusedCapacity(self.allocator, self.chunks_to_upload.items.len) catch return false;
         const block_buffer = self.gpu_block_buffer.buffer;
         const chunk_info_buffer = self.gpu_chunk_info_buffer.buffer;
 
@@ -221,6 +292,7 @@ pub const VoxelGrid = struct {
             std.debug.print("Uploading {} voxel chunks to GPU\n", .{self.chunks_to_upload.items.len});
         }
 
+        for (self.chunks_to_upload.items) |upload_chunk| self.removeResidentLayer(upload_chunk.chunk_coords, upload_chunk.layer);
         for (self.chunks_to_upload.items) |*upload_chunk| {
             self.custom_dirty = self.custom_dirty or upload_chunk.chunk_side_data.custom_blocks.items.len > 0;
             var total_data_size_total: usize = 0;
@@ -229,10 +301,8 @@ pub const VoxelGrid = struct {
             }
 
             if (total_data_size_total == 0) {
-                if (upload_chunk.chunk_side_data.custom_blocks.items.len > 0) {
-                    self.chunks.append(self.allocator, .{ .chunk_origin = upload_chunk.chunk_coords, .custom_blocks = upload_chunk.chunk_side_data.custom_blocks }) catch @panic("OOM");
-                    upload_chunk.chunk_side_data.custom_blocks = .empty;
-                }
+                self.chunks.appendAssumeCapacity(.{ .chunk_origin = upload_chunk.chunk_coords, .layer = upload_chunk.layer, .geometry_stamp = upload_chunk.geometry_stamp, .custom_blocks = upload_chunk.chunk_side_data.custom_blocks });
+                upload_chunk.chunk_side_data.custom_blocks = .empty;
                 continue;
             }
 
@@ -254,7 +324,7 @@ pub const VoxelGrid = struct {
                 .data_slot_index = data_slot_index,
             };
 
-            var total_data_size: u16 = 0;
+            var total_data_size: u32 = 0;
             var side_data_indices: [6]SideDataPosition = @splat(.{ .index = 0, .count = 0 });
             for (upload_chunk.chunk_side_data.blocks_grouped_by_side, 0..) |side, side_index| {
                 if (side.items.len > 0) {
@@ -283,6 +353,8 @@ pub const VoxelGrid = struct {
 
             var chunk_inner_data: VoxelChunk = .{
                 .chunk_origin = upload_chunk.chunk_coords,
+                .layer = upload_chunk.layer,
+                .geometry_stamp = upload_chunk.geometry_stamp,
                 .gpu_residence_info = null,
                 .custom_blocks = upload_chunk.chunk_side_data.custom_blocks,
             };
@@ -307,7 +379,7 @@ pub const VoxelGrid = struct {
                 };
             }
 
-            self.chunks.append(self.allocator, chunk_inner_data) catch @panic("OOM");
+            self.chunks.appendAssumeCapacity(chunk_inner_data);
         }
 
         // deinit all chunk side data and clear the upload list
@@ -316,6 +388,7 @@ pub const VoxelGrid = struct {
         }
         self.chunks_to_upload.clearRetainingCapacity();
         self.uploadCustomBlocks(gctx);
+        return true;
     }
 
     /// Removals still reach the GPU when ordinary uploads are held by capacity pressure.
@@ -408,17 +481,17 @@ fn convertSideDataIndicesIntoPerspectiveIndices(side_data_indices: [6]SideDataPo
         view_side_data_indices[i] = .{
             .{
                 faces_count[0],
-                side_data_indices[x].index,
+                @intCast(side_data_indices[x].index),
             },
             .{
                 faces_count[0] + faces_count[1],
                 // Empty directions have no stored range and the shader never reads
                 // their offset. Subtracting from their default zero would underflow.
-                if (faces_count[1] == 0) 0 else side_data_indices[y].index - faces_count[0],
+                if (faces_count[1] == 0) 0 else @intCast(side_data_indices[y].index - faces_count[0]),
             },
             .{
                 total_faces_count,
-                if (faces_count[2] == 0) 0 else side_data_indices[z].index - faces_count[0] - faces_count[1],
+                if (faces_count[2] == 0) 0 else @intCast(side_data_indices[z].index - faces_count[0] - faces_count[1]),
             },
         };
 
@@ -464,6 +537,25 @@ test "perspective offsets address the correct faces for every combination of emp
                 try std.testing.expectEqual(face_index, perspective.view_side_data_indices[view][range][0]);
             }
             try std.testing.expectEqual(face_index, perspective.faces_count_per_view[view]);
+        }
+    }
+}
+
+test "maximum opaque checkerboard preserves the packed shader count and offset bounds" {
+    var positions: [6]SideDataPosition = undefined;
+    for (&positions, 0..) |*position, i| position.* = .{ .index = @intCast(i * 16_384), .count = 16_384 };
+    try std.testing.expect(positions[5].index > std.math.maxInt(u16));
+    const perspective = convertSideDataIndicesIntoPerspectiveIndices(positions);
+    const resident: @import("voxel_chunk.zig").GpuResidenceInfo = .{ .faces_count_per_view = perspective.faces_count_per_view, .chunk_index = 0, .data_slot_index = 0, .data_slot_size_level = 9 };
+    for (INDEXES, 0..) |sides, view| {
+        try std.testing.expectEqual(@as(u16, 49_152), perspective.faces_count_per_view[view]);
+        try std.testing.expectEqual(@as(u32, 294_912), resident.vertexCount(view));
+        var first: u32 = 0;
+        for (sides, 0..) |side, range| {
+            const descriptor = perspective.view_side_data_indices[view][range];
+            try std.testing.expectEqual(positions[side].index, first + descriptor[1]);
+            first += positions[side].count;
+            try std.testing.expectEqual(first, descriptor[0]);
         }
     }
 }
@@ -534,4 +626,61 @@ test "custom uploads group formed and unformed geometry and reset after reversio
     try std.testing.expectEqual(@as(u32, 0), grid.custom_slope_count);
     try std.testing.expect(grid.prepareCustomBlocks());
     try std.testing.expectEqual(@as(u32, 0), grid.custom_block_count);
+}
+
+test "construction and terrain replacements retain displayed layers until installation" {
+    const allocator = std.testing.allocator;
+    var grid: VoxelGrid = .{ .allocator = allocator, .gpu_chunk_info_buffer = undefined, .gpu_block_buffer = undefined };
+    defer {
+        grid.clearChunks();
+        grid.chunks.deinit(allocator);
+        grid.chunks_to_upload.deinit(allocator);
+    }
+    const coords: ChunkCoords = .{ 1, 2, 3 };
+    try grid.chunks.append(allocator, .{ .chunk_origin = coords, .geometry_stamp = .{ .mesh_revision = 1 } });
+    try grid.chunks.append(allocator, .{ .chunk_origin = coords, .layer = .construction, .geometry_stamp = .{ .mesh_revision = 2 } });
+    try grid.tryAppendChunk(.{ .chunk_coords = coords, .chunk_side_data = .{}, .geometry_stamp = .{ .mesh_revision = 3 } });
+    try grid.tryAppendChunk(.{ .chunk_coords = coords, .layer = .construction, .chunk_side_data = .{}, .geometry_stamp = .{ .mesh_revision = 4 } });
+    try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.mesh_revision);
+    try std.testing.expectEqual(@as(u64, 2), grid.installedGeometry(coords, .construction).?.mesh_revision);
+    try std.testing.expectEqual(@as(usize, 2), grid.chunks_to_upload.items.len);
+    try grid.tryAppendChunk(.{ .chunk_coords = coords, .chunk_side_data = .{}, .geometry_stamp = .{ .mesh_revision = 5 } });
+    try std.testing.expectEqual(@as(usize, 2), grid.chunks_to_upload.items.len);
+    grid.cancelPendingChunkLayer(coords, .terrain);
+    try std.testing.expectEqual(@as(usize, 1), grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.mesh_revision);
+    grid.removeChunkLayer(coords, .terrain);
+    try std.testing.expectEqual(null, grid.installedGeometry(coords, .terrain));
+    try std.testing.expectEqual(@as(u64, 2), grid.installedGeometry(coords, .construction).?.mesh_revision);
+}
+
+test "construction upload capacity failure keeps resident display and queued work" {
+    const allocator = std.testing.allocator;
+    var grid: VoxelGrid = .{ .allocator = allocator, .gpu_chunk_info_buffer = undefined, .gpu_block_buffer = undefined };
+    defer {
+        grid.clearChunks();
+        grid.chunks.deinit(allocator);
+        grid.chunks_to_upload.deinit(allocator);
+    }
+    for (0..VOXEL_GRID_SLOT_COUNT / (1 << MAX_SPAN_SIZE_EXPONENT)) |_| _ = try grid.gpu_block_buffer_manager.occupyBlock(.{ .size_exponent = MAX_SPAN_SIZE_EXPONENT });
+    for (0..SlotBufferManager.SLOT_COUNT) |_| _ = try grid.gpu_chunk_info_buffer_manager.occupyBlock();
+    const coords: ChunkCoords = .{ 1, 2, 3 };
+    try grid.chunks.append(allocator, .{
+        .chunk_origin = coords,
+        .geometry_stamp = .{ .mesh_revision = 1 },
+        .gpu_residence_info = .{ .faces_count_per_view = @splat(0), .chunk_index = 0, .data_slot_index = 0, .data_slot_size_level = MAX_SPAN_SIZE_EXPONENT },
+    });
+    var mesh: @import("voxel_chunk.zig").ChunkSideData = .{};
+    for (&mesh.blocks_grouped_by_side) |*side| {
+        try side.resize(allocator, 16_384);
+        @memset(side.items, .{ .coords = .{ 1, 1, 1 }, .block_type = .stone });
+    }
+    try grid.tryAppendChunk(.{ .chunk_coords = coords, .layer = .construction, .chunk_side_data = mesh });
+    try std.testing.expect(!grid.hasUploadCapacity());
+    try std.testing.expect(!grid.tryUploadToGPU(undefined));
+    try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.mesh_revision);
+    try std.testing.expectEqual(@as(usize, 1), grid.chunks_to_upload.items.len);
+    grid.chunks_to_upload.items[0].layer = .terrain;
+    try std.testing.expect(grid.hasUploadCapacity());
+    try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.mesh_revision);
 }

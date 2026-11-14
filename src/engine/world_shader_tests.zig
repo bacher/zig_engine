@@ -215,6 +215,38 @@ test "GPU material appearances keep water and foliage opaque with transparent at
     try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
 }
 
+test "GPU construction layer keeps identical color and depth through queued terrain handoff" {
+    var uncaptured: ValidationResponse = .{};
+    var validation: ValidationResponse = .{};
+    var mapping: coordinate_readback.MapResponse = .{};
+    const gpu = try HeadlessDawn.init();
+    defer gpu.deinit();
+    gpu.device.setUncapturedErrorCallback(ValidationResponse.callback, &uncaptured);
+    gpu.device.pushErrorScope(.validation);
+    const checked = @import("construction_layer_readback.zig").check(gpu.device, &mapping);
+    _ = gpu.device.popErrorScope(ValidationResponse.callback, &validation);
+    try coordinate_readback.waitForCallback(gpu.device, &validation.done);
+    try std.testing.expectEqual(@as(usize, 0), validation.errors);
+    try checked;
+    try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
+}
+
+test "GPU oversized construction mesh keeps packed face addresses through terrain handoff" {
+    var uncaptured: ValidationResponse = .{};
+    var validation: ValidationResponse = .{};
+    var mapping: coordinate_readback.MapResponse = .{};
+    const gpu = try HeadlessDawn.init();
+    defer gpu.deinit();
+    gpu.device.setUncapturedErrorCallback(ValidationResponse.callback, &uncaptured);
+    gpu.device.pushErrorScope(.validation);
+    const checked = @import("construction_layer_readback.zig").checkOversized(gpu.device, &mapping);
+    _ = gpu.device.popErrorScope(ValidationResponse.callback, &validation);
+    try coordinate_readback.waitForCallback(gpu.device, &validation.done);
+    try std.testing.expectEqual(@as(usize, 0), validation.errors);
+    try checked;
+    try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
+}
+
 fn expectPipelineHandles(gctx: *zgpu.GraphicsContext, pipelines: WorldPipelines, valid: bool) !void {
     inline for (std.meta.fields(WorldPipelines)) |field| {
         try std.testing.expectEqual(valid, gctx.isResourceValid(@field(pipelines, field.name).pipeline_handle));

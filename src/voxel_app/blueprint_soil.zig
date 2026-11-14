@@ -47,7 +47,7 @@ pub const Plan = struct {
 /// Requires a certified definition and admitted, injective instance footprint.
 /// Stage every listed block/timer/revision before publishing this plan together
 /// with the instance. The plan needs no allocation while its changes are applied.
-/// Empty definition cells, loose dirt, and its compaction timers are untouched.
+/// Empty definition cells do not cover terrain; only soil has surface effects.
 pub fn prepare(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, definition: blueprint.Definition, instance: runtime.Instance, source: Source) !Plan {
     var result: Plan = .{};
     errdefer result.deinit(allocator);
@@ -57,7 +57,7 @@ pub fn prepare(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, 
         if (block[2] == 0) continue;
         block[2] -= 1;
         const surface = try source.read(source.context, block);
-        if (surface.material != .grass and surface.material != .packed_dirt) continue;
+        if (!surface.material.isEarth()) continue;
         const change: Change = .{ .block = block, .clear_grass = surface.material == .grass, .cancel_grow = surface.timer_kind == .grow_grass };
         if (!change.clear_grass and !change.cancel_grow) continue;
         try result.changes.append(allocator, change);
@@ -114,11 +114,11 @@ test "miniature coverage clears only target-below grass and cancels only surface
     defer fixture.deinit();
     const surfaces = [_]Surface{
         .{ .material = .grass },
-        .{ .material = .packed_dirt, .timer_kind = .grow_grass },
-        .{ .material = .dirt, .timer_kind = .compact_dirt },
+        .{ .material = .dirt, .timer_kind = .grow_grass },
+        .{ .material = .dirt },
         .{ .material = .grass, .timer_kind = .grow_grass }, // Hole: never queried.
-        .{ .material = .packed_dirt },
-        .{ .material = .grass, .timer_kind = .compact_dirt },
+        .{ .material = .dirt },
+        .{ .material = .grass },
         .{ .material = .stone, .timer_kind = .grow_grass },
     };
     for (surfaces, 0..) |surface, x| try fixture.put(.{ 10 + @as(u32, @intCast(x)), 10, 31 }, surface);
@@ -186,20 +186,20 @@ test "clearing grass without a growth event prepares an empty cancellation mask"
     try std.testing.expectEqual(@as(usize, 0), plan.cancel_grow.getPtr(plan.chunk_ids.items[0]).?.count());
 }
 
-test "coverage skips cells without a below block and has no effects for loose soil" {
+test "coverage skips cells without a below block and leaves bare soil without timers unchanged" {
     const a = std.testing.allocator;
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 2, 2, 2 } });
     const definition: blueprint.Definition = .{ .size = .{ 1, 1, 2 }, .cells = &.{ .dirt, .planks }, .target_count = 2 };
     var fixture: Fixture = .{};
     defer fixture.deinit();
-    try fixture.put(.{ 10, 10, 0 }, .{ .material = .dirt, .timer_kind = .compact_dirt });
+    try fixture.put(.{ 10, 10, 0 }, .{ .material = .dirt });
     var plan = try prepare(a, &layout, definition, Fixture.instance(.{ 10, 10, 0 }, 0), fixture.source());
     defer plan.deinit(a);
     try std.testing.expectEqual(@as(usize, 1), fixture.reads);
     try std.testing.expectEqual(@as(usize, 0), plan.changes.items.len);
     try std.testing.expectEqual(@as(usize, 0), plan.chunk_ids.items.len);
     try std.testing.expectEqual(@as(usize, 0), plan.cancel_grow.count());
-    try std.testing.expectEqualDeep(Surface{ .material = .dirt, .timer_kind = .compact_dirt }, fixture.surfaces.get(.{ 10, 10, 0 }).?);
+    try std.testing.expectEqualDeep(Surface{ .material = .dirt }, fixture.surfaces.get(.{ 10, 10, 0 }).?);
 }
 
 fn allocationFailureFixture(a: std.mem.Allocator) !void {
@@ -208,7 +208,7 @@ fn allocationFailureFixture(a: std.mem.Allocator) !void {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.put(.{ 31, 10, 31 }, .{ .material = .grass, .timer_kind = .grow_grass });
-    try fixture.put(.{ 32, 10, 31 }, .{ .material = .packed_dirt, .timer_kind = .grow_grass });
+    try fixture.put(.{ 32, 10, 31 }, .{ .material = .dirt, .timer_kind = .grow_grass });
     defer {
         std.debug.assert(fixture.surfaces.get(.{ 31, 10, 31 }).?.material == .grass);
         std.debug.assert(fixture.surfaces.get(.{ 32, 10, 31 }).?.timer_kind == .grow_grass);

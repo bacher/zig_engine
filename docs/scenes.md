@@ -112,7 +112,7 @@ The default scene has a spectator controller:
 | B in the voxel app | Open the chooser from ordinary play or unanchored capture; dismiss it back to that mode, or dismiss placement preview. Ignored after anchor selection outside name entry. |
 | Z in the voxel app | Enter blueprint capture with empty hands, or exit capture; type Z normally in the name dialog. |
 | Enter in blueprint capture | Open the name dialog only after successful validation; Enter in the dialog confirms the name and saves. |
-| 1-6 in the voxel app | Select loose soil, crushed stone, trunk, planks, rebar, or reinforced concrete. |
+| 1-6 in the voxel app | Select soil, crushed stone, trunk, planks, rebar, or reinforced concrete. |
 | Tab in the voxel app | Toggle putting/removing; initially removing, preserved across player/spectator control changes. |
 | Left click in ordinary voxel play | Perform the active block mode's action within four metres. |
 | Mouse1 / E in blueprint capture | Confirm the hovered anchor shown by the immediate frame at up to 30 metres, then select XY extent and height under the capture targeting rules. |

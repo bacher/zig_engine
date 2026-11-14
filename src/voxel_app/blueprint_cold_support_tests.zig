@@ -209,7 +209,8 @@ fn runTrial(comptime Adapter: type, layout: *const engine.WorldLayout, capacity:
     var digest = std.hash.Wyhash.init(0);
     for (origins, 0..) |origin, site| {
         const instance = state.blueprints.instances.get(site + 1).?;
-        try std.testing.expect(!instance.active);
+        try std.testing.expect(instance.active);
+        try std.testing.expectEqual(runtime.Phase.materializing, instance.phase);
         try std.testing.expectEqual(@as(u32, 0), instance.remaining);
         for (instance.fulfilled) |byte| try std.testing.expectEqual(@as(u8, 255), byte);
         digest.update(instance.fulfilled);
@@ -217,7 +218,12 @@ fn runTrial(comptime Adapter: type, layout: *const engine.WorldLayout, capacity:
             const block = position(layout, origin, cell_index);
             const coords, const local = world.splitBlockCoords(block);
             const chunk = state.modified_chunks.get(layout.encodeChunkCoords(coords)).?;
-            const material = chunk.content.getBlock(local);
+            try std.testing.expectEqual(BlockType.none, chunk.content.getBlock(local));
+            try std.testing.expectEqual(@as(u64, 0), chunk.chunk_revision);
+            try std.testing.expectEqual(@as(usize, 0), chunk.metadata.constructed.items.len);
+            const physical = state.blueprints.physicalAt(block);
+            try std.testing.expect(physical == .material);
+            const material = physical.material;
             try std.testing.expectEqual(BlockType.planks, material);
             const encoded = [_]u8{@intFromEnum(material)};
             digest.update(&encoded);

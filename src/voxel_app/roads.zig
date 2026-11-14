@@ -104,7 +104,6 @@ pub const Context = struct {
         if (self.virtual_edit) |edit| {
             if (@reduce(.And, normalized == Cell{ edit.block[0], edit.block[1], edit.block[2] })) return switch (edit.action) {
                 .remove => .none,
-                .compact => .packed_dirt,
                 .put => |value| if (value == .country_road_adaptive) .custom else value,
             };
         }
@@ -123,7 +122,7 @@ pub const Context = struct {
         if (self.virtual_edit) |edit| {
             if (@reduce(.And, normalized == Cell{ edit.block[0], edit.block[1], edit.block[2] })) {
                 return switch (edit.action) {
-                    .remove, .compact => null,
+                    .remove => null,
                     .put => |value| if (value == .country_road_adaptive or value == .custom) .{ .index = @import("block_transformations.zig").index(world.splitBlockCoords(edit.block)[1]) } else null,
                 };
             }

@@ -11,9 +11,8 @@ client data produces `missing_data`, never an assumption that the missing cells 
 | --- | --- |
 | Natural stone (`stone`) | Generated rock; cannot be placed. Mining yields `crushed_stone`. |
 | Crushed stone | Placeable masonry; cannot become natural stone. |
-| Loose soil (`dirt`) | The soil placement/mining item. Needs a filled 3x3 support layer and supplies no support. |
-| Packed soil (`packed_dirt`) | Generated soil or compacted loose soil. Mining yields loose soil. |
-| Grass-covered packed soil (`grass`) | A surface appearance/state of packed soil, never a placeable item. |
+| Bare soil (`dirt`) | The soil placement/mining item. Needs a filled 3x3 support layer and supplies soil support immediately. |
+| Grass-covered soil (`grass`) | Surface cover on the same structural soil material, never a separate placeable item. Mining yields `dirt`. |
 | Tree trunk | Vertically supported wood. |
 | Planks | Wood with limited horizontal support propagation. |
 | Rebar and reinforced concrete | Share horizontal support and the mineral height group. |
@@ -22,7 +21,7 @@ client data produces `missing_data`, never an assumption that the missing cells 
 | Sand | Placeable/minable; retains a filled 3×3 footprint, has no soil timers, and fills soil/sand footprints without providing construction support. |
 | Leaves | Opaque colliding foliage; removable without an item, with no structural support or decay. |
 | Ore, limestone, coal | Natural-rock support; mining disabled until usable resource results are configured. |
-| Clay | Packed-soil support, without compaction/grass timers; mining disabled pending resource mechanics. |
+| Clay | Soil-platform support, without grass timers; mining disabled pending resource mechanics. |
 | Deeprock | Immutable seeded bottom formation; one exposed top supplies a direct stable foundation. |
 
 Water and standalone snow may be placed above sand, air, or other materials. They require
@@ -58,33 +57,36 @@ selection/definition limits in [R54/Q25](../specs/features/blueprints.md#horizon
 
 Full designs are validated at creation and composed with the destination at application.
 Subsequent blueprint-directed structural approval must inspect no more than the real block
-directly below and four immediate XY neighbors. Any real block except loose soil below passes
-this cheap rule; with air or loose soil below, an eligible real XY neighbor is required. This deliberately permits temporarily
+directly below and four immediate XY neighbors. Any real block below passes
+this cheap rule; with air below, an eligible real XY neighbor is required. This deliberately permits temporarily
 unsupported intermediate states without repeating ordinary height/span or dependent searches.
 
-For cheap fulfillment with air or loose soil below, an eligible real XY neighbor is a matching logical
+For cheap fulfillment with air below, an eligible real XY neighbor is a matching logical
 material, either reinforced type for a rebar/concrete target, or natural rock for a
 crushed-stone target. Reuse the ordinary `isNaturalRock()` family: stone, metal_ore,
 limestone, coal, and deeprock; clay is not in that family. This directed support exception
 matches ordinary crushed-bridge routes and prevents a legal foundation removal from
 stranding a crushed miniature between real stone sides. It uses the same four XY reads,
 adds no recursive validation, and does not change the target's required inventory material.
-Normal dirt aging preserves its blueprint fulfillment identity across dirt, packed dirt, and grass.
+Bare and grassy soil share the same blueprint resource identity; capture normalizes grass to bare soil.
 Miniatures never count as real support. Filling a target and completing the last target require
 no full-design scan; the detailed structural/performance contract is in
 [R27–R32 and R51](../specs/features/blueprints.md#assembly-and-completion).
 
 Application handles soil covering once, before construction starts. For every new miniature,
-it turns real grass immediately below into packed soil and cancels any grass-growth timer
+it turns real grass immediately below into bare soil and cancels any grass-growth timer
 there. This includes elevated targets over internal cavities, not just the design's bottom
-layer. Empty blueprint cells do not cover soil. Loose soil and its compaction deadline stay
-unchanged. These terrain updates and publication of the instance commit atomically.
+layer. Empty blueprint cells and the frame do not cover soil. Clearing cover preserves
+structural support. These terrain updates and publication of the instance commit atomically.
 
-A fill changes only its target's terrain and metadata, plus the associated inventory and
-blueprint progress. It may read the block below for support, but never changes that block or
-its timers. A pending miniature directly above counts as cover when scheduling or executing
-grass growth, so grass cannot reappear between application and fulfillment. This grass rule
-grants miniatures no collision, occupancy, or structural support.
+A fill changes only its simulation-owned target and progress, plus the associated inventory.
+It may read the block below for support, but never changes that block or its timers.
+Pending targets count as cover for ordinary terrain grass. Physical cover uses the composed
+view, so a fulfilled simulation-owned block also prevents growth below it. Soil targets
+remain bare with no timers while building or materializing, including transferred portions.
+After the whole site completes, world-data initializes exposed target soil using completion
+time plus the ordinary grass delay. This grass rule grants miniatures no collision or
+structural support.
 
 Blueprint fills queue coalesced adaptive-road work by chunk. Road shapes may update after
 a short delay. Formation/reversion preserve structural capabilities, so shape-only updates
@@ -190,7 +192,7 @@ or final validation pass; the five-neighbor bound remains.
 
 A stable platform is a completely filled 3x3x3 cube immediately below a candidate block.
 The cube covers x/y offsets -1 through +1 and z offsets -1 through -3. The candidate must
-be directly above the center of the cube's top layer. Every cell must contain packed soil,
+be directly above the center of the cube's top layer. Every cell must contain bare or grassy soil,
 natural or crushed stone, rebar, or reinforced concrete. Mixtures are allowed;
 ore, limestone, coal, clay, and deeprock also qualify; wood, water, sand, snow, foliage, and air do not qualify.
 
@@ -201,23 +203,20 @@ crushed-stone run at the platform, rather than counting through it.
 
 ## Local support and height
 
-Loose soil and sand need nine qualifying blocks in the 3x3 layer directly beneath them. Packed earth,
-stone, geological resources, rebar/concrete, trunks, planks, and sand can fill this layer. Water,
-standalone snow, foliage, and air cannot. Sand remains nonstructural despite filling a footprint. A constructed soil block
-retains this footprint requirement after compaction (and constructed sand retains its own footprint), so removing temporary supports cannot
-leave a previously placed soil block floating. Generated terrain is exempt from building
-validation; natural cliffs and hills remain mineable.
+Soil and sand need nine qualifying blocks in the 3x3 layer directly beneath them. Bare or
+grassy soil, stone, geological resources, rebar/concrete, trunks, planks, and sand can fill this
+layer. Water, standalone snow, foliage, and air cannot. Sand remains nonstructural despite
+filling a footprint. A constructed soil block retains its own footprint requirement, so
+removing temporary supports cannot leave it floating. Generated terrain is exempt from
+building validation; natural cliffs and hills remain mineable.
 
-Loose soil never fills a footprint, stable platform, road foundation, or direct support route.
-Building another soil layer requires compacting its supporting layer first. Manual and timed
-compaction preserve the soil block's own footprint rule and only add support capabilities;
-neither checks surrounding constructions. Legal lateral routes above loose soil remain valid
-after compaction, including at their height limits. Compaction is allowed inside unfinished
-blueprint boxes and preserves any already fulfilled soil target.
+Bare and grassy soil have identical structural capabilities: they fill footprints, stable
+platforms, and road foundations. Additional soil layers can be placed immediately. Grass
+clearing and growth change only cover and cannot weaken or strengthen an existing structure.
 
 Trunks and planks can rest on structural materials. Crushed stone can rest on crushed
 stone. Rebar and concrete can rest on either reinforced material. A stable platform is
-an additional valid foundation for all these materials. Literal natural `stone`, packed soil
+an additional valid foundation for all these materials. Literal natural `stone`, soil
 and clay provide direct support only through the centered full 3x3x3 stable platform.
 Stone remains a qualifying platform material, and mixtures are allowed. Ore, limestone,
 coal and deeprock retain their single-block natural-foundation shortcut. Wood retains
@@ -229,7 +228,7 @@ valid lateral route can still support the target.
 
 Downward-support eligibility is distinct from occupancy.
 Failure of the direct route does not veto another support route already permitted for the
-material. In particular, laterally supported planks may have dirt/packed dirt/grass directly
+material. In particular, laterally supported planks may have bare or grassy soil directly
 below without requiring that earth to form a stable platform. The same independent-route
 principle applies to materials with their own lateral support mechanisms; it grants no new
 lateral mechanism to trunks, soil, sand, or roads.
@@ -436,9 +435,8 @@ order for deterministic diagnostics. Conservative downward support envelopes ski
 cells. Soil depends
 only on its immediate 3x3 footprint; wood and mineral envelopes include horizontal routes
 at each lower level and off-center platform cells. Missing data within an affected envelope
-still blocks client approval; incomplete constructions outside it do not veto edits. Time events
-do not run structural validation: compaction only adds support, and grass has the same
-support properties as packed soil.
+still blocks client approval; incomplete constructions outside it do not veto edits. Grass events
+do not run structural validation because bare and grassy soil have the same support properties.
 Support states and memoization exist only during validation; no support graph or dependency
 information is added to stored chunk metadata. A dependency index could be a separate future
 optimization, but is not required for correctness.
@@ -452,44 +450,40 @@ lowest-height rules while avoiding repeated overlapping searches during synchron
 
 ## Simulation time and transformations
 
-The planned [construction soil model](../specs/features/construction-state-ownership.md#q6--soil-and-compact-physical-state)
-removes the loose/compacted distinction and compaction mechanics while retaining grass. It keeps
-one-time grass clearing below miniatures, holds site soil bare through materialization, and
-starts ordinary world-data growth only after the whole site completes. The rules below describe
-the current implementation; the new model and its ruleset/save changes are pending.
+The [construction soil model](../specs/features/construction-state-ownership.md#q6--soil-and-compact-physical-state)
+uses one structural soil material with optional grass cover. There is no loose/compacted
+state, manual compaction action, or compaction timer. The old `packed_dirt` numeric slot is
+reserved; the format/ruleset gate rejects saves from the earlier model.
 
 Simulation time uses 60 ticks per second. The application advances it from frame elapsed
 time; the service processes monotonic `advanceTo` requests in the same queue as edits.
 Stopping game-time advancement pauses deadlines. Subscription eviction has no effect.
 
-- Placing loose soil schedules compaction 30 minutes later.
-- Loose soil remains loose when placed beneath a block or covered later; covering preserves its compaction deadline.
-- In player mode, holding mouse2 on loose soil for three seconds compacts it, using the action progress bar. Release, changed target or terrain, lost reach, focus loss, and leaving player mode cancel unfinished work. Inventory is unchanged, and the next action waits for acknowledgement and a fresh press.
-- Manual and timed compaction always replace loose soil with packed soil, without environmental validation. They schedule grass 30 minutes later unless a pending miniature is directly above; suppressing grass never prevents compaction.
-- Covering packed soil clears grass and cancels its pending surface timer.
+- Placing exposed bare soil schedules grass 30 minutes later. Covered soil receives no timer.
+- Covering soil clears grass to bare soil and cancels its pending surface timer.
 - Applying a blueprint performs these covering updates below every new miniature, including elevated targets. Filling a miniature performs no covering writes to neighboring soil.
-- Exposing packed soil schedules grass 30 minutes after the exposure unless a pending miniature is directly above. Grass growth requires physical air and no pending miniature in that cell above. Blueprint-empty cells and the frame alone do not block growth.
-- Generated soil is already packed, with climate cover on its exposed surface immediately.
-- The saved `grass` state renders green in temperate/desert columns, yellow in steppe, and snowy on top in frozen columns. Loose and packed soil retain their ordinary appearance until the existing timer grows cover.
-  Generation schedules no soil transformations, regardless of when a chunk is discovered.
+- Exposing bare soil schedules grass 30 minutes after exposure. Growth requires physical air in the composed view and no pending target directly above. Blueprint-empty cells and the frame alone do not block growth. Unknown dependencies defer growth with the original deadline.
+- Site targets stay bare with no grass timers through building and materialization. Growth initialization starts only when the whole site completes, with deadlines measured from completion rather than fulfillment. World-data retains unfinished initialization and its original completion time across saves/restarts.
+- Late initialization rechecks cell identity, cover, and newer edit/timer state. It cannot recreate removed soil or replace a newer exposure deadline.
+- Generated soil uses bare soil internally and climate grass cover on exposed surfaces immediately. Generation schedules no transformations, regardless of when a chunk is discovered.
+- The saved `grass` state renders green in temperate/desert columns, yellow in steppe, and snowy on top in frozen columns. Bare soil retains its ordinary appearance until cover grows.
 - Grass may grow underground. Light and sky access are not checked.
 
 Each chunk has sparse, independently owned metadata for constructed indices and a sorted
-array of pending transformations. Each event stores a cell index, kind, and deadline tick;
+array of pending grass deadlines. Each event stores a cell index, kind, and deadline tick;
 block cells carry no timestamps. A cell has at most one pending event. Removing/replacing
 it cancels its event, and a new placement receives a fresh deadline.
 
-Time processing checks the first deadline, takes a due prefix, and updates only those cells.
-A large time step can compact soil and grow grass in one update using the original deadlines,
-without adding another 30-minute delay at reload or catch-up. Type changes advance chunk
-and mesh revisions and reach both block and mesh subscribers in complete update packages.
+Time processing examines a sorted due prefix and applies one terminal grass transition per
+event. Unknown exposure retains the original deadline. Type changes advance chunk and mesh
+revisions and reach both block and mesh subscribers in complete update packages.
 
-Pending transformations survive client streaming eviction and persist with the world's
+Pending grass deadlines and unfinished completion initialization persist with the world's
 simulation tick and construction metadata. See [persistence](persistence.md).
 
 ## Tools and validation
 
-Keys 1-8 select loose soil, crushed stone, trunk, planks, rebar, reinforced concrete, solid
+Keys 1-8 select soil, crushed stone, trunk, planks, rebar, reinforced concrete, solid
 country road, and adaptive country road.
 Tab toggles removing (the initial mode) and putting, independently of player/spectator
 control. Left click performs the active mode's action. In putting mode E places against

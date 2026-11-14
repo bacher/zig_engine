@@ -1752,9 +1752,10 @@ Simulation still needs only immutable definition materials plus progress, not gr
 
 [PR #64](https://github.com/bacher/zig_engine/pull/64) already made direct blueprint fulfillment
 writes target-local. Application covering and world-data grass machinery can be reused, with
-composed exposure checks and the removal of compaction prerequisites. Existing runtime rules
-remain described in [block placement](../../docs/block-placement.md#simulation-time-and-transformations)
-until implementation and explicit ruleset/save gates. No measured performance gain is claimed.
+composed exposure checks and the removal of compaction prerequisites. The construction implementation
+now applies these rules under world format 7; current semantics are described in
+[block placement](../../docs/block-placement.md#simulation-time-and-transformations).
+No measured performance gain over the previous architecture is claimed.
 
 ### Q22 — Initial execution of simulation-owned warehouses
 

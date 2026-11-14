@@ -31,7 +31,7 @@ pub const ChunkSnapshot = struct {
     immutable: []const transforms.BlockIndex = &.{},
     index: runtime.ChunkIndex = .{},
     /// Exact pending grass-growth membership captured with this chunk revision.
-    /// Compaction events remain distinct and never enter this coverage mask.
+    /// Deferred construction initialization markers never enter this coverage mask.
     grow_grass: std.StaticBitSet(32768) = .initEmpty(),
 
     pub fn deinit(self: *ChunkSnapshot, allocator: std.mem.Allocator) void {
@@ -64,6 +64,15 @@ pub const Snapshot = struct {
             if (index < target_index) low = middle + 1 else if (index > target_index) high = middle else return true;
         }
         return false;
+    }
+
+    /// Construction copies and snapshot directory/masks, excluding raw terrain
+    /// arrays governed by max_snapshot_bytes.
+    pub fn constructionOwnedBytes(self: *const Snapshot) usize {
+        var bytes = runtime.estimatedMapBytes(ChunkId, ChunkSnapshot, self.chunks.capacity());
+        var chunks = self.chunks.valueIterator();
+        while (chunks.next()) |chunk| bytes +|= chunk.index.estimatedOwnedBytes() +| chunk.immutable.len *| @sizeOf(transforms.BlockIndex);
+        return bytes;
     }
 
     pub fn estimatedOwnedBytes(self: *const Snapshot) usize {
@@ -304,7 +313,7 @@ test "canonical immutable lookup finds sorted floor indices at either edge and b
     }
 }
 
-test "detached admission prebuilds chunk publication and completion stays constant work" {
+test "detached admission prebuilds publication and retains restrictions through materialization" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     const definition = try fixture.definition(.{ 2, 1, 1 }, &.{ .rebar, .rebar });
@@ -322,6 +331,13 @@ test "detached admission prebuilds chunk publication and completion stays consta
     try std.testing.expect(fixture.state.targetAt(.{ 10, 10, 4 }) == null);
     try std.testing.expect(fixture.state.targetAt(.{ 11, 10, 4 }) != null);
     try std.testing.expect(fixture.state.fulfill(&fixture.snapshot.layout, .{ .instance_id = instance.id, .cell_index = 1 }));
+    try std.testing.expect(fixture.state.boxAt(&fixture.snapshot.layout, .{ 10, 10, 4 }) != null);
+    const materializing = fixture.state.instances.get(instance.id).?;
+    try std.testing.expectEqual(runtime.Phase.materializing, materializing.phase);
+    for (materializing.target_groups) |group| {
+        try std.testing.expect(fixture.state.acceptTransfer(.{ .instance_id = instance.id, .chunk_id = group.chunk_id, .terrain_revision = 1 }));
+    }
+    try std.testing.expect(fixture.state.complete(instance.id));
     try std.testing.expect(fixture.state.boxAt(&fixture.snapshot.layout, .{ 10, 10, 4 }) == null);
     fixture.state.cleanup(std.testing.allocator, 1);
 }
@@ -339,22 +355,19 @@ test "destination admission rejects occupied targets and incomplete physical pla
     try std.testing.expectEqual(RejectCode.foundation, (try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{})).rejected.code);
 }
 
-test "destination platform rejects loose soil and accepts its compacted replacement" {
+test "destination platform accepts bare and grassy soil with identical capability" {
     var fixture = try Fixture.init();
     defer fixture.deinit();
     const definition = try fixture.definition(.{ 1, 1, 1 }, &.{.planks});
     var instance = try fixture.instance(.{ 10, 10, 4 });
     defer instance.deinit(std.testing.allocator);
-    // One off-center loose cell is enough to break the full platform witness.
     const cell: Cell = .{ 9, 9, 1 };
-    try fixture.put(cell, .dirt);
-    const rejected = try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
-    try std.testing.expectEqual(RejectCode.foundation, rejected.rejected.code);
-    try std.testing.expectEqual(cell, rejected.rejected.cell.?);
-    try fixture.put(cell, .packed_dirt);
-    var accepted = try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
-    try std.testing.expect(accepted == .prepared);
-    defer accepted.prepared.deinit(std.testing.allocator);
+    for ([_]rules.BlockType{ .dirt, .grass }) |soil| {
+        try fixture.put(cell, soil);
+        var accepted = try prepareCertified(std.testing.allocator, &fixture.snapshot, definition, instance, .{});
+        try std.testing.expect(accepted == .prepared);
+        accepted.prepared.deinit(std.testing.allocator);
+    }
 }
 
 test "composed admission preserves water and snow above a proposed sand target" {
@@ -720,7 +733,7 @@ test "certified admission agrees with complete-world structural reference across
     mixed[blueprint.linearIndex(size, .{ 16, 0, 0 }).?] = .sand;
     mixed[blueprint.linearIndex(size, .{ 15, 6, 0 }).?] = .country_road_solid;
     const fallback = [_]rules.BlockType{.stone} ** 7 ++ [_]rules.BlockType{.rebar};
-    const platforms = [_]rules.BlockType{ .stone, .packed_dirt, .grass, .clay, .crushed_stone, .rebar, .reinforced_concrete, .metal_ore, .limestone, .coal, .deeprock };
+    const platforms = [_]rules.BlockType{ .stone, .dirt, .grass, .clay, .crushed_stone, .rebar, .reinforced_concrete, .metal_ore, .limestone, .coal, .deeprock };
     var cavity_controls: usize = 0;
     for ([_]blueprint.Snapshot{ .{ .size = size, .cells = &mixed }, .{ .size = .{ 1, 1, 8 }, .cells = &fallback } }, 0..) |input, scenario| {
         const compiled = try blueprint.compile(allocator, input, .{ .horizontal_limit = blueprint.horizontalLimit(&layout) });
@@ -813,8 +826,8 @@ test "seeded certified admission preserves complete-world proofs under mixed pla
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
     const seed: u64 = 530811;
     const candidate_count = 32;
-    const materials = [_]rules.BlockType{ .none, .none, .none, .stone, .crushed_stone, .dirt, .packed_dirt, .grass, .sand, .tree_trunk, .planks, .rebar, .reinforced_concrete, .country_road_solid };
-    const platforms = [_]rules.BlockType{ .stone, .packed_dirt, .grass, .clay, .crushed_stone, .rebar, .reinforced_concrete, .metal_ore, .limestone, .coal, .deeprock };
+    const materials = [_]rules.BlockType{ .none, .none, .none, .stone, .crushed_stone, .dirt, .grass, .sand, .tree_trunk, .planks, .rebar, .reinforced_concrete, .country_road_solid };
+    const platforms = [_]rules.BlockType{ .stone, .dirt, .grass, .clay, .crushed_stone, .rebar, .reinforced_concrete, .metal_ore, .limestone, .coal, .deeprock };
     const additions = [_]rules.BlockType{ .sand, .leaves, .water, .snow, .tree_trunk, .crushed_stone, .rebar, .stone, .dirt };
     var accepted: usize = 0;
     var multilayer: usize = 0;
@@ -836,7 +849,7 @@ test "seeded certified admission preserves complete-world proofs under mixed pla
             // sparse volumes also generate invalid candidates for the compiler.
             for (cells) |*material| material.* = materials[random.uintLessThan(usize, materials.len)];
             cells[0] = .stone;
-            cells[@as(usize, size[0]) * size[1] - 1] = .packed_dirt;
+            cells[@as(usize, size[0]) * size[1] - 1] = .dirt;
         } else {
             for (0..size[1]) |y| for (0..size[0]) |x| {
                 if (x == 0 and y == 0) {
@@ -844,7 +857,7 @@ test "seeded certified admission preserves complete-world proofs under mixed pla
                     continue;
                 }
                 if (x == size[0] - 1 and y == size[1] - 1) {
-                    cells[y * size[0] + x] = .packed_dirt;
+                    cells[y * size[0] + x] = .dirt;
                     continue;
                 }
                 if (random.uintLessThan(u32, 4) == 0) continue;
@@ -979,7 +992,7 @@ test "compiler rejects the clipped support route that box-face validation misses
     for ([_]blueprint.LocalCell{ .{ 0, 2, 0 }, .{ 30, 4, 0 }, .{ 30, 0, 0 } }) |local| {
         const root = runtime.worldCell(&fixture.snapshot.layout, instance.origin, size, 0, local).?;
         for (1..4) |depth| for (0..3) |y| for (0..3) |x| {
-            try fixture.put(.{ root[0] + @as(u32, @intCast(x)) - 1, root[1] + @as(u32, @intCast(y)) - 1, root[2] - @as(u32, @intCast(depth)) }, .packed_dirt);
+            try fixture.put(.{ root[0] + @as(u32, @intCast(x)) - 1, root[1] + @as(u32, @intCast(y)) - 1, root[2] - @as(u32, @intCast(depth)) }, .dirt);
         };
     }
     // Full ordinary validation still distinguishes an unsupported interior cell

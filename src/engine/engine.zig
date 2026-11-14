@@ -802,7 +802,7 @@ pub const Engine = struct {
                             // Opposite views cover all six sides. Shadow visibility must
                             // not depend on which faces the camera can see.
                             inline for (.{ 0, 7 }) |view_index| {
-                                shadow_map_pass.draw(@intCast(info.faces_count_per_view[view_index] * 6), 1, 0, (info.chunk_index << 3) + view_index);
+                                shadow_map_pass.draw(info.vertexCount(view_index), 1, 0, (info.chunk_index << 3) + view_index);
                             }
                         }
 
@@ -913,8 +913,7 @@ pub const Engine = struct {
                         // if camera is looking at the chunk only from one side of each axis, draw two views covering whole chunk
                         if (dx == 0 or dy == 0 or dz == 0) {
                             inline for (.{ 0, 7 }) |view_index| {
-                                pass.draw(@intCast(info.faces_count_per_view[view_index] * 6), 1, 0, (info.chunk_index << 3) + view_index);
-                                // pass.draw(@intCast(info.faces_count_per_view[7] * 6), 1, 0, (info.chunk_index << 3) + 7);
+                                pass.draw(info.vertexCount(view_index), 1, 0, (info.chunk_index << 3) + view_index);
                             }
                         } else {
                             // or draw only one view covering the sides of the chunk which is visible from the camera
@@ -923,7 +922,7 @@ pub const Engine = struct {
                                 @as(u3, @intFromBool(dy < 0)) << 1 |
                                 @as(u3, @intFromBool(dz < 0));
 
-                            pass.draw(@intCast(info.faces_count_per_view[view_index] * 6), 1, 0, (info.chunk_index << 3) + view_index);
+                            pass.draw(info.vertexCount(view_index), 1, 0, (info.chunk_index << 3) + view_index);
                         }
                     }
 

@@ -3,7 +3,8 @@ const std = @import("std");
 const MAX_SPAN_SIZE_EXPONENT = @import("./voxel_consts.zig").MAX_SPAN_SIZE_EXPONENT;
 const VOXEL_GRID_SLOT_COUNT = @import("./voxel_consts.zig").VOXEL_GRID_SLOT_COUNT;
 
-const SLOTS_PER_SPAN: u32 = 1 << MAX_SPAN_SIZE_EXPONENT; // 64
+const BASE_SPAN_SIZE_EXPONENT = 6;
+const SLOTS_PER_SPAN: u32 = 1 << BASE_SPAN_SIZE_EXPONENT; // 64
 
 // 4096 blocks
 // block = 1024 bytes
@@ -34,24 +35,24 @@ pub const BufferSpan = struct {
 
 const SpanList = std.MultiArrayList(BufferSpan);
 
-// DynamicSlotBufferManager allows to hold 64 spans of 64 blocks each (4096 blocks total).
+// DynamicSlotBufferManager holds 64 spans of 64 slots each (4096 slots total).
 // Each span can be used for a different size of blocks.
 // The size of the blocks is determined by the size exponent.
 // The size exponent is the exponent of 2 that represents the size of the blocks.
 // For example, a size exponent of 0 represents blocks of size 1, a size exponent of 1 represents blocks of size 2, etc.
 // The size exponent is stored in the BufferSpan struct.
 // The map is a bitmask that represents the availability of the blocks in the span.
-// The map is a 64-bit integer that is used to track the availability of the blocks in the span.
+// The map tracks blocks inside a base span. Larger blocks reserve 2/4/8 adjacent
+// base spans as one allocation; ordinary size classes keep their existing packing.
 pub const DynamicSlotBufferManager = struct {
     const Self = @This();
 
-    // pub const SPAN_COUNT = @divExact(VOXEL_GRID_SLOT_COUNT, SLOTS_PER_SPAN);
-    pub const SPAN_COUNT = 64;
+    pub const SPAN_COUNT = @divExact(VOXEL_GRID_SLOT_COUNT, SLOTS_PER_SPAN);
 
     // meta map holds a bit mask for each span size, 1 means the span is not full, 0 means the span can't be used for
     // this size (it's either already full or it's used for a different size)
     // initially all 0 because there are no spans yet
-    span_meta_maps: [MAX_SPAN_SIZE_EXPONENT + 1]u64 = @splat(0),
+    span_meta_maps: [BASE_SPAN_SIZE_EXPONENT + 1]u64 = @splat(0),
     // SoA backing store for BufferSpan { map, size }; accessed via spanList().get/set
     span_storage: [SpanList.capacityInBytes(SPAN_COUNT)]u8 align(@alignOf(BufferSpan)) = @splat(0),
     span_count: u32 = 0,
@@ -92,6 +93,7 @@ pub const DynamicSlotBufferManager = struct {
     pub fn occupyBlock(self: *Self, params: struct { size_exponent: u8 }) !u32 {
         const size_exponent = params.size_exponent;
         std.debug.assert(size_exponent <= MAX_SPAN_SIZE_EXPONENT);
+        if (size_exponent > BASE_SPAN_SIZE_EXPONENT) return self.occupyLargeBlock(size_exponent);
 
         const slot_size: u32 = @as(u32, 1) << @intCast(size_exponent);
         const bits_to_check = @divExact(64, slot_size);
@@ -113,8 +115,8 @@ pub const DynamicSlotBufferManager = struct {
                 const meta_mask = ~(@as(u64, 1) << @intCast(i));
                 // mark the span as unavailable for all other sizes, and for the max-size block
                 // since it fills the span immediately
-                for (0..MAX_SPAN_SIZE_EXPONENT + 1) |size_iterator| {
-                    if (size_iterator != size_exponent or size_iterator == MAX_SPAN_SIZE_EXPONENT) {
+                for (0..BASE_SPAN_SIZE_EXPONENT + 1) |size_iterator| {
+                    if (size_iterator != size_exponent or size_iterator == BASE_SPAN_SIZE_EXPONENT) {
                         self.span_meta_maps[size_iterator] &= meta_mask;
                     }
                 }
@@ -157,7 +159,7 @@ pub const DynamicSlotBufferManager = struct {
         // update the meta map for the new span
         // special case for span with maximum size, it can't be used because right after initialization it's already
         // full (the block occupies the whole span)
-        if (size_exponent < MAX_SPAN_SIZE_EXPONENT) {
+        if (size_exponent < BASE_SPAN_SIZE_EXPONENT) {
             self.span_meta_maps[size_exponent] |= (@as(u64, 1) << @intCast(new_span_index));
         }
 
@@ -165,10 +167,44 @@ pub const DynamicSlotBufferManager = struct {
         return new_span_index * SLOTS_PER_SPAN;
     }
 
+    fn occupyLargeBlock(self: *Self, size_exponent: u8) error{NoSpaceLeft}!u32 {
+        const span_count: u32 = @as(u32, 1) << @intCast(size_exponent - BASE_SPAN_SIZE_EXPONENT);
+        var spans = self.spanList();
+        var first: u32 = 0;
+        while (first + span_count <= SPAN_COUNT) : (first += 1) {
+            var available = true;
+            for (first..first + span_count) |index| {
+                if (spans.get(index).map != 0) {
+                    available = false;
+                    break;
+                }
+            }
+            if (!available) continue;
+            const mask = lowNBits(span_count) << @intCast(first);
+            for (&self.span_meta_maps) |*meta_map| meta_map.* &= ~mask;
+            for (first..first + span_count) |index| spans.set(index, .{ .map = 1, .size = size_exponent });
+            self.span_count = @max(self.span_count, first + span_count);
+            return first * SLOTS_PER_SPAN;
+        }
+        return error.NoSpaceLeft;
+    }
+
     pub fn freeBlock(self: *Self, block_index: u32) void {
         const span_index, const slot_index = divmod(block_index, SLOTS_PER_SPAN);
         var spans = self.spanList();
         var span = spans.get(span_index);
+
+        if (span.size > BASE_SPAN_SIZE_EXPONENT) {
+            const span_count: u32 = @as(u32, 1) << @intCast(span.size - BASE_SPAN_SIZE_EXPONENT);
+            std.debug.assert(slot_index == 0);
+            for (span_index..span_index + span_count) |index| {
+                std.debug.assert(spans.get(index).map == 1 and spans.get(index).size == span.size);
+                spans.set(index, .{});
+            }
+            const meta_mask = lowNBits(span_count) << @intCast(span_index);
+            for (&self.span_meta_maps) |*meta_map| meta_map.* |= meta_mask;
+            return;
+        }
 
         const span_slot_size: u32 = @as(u32, 1) << @intCast(span.size);
         const mask: u64 = @as(u64, 1) << @intCast(@divExact(slot_index, span_slot_size));
@@ -180,7 +216,7 @@ pub const DynamicSlotBufferManager = struct {
         const meta_mask = (@as(u64, 1) << @intCast(span_index));
         // if the span is empty, we should mark it as available for all sizes
         if (span.map == 0) {
-            for (0..MAX_SPAN_SIZE_EXPONENT + 1) |i| {
+            for (0..BASE_SPAN_SIZE_EXPONENT + 1) |i| {
                 self.span_meta_maps[i] |= meta_mask;
             }
         } else {
@@ -360,4 +396,57 @@ test "a hole in the last span is found and reused" {
     try std.testing.expectEqual(last_block, reused);
     try std.testing.expectEqual(DynamicSlotBufferManager.SPAN_COUNT, manager.span_count);
     try std.testing.expectError(error.NoSpaceLeft, manager.occupyBlock(.{ .size_exponent = 6 }));
+}
+
+test "more than eight live size classes keep ordinary base span packing" {
+    var manager: DynamicSlotBufferManager = .{};
+    var starts: [MAX_SPAN_SIZE_EXPONENT + 1]u32 = undefined;
+    for (&starts, 0..) |*start, exponent| start.* = try manager.occupyBlock(.{ .size_exponent = @intCast(exponent) });
+    for (starts, 0..) |start, exponent| {
+        const end = start + (@as(u32, 1) << @intCast(exponent));
+        try std.testing.expect(end <= VOXEL_GRID_SLOT_COUNT);
+        for (starts[0..exponent], 0..) |other, other_exponent| {
+            const other_end = other + (@as(u32, 1) << @intCast(other_exponent));
+            try std.testing.expect(end <= other or other_end <= start);
+        }
+    }
+    // Classes 0..6 retain one ordinary span each; 7..9 need 2+4+8.
+    try std.testing.expectEqual(@as(u32, 7 + 2 + 4 + 8), manager.span_count);
+    for (starts) |start| manager.freeBlock(start);
+    for (0..DynamicSlotBufferManager.SPAN_COUNT) |i| {
+        try std.testing.expectEqual(@as(u32, @intCast(i)) * SLOTS_PER_SPAN, try manager.occupyBlock(.{ .size_exponent = BASE_SPAN_SIZE_EXPONENT }));
+    }
+}
+
+test "oversized allocations free and reuse every reserved base span" {
+    for (BASE_SPAN_SIZE_EXPONENT + 1..MAX_SPAN_SIZE_EXPONENT + 1) |exponent| {
+        var manager: DynamicSlotBufferManager = .{};
+        _ = try manager.occupyBlock(.{ .size_exponent = 0 });
+        const large = try manager.occupyBlock(.{ .size_exponent = @intCast(exponent) });
+        // No larger-block alignment is required by the shader or buffer; the
+        // first contiguous range starts immediately after the occupied span.
+        try std.testing.expectEqual(SLOTS_PER_SPAN, large);
+        manager.freeBlock(large);
+        try std.testing.expectEqual(large, try manager.occupyBlock(.{ .size_exponent = @intCast(exponent) }));
+        manager.freeBlock(large);
+        const spans: u32 = @as(u32, 1) << @intCast(exponent - BASE_SPAN_SIZE_EXPONENT);
+        for (0..spans) |i| {
+            try std.testing.expectEqual(large + @as(u32, @intCast(i)) * SLOTS_PER_SPAN, try manager.occupyBlock(.{ .size_exponent = BASE_SPAN_SIZE_EXPONENT }));
+        }
+    }
+}
+
+test "maximum allocations exhaust the unchanged buffer and reuse the released range" {
+    var manager: DynamicSlotBufferManager = .{};
+    const slots: u32 = 1 << MAX_SPAN_SIZE_EXPONENT;
+    var allocations: [VOXEL_GRID_SLOT_COUNT / slots]u32 = undefined;
+    for (&allocations, 0..) |*allocation, i| {
+        allocation.* = try manager.occupyBlock(.{ .size_exponent = MAX_SPAN_SIZE_EXPONENT });
+        try std.testing.expectEqual(@as(u32, @intCast(i)) * slots, allocation.*);
+    }
+    try std.testing.expectError(error.NoSpaceLeft, manager.occupyBlock(.{ .size_exponent = 0 }));
+    try std.testing.expectError(error.NoSpaceLeft, manager.occupyBlock(.{ .size_exponent = MAX_SPAN_SIZE_EXPONENT }));
+    const released = allocations[3];
+    manager.freeBlock(released);
+    try std.testing.expectEqual(released, try manager.occupyBlock(.{ .size_exponent = MAX_SPAN_SIZE_EXPONENT }));
 }

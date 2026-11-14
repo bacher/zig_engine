@@ -48,13 +48,14 @@ pub const BlockType = enum(u8) {
     none = 0,
     /// Natural rock. Mining yields crushed stone; players cannot place this type.
     stone = 1,
-    /// Loose soil supplies no support. Generated soil uses packed_dirt instead.
+    /// Bare soil. Grass is surface cover with identical structural capability.
     dirt = 2,
-    /// Packed soil with a grass surface; not a separately placeable material.
+    /// Grass-covered soil; not a separately placeable material.
     grass = 3,
     water = 4,
     sand = 5,
     snow = 6,
+    /// Reserved legacy soil encoding. Current rulesets reject it on load.
     packed_dirt = 7,
     crushed_stone = 8,
     tree_trunk = 9,
@@ -81,7 +82,7 @@ pub const BlockType = enum(u8) {
     }
 
     pub fn isEarth(self: BlockType) bool {
-        return self == .dirt or self == .packed_dirt or self == .grass;
+        return self == .dirt or self == .grass;
     }
 
     pub fn isWood(self: BlockType) bool {
@@ -104,7 +105,7 @@ pub const BlockType = enum(u8) {
     }
 
     pub fn isStablePlatformMaterial(self: BlockType) bool {
-        return self == .packed_dirt or self == .grass or self == .clay or self.isNaturalRock() or self.isMineralConstruction();
+        return self.isEarth() or self == .clay or self.isNaturalRock() or self.isMineralConstruction();
     }
 
     pub fn isStructural(self: BlockType) bool {
@@ -122,7 +123,7 @@ pub const BlockType = enum(u8) {
     pub fn miningPolicy(self: BlockType) MiningPolicy {
         return switch (self) {
             .stone => .{ .yields = .crushed_stone },
-            .dirt, .packed_dirt, .grass => .{ .yields = .dirt },
+            .dirt, .grass => .{ .yields = .dirt },
             .custom => .{ .yields = .country_road_adaptive },
             .water, .sand, .snow, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive => .{ .yields = self },
             .leaves => .remove_without_item,
@@ -217,11 +218,24 @@ comptime {
     std.debug.assert(@offsetOf(GPU_ChunkInfo, "data_slot_index") == 108);
 }
 
+pub const Layer = enum { terrain, construction };
+
+/// Identifies the complete data/composition and subscription used by a mesh.
+/// An upload becomes current only after it has successfully replaced its layer.
+pub const GeometryStamp = struct {
+    subscription_id: u64 = 0,
+    chunk_revision: u64 = 0,
+    mesh_revision: u64 = 0,
+    composition_revision: u64 = 0,
+};
+
 pub const VoxelChunk = struct {
     pub const Self = @This();
 
     // TODO: should we add chunk_id here?
     chunk_origin: ChunkCoords,
+    layer: Layer = .terrain,
+    geometry_stamp: GeometryStamp = .{},
 
     // if null, then it means that the chunk is not resident on the GPU most likely because does not have visible faces
     gpu_residence_info: ?GpuResidenceInfo = null,
@@ -239,6 +253,10 @@ pub const GpuResidenceInfo = struct {
     chunk_index: u32,
     data_slot_index: u32,
     data_slot_size_level: u8,
+
+    pub fn vertexCount(self: GpuResidenceInfo, view: usize) u32 {
+        return @as(u32, self.faces_count_per_view[view]) * 6;
+    }
 };
 
 pub const ChunkSideData = struct {
@@ -290,4 +308,6 @@ pub const ChunkSideData = struct {
 pub const VoxelChunkUpload = struct {
     chunk_coords: ChunkCoords,
     chunk_side_data: ChunkSideData,
+    layer: Layer = .terrain,
+    geometry_stamp: GeometryStamp = .{},
 };

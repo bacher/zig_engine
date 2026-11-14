@@ -3,9 +3,9 @@
 This is the normative format reference for the
 [world-persistence feature spec](../features/world-persistence.md). It contains the existing
 binary layouts, encoding rules, compatibility policy, checksums, and metadata bounds
-for current format 5. Formats 1–4 are rejected as incompatible development worlds.
-Version 5 retains the version-4 byte layouts and gates the changed stone support and
-blueprint certificate semantics; it adds no migration or historical ruleset.
+for current format 7. Formats 1–6 are rejected as incompatible development worlds.
+Version 7 persists construction ownership transfers, retained materializing instances,
+and durable grass-initialization obligations; it adds no migration or historical ruleset.
 All R/Q identifiers refer to that feature spec;
 requirement and acceptance-criterion IDs remain there. Runtime ownership, cancellation,
 recovery procedures, and platform durability remain in the feature spec.
@@ -57,7 +57,7 @@ range, with actual decoding support for every accepted version. These are distin
 snapshot sequences, world ticks, and generator versions. The minimum is an engine support
 policy; a second per-file version field is not required for this initial design.
 
-The current writer and minimum reader version are both 5. Development formats 1–4
+The current writer and minimum reader version are both 7. Development formats 1–6
 are rejected before their gameplay records are interpreted. A version bump alone does
 not implement compatibility: incompatible changes must also raise the minimum unless
 the engine supplies every required older decoding path. Pre-release development saves
@@ -69,22 +69,16 @@ gameplay change also advances the write version and raises the minimum to exclud
 even when record layouts are unchanged. This world-level gate covers saved blueprint definitions
 and unfinished instances without independent rule-version fields or migration.
 
-Initially perform no material-enum membership checks, either per raw cell or per RLE run.
-Retain file/record checksums and structural bounds, and reject unsupported codec IDs at the
-per-record dispatch point. Once version/integrity checks succeed and decoding yields exactly
-32,768 bytes, reinterpret the owned buffer directly as `[32][32][32]BlockType` in x-fast order.
-For standard RLE, expand material bytes and initialize omitted trailing air without first
-converting each run's material to an enum. Validate custom metadata using byte-level custom
-markers before publishing the typed chunk. Temporary decoding buffers do not change the
-enum-based runtime representation.
+Validate material membership before publishing a typed chunk, including chunks with no
+metadata. Accepted raw IDs are 0–6, 8–20, and 255. Legacy packed dirt ID 7 is reserved
+and rejected, as are all other IDs. Raw and RLE decoding must yield exactly 32,768 bytes
+including implicit trailing air, then metadata validation scans every material byte.
+Checksums and version compatibility do not replace material membership validation.
 
-Verify the assumed one-byte `BlockType` layout and array size at compile time, and preserve
-required alignment and buffer ownership/lifetime. A cast must not leave the live chunk pointing
-into recycled I/O scratch storage. The accepted trust assumption is that a compatible writer
-emitted valid values and verified bytes retain them. Version/checksum checks do not logically
-establish membership in the exhaustive enum. Invalid values from a writer bug, an incorrect
-compatibility declaration, or a file with matching recomputed checksums can still produce
-undefined behavior; safe handling of that case is explicitly not guaranteed in v1.
+Verify the one-byte `BlockType` layout and array size at compile time and preserve required
+alignment and ownership. The live chunk must own its decoded buffer rather than referring
+to recycled I/O scratch storage. Custom metadata must match byte-255 cells exactly before
+the owned buffer is reinterpreted in x-fast `[z][y][x]` order.
 
 ## Section Compatibility and Extensions
 
@@ -129,7 +123,7 @@ Even skipped payloads remain within validated section/record bounds and enclosin
 coverage. Check their lengths before seeking/advancing. Optionality is a format compatibility
 promise that gameplay remains valid without interpreting that extension; it is not a general
 guarantee of lossless preservation of unknown data when rewriting saves. Custom-block types
-are required semantic data and must be recognized; the material-enum trust policy does not
+are required semantic data and must be recognized; material validation does not
 permit skipping unknown custom payloads or guessing their sizes.
 
 The file-version gate runs before section interpretation. An older engine still rejects a
@@ -158,7 +152,7 @@ standard payload denotes an all-air chunk, still an explicit override when index
 that payload length is even and the sum of counts does not exceed 32,768; explicit cells plus
 implicit trailing air must fill the chunk exactly. Raw requires all 32,768 material bytes,
 including trailing air. Apply R49/R50's version and enum policy and validate custom-cell
-metadata in both modes; no separate full-block material-ID scan is required.
+metadata and every material ID in both modes.
 
 Select standard if its encoded block payload is <=32,768 bytes; select raw otherwise. Codec
 selection does not need a separate histogram pass or persistent per-chunk statistics. Encode
@@ -205,9 +199,12 @@ alternative algorithms are follow-up improvements, not prerequisites for this in
 
 The initial save-format version was 1; version 2 added inventory schema 1 below.
 Version 3 added the world's private blueprint library and unfinished-instance progress.
-The current writer and minimum readable version are both 5. Version 4 added unfinished
-world-work keys with each base and WAL snapshot. Version 5 retains that layout and gates
-platform-only direct stone support and portable blueprint certification. The base and every WAL segment must pass this
+The current writer and minimum readable version are both 7. Version 4 added unfinished
+world-work keys with each base and WAL snapshot. Version 5 gated platform-only direct stone
+support and portable blueprint certification. Version 6 excluded loose-soil support and
+placement-triggered compaction. Version 7 changes blueprint progress and transformation-marker
+semantics.
+The base and every WAL segment must pass this
 whole-world version gate before their gameplay data is published. No migration or
 historical ruleset dispatch is provided. Fixed base/WAL header sizes remain unchanged.
 All integer fields are explicitly sized and little-endian; f32/f64 use
@@ -277,7 +274,7 @@ new physical checksum.
 | Chunk edge length | u16, initially 32 |
 | World dimensions in chunks, X/Y/Z | [3]u32 |
 | Topology flags | u8; bit 0 = wrap X, other bits initially zero |
-| Generator ID | u16; 0 flat, 1 terrain |
+| Generator ID | u16; 2 current natural/flat profile generator |
 | Generator implementation version | u32, initially 1 |
 | Seed | u64 |
 | Generator-settings byte length | u32 |
@@ -294,23 +291,24 @@ advance the generator implementation identity/version and the world-save write/m
 versions so unsupported older worlds are rejected under Q1. Keep one current generator logic
 with its supported settings profiles rather than historical implementations or required migration.
 
-Terrain generator version 1 settings are exactly 39 bytes, in this order:
+Generator ID 2, implementation version 1, is the only accepted generator. Settings start
+with a profile byte: 0 natural, 1 flat. Flat settings are exactly one byte `{1}`. Natural
+settings are exactly nine bytes, in this order:
 
 | Field | Encoding |
 | --- | --- |
-| noise_scale | f64 |
-| octaves | u8 |
-| lacunarity | f64 |
-| persistence | f64 |
-| base_height_present | u8; 0 automatic, 1 explicit |
-| base_height | u32; zero when automatic |
-| height_amplitude | f64 |
-| dirt_depth | u8 |
+| profile | u8 = 0 |
+| beaches | u8 boolean, 0 or 1 |
+| climate_displacement | u16 |
+| island_count | u8 |
+| large_deposits_per_resource | u8 |
+| small_deposits_per_resource | u8 |
+| feature_index_capacity | u16 |
 
-Preserve the automatic-height choice rather than substituting today's explicit default.
-Validate settings with the supported generator's parameter/layout rules. Flat generation
-uses seed zero and an empty settings payload. Terrain descriptors therefore occupy 80 bytes,
-and flat descriptors 41 bytes, for these initial schemas.
+Validate all settings against the current generator's parameter and layout rules. The
+descriptor occupies 42 bytes for flat and 50 bytes for natural; its fixed part remains
+41 bytes. Saved settings determine generation for absent chunks throughout the world's
+lifetime.
 
 ### Global and player records
 
@@ -473,43 +471,74 @@ An instance references an existing retained immutable definition and has the sam
 owner. Its rotated box fits finite Y/Z bounds, uses normalized wrapping X, and cannot
 overlap another active box. Rotation maps `(x,y,z)` to `(y,width-1-x,z)` per clockwise turn.
 
-An empty never-used blueprint checkpoint is zero bytes. Otherwise the checkpoint starts
-with maximum allocated definition ID u64, maximum allocated instance ID u64, definition
-count u32, and active-instance count u32. These highwaters survive retirement of completed
-instances. Definitions follow in increasing ID order, then active instances in increasing
-ID order. Each instance record adds remaining target count u32 and exactly
-`ceil(definition_volume / 8)` fulfillment bytes. Bit `index % 8` of byte `index / 8` marks
-that dense definition index fulfilled. Air-cell and unused trailing bits must be zero;
-remaining must equal occupied targets minus set bits and must be positive. Completed
-instances have no checkpoint record. Definitions remain available to every referencing
-instance; there is no deletion operation in this iteration. All derived spatial/render
-indexes are rebuilt rather than serialized.
+An empty never-used blueprint checkpoint is zero bytes. Otherwise its header is exactly
+28 bytes: maximum allocated definition ID u64, maximum allocated instance ID u64,
+definition count u32, active-instance count u32, and grass-initialization count u32.
+Highwaters survive completed-instance retirement. Definitions follow in increasing ID
+order, then active instances in increasing ID order. The identity/transform record is
+exactly 37 bytes. Each active instance contains, in order:
 
-WAL operations have no native struct framing or per-operation padding. Parse to the exact
-declared operation-section end; reject unknown kinds, truncated fields, invalid references,
-out-of-order/reused IDs, duplicate fulfillment, and progress directed at air/out-of-range
-cells. Definition publication and instance creation can precede fulfillment in one
-transaction.
-
-| Kind u8 | Following payload |
+| Field | Encoding |
 | --- | --- |
-| 1 | Immutable definition record |
-| 2 | Instance identity/transform record; all targets initially pending |
-| 3 | Instance ID u64, dense definition cell index u32 |
+| Identity/transform | 37-byte record above |
+| Remaining target count | u32 |
+| Phase | u8; 0 building, 1 materializing |
+| Construction revision | u64 |
+| Fulfillment bitmap | exactly `ceil(definition_volume / 8)` bytes |
+| Target-bearing portion count | u32 |
+| Portions | each chunk ID u32 followed by terrain revision u64, sorted by chunk ID |
 
-Kind 3 occupies exactly 13 bytes including its kind and updates one bit and the remaining
-counter. Reaching zero retires the instance without a completion scan. Normal fulfillment
-never rewrites its immutable definition or complete bitmap; checkpointing may encode both
-in full. Preflight validates/allocates touched operations before the commit footer and
-publishes all blueprint, terrain, and inventory state together after durable commit.
-Recovery applies only a fully verified committed operation section, with the same atomic
-boundary. Before entering gameplay the authority also checks fulfilled materials against
-real terrain (dirt includes grass/packed dirt) and pending targets against real air.
+Bit `index % 8` of byte `index / 8` marks that dense definition index fulfilled. Air-cell
+and unused trailing bits must be zero. Remaining equals occupied targets minus set bits;
+positive remaining requires building, and zero remaining requires materializing. The last
+fill retains the materializing instance. Its portions cover exactly the canonical
+nonempty target groups, including groups with no transfer. Revision zero denotes simulation
+ownership; a nonzero terrain revision denotes world-data ownership. Only materializing
+instances may have transfers. Construction revision equals fulfilled target count plus
+transferred portion count. Complete instances have no active checkpoint record.
 
-Limits are resource policy, not historical gameplay versions: defaults permit 1,048,576
-cells per definition, 4,096 definitions and active instances, a 64 MiB checkpoint, and a
-16 MiB/1,048,576-operation WAL section. They are configurable; checked arithmetic and
-declared wire widths still apply. A failure leaves the transaction unpublished/retryable.
+Grass obligations follow active instances, sorted by `(instance_id, chunk_id)`. Each is
+49 bytes: identity/transform (37), chunk ID u32, and completion tick u64. It refers to a
+retained definition and a soil-bearing target chunk; its completed instance ID is at most
+the highwater and cannot also identify a live instance. This descriptor routes work and
+supplies a deadline; cell lifetime is proved separately by per-cell markers. Definitions
+remain retained; there is no deletion operation. Derived spatial/render indexes are rebuilt.
+
+WAL operations have no native struct framing or padding. Parse to the exact section end;
+reject unknown kinds, truncation, invalid references, reused IDs, duplicate fulfillment or
+transfer, and progress directed at air/out-of-range cells. Ordered operations may create,
+fill, transfer, complete and initialize a site in one transaction.
+
+| Kind u8 | Following payload | Total bytes |
+| --- | --- | --- |
+| 1 | Immutable definition record | variable |
+| 2 | Identity/transform; targets initially pending | 38 |
+| 3 | Instance ID u64, dense definition index u32 | 13 |
+| 4 | Instance ID u64, chunk ID u32, terrain revision u64 | 21 |
+| 5 | Instance ID u64, completion tick u64, soil-group count u32 | 21 |
+| 6 | Instance ID u64, initialized chunk ID u32 | 13 |
+
+Kind 3 changes one bit, remaining count and construction revision. Kind 4 transfers an
+entire canonical target group exactly once, at a nonzero terrain revision. Kind 5 requires
+all targets fulfilled and all groups transferred; it retires the instance, frees active
+quota, and creates exactly the declared number of soil-group obligations. Kind 6 retires
+the matching grass obligation after its matching cell markers have been activated.
+Normal fulfillment never rewrites immutable definitions or complete bitmaps. Checkpointing
+may encode the full bitmap and portions.
+
+Preflight validates and allocates touched operations before the commit footer. Publication,
+raw terrain, timers, player inventory and obligations share one durable transaction/capture
+boundary; recovery publishes only fully verified committed sections. Before gameplay,
+pending targets and fulfilled untransferred targets must be raw air. Transferred targets
+must exactly match the bare definition material; grass and legacy packed dirt do not count
+as transferred dirt. A portion's terrain revision cannot exceed the raw chunk revision.
+
+Defaults permit 1,048,576 cells per definition, 4,096 definitions and active instances,
+4,096 grass obligations, a 64 MiB encoded checkpoint and a 16 MiB/1,048,576-operation WAL
+section. Full grass-obligation capacity defers completion without discarding accepted work.
+These are configurable resource policies, independent of the service's 256 MiB native
+construction-container estimate and 128 MiB source-snapshot bound. Checked arithmetic and
+declared wire widths still apply. Preflight failure leaves the transaction unpublished.
 
 ## Snapshot Integrity
 
@@ -603,14 +632,20 @@ without padding:
 | Section | Entry fields | Serialized entry size |
 | --- | --- | --- |
 | Construction markers | Cell index u16 | 2 bytes |
-| Pending transformations | Cell index u16, transformation kind u8, deadline tick u64 | 11 bytes |
+| Pending transformations | Cell index u16, kind u8, deadline tick or lifetime token u64 | 11 bytes |
 | Custom blocks: unformed adaptive road | Custom type u8, road state u8 | 2 bytes |
 | Custom blocks: formed adaptive road | Custom type u8, road state u8, high endpoint [3]u32, downhill direction u8, formation length u32, section index u32 | 23 bytes |
 
 Construction and timer payloads contain no additional entry count: divide the section length
 by 2 or 11 respectively, rejecting a remainder or count above 32,768 before allocation.
 Cell indices use x-fast order and must be below 32,768 despite their u16 storage width.
-Transformation kinds are explicitly 0 compact_dirt and 1 grow_grass; reject unknown kinds.
+Transformation kind 0 is removed and rejected. Kind 1 is `grow_grass`, whose u64 is an
+executable logical deadline. Kind 2 is `initialize_grass`, accepted only on raw bare dirt
+(ID 2) with a nonzero construction lifetime token. Reject all other kinds. Kind 2 never
+runs as an ordinary timer and has no deadline. A durable completion obligation activates
+only a matching cell's token and starts its grow deadline at `completion_tick + delay`.
+Cell replacement or cancellation destroys its old marker, preventing stale obligations
+from initializing a later cell lifetime.
 
 Custom type 0 denotes an adaptive road. Road state 0 is unformed/adaptive and has no further
 fields; state 1 is a formed slope and has the remaining 21 bytes listed above. Reject unknown

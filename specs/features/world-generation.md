@@ -23,6 +23,12 @@ tuning remains provisional for visual review.
 Implementation evidence and measured defaults are recorded in the
 [validation report](../../docs/validation/world-generation/README.md).
 
+The construction ownership implementation supersedes the soil-specific loose/packed distinction
+and compaction timers in R13–R14 below. Generated bare soil uses the same support rules as grass;
+new ordinary bare soil grows grass directly, while active construction soil stays bare until
+materialization completes. See [construction Q6](construction-state-ownership.md#q6--soil-and-compact-physical-state)
+and the format-7 gate. Other generation requirements and historical measurements are unchanged.
+
 ## Context
 
 - [Game vision](../../docs/game-vision.md) defines one-metre voxels, periodic X, finite Y/Z,

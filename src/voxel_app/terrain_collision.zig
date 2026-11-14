@@ -1,4 +1,4 @@
-//! CPU collision queries against the application's optimistic block cache.
+//! CPU collision queries against the composed optimistic physical world.
 const engine = @import("engine");
 const World = @import("world.zig").World;
 const coordinates = @import("block_coordinates.zig");
@@ -46,18 +46,17 @@ pub const Query = struct {
         // The finite y/z edges are walls. X follows the voxel application's topology.
         const block = coordinates.fromWorld(self.world.layout, cell) orelse return .{ .occupancy = .solid };
         if (!coordinates.isPlayableY(self.world.layout, block[1], self.world.playable_y_inset)) return .{ .occupancy = .solid };
-        const chunk_coords, const local = @import("world.zig").splitBlockCoords(block);
-        const chunk = self.world.getChunk(chunk_coords) orelse {
+        const chunk_coords, _ = @import("world.zig").splitBlockCoords(block);
+        const material = self.world.reader().get(.{ block[0], block[1], block[2] }) orelse {
             if (report_missing) self.missing_chunk = self.missing_chunk orelse chunk_coords;
             return .{ .occupancy = .missing };
         };
-        const material = chunk.content.getBlock(local);
-        // One chunk/material lookup per cell; sparse road metadata is only read
-        // for the custom sentinel, never for ordinary terrain or air.
-        const road = if (material == .custom) chunk.metadata.road(@import("block_transformations.zig").index(local)) else null;
+        // Missing construction definitions/progress use the same blocked-world
+        // behavior as missing terrain. Packed cargo can extend movement queries
+        // separately without becoming support/capturable material.
         return .{
             .occupancy = if (movementCollision(material) == .full_cube) .solid else .clear,
-            .shape = if (road) |r| r.shape() else null,
+            .shape = if (material == .custom) self.world.customShape(block) else null,
         };
     }
 

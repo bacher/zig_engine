@@ -7,6 +7,22 @@ const rules = @import("block_rules.zig");
 const ChunkId = @import("consts.zig").ChunkId;
 const chunk_size = @import("consts.zig").CHUNK_SIZE;
 pub const Cell = [3]u32;
+pub const Phase = @import("construction_state.zig").Phase;
+pub const Identity = @import("construction_state.zig").Identity;
+pub const ObjectKind = @import("construction_state.zig").ObjectKind;
+pub const StorageOwner = @import("construction_state.zig").StorageOwner;
+
+/// Rebuildable grouping, never an independent target-membership authority.
+pub const TargetGroup = struct {
+    chunk_id: ChunkId,
+    first: u32,
+    count: u32,
+    transferred: bool = false,
+    terrain_revision: u64 = 0,
+};
+
+pub const Transfer = struct { instance_id: u64, chunk_id: ChunkId, terrain_revision: u64 };
+pub const Completion = struct { instance_id: u64, completion_tick: u64 = 0 };
 
 pub const SavedDefinition = struct {
     id: u64,
@@ -36,13 +52,26 @@ pub const Instance = struct {
     fulfilled: []u8,
     remaining: u32,
     active: bool = true,
+    phase: Phase = .building,
+    revision: u64 = 0,
+    lifetime: u64 = 0,
     box_chunks: []ChunkId,
+    target_groups: []TargetGroup = &.{},
+    target_indices: []u32 = &.{},
+    remaining_groups: u32 = 0,
     cleanup_cursor: usize = 0,
 
     pub fn deinit(self: *Instance, allocator: std.mem.Allocator) void {
         allocator.free(self.fulfilled);
         allocator.free(self.box_chunks);
+        allocator.free(self.target_groups);
+        allocator.free(self.target_indices);
         self.* = undefined;
+    }
+
+    pub fn estimatedOwnedBytes(self: Instance) usize {
+        return self.fulfilled.len +| self.box_chunks.len *| @sizeOf(ChunkId) +|
+            self.target_groups.len *| @sizeOf(TargetGroup) +| self.target_indices.len *| @sizeOf(u32);
     }
 
     pub fn isFulfilled(self: Instance, index: usize) bool {
@@ -55,7 +84,27 @@ pub const Instance = struct {
         var copy = self;
         copy.fulfilled = bits;
         copy.box_chunks = try allocator.dupe(ChunkId, self.box_chunks);
+        errdefer allocator.free(copy.box_chunks);
+        copy.target_groups = try allocator.dupe(TargetGroup, self.target_groups);
+        errdefer allocator.free(copy.target_groups);
+        copy.target_indices = try allocator.dupe(u32, self.target_indices);
         return copy;
+    }
+
+    pub fn groupIndex(self: Instance, id: ChunkId) ?usize {
+        var low: usize = 0;
+        var high = self.target_groups.len;
+        while (low < high) {
+            const middle = low + (high - low) / 2;
+            const group = self.target_groups[middle];
+            if (group.chunk_id == id) return middle;
+            if (group.chunk_id < id) low = middle + 1 else high = middle;
+        }
+        return null;
+    }
+
+    pub fn targetsOfGroup(self: Instance, group: TargetGroup) []const u32 {
+        return self.target_indices[group.first..][0..group.count];
     }
 };
 
@@ -110,9 +159,20 @@ pub const PreparedPublication = struct {
     instance: Instance,
     chunks: std.AutoHashMapUnmanaged(ChunkId, ChunkIndex) = .empty,
     published: bool = false,
+    retired_instance: ?Instance = null,
+
+    pub fn estimatedOwnedBytes(self: *const PreparedPublication) usize {
+        var bytes = estimatedMapBytes(ChunkId, ChunkIndex, self.chunks.capacity());
+        if (!self.published) bytes +|= self.instance.estimatedOwnedBytes();
+        if (self.retired_instance) |instance| bytes +|= instance.estimatedOwnedBytes();
+        var chunks = self.chunks.valueIterator();
+        while (chunks.next()) |chunk| bytes +|= chunk.estimatedOwnedBytes();
+        return bytes;
+    }
 
     pub fn deinit(self: *PreparedPublication, allocator: std.mem.Allocator) void {
         if (!self.published) self.instance.deinit(allocator);
+        if (self.retired_instance) |*instance| instance.deinit(allocator);
         var chunks = self.chunks.valueIterator();
         while (chunks.next()) |chunk| chunk.deinit(allocator);
         self.chunks.deinit(allocator);
@@ -124,6 +184,64 @@ pub const PreparedPublication = struct {
 /// preparation; only footprint chunks are cloned and extended. Client callers
 /// may supply preceding fulfillments to filter from these owned clones.
 pub fn buildPublication(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, definition: blueprint.Definition, instance: Instance, source: *const std.AutoHashMapUnmanaged(ChunkId, ChunkIndex), fulfillments: ?*const FulfillmentSet) !PreparedPublication {
+    return buildPublicationReplacing(allocator, layout, definition, instance, source, fulfillments, null);
+}
+
+/// Replaces progress for the same immutable descriptor/lifetime. All old
+/// footprint sources remain untouched until publication succeeds.
+pub fn buildSnapshotPublication(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, definition: blueprint.Definition, instance: Instance, source: *const std.AutoHashMapUnmanaged(ChunkId, ChunkIndex)) !PreparedPublication {
+    try validateSnapshot(layout, definition, instance);
+    return buildPublicationReplacing(allocator, layout, definition, instance, source, null, instance.id);
+}
+
+/// Full/resync snapshots are uncommon and validate their complete payload once.
+/// Routine deltas use the allocation-free, bounded local transition APIs.
+pub fn validateSnapshot(layout: *const engine.WorldLayout, definition: blueprint.Definition, instance: Instance) !void {
+    if (instance.id == 0 or instance.lifetime != instance.id or !validFootprint(layout, instance.origin, definition.size, instance.rotation) or instance.active != (instance.phase != .complete) or instance.fulfilled.len != (definition.cells.len + 7) / 8 or instance.target_indices.len != definition.target_count) return error.InvalidConstructionSnapshot;
+    if (definition.cells.len % 8 != 0 and instance.fulfilled[instance.fulfilled.len - 1] >> @as(u3, @intCast(definition.cells.len % 8)) != 0) return error.InvalidConstructionSnapshot;
+    var remaining = definition.target_count;
+    for (definition.cells, 0..) |material, index| if (instance.isFulfilled(index)) {
+        if (material == .none) return error.InvalidConstructionSnapshot;
+        remaining -= 1;
+    };
+    if (instance.remaining != remaining or (remaining != 0) != (instance.phase == .building)) return error.InvalidConstructionSnapshot;
+    var count: usize = 0;
+    var remaining_groups: u32 = 0;
+    for (instance.target_groups, 0..) |group, group_slot| {
+        if (group.count == 0 or group.first != count or group.count > instance.target_indices.len - count or (group_slot != 0 and instance.target_groups[group_slot - 1].chunk_id >= group.chunk_id) or group.transferred != (group.terrain_revision != 0) or (instance.phase == .building and group.transferred)) return error.InvalidConstructionSnapshot;
+        if (!group.transferred) remaining_groups += 1;
+        var previous: ?u32 = null;
+        for (instance.targetsOfGroup(group)) |index| {
+            if (index >= definition.cells.len or definition.cells[index] == .none or (previous != null and previous.? >= index)) return error.InvalidConstructionSnapshot;
+            const cell = worldCell(layout, instance.origin, definition.size, instance.rotation, blueprint.cellAtIndex(definition.size, index)).?;
+            if (chunkId(layout, cell) != group.chunk_id) return error.InvalidConstructionSnapshot;
+            previous = index;
+        }
+        count += group.count;
+    }
+    if (count != definition.target_count or instance.remaining_groups != remaining_groups or (instance.phase == .complete and remaining_groups != 0)) return error.InvalidConstructionSnapshot;
+    const expected_revision = @as(u64, definition.target_count - remaining) + instance.target_groups.len - remaining_groups + @intFromBool(instance.phase == .complete);
+    if (instance.revision != expected_revision) return error.InvalidConstructionSnapshot;
+    // Footprint discovery itself is immutable and must cover the exact box,
+    // including box-only chunks. Enumeration needs no temporary allocation.
+    const rotated = blueprint.rotatedSize(definition.size, instance.rotation);
+    var box_count: usize = 0;
+    var z = instance.origin[2] / chunk_size;
+    while (z <= (instance.origin[2] + rotated[2] - 1) / chunk_size) : (z += 1) {
+        var y = instance.origin[1] / chunk_size;
+        while (y <= (instance.origin[1] + rotated[1] - 1) / chunk_size) : (y += 1) {
+            var x: u64 = instance.origin[0] / chunk_size;
+            while (x <= (@as(u64, instance.origin[0]) + rotated[0] - 1) / chunk_size) : (x += 1) {
+                const expected = layout.encodeChunkCoords(.{ @intCast(x % @as(u64, @intCast(layout.size_in_chunks[0]))), @intCast(y), @intCast(z) });
+                if (box_count >= instance.box_chunks.len or instance.box_chunks[box_count] != expected) return error.InvalidConstructionSnapshot;
+                box_count += 1;
+            }
+        }
+    }
+    if (box_count != instance.box_chunks.len) return error.InvalidConstructionSnapshot;
+}
+
+fn buildPublicationReplacing(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, definition: blueprint.Definition, instance: Instance, source: *const std.AutoHashMapUnmanaged(ChunkId, ChunkIndex), fulfillments: ?*const FulfillmentSet, replacing: ?u64) !PreparedPublication {
     var result: PreparedPublication = .{ .instance = instance };
     errdefer {
         var iterator = result.chunks.valueIterator();
@@ -134,6 +252,16 @@ pub fn buildPublication(allocator: std.mem.Allocator, layout: *const engine.Worl
     for (instance.box_chunks) |id| {
         var index = if (source.get(id)) |existing| try existing.clone(allocator) else ChunkIndex{};
         errdefer index.deinit(allocator);
+        if (replacing) |old_id| {
+            var target_slot: usize = 0;
+            while (target_slot < index.targets.items.len) {
+                const cell = index.targets.items[target_slot];
+                if (index.lookup.get(cell).?.instance_id == old_id) {
+                    _ = index.removeTarget(cell);
+                } else target_slot += 1;
+            }
+            if (std.mem.indexOfScalar(u64, index.instances.items, old_id)) |old_slot| _ = index.instances.swapRemove(old_slot);
+        }
         // Source entries may borrow an earlier publication. Filter only this
         // owned clone, preserving both rollback and its original commit point.
         if (fulfillments) |removed| if (removed.count() != 0) {
@@ -167,12 +295,14 @@ pub const Change = union(enum) {
     definition: SavedDefinition,
     instance: Instance,
     fulfill: Fulfill,
+    transfer: Transfer,
+    complete: Completion,
 
     pub fn deinit(self: *Change, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .definition => |*value| value.deinit(allocator),
             .instance => |*value| value.deinit(allocator),
-            .fulfill => {},
+            .fulfill, .transfer, .complete => {},
         }
     }
 };
@@ -201,6 +331,65 @@ pub fn contains(layout: *const engine.WorldLayout, origin: Cell, size: blueprint
         cell[2] >= origin[2] and @as(u64, cell[2]) < @as(u64, origin[2]) + rotated[2];
 }
 
+/// Exact inverse of worldCell, including the unique wrapped-X image.
+pub fn definitionIndex(layout: *const engine.WorldLayout, origin: Cell, size: blueprint.Size, rotation: u2, cell: Cell) ?u32 {
+    if (!contains(layout, origin, size, rotation, cell)) return null;
+    const x: u32 = @intCast((@as(u64, cell[0]) + layout.size_in_blocks[0] - origin[0]) % layout.size_in_blocks[0]);
+    const y = cell[1] - origin[1];
+    const xy: [2]u32 = switch (rotation) {
+        0 => .{ x, y },
+        1 => .{ size[0] - 1 - y, x },
+        2 => .{ size[0] - 1 - x, size[1] - 1 - y },
+        3 => .{ y, size[1] - 1 - x },
+    };
+    return @intCast(blueprint.linearIndex(size, .{ xy[0], xy[1], cell[2] - origin[2] }).?);
+}
+
+const Grouping = struct { groups: []TargetGroup, indices: []u32 };
+
+fn prepareGroups(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, definition: blueprint.Definition, origin: Cell, rotation: u2) !Grouping {
+    var counts: std.AutoHashMapUnmanaged(ChunkId, u32) = .empty;
+    defer counts.deinit(allocator);
+    for (definition.cells, 0..) |material, index| {
+        if (material == .none) continue;
+        const cell = worldCell(layout, origin, definition.size, rotation, blueprint.cellAtIndex(definition.size, index)) orelse return error.InvalidFootprint;
+        const entry = try counts.getOrPut(allocator, chunkId(layout, cell));
+        if (!entry.found_existing) entry.value_ptr.* = 0;
+        entry.value_ptr.* += 1;
+    }
+    const groups = try allocator.alloc(TargetGroup, counts.count());
+    errdefer allocator.free(groups);
+    var keys = counts.keyIterator();
+    var slot: usize = 0;
+    while (keys.next()) |id| : (slot += 1) groups[slot] = .{ .chunk_id = id.*, .first = 0, .count = counts.get(id.*).? };
+    const Order = struct {
+        fn less(_: void, a: TargetGroup, b: TargetGroup) bool {
+            return a.chunk_id < b.chunk_id;
+        }
+    };
+    std.mem.sort(TargetGroup, groups, {}, Order.less);
+    var total: u32 = 0;
+    for (groups, 0..) |*group, group_slot| {
+        group.first = total;
+        total += group.count;
+        // Reuse the count map as a chunk-to-group cursor directory.
+        counts.getPtr(group.chunk_id).?.* = @intCast(group_slot);
+    }
+    const indices = try allocator.alloc(u32, total);
+    errdefer allocator.free(indices);
+    const cursors = try allocator.alloc(u32, groups.len);
+    defer allocator.free(cursors);
+    @memset(cursors, 0);
+    for (definition.cells, 0..) |material, index| {
+        if (material == .none) continue;
+        const cell = worldCell(layout, origin, definition.size, rotation, blueprint.cellAtIndex(definition.size, index)).?;
+        const group_slot = counts.get(chunkId(layout, cell)).?;
+        indices[groups[group_slot].first + cursors[group_slot]] = @intCast(index);
+        cursors[group_slot] += 1;
+    }
+    return .{ .groups = groups, .indices = indices };
+}
+
 fn chunkId(layout: *const engine.WorldLayout, cell: Cell) ChunkId {
     return layout.encodeChunkCoords(.{ @intCast(cell[0] / chunk_size), @intCast(cell[1] / chunk_size), @intCast(cell[2] / chunk_size) });
 }
@@ -226,6 +415,12 @@ pub fn boxChunks(allocator: std.mem.Allocator, layout: *const engine.WorldLayout
     return result.toOwnedSlice(allocator);
 }
 
+/// Requested native capacity estimate, including hash metadata/alignment padding.
+/// Allocator pages, allocator bookkeeping and process RSS are outside this policy.
+pub fn estimatedMapBytes(comptime K: type, comptime V: type, capacity: usize) usize {
+    return capacity *| (@sizeOf(K) + @sizeOf(V) + 1) +| (if (capacity == 0) @as(usize, 0) else 64);
+}
+
 pub const State = struct {
     /// Immutable world layout; set by world/service init or first insertion.
     layout: ?*const engine.WorldLayout = null,
@@ -237,6 +432,20 @@ pub const State = struct {
     revision: u64 = 0,
     max_definition_id: u64 = 0,
     max_instance_id: u64 = 0,
+
+    pub fn estimatedOwnedBytes(self: *const State) usize {
+        var bytes = estimatedMapBytes(u64, SavedDefinition, self.definitions.capacity()) +|
+            estimatedMapBytes(u64, Instance, self.instances.capacity()) +|
+            estimatedMapBytes(ChunkId, ChunkIndex, self.chunks.capacity()) +|
+            self.cleanup_queue.capacity *| @sizeOf(u64);
+        var definitions = self.definitions.valueIterator();
+        while (definitions.next()) |definition| bytes +|= definition.name.len +| definition.definition.cells.len;
+        var instances = self.instances.valueIterator();
+        while (instances.next()) |instance| bytes +|= instance.estimatedOwnedBytes();
+        var chunks = self.chunks.valueIterator();
+        while (chunks.next()) |chunk| bytes +|= chunk.estimatedOwnedBytes();
+        return bytes;
+    }
 
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
         var definitions = self.definitions.valueIterator();
@@ -266,6 +475,64 @@ pub const State = struct {
         return if (self.chunks.get(id)) |index| index.instances.items else &.{};
     }
 
+    pub const Member = struct { target: Target, fulfilled: bool, owner: StorageOwner };
+    pub const Physical = union(enum) { unowned, unknown, material: rules.BlockType };
+
+    /// Membership lasts through materialization and never depends on pending
+    /// lookup entries. The chunk directory bounds candidate discovery.
+    pub fn memberAt(self: *const State, cell: Cell) ?Member {
+        const layout = self.layout orelse return null;
+        const id = chunkId(layout, cell);
+        for (self.chunkInstances(id)) |instance_id| {
+            const instance = self.instances.get(instance_id) orelse continue;
+            if (!instance.active) continue;
+            const definition = self.definitions.get(instance.definition_id) orelse continue;
+            const index = definitionIndex(layout, instance.origin, definition.definition.size, instance.rotation, cell) orelse continue;
+            const material = definition.definition.cells[index];
+            if (material == .none) continue;
+            const transferred = if (instance.groupIndex(id)) |group_slot| instance.target_groups[group_slot].transferred else false;
+            return .{ .target = .{ .instance_id = instance.id, .cell_index = index, .material = material }, .fulfilled = instance.isFulfilled(index), .owner = if (transferred) .world_data else .simulation };
+        }
+        return null;
+    }
+
+    /// A missing source behind discovery is unknown, never permission to use
+    /// raw air. Transferred portions defer to the matching terrain snapshot.
+    pub fn physicalAt(self: *const State, cell: Cell) Physical {
+        const layout = self.layout orelse return .unowned;
+        const id = chunkId(layout, cell);
+        for (self.chunkInstances(id)) |instance_id| {
+            const instance = self.instances.get(instance_id) orelse return .unknown;
+            if (!instance.active) continue;
+            const definition = self.definitions.get(instance.definition_id) orelse return .unknown;
+            const index = definitionIndex(layout, instance.origin, definition.definition.size, instance.rotation, cell) orelse continue;
+            const material = definition.definition.cells[index];
+            if (material == .none) continue;
+            const group_slot = instance.groupIndex(id) orelse return .unknown;
+            if (instance.target_groups[group_slot].transferred) return .unowned;
+            return .{ .material = if (instance.isFulfilled(index)) material else .none };
+        }
+        return .unowned;
+    }
+
+    /// Enumerators must include fulfilled simulation targets in addition to
+    /// ordinary terrain provenance. Only target-bearing chunk groups are read.
+    pub fn appendConstructed(self: *const State, allocator: std.mem.Allocator, id: ChunkId, out: *std.ArrayList(rules.Cell)) !void {
+        const layout = self.layout orelse return;
+        for (self.chunkInstances(id)) |instance_id| {
+            const instance = self.instances.get(instance_id) orelse return error.UnknownConstruction;
+            if (!instance.active) continue;
+            const definition = self.definitions.get(instance.definition_id) orelse return error.UnknownDefinition;
+            const group_slot = instance.groupIndex(id) orelse continue;
+            const group = instance.target_groups[group_slot];
+            if (group.transferred) continue;
+            for (instance.targetsOfGroup(group)) |index| if (instance.isFulfilled(index)) {
+                const cell = worldCell(layout, instance.origin, definition.definition.size, instance.rotation, blueprint.cellAtIndex(definition.definition.size, index)).?;
+                try out.append(allocator, .{ cell[0], cell[1], cell[2] });
+            };
+        }
+    }
+
     pub fn boxAt(self: *const State, layout: *const engine.WorldLayout, cell: Cell) ?u64 {
         for (self.chunkInstances(chunkId(layout, cell))) |id| {
             const instance = self.instances.get(id) orelse continue;
@@ -290,8 +557,10 @@ pub const State = struct {
         const box_chunks = try boxChunks(allocator, layout, origin, saved.definition.size, rotation);
         errdefer allocator.free(box_chunks);
         const bits = try allocator.alloc(u8, (saved.definition.cells.len + 7) / 8);
+        errdefer allocator.free(bits);
         @memset(bits, 0);
-        return .{ .id = id, .definition_id = definition_id, .owner = owner, .origin = origin, .rotation = rotation, .fulfilled = bits, .remaining = saved.definition.target_count, .box_chunks = box_chunks };
+        const grouping = try prepareGroups(allocator, layout, saved.definition, origin, rotation);
+        return .{ .id = id, .definition_id = definition_id, .owner = owner, .origin = origin, .rotation = rotation, .fulfilled = bits, .remaining = saved.definition.target_count, .box_chunks = box_chunks, .lifetime = id, .target_groups = grouping.groups, .target_indices = grouping.indices, .remaining_groups = @intCast(grouping.groups.len) };
     }
 
     pub fn overlaps(self: *const State, layout: *const engine.WorldLayout, candidate: Instance) bool {
@@ -394,11 +663,32 @@ pub const State = struct {
         prepared.published = true;
     }
 
+    /// Preparation retains ownership on failure. A newer snapshot for an
+    /// existing lifetime may replace its derived pending indexes atomically.
+    pub fn reserveSnapshotPublication(self: *State, allocator: std.mem.Allocator, layout: *const engine.WorldLayout, prepared: *const PreparedPublication) !void {
+        const definition = self.definitions.get(prepared.instance.definition_id) orelse return error.UnknownDefinition;
+        if (definition.owner != prepared.instance.owner) return error.ConflictingSnapshot;
+        const old = self.instances.get(prepared.instance.id) orelse return self.reservePublication(allocator, layout, prepared);
+        if (prepared.published or old.definition_id != prepared.instance.definition_id or old.owner != prepared.instance.owner or old.rotation != prepared.instance.rotation or !std.mem.eql(u32, &old.origin, &prepared.instance.origin) or old.lifetime != prepared.instance.lifetime or prepared.instance.revision <= old.revision) return error.ConflictingSnapshot;
+        if (old.phase == .complete or @intFromEnum(prepared.instance.phase) < @intFromEnum(old.phase)) return error.ConflictingSnapshot;
+        for (old.fulfilled, prepared.instance.fulfilled) |before, after| if (before & after != before) return error.ConflictingSnapshot;
+        for (old.target_groups, prepared.instance.target_groups) |before, after| if (before.transferred and (!after.transferred or before.terrain_revision != after.terrain_revision)) return error.ConflictingSnapshot;
+        self.layout = layout;
+        try self.chunks.ensureUnusedCapacity(allocator, @intCast(prepared.chunks.count()));
+        try self.cleanup_queue.ensureTotalCapacity(allocator, self.cleanup_queue.items.len + self.instances.count() + 1);
+    }
+
+    pub fn publishSnapshotPublication(self: *State, prepared: *PreparedPublication) void {
+        if (self.instances.fetchRemove(prepared.instance.id)) |old| prepared.retired_instance = old.value;
+        self.publishPublication(prepared);
+        if (!prepared.instance.active) self.cleanup_queue.appendAssumeCapacity(prepared.instance.id);
+    }
+
     /// No allocation, instance scan, or structural validation. Swap-removal keeps
     /// visible-chunk target traversal proportional to remaining miniatures.
     pub fn fulfill(self: *State, layout: *const engine.WorldLayout, value: Fulfill) bool {
         const instance = self.instances.getPtr(value.instance_id) orelse return false;
-        if (!instance.active) return false;
+        if (!instance.active or instance.phase != .building or instance.revision == std.math.maxInt(u64)) return false;
         const saved = self.definitions.get(instance.definition_id) orelse return false;
         if (value.cell_index >= saved.definition.cells.len or saved.definition.cells[value.cell_index] == .none or instance.isFulfilled(value.cell_index)) return false;
         const cell = worldCell(layout, instance.origin, saved.definition.size, instance.rotation, blueprint.cellAtIndex(saved.definition.size, value.cell_index)) orelse return false;
@@ -407,11 +697,53 @@ pub const State = struct {
         instance.fulfilled[value.cell_index / 8] |= @as(u8, 1) << @as(u3, @intCast(value.cell_index % 8));
         instance.remaining -= 1;
         if (instance.remaining == 0) {
-            instance.active = false;
-            self.cleanup_queue.appendAssumeCapacity(instance.id);
+            instance.phase = .materializing;
         }
+        instance.revision += 1;
         self.revision +%= 1;
         return true;
+    }
+
+    /// Destination terrain and provenance must already be prepared. The caller
+    /// commits this alongside that patch on the same executor without yielding.
+    pub fn acceptTransfer(self: *State, value: Transfer) bool {
+        const instance = self.instances.getPtr(value.instance_id) orelse return false;
+        if (!instance.active or instance.phase != .materializing or instance.revision == std.math.maxInt(u64) or value.terrain_revision == 0) return false;
+        const group_slot = instance.groupIndex(value.chunk_id) orelse return false;
+        const group = &instance.target_groups[group_slot];
+        if (group.transferred) return false;
+        group.transferred = true;
+        group.terrain_revision = value.terrain_revision;
+        instance.remaining_groups -= 1;
+        instance.revision += 1;
+        self.revision +%= 1;
+        return true;
+    }
+
+    /// Grass-initialization obligations/publication must be reserved before this
+    /// transition. Client render retention has its own lifetime after retirement.
+    pub fn complete(self: *State, instance_id: u64) bool {
+        const instance = self.instances.getPtr(instance_id) orelse return false;
+        if (!instance.active or instance.phase != .materializing or instance.remaining_groups != 0 or instance.revision == std.math.maxInt(u64)) return false;
+        instance.phase = .complete;
+        instance.active = false;
+        instance.revision += 1;
+        self.cleanup_queue.appendAssumeCapacity(instance.id);
+        self.revision +%= 1;
+        return true;
+    }
+
+    /// Return only soil-bearing target chunks using already prepared groups.
+    /// Call before complete/cleanup to prepare world-data's persistent work.
+    pub fn appendSoilGroups(self: *const State, allocator: std.mem.Allocator, instance_id: u64, out: *std.ArrayList(ChunkId)) !void {
+        const instance = self.instances.get(instance_id) orelse return error.UnknownConstruction;
+        const definition = self.definitions.get(instance.definition_id) orelse return error.UnknownDefinition;
+        for (instance.target_groups) |group| {
+            for (instance.targetsOfGroup(group)) |index| if (definition.definition.cells[index] == .dirt) {
+                try out.append(allocator, group.chunk_id);
+                break;
+            };
+        }
     }
 
     /// Bounded deferred retirement, separate from fulfillment and completion.
@@ -450,6 +782,39 @@ pub const State = struct {
         }
     }
 
+    /// CLIENT CACHE ONLY. The authoritative simulation must use complete and
+    /// cleanup. The caller has released every subscription/gameplay dependency
+    /// and keeps the lifetime unavailable until eviction and any resync finish.
+    /// Return true when the cache record is gone; preserve immutable definitions
+    /// and ID highwaters so eviction cannot revive an old authoritative lifetime.
+    pub fn evictCachedInstance(self: *State, allocator: std.mem.Allocator, instance_id: u64, chunk_budget: usize) bool {
+        const instance = self.instances.getPtr(instance_id) orelse return true;
+        var budget = chunk_budget;
+        while (budget != 0 and instance.cleanup_cursor < instance.box_chunks.len) : (budget -= 1) {
+            const id = instance.box_chunks[instance.cleanup_cursor];
+            if (self.chunks.getPtr(id)) |chunk| {
+                var slot: usize = 0;
+                while (slot < chunk.targets.items.len) {
+                    const cell = chunk.targets.items[slot];
+                    if (chunk.lookup.get(cell).?.instance_id == instance_id) {
+                        _ = chunk.removeTarget(cell);
+                    } else slot += 1;
+                }
+                if (std.mem.indexOfScalar(u64, chunk.instances.items, instance_id)) |position| _ = chunk.instances.swapRemove(position);
+                if (chunk.instances.items.len == 0 and chunk.targets.items.len == 0) {
+                    var removed = self.chunks.fetchRemove(id).?.value;
+                    removed.deinit(allocator);
+                }
+            }
+            instance.cleanup_cursor += 1;
+            self.revision +%= 1;
+        }
+        if (instance.cleanup_cursor != instance.box_chunks.len) return false;
+        var removed = self.instances.fetchRemove(instance_id).?.value;
+        removed.deinit(allocator);
+        return true;
+    }
+
     pub fn collectAffected(self: *const State, allocator: std.mem.Allocator, layout: *const engine.WorldLayout, target: Cell, real: []const rules.Cell) ![]rules.Cell {
         var unique: std.AutoHashMapUnmanaged(rules.Cell, void) = .empty;
         defer unique.deinit(allocator);
@@ -466,6 +831,20 @@ pub const State = struct {
                     for (self.chunkTargets(layout.encodeChunkCoords(coords))) |cell| {
                         const signed: rules.Cell = .{ cell[0], cell[1], cell[2] };
                         if (rules.distance(layout, signed, center) <= radius) try unique.put(allocator, signed, {});
+                    }
+                    const id = layout.encodeChunkCoords(coords);
+                    for (self.chunkInstances(id)) |instance_id| {
+                        const instance = self.instances.get(instance_id) orelse return error.UnknownConstruction;
+                        if (!instance.active) continue;
+                        const definition = self.definitions.get(instance.definition_id) orelse return error.UnknownDefinition;
+                        const group_slot = instance.groupIndex(id) orelse continue;
+                        const group = instance.target_groups[group_slot];
+                        if (group.transferred) continue;
+                        for (instance.targetsOfGroup(group)) |index| if (instance.isFulfilled(index)) {
+                            const cell = worldCell(layout, instance.origin, definition.definition.size, instance.rotation, blueprint.cellAtIndex(definition.definition.size, index)).?;
+                            const signed: rules.Cell = .{ cell[0], cell[1], cell[2] };
+                            if (rules.distance(layout, signed, center) <= radius) try unique.put(allocator, signed, {});
+                        };
                     }
                 }
             }
@@ -518,3 +897,117 @@ pub const CompletedReader = struct {
         return self.physical.isImmutable(.{ cell[0], cell[1], cell[2] });
     }
 };
+
+test "target authority survives fulfillment and transfers independently by chunk" {
+    const a = std.testing.allocator;
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    var state: State = .{ .layout = &layout };
+    defer state.deinit(a);
+    try state.insertDefinition(a, .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Sparse"), .definition = .{ .size = .{ 3, 1, 1 }, .cells = try a.dupe(rules.BlockType, &.{ .dirt, .none, .planks }), .target_count = 2 } });
+    const instance = try state.prepareInstance(a, &layout, 1, 1, 1, .{ 127, 10, 10 }, 0);
+    try state.insertInstance(a, &layout, instance);
+    try std.testing.expectEqual(@as(usize, 2), instance.target_groups.len);
+    try std.testing.expectEqual(rules.BlockType.none, state.physicalAt(.{ 127, 10, 10 }).material);
+    try std.testing.expect(state.memberAt(.{ 0, 10, 10 }) == null);
+    const native_before = state.estimatedOwnedBytes();
+    try std.testing.expect(instance.estimatedOwnedBytes() >= instance.fulfilled.len + instance.box_chunks.len * @sizeOf(ChunkId) + instance.target_groups.len * @sizeOf(TargetGroup) + instance.target_indices.len * @sizeOf(u32));
+    try std.testing.expect(state.fulfill(&layout, .{ .instance_id = 1, .cell_index = 0 }));
+    try std.testing.expectEqual(native_before, state.estimatedOwnedBytes());
+    try std.testing.expect(!state.fulfill(&layout, .{ .instance_id = 1, .cell_index = 0 }));
+    try std.testing.expect(state.targetAt(.{ 127, 10, 10 }) == null);
+    try std.testing.expectEqual(rules.BlockType.dirt, state.physicalAt(.{ 127, 10, 10 }).material);
+    try std.testing.expectEqual(StorageOwner.simulation, state.memberAt(.{ 127, 10, 10 }).?.owner);
+    try std.testing.expect(state.fulfill(&layout, .{ .instance_id = 1, .cell_index = 2 }));
+    try std.testing.expectEqual(Phase.materializing, state.instances.get(1).?.phase);
+    try std.testing.expect(state.boxAt(&layout, .{ 0, 10, 10 }) != null);
+    state.cleanup(a, 100);
+    try std.testing.expect(state.instances.contains(1));
+    var constructed: std.ArrayList(rules.Cell) = .empty;
+    defer constructed.deinit(a);
+    for (instance.target_groups) |group| try state.appendConstructed(a, group.chunk_id, &constructed);
+    try std.testing.expectEqual(@as(usize, 2), constructed.items.len);
+    const first = instance.target_groups[0];
+    try std.testing.expect(state.acceptTransfer(.{ .instance_id = 1, .chunk_id = first.chunk_id, .terrain_revision = 7 }));
+    try std.testing.expect(!state.acceptTransfer(.{ .instance_id = 1, .chunk_id = first.chunk_id, .terrain_revision = 7 }));
+    try std.testing.expect(!state.complete(1));
+    const second = instance.target_groups[1];
+    try std.testing.expect(state.acceptTransfer(.{ .instance_id = 1, .chunk_id = second.chunk_id, .terrain_revision = 8 }));
+    try std.testing.expectEqual(StorageOwner.world_data, state.memberAt(.{ 127, 10, 10 }).?.owner);
+    try std.testing.expect(state.physicalAt(.{ 127, 10, 10 }) == .unowned);
+    try std.testing.expect(state.boxAt(&layout, .{ 0, 10, 10 }) != null);
+    var soil: std.ArrayList(ChunkId) = .empty;
+    defer soil.deinit(a);
+    try state.appendSoilGroups(a, 1, &soil);
+    try std.testing.expectEqual(@as(usize, 1), soil.items.len);
+    try std.testing.expect(state.complete(1));
+    try std.testing.expect(!state.complete(1));
+    try std.testing.expect(state.boxAt(&layout, .{ 0, 10, 10 }) == null);
+    state.cleanup(a, 100);
+    try std.testing.expect(!state.instances.contains(1));
+    try std.testing.expectEqual(@as(u64, 1), state.max_instance_id);
+}
+
+test "definition lookup is exact for rotations wrapped images and missing sources" {
+    const a = std.testing.allocator;
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    const size: blueprint.Size = .{ 5, 3, 2 };
+    for (0..4) |rotation_raw| {
+        const rotation: u2 = @intCast(rotation_raw);
+        for (0..30) |index| {
+            const cell = worldCell(&layout, .{ 127, 10, 10 }, size, rotation, blueprint.cellAtIndex(size, index)).?;
+            try std.testing.expectEqual(@as(u32, @intCast(index)), definitionIndex(&layout, .{ 127, 10, 10 }, size, rotation, cell).?);
+        }
+    }
+    var state: State = .{ .layout = &layout };
+    defer state.deinit(a);
+    try state.insertDefinition(a, .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "One"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(rules.BlockType, &.{.planks}), .target_count = 1 } });
+    const instance = try state.prepareInstance(a, &layout, 1, 1, 1, .{ 5, 5, 5 }, 0);
+    try state.insertInstance(a, &layout, instance);
+    const missing = state.definitions.fetchRemove(1).?.value;
+    try std.testing.expect(state.physicalAt(.{ 5, 5, 5 }) == .unknown);
+    state.definitions.putAssumeCapacity(1, missing);
+}
+
+fn snapshotReplacementScenario(a: std.mem.Allocator) !void {
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    var state: State = .{ .layout = &layout };
+    defer state.deinit(a);
+    var saved: SavedDefinition = .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Snapshot"), .definition = undefined };
+    var owns_name = true;
+    errdefer if (owns_name) a.free(saved.name);
+    saved.definition = .{ .size = .{ 2, 1, 1 }, .cells = try a.dupe(rules.BlockType, &.{ .planks, .planks }), .target_count = 2 };
+    state.insertDefinition(a, saved) catch |err| {
+        saved.definition.deinit(a);
+        return err;
+    };
+    owns_name = false;
+    const initial = try state.prepareInstance(a, &layout, 1, 1, 1, .{ 31, 10, 10 }, 0);
+    state.insertInstance(a, &layout, initial) catch |err| {
+        var cleanup = initial;
+        cleanup.deinit(a);
+        return err;
+    };
+    var snapshot = try initial.clone(a);
+    snapshot.fulfilled[0] = 1;
+    snapshot.remaining = 1;
+    snapshot.revision = 1;
+    var prepared = buildSnapshotPublication(a, &layout, saved.definition, snapshot, &state.chunks) catch |err| {
+        snapshot.deinit(a);
+        return err;
+    };
+    defer prepared.deinit(a);
+    try state.reserveSnapshotPublication(a, &layout, &prepared);
+    try std.testing.expectEqual(@as(u32, 2), state.instances.get(1).?.remaining);
+    state.publishSnapshotPublication(&prepared);
+    try std.testing.expectEqual(@as(u32, 1), state.instances.get(1).?.remaining);
+    try std.testing.expect(state.targetAt(.{ 31, 10, 10 }) == null);
+    try std.testing.expect(state.targetAt(.{ 32, 10, 10 }) != null);
+    try std.testing.expectEqual(rules.BlockType.planks, state.physicalAt(.{ 31, 10, 10 }).material);
+    var invalid = state.instances.get(1).?;
+    invalid.remaining = 0;
+    try std.testing.expectError(error.InvalidConstructionSnapshot, validateSnapshot(&layout, saved.definition, invalid));
+}
+
+test "full snapshot replacement retains sources and rolls back every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, snapshotReplacementScenario, .{});
+}
