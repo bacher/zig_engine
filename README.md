@@ -20,6 +20,12 @@ zig build benchmark-generation -Doptimize=ReleaseFast -- 12345 3
 zig build test-gpu    # Optional headless Dawn GPU checks (requires graphics adapter)
 ```
 
+For the automated windowed construction A/B benchmark, build ReleaseFast and run
+`python3 scripts/benchmark_client_visuals.py` on an unlocked desktop. It drives the
+camera and world-service commands automatically and retains frame/event data. See
+[client construction measurements](docs/validation/client-construction-visuals.md)
+for workload, timing definitions and limits.
+
 The applications load installed content relative to the executable directory. See [architecture](docs/architecture.md) for the build and startup flow.
 
 ## Documentation

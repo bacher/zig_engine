@@ -51,7 +51,7 @@ These are technical budgets rather than additional material/geometry rules. Reso
 | Dynamic GPU instances | Lazy growth from 1,024, 48 bytes each; diagnostics and rails |
 | Cached full-size preview | 16 bytes per occupied cell, uploaded once per selection; separate transform uniforms |
 | Cached miniature sources | 16 bytes per cell; 1,100,000 resident cells and 4,096 nonempty chunks; one temporary replacement of at most 32,768 cells (18,124,288 accounted source bytes resident plus replacement), excluding transforms, bindings, containers and driver/in-flight overhead |
-| Dirty miniature work | One entry per affected loaded chunk, drained immediately; failed replacements retain retryable dirtiness |
+| Pending visual preparation | Follow-up to PR #58: one shared FIFO entry per affected loaded chunk with terrain/miniature dirty flags; at most four visits and two milliseconds soft preparation time per update, no minimum age; stale/failed visits consume a count slot |
 
 The independent horizontal limit remains `min(world_block_size_x / 2 - 1, world_block_size_y)` for each horizontal dimension. The 100×100×32 reference scenario fits the volume/source/snapshot budgets where world dimensions permit it.
 
@@ -59,10 +59,11 @@ For a dense 100×100×32 placement preview, packed source storage/upload is 5,12
 
 ## Automated coverage
 
-### Immediate construction miniature cache (2026-11-09)
+### Immediate construction miniature cache — PR #58 (2026-11-09)
 
 The [incremental visual spec](../specs/features/incremental-construction-visuals.md)
-splits immediate miniature caching from a pending FIFO preparation PR. The cache uses a
+splits [PR #58](https://github.com/bacher/zig_engine/pull/58) (`0df6e85`, immediate
+miniature caching) from its FIFO preparation follow-up. The cache uses a
 single resident source per chunk and one synchronous temporary replacement. Source/chunk
 limits, subscription identity, resource lifetime and exact invalidation remain required;
 terrain/miniature paired staging is removed. Terrain keeps its existing extraction,
@@ -88,10 +89,41 @@ Client coverage includes exact dirty hooks, blueprint no-ops/commit order/prefli
 prediction rejection/cross-chunk replay, mesh-only fulfillment, stale/accepted snapshots,
 retryable failure with shrinking progress and eviction/reload.
 
-The second PR will add FIFO, at most four whole chunk preparations and a two-millisecond
-soft elapsed budget checked between chunks, with no minimum age. It is pending; the
-current cache drains dirty sources immediately and does not defer terrain/miniature
-publication as a pair.
+PR #58 drains dirty sources immediately. Its checks and renderer timings above remain
+phase-one evidence; the scheduling follow-up is recorded separately below.
+
+### Shared FIFO preparation — follow-up to PR #58
+
+The follow-up coalesces terrain/miniature dirty flags through one FIFO item per loaded
+chunk. It visits at most four chunks and stops starting visits after two milliseconds
+of elapsed preparation time, checked between visits, with no minimum age. Stale/failed
+visits consume a slot and unfinished flags remain retryable. Terrain and miniatures
+publish independently. Reconciliation, direct service-mesh acceptance and terrain GPU
+uploads remain outside the budget; VoxelGrid is unchanged. These limits are not hard
+frame-time or visual-latency guarantees.
+
+The [fresh CPU replay](benchmarks/construction-visuals-2026-11-09/cpu-budget-age0-results.log)
+passed 60 runs with matching final state. At 512 accepted fills/s, the budget reduces
+mesh builds from 2,048 to 974 and CPU-side preparation p95 from 0.5722 to 0.2568 ms;
+first-dirty scheduled age p95 rises from 15.7552 to 110.1563 ms. In a 27-chunk burst,
+maximum preparation time is 1.7063/0.2572 ms and maximum scheduled age is 0/100 ms for
+immediate/budgeted work. These are medians of three per-run statistics. The replay uses
+production helpers but bypasses the full Game/GPU/service lifecycle; per-publication
+scheduled ages are not edit-to-visible latency. Age two is a comparison only.
+
+The implementation has focused client tests for FIFO/count/time policy, independent
+retries, stale subscriptions, eviction, direct service meshes and terrain extraction
+failure. Read-only review found no issue. The
+[fresh queue fixture](benchmarks/construction-visuals-2026-11-09/queue-age0-results.log)
+coalesces 8,192 marks into 140/355 visits for 128/343 chunks, with at most four visits per
+frame, peak occupancy equal to the chunk population and zero idle head inspections.
+Those queue counts exclude geometry work and timing. Debug validation passed **49/49
+steps, 1,946 tests and one existing skip**; formatting/whitespace checks passed.
+ReleaseFast install/test passed **57/57 steps, 1,939 tests and eight existing skips**,
+building both applications. The unchanged renderer retains PR #58's
+**19/19 GPU steps and 108 passing tests** as its GPU evidence. The
+[measurement report](validation/construction-visuals.md) documents the new harness scope
+and keeps the historical results separate.
 
 ### Persisted unfinished-work verification and measurements
 

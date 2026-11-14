@@ -40,6 +40,8 @@ pub const VoxelGrid = struct {
     allocator: std.mem.Allocator,
     chunks: ChunkList = .empty,
     chunks_to_upload: ChunkUploadList = .empty,
+    /// Benchmark runs buffer their samples instead of logging every upload frame.
+    log_uploads: bool = true,
 
     gpu_chunk_info_buffer_manager: SlotBufferManager = .{},
     gpu_chunk_info_buffer: GPUBuffer,
@@ -217,7 +219,7 @@ pub const VoxelGrid = struct {
         const block_buffer = self.gpu_block_buffer.buffer;
         const chunk_info_buffer = self.gpu_chunk_info_buffer.buffer;
 
-        if (self.chunks_to_upload.items.len > 0) {
+        if (self.log_uploads and self.chunks_to_upload.items.len > 0) {
             std.debug.print("Uploading {} voxel chunks to GPU\n", .{self.chunks_to_upload.items.len});
         }
 

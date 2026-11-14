@@ -1,0 +1,22 @@
+Artifacts: /private/tmp/client-visual-ab-2026-11-14
+Launching the real windowed client sequentially; leave its windows running.
+  orbit repetition 1/3: immediate
+  orbit repetition 1/3: budgeted
+  orbit repetition 2/3: budgeted
+  orbit repetition 2/3: immediate
+  orbit repetition 3/3: immediate
+  orbit repetition 3/3: budgeted
+  travel repetition 1/3: immediate
+  travel repetition 1/3: budgeted
+  travel repetition 2/3: budgeted
+  travel repetition 2/3: immediate
+  travel repetition 3/3: immediate
+  travel repetition 3/3: budgeted
+
+Median per-run timings (ms; negative comparison deltas mean lower):
+camera   policy       frames accepted/s interval p95 interval p99  frame p95  frame p99  frame max  upload p95  terrain p95   mini p95
+orbit    immediate       960    511.432       10.814       12.443     10.814     12.442     14.916       0.015       10.706     10.706
+orbit    budgeted        960    511.361       10.993       12.438     10.992     12.437     14.380       0.010       24.758     24.758
+travel   immediate       961    511.436       10.572       11.039     10.572     11.039     12.125       0.015       10.462     10.424
+travel   budgeted        959    511.358       10.976       12.556     10.976     12.555     17.174       0.013       26.140     27.314
+Equivalent admitted/accepted workloads and final checksums verified. Report: /private/tmp/client-visual-ab-2026-11-14/report.json

@@ -92,6 +92,24 @@ const EngineInitOptions = struct {
 pub const Engine = struct {
     pub const LoadedModelId = enum(u32) { _ };
 
+    /// Host-side timings for a completed client frame, without waiting for GPU completion.
+    pub const FrameMeasurement = struct {
+        /// Monotonic timestamps relative to the engine's clock_start.
+        started_ns: u64,
+        finished_ns: u64,
+        /// Host submit return timestamp relative to clock_start, before presentation.
+        submitted_ns: u64 = 0,
+        /// Start-to-start interval; zero for the first frame after enabling measurement.
+        frame_interval_ns: u64,
+        poll_ns: u64,
+        update_ns: u64,
+        /// The full draw call, including submit_ns and present_ns.
+        draw_ns: u64,
+        /// Time in the host submit and present calls, not GPU execution time.
+        submit_ns: u64,
+        present_ns: u64,
+    };
+
     const SpecialModel = union(enum) {
         skybox: *SkyBoxModel,
         cubemap: *SkyBoxCubemapModel,
@@ -123,6 +141,8 @@ pub const Engine = struct {
         onPauseChanged: ?*const fn (engine: *Engine, argument: *anyopaque) void = null,
         /// Cancel application-owned holds and queued controls on input transitions.
         onGameplayInputChanged: ?*const fn (engine: *Engine, argument: *anyopaque) void = null,
+        /// Opt in to host frame timing; called after resize handling and input flushing.
+        onFrameComplete: ?*const fn (engine: *Engine, argument: *anyopaque, measurement: FrameMeasurement) void = null,
     };
 
     gctx: *zgpu.GraphicsContext,
@@ -677,6 +697,10 @@ pub const Engine = struct {
     }
 
     pub fn draw(engine: *Engine) GraphicsContextState {
+        return engine.drawWithMeasurement(null);
+    }
+
+    fn drawWithMeasurement(engine: *Engine, measurement: ?*FrameMeasurement) GraphicsContextState {
         const drawn_scene = engine.active_scene;
         if (drawn_scene) |scene| {
             std.debug.assert(!scene.is_drawing);
@@ -1194,9 +1218,18 @@ pub const Engine = struct {
         };
         defer commands.release();
 
+        const submit_started_ns = if (measurement != null) engine.frameTimestampNs() else 0;
         gctx.submit(&.{commands});
 
+        const present_started_ns = if (measurement) |timing| started: {
+            const now = engine.frameTimestampNs();
+            timing.submitted_ns = now;
+            timing.submit_ns = now - submit_started_ns;
+            break :started now;
+        } else 0;
+
         const gctx_state = gctx.present();
+        if (measurement) |timing| timing.present_ns = engine.frameTimestampNs() - present_started_ns;
 
         return gctx_state;
     }
@@ -1791,15 +1824,41 @@ pub const Engine = struct {
         if (engine.requestClose()) engine.window_context.window.setShouldClose(true);
     }
 
+    fn frameTimestampNs(engine: *Engine) u64 {
+        return @intCast(@max(0, engine.clock_start.durationTo(std.Io.Clock.awake.now(engine.io)).nanoseconds));
+    }
+
     pub fn runLoop(engine: *Engine) !void {
         if (engine.active_scene) |scene| {
             try scene.prepareForRendering();
         }
 
         const window = engine.window_context.window;
+        var previous_frame_started_ns: ?u64 = null;
 
         while (true) {
+            const on_frame_complete = engine.callbacks.onFrameComplete;
+            var measurement: ?FrameMeasurement = if (on_frame_complete != null) timing: {
+                const started_ns = engine.frameTimestampNs();
+                const interval_ns = if (previous_frame_started_ns) |previous| started_ns - previous else 0;
+                previous_frame_started_ns = started_ns;
+                break :timing .{
+                    .started_ns = started_ns,
+                    .finished_ns = 0,
+                    .submitted_ns = 0,
+                    .frame_interval_ns = interval_ns,
+                    .poll_ns = 0,
+                    .update_ns = 0,
+                    .draw_ns = 0,
+                    .submit_ns = 0,
+                    .present_ns = 0,
+                };
+            } else disabled: {
+                previous_frame_started_ns = null;
+                break :disabled null;
+            };
             zglfw.pollEvents();
+            if (measurement) |*timing| timing.poll_ns = engine.frameTimestampNs() - timing.started_ns;
 
             if (window.shouldClose()) {
                 if (engine.requestClose()) break;
@@ -1808,8 +1867,15 @@ pub const Engine = struct {
 
             // slowOperation();
 
+            const update_started_ns = if (measurement != null) engine.frameTimestampNs() else 0;
             try engine.update();
-            const gctx_state = engine.draw();
+            const draw_started_ns = if (measurement) |*timing| started: {
+                const now = engine.frameTimestampNs();
+                timing.update_ns = now - update_started_ns;
+                break :started now;
+            } else 0;
+            const gctx_state = engine.drawWithMeasurement(if (measurement) |*timing| timing else null);
+            if (measurement) |*timing| timing.draw_ns = engine.frameTimestampNs() - draw_started_ns;
 
             switch (gctx_state) {
                 .normal_execution => {},
@@ -1824,6 +1890,10 @@ pub const Engine = struct {
             }
 
             engine.input_controller.flushQueue();
+            if (measurement) |*timing| {
+                timing.finished_ns = engine.frameTimestampNs();
+                on_frame_complete.?(engine, engine.callbacks.argument, timing.*);
+            }
             // return;
         }
     }
