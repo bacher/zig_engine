@@ -108,9 +108,11 @@ GPU representation remains independent of this contract.
 
 The lifecycle is `building → materializing → complete`. Bounded target-chunk patches preserve
 intervening terrain edits, and the frame/active-site restrictions stay until all portions
-transfer. Client geometry switches per chunk when its static replacement is available; server
-completion does not wait for clients. Shared capture preserves partial transfers and resources
-coherently without per-block disk synchronization or a final structural scan.
+transfer. Blocked portions yield so ready sites progress and retained work resumes after recovery.
+Client geometry switches per chunk when its static replacement is installed for display;
+collision/interaction can adopt coherent data earlier. Server completion does not wait for clients.
+Shared capture preserves partial transfers and resources coherently without per-block disk
+synchronization or a final structural scan.
 
 [Q6](../specs/features/construction-state-ownership.md#q6--soil-and-compact-physical-state)
 removes the loose/compacted soil distinction but retains world-data grass. Application clears

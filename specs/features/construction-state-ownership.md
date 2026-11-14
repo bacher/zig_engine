@@ -1,7 +1,7 @@
 ---
 service: zig_engine
 created: 2026-11-12
-updated: 2026-11-13
+updated: 2026-11-14
 status: approved
 ---
 
@@ -134,14 +134,20 @@ enqueue cost only; it cannot establish the benefit of this ownership change.
 - R22: Keep construction membership, current storage ownership per target chunk, and terrain
   snapshot versions distinguishable. Chunk metadata/snapshots must identify a coherent
   composition state, including during partial materialization and discovery retirement.
-- R23: Switch each client portion from dynamic to static only when a matching terrain
-  representation is available. Keep the previous dynamic representation while its replacement
-  is in flight. A completion/retirement message alone cannot erase geometry; delayed data
-  cannot double-render, reopen a site, or overwrite a newer post-completion terrain edit.
+- R23: Distinguish terrain-data readiness from render readiness. For a portion still selected
+  for display, retain its dynamic presentation until matching static geometry is installed
+  and ready to draw; receiving a snapshot or queuing a mesh build/upload is insufficient.
+  Activate the replacement and remove the old presentation in the same displayed frame,
+  without a hole or duplicate. Collision/interaction may adopt newer coherent authoritative
+  data independently of GPU readiness. Completion notices and stale data/jobs cannot erase
+  the retained display, reopen a site, or overwrite a newer post-completion edit.
 - R24: Build target groups by chunk and schedule materialization over those groups, without
   repeatedly scanning the full definition or transferring every chunk in a sparse box.
   About 5–10 seconds is an acceptable normal-load completion delay, not a forced wait or
   hard deadline. Backpressure/retry cannot discard targets or release restrictions early.
+  Blocked portions must yield so other ready portions/sites receive fair service. Retain a
+  bounded retry/wake path; finite admitted work must finish once dependencies and processing
+  capacity remain available. Later arrivals cannot indefinitely displace ready admitted work.
 - R25: Preserve constructed-cell enumeration and affected-construction validation across both
   owners. Changing a low-level block getter alone is insufficient if a caller enumerates
   only terrain metadata. Preserve bounded/coalesced road follow-up obligations and their
@@ -294,6 +300,14 @@ normal-load delay around 5–10 seconds is acceptable, and the frame makes the r
 state visible. This is not a guaranteed deadline under overload and does not introduce a
 mandatory delay. Failed work retries while the source and restrictions remain intact.
 
+A portion waiting for chunk data, a source hold, or retryable resource failure yields its
+scheduling turn instead of repeatedly blocking the queue head. Other ready portions, including
+those of other sites, continue receiving fair service. Keep blocked work discoverable through
+a bounded retry/wake mechanism so it resumes after recovery; new arrivals cannot starve ready
+admitted work. Finite admitted materialization completes once dependencies and processing
+capacity remain available. This refines the existing [fairness principles](../../docs/simulation-notes.md#bounded-work-and-fairness)
+without prescribing a queue layout, equal CPU shares, a hard deadline, or priority handback.
+
 For each portion, prepare a target-only patch and required provenance, validate destination
 versions/holds, then accept it into the current chunk together with its ownership-transfer
 record. Other sites and cavity edits survive. Each accepted portion has one physical owner;
@@ -306,12 +320,22 @@ active-site rules even in portions already owned by world-data. An attempted edi
 accelerate the transfer or enter a future replay queue. After every portion is accepted, release
 the frame/restrictions and retire discovery/source records subject to safe lifetimes.
 
-Clients switch per chunk when the corresponding terrain representation and composition state
-are available together. If a transfer notice arrives first, keep that dynamic portion until
-its static replacement arrives. If static data arrives first, its matching composition metadata
-prevents drawing both copies. Other chunks stay dynamic. A global completion notice cannot
-remove portions still awaiting their static representation. Clients need not load every chunk
-of a large site to make progress.
+Clients reconcile matching terrain data and composition state per chunk, then switch visual
+presentation only when the corresponding static geometry is installed and ready for display.
+If a transfer notice arrives first, retain the dynamic portion while awaiting terrain data.
+If static data arrives first, use its composition metadata to prepare the replacement, but do
+not hide the dynamic portion merely because a mesh build/upload has been queued. Delayed or
+retryably failed geometry preparation/upload retains the previous presentation for portions
+still selected for display, while collision/interaction can adopt newer coherent data without
+waiting for the GPU.
+
+At successful visual handoff, activate static geometry and hide the replaced dynamic portion
+in the same displayed frame. Check chunk/subscription incarnation and composition/geometry
+revisions before activation; superseded jobs cannot install an obsolete replacement. This
+contract applies to combined buffers as well as separate passes. Normal visibility eviction
+still applies and does not pin off-screen sites indefinitely. Other visible portions remain
+dynamic until their own replacement is ready. A global completion notice alone cannot retire
+their presentation. Clients need not load every chunk of a large site to make progress.
 
 Server completion never waits for clients. A client may retain its cached definition/final
 snapshot longer than the server retains the site. World-data must retain Q6's completion time
@@ -472,9 +496,11 @@ criteria updated to match Q3/Q5/Q6.
 - AC30: GIVEN materialization exceeds the normal-load delay or encounters failure WHEN work is
   delayed THEN source/restrictions persist and no timeout discards contents or completes early.
 - AC31: GIVEN a transfer/completion notice before its terrain snapshot WHEN a client composes
-  the world THEN it retains the dynamic portion until a matching static replacement is available.
+  the world THEN it retains the visible dynamic portion until matching static geometry is
+  installed and ready for display, not merely until its data arrives.
 - AC32: GIVEN the matching static snapshot before a separate lifecycle notification WHEN applied
-  THEN its composition metadata switches that portion without holes or duplicate rendering.
+  THEN composition metadata permits data reconciliation, while visual replacement waits for
+  render readiness and switches in one displayed frame without holes or duplicate rendering.
 - AC33: GIVEN a client observing only some site chunks WHEN they materialize THEN it can switch
   those portions without loading or acknowledging the rest of the construction.
 - AC34: GIVEN a stale chunk reference after server retirement WHEN the client requests the site
@@ -519,6 +545,15 @@ criteria updated to match Q3/Q5/Q6.
 - AC51: GIVEN bare and grassy versions of the unified soil WHEN checking support, construction
   certification, collision, or mining THEN cover does not change those outcomes; both use the
   selected soil baseline, and clearing grass at admission cannot weaken a foundation.
+- AC52: GIVEN materializing sites A and B with A's destination held/unavailable and B ready
+  WHEN the scheduler runs THEN A yields, B completes without waiting for A, and A resumes and
+  completes after its dependencies and processing capacity remain available; later arrivals
+  cannot indefinitely starve either site's ready work.
+- AC53: GIVEN matching terrain data/composition metadata but a delayed or retryably failed
+  mesh build/upload for a visible portion WHEN client frames advance THEN dynamic presentation
+  remains while collision/interaction can use the newer coherent data; on successful current
+  geometry installation it switches without a hole or duplicate, and superseded jobs cannot
+  activate stale geometry.
 
 ## Constraints
 
@@ -622,8 +657,10 @@ state. Measure and fault-test these before claiming a performance improvement.
 
 - [ ] T5: Add simulation-owned records, target groups, full-lifetime discovery, and coherent admission.
 - [ ] T6: Add composed reads/enumeration and route fulfillment/resources to the correct owners.
-- [ ] T7: Add materialization phases, per-chunk acceptance, common capture/recovery, and safe retirement.
-- [ ] T8: Integrate prediction, collision, rendering, and per-portion client handoff.
+- [ ] T7: Add materialization phases, per-chunk acceptance, fair scheduling with blocked-work
+  yielding/recovery, common capture, and safe retirement.
+- [ ] T8: Integrate prediction, collision, rendering, and per-portion client handoff; separate
+  data readiness from successful geometry installation and retain display through upload retries.
 - [ ] T9: Apply Q6: remove compaction, retain atomic admission grass clearing, suppress active
   target growth, and add bounded post-completion world-data timer initialization/recovery;
   unify bare/grassy soil support in ordinary rules, certification, and cheap fulfillment;
@@ -633,6 +670,7 @@ state. Measure and fault-test these before claiming a performance improvement.
 
 ### Validation
 
-- [ ] T-val: Verify AC1–AC51, relevant blueprint/persistence regressions, allocation/fault/reordering
-  cases, restart during partial materialization, and end-to-end performance under Q7; record
+- [ ] T-val: Verify AC1–AC53, relevant blueprint/persistence regressions, allocation/fault/reordering
+  cases, blocked-site fairness/recovery, delayed/failed geometry installation, restart during
+  partial materialization, and end-to-end performance under Q7; record
   measured results, selected budgets, and remaining limitations.

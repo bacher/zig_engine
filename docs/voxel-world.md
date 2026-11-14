@@ -8,7 +8,9 @@ The [construction state ownership spec](../specs/features/construction-state-own
 selects a future static/dynamic split: simulation owns active targets, while base terrain stays
 air at those cells until materialization. Chunk references and immutable blueprint definitions
 resolve membership without ownership-marker blocks. Clients compose terrain with separately
-subscribed progress and switch each portion to static geometry when its matching chunk arrives.
+subscribed progress and switch each visible portion only when matching static geometry is
+installed for display, retaining dynamic geometry through build/upload delays. Collision and
+interaction may adopt coherent chunk data before that visual handoff.
 Physical queries, collision, and constructed-cell enumeration must compose both sources too.
 The representations and service behavior below describe the current implementation.
 
