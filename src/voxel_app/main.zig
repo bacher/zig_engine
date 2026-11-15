@@ -5611,6 +5611,69 @@ test "movement retains certified meshes and remote boundary changes invalidate t
     try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
 }
 
+test "composed service boundary updates retain edited terrain and wait for new geometry" {
+    const a = std.testing.allocator;
+    const service = try WorldDataService.create(std.testing.io, a, &test_layout, .flat);
+    defer service.destroy();
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const coords: ChunkCoords = .{ 2, 2, 3 };
+    const id = test_layout.encodeChunkCoords(coords);
+    const editor = try service.createClient();
+    const edited = try StreamingTest.serviceOperation(editor, .{
+        .block = .{ 2 * consts.CHUNK_SIZE + 8, 2 * consts.CHUNK_SIZE + 8, 3 * consts.CHUNK_SIZE + 8 },
+        .action = .remove,
+    });
+    try std.testing.expectEqual(world_module.OperationStatus.success, edited.status);
+    game.world_client = try service.createClient();
+    const token = game.world_client.?.requestChunks(.{ coords[0], coords[1] }, coords[2], coords[2] + 1);
+    try fixture.subscribe(coords, token, .blocks);
+    try fixture.waitAndApplyPackages();
+    const previous = game.construction_cache.geometryStamp(id).?;
+    try std.testing.expectEqual(@as(u64, 1), previous.chunk_revision);
+    try std.testing.expectEqual(@as(u64, 1), previous.mesh_revision);
+    try std.testing.expect(game.construction_cache.geometryInstalled(id, previous));
+    try fixture.grid.chunks.append(a, .{ .chunk_origin = coords, .geometry_stamp = previous });
+    game.rebuildDirtyChunks();
+    const previous_right_faces = fixture.upload(coords).chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len;
+    fixture.grid.cancelPendingChunkLayer(coords, .terrain);
+
+    const neighbor_edit = try StreamingTest.serviceOperation(editor, .{
+        .block = .{ 3 * consts.CHUNK_SIZE, 2 * consts.CHUNK_SIZE + 8, 3 * consts.CHUNK_SIZE + 8 },
+        .action = .remove,
+    });
+    try std.testing.expectEqual(world_module.OperationStatus.success, neighbor_edit.status);
+    try std.testing.expect(try game.world_client.?.waitPackages(&game.chunk_packages));
+    try std.testing.expectEqual(@as(usize, 1), game.chunk_packages.items.len);
+    const package = &game.chunk_packages.items[0];
+    try std.testing.expectEqual(@as(usize, 1), package.responses.items.len);
+    const response = package.responses.items[0];
+    try std.testing.expect(response.data == .boundaries);
+    try std.testing.expect(response.composition != null);
+    try std.testing.expectEqual(@as(usize, 0), response.composition.?.sites.len);
+    const terrain_revision = response.chunk_revision;
+    try std.testing.expect(game.applyPackage(package));
+    package.responses.deinit(a);
+    game.chunk_packages.clearRetainingCapacity();
+
+    try std.testing.expectEqual(@as(u64, 2), game.boundary_snapshots.get(id).?.mesh_revision);
+    try std.testing.expectEqual(previous.chunk_revision, terrain_revision);
+    try std.testing.expectEqual(previous.chunk_revision, game.world.?.getChunk(coords).?.chunk_revision);
+    try std.testing.expect(!game.boundary_snapshots.get(id).?.masks[@intFromEnum(Side.right)].contains(.right, .{ 31, 8, 8 }));
+    const current = game.construction_cache.geometryStamp(id).?;
+    try std.testing.expectEqual(previous.chunk_revision, current.chunk_revision);
+    try std.testing.expectEqual(@as(u64, 2), current.mesh_revision);
+    // New planes update data immediately, but cannot certify the resident mesh.
+    try std.testing.expectEqual(previous, fixture.grid.installedGeometry(coords, .terrain).?);
+    try std.testing.expect(!game.construction_cache.geometryInstalled(id, previous));
+    try std.testing.expect(game.dirty_chunk_ids.contains(id));
+    game.rebuildDirtyChunks();
+    try std.testing.expectEqual(current, fixture.upload(coords).geometry_stamp);
+    try std.testing.expectEqual(previous_right_faces + 1, fixture.upload(coords).chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
+}
+
 test "newer boundary inputs prevent promotion reuse in either package order and reject stale planes" {
     for ([_]bool{ false, true }) |boundaries_first| {
         var fixture: StreamingTest = .{};

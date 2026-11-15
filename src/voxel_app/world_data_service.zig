@@ -1463,9 +1463,11 @@ pub const WorldDataService = struct {
                         self.retryConstructionAfterFailure(err);
                         continue :clients;
                     };
+                    const chunk = self.worker_state.modified_chunks.get(entry.key_ptr.*);
                     client.pending.responses.append(self.allocator, .{
                         .coords = coords,
                         .subscription_id = sub.id,
+                        .chunk_revision = if (chunk) |value| value.chunk_revision else 0,
                         .mesh_revision = self.worker_state.meshRevision(coords),
                         .data = .{ .boundaries = boundaries },
                     }) catch |err| {
@@ -6377,25 +6379,30 @@ test "boundary-only observers are notified before the edit reply without subscri
     defer service.destroy();
     const observer = try service.createClient();
     const editor = try service.createClient();
+    _ = editor.submitOperation(.{ .block = .{ 2 * CHUNK_SIZE + 8, 2 * CHUNK_SIZE + 8, 3 * CHUNK_SIZE + 8 }, .action = .remove });
+    var replies: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&replies);
+    try waitForResponses(editor, &replies, 1);
     const token = observer.requestChunks(.{ 2, 2 }, 3, 4);
     var initial: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&initial);
     try waitForResponses(observer, &initial, 1);
+    try std.testing.expectEqual(@as(u64, 1), initial.items[0].chunk_revision);
     _ = editor.submitOperation(.{ .block = .{ 3 * CHUNK_SIZE, 2 * CHUNK_SIZE + 8, 3 * CHUNK_SIZE + 8 }, .action = .remove });
-    var replies: std.ArrayList(ChunkResponse) = .empty;
-    defer deinitResponses(&replies);
-    try waitForResponses(editor, &replies, 1);
+    try waitForResponses(editor, &replies, 2);
     var observed: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&observed);
     observer.takeResponses(&observed);
     try std.testing.expectEqual(1, observed.items.len);
     try std.testing.expectEqual(token, observed.items[0].subscription_id.?);
-    try std.testing.expectEqual(1, observed.items[0].mesh_revision);
+    try std.testing.expectEqual(@as(u64, 1), observed.items[0].chunk_revision);
+    try std.testing.expectEqual(2, observed.items[0].mesh_revision);
+    try std.testing.expect(observed.items[0].composition != null);
     try std.testing.expect(!observed.items[0].data.boundaries[@intFromEnum(Side.right)].contains(.right, .{ 31, 8, 8 }));
 
     observer.evictChunk(test_layout.encodeChunkCoords(.{ 2, 2, 3 }), token);
     _ = editor.submitOperation(.{ .block = .{ 3 * CHUNK_SIZE, 2 * CHUNK_SIZE + 9, 3 * CHUNK_SIZE + 8 }, .action = .remove });
-    try waitForResponses(editor, &replies, 2);
+    try waitForResponses(editor, &replies, 3);
     observer.takeResponses(&observed);
     try std.testing.expectEqual(1, observed.items.len);
 }
