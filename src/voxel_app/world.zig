@@ -3024,6 +3024,50 @@ test "client blueprint package creates completes and replaces a site in order" {
     try std.testing.expect(!try orderedBlueprintReplacementScenario(false, null));
 }
 
+test "construction snapshot cleanup restarts for the client's full footprint" {
+    const a = std.testing.allocator;
+    var publisher = try World.init(a, &test_layout);
+    defer publisher.deinit();
+    const cells = [_]BlockType{.planks} ** 129;
+    try insertTestBlueprint(&publisher, 1, .{ 31, 10, 10 }, .{ 129, 1, 1 }, &cells);
+    for (0..cells.len) |index| try std.testing.expect(publisher.blueprints.fulfill(publisher.layout, .{ .instance_id = 1, .cell_index = @intCast(index) }));
+    for (publisher.blueprints.instances.get(1).?.target_groups) |group|
+        try std.testing.expect(publisher.blueprints.acceptTransfer(.{ .instance_id = 1, .chunk_id = group.chunk_id, .terrain_revision = 1 }));
+    try std.testing.expect(publisher.blueprints.complete(1));
+    publisher.blueprints.cleanup(a, 4);
+    const snapshot = publisher.blueprints.instances.get(1).?;
+    try std.testing.expectEqual(@as(usize, 5), snapshot.box_chunks.len);
+    try std.testing.expectEqual(@as(usize, 4), snapshot.cleanup_cursor);
+
+    var client = try World.init(a, &test_layout);
+    defer client.deinit();
+    try client.applyBlueprintChanges(&.{.{ .definition = publisher.blueprints.definitions.get(1).? }});
+    for (0..cells.len) |index| try setTestPhysical(&client, .{ 31 + @as(u32, @intCast(index)), 10, 10 }, .planks);
+    for (snapshot.box_chunks) |id| client.chunks.getPtr(id).?.chunk_revision = 1;
+    try client.applyConstructionSnapshot(.{ .world_session = 1, .kind = .construction, .id = 1, .lifetime = 1 }, snapshot);
+    // Full snapshot publication restores discovery even in the four chunks
+    // already retired by the publisher. Their cleanup progress is local state.
+    for (snapshot.box_chunks) |id| try std.testing.expectEqualSlices(u64, &.{1}, client.blueprints.chunkInstances(id));
+    const revision = client.blueprints.revision;
+    client.blueprints.cleanup(a, 4);
+    try std.testing.expect(client.blueprints.instances.contains(1));
+    try std.testing.expectEqual(@as(usize, 4), client.blueprints.instances.get(1).?.cleanup_cursor);
+    try std.testing.expectEqual(revision + 4, client.blueprints.revision);
+    for (snapshot.box_chunks[0..4]) |id| try std.testing.expectEqual(@as(usize, 0), client.blueprints.chunkInstances(id).len);
+    try std.testing.expectEqualSlices(u64, &.{1}, client.blueprints.chunkInstances(snapshot.box_chunks[4]));
+    const probes = [_][3]u32{ .{ 31, 10, 10 }, .{ 32, 10, 10 }, .{ 64, 10, 10 }, .{ 96, 10, 10 }, .{ 159, 10, 10 } };
+    for (probes) |cell| try std.testing.expectEqual(@as(?BlockType, .planks), client.physicalBlock(cell));
+
+    client.blueprints.cleanup(a, 1);
+    try std.testing.expect(!client.blueprints.instances.contains(1));
+    try std.testing.expectEqual(revision + 5, client.blueprints.revision);
+    try std.testing.expectEqual(@as(u32, 0), client.blueprints.chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), client.blueprints.cleanup_queue.items.len);
+    for (snapshot.box_chunks) |id| try std.testing.expectEqual(@as(usize, 0), client.blueprints.chunkInstances(id).len);
+    for (probes) |cell| try std.testing.expectEqual(@as(?BlockType, .planks), client.physicalBlock(cell));
+    try std.testing.expectEqual(@as(usize, 4), publisher.blueprints.instances.get(1).?.cleanup_cursor);
+}
+
 test "ordered blueprint replacement rolls back every allocation failure and retries" {
     for ([_]bool{ true, false }) |existing_instance| {
         var fail_index: usize = 0;

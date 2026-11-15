@@ -193,7 +193,11 @@ pub fn buildPublication(allocator: std.mem.Allocator, layout: *const engine.Worl
 /// only those entries can yield to the snapshot before bounded source cleanup.
 pub fn buildSnapshotPublication(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, definition: blueprint.Definition, instance: Instance, source: *const State) !PreparedPublication {
     try validateSnapshot(layout, definition, instance);
-    return buildPublicationReplacing(allocator, layout, definition, instance, &source.chunks, null, instance.id, source);
+    var prepared = try buildPublicationReplacing(allocator, layout, definition, instance, &source.chunks, null, instance.id, source);
+    // Rebuilding every footprint entry also restarts this cache's retirement;
+    // the publisher's cursor only describes its own directory cleanup.
+    prepared.instance.cleanup_cursor = 0;
+    return prepared;
 }
 
 /// Full/resync snapshots are uncommon and validate their complete payload once.
