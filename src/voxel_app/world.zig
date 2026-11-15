@@ -1138,10 +1138,13 @@ pub const World = struct {
         if (self.construction_availability) |availability| {
             if (!availability.chunk_available(availability.context, id)) return null;
         }
-        // Retained completed sources still certify the minimum static data
-        // version. A completion notice cannot turn an old raw-air snapshot
-        // into a valid physical view before the replacement arrives.
+        // Display retention may keep several completed sources at a cell now
+        // owned by a newer site. Only the current target can select its physical
+        // source, including terrain handback received before lifecycle progress.
+        const current = self.blueprints.memberAt(block);
+        var terrain_owned = false;
         for (self.blueprints.chunkInstances(id)) |instance_id| {
+            if (current) |member| if (instance_id != member.target.instance_id) continue;
             const instance = self.blueprints.instances.get(instance_id) orelse return null;
             const definition = self.blueprints.definitions.get(instance.definition_id) orelse return null;
             const index = blueprint_runtime.definitionIndex(self.layout, instance.origin, definition.definition.size, instance.rotation, block) orelse continue;
@@ -1149,7 +1152,7 @@ pub const World = struct {
             if (self.construction_terrain_owner) |owner| if (owner.terrain_revision(owner.context, id, instance.id, instance.lifetime)) |revision| {
                 const chunk = self.getChunk(coords) orelse return null;
                 if (chunk.chunk_revision < revision) return null;
-                return chunk.content.getBlock(local);
+                terrain_owned = true;
             };
             const group_slot = instance.groupIndex(id) orelse return null;
             const group = instance.target_groups[group_slot];
@@ -1158,6 +1161,9 @@ pub const World = struct {
                 if (chunk.chunk_revision < group.terrain_revision) return null;
             }
         }
+        // Without an active target, every retained matching source still
+        // certifies a minimum terrain version before raw data can be used.
+        if (terrain_owned) return (self.getChunk(coords) orelse return null).content.getBlock(local);
         for (self.pending_operations.items) |pending| {
             if (pending.resolved_status != null or pending.operation.blueprint == null or !std.mem.eql(u32, &pending.operation.block, &block)) continue;
             const target = self.blueprints.targetAt(block) orelse continue;

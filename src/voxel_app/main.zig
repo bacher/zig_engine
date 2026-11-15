@@ -7549,6 +7549,115 @@ test "construction data precedes lifecycle and failed geometry handoff retains t
     try std.testing.expect(!Game.includeConstructionPortion(game, id, instance));
 }
 
+fn testCurrentConstructionOwner(optimistic: bool) !void {
+    const a = std.testing.allocator;
+    const runtime = @import("blueprint_runtime.zig");
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try prepareMiniatureSite(&fixture, 1);
+    const game = &fixture.game;
+    const world = &game.world.?;
+    const cache = &game.construction_cache;
+    const coords: ChunkCoords = .{ 1, 1, 1 };
+    const id = game.layout().encodeChunkCoords(coords);
+    const cell: [3]u32 = .{ 40, 40, 40 };
+    const first = world.blueprints.instances.get(1).?;
+    const first_identity: construction_stream.Identity = .{ .world_session = 91, .id = 1, .lifetime = first.lifetime };
+    _ = cache.acceptSession(91);
+    try cache.definitionInstalled(a, 1);
+    try cache.requestSnapshot(a, first_identity);
+    var package: world_data_service.ResponsePackage = .{ .world_session = 91 };
+    defer package.deinit(a);
+    try package.construction_updates.append(a, .{ .snapshot = try (construction_stream.Snapshot{ .identity = first_identity, .instance = first }).clone(a) });
+    try std.testing.expect(game.applyPackage(&package));
+    var base = WorldChunk.initEmpty();
+    defer base.deinit(a);
+    _ = base.apply(a, .{ 8, 8, 7 }, .{ .put = .sand });
+    var stamp: construction_stream.GeometryStamp = .{ .subscription_id = 1, .mesh_revision = 1, .composition_revision = 1 };
+    try applyConstructionChunkForTest(&fixture, base.clone(a), stamp, &.{.{ .identity = first_identity, .site_revision = first.revision }});
+    try std.testing.expect(cache.geometryInstalled(id, stamp));
+    try fixture.grid.chunks.append(a, .{ .chunk_origin = coords, .geometry_stamp = stamp });
+    const source_stamp: construction_stream.GeometryStamp = .{ .mesh_revision = 1 };
+    try fixture.grid.chunks.append(a, .{ .chunk_origin = coords, .layer = .construction, .geometry_stamp = source_stamp });
+    const first_complete: construction_stream.Delta = .{ .identity = first_identity, .base_revision = first.revision, .revision = first.revision + 3, .fulfilled_indices = &.{0}, .transfers = &.{.{ .instance_id = 1, .chunk_id = id, .terrain_revision = 1 }}, .phase = .complete };
+    try package.construction_updates.append(a, .{ .delta = try first_complete.clone(a) });
+    try std.testing.expect(game.applyPackage(&package));
+    // Completion alone cannot authorize the pre-materialization terrain data.
+    try std.testing.expectEqual(null, world.physicalBlock(cell));
+    var materialized = base.clone(a);
+    defer materialized.deinit(a);
+    _ = materialized.apply(a, .{ 8, 8, 8 }, .{ .put = .planks });
+    stamp = .{ .subscription_id = 1, .chunk_revision = 1, .mesh_revision = 2, .composition_revision = 2 };
+    try applyConstructionChunkForTest(&fixture, materialized.clone(a), stamp, &.{.{ .identity = first_identity, .site_revision = first_complete.revision, .transferred = true, .terrain_revision = 1 }});
+    stamp = .{ .subscription_id = 1, .chunk_revision = 2, .mesh_revision = 3, .composition_revision = 3 };
+    try applyConstructionChunkForTest(&fixture, base.clone(a), stamp, &.{});
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.none, world.physicalBlock(cell).?);
+
+    // The old source remains for display while a new site owns the same target.
+    var second = try world.blueprints.prepareInstance(a, game.layout(), 2, 1, 1, cell, 0);
+    defer second.deinit(a);
+    const second_identity: construction_stream.Identity = .{ .world_session = 91, .id = 2, .lifetime = second.lifetime };
+    try cache.requestSnapshot(a, second_identity);
+    try package.construction_updates.append(a, .{ .snapshot = try (construction_stream.Snapshot{ .identity = second_identity, .instance = second }).clone(a) });
+    try std.testing.expect(game.applyPackage(&package));
+    stamp.mesh_revision += 1;
+    stamp.composition_revision += 1;
+    try applyConstructionChunkForTest(&fixture, base.clone(a), stamp, &.{.{ .identity = second_identity, .site_revision = second.revision }});
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.none, world.physicalBlock(cell).?);
+    if (optimistic) {
+        const operation: world_module.BlockOperation = .{ .block = cell, .action = .{ .put = .planks }, .blueprint = .{ .instance_id = 2, .cell_index = 0 } };
+        try std.testing.expectEqual(world_module.OperationStatus.success, world.tryOperation(operation).status);
+        world.pending_operations.items[0].request_id = 77;
+        try std.testing.expect(!world.blueprints.instances.get(2).?.isFulfilled(0));
+        try std.testing.expectEqual(voxel_chunk_module.BlockType.planks, world.physicalBlock(cell).?);
+        world.acknowledgeOperation(77);
+    }
+    const second_fill: construction_stream.Delta = .{ .identity = second_identity, .base_revision = second.revision, .revision = second.revision + 1, .fulfilled_indices = &.{0}, .phase = .materializing };
+    try package.construction_updates.append(a, .{ .delta = try second_fill.clone(a) });
+    try std.testing.expect(game.applyPackage(&package));
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.planks, world.blueprints.physicalAt(cell).material);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.planks, world.physicalBlock(cell).?);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.none, world.getChunk(coords).?.content.getBlock(.{ 8, 8, 8 }));
+    const retained = world.blueprints.instances.get(1).?;
+    try std.testing.expectEqual(runtime.Phase.complete, retained.phase);
+    try std.testing.expect(!cache.portionReady(id, retained, 1));
+    try std.testing.expectEqual(source_stamp, fixture.grid.installedGeometry(coords, .construction).?);
+
+    // The current owner's own terrain proof still guards data before its
+    // lifecycle update, including metadata for a subsequent ordinary removal.
+    stamp = .{ .subscription_id = 1, .chunk_revision = 3, .mesh_revision = 5, .composition_revision = 5 };
+    try applyConstructionChunkForTest(&fixture, materialized.clone(a), stamp, &.{.{ .identity = second_identity, .site_revision = second_fill.revision + 1, .transferred = true, .terrain_revision = 3 }});
+    stamp = .{ .subscription_id = 1, .chunk_revision = 4, .mesh_revision = 6, .composition_revision = 6 };
+    try package.responses.append(a, .{
+        .coords = coords,
+        .subscription_id = 1,
+        .chunk_revision = stamp.chunk_revision,
+        .mesh_revision = stamp.mesh_revision,
+        .composition = try (construction_stream.ChunkComposition{ .revision = stamp.composition_revision }).clone(a),
+        .data = .{ .boundaries = @splat(.{}) },
+    });
+    try std.testing.expect(game.applyPackage(&package));
+    try std.testing.expectEqual(null, world.physicalBlock(cell));
+    package.responses.clearRetainingCapacity();
+    const second_complete: construction_stream.Delta = .{ .identity = second_identity, .base_revision = second_fill.revision, .revision = second_fill.revision + 2, .transfers = &.{.{ .instance_id = 2, .chunk_id = id, .terrain_revision = 3 }}, .phase = .complete };
+    try package.construction_updates.append(a, .{ .delta = try second_complete.clone(a) });
+    try std.testing.expect(game.applyPackage(&package));
+    // With both sources complete, every retained terrain barrier still applies:
+    // the first source's v2 proof cannot authorize data older than B's v4 proof.
+    try std.testing.expectEqual(null, world.physicalBlock(cell));
+    try applyConstructionChunkForTest(&fixture, base.clone(a), stamp, &.{});
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.none, world.physicalBlock(cell).?);
+}
+
+test "construction current target takes precedence over retained sources after fulfillment" {
+    try testCurrentConstructionOwner(false);
+}
+
+test "construction current target takes precedence over retained sources during optimistic fulfillment" {
+    try testCurrentConstructionOwner(true);
+}
+
 test "construction discovery outside the visible set blocks collision and targeting until resync" {
     const a = std.testing.allocator;
     var fixture: StreamingTest = .{};
