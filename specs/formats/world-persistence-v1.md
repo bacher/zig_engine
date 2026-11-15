@@ -3,9 +3,11 @@
 This is the normative format reference for the
 [world-persistence feature spec](../features/world-persistence.md). It contains the existing
 binary layouts, encoding rules, compatibility policy, checksums, and metadata bounds
-for current format 7. Formats 1–6 are rejected as incompatible development worlds.
-Version 7 persists construction ownership transfers, retained materializing instances,
-and durable grass-initialization obligations; it adds no migration or historical ruleset.
+for current format 8. Formats 1–7 are rejected as incompatible development worlds.
+Version 8 adds warehouse registrations, stock, accepted delivery cargo and capacity promises
+to the shared snapshot, and pallet material 23. Construction ownership transfers, retained
+materializing instances and grass-initialization obligations retain their current semantics.
+No migration or historical ruleset is provided.
 All R/Q identifiers refer to that feature spec;
 requirement and acceptance-criterion IDs remain there. Runtime ownership, cancellation,
 recovery procedures, and platform durability remain in the feature spec.
@@ -57,7 +59,7 @@ range, with actual decoding support for every accepted version. These are distin
 snapshot sequences, world ticks, and generator versions. The minimum is an engine support
 policy; a second per-file version field is not required for this initial design.
 
-The current writer and minimum reader version are both 7. Development formats 1–6
+The current writer and minimum reader version are both 8. Development formats 1–7
 are rejected before their gameplay records are interpreted. A version bump alone does
 not implement compatibility: incompatible changes must also raise the minimum unless
 the engine supplies every required older decoding path. Pre-release development saves
@@ -70,7 +72,7 @@ even when record layouts are unchanged. This world-level gate covers saved bluep
 and unfinished instances without independent rule-version fields or migration.
 
 Validate material membership before publishing a typed chunk, including chunks with no
-metadata. Accepted raw IDs are 0–6, 8–20, and 255. Legacy packed dirt ID 7 is reserved
+metadata. Accepted raw IDs are 0–6, 8–20, 23 (pallet), and 255. Legacy packed dirt ID 7 is reserved
 and rejected, as are all other IDs. Raw and RLE decoding must yield exactly 32,768 bytes
 including implicit trailing air, then metadata validation scans every material byte.
 Checksums and version compatibility do not replace material membership validation.
@@ -199,11 +201,12 @@ alternative algorithms are follow-up improvements, not prerequisites for this in
 
 The initial save-format version was 1; version 2 added inventory schema 1 below.
 Version 3 added the world's private blueprint library and unfinished-instance progress.
-The current writer and minimum readable version are both 7. Version 4 added unfinished
+The current writer and minimum readable version are both 8. Version 4 added unfinished
 world-work keys with each base and WAL snapshot. Version 5 gated platform-only direct stone
 support and portable blueprint certification. Version 6 excluded loose-soil support and
 placement-triggered compaction. Version 7 changes blueprint progress and transformation-marker
-semantics.
+semantics. Version 8 adds the warehouse-state section to base, WAL and snapshot-zero hash
+inputs while keeping the 120-byte base/WAL headers and 84-byte transaction header.
 The base and every WAL segment must pass this
 whole-world version gate before their gameplay data is published. No migration or
 historical ruleset dispatch is provided. Fixed base/WAL header sizes remain unchanged.
@@ -225,6 +228,7 @@ Chunk index
 Player records
 Blueprint-state byte length (u64), followed by blueprint checkpoint bytes
 Pending-work byte length (u64), followed by canonical pending-work keys
+Warehouse-state byte length (u64), followed by canonical warehouse/delivery snapshot bytes
 Chunk records
 Base physical checksum (32 bytes)
 ```
@@ -252,9 +256,9 @@ Sections and records must consume their extents exactly, without overlaps, gaps,
 unaccounted bytes. The index and base chunk records are sorted by chunk ID with no duplicates;
 each index identity and absolute offset must select the matching complete chunk record.
 Player records are sorted by player ID with no duplicates.
-The blueprint and pending-work length prefixes are present even when zero; their bytes
+The blueprint, pending-work and warehouse-state length prefixes are present even when zero; their bytes
 are not part of the player-record or chunk-record section lengths. Chunk-index absolute
-offsets account for both sections. Their declared lengths are bounded before allocation
+offsets account for all three sections. Their declared lengths are bounded before allocation
 and must fit the base's exact total extent.
 
 Compaction writes a seekable temporary file: reserve the index, stream records, and finalize
@@ -332,7 +336,7 @@ Each player record has this layout:
 Legacy inventory schema 0 has a zero payload length and occupies 52 bytes in total;
 reading it initializes an empty slot. Current inventory schema 1 has a one-byte payload,
 so every newly encoded player record occupies 53 bytes. Payload byte 0 denotes an empty
-slot; bytes 2, 4, 5, 6, and 8 through 14 are the placeable carried materials. Reject other
+slot; bytes 2, 4, 5, 6, 8 through 14, and 23 are the carried materials. Reject other
 values, unsupported inventory schemas, incorrect payload lengths, and nonfinite
 coordinates/angles. Player schema remains 1. Read each player using its declared record
 length, then validate exactly the declared player count in ascending ID order.
@@ -346,7 +350,8 @@ checksum: its container's physical checksum or transaction digest covers it.
 Persist all known players, including offline players, sorted by unique player ID. A
 simultaneous-player target does not limit historical records. Each WAL transaction
 contains complete global state, the complete player array, and the complete pending-work
-set, plus only changed chunks and ordered blueprint operations.
+set, plus only changed chunks and ordered blueprint operations. Warehouse state is a complete
+replacement only when its domain changed; otherwise the transaction retains the preceding image.
 Player eligibility still follows R42; client/session command dependency watermarks are
 resolved before capture and are not serialized as persistent session counters. Validate
 record counts and exact section consumption before publishing recovered state.
@@ -376,8 +381,11 @@ header and directory entry under the existing creation/rotation durability contr
 
 Each transaction consists of header, complete global state, complete player array,
 blueprint-operation byte length (u64), blueprint operations, pending-work byte length
-(u64), canonical pending-work keys, changed chunk records, and commit footer. Both length
-prefixes are present even when zero. The transaction header is exactly 84 bytes:
+(u64), canonical pending-work keys, warehouse-state prefix (u64), optional warehouse snapshot,
+changed chunk records, and commit footer. All three prefixes are present. Warehouse prefix
+`0xffffffffffffffff` retains the prior warehouse image and is followed by no warehouse bytes;
+any other value is the replacement image's byte length, including zero to clear it. The
+transaction header is exactly 84 bytes:
 
 | Field, in order | Encoding |
 | --- | --- |
@@ -402,7 +410,7 @@ The commit footer is exactly 56 bytes:
 The changed-chunk count is known at capture, while compressed sizes become known during
 encoding. Put the total transaction size only in the footer, allowing streaming without
 WAL backpatching or retaining all encoded chunks. Release snapshot references under R29.
-Parse the declared global/player/blueprint/pending-work sections and exactly the declared number of length-framed
+Parse the declared global/player/blueprint/pending-work/warehouse sections and exactly the declared number of length-framed
 chunk records before expecting a footer; never search payload bytes for magic markers.
 Reject duplicate chunk IDs within a transaction. Chunk records use the identical base/WAL
 representation already defined; WAL chunk ordering need not match the sorted base order.
@@ -445,6 +453,73 @@ and the enclosing world-version compatibility policy.
 The capture owns an immutable encoded set; storage owns the last committed encoded set.
 Base compaction copies its frozen set and preserves any newer live committed membership.
 See [persisted unfinished world work](../features/deferred-world-work.md).
+
+### Warehouse registrations and accepted cargo
+
+`persistence/warehouses.zig` defines one complete compact snapshot. A zero-byte image is the
+empty initial state. A nonempty image starts with this exact 48-byte header:
+
+| Field, in order | Encoding |
+| --- | --- |
+| Magic `ZGWARE01` | 8 bytes |
+| Next warehouse ID | u64 |
+| Warehouse domain generation | u64 |
+| Next delivery ID | u64 |
+| Contiguous completed-delivery frontier | u64 |
+| Warehouse record count | u32 |
+| Retained delivery record count | u32 |
+
+Warehouse records follow in strictly increasing ID order, each exactly 51 bytes:
+
+| Field, in order | Encoding |
+| --- | --- |
+| Warehouse ID and lifetime | [2]u64 |
+| Fixed origin, X/Y/Z in canonical block coordinates | [3]u32 |
+| Relative footprint bounds, xmin/xmax/ymin/ymax | [4]i8 |
+| Configured cargo material | u8 |
+| Stock and aggregate incoming promise | [2]u16 |
+| Active column count | u8 |
+| Enabled | u8 boolean, 0 or 1 |
+| Accepted task obligation count | u32 |
+| Record revision | u64 |
+
+Retained delivery records follow in strictly increasing ID order, each exactly 48 bytes:
+
+| Field, in order | Encoding |
+| --- | --- |
+| Delivery ID | u64 |
+| Source warehouse ID and lifetime | [2]u64 |
+| Destination warehouse ID and lifetime | [2]u64 |
+| Cargo material | u8 |
+| Accepted quantity, owned cargo, remaining destination promise | [3]u16 |
+| Complete | u8 boolean, 0 or 1 |
+
+Nonempty image length must equal `48 + 51*warehouse_count + 48*delivery_count` exactly.
+The current limits are 4,096 warehouses, 4,096 retained tasks and 2 MiB image bytes. A
+full record-cap image is 405,552 bytes. Counts, multiplication and bounds are checked before
+allocation. Cargo materials are IDs 2, 4, 6 and 8–14 or 23. The image has no separate checksum:
+its enclosing base physical checksum, initial anchor or WAL digest covers all its bytes.
+
+IDs/lifetimes are nonzero; warehouse IDs and delivery endpoint IDs lie below the next warehouse
+ID. World-session identity and the fixed warehouse kind are reconstructed for the newly opened
+session. Geometry must form a legal at-most-5-by-5 footprint with valid full six-level bounds.
+Stock plus incoming cannot exceed its physical capacity, and active columns cannot exceed its
+footprint. Disabled or reduced-capacity warehouses retain already accepted incoming promises.
+
+Retained task IDs must fill the interval after the completed frontier and before the next ID;
+an unfinished task can pin later completed records. Unfinished tasks retain their full accepted
+quantity as cargo and destination promise. Both endpoint registrations and materials must match,
+and one linear aggregate validation must reproduce every warehouse's incoming and obligation
+counts. Completed tasks retain zero cargo/promise and may reference an endpoint that has since
+unregistered. Retiring a contiguous completed prefix advances the persistent frontier. Repeated
+handover at or below it has no resource effect; an old start cannot relabel that task ID.
+
+Claims, layout permutations, rendered goods, subscriptions and external command ledgers are
+not serialized. After decoding the canonical records, rebuild claims/layouts and validate the
+member pallets, reserved envelope and support against the coherent terrain/construction state
+before admitting commands. Warehouse domain generations advance only after successful
+preflight; capture acknowledgment retires only its captured generation. The codec defines
+accepted cargo custody and completion state, not a full logistics scheduler.
 
 ### Blueprint definitions and active instances
 
@@ -568,13 +643,15 @@ byte concatenation, is:
 | Snapshot-zero anchor | Initial-anchor domain prefix `||` canonical initial fields listed below |
 
 Transaction coverage includes its header, global state, full player records, blueprint
-length prefix and operations, pending-work length prefix and keys, chunk records
+length prefix and operations, pending-work length prefix and keys, warehouse prefix and any
+replacement bytes, chunk records
 with their checksums, and the commit footer's marker, total length, and repeated sequence.
 Only its final digest is excluded. The included segment header binds world, segment, format,
 and segment predecessor; the transaction header binds the immediately previous committed
 sequence/digest. Verify the segment header independently before using it in this input.
 The base physical checksum includes the finalized header, incorporated logical digest,
-descriptor, global state, index, blueprint length/checkpoint, pending-work length/keys, and
+descriptor, global state, index, blueprint length/checkpoint, pending-work length/keys,
+warehouse length/snapshot, and
 all player/chunk records with their record checksums.
 
 Use one chained digest per committed snapshot transaction. Validate footer identity/length
@@ -598,6 +675,7 @@ Player count (u64)
 Player-section length (u64), followed by player records sorted by player ID
 Blueprint-state length (u64), followed by canonical blueprint checkpoint bytes
 Pending-work length (u64), followed by canonical pending-work keys
+Warehouse-state length (u64), followed by canonical warehouse/delivery snapshot bytes
 Initial override count (u64), followed by chunk records sorted by chunk ID
 ```
 

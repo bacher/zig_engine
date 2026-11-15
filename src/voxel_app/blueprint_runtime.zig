@@ -901,6 +901,7 @@ pub const CompletedReader = struct {
         result.block_at = read;
         result.custom_shape_at = shape;
         result.immutable_at = immutable;
+        result.mutation_allowed = mutationAllowed;
         return result;
     }
 
@@ -918,6 +919,11 @@ pub const CompletedReader = struct {
     fn immutable(context: *anyopaque, cell: Cell) bool {
         const self: *CompletedReader = @ptrCast(@alignCast(context));
         return self.physical.isImmutable(.{ cell[0], cell[1], cell[2] });
+    }
+
+    fn mutationAllowed(context: *anyopaque, cell: Cell, material: rules.BlockType) ?rules.Failure {
+        const self: *CompletedReader = @ptrCast(@alignCast(context));
+        return if (self.physical.mutation_allowed) |check| check(self.physical.context, cell, material) else null;
     }
 };
 

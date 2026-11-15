@@ -2,8 +2,7 @@
 
 A multiblock structure (сооружение) gives a set of world cells a shared gameplay identity.
 It can own state, protect members, reserve surrounding air, and replace member presentation.
-[Warehouses](../specs/features/warehouses.md) specify explicit registration, with implementation
-pending; [adaptive road slopes](country-roads.md) already demonstrate automatic recognition.
+[Warehouses](../specs/features/warehouses.md) implement explicit registration; [adaptive road slopes](country-roads.md) already demonstrate automatic recognition.
 This vocabulary does not imply an existing general registry or require rewriting roads.
 
 ## Registration
@@ -11,7 +10,7 @@ This vocabulary does not imply an existing general registry or require rewriting
 | Policy | Trigger | Examples |
 | --- | --- | --- |
 | Automatic | A valid block pattern is recognized | Existing road slope; future workbench |
-| Explicit | Player confirms a dialog after assembling valid blocks | Warehouse (specified) |
+| Explicit | Player confirms a dialog after assembling valid blocks | Warehouse |
 
 Each type defines its pattern and validation. Successful registration establishes identity,
 members, type-specific state, and claims coherently. A later registration at the same location

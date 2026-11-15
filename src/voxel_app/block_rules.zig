@@ -42,6 +42,7 @@ pub const Reason = enum {
     sand_footprint,
     mining_forbidden,
     immutable_cell,
+    warehouse_claim,
 };
 
 /// Target-relative coordinates remain continuous across the wrapped x seam.
@@ -92,6 +93,9 @@ pub const Reader = struct {
     custom_shape_at: ?*const fn (*anyopaque, [3]u32) ?engine.voxel_chunk.custom_block.Shape = null,
     /// Playable worlds supply the canonical generator floor, independently of residency.
     immutable_at: ?*const fn (*anyopaque, [3]u32) bool = null,
+    /// Owner-specific guards are consulted for every prepared runtime write,
+    /// including indirect road/soil mutations. Reads still expose real material.
+    mutation_allowed: ?*const fn (*anyopaque, [3]u32, BlockType) ?Failure = null,
     /// Reserved polar rows, measured in storage blocks at each finite Y edge.
     playable_y_inset: u32 = 0,
 
@@ -131,7 +135,7 @@ pub const Reader = struct {
 
 /// Road support is independent of full-cube collision.
 pub fn supportsRoad(material: BlockType) bool {
-    return material != .none and material != .sand and material != .leaves and material != .packed_dirt;
+    return material != .none and material != .sand and material != .leaves and material != .packed_dirt and material != .pallet;
 }
 
 /// Ordinary stone needs a complete platform; other geological foundations
@@ -648,6 +652,14 @@ pub const Validator = struct {
     }
 
     fn evaluateUncached(self: *Validator, cell: Cell, material: BlockType) ReadError!Evaluation {
+        if (material == .pallet) {
+            const below_cell = cell - Cell{ 0, 0, 1 };
+            const below = try self.get(below_cell);
+            if (below.canSupportPallet()) return .{ .supported = .{} };
+            var result = failure(.incompatible_support, cell, 0, 1);
+            result.rejected.add(below_cell);
+            return result;
+        }
         if (material.isRoad()) {
             const below_cell = cell - Cell{ 0, 0, 1 };
             const below = try self.get(below_cell);
@@ -734,7 +746,7 @@ pub const Validator = struct {
         if (depth < 0) return false;
         self.beginCheck(cell);
         const material = try self.get(cell);
-        if (material.isRoad()) {
+        if (material.isRoad() or material == .pallet) {
             const delta = self.reader.displacement(cell, edit.cell);
             return depth == 1 and delta[0] == 0 and delta[1] == 0;
         }
@@ -959,6 +971,37 @@ test "soil needs nine cells; unknown dependencies and world seams are distinct f
     try std.testing.expectEqual(8, failure_result.actual);
     try std.testing.expectEqual(9, failure_result.limit);
     try std.testing.expectEqual(1, failure_result.involved_count);
+}
+
+test "pallets require exactly one eligible real floor and supply no construction support" {
+    const cell: Cell = .{ 20, 20, 20 };
+    for (std.enums.values(BlockType)) |floor| {
+        var fixture: Fixture = .{};
+        defer fixture.deinit();
+        try fixture.raw(cell - Cell{ 0, 0, 1 }, floor);
+        fixture.read_calls = 0;
+        try std.testing.expectEqual(floor.canSupportPallet(), fixture.check(cell, .pallet) == null);
+        try std.testing.expectEqual(@as(usize, 1), fixture.read_calls);
+    }
+    try std.testing.expect(!BlockType.pallet.isStructural());
+    try std.testing.expect(!BlockType.pallet.isStablePlatformMaterial());
+    try std.testing.expect(!supportsRoad(.pallet));
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    fixture.missing = cell - Cell{ 0, 0, 1 };
+    try std.testing.expectEqual(Reason.missing_data, fixture.check(cell, .pallet).?.reason);
+}
+
+test "loose pallet ordinary dependency survives unregister and protects direct support" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    const pallet: Cell = .{ 10, 10, 4 };
+    try fixture.put(pallet, .pallet);
+    try std.testing.expectEqual(Reason.would_remove_support, fixture.check(pallet - Cell{ 0, 0, 1 }, .none).?.reason);
+    try std.testing.expectEqual(Reason.would_invalidate_structure, fixture.check(pallet - Cell{ 0, 0, 1 }, .sand).?.reason);
+    try std.testing.expect(fixture.check(pallet + Cell{ 0, 0, 1 }, .pallet) != null);
+    try std.testing.expect(fixture.check(pallet + Cell{ 0, 0, 1 }, .country_road_solid) != null);
+    try std.testing.expect(fixture.check(pallet + Cell{ 0, 0, 1 }, .planks) != null);
 }
 
 test "bare and grassy soil support other materials through the same centered three-layer platform" {

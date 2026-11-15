@@ -4,6 +4,7 @@ const Io = std.Io;
 const format = @import("format.zig");
 const storage = @import("storage.zig");
 const blueprints = @import("blueprints.zig");
+const warehouses = @import("warehouses.zig");
 const deferred_work = @import("../deferred_world_work.zig");
 const world = @import("../world.zig");
 const transformations = @import("../block_transformations.zig");
@@ -117,6 +118,9 @@ pub const Job = struct {
     blueprint_changes: []u8 = &.{},
     /// Owned canonical complete set frozen at the same boundary as sources.
     pending_work: []u8 = &.{},
+    /// Null retains the preceding complete warehouse state; owned immutable
+    /// bytes otherwise belong to the same complete-operation capture fence.
+    warehouse_snapshot: ?[]u8 = null,
     /// The service supplies exact new-instance bitmap sizes. Direct callers
     /// derive a conservative summary without reading the writer-owned State.
     blueprint_summary: ?blueprints.PrepareSummary = null,
@@ -188,6 +192,7 @@ pub const Job = struct {
         if (self.pending_work.len != 0) try deferred_work.validate(self.pending_work, self.store.dimensions, self.store.limits.max_pending_work);
         self.working_reserved_bytes = try std.math.add(usize, self.limits.output_bytes, try std.math.add(usize, manifest, try std.math.add(usize, self.players.len + self.blueprint_changes.len, scratch + @sizeOf(Job))));
         self.working_reserved_bytes = try std.math.add(usize, self.working_reserved_bytes, blueprint_prepare);
+        if (self.warehouse_snapshot) |bytes| self.working_reserved_bytes = try std.math.add(usize, self.working_reserved_bytes, try std.math.add(usize, try std.math.mul(usize, bytes.len, 2), try warehouses.preparationMemoryBound(bytes, self.store.limits.warehouses)));
         self.working_reserved_bytes = try std.math.add(usize, self.working_reserved_bytes, try pendingWorkMemoryBound(self.pending_work.len));
         self.working_reserved_bytes = try std.math.add(usize, self.working_reserved_bytes, self.extra_working_bytes);
         if (self.working_reserved_bytes > self.limits.working_bytes) return error.WorkingCapacityExceeded;
@@ -273,6 +278,7 @@ pub const Job = struct {
         self.allocator.free(self.players);
         self.allocator.free(self.blueprint_changes);
         self.allocator.free(self.pending_work);
+        if (self.warehouse_snapshot) |bytes| self.allocator.free(bytes);
         self.allocator.destroy(self);
     }
     fn emit(self: *Job, event: Event) void {
@@ -381,7 +387,7 @@ pub const Job = struct {
         self.store_mutex.lockUncancelable(self.io);
         defer self.store_mutex.unlock(self.io);
         const global = format.encodeGlobal(self.tick);
-        try self.store.beginSnapshotWithState(self.sequence, &global, self.players, self.player_count, self.sources.len, self.blueprint_changes, self.pending_work);
+        try self.store.beginSnapshotWithSimulation(self.sequence, &global, self.players, self.player_count, self.sources.len, self.blueprint_changes, self.pending_work, self.warehouse_snapshot);
         while (true) {
             self.mutex.lockUncancelable(self.io);
             while (self.output_head == self.output.items.len and !self.encoder_finished)

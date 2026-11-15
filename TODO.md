@@ -23,4 +23,4 @@
 - [ ] **P3:** Make the world-map header fit narrow windows at high UI scale, and cover actual font scaling in UI tests (see [header overlap](docs/world-map.md#p3-header-overlaps-in-narrow-windows-at-high-ui-scale)).
 - [ ] Add natural-world and downsampling regressions for the world-map raster (see [missing test coverage](docs/world-map.md#test-improvement-natural-terrain-and-downsampling)).
 
-- [ ] Complete [construction ownership follow-ups](specs/features/construction-state-ownership.md#follow-ups): end-to-end/target-PC validation, ownership comparison, optional compact snapshots, then mixed integration with [warehouses](specs/features/warehouses.md#implementation-preparation). Warehouse gameplay remains unimplemented.
+- [ ] Complete [construction ownership follow-ups](specs/features/construction-state-ownership.md#follow-ups): end-to-end/target-PC validation, ownership comparison, optional compact snapshots, and mixed workload validation with [warehouses](specs/features/warehouses.md#implementation-evidence-and-remaining-work). Warehouse gameplay is implemented; sustained target-PC and whole-frame validation remain open.

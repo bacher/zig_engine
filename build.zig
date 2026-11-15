@@ -247,6 +247,57 @@ pub fn build(b: *std.Build) void {
     blueprint_unit_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
     b.step("test-blueprint", "Run isolated blueprint compilation and bounded fulfillment tests").dependOn(&b.addRunArtifact(blueprint_unit_tests).step);
 
+    const warehouse_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/warehouse_state.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    warehouse_tests.root_module.linkLibrary(voxel_engine_lib);
+    warehouse_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
+    const run_warehouse_tests = b.addRunArtifact(warehouse_tests);
+    b.step("test-warehouse", "Run warehouse layout, recognition, claims, inventory and accepted delivery tests").dependOn(&run_warehouse_tests.step);
+
+    const warehouse_client_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/warehouse_client.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    warehouse_client_tests.root_module.linkLibrary(voxel_engine_lib);
+    warehouse_client_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
+    const run_warehouse_client_tests = b.addRunArtifact(warehouse_client_tests);
+    b.step("test-warehouse-client", "Run warehouse subscription, prediction and logical collision tests").dependOn(&run_warehouse_client_tests.step);
+
+    const packed_geometry_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/packed_geometry.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    packed_geometry_tests.root_module.linkLibrary(voxel_engine_lib);
+    packed_geometry_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
+    const run_packed_geometry_tests = b.addRunArtifact(packed_geometry_tests);
+    b.step("test-packed-geometry", "Run packed cargo external-face, marker and auxiliary-source tests").dependOn(&run_packed_geometry_tests.step);
+
+    const packed_benchmark = b.addExecutable(.{
+        .name = "packed-geometry-benchmark",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/packed_geometry_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    packed_benchmark.root_module.linkLibrary(voxel_engine_lib);
+    packed_benchmark.root_module.addImport("engine", voxel_engine_lib.root_module);
+    b.step("bench-packed-geometry", "Measure observed and unobserved warehouse presentation source work").dependOn(&b.addRunArtifact(packed_benchmark).step);
+
     const construction_client_tests = b.addTest(.{
         .filters = test_filters,
         .root_module = b.createModule(.{
@@ -485,6 +536,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_construction_client_tests.step);
     test_step.dependOn(&run_construction_geometry_tests.step);
     test_step.dependOn(&run_blueprint_service_tests.step);
+    test_step.dependOn(&run_warehouse_tests.step);
+    test_step.dependOn(&run_warehouse_client_tests.step);
+    test_step.dependOn(&run_packed_geometry_tests.step);
     const generation_tests = b.addTest(.{
         .filters = test_filters,
         .root_module = b.createModule(.{
@@ -531,6 +585,7 @@ pub fn build(b: *std.Build) void {
             .link_libc = true,
         }),
     });
+    persistence_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
     const run_persistence_tests = b.addRunArtifact(persistence_tests);
     b.step("test-persistence", "Run CPU persistence format, storage, and launch tests").dependOn(&run_persistence_tests.step);
     test_step.dependOn(&run_persistence_tests.step);

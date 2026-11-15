@@ -33,7 +33,7 @@ pub fn materialMatches(required: BlockType, actual: BlockType) bool {
 }
 
 pub fn eligibleHorizontalSupport(required: BlockType, neighbor: BlockType) bool {
-    return neighbor != .none and (materialMatches(required, neighbor) or
+    return neighbor != .none and neighbor != .pallet and (materialMatches(required, neighbor) or
         (required.isReinforced() and neighbor.isReinforced()) or
         (required == .crushed_stone and neighbor.isNaturalRock()));
 }
@@ -42,7 +42,7 @@ pub fn eligibleHorizontalSupport(required: BlockType, neighbor: BlockType) bool 
 /// `physical` must expose actual terrain only; unknown data supplies no proof.
 pub fn checkFulfillment(physical: rules.Reader, cell: rules.Cell, required: BlockType) bool {
     const below = physical.get(cell - rules.Cell{ 0, 0, 1 }) orelse return false;
-    if (below != .none) return true;
+    if (below != .none and below != .pallet) return true;
     for (directions) |direction| {
         if (physical.get(cell + direction)) |neighbor| {
             if (eligibleHorizontalSupport(required, neighbor)) return true;
@@ -629,6 +629,13 @@ test "fulfillment uses at most five physical reads and shared directed material 
     try std.testing.expect(!materialMatches(.rebar, .reinforced_concrete));
     physical.below = null;
     try std.testing.expect(!checkFulfillment(reader, .{ 10, 10, 10 }, .reinforced_concrete));
+    physical.below = .pallet;
+    physical.neighbors = .{ .pallet, .pallet, .pallet, .pallet };
+    try std.testing.expect(!checkFulfillment(reader, .{ 10, 10, 10 }, .planks));
+    try std.testing.expect(!eligibleHorizontalSupport(.pallet, .pallet));
+    // An independent legal support route still works beside a pallet.
+    physical.neighbors[0] = .planks;
+    try std.testing.expect(checkFulfillment(reader, .{ 10, 10, 10 }, .planks));
 }
 
 test "cancelled compilation releases allocations without publishing a candidate" {

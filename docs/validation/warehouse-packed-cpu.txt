@@ -1,0 +1,31 @@
+Warehouse packed presentation CPU source benchmark, 2026-11-15
+Native arm64, Zig ReleaseFast.
+Command: ZIG_GLOBAL_CACHE_DIR=/private/tmp/warehouse-zig-global zig build bench-packed-geometry -Doptimize=ReleaseFast -j2
+
+Scope: 4096 complete logical client records, each with 150 stored units. Only
+observed objects enter the spatial presentation directory. This measures CPU
+source bookkeeping and geometry derivation, not authoritative simulation throughput.
+Times are wall-clock averages across eight complete source sweeps. Idle scans
+check dirty flags across 10000 unchanged frames and derive/upload nothing.
+Directory time is cumulative initial directory construction; seeding records is excluded.
+
+source_bytes counts CPU Face(20B), Instance(16B), Marker(20B) records per complete
+sweep. Actual GPU records additionally carry their source owner and are measured
+separately by packed_renderer. This benchmark performs no GPU uploads or draws.
+retained_directory_estimate includes hash/list capacities and retained pallet indices,
+excluding the client logical records. transient_source_capacity is the maximum live
+heap capacity of one rebuilt source, excluding fixed stack masks and allocator metadata.
+boundary=true crosses chunk X/Y/Z boundaries; the first warehouse crosses wrapped X.
+
+packed_cpu total_objects=4096 observed=0 boundary=false material=dirt source_chunks=0 directory_us=0.000 sweep_us=0.021 per_observed_us=0.021 idle_scan_us=0.001 source_bytes=0 retained_directory_estimate=0 transient_source_capacity=0 visited_objects=0 visited_slots=0 idle_builds=0 idle_upload_bytes=0
+packed_cpu total_objects=4096 observed=0 boundary=false material=country_road_adaptive source_chunks=0 directory_us=0.000 sweep_us=0.026 per_observed_us=0.026 idle_scan_us=0.001 source_bytes=0 retained_directory_estimate=0 transient_source_capacity=0 visited_objects=0 visited_slots=0 idle_builds=0 idle_upload_bytes=0
+packed_cpu total_objects=4096 observed=0 boundary=false material=pallet source_chunks=0 directory_us=0.000 sweep_us=0.021 per_observed_us=0.021 idle_scan_us=0.001 source_bytes=0 retained_directory_estimate=0 transient_source_capacity=0 visited_objects=0 visited_slots=0 idle_builds=0 idle_upload_bytes=0
+packed_cpu total_objects=4096 observed=64 boundary=false material=dirt source_chunks=64 directory_us=14.086 sweep_us=163.073 per_observed_us=2.548 idle_scan_us=0.046 source_bytes=217600 retained_directory_estimate=19072 transient_source_capacity=4580 visited_objects=64 visited_slots=9600 idle_builds=0 idle_upload_bytes=0
+packed_cpu total_objects=4096 observed=64 boundary=false material=country_road_adaptive source_chunks=64 directory_us=12.463 sweep_us=119.917 per_observed_us=1.874 idle_scan_us=0.048 source_bytes=307200 retained_directory_estimate=19072 transient_source_capacity=6144 visited_objects=64 visited_slots=9600 idle_builds=0 idle_upload_bytes=0
+packed_cpu total_objects=4096 observed=64 boundary=false material=pallet source_chunks=64 directory_us=10.921 sweep_us=118.255 per_observed_us=1.848 idle_scan_us=0.051 source_bytes=307200 retained_directory_estimate=19072 transient_source_capacity=6144 visited_objects=64 visited_slots=9600 idle_builds=0 idle_upload_bytes=0
+packed_cpu total_objects=4096 observed=1024 boundary=false material=dirt source_chunks=1024 directory_us=182.955 sweep_us=2581.365 per_observed_us=2.521 idle_scan_us=1.215 source_bytes=3481600 retained_directory_estimate=305152 transient_source_capacity=4580 visited_objects=1024 visited_slots=153600 idle_builds=0 idle_upload_bytes=0
+packed_cpu total_objects=4096 observed=1024 boundary=false material=country_road_adaptive source_chunks=1024 directory_us=168.207 sweep_us=1910.787 per_observed_us=1.866 idle_scan_us=1.218 source_bytes=4915200 retained_directory_estimate=305152 transient_source_capacity=6144 visited_objects=1024 visited_slots=153600 idle_builds=0 idle_upload_bytes=0
+packed_cpu total_objects=4096 observed=1024 boundary=false material=pallet source_chunks=1024 directory_us=171.943 sweep_us=1910.615 per_observed_us=1.866 idle_scan_us=1.252 source_bytes=4915200 retained_directory_estimate=305152 transient_source_capacity=6144 visited_objects=1024 visited_slots=153600 idle_builds=0 idle_upload_bytes=0
+packed_cpu total_objects=4096 observed=64 boundary=true material=dirt source_chunks=264 directory_us=78.580 sweep_us=566.609 per_observed_us=8.853 idle_scan_us=0.234 source_bytes=217600 retained_directory_estimate=77440 transient_source_capacity=1880 visited_objects=512 visited_slots=76800 idle_builds=0 idle_upload_bytes=0
+packed_cpu total_objects=4096 observed=64 boundary=true material=country_road_adaptive source_chunks=264 directory_us=67.664 sweep_us=515.266 per_observed_us=8.051 idle_scan_us=0.226 source_bytes=307200 retained_directory_estimate=77440 transient_source_capacity=2400 visited_objects=512 visited_slots=76800 idle_builds=0 idle_upload_bytes=0
+packed_cpu total_objects=4096 observed=64 boundary=true material=pallet source_chunks=264 directory_us=62.456 sweep_us=519.151 per_observed_us=8.112 idle_scan_us=0.224 source_bytes=307200 retained_directory_estimate=77440 transient_source_capacity=2400 visited_objects=512 visited_slots=76800 idle_builds=0 idle_upload_bytes=0

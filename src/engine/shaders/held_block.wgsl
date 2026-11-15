@@ -15,7 +15,9 @@ struct HeldVertex {
 }
 
 @vertex fn vs(@builtin(vertex_index) index: u32) -> HeldVertex {
-    let vertex = blockVertex(index, held.material.x);
+    var vertex: VoxelVertex;
+    if held.material.x == 23u { vertex = palletVertex(index); }
+    else { vertex = blockVertex(index, held.material.x); }
     return HeldVertex(
         held.clip_from_block * vertex.position,
         vertex.uv,

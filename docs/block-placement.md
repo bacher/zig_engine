@@ -18,6 +18,7 @@ client data produces `missing_data`, never an assumption that the missing cells 
 | Rebar and reinforced concrete | Share horizontal support and the mineral height group. |
 | Solid country road | Ordinary cube; requires solid support directly below. |
 | Adaptive country road | Custom cell (255); full-cube collision until a supported 4–12-section run forms a slope. |
+| Pallet | Walk-through, approximately 0.2 blocks high; needs an eligible real block directly below, cannot support construction or another pallet. Recoverable, but excluded from blueprint capture. |
 | Sand | Placeable/minable; retains a filled 3×3 footprint, has no soil timers, and fills soil/sand footprints without providing construction support. |
 | Leaves | Opaque colliding foliage; removable without an item, with no structural support or decay. |
 | Ore, limestone, coal | Natural-rock support; mining disabled until usable resource results are configured. |
@@ -33,6 +34,26 @@ forbidden, remove without an item, or yield a configured placeable item. New unc
 resources default to forbidden mining. `mined_type` is optional even on success; clearing
 leaves keeps an empty player slot empty. An occupied slot still rejects all player mining.
 Deeprock has an independent mutation guard covering all direct and indirect writes.
+
+### Pallets and packed warehouse cargo
+
+A loose pallet needs a direct floor from `canSupportPallet()`: natural rock, soil with or
+without grass, clay, crushed stone, trunk, planks, rebar/concrete or solid country-road blocks.
+Adaptive roads, water, sand, snow, leaves, air and pallets cannot support it. Eligible fulfilled construction
+targets count as real floor; miniatures and packed cargo do not. Ordinary dependency checks
+protect that floor while a pallet survives, including after warehouse unregister. Pallets
+supply no structural support, so pallet-on-pallet placement is rejected.
+
+Registered warehouses protect member pallets and their reserved air against ordinary edits
+and future construction targets. Empty clearance halos may share a one-cell aisle. Registration
+and mutation guards use the same compatibility policy; unregister releases only that owner's
+claims. A construction can coexist with a warehouse in its empty cavity and later hand back
+only its own targets, preserving the warehouse and its support.
+
+Packed stock has full-cell movement collision and targeting regardless of visual shape, but
+is absent from support and blueprint-capture material views. Warehouse transfers change stock
+and inventory, not terrain cells. See the [warehouse spec](../specs/features/warehouses.md)
+for material eligibility, fast interaction, capacity and lifecycle rules.
 
 ### Blueprint normalization
 

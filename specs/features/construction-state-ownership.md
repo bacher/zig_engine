@@ -16,12 +16,13 @@ materialize into world-data chunks in bounded background work.
 
 **Status: partially implemented.** Core implementation tasks T1–T12 are complete in
 [PR #66](https://github.com/bacher/zig_engine/pull/66). Remaining validation, optional
-optimization, and subsequent warehouse integration are tracked separately in T13–T16 below.
+optimization, and mixed warehouse validation are tracked separately in T13–T16 below.
 
 The ownership, publication, and lifecycle contracts below are approved. The implementation
 uses the existing service executor, separate construction meshes with internal-face culling,
 bounded publication, and shared capture. Validation and measured limitations are recorded
-under Q7; warehouse gameplay and the mixed warehouse acceptance cases remain subsequent work.
+under Q7. The subsequent [warehouse implementation](warehouses.md#implementation-evidence-and-remaining-work)
+extends the same boundaries; its reports track mixed acceptance cases and remaining load validation.
 
 ## Context
 
@@ -547,13 +548,14 @@ perform resource accounting. Full supplier/route/task scheduling remains separat
 Construction validation uses the existing player path and controlled internal operations;
 it need not implement warehouses or deliveries early. Verify the common boundaries in this
 stage, then run the mixed warehouse cases below during warehouse implementation. Mixed cases
-are future integration obligations, not claims that unimplemented warehouses already pass.
+are checked by the subsequent warehouse implementation; its evidence report distinguishes
+executed mixed cases from broader workload validation.
 
 ## Acceptance Criteria
 
 These criteria define implementation behavior. Existing IDs are retained, with superseded
 marker/completion/soil criteria updated to match Q3/Q5/Q6. Mixed warehouse cases AC55–AC60
-remain integration obligations for the subsequent warehouse implementation.
+belong to the subsequent warehouse implementation and its linked evidence reports.
 
 - AC1: GIVEN an admissible blueprint WHEN applied THEN only nonempty targets become
   simulation-owned physical air; ordinary cavity/foundation terrain stays world-data-owned
@@ -824,7 +826,7 @@ state. Measure and fault-test these before claiming a performance improvement.
   blocked-site fairness/recovery, delayed/failed geometry installation, partial restart, and
   component workload measurements are covered by the evidence below. Whole-frame/target-PC
   measurements and comparison with Q2 alternatives remain open under Q7. Complete mixed
-  warehouse cases AC55–AC60 when that feature is implemented.
+  sustained mixed warehouse workloads; native cases AC55–AC60 are covered under T16.
 
 ### Follow-ups
 
@@ -836,10 +838,13 @@ state. Measure and fault-test these before claiming a performance improvement.
   grouping for the same definition/lifetime. The [payload comparison](../../docs/validation/construction-transport.md#snapshot-payload-boundary)
   measures a prototype; production snapshots still carry grouping arrays. Preserve validation,
   source lifetime and local cleanup semantics. This is separate from warehouse Q25 deltas.
-- [ ] T16 — Subsequent feature integration: implement warehouses on Q8's shared foundation and
-  execute mixed cases AC55–AC60. Warehouse gameplay is not part of this implementation.
+- [x] T16 — Subsequent feature integration: warehouses extend Q8's shared foundation. Mixed
+  cases AC55–AC60 now have native coverage: same-ID package routing and command-intent reuse,
+  distinct cargo/support/capture reads, partial handback with stock transfers and frozen cargo/
+  player capture, independent stream resync, and real-soil grass beside packed soil. See
+  [warehouse validation](../../docs/validation/warehouses.md) and application integration tests.
 
-T13/T14 keep validation open; T16 depends on the next feature. T15 is optional and does not
+T13/T14 keep broader validation open; T16 records the mixed-case evidence from warehouses. T15 is optional and does not
 by itself block completion of the current contracts. T-val summarizes the remaining checks.
 
 ### Implementation evidence
@@ -855,8 +860,8 @@ by itself block completion of the current contracts. T-val summarizes the remain
 
 These reports do not establish a speedup over Q2 alternatives, whole-frame latency under a
 full economy, or target-PC capacity. The authority workload excludes command admission and
-dispatch; the geometry timing excludes the full frame and GPU execution. Complete mixed
-warehouse checks AC55–AC60 after warehouse implementation. Keep broader end-to-end and
+dispatch; the geometry timing excludes the full frame and GPU execution. Mixed warehouse checks AC55–AC60 are now covered by the subsequent warehouse implementation.
+Keep broader end-to-end and
 alternative comparisons open rather than treating the component measurements as those results.
 
 Initial integrated verification on 2026-11-14 (historical baseline, before the review fixes):
