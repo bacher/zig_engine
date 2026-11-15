@@ -23,6 +23,12 @@ tuning remains provisional for visual review.
 Implementation evidence and measured defaults are recorded in the
 [validation report](../../docs/validation/world-generation/README.md).
 
+R13–R14 below incorporate construction ownership's unified soil and removal of compaction.
+Generated bare soil uses the same support rules as grass;
+new ordinary bare soil grows grass directly, while active construction soil stays bare until
+materialization completes. See [construction Q6](construction-state-ownership.md#q6--soil-and-compact-physical-state)
+and the format-7 gate. Other generation requirements and historical measurements are unchanged.
+
 ## Context
 
 - [Game vision](../../docs/game-vision.md) defines one-metre voxels, periodic X, finite Y/Z,
@@ -35,9 +41,9 @@ Implementation evidence and measured defaults are recorded in the
 - [Voxel world](../../docs/voxel-world.md) describes a seeded, cave-free heightmap generator,
   prepared immutable noise tables, a bounded column cache, and regeneration of untouched
   chunks. The pre-feature generator had no continents, climate, deposits, or generated trees.
-- [Block placement](../../docs/block-placement.md) already distinguishes loose soil,
-  packed soil, and grass-covered packed soil. Compaction and surface timers are authoritative
-  state. Sand previously bypassed structural placement checks; a stable soil platform can
+- [Block placement](../../docs/block-placement.md) originally distinguished loose/packed soil
+  and grass. Construction Q6 now unifies their support and retains only grass-growth timers.
+  Sand previously bypassed structural placement checks; a stable soil platform can
   reset construction support counters without proving support down to underlying natural rock.
 - [Country roads](country-roads.md) previously allowed cube-colliding materials as direct
   support. The sand and foliage restrictions deliberately narrow that rule.
@@ -126,13 +132,14 @@ Implementation evidence and measured defaults are recorded in the
 
 ### Surface materials and water
 
-- R13: Preserve saved soil states and the existing compaction/grass timers. For a state
-  that displays grass in temperate climate, render yellow grass in steppe and a snow-covered
+- R13: Preserve saved bare/grass-covered soil and ordinary grass-growth timers under
+  construction Q6. For a state that displays grass in temperate climate, render yellow grass in steppe and a snow-covered
   top surface in frozen climate. These are render appearances, not new saved soil types.
   Moving and placing soil changes its eventual appearance according to the destination
-  column; mining continues to yield ordinary loose soil.
-- R14: Confirmed surface interpretation: freshly placed loose soil stays loose, and exposed
-  packed soil receives its climate cover on the same schedule that currently grows grass.
+  column; mining continues to yield ordinary bare soil.
+- R14: Confirmed surface interpretation: ordinary exposed bare soil grows climate-appropriate
+  grass cover after thirty minutes. Active construction soil stays bare; world-data initializes
+  growth only after full materialization under construction Q6.
   Generated exposed soil receives its cover immediately. Covering soil still removes the
   cover. Frozen climate does not replace soil with the existing standalone `snow` block.
   “Exposed” means no block immediately above, preserving today's underground grass eligibility
@@ -615,7 +622,7 @@ consolidation tasks remain separate.
 - AC7: GIVEN generated desert land and an ordinary soil block placed there WHEN generating
   and editing THEN natural cover is sand or exposed rock/resource, the placed soil stays
   soil, and sand receives no soil transformations in any climate. [R15–R16]
-- AC8: GIVEN sand or loose soil placement WHEN its complete `3 × 3` footprint is absent,
+- AC8: GIVEN sand or soil placement WHEN its complete `3 × 3` footprint is absent,
   present, missing from the client, or later removed THEN shared client/service validation
   respectively rejects, accepts, waits/rejects as unknown, or rejects support removal;
   generated sand remains mineable under the existing natural-terrain exemption. [R16]

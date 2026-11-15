@@ -1,5 +1,11 @@
 # Blueprint compiler and admission measurements
 
+This report records the pre-construction-ownership baseline, including historical soil-support
+and compaction revisions. Current soil and ownership semantics are defined by
+[construction ownership](../../specs/features/construction-state-ownership.md) and verified in
+[the construction authority report](construction-authority.md). The timings below are not
+measurements of the new ownership implementation.
+
 Measured on Apple M4 Max, arm64, macOS 26.7.1, Zig 0.16.0, ReleaseFast.
 These are individual synthetic fixture runs, with no discarded warmup or tail
 latency estimate. They establish helper costs for the stated contents; they do

@@ -2,7 +2,27 @@
 
 This report accompanies the implementation of [the blueprint specification](../specs/features/blueprints.md). Capture and application are implemented; planning, rewards, sharing, NPC logistics, and applied-site cancellation remain outside this iteration.
 
-## Implemented paths
+## Current construction ownership follow-up
+
+Active targets now store fulfillment in simulation; raw terrain remains air until per-chunk
+materialization. Composed reads include filled targets for support, targeting, and collision.
+The frame and extraction restrictions last through whole-site materialization. A separate
+culled construction mesh stays visible until its static replacement is installed on the GPU.
+
+Soil has one structural material with optional grass, no compaction, and identical bare/grassy
+support. Admission clears grass below miniatures atomically. Active target soil remains bare;
+ordinary grass scheduling begins after the site completes. World format 7 rejects older saves.
+External Save/Apply and player/observer edits share a bounded live-session retry ledger;
+acknowledged commands require resynchronization rather than replaying older snapshots.
+
+See [authority validation](validation/construction-authority.md),
+[transport validation](validation/construction-transport.md), and
+[render validation](validation/construction-rendering.md) for current coverage and limitations.
+The measurements and implementation notes below record the original blueprint baseline;
+its terrain-owned fills, immediate retirement, soil-compaction rules, and endpoint-lifetime
+Save-key semantics are superseded by this follow-up.
+
+## Original blueprint implementation (historical baseline)
 
 - The selected capture frame, including the unconfirmed anchor frame, uses a faint `.greater` pass without depth writes before the normal opaque `.less_equal` depth-writing pass. Diagnostics and rails share one dynamic opaque instanced draw. Pending-target miniatures use cached sources with one draw per visible nonempty chunk; a full-size application preview uses its separate cached instanced draw. The occluded-frame draw reuses the dynamic instances and adds only the selected frame's twelve rails, 144 triangles, in one extra draw. Miniatures, full-size application previews, and other active sites' frames receive no occluded-frame draw.
 - All frames choose one continuous periodic X image using their middle cell. The renderer reuses its single chunk-relative conversion and subtracts the middle-cell offset before emitting the same twelve rails. There is no block traversal, second wrap calculation, split geometry, extra upload, or extra draw. Simultaneously visible opposite images of one site are outside this rendering scope; miniature and cached-preview coordinate policies retain their existing behavior.

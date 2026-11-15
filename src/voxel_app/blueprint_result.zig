@@ -8,6 +8,7 @@ pub const Rejection = struct {
 };
 pub const Result = struct {
     request_id: u64,
+    command: ?@import("construction_state.zig").CommandIdentity = null,
     kind: enum { save, apply },
     status: enum { success, invalid, missing_data, resource_exhausted, stale },
     definition_id: ?u64 = null,

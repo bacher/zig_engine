@@ -10,6 +10,8 @@ const format = @import("persistence/format.zig");
 const storage = @import("persistence/storage.zig");
 const persistence = @import("persistence/coordinator.zig");
 const wire = @import("persistence/blueprints.zig");
+const construction_client = @import("construction_client.zig");
+const construction_stream = @import("construction_stream.zig");
 const a = std.testing.allocator;
 const io = std.testing.io;
 const origin: [3]u32 = .{ 40, 40, 48 };
@@ -29,6 +31,7 @@ const Harness = struct {
     service: ?*service_api.WorldDataService = null,
     client: ?*service_api.Client = null,
     local: world.World,
+    construction_cache: construction_client.Cache = .{},
     operation_results: std.ArrayList(service_api.OperationResult) = .empty,
     blueprint_results: std.ArrayList(service_api.BlueprintResult) = .empty,
     fill_packages: usize = 0,
@@ -47,9 +50,10 @@ const Harness = struct {
         const tick = format.encodeGlobal(0);
         var store = try storage.Store.create(a, path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &tick, .players = &.{}, .player_count = 0 }, .{});
         errdefer store.deinit();
-        const local = try world.World.init(a, &layout);
-        self.* = .{ .path = path, .layout = layout, .store = store, .store_open = true, .local = local };
+        self.* = .{ .path = path, .layout = layout, .store = store, .store_open = true, .local = undefined };
+        self.local = try world.World.init(a, &self.layout);
         errdefer self.local.deinit();
+        errdefer self.construction_cache.deinit(a);
         try self.start();
         return self;
     }
@@ -73,6 +77,7 @@ const Harness = struct {
     fn destroy(self: *Harness) void {
         if (self.service) |service| service.destroy();
         self.local.deinit();
+        self.construction_cache.deinit(a);
         if (self.store_open) self.store.deinit();
         self.operation_results.deinit(a);
         self.blueprint_results.deinit(a);
@@ -88,12 +93,21 @@ const Harness = struct {
         }
         self.client.?.takePackages(&packages);
         for (packages.items) |*package| {
+            try std.testing.expect(self.construction_cache.acceptSession(package.world_session));
             var has_fill = false;
             var block_count: usize = 0;
-            for (package.blueprint_changes.items) |change| if (change == .fulfill) {
-                has_fill = true;
-            };
             try self.local.applyBlueprintChanges(package.blueprint_changes.items);
+            for (package.blueprint_changes.items) |change| if (change == .definition) {
+                try self.construction_cache.definitionInstalled(a, change.definition.id);
+            };
+            for (package.responses.items) |response| if (response.composition) |composition| {
+                const id = self.layout.encodeChunkCoords(response.coords);
+                for (composition.sites) |reference| try self.construction_cache.discover(a, id, reference);
+            };
+            for (package.construction_updates.items) |update| {
+                if (update == .delta and update.delta.fulfilled_indices.len != 0) has_fill = true;
+                try self.applyConstructionUpdate(update);
+            }
             for (package.responses.items) |response| if (response.operation) |result| {
                 self.local.acknowledgeOperationResult(result.request_id, result.status);
                 try self.operation_results.append(a, result);
@@ -118,10 +132,60 @@ const Harness = struct {
                 self.fill_snapshots += block_count;
             }
         }
+        for (self.construction_cache.requests.items) |request| switch (request) {
+            .definition => |id| try self.client.?.tryRequestBlueprintDefinition(id),
+            .snapshot => |identity| try self.client.?.tryResyncConstruction(identity),
+            .chunk => |id| {
+                const coords = self.layout.decodeChunkId(id);
+                _ = try self.client.?.tryRequestChunksInMode(.{ coords[0], coords[1] }, coords[2], coords[2] + 1, .blocks);
+            },
+        };
+        self.construction_cache.requests.clearRetainingCapacity();
         var results: std.ArrayList(service_api.BlueprintResult) = .empty;
         defer results.deinit(a);
         self.client.?.takeBlueprintResults(&results);
         try self.blueprint_results.appendSlice(a, results.items);
+    }
+    fn applyConstructionUpdate(self: *Harness, update: construction_stream.Update) !void {
+        switch (update) {
+            .snapshot => |snapshot| {
+                if (try self.construction_cache.checkSnapshot(a, snapshot) != .apply) return;
+                try self.local.applyConstructionSnapshot(snapshot);
+                self.construction_cache.snapshotInstalled(snapshot);
+            },
+            .delta => |delta| {
+                if (try self.construction_cache.checkDelta(a, delta) != .apply) return;
+                var changes: std.ArrayList(runtime.Change) = .empty;
+                defer changes.deinit(a);
+                for (delta.fulfilled_indices) |index| try changes.append(a, .{ .fulfill = .{ .instance_id = delta.identity.id, .cell_index = index } });
+                for (delta.transfers) |transfer| try changes.append(a, .{ .transfer = transfer });
+                if (delta.phase == .complete) try changes.append(a, .{ .complete = .{ .instance_id = delta.identity.id } });
+                try self.local.applyBlueprintChanges(changes.items);
+                const installed = self.local.blueprints.instances.getPtr(delta.identity.id).?;
+                if (delta.phase) |phase| try std.testing.expectEqual(phase, installed.phase);
+                installed.revision = delta.revision;
+                self.construction_cache.deltaInstalled(delta);
+            },
+            .retired => |retired| {
+                if (try self.construction_cache.retire(a, retired) != .apply) return;
+                if (self.local.blueprints.instances.getPtr(retired.identity.id)) |instance| {
+                    try std.testing.expectEqual(retired.identity.lifetime, instance.lifetime);
+                    instance.active = false;
+                    instance.phase = .complete;
+                    instance.revision = @max(instance.revision, retired.revision);
+                }
+            },
+        }
+    }
+    fn waitComplete(self: *Harness, id: u64) !void {
+        const end = deadline();
+        while (persistence.now(io) < end) {
+            try self.pump();
+            const instance = self.local.blueprints.instances.get(id);
+            if (instance == null or (!instance.?.active and instance.?.phase == .complete)) return;
+            try pause();
+        }
+        return error.TestCompletionTimeout;
     }
     fn waitBlueprint(self: *Harness, id: u64) !service_api.BlueprintResult {
         const end = deadline();
@@ -202,6 +266,7 @@ const Harness = struct {
         self.store_open = true;
         self.local.deinit();
         self.local = try world.World.init(a, &self.layout);
+        self.construction_cache.deinit(a);
         self.operation_results.clearRetainingCapacity();
         self.blueprint_results.clearRetainingCapacity();
         try self.start();
@@ -250,6 +315,7 @@ test "Save and final Save wait for a queued blueprint application to finish admi
         f.client = null;
         f.local.deinit();
         f.local = try world.World.init(a, &f.layout);
+        f.construction_cache.deinit(a);
         f.operation_results.clearRetainingCapacity();
         f.blueprint_results.clearRetainingCapacity();
         var gate: ReadGate = .{};
@@ -299,17 +365,20 @@ test "public blueprint publication application identity and atomic player fulfil
     const completed = try f.edit(.{ .block = origin, .action = .{ .put = .planks }, .player = .{ .id = 1, .expected_sequence = 0 }, .blueprint = .{ .instance_id = instance, .cell_index = 0 } });
     try std.testing.expectEqual(world.OperationStatus.success, completed.status);
     try std.testing.expectEqual(@as(?blueprint.BlockType, null), completed.player_inventory.?.material);
+    try f.waitComplete(instance);
     const end = deadline();
     while (persistence.now(io) < end) {
         try f.pump();
-        if (f.local.blueprints.targetAt(origin) == null and f.local.reader().get(.{ 40, 40, 48 }) == .planks) break;
+        if (f.local.blueprints.boxAt(f.local.layout, origin) == null and f.local.reader().get(.{ 40, 40, 48 }) == .planks) break;
         try pause();
     }
     try std.testing.expect(f.local.blueprints.targetAt(origin) == null);
     try std.testing.expect(f.local.blueprints.boxAt(f.local.layout, origin) == null);
     try std.testing.expectEqual(blueprint.BlockType.planks, f.local.reader().get(.{ 40, 40, 48 }).?);
     try std.testing.expect(f.fill_packages > 0);
-    try std.testing.expect(f.fill_snapshots > 0);
+    // Fulfillment progress is streamed independently of terrain. Handback may
+    // share a later publication with its final progress delta.
+    try std.testing.expect(f.fill_snapshots <= f.fill_packages);
     const occupied = try f.apply(1, id, origin, 0);
     try std.testing.expect(occupied.status != .success);
     try f.save();
@@ -345,6 +414,7 @@ test "public partial blueprint restart retains exact progress and completion del
     const delta = try wire.encodeOps(a, &.{ .{ .fulfill = .{ .instance_id = instance, .cell_index = 1 } }, .{ .fulfill = .{ .instance_id = instance, .cell_index = 2 } }, .{ .fulfill = .{ .instance_id = instance, .cell_index = 3 } } });
     defer a.free(delta);
     try std.testing.expectEqual(@as(usize, 39), delta.len);
+    try f.waitComplete(instance);
     try f.save();
     try f.restart();
     try std.testing.expectEqual(@as(u32, 0), f.local.blueprints.instances.count());
@@ -423,7 +493,9 @@ test "startup rejects checksum-valid blueprint progress that disagrees with pend
             @memcpy(&blocks, std.mem.asBytes(&data.blocks));
         }
         const index = 16 * 1024 + 8 * 32 + 8;
-        blocks[index] = if (fulfilled) 0 else @intFromEnum(blueprint.BlockType.planks);
+        // Both pending and simulation-owned fulfilled targets persist as air.
+        try std.testing.expectEqual(@as(u8, 0), blocks[index]);
+        blocks[index] = @intFromEnum(blueprint.BlockType.planks);
         const encoded = try format.encodeChunk(a, f.store.world_uuid, .{ .id = chunk_id, .revision = revision, .is_unreachable = false, .blocks = &blocks, .metadata = &.{} });
         defer a.free(encoded);
         try f.store.beginSnapshot(f.store.sequence + 1, f.store.global, f.store.players, f.store.player_count, 1);

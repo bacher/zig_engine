@@ -2030,15 +2030,15 @@ test "completed blueprint site frees quota for a same-batch replacement across W
     var f = try Fixture.init();
     defer f.deinit();
     const definition: blueprint_records.DefinitionView = .{ .id = 1, .owner = 7, .name = "Soil", .size = .{ 1, 1, 1 }, .cells = &.{2}, .target_count = 1 };
-    const state_bytes = 24 + 38 + definition.name.len + definition.cells.len + 41 + 1;
-    const limits: Limits = .{ .blueprints = .{ .max_instances = 1, .max_state_bytes = state_bytes } };
+    const state_bytes = 28 + 38 + definition.name.len + definition.cells.len + 54 + 1 + 12;
+    const limits: Limits = .{ .blueprints = .{ .max_instances = 1, .max_state_bytes = state_bytes + 24 } };
     f.store.limits = limits;
     const initial = try blueprint_records.encodeOps(a, &.{ .{ .definition = definition }, .{ .instance = .{ .id = 1, .definition_id = 1, .owner = 7, .origin = .{ 0, 0, 0 }, .rotation = 0 } } });
     defer a.free(initial);
     const tick = format.encodeGlobal(1);
     try f.store.beginSnapshotWithBlueprints(1, &tick, &.{}, 0, 0, initial);
     _ = try f.store.commitSnapshot();
-    const replacement = try blueprint_records.encodeOps(a, &.{ .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } }, .{ .instance = .{ .id = 2, .definition_id = 1, .owner = 7, .origin = .{ 1, 0, 0 }, .rotation = 0 } } });
+    const replacement = try blueprint_records.encodeOps(a, &.{ .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } }, .{ .transfer = .{ .instance_id = 1, .chunk_id = 0, .terrain_revision = 1 } }, .{ .complete = .{ .instance_id = 1, .completion_tick = 1, .soil_group_count = 1 } }, .{ .grass_initialized = .{ .instance_id = 1, .chunk_id = 0 } }, .{ .instance = .{ .id = 2, .definition_id = 1, .owner = 7, .origin = .{ 1, 0, 0 }, .rotation = 0 } } });
     defer a.free(replacement);
     var blocks: [32768]u8 = @splat(0);
     blocks[0] = 2;
@@ -2110,7 +2110,8 @@ test "unfinished progress survives checkpoint racing a final fulfillment and unc
     f.store.deinit();
     f.store = try Store.open(a, f.path, .{});
     try std.testing.expectEqual(@as(u64, 3), f.store.sequence);
-    try std.testing.expectEqual(@as(u32, 0), f.store.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u32, 1), f.store.blueprints.instances.count());
+    try std.testing.expectEqual(blueprint_records.Phase.materializing, f.store.blueprints.instances.get(9).?.phase);
     try std.testing.expectEqual(@as(u64, 9), f.store.blueprints.max_instance_id);
     try std.testing.expectEqual(@as(u32, 1), f.store.blueprints.definitions.count());
     try std.testing.expectEqual(@as(?u8, null), (try format.decodePlayer(f.store.players)).inventory);
@@ -2318,4 +2319,83 @@ test "checksummed unknown pending-work kinds are rejected from base and WAL" {
         defer store.deinit();
         try std.testing.expectEqualSlices(u8, &pending, store.pending_work);
     }
+}
+
+test "construction transfer completion and grass activation recover atomically after failed sync" {
+    const a = std.testing.allocator;
+    for (0..3) |stage| for ([_]bool{ false, true }) |survives| {
+        var model = io.Model.init(a);
+        defer model.deinit();
+        io.test_model = &model;
+        defer io.test_model = null;
+        var f = try Fixture.init();
+        defer f.deinit();
+        const fill: blueprint_records.Op = .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } };
+        const transfer: blueprint_records.Op = .{ .transfer = .{ .instance_id = 1, .chunk_id = 0, .terrain_revision = 1 } };
+        const complete: blueprint_records.Op = .{ .complete = .{ .instance_id = 1, .completion_tick = 1000, .soil_group_count = 1 } };
+        const initialized: blueprint_records.Op = .{ .grass_initialized = .{ .instance_id = 1, .chunk_id = 0 } };
+        const initial_ops = [_]blueprint_records.Op{
+            .{ .definition = .{ .id = 1, .owner = 7, .name = "Soil", .size = .{ 1, 1, 1 }, .cells = &.{2}, .target_count = 1 } },
+            .{ .instance = .{ .id = 1, .definition_id = 1, .owner = 7, .origin = .{ 0, 0, 0 }, .rotation = 0 } },
+            fill,
+            transfer,
+            complete,
+        };
+        const initial = try blueprint_records.encodeOps(a, initial_ops[0 .. 3 + stage]);
+        defer a.free(initial);
+        const tick = format.encodeGlobal(1);
+        var blocks: [32768]u8 = @splat(0);
+        blocks[0] = 2;
+        const marker = try format.encodeMetadata(a, .{ .construction = &.{0}, .timers = &.{.{ .cell = 0, .kind = 2, .deadline = 1 }} });
+        defer a.free(marker);
+        const transferred_record = try format.encodeChunk(a, f.store.world_uuid, .{ .id = 0, .revision = 1, .is_unreachable = false, .blocks = &blocks, .metadata = marker });
+        defer a.free(transferred_record);
+        try f.store.beginSnapshotWithBlueprints(1, &tick, &.{}, 0, @intFromBool(stage != 0), initial);
+        if (stage != 0) try f.store.appendChunk(transferred_record);
+        _ = try f.store.commitSnapshot();
+        const operation = [_]blueprint_records.Op{ transfer, complete, initialized };
+        const changes = try blueprint_records.encodeOps(a, operation[stage..][0..1]);
+        defer a.free(changes);
+        const activated = try format.encodeMetadata(a, .{ .construction = &.{0}, .timers = &.{.{ .cell = 0, .kind = 1, .deadline = 2000 }} });
+        defer a.free(activated);
+        const activated_record = try format.encodeChunk(a, f.store.world_uuid, .{ .id = 0, .revision = 2, .is_unreachable = false, .blocks = &blocks, .metadata = activated });
+        defer a.free(activated_record);
+        try f.store.beginSnapshotWithBlueprints(2, &tick, &.{}, 0, @intFromBool(stage != 1), changes);
+        if (stage != 1) try f.store.appendChunk(if (stage == 0) transferred_record else activated_record);
+        var fault: io.Faults = .{ .operation = .full_sync };
+        f.store.setFaults(&fault);
+        try std.testing.expectError(error.Io, f.store.commitSnapshot());
+        f.store.setFaults(null);
+        try model.crash(if (survives) .survive_unsynced else .lose_unsynced);
+        f.store.deinit();
+        f.store = try Store.open(a, f.path, .{});
+        // Verify both WAL replay and a subsequently compacted checkpoint.
+        for ([_]bool{ false, true }) |compact| {
+            if (compact) {
+                try f.store.compact();
+                f.store.deinit();
+                f.store = try Store.open(a, f.path, .{});
+            }
+            try std.testing.expectEqual(@as(u64, if (survives) 2 else 1), f.store.sequence);
+            const completed = stage == 2 or (stage == 1 and survives);
+            try std.testing.expectEqual(!completed, f.store.blueprints.instances.contains(1));
+            const obligation = (stage == 1 and survives) or (stage == 2 and !survives);
+            try std.testing.expectEqual(@as(u32, @intFromBool(obligation)), f.store.blueprints.grass_initializations.count());
+            if (!completed) try std.testing.expectEqual(@as(u64, if (stage != 0 or survives) 1 else 0), f.store.blueprints.instances.get(1).?.portions[0].terrain_revision);
+            const raw = try f.store.readChunk(a, 0);
+            defer if (raw) |bytes| a.free(bytes);
+            try std.testing.expectEqual(stage != 0 or survives, raw != null);
+            if (raw) |bytes| {
+                var chunk = try format.decodeChunk(a, f.store.world_uuid, bytes, f.store.dimensions);
+                defer chunk.deinit(a);
+                var metadata = try format.decodeMetadata(a, chunk.blocks, chunk.metadata, f.store.dimensions);
+                defer metadata.deinit(a);
+                const growth = stage == 2 and survives;
+                try std.testing.expectEqual(@as(u64, if (growth) 2 else 1), chunk.revision);
+                try std.testing.expectEqual(@as(u8, 2), chunk.blocks[0]);
+                try std.testing.expectEqual(@as(u8, if (growth) 1 else 2), metadata.timers[0].kind);
+                try std.testing.expectEqual(@as(u64, if (growth) 2000 else 1), metadata.timers[0].deadline);
+            }
+        }
+    };
 }

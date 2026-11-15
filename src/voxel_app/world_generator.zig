@@ -170,7 +170,7 @@ pub const PreparedWorldGenerator = struct {
                 const height = terrain.height(x, y);
                 if (z >= height) break :blk .none;
                 const depth = height - z - 1;
-                break :blk if (depth == 0) .grass else if (depth <= terrain.dirt_depth) .packed_dirt else .stone;
+                break :blk if (depth == 0) .grass else if (depth <= terrain.dirt_depth) .dirt else .stone;
             },
         };
     }
@@ -470,7 +470,7 @@ fn generateTerrainChunk(
                 else if (depth_below_surface == 0)
                     BlockType.grass
                 else if (depth_below_surface <= dirt_depth)
-                    BlockType.packed_dirt
+                    BlockType.dirt
                 else
                     BlockType.stone;
             }
@@ -525,7 +525,7 @@ test "terrain column has surface chunks between stone and air" {
         var chunk = column_generator.generateChunk(std.testing.allocator, @intCast(z));
         defer chunk.deinit(std.testing.allocator);
         const data = chunk.content.toData();
-        if (std.mem.indexOfScalar(BlockType, asFlatBlocks(&data), .packed_dirt) != null) {
+        if (std.mem.indexOfScalar(BlockType, asFlatBlocks(&data), .dirt) != null) {
             surface_chunk_count += 1;
         }
     }
@@ -619,7 +619,7 @@ test "unreachable terrain requires a solid ceiling and one-block horizontal wall
     defer chunk.deinit(std.testing.allocator);
     try std.testing.expect(chunk.flags.is_unreachable);
     // This takes the layered generation path, rather than the all-stone shortcut.
-    try std.testing.expectEqual(BlockType.packed_dirt, chunk.content.getBlock(.{ 0, 0, CHUNK_SIZE - 1 }));
+    try std.testing.expectEqual(BlockType.dirt, chunk.content.getBlock(.{ 0, 0, CHUNK_SIZE - 1 }));
 
     column.column.terrain.minimum_adjacent_height = top - 1;
     const cliff_chunk = column.generateChunk(std.testing.allocator, 2);
@@ -634,7 +634,7 @@ test "unreachable terrain requires a solid ceiling and one-block horizontal wall
     defer surface_chunk.deinit(std.testing.allocator);
     try std.testing.expect(!surface_chunk.flags.is_unreachable);
     try std.testing.expectEqual(BlockType.grass, surface_chunk.content.getBlock(.{ 0, 0, CHUNK_SIZE - 1 }));
-    try std.testing.expectEqual(BlockType.packed_dirt, surface_chunk.content.getBlock(.{ 0, 0, CHUNK_SIZE - 2 }));
+    try std.testing.expectEqual(BlockType.dirt, surface_chunk.content.getBlock(.{ 0, 0, CHUNK_SIZE - 2 }));
     try std.testing.expectEqual(0, surface_chunk.metadata.timed.events.items.len);
 }
 

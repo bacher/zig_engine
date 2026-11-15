@@ -1,8 +1,8 @@
 ---
 service: zig_engine
 created: 2026-11-12
-updated: 2026-11-14
-status: approved
+updated: 2026-11-15
+status: partially-implemented
 ---
 
 # Move active construction targets into simulation state
@@ -14,10 +14,14 @@ physical contents, progress, and saved state. Clients compose an almost static t
 with immutable blueprint definitions and compact construction progress. Completed constructions
 materialize into world-data chunks in bounded background work.
 
-The ownership, publication, and lifecycle contracts below are approved for implementation.
-This is a documentation change: runtime implementation and performance measurements remain
-pending. Exact wire encoding, scheduling budgets, and GPU representation are engineering
-choices to validate against these contracts.
+**Status: partially implemented.** Core implementation tasks T1–T12 are complete in
+[PR #66](https://github.com/bacher/zig_engine/pull/66). Remaining validation, optional
+optimization, and subsequent warehouse integration are tracked separately in T13–T16 below.
+
+The ownership, publication, and lifecycle contracts below are approved. The implementation
+uses the existing service executor, separate construction meshes with internal-face culling,
+bounded publication, and shared capture. Validation and measured limitations are recorded
+under Q7; warehouse gameplay and the mixed warehouse acceptance cases remain subsequent work.
 
 ## Context
 
@@ -31,21 +35,20 @@ content and ordinary placements in blueprint-empty cavities. Boxes cannot overla
 multiple sites can occupy the same chunk and use each other's fulfilled targets as support.
 Fulfillment checks at most five physical neighbors and needs no final structural scan.
 
-Today `world_data_service.zig` writes completed blocks into terrain. The runtime's pending-target
-index drops entries on fulfillment, and the last fill releases the site and its restrictions.
-Persistence likewise retires the instance on its last fulfillment. These lifetimes must change:
-filled targets need discovery until handback, and a fully filled site remains active while
-materializing. This spec explicitly supersedes blueprint R32's immediate release and the soil
+Before this change, `world_data_service.zig` wrote completed blocks into terrain. The runtime's
+pending-target index dropped entries on fulfillment, and the last fill released the site and
+its restrictions. Persistence likewise retired the instance on its last fulfillment.
+Filled targets now retain discovery until handback, and a fully filled site remains active while
+materializing. This spec explicitly supersedes blueprint R32's former immediate release and the soil
 compaction/active-target aging rules. Q6 retains grass covering at admission and moves grass
 initialization for built soil to world-data after completion. Other blueprint contracts remain
 in force except the soil equivalence explicitly described there.
 
 [PR #64](https://github.com/bacher/zig_engine/pull/64) made fulfillment's direct cell mutation
-target-local. Current application still clears grass/cancels surface timers below targets;
-manual compaction, compaction timers, and grass growth remain implemented. Q6 removes the
+target-local. Application still clears grass/cancels surface timers below targets.
+Q6 removes the
 loose/compacted soil distinction and compaction mechanics, while retaining grass as surface
-cover under world-data ownership. These are planned changes, not effects already implemented
-by PR #64.
+cover under world-data ownership. These changes belong to this implementation, rather than PR #64.
 
 The [shared save baseline](warehouses.md#q18--atomic-transfers-and-coherent-durable-capture)
 captures world, player, and simulation state coherently without a disk sync per item.
@@ -167,7 +170,7 @@ enqueue cost only; it cannot establish the benefit of this ownership change.
   work until initialized. Retry/restart cannot lose, duplicate, or reset deadlines, and delayed
   initialization must respect subsequent ordinary edits and their cell/timer lifetimes.
 - R29: Grass is surface cover, not a change in structural capability. Use one soil support
-  baseline for bare and grassy soil: current packed-soil behavior,
+  baseline for bare and grassy soil: the pre-change packed-soil behavior,
   including its own footprint/platform requirements. Remove loose-soil exclusions consistently
   from ordinary rules, blueprint normalization/certification, and the five-neighbor predicate;
   preserve that predicate's bound and resource identity across cover changes.
@@ -424,7 +427,7 @@ and their tests explicitly, with the appropriate ruleset/save gates. Reuse the a
 preparation and world-data grass scheduler, removing their dependence on compaction. Keep the
 single soil material's resource identity and structural behavior independent of grass cover.
 
-**Confirmed soil support:** use current packed-soil support capabilities
+**Confirmed soil support:** use the pre-change packed-soil support capabilities
 for both bare and grassy soil, retaining soil's own footprint/platform requirements. Clearing
 grass must not weaken an existing foundation; growing grass must not strengthen it. Remove the
 old loose-soil support exclusion from ordinary rules and the cheap fulfillment predicate, and
@@ -447,6 +450,23 @@ terrain reads, multiple sites per chunk, sparse boxes, large definitions shared 
 client subscription churn, completion/grass-initialization bursts, and cold/empty chunks. Exercise capture/restart
 and publication reordering at every lifecycle boundary. Record limits and uncertainty alongside
 Q2 alternatives; revisit the design if composed reads or retained state erase the intended gain.
+
+**IMPLEMENTATION CHECKPOINT 2026-11-14.** The selected rendering path is a separate
+construction mesh using ordinary voxel face records and shaders. It culls adjacent fulfilled
+construction faces across site/chunk seams. Mesh-only terrain may retain hidden interface
+faces; it does not require transmitting terrain cells. Static replacement and dynamic removal
+install together after allocation/capacity preflight, while coherent physical data may advance
+earlier. See [render validation](../../docs/validation/construction-rendering.md).
+
+The service attempts at most four materialization portions/completions and one soil-group
+initialization per turn. Held/unavailable work yields and resumes on dependency progress.
+Construction publication has its own 32 MiB shared payload limit and a bounded history ring;
+overwrite triggers a current snapshot. These are subsystem limits, not a total RAM limit.
+See [transport validation](../../docs/validation/construction-transport.md) for accounting and
+failure cases. Reference workloads include 128 dense shared-definition sites, 128 sparse
+sites, two observers, mostly ordinary reads, partial saves/restarts and completion bursts;
+the measured results and exclusions are recorded in
+[authority validation](../../docs/validation/construction-authority.md).
 
 ### Q8 — Construction first, then warehouse integration
 
@@ -476,6 +496,21 @@ retiring one cannot invalidate the other's reference/subscription. External comm
 identity binds the whole typed intent, including target and payload; reuse with different
 contents is rejected. An old command cannot affect a new registration. Automatic simulation
 work uses task transitions rather than a player-command cache lookup for each item.
+
+**CONFIRMED IMPLEMENTATION CHECKPOINT 2026-11-14.** Use the same live-session command
+ledger for external blueprint Save/Apply and player/observer block operations. One endpoint
+sequence spans these typed intents. Reserve bounded identity, exact intent and scalar-result
+storage before enqueue; a duplicate returns pending or its retained outcome without adding
+another queued mutation or waiter. The default global record window is `pending_commands`
+(256), with a separate 32 MiB intent/result storage cap. Retired acknowledged sequences
+require resynchronization, including retries through the legacy Save-key adapter. A new client
+session is fenced until its caller has refreshed authoritative state. Current in-process
+collection acknowledges ownership of the returned results; a future wire adapter must use
+explicit acknowledgment. Blueprint notification allocation failure retains its terminal scalar
+outcome in that bounded ledger and retries delivery without rerunning Save/Apply. Automatic
+simulation operations bypass this bookkeeping. There is no durable per-click response log.
+See [the implemented command contract](../../docs/validation/construction-commands.md) for
+exact intent matching, acknowledgment, memory accounting, and session fences.
 
 Snapshots retain type-specific meaning. Construction sends an immutable definition, initial
 progress, and revisioned batched bit/index updates. Warehouse Q24 sends compact complete object
@@ -516,9 +551,9 @@ are future integration obligations, not claims that unimplemented warehouses alr
 
 ## Acceptance Criteria
 
-These criteria specify future implementation behavior; they do not claim runtime verification
-in this documentation change. Existing IDs are retained, with superseded marker/completion/soil
-criteria updated to match Q3/Q5/Q6.
+These criteria define implementation behavior. Existing IDs are retained, with superseded
+marker/completion/soil criteria updated to match Q3/Q5/Q6. Mixed warehouse cases AC55–AC60
+remain integration obligations for the subsequent warehouse implementation.
 
 - AC1: GIVEN an admissible blueprint WHEN applied THEN only nonempty targets become
   simulation-owned physical air; ordinary cavity/foundation terrain stays world-data-owned
@@ -681,7 +716,7 @@ criteria updated to match Q3/Q5/Q6.
 
 ## Out of Scope
 
-- Runtime implementation, benchmarks, deployment, or save-format changes in this documentation PR.
+- Warehouse gameplay and stock records; only their shared integration boundary belongs here.
 - NPC scheduler/task/cargo decomposition, new cancellation/refund UI, or whole-box ownership.
 - A separate simulation thread, parallel region executor, universal transaction framework,
   independent owner saves, or an adopted best-effort resource-loss exception.
@@ -763,30 +798,84 @@ state. Measure and fault-test these before claiming a performance improvement.
   record reader lifetimes and revision/resync requirements in Q1/Q3/Q4.
 - [x] T3: Select bounded per-chunk materialization with retained restrictions and Q6's soil
   model: grass stays world-data-owned, active targets stay bare, compaction is removed.
-- [ ] T4: Define Q7 workload sizes, counters, memory accounting, numeric budgets, and fault cases.
+- [x] T4: Define Q7 workload sizes, counters, memory accounting, numeric budgets, and fault cases.
 
 ### Implementation sequence
 
-- [ ] T5: Add simulation-owned records, target groups, full-lifetime discovery, and coherent admission.
-- [ ] T6: Add composed reads/enumeration and route fulfillment/resources to the correct owners.
-- [ ] T7: Add materialization phases, per-chunk acceptance, fair scheduling with blocked-work
+- [x] T5: Add simulation-owned records, target groups, full-lifetime discovery, and coherent admission.
+- [x] T6: Add composed reads/enumeration and route fulfillment/resources to the correct owners.
+- [x] T7: Add materialization phases, per-chunk acceptance, fair scheduling with blocked-work
   yielding/recovery, common capture, and safe retirement.
-- [ ] T8: Integrate prediction, collision, rendering, and per-portion client handoff; separate
+- [x] T8: Integrate prediction, collision, rendering, and per-portion client handoff; separate
   data readiness from successful geometry installation and retain display through upload retries.
-- [ ] T9: Apply Q6: remove compaction, retain atomic admission grass clearing, suppress active
+- [x] T9: Apply Q6: remove compaction, retain atomic admission grass clearing, suppress active
   target growth, and add bounded post-completion world-data timer initialization/recovery;
   unify bare/grassy soil support in ordinary rules, certification, and cheap fulfillment;
   update format gates, tests, and documentation.
-- [ ] T10: Add immutable definition caching, initial snapshots, batched deltas, subscriptions, and resync.
-- [ ] T11: Audit ordinary/dependent validation, road obligations, mesh boundaries, and raw-air shortcuts.
-- [ ] T12: Establish Q8's reusable simulation-state/capture and typed command/discovery boundaries
+- [x] T10: Add immutable definition caching, initial snapshots, batched deltas, subscriptions, and resync.
+- [x] T11: Audit ordinary/dependent validation, road obligations, mesh boundaries, and raw-air shortcuts.
+- [x] T12: Establish Q8's reusable simulation-state/capture and typed command/discovery boundaries
   during construction implementation; record AC55–AC60 as mixed integration checks for the
   subsequent warehouse implementation, without implementing warehouse gameplay in this stage.
 
 ### Validation
 
-- [ ] T-val: Verify AC1–AC54 and the common-boundary portions of AC55–AC60; complete mixed
-  warehouse cases when that feature is implemented. Run blueprint/persistence regressions, allocation/fault/reordering
-  cases, blocked-site fairness/recovery, delayed/failed geometry installation, restart during
-  partial materialization, and end-to-end performance under Q7; record
-  measured results, selected budgets, and remaining limitations.
+- [ ] T-val (partial): Blueprint/persistence regressions, allocation/fault/reordering cases,
+  blocked-site fairness/recovery, delayed/failed geometry installation, partial restart, and
+  component workload measurements are covered by the evidence below. Whole-frame/target-PC
+  measurements and comparison with Q2 alternatives remain open under Q7. Complete mixed
+  warehouse cases AC55–AC60 when that feature is implemented.
+
+### Follow-ups
+
+- [ ] T13 — Required validation: complete Q7 end-to-end, whole-frame and target-PC workloads,
+  including subscription churn, save/publication pressure and long-running completion bursts.
+- [ ] T14 — Required comparison: measure equivalent completed work for Q2 ownership/execution
+  alternatives; component benchmarks alone do not establish an architectural speedup.
+- [ ] T15 — Optional optimization: evaluate compact construction snapshots and reuse of client
+  grouping for the same definition/lifetime. The [payload comparison](../../docs/validation/construction-transport.md#snapshot-payload-boundary)
+  measures a prototype; production snapshots still carry grouping arrays. Preserve validation,
+  source lifetime and local cleanup semantics. This is separate from warehouse Q25 deltas.
+- [ ] T16 — Subsequent feature integration: implement warehouses on Q8's shared foundation and
+  execute mixed cases AC55–AC60. Warehouse gameplay is not part of this implementation.
+
+T13/T14 keep validation open; T16 depends on the next feature. T15 is optional and does not
+by itself block completion of the current contracts. T-val summarizes the remaining checks.
+
+### Implementation evidence
+
+| Contract | Evidence and scope |
+| --- | --- |
+| Target-only admission, composed support, fulfillment/resource coherence, lifecycle and restart (AC1–AC20, AC26–AC30, AC36–AC38, AC41–AC42, AC54) | [Authority validation](../../docs/validation/construction-authority.md), direct service regressions, blueprint runtime and persistence fault suites. |
+| Discovery, definition reuse, revision gaps, batched updates and retirement (AC6, AC10, AC15, AC22–AC25, AC34, AC39–AC40) | [Transport validation](../../docs/validation/construction-transport.md) and client cache reordering/allocation-failure tests. |
+| Per-portion physical/display handoff (AC31–AC33, AC35, AC53) | [Render validation](../../docs/validation/construction-rendering.md), application package integration tests, and real color/depth GPU readback before and after nonempty layer replacement. |
+| Soil cover, delayed initialization, replacement lifetimes and fairness (AC43–AC52) | Direct service admission/fault/restart tests, block rules, timer kernel, and storage loss/survival checks described in the authority report. |
+| Shared external-command boundary (Q8 and common portion of AC55) | [Command validation](../../docs/validation/construction-commands.md): exact typed intents, session/lifetime fences, replay, acknowledgment, bounded admission and allocation failure. |
+| Performance evidence (AC17, AC21) | Completed authority workloads and CPU geometry measurements with reported budgets, hardware, retained/peak bytes, and exclusions. |
+
+These reports do not establish a speedup over Q2 alternatives, whole-frame latency under a
+full economy, or target-PC capacity. The authority workload excludes command admission and
+dispatch; the geometry timing excludes the full frame and GPU execution. Complete mixed
+warehouse checks AC55–AC60 after warehouse implementation. Keep broader end-to-end and
+alternative comparisons open rather than treating the component measurements as those results.
+
+Initial integrated verification on 2026-11-14 (historical baseline, before the review fixes):
+
+- `zig build install test -Doptimize=ReleaseFast -j2 --summary all`: 60/60 build steps,
+  2,637 tests passed and 8 skipped.
+- `zig build test-world-service --summary all`: 16/16 steps, 644 tests passed;
+  the one ReleaseFast-only measurement was skipped in Debug.
+- `zig build test-gpu -Doptimize=ReleaseFast -j2 --summary all`: 20/20 steps,
+  126/126 tests passed on the Metal adapter, covering both wrapping modes.
+
+Review hardening through `8253acf` additionally covers current-owner precedence over retained
+sources, local invalidation for ordinary fills, boundary-only terrain revisions, retirement
+without a final progress update, and fresh local cleanup cursors on snapshot replacement.
+Snapshots now have a dedicated immutable payload boundary rather than embedding a runtime
+instance. See the transport and rendering reports for the cases and remaining costs.
+
+Recorded scoped verification at that revision: construction-client 123 passed/1 benchmark
+skipped, world 354 passed, application 839 passed/2 skipped, blueprint-service 656 passed/2
+skipped, and direct transport 16 passed. Two ReleaseFast snapshot benchmark runs passed
+3/3 each. These targets overlap; do not add their counts. The integrated and GPU suites above
+were not rerun for these final review fixes or this documentation reconciliation.

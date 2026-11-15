@@ -6,8 +6,7 @@ const BlockType = @import("engine").voxel_chunk.BlockType;
 
 pub const extraction_seconds: f64 = 3;
 pub const placement_seconds: f64 = 1;
-pub const compaction_seconds: f64 = 3;
-pub const Source = enum { key, mouse, secondary_mouse };
+pub const Source = enum { key, mouse };
 
 pub const Interaction = struct {
     inventory: ?BlockType = null,
@@ -16,7 +15,6 @@ pub const Interaction = struct {
     requested: ?Source = null,
     key_down: bool = false,
     mouse_down: bool = false,
-    secondary_mouse_down: bool = false,
 
     pub const Hold = struct {
         source: Source,
@@ -28,17 +26,15 @@ pub const Interaction = struct {
             return switch (self.operation.action) {
                 .remove => extraction_seconds,
                 .put => placement_seconds,
-                .compact => compaction_seconds,
             };
         }
     };
 
     pub fn press(self: *Interaction, source: Source) void {
-        const was_down = self.key_down or self.mouse_down or self.secondary_mouse_down;
+        const was_down = self.key_down or self.mouse_down;
         switch (source) {
             .key => self.key_down = true,
             .mouse => self.mouse_down = true,
-            .secondary_mouse => self.secondary_mouse_down = true,
         }
         // All controls must be released before a fresh action can start. A press
         // while waiting for authority is consumed, never queued for later.
@@ -49,7 +45,6 @@ pub const Interaction = struct {
         switch (source) {
             .key => self.key_down = false,
             .mouse => self.mouse_down = false,
-            .secondary_mouse => self.secondary_mouse_down = false,
         }
         if (self.requested == source) self.requested = null;
         if (self.holding) |hold| if (hold.source == source) {
@@ -57,7 +52,7 @@ pub const Interaction = struct {
         };
     }
 
-    /// Finish a local attempt. Compaction leaves the carried block unchanged.
+    /// Finish a local placement or extraction attempt.
     pub fn completePrediction(self: *Interaction, result: world.EditResult) void {
         std.debug.assert(self.pending == null);
         const hold = self.holding.?;
@@ -66,7 +61,6 @@ pub const Interaction = struct {
         self.inventory = switch (hold.operation.action) {
             .remove => result.mined_type,
             .put => null,
-            .compact => self.inventory,
         };
         self.pending = .{};
     }
@@ -82,7 +76,7 @@ pub const Interaction = struct {
     /// still need a later rebase if rolling back a rejected edit ran out of memory.
     pub fn acknowledge(self: *Interaction, player_id: u64, result: OperationResult) bool {
         const pending = if (self.pending) |*pending| pending else return false;
-        if (pending.request_id != result.request_id) return false;
+        if (pending.request_id != result.request_id or pending.resolved) return false;
         if (result.player_inventory) |inventory| if (inventory.player_id == player_id) {
             self.inventory = inventory.material;
         };
@@ -109,7 +103,6 @@ pub const Interaction = struct {
         self.cancelHold();
         self.key_down = false;
         self.mouse_down = false;
-        self.secondary_mouse_down = false;
     }
 };
 
@@ -130,30 +123,6 @@ test "release cancels even between frames and switching controls cannot extend a
     try std.testing.expectEqual(Source.mouse, interaction.requested.?);
 }
 
-test "compaction preserves inventory and shares the fresh-press action gate" {
-    for ([_]?BlockType{ null, .sand }) |inventory| {
-        var interaction: Interaction = .{ .inventory = inventory };
-        interaction.press(.secondary_mouse);
-        try std.testing.expectEqual(Source.secondary_mouse, interaction.requested.?);
-        interaction.requested = null;
-        interaction.holding = .{ .source = .secondary_mouse, .operation = .{ .block = .{ 1, 2, 3 }, .action = .compact }, .material = .dirt };
-        try std.testing.expectEqual(@as(f64, 3), interaction.holding.?.duration());
-        interaction.completePrediction(.{ .status = .success });
-        try std.testing.expectEqual(inventory, interaction.inventory);
-        interaction.markSubmitted(7);
-        try std.testing.expect(interaction.acknowledge(1, .{ .request_id = 7, .status = .success, .player_inventory = .{ .player_id = 1, .material = inventory } }));
-        interaction.finishReconciliation(&.{});
-        interaction.press(.key);
-        try std.testing.expectEqual(null, interaction.requested);
-        interaction.release(.secondary_mouse);
-        interaction.press(.secondary_mouse);
-        try std.testing.expectEqual(null, interaction.requested);
-        interaction.loseFocus();
-        interaction.press(.secondary_mouse);
-        try std.testing.expectEqual(Source.secondary_mouse, interaction.requested.?);
-    }
-}
-
 test "presses during acknowledgement wait are consumed and focus loss preserves pending inventory" {
     var interaction: Interaction = .{ .inventory = .dirt, .pending = .{} };
     interaction.press(.key);
@@ -169,6 +138,15 @@ test "presses during acknowledgement wait are consumed and focus loss preserves 
     try std.testing.expectEqual(null, interaction.requested);
     try std.testing.expect(interaction.pending != null);
     try std.testing.expectEqual(BlockType.dirt, interaction.inventory.?);
+}
+
+test "duplicate resolved command result cannot restore an older inventory snapshot" {
+    var interaction: Interaction = .{ .inventory = .sand, .pending = .{ .request_id = 77 } };
+    const result: OperationResult = .{ .request_id = 77, .status = .success, .player_inventory = .{ .player_id = 1, .material = .dirt } };
+    try std.testing.expect(interaction.acknowledge(1, result));
+    interaction.inventory = .planks;
+    try std.testing.expect(!interaction.acknowledge(1, result));
+    try std.testing.expectEqual(BlockType.planks, interaction.inventory.?);
 }
 
 test "completing a local attempt predicts inventory only when the terrain edit succeeds" {

@@ -119,7 +119,8 @@ test "blueprint dense maximum fulfillment measures bounded preparation capacity 
             try std.testing.expectEqual(@as(u32, dense_cells), state.instances.get(1).?.remaining);
             state.apply(&prepared);
         }
-        try std.testing.expectEqual(@as(u32, 0), state.instances.count());
+        try std.testing.expectEqual(@as(u32, 1), state.instances.count());
+        try std.testing.expectEqual(blueprints.Phase.materializing, state.instances.get(1).?.phase);
         try std.testing.expectEqual(@as(u64, 1), state.max_instance_id);
         const expected = try blueprints.encodeState(a, &state);
         defer a.free(expected);
@@ -187,11 +188,13 @@ fn orderedFailureScenario(a: Allocator) !void {
     }
     const before = try blueprints.encodeState(fixtures, &state);
     defer fixtures.free(before);
-    var ops: [cells.len + 3]blueprints.Op = undefined;
+    var ops: [cells.len + 5]blueprints.Op = undefined;
     ops[0] = .{ .instance = .{ .id = 1, .definition_id = 1, .owner = 7, .origin = .{ 0, 0, 32 }, .rotation = 0 } };
     for (0..cells.len) |index| ops[index + 1] = .{ .fulfill = .{ .instance_id = 1, .cell_index = @intCast(index) } };
-    ops[cells.len + 1] = .{ .instance = .{ .id = 2, .definition_id = 1, .owner = 7, .origin = .{ 0, 0, 32 }, .rotation = 0 } };
-    ops[cells.len + 2] = .{ .fulfill = .{ .instance_id = 2, .cell_index = 0 } };
+    ops[cells.len + 1] = .{ .transfer = .{ .instance_id = 1, .chunk_id = 16, .terrain_revision = 1 } };
+    ops[cells.len + 2] = .{ .complete = .{ .instance_id = 1, .completion_tick = 1 } };
+    ops[cells.len + 3] = .{ .instance = .{ .id = 2, .definition_id = 1, .owner = 7, .origin = .{ 0, 0, 32 }, .rotation = 0 } };
+    ops[cells.len + 4] = .{ .fulfill = .{ .instance_id = 2, .cell_index = 0 } };
     const changes = try blueprints.encodeOps(fixtures, &ops);
     defer fixtures.free(changes);
     {

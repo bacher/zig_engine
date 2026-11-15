@@ -10,7 +10,7 @@
 
 - [ ] Add multiple point and spot lights alongside at most one directional light; implement light accumulation and per-light shadow allocation (deferred; see [lighting plan](docs/rendering.md#lighting-contract-and-extension-plan)).
 
-- [ ] Define voxel GPU memory budgets, oversized-chunk handling, capacity-pressure recovery, and growth/eviction validation (deferred; voxel implementation unchanged; see [voxel follow-ups](docs/voxel-world.md#deferred-capacity-and-lifetime-work)).
+- [ ] Complete global voxel GPU memory budgets, fragmentation/pressure recovery, and growth/eviction validation (local construction-layer capacity preflight and oversized-chunk handling already exist; see [voxel follow-ups](docs/voxel-world.md#deferred-capacity-and-lifetime-work)).
 
 - [ ] Define a final player recovery policy when adjacent cells, five seconds of position history, and the bounded eight-metre search contain no clear body-sized space. Currently movement freezes, stderr reports the failure, and recovery retries after terrain updates or once per second.
 
@@ -22,3 +22,5 @@
 - [ ] **P2:** Keep the first world-map opening responsive while generating its raster; preserve caching and bounded memory (see [map generation stall](docs/world-map.md#p2-map-generation-stalls-the-first-frame)).
 - [ ] **P3:** Make the world-map header fit narrow windows at high UI scale, and cover actual font scaling in UI tests (see [header overlap](docs/world-map.md#p3-header-overlaps-in-narrow-windows-at-high-ui-scale)).
 - [ ] Add natural-world and downsampling regressions for the world-map raster (see [missing test coverage](docs/world-map.md#test-improvement-natural-terrain-and-downsampling)).
+
+- [ ] Complete [construction ownership follow-ups](specs/features/construction-state-ownership.md#follow-ups): end-to-end/target-PC validation, ownership comparison, optional compact snapshots, then mixed integration with [warehouses](specs/features/warehouses.md#implementation-preparation). Warehouse gameplay remains unimplemented.

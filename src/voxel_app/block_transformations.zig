@@ -6,11 +6,14 @@ pub const ticks_per_second: Tick = 60;
 pub const transformation_delay: Tick = 30 * 60 * ticks_per_second;
 pub const BlockIndex = u15;
 pub const Kind = enum(u8) {
-    compact_dirt = 0,
+    // Value 0 belonged to removed compaction events.
     grow_grass = 1,
+    /// Persistent world-data work marker. due_tick is the construction lifetime
+    /// token, not a deadline; only completion initialization may consume it.
+    initialize_grass = 2,
     pub fn isLazy(self: Kind) bool {
         return switch (self) {
-            .compact_dirt, .grow_grass => true,
+            .grow_grass, .initialize_grass => true,
         };
     }
 };
@@ -88,12 +91,26 @@ pub const Queue = struct {
 
     pub fn tryTakeDue(self: *Queue, allocator: std.mem.Allocator, tick: Tick) ![]Event {
         var count: usize = 0;
-        while (count < self.events.items.len and self.events.items[count].due_tick <= tick) : (count += 1) {}
+        var end: usize = 0;
+        while (end < self.events.items.len and self.events.items[end].due_tick <= tick) : (end += 1) {
+            if (self.events.items[end].kind != .initialize_grass) count += 1;
+        }
         if (count == 0) return &.{};
-        const due = try allocator.dupe(Event, self.events.items[0..count]);
-        const remaining = self.events.items.len - count;
-        std.mem.copyForwards(Event, self.events.items[0..remaining], self.events.items[count..]);
-        self.events.items.len = remaining;
+        const due = try allocator.alloc(Event, count);
+        var retained: usize = 0;
+        var taken: usize = 0;
+        for (self.events.items[0..end]) |event| {
+            if (event.kind == .initialize_grass) {
+                self.events.items[retained] = event;
+                retained += 1;
+            } else {
+                due[taken] = event;
+                taken += 1;
+            }
+        }
+        const remaining = self.events.items.len - end;
+        std.mem.copyForwards(Event, self.events.items[retained..][0..remaining], self.events.items[end..]);
+        self.events.items.len = retained + remaining;
         return due;
     }
 };
@@ -103,8 +120,8 @@ test "deadlines remain ordered and replacement cancels an earlier incarnation" {
     var queue: Queue = .{};
     defer queue.deinit(allocator);
     queue.schedule(allocator, .{ .block = 2, .kind = .grow_grass, .due_tick = 20 });
-    queue.schedule(allocator, .{ .block = 1, .kind = .compact_dirt, .due_tick = 10 });
-    queue.schedule(allocator, .{ .block = 2, .kind = .compact_dirt, .due_tick = 30 });
+    queue.schedule(allocator, .{ .block = 1, .kind = .grow_grass, .due_tick = 10 });
+    queue.schedule(allocator, .{ .block = 2, .kind = .grow_grass, .due_tick = 30 });
     const early = queue.takeDue(allocator, 9);
     defer allocator.free(early);
     try std.testing.expectEqual(0, early.len);
@@ -115,7 +132,7 @@ test "deadlines remain ordered and replacement cancels an earlier incarnation" {
     const second = queue.takeDue(allocator, 30);
     defer allocator.free(second);
     try std.testing.expectEqual(1, second.len);
-    try std.testing.expectEqual(Kind.compact_dirt, second[0].kind);
+    try std.testing.expectEqual(Kind.grow_grass, second[0].kind);
 }
 
 test "chunk-local indices cover all 32768 cells without aliasing" {
@@ -128,7 +145,7 @@ test "chunk-local indices cover all 32768 cells without aliasing" {
 fn exerciseFallibleQueue(a: std.mem.Allocator) !void {
     var source: Queue = .{};
     defer source.deinit(a);
-    try source.trySchedule(a, .{ .block = 1, .kind = .compact_dirt, .due_tick = 10 });
+    try source.trySchedule(a, .{ .block = 1, .kind = .grow_grass, .due_tick = 10 });
     try source.trySchedule(a, .{ .block = 1, .kind = .grow_grass, .due_tick = 20 });
     var copy = try source.tryClone(a);
     defer copy.deinit(a);
@@ -143,7 +160,7 @@ test "fallible queue cloning rescheduling and extraction release every failed al
 test "failed event insertion preserves existing deadlines" {
     var source: Queue = .{};
     defer source.deinit(std.testing.allocator);
-    try source.trySchedule(std.testing.allocator, .{ .block = 1, .kind = .compact_dirt, .due_tick = 10 });
+    try source.trySchedule(std.testing.allocator, .{ .block = 1, .kind = .grow_grass, .due_tick = 10 });
     // Fill the allocated capacity before attempting insertion through a failing allocator.
     while (source.events.items.len < source.events.capacity) source.scheduleAssumeCapacity(.{ .block = @intCast(source.events.items.len + 1), .kind = .grow_grass, .due_tick = 20 });
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
@@ -154,4 +171,22 @@ test "failed event insertion preserves existing deadlines" {
     // Replacement reuses its canceled slot, even when allocations are unavailable.
     try source.trySchedule(failing.allocator(), .{ .block = 1, .kind = .grow_grass, .due_tick = 40 });
     try std.testing.expectEqual(before, source.events.items.len);
+}
+
+test "initialization markers never expire and replacement cancels their lifetime" {
+    const a = std.testing.allocator;
+    var queue: Queue = .{};
+    defer queue.deinit(a);
+    try queue.trySchedule(a, .{ .block = 1, .kind = .initialize_grass, .due_tick = 7 });
+    try queue.trySchedule(a, .{ .block = 2, .kind = .grow_grass, .due_tick = 10 });
+    const due = try queue.tryTakeDue(a, std.math.maxInt(u64));
+    defer a.free(due);
+    try std.testing.expectEqual(@as(usize, 1), due.len);
+    try std.testing.expectEqual(@as(BlockIndex, 2), due[0].block);
+    try std.testing.expectEqual(@as(usize, 1), queue.events.items.len);
+    try std.testing.expectEqual(Kind.initialize_grass, queue.events.items[0].kind);
+    try queue.trySchedule(a, .{ .block = 1, .kind = .grow_grass, .due_tick = 100 });
+    try std.testing.expectEqual(@as(usize, 1), queue.events.items.len);
+    try std.testing.expectEqual(Kind.grow_grass, queue.events.items[0].kind);
+    try std.testing.expectEqual(@as(Tick, 100), queue.events.items[0].due_tick);
 }

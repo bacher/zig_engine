@@ -117,6 +117,15 @@ pub const SimulationWorker = struct {
                     continue;
                 },
                 error.ServiceStopped => return,
+                // This endpoint only submits automatic local simulation work,
+                // which never enters the external live-session command ledger.
+                error.StaleCommand,
+                error.ConflictingCommand,
+                error.InvalidCommandSession,
+                error.OutOfOrderCommand,
+                error.CommandSequenceExhausted,
+                error.CommandResyncRequired,
+                => unreachable,
             };
             const status = try self.waitForOperation(&responses, id);
             action = nextAction(action, status);
@@ -208,7 +217,7 @@ test "simulation repeatedly pushes put remove put to a subscribed client" {
     }
     try std.testing.expect(try observer.waitResponses(&responses));
     try std.testing.expectEqual(1, responses.items.len);
-    responses.items[0].data.blocks.chunk.deinit(allocator);
+    responses.items[0].deinit(allocator);
     responses.clearRetainingCapacity();
 
     const started = Io.Clock.awake.now(io);

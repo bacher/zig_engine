@@ -1,8 +1,8 @@
 # Simulation notes
 
-These notes capture gameplay intent, constraints, and architecture decisions for the upcoming simulation. They accompany the [game vision](game-vision.md) and [design principles](../DESIGN_PRINCIPLES.md). They describe planned behavior and retain alternatives where no choice has been made; the selected first-version warehouse execution does not determine the full economy's scaling architecture.
+These notes capture gameplay intent, constraints, and architecture decisions for the upcoming simulation. They accompany the [game vision](game-vision.md) and [design principles](../DESIGN_PRINCIPLES.md). Construction ownership and shared capture are implemented; warehouse gameplay and the broader economy remain planned. These notes retain alternatives where no choice has been made; the selected first-version warehouse execution does not determine the full economy's scaling architecture.
 
-The [open questions](simulation-open-questions.md) track remaining decisions. Implement [construction ownership first, then warehouses](../specs/features/construction-state-ownership.md#q8--construction-first-then-warehouse-integration), sharing the simulation-state and capture boundary while retaining distinct records, world-query semantics, and publication policies. The [warehouse specification](../specs/features/warehouses.md) settles first-version storage behavior; full logistics allocation and other marked follow-ups remain separate work.
+The [open questions](simulation-open-questions.md) track remaining decisions. The implemented foundation follows [construction ownership first, then warehouses](../specs/features/construction-state-ownership.md#q8--construction-first-then-warehouse-integration), sharing the simulation-state and capture boundary while retaining distinct records, world-query semantics, and publication policies. The [warehouse specification](../specs/features/warehouses.md) settles first-version storage behavior; full logistics allocation and other marked follow-ups remain separate work.
 
 ## Primary scenario and player intervention
 
@@ -43,7 +43,7 @@ Each mutable fact needs a clear authoritative source and a defined way to coordi
 | State | Responsible component |
 | --- | --- |
 | Base terrain outside simulation-owned construction targets, chunk storage/loading, and terrain publication | World-data service |
-| Active construction target cells, their physical contents, progress, and saved state until handback | Simulation; selected direction, implementation pending |
+| Active construction target cells, their physical contents, progress, and saved state until handback | Simulation on the service executor |
 | Accepted operations and deliveries, their timing, paid costs, and obligations | Simulation |
 | Persistent warehouse objects, stock, incoming capacity, configuration, geometry, and lifecycle | Simulation |
 | Indexes for discovering work, dependencies, and routing | Simulation, updated from relevant world changes |
@@ -95,11 +95,12 @@ accepts coherent live transitions plus shared save capture/WAL without disk sync
 per item. Its implementation must prioritize automatic work.
 
 The [construction state ownership spec](../specs/features/construction-state-ownership.md)
-selects actual simulation ownership of nonempty blueprint targets and later materialization
-into current world-data chunks. Cavities and foundations remain world-data-owned. Targets stay
+implements actual simulation ownership of nonempty blueprint targets and later materialization
+into current world-data chunks. Cells outside this site's targets retain their existing owner;
+that can be world-data or another site whose fulfilled targets supply support. Targets stay
 air in base terrain while simulation owns them; chunk references plus immutable definitions
-provide discovery without in-cell markers. Full-lifetime membership replaces the current
-pending-only target lookup. This responsibility change is not yet implemented.
+provide discovery without in-cell markers. Full-lifetime membership retains fulfilled targets
+through materialization, alongside a separate pending-target index.
 
 Clients fetch shared immutable definitions and subscribe to per-instance progress snapshots
 and batched deltas. Physical reads and constructed-cell enumeration compose both owners;
@@ -119,8 +120,7 @@ removes the loose/compacted soil distinction but retains world-data grass. Appli
 grass/cancels growth below miniatures once; soil targets stay bare without timers throughout
 building and materializing. World-data initializes ordinary growth on exposed soil after the
 whole site completes, with coherent pending work and deadlines. Definition plus progress still
-describes simulation-owned target materials. Current runtime compaction remains until this
-planned change is implemented.
+describes simulation-owned target materials. Manual and timed soil compaction are removed.
 
 [Alternatives](../specs/features/construction-state-ownership.md#q2--ownership-and-execution-alternatives)
 retain whole-box ownership, queued world-data operations, and site-defined legal actions with

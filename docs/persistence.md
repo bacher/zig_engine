@@ -34,7 +34,7 @@ versions only, not intermediate development builds, including builds between rel
 
 The game runs one current gameplay/construction logic. It does not select historical rules
 from a world or blueprint. Compatibility with older file encodings is separate: the current
-implementation writes and reads format 6. Formats 1–5 are incompatible development
+implementation writes and reads format 7. Formats 1–6 are incompatible development
 saves and are rejected as whole worlds. The base and WAL readers enforce the supported inclusive
 range through `minimum_readable_version` and `current_write_version`.
 
@@ -46,12 +46,12 @@ saved blueprint libraries, and unfinished construction sites together. Generator
 identity/version guards likewise reject unsupported algorithms. All accepted saves use the
 current game logic.
 
-Version 6 keeps the version-5 byte layouts but excludes loose soil from support and
-removes placement-triggered compaction. Raising both gates excludes old buildings and
-blueprint libraries that relied on loose soil as a foundation. It retains version 5's
-platform-only direct stone foundations and portable blueprint certification.
+Version 7 stores construction lifecycle, target-chunk ownership transfers, and pending
+post-completion grass initialization. Bare and grassy soil share support rules; legacy
+packed-soil value 7 and compaction events are rejected. Both version gates advance together.
+Platform-only direct stone foundations and portable blueprint certification remain.
 
-## Warehouse command sessions (planned)
+## External command sessions
 
 [Warehouse Q23](../specs/features/warehouses.md#q23--command-identity-and-retry-lifetime)
 selects duplicate recognition within a live server/world and client session, without requiring
@@ -59,28 +59,40 @@ save records for every user command's response. Restart/reload uses fresh sessio
 authoritative state refresh; uncertain old requests are not automatically replayed as new
 commands. A command may be present in the saved state even if its reply was not received.
 This preserves the shared coherent save boundary and does not relax persistent delivery/task
-recovery. Exact bounded acknowledgment/history mechanics remain implementation review.
+recovery. Construction establishes this boundary for external Save/Apply and block operations;
+warehouses will add their typed intents. The service retains at most `pending_commands`
+unacknowledged records globally, under a separate 32 MiB command-storage budget. In-process
+result collection acknowledges receipt; a future wire adapter uses explicit acknowledgment.
+An acknowledged sequence stays below the endpoint's retirement frontier and cannot execute
+again. Retry results contain scalar outcomes and immutable IDs, never old mutable inventory
+or terrain snapshots. Automatic simulation operations use their own lifecycle and bypass
+the external-command ledger.
 
 ## Saving and exit
 
-The planned [construction ownership change](../specs/features/construction-state-ownership.md)
+The [construction ownership implementation](../specs/features/construction-state-ownership.md)
 moves canonical active-target progress into simulation, with immutable definitions, lifecycle,
 and per-target-chunk transfer state in the shared coherent save boundary. Admission/handback
-must capture matching discovery, resources, and terrain. A fully filled but materializing site
-must remain saved; recovery resumes untransferred portions without repeating accepted effects.
+capture matching discovery, resources, and terrain. A fully filled but materializing site
+remains saved; recovery resumes untransferred portions without repeating accepted effects.
 World-data grass timers and unfinished post-completion initialization share that capture, retaining
 completion-based deadlines without duplicate scheduling or resets after restart.
-No ownership-marker blocks or independently committed simulation saves are required. The format
-and behavior below describe the implemented world-data-owned construction path.
+No ownership-marker blocks or independently committed simulation saves are used. Transferred
+soil carries a non-executable `initialize_grass` marker whose token identifies the construction;
+a later ordinary replacement cancels it. Deferred initialization only converts matching markers,
+so an older obligation cannot replace a newer exposure deadline, including after restart.
 
 Autosave attempts run every 60 seconds and compaction is requested every 10 minutes. Only a durable WAL commit establishes saved progress; the interval is not a maximum loss window. Base compaction allows exact-version dirty chunks to unload and retires covered journals after durable installation.
 
 Saved blueprints belong to the selected world's player identity. Immutable definitions are
 shared by active construction instances and retained while referenced. Definitions, instance
 creation, and individual target completions enter the same WAL transaction as changed real
-blocks and player inventory. A completion record occupies 13 bytes; ordinary saves do not
+blocks and player inventory. A fulfillment record occupies 13 bytes; ordinary saves do not
 rewrite the definition or fulfillment bitmap for every placed target. Checkpoints encode
-the full library and remaining progress, then rebuild derived runtime indexes after load.
+the full library, remaining progress, lifecycle and accepted portions, then rebuild derived
+runtime indexes after load. Transfer and site-completion records each occupy 21 bytes; a
+grass-initialization retirement occupies 13 bytes. Restore verifies transferred revisions
+against saved terrain before making the composed world available.
 Temporary capture selections, helper jobs, diagnostics, and unconfirmed names have no save
 representation. In-memory library acceptance is distinct from a durable save acknowledgment;
 storage failures leave accepted state dirty for retry. Ephemeral worlds remain session-only.
@@ -118,7 +130,7 @@ The exit drain includes submitted blueprint applications while their detached ad
 pending, and preserves their order with later mutations. A failed application resolves its
 command fence without publishing an instance.
 
-Saved player state includes identity, feet position, yaw, pitch, and the material in the one-slot inventory. Inventory changes belong to authoritative terrain transfers and are captured in the same snapshot. Movement checkpoints preserve the service-owned inventory. Velocity, climbing state, partial interaction holds, pending client predictions, and transient movement history are reset on startup. Format 5 uses inventory schema 1. Restored collision is checked against authoritative terrain before gameplay starts.
+Saved player state includes identity, feet position, yaw, pitch, and the material in the one-slot inventory. Inventory changes belong to authoritative transfers, including coherent construction fulfillment across the world-data inventory and simulation target owners, and are captured in the same snapshot. Movement checkpoints preserve the service-owned inventory. Velocity, climbing state, partial interaction holds, pending client predictions, and transient movement history are reset on startup. Format 5 uses inventory schema 1. Restored collision is checked against authoritative terrain before gameplay starts.
 
 ## Storage and ownership
 
@@ -142,7 +154,7 @@ The durability contract is local APFS on macOS. Network filesystems, other platf
 
 Live chunks, temporary preparation, source pins, and encoded output have different ownership lifetimes. A pin does not allocate a second block array. Empty blocks/metadata stay allocation-free; allocated capacities and temporary overlaps matter more than used lengths. Process RSS includes allocator overhead, graphics, client copies, and other storage beyond persistence counters. The separate resource-budgeting feature will provide global policy.
 
-Lazy dirt/grass timers may unload once exact-version base and pin rules permit it. Loading registers them; catch-up runs in the next eligible block-timer pass using original deadlines and current conditions. No elapsed offline time is added. Economy and cross-chunk NPC scheduling remain separate future work.
+Lazy grass-growth timers and non-executable construction initialization markers may unload once exact-version base and pin rules permit it. Loading registers executable timers; catch-up runs in the next eligible block-timer pass using original deadlines and current composed cover. Unknown cover defers growth. Initialization markers instead wait for construction completion work. No elapsed offline time is added. Economy and cross-chunk NPC scheduling remain separate future work.
 
 ## Validation and measurements
 

@@ -290,7 +290,7 @@ pub const NaturalWorld = struct {
     pub fn materialAt(self: *const NaturalWorld, x: i64, y: u32, z: u32) BlockType {
         const e = self.baseEnvironmentAt(x, y);
         const base = self.materialFromEnvironment(x, y, z, e);
-        if (base == .grass and z + 1 == e.terrain_height and vegetation.trunkRootAt(self, x, y)) return .packed_dirt;
+        if (base == .grass and z + 1 == e.terrain_height and vegetation.trunkRootAt(self, x, y)) return .dirt;
         // A downhill crown may stand well above this column's own terrain.
         // Complete candidate geometry bounds the probe, not local ground + 8.
         if (base == .none) return vegetation.at(self, x, y, z) orelse .none;
@@ -316,7 +316,7 @@ pub const NaturalWorld = struct {
         const depth = e.terrain_height - z - 1;
         if (e.surface_cover == .sand and depth < 5) return .sand;
         if (self.deposits.at(column.deposit_candidates, column.x, column.y, z)) |resource| return resource;
-        if (e.surface_cover == .soil and depth < 5) return if (depth == 0 and !e.water_present) .grass else .packed_dirt;
+        if (e.surface_cover == .soil and depth < 5) return if (depth == 0 and !e.water_present) .grass else .dirt;
         return .stone;
     }
 };
@@ -627,7 +627,7 @@ pub const NaturalColumn = struct {
             const lx = hash.distanceX(tree.root[0], chunk_x, width);
             const ly = @as(i64, tree.root[1]) - chunk_y;
             const lz = @as(i64, tree.root[2]) - 1 - chunk_z_base;
-            if (lx >= 0 and lx < 32 and ly >= 0 and ly < 32 and lz >= 0 and lz < 32 and data.blocks[@intCast(lz)][@intCast(ly)][@intCast(lx)] == .grass) data.blocks[@intCast(lz)][@intCast(ly)][@intCast(lx)] = .packed_dirt;
+            if (lx >= 0 and lx < 32 and ly >= 0 and ly < 32 and lz >= 0 and lz < 32 and data.blocks[@intCast(lz)][@intCast(ly)][@intCast(lx)] == .grass) data.blocks[@intCast(lz)][@intCast(ly)][@intCast(lx)] = .dirt;
         }
         return data;
     }

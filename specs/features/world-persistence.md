@@ -1,6 +1,7 @@
 ---
 service: zig_engine
 created: 2026-10-15
+updated: 2026-11-15
 status: in-progress
 ---
 
@@ -22,18 +23,29 @@ This revision supersedes the conflicting COW decisions in
 
 ## Context
 
-The world-data service has one worker ordering commands from multiple clients. A command
-can modify several chunks through road formation/reversion, neighbor revelation, or soil
+**Current implementation baseline, 2026-11-15.** Persistence is implemented using format 7,
+which rejects development formats 1–6. World-data owns terrain and player inventory; a shared
+capture/WAL cut includes simulation-owned construction targets and partial materialization.
+[Construction ownership Q6](construction-state-ownership.md#q6--soil-and-compact-physical-state)
+supersedes the original compaction model: bare/grassy soil have identical support, only grass
+growth has a timer, and active targets stay bare. Construction `initialize_grass` entries
+are lifecycle markers, not executable deadlines. R47/R77/R78 and their criteria below describe
+this current contract. See [persistence](../../docs/persistence.md) for implemented behavior
+and [acceptance evidence](../../docs/persistence-acceptance.md) for remaining validation.
+
+**Original planning baseline (2026-10-15, historical):** The world-data service had one worker
+ordering commands from multiple clients. A command could modify several chunks through road formation/reversion, neighbor revelation, or soil
 transformations. Due transformations run after a request batch. Modified chunks remain in
 `WorkerState.modified_chunks` across subscription eviction; untouched chunks are generated
-on demand. There is no disk persistence or disk-backed authoritative chunk lookup today.
+on demand. At that planning baseline there was no disk persistence or disk-backed authoritative
+chunk lookup.
 
 Chunk blocks are byte values in `[z][y][x]` order, with x contiguous. Persistent metadata
 includes construction markers, scheduled transformation kinds/deadlines, and custom road
 ownership/orientation. Chunk flags include a historical revealed/unreachable property.
 Boundary masks, meshes, subscription tokens, and optimistic client edits are derived or
-transient. World ticks are u64 at 60 ticks/second; per-chunk revisions currently use u32.
-Several edits can occur during one tick. Player state currently belongs to the main thread;
+transient. World ticks were u64 at 60 ticks/second; per-chunk revisions then used u32.
+Several edits could occur during one tick. Player state then belonged to the main thread;
 the demonstration simulation also has private execution state.
 
 The intended late-game workload is approximately 99.9% simulation-initiated chunk updates,
@@ -103,8 +115,9 @@ Decision status as of 2026-10-19:
   a write stall. Larger caps are experiments, not shipping defaults or upfront allocations.
 - CONFIRMED by the user: pending timers alone need not retain a chunk when every timer is
   explicitly lazy. Eviction still requires the exact current version in the installed base
-  and clearance of other pins. Both existing block timer kinds, dirt compaction and grass
-  growth, are confirmed lazy. R77 supersedes the blanket timer pin. CONFIRMED: ordinary
+  and clearance of other pins. Grass growth is lazy; construction Q6 later removed soil
+  compaction. Non-executable grass-initialization markers also permit eviction under R77.
+  R77 supersedes the blanket timer pin. CONFIRMED: ordinary
   loading restores/registers block timers; catch-up runs in the next eligible block-timer
   pass under R47/R78. Outdated terrain may be exposed and edited before that pass; edits
   maintain eligibility atomically, including across chunk boundaries, and timer execution
@@ -451,12 +464,12 @@ mechanisms without overriding those contracts.
   checksums and WAL transaction-chain verification as separate integrity requirements.
 - R47: At the start of each normal resident block-timer pass, capture logical tick T and a
   fixed list of resident chunks with timers due at or before T. Process each selected chunk
-  once with R78's local transition logic, revalidating current state/incarnation after waits.
+  once with R78's composed-cover checks, revalidating current state/incarnation after waits.
   Keep T fixed throughout the pass; do not consume cancelled/replaced events from stale
   observations. Chunks loaded after selection do not expand that list or launch recursive
-  passes; they become eligible for a later pass under R78. Preserve finite dirt-to-packed-
-  dirt-to-grass catch-up: follow-up deadlines derive from the original deadline and
-  may execute in the same pass if due by T and locally eligible. Work due after T waits for
+  passes; they become eligible for a later pass under R78. Grass growth is a terminal
+  transition using its original deadline and current cover; unknown cover defers it without
+  resetting that deadline. There is no soil-compaction stage. Work due after T waits for
   a later pass even if time advances. Resource/capture deferral publishes no partial operation
   and preserves pending state under R31/R39. No pass is added solely to drain all timers
   before saving; broader simulation scheduling remains deferred.
@@ -717,7 +730,8 @@ mechanisms without overriding those contracts.
   Lazy means execution may be deferred while nonresident until an eligible block-timer pass
   after ordinary loading under R78, using original deadlines and current local conditions. It is
   a property of timer-kind semantics, not merely a distant deadline, player distance, or an
-  empty subscription set. Both existing kinds, compact_dirt and grow_grass, are lazy. A
+  empty subscription set. `grow_grass` is lazy. `initialize_grass` also permits eviction but
+  is a non-executable construction-lifetime marker, consumed only by completion initialization. A
   recognized kind not explicitly classified lazy retains a timer residency pin while pending; unsupported serialized kinds remain load errors. V1 needs no
   global wakeup/loading scheduler or new serialized lazy flag. Remove resident due-index
   membership on eviction and restore it once on ordinary load. Revalidate timer incarnation
@@ -735,13 +749,14 @@ mechanisms without overriding those contracts.
   Players, meshes/collision, and dependent commands may observe pre-catch-up terrain; edits
   admitted before timer execution take effect in authoritative order. Recheck current event
   identity/incarnation and expected material so stale timers cannot overwrite newer edits.
-  Execute chunk-local transitions in stable (deadline, cell-index) order through the pass's
-  fixed cutoff T, deriving follow-up deadlines from the original deadline. Timer execution
-  must not read/load adjacent chunks or invoke general multi-chunk simulation/placement
-  validation. All authoritative edits affecting eligibility must schedule, replace, or cancel
-  affected timers atomically with their full write set, including exposure changes across
-  boundaries; preserve current cover/uncover gameplay semantics. Audit all mutation paths
-  before removing execution-time neighbor checks. No serialized eligibility flag is required.
+  Execute grass transitions in stable (deadline, cell-index) order through the pass's fixed
+  cutoff T. Recheck active-site membership, pending cover and composed physical cover under
+  construction Q6, including the cell above across a chunk boundary. Unknown dependencies
+  defer growth with the original deadline; use ordinary bounded dependency access without a
+  general structural scan or recursive timer pass. All authoritative edits affecting eligibility
+  schedule, replace, or cancel affected timers atomically with their full write set, including
+  exposure changes across boundaries. No serialized eligibility flag is required. Lifecycle
+  initialization markers are not executed by timer passes.
   Timer operations follow R31's resource preparation and atomic publication, R68's capture
   gate, and R48's revision/dirty tracking, including metadata-only consumption. Registration
   alone does not consume a timer or dirty unchanged saved state. Persistence-only recovery,
@@ -756,7 +771,7 @@ mechanisms without overriding those contracts.
   passes before readiness, preserving saved ownership without whole-world scans/preloads.
   Runtime cursors/repeat flags remain volatile. See [unfinished world work](deferred-world-work.md)
   for canonical encoding, membership generations, bounds, and validation. Format 4 introduced
-  these keys; the current format-5 gates reject development formats 1–4 without migration.
+  these keys; the current format-7 gates reject development formats 1–6 without migration.
 
 ## Clarifications
 
@@ -893,11 +908,12 @@ mechanisms without overriding those contracts.
   without scanning the base; they supplement transaction completeness and ordering (R46).
   Exact bytes are in the [chunk layout](../formats/world-persistence-v1.md#chunk-record-layout).
 - Q29: What timer eligibility and catch-up behavior belongs in persistence v1?
-  A29: RETAINED: fixed resident-pass tick/list, original deadlines, finite soil-transition
-  chains, no recursive draining before saving, and no offline elapsed-time catch-up.
+  A29: RETAINED: fixed resident-pass tick/list, original grass deadlines, no recursive
+  draining before saving, and no offline elapsed-time catch-up. Construction Q6 removes
+  the former soil-compaction chain.
   REVISED/CONFIRMED: ordinary loading restores/registers lazy block timers; R78 catches them
-  up in the next eligible block-timer pass without delaying readiness. Execution uses local
-  state with eligibility maintained by authoritative edits, including edits before catch-up.
+  up in the next eligible block-timer pass without delaying readiness. Execution rechecks
+  composed cover and membership under R78; edits before catch-up maintain eligibility.
   Block timers remain distinct from broader NPC simulation, whose scheduling is deferred.
 - Q30: Must eviction inspect active/sealed WALs or maintain separate pending-WAL eligibility?
   A30: CONFIRMED by the user: no. Compare the current persistent chunk revision with its
@@ -1041,13 +1057,15 @@ mechanisms without overriding those contracts.
   overload or slow encoding. R76 makes the evidence needed to choose defaults part of v1.
 
 - Q52: Which timers are lazy, and when does reload catch-up run?
-  A52: CONFIRMED: compact_dirt and grow_grass are lazy. Ordinary loading restores/registers
+  A52: CONFIRMED, updated by construction Q6: `grow_grass` is lazy; compaction is removed.
+  `initialize_grass` is an eviction-safe lifecycle marker, not a timer deadline. Ordinary loading restores/registers
   timers; catch-up runs in the next eligible block-timer pass under R47/R78. The user accepts
   outdated terrain being visible, even beyond a frame or two. This supersedes catch-up before
   exposure and removes a separate load-time execution stage. Edits may precede overdue timer
-  execution and must atomically maintain eligibility; local event/material checks prevent
-  stale effects. Identical state, cutoffs, and ordered edits are deterministic; changing the
-  edit/timer order may change outcomes. Original deadlines and finite catch-up chains remain.
+  execution and must atomically maintain eligibility; event/material and composed-cover checks
+  prevent stale effects. Identical state, cutoffs, and ordered edits are deterministic; changing the
+  edit/timer order may change outcomes. Original deadlines remain; future recurring/chained
+  timers require their own bounded catch-up contract.
   Capture, backlog, and resource pressure may delay execution; fair bounded passes retain
   due work. Future economy events need their own scheduling contract and do not inherit
   these local block-timer semantics.
@@ -1281,13 +1299,13 @@ mechanisms without overriding those contracts.
   Captures contain complete published operations and may retain overdue timers;
   persistence-only reads preserve saved timers without registering or executing them.
 
-- AC69: GIVEN an eligible block-timer pass with an overdue dirt-compaction timer WHEN
-  its grass-growth follow-up is also due by the fixed cutoff T and locally eligible THEN both
-  transitions may complete using the original deadline relationship. A follow-up after T
-  remains pending even if world time advances during processing or resource waits.
+- AC69: GIVEN a grass-growth timer WHEN an eligible pass reaches its original deadline by
+  fixed cutoff T and current composed cover/membership permits growth THEN bare soil becomes
+  grass. A deadline after T remains pending even if time advances during processing or waits;
+  unknown cover preserves the original due event. There is no compaction/follow-up stage.
 - AC70: GIVEN selected block-timer work delayed before execution WHEN its event is cancelled/
-  replaced or authoritative state changes THEN local identity/material checks prevent stale
-  effects without adjacent-chunk reads. Capture/resource failure preserves authoritative
+  replaced or authoritative state changes THEN identity/material and composed-cover checks
+  prevent stale effects; unavailable cover defers growth. Capture/resource failure preserves authoritative
   state without partial effects; deferred work follows R39. Eligibility-changing edits
   update affected timer state atomically under R78, including across chunk boundaries.
 - AC71: GIVEN equal live/installed-base persistent revisions, a readable matching catalog,
@@ -1567,14 +1585,13 @@ mechanisms without overriding those contracts.
   prevents eviction; missing lazy classification is not permission to unload. After a lazy
   timer changes blocks or metadata, an older installed-base revision cannot permit eviction.
 
-- AC136: GIVEN an ordinarily loaded loose-dirt chunk with overdue compaction and an eligible
-  grass follow-up WHEN capture, backlog, or resource pressure postpones its timer work THEN
-  the chunk may become ready and expose saved terrain with the original timers still pending.
-  Once execution is permitted, fair bounded passes make progress while it remains resident.
-  Without intervening edits, a pass cutoff T covering both deadlines produces grass; if only
-  compaction is due by T, packed dirt retains the original future grass deadline. If an edit
-  first cancels/replaces a timer or changes eligibility, stale work has no effect. Deferred
-  work remains pending; no partial authoritative timer operation is published.
+- AC136: GIVEN an ordinarily loaded bare-soil chunk with overdue grass growth WHEN capture,
+  backlog, unknown cover or resource pressure postpones its timer work THEN the chunk may
+  become ready and expose saved terrain with the original timer still pending. Once execution
+  and dependencies permit, fair bounded passes make progress while it remains resident.
+  A pass through the deadline grows grass only if current composed cover/membership permits
+  it; an earlier cutoff retains the original deadline. An edit that cancels/replaces the timer
+  or changes eligibility prevents stale effects. No partial timer operation is published.
 
 - AC137: GIVEN identical local block/timer state and cutoff T WHEN repeating catch-up or
   comparing one large step with incremental cutoffs through T without intervening edits
@@ -1582,8 +1599,9 @@ mechanisms without overriding those contracts.
   Replaying identical cutoffs and ordered edits also agrees; different edit/timer ordering
   need not produce equal outcomes. Publication revision counts may differ with grouping
   but remain monotonic. Cover/uncover
-  edits across a chunk boundary maintain eligibility atomically; timer execution performs
-  no neighboring reads/loads. Stale concurrent load results cannot overwrite newer state.
+  edits across a chunk boundary maintain eligibility atomically; timer execution rechecks
+  composed cover and defers unknown dependencies under R78. Stale concurrent load results
+  cannot overwrite newer state.
 
 - AC138: GIVEN unfinished road-shape work or a membership-only mark/clear WHEN capturing,
   committing, failing, canceling, compacting, or reopening a save THEN the recovered full
@@ -1957,26 +1975,26 @@ No global deadline-loading scheduler is introduced.
 
 Each pass fixes logical cutoff T and its eligible resident-chunk list at pass start. Later
 loads become eligible for a later pass, without expanding the selected list or launching a
-recursive pass. Use stable (deadline, cell-index) order and original follow-up deadlines.
+recursive pass. Use stable (deadline, cell-index) order and original grass deadlines.
 Bound work and schedule fairly while residency and execution permissions hold; preserve
 unprocessed due work across deferrals. The next eligible pass is not a next-frame promise.
-The existing two-stage soil chain is finite; future recurring timers need their own bounded
-catch-up contract.
+Grass growth has one terminal transition; future recurring or chained timers need their
+own bounded catch-up contract. Construction initialization markers are handled separately
+by completion work and are never executed as ordinary timers.
 
-For example, a loaded loose-dirt block may be visible before compaction due at 100 and grass
-due at 200 execute. With no intervening edit, a pass at cutoff 250 produces grass; a pass at
-150 produces packed dirt and retains the deadline of 200. An edit can precede either pass
-and change the applicable result. Current event identity/material checks prevent stale
+For example, a loaded bare-soil block may be visible before its grass deadline of 200.
+A pass at 150 leaves it pending. A pass at 250 grows grass if current composed cover and
+membership permit it; unknown cover leaves the original deadline pending. An edit can precede
+either pass and change the result. Event identity/material and cover checks prevent stale
 work from overwriting that edit. With identical state, cutoffs, and ordered edits, execution
 is deterministic. Without intervening edits, evaluation at T is idempotent and incremental
 cutoffs through T produce the same logical contents as one large catch-up.
 
-Current code checks the block above during timer execution. Replace that dependency only
-after auditing eligibility maintenance in every authoritative mutation path: covering soil
-cancels its timer and applies the existing covered-soil rule; uncovering schedules the
-appropriate transition. Cross-boundary effects remain part of the edit's atomic write set.
-Timer execution needs only local event/material checks and local follow-up scheduling.
-It must not recursively load a neighbor or invoke broader simulation validation.
+Timer execution checks composed physical cover above, active-target membership and planned
+cover under construction Q6. Covering soil cancels growth; uncovering starts a fresh exposure
+deadline. Cross-boundary edit effects remain part of the atomic write set. Dependency access
+may include the chunk above; unavailable cover defers growth without resetting its deadline.
+This requires neither general structural validation nor a recursive timer pass.
 
 Timer execution defers while capture holds sources; existing executing operations finish
 before capture. Loading follows normal publication rules without a timer catch-up gate.
@@ -2841,7 +2859,7 @@ from incomplete test/evaluation campaigns; unchecked evaluation tasks are not wa
   policy case in the harness without adding a new serialized gameplay kind solely for testing.
   Add AC136/AC137 coverage for readiness before catch-up, fair bounded pass progress, edits
   before timer execution, idempotence, incremental/large-step equivalence, cross-boundary
-  edits, and no timer-time neighbor loads.
+  edits, and composed-cover checks with unknown-dependency deferral under construction Q6.
 - [ ] T7: Measure snapshot/edit latency, memory use, and compaction interference; tune budgets.
   Compare worker CPU, allocations, copied bytes, and latency against baseline with saving
   inactive/active, separating gate/preparation, source waiting, existing client copies, encoding,

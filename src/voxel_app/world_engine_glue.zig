@@ -96,7 +96,7 @@ test "column climate changes covered soil appearance without changing saved mate
     }
     data.blocks[2][5][0] = .sand;
     data.blocks[2][5][2] = .dirt;
-    data.blocks[2][5][4] = .packed_dirt;
+    data.blocks[2][5][4] = .dirt;
     climate[5] = @splat(.frozen);
     var mesh = try tryExtractChunkSideDataWithClimate(allocator, .{ .blocks = &data }, @splat(.{}), &climate);
     defer mesh.deinit(allocator);
@@ -107,7 +107,7 @@ test "column climate changes covered soil appearance without changing saved mate
     }
     try std.testing.expectEqual(voxel.RenderMaterial.sand, tops[4].block_type);
     try std.testing.expectEqual(voxel.RenderMaterial.dirt, tops[5].block_type);
-    try std.testing.expectEqual(voxel.RenderMaterial.packed_dirt, tops[6].block_type);
+    try std.testing.expectEqual(voxel.RenderMaterial.dirt, tops[6].block_type);
 }
 
 test "neighbor masks cull matching faces and retain real exterior surfaces" {

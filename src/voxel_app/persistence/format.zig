@@ -1,10 +1,10 @@
 //! Versioned wire codecs. All wire storage is bytes, never native struct layout.
 const std = @import("std");
 const generation_settings = @import("../generation_settings.zig");
-// Version 6 excludes loose-soil support and placement-triggered compaction.
-// Older development worlds and their blueprint certificates use incompatible rules.
-pub const current_write_version: u32 = 6;
-pub const minimum_readable_version: u32 = 6;
+// Version 7 moves active target contents/progress into simulation and removes
+// packed soil. Older development worlds have incompatible rules and ownership.
+pub const current_write_version: u32 = 7;
+pub const minimum_readable_version: u32 = 7;
 pub const Uuid = [16]u8;
 pub const Digest = [32]u8;
 pub const cell_count = 32768;
@@ -72,7 +72,7 @@ pub const Chunk = struct {
 /// Wire material IDs are independent of the runtime enum's native representation.
 pub fn validBlockMaterial(material: u8) bool {
     return switch (material) {
-        0...20, 255 => true,
+        0...6, 8...20, 255 => true,
         else => false,
     };
 }
@@ -126,8 +126,10 @@ pub fn validateMetadata(blocks: []const u8, metadata: []const u8, dimensions: [3
                     if (index >= cell_count or seen[index]) return error.InvalidMetadata;
                     seen[index] = true;
                     if (kind == 3) {
-                        if (try payload.int(u8) > 1) return error.InvalidMetadata;
-                        _ = try payload.int(u64);
+                        const event_kind = try payload.int(u8);
+                        const token = try payload.int(u64);
+                        if (event_kind != 1 and event_kind != 2) return error.InvalidMetadata;
+                        if (event_kind == 2 and (blocks[index] != 2 or token == 0)) return error.InvalidMetadata;
                     }
                 }
             },
@@ -450,6 +452,8 @@ pub fn decodeDescriptor(bytes: []const u8) Error!Descriptor {
 
 pub const Formation = struct { high_endpoint: [3]u32, direction: u8, length: u32, section: u32 };
 pub const CustomRoad = struct { formation: ?Formation = null };
+/// Kind 2 is unfinished grass initialization: deadline is a construction
+/// lifetime token and is never interpreted as an executable time deadline.
 pub const Timer = struct { cell: u16, kind: u8, deadline: u64 };
 pub const MetadataView = struct { roads: []const CustomRoad = &.{}, construction: []const u16 = &.{}, timers: []const Timer = &.{} };
 pub fn encodeMetadata(allocator: std.mem.Allocator, view: MetadataView) ![]u8 {
@@ -468,7 +472,7 @@ pub fn encodeMetadata(allocator: std.mem.Allocator, view: MetadataView) ![]u8 {
     }
     @memset(&seen, false);
     for (view.timers) |timer| {
-        if (timer.cell >= cell_count or seen[timer.cell] or timer.kind > 1) return error.InvalidMetadata;
+        if (timer.cell >= cell_count or seen[timer.cell] or (timer.kind != 1 and timer.kind != 2) or (timer.kind == 2 and timer.deadline == 0)) return error.InvalidMetadata;
         seen[timer.cell] = true;
     }
     const size = roads_len + view.construction.len * 2 + view.timers.len * 11 + @as(usize, if (roads_len > 0) 9 else 0) + @as(usize, if (view.construction.len > 0) 9 else 0) + @as(usize, if (view.timers.len > 0) 9 else 0);
@@ -884,4 +888,22 @@ test "inventory schema roundtrips all carried materials and migrates legacy empt
     try std.testing.expectError(error.InvalidFormat, decodePlayer(&invalid));
     try std.testing.expectError(error.InvalidFormat, decodePlayer(encoded[0..52]));
     try std.testing.expectError(error.InvalidFormat, validatePlayers(&encoded, std.math.maxInt(u64)));
+}
+
+test "initialization markers persist only on bare soil with a live token" {
+    const a = std.testing.allocator;
+    var blocks: [cell_count]u8 = @splat(0);
+    blocks[9] = 2;
+    const metadata = try encodeMetadata(a, .{ .timers = &.{.{ .cell = 9, .kind = 2, .deadline = 7 }} });
+    defer a.free(metadata);
+    try validateMetadata(&blocks, metadata, .{ 4, 4, 4 });
+    var decoded = try decodeMetadata(a, &blocks, metadata, .{ 4, 4, 4 });
+    defer decoded.deinit(a);
+    try std.testing.expectEqual(@as(u8, 2), decoded.timers[0].kind);
+    try std.testing.expectEqual(@as(u64, 7), decoded.timers[0].deadline);
+    blocks[9] = 3;
+    try std.testing.expectError(error.InvalidMetadata, validateMetadata(&blocks, metadata, .{ 4, 4, 4 }));
+    try std.testing.expectError(error.InvalidMetadata, encodeMetadata(a, .{ .timers = &.{.{ .cell = 9, .kind = 2, .deadline = 0 }} }));
+    try std.testing.expectError(error.InvalidMetadata, encodeMetadata(a, .{ .timers = &.{.{ .cell = 9, .kind = 0, .deadline = 7 }} }));
+    try std.testing.expect(!validBlockMaterial(7));
 }

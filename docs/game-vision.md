@@ -114,7 +114,7 @@ Initial material examples:
 
 | Material | Proposed construction behavior |
 | --- | --- |
-| Loose soil | Requires a filled 3 × 3 support layer immediately beneath the placed cell and supplies no support itself. Compact each supporting layer before adding another; successive layers need wider foundations, producing pyramid-like forms. Hold mouse2 for three seconds to compact one block, or wait for its timer. |
+| Soil, bare or grass-covered | Requires a filled 3 × 3 supporting layer immediately beneath the placed cell. Both forms immediately supply the same support; grass changes the surface only. Successive soil layers need wider foundations, producing pyramid-like forms rather than a freestanding one-cell pillar. There is no manual or timed compaction. See [current placement rules](block-placement.md). |
 | Planks | Can rest on a supporting block and extend horizontally through other planks for up to two unsupported steps, including diagonals. The intended examples are a 5 × 5 platform on a central support, or a six-block beam including its two supported endpoints. |
 | Rebar and reinforced concrete | Can extend horizontally in a similar way, with a larger reach X still to be decided for the long-term design. |
 
@@ -146,7 +146,7 @@ Capture uses three stages: choose an anchor cell, extend an XY rectangle, then c
 
 Blueprint selection and name entry block gameplay controls while the world continues running. The first iteration should support buildings of approximately 100×100×32 cells where world dimensions permit, with most designs smaller. This is a supported workload rather than a size cap; preparation and application must keep the world responsive.
 
-Placement starts with a full-size, noncolliding preview, rotatable in 90-degree clockwise steps. Applying it requires actual bottom platforms and free cells at every nonempty blueprint target, even if an existing block has the correct type. Existing blocks in blueprint-empty cells stay in place. The active site has a thin black/yellow box frame and a quarter-size floating block miniature at every pending cell. Miniatures do not block walking. A target accepts only its required material; placing the real block removes the miniature. Extraction is forbidden throughout the active box, including preexisting nontarget blocks. Currently the frame and blueprint restrictions disappear when all targets are fulfilled; the planned construction-ownership change below retains them until materialization finishes. A site cannot overlap another unfinished site's box. Future NPCs deliver materials and assemble these sites; their logistics/scheduling are separate features.
+Placement starts with a full-size, noncolliding preview, rotatable in 90-degree clockwise steps. Applying it requires actual bottom platforms and free cells at every nonempty blueprint target, even if an existing block has the correct type. Existing blocks in blueprint-empty cells stay in place. The active site has a thin black/yellow box frame and a quarter-size floating block miniature at every pending cell. Miniatures do not block walking. A target accepts only its required material; placing the real block removes the miniature. Extraction is forbidden throughout the active box, including preexisting nontarget blocks. The frame and blueprint restrictions remain until all target portions have materialized into ordinary terrain. A site cannot overlap another unfinished site's box. Future NPCs deliver materials and assemble these sites; their logistics/scheduling are separate features.
 
 Assembly must stay cheap enough for many concurrent NPC building projects. Full design validation happens during creation, while each blueprint-directed placement needs only local structural approval. The [placement contract](block-placement.md#blueprint-fulfillment) limits that approval to five real neighbors and requires no final building scan.
 
@@ -154,7 +154,7 @@ World modifications must preserve valid affected constructions in the logical wo
 
 The [blueprint specification](../specs/features/blueprints.md) is the detailed source for capture geometry, material normalization, UI transitions, preparation/save protocols, validation, and performance measurements. Blueprints and unfinished sites use the game's single current logic and follow the general [save compatibility policy](persistence.md#save-compatibility). The [implementation validation report](blueprints-validation.md) records the checks and measurements for capture and application; future acquisition paths remain separate.
 
-The selected [construction storage direction](../specs/features/construction-state-ownership.md)
+The implemented [construction storage model](../specs/features/construction-state-ownership.md)
 places active target cells in simulation state, while ordinary terrain stays with world-data.
 Clients combine terrain with shared immutable blueprints and per-site progress. Built targets
 have ordinary block physics throughout construction. After the last fill, bounded background
@@ -163,7 +163,7 @@ all portions finish. A normal-load delay around 5–10 seconds is acceptable, wi
 wait or hard deadline. Permitted cavity placements remain available. The design treats soil
 as one material without compaction. Grass disappears beneath miniatures at application;
 soil targets stay bare until the site completes, then world-data starts ordinary growth on
-exposed surfaces. These changes are pending implementation.
+exposed surfaces. The [authority](validation/construction-authority.md), [transport](validation/construction-transport.md), and [rendering](validation/construction-rendering.md) reports record verification and measured limits.
 
 ## Production, services, and logistics
 

@@ -18,6 +18,7 @@ const ChunkMetadata = @import("chunk_metadata.zig").Metadata;
 const roads = @import("roads.zig");
 pub const block_rules = @import("block_rules.zig");
 const blueprint = @import("blueprint.zig");
+const construction_stream = @import("construction_stream.zig");
 pub const blueprint_runtime = @import("blueprint_runtime.zig");
 
 /// Synchronous notifications for committed changes only. Footprint slices are
@@ -174,7 +175,6 @@ pub const WorldChunk = struct {
                 if (existing == .none) return .already_removed;
                 if (existing.miningPolicy() == .forbidden) return .constraint_violation;
             },
-            .compact => if (existing != .dirt) return .target_changed,
         }
         _ = try self.tryEnsureData(allocator);
         return .success;
@@ -189,12 +189,6 @@ pub const WorldChunk = struct {
     fn applyPreparedPolicy(self: *WorldChunk, allocator: std.mem.Allocator, local: [3]u5, action: BlockAction, retain_empty: bool) OperationStatus {
         const existing = self.content.getBlock(local);
         if (!mutation_guard.allowsMaterialChange(existing, action.replacement())) return .constraint_violation;
-        if (action == .compact) {
-            if (existing != .dirt) return .target_changed;
-            self.changeType(local, .packed_dirt);
-            self.metadata.timed.cancel(transformations.index(local));
-            return .success;
-        }
         const block_type: BlockType = switch (action) {
             .put => |block_type| blk: {
                 std.debug.assert(block_type != .none);
@@ -206,7 +200,6 @@ pub const WorldChunk = struct {
                 if (existing.miningPolicy() == .forbidden) return .constraint_violation;
                 break :blk .none;
             },
-            .compact => unreachable,
         };
         std.debug.assert(self.content == .blocks);
         const data = self.content.blocks;
@@ -262,13 +255,11 @@ pub const ChunkNotReceivedError = error{ChunkNotReceived};
 pub const BlockAction = union(enum) {
     put: BlockType,
     remove,
-    compact,
 
     pub fn replacement(self: BlockAction) BlockType {
         return switch (self) {
             .put => |material| material,
             .remove => .none,
-            .compact => .packed_dirt,
         };
     }
 };
@@ -391,9 +382,11 @@ pub const ValidationWindow = struct {
     chunks: ValidationChunks,
     revisions: [27]?u64 = undefined,
     blueprint_revision: u64 = 0,
+    construction_read_revision: u64 = 0,
 
     pub fn isCurrent(self: *const ValidationWindow, world: *const World) bool {
         if (self.blueprint_revision != world.blueprints.revision) return false;
+        if (self.construction_read_revision != world.constructionReadRevision()) return false;
         for (self.chunks.ids[0..self.chunks.count], 0..) |id, i| {
             const revision = if (world.chunks.get(id)) |chunk| chunk.validation_revision else null;
             if (revision != self.revisions[i]) return false;
@@ -474,10 +467,6 @@ fn preflightEdit(reader: block_rules.Reader, operation: BlockOperation, ready: *
                 return .{ .status = .constraint_violation, .failure = .{ .reason = .mining_forbidden, .subject = cell } };
             break :blk .none;
         },
-        .compact => blk: {
-            if (existing != .dirt) return .{ .status = .target_changed };
-            break :blk .packed_dirt;
-        },
     };
     ready.* = .{ .cell = cell, .material = material, .removal = operation.action == .remove, .mined_type = if (operation.action == .remove) existing.minedType() else null };
     return null;
@@ -497,7 +486,6 @@ fn validatePhysicalEdit(allocator: std.mem.Allocator, reader: block_rules.Reader
 pub fn validateEdit(allocator: std.mem.Allocator, reader: block_rules.Reader, constructed: []const block_rules.Cell, operation: BlockOperation) EditResult {
     var edit: PhysicalEdit = undefined;
     if (preflightEdit(reader, operation, &edit)) |rejected| return rejected;
-    if (operation.action == .compact) return .{ .status = .success };
     return validatePhysicalEdit(allocator, reader, constructed, edit);
 }
 
@@ -543,19 +531,37 @@ fn pendingTargetsMayAffectEdit(physical: block_rules.Reader, state: *const bluep
     return false;
 }
 
+/// Conservative bounded locality check for provenance held outside terrain.
+fn simulationConstructionMayAffectEdit(physical: block_rules.Reader, state: *const blueprint_runtime.State, target: [3]u32) bool {
+    const window = validationChunks(physical.layout, target);
+    for (window.ids[0..window.count]) |id| for (state.chunkInstances(id)) |instance_id| {
+        const instance = state.instances.get(instance_id) orelse return true;
+        if (!instance.active) continue;
+        const group_slot = instance.groupIndex(id) orelse continue;
+        if (instance.target_groups[group_slot].transferred) continue;
+        const definition = state.definitions.get(instance.definition_id) orelse return true;
+        if (instance.remaining < definition.definition.target_count) return true;
+    };
+    return false;
+}
+
 /// Shared client/authority dispatch: when the edit window has no pending targets,
 /// the physical and completed views coincide and need only one ordinary check.
 /// Otherwise keep physical target approval independent of miniature support.
 pub fn validateCompletedEdit(allocator: std.mem.Allocator, physical: block_rules.Reader, state: *const blueprint_runtime.State, constructed: []const block_rules.Cell, operation: BlockOperation) EditResult {
     if (operation.blueprint != null) return validateBlueprintFulfillment(physical, state, operation);
     if (state.instances.count() == 0) return validateEdit(allocator, physical, constructed, operation);
-    if (state.targetAt(operation.block) != null) return .{ .status = .target_changed };
+    if (state.memberAt(operation.block) != null) return .{ .status = .target_changed };
     const cell: block_rules.Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
     if (operation.action == .remove and state.boxAt(physical.layout, operation.block) != null) return .{ .status = .constraint_violation, .failure = .{ .reason = .would_remove_support, .subject = cell } };
     var edit: PhysicalEdit = undefined;
     if (preflightEdit(physical, operation, &edit)) |rejected| return rejected;
-    if (operation.action == .compact) return .{ .status = .success };
-    if (!pendingTargetsMayAffectEdit(physical, state, operation.block)) return validatePhysicalEdit(allocator, physical, constructed, edit);
+    if (!pendingTargetsMayAffectEdit(physical, state, operation.block)) {
+        if (operation.action != .remove or !simulationConstructionMayAffectEdit(physical, state, operation.block)) return validatePhysicalEdit(allocator, physical, constructed, edit);
+        const affected = state.collectAffected(allocator, physical.layout, operation.block, constructed) catch return .{ .status = .resource_exhausted };
+        defer allocator.free(affected);
+        return validatePhysicalEdit(allocator, physical, affected, edit);
+    }
     const material = edit.material;
     if (operation.action == .put) {
         var physical_validator: block_rules.Validator = .{ .allocator = allocator, .reader = physical, .edit = .{ .cell = cell, .material = material } };
@@ -585,6 +591,15 @@ pub const World = struct {
     allocator: std.mem.Allocator,
     chunks: ChunksHashMap = .empty,
     blueprints: blueprint_runtime.State = .{},
+    construction_availability: ?struct {
+        context: *const anyopaque,
+        chunk_available: *const fn (*const anyopaque, ChunkId) bool,
+        read_revision: *const fn (*const anyopaque) u64,
+    } = null,
+    construction_terrain_owner: ?struct {
+        context: *const anyopaque,
+        terrain_revision: *const fn (*const anyopaque, ChunkId, u64, u64) ?u64,
+    } = null,
     pending_operations: std.ArrayList(PendingOperation) = .empty,
     pending_operation_limit: usize = 4096,
     pending_byte_limit: usize = 8 * 1024 * 1024,
@@ -758,42 +773,16 @@ pub const World = struct {
     /// One ordered replay step: capture ownership, mutate material, then restore
     /// saved formations and evaluate the road transition against this exact state.
     fn tryApplyPending(self: *World, pending: *PendingOperation, stamp_material: bool) !void {
-        if (pending.operation.blueprint != null) {
-            const result = validateBlueprintFulfillment(self.reader(), &self.blueprints, pending.operation);
-            if (result.status != .success) return;
-            const coords, const local = splitBlockCoords(pending.operation.block);
-            const chunk = self.chunks.getPtr(self.layout.encodeChunkCoords(coords)) orelse return;
-            const before: CellState = .{ .material = .none, .road = null, .timed = null, .constructed = false, .cell_changes = chunk.cell_changes };
-            try chunk.metadata.constructed.ensureUnusedCapacity(self.allocator, 1);
-            const status = try chunk.prepareApply(self.allocator, local, pending.operation.action);
-            if (status != .success) return;
-            _ = chunk.applyPrepared(self.allocator, local, pending.operation.action);
-            chunk.metadata.appendConstructedKnownEmptyAssumeCapacity(transformations.index(local));
-            pending.cell_undo = before;
-            if (stamp_material) {
-                self.validation_revision +%= 1;
-                chunk.validation_revision = self.validation_revision;
-            }
-            self.revealNeighbors(coords, chunk.flags);
-            return;
-        }
+        // Predicted construction fills are an overlay of pending intentions.
+        // They never write raw terrain or its provenance/timers.
+        if (pending.operation.blueprint != null) return;
         if (!self.allowsOperation(pending.operation)) return;
         const coords, const local = splitBlockCoords(pending.operation.block);
         const chunk = self.chunks.getPtr(self.layout.encodeChunkCoords(coords)) orelse return;
         const before = CellState.capture(chunk, local);
-        if (pending.operation.action == .compact) {
-            if (try chunk.tryApply(self.allocator, local, .compact) != .success) return;
-            pending.cell_undo = before;
-            if (stamp_material) {
-                self.validation_revision +%= 1;
-                chunk.validation_revision = self.validation_revision;
-            }
-            return;
-        }
         const can_apply = switch (pending.operation.action) {
             .put => before.material == .none,
             .remove => before.material != .none,
-            .compact => unreachable,
         };
         if (comptime @import("builtin").is_test) if (self.road_plan_counter) |counter| {
             counter.* += 1;
@@ -889,10 +878,19 @@ pub const World = struct {
         for (changes) |change| switch (change) {
             .definition => definition_count += 1,
             .instance => instance_count += 1,
-            .fulfill => {},
+            .fulfill, .transfer, .complete => {},
         };
         if (definition_count == 0 and instance_count == 0) {
-            for (changes) |change| self.fulfillBlueprintObserved(change.fulfill, observer);
+            for (changes) |change| switch (change) {
+                .fulfill => |value| self.fulfillBlueprintObserved(value, observer),
+                .transfer => |value| {
+                    _ = self.blueprints.acceptTransfer(value);
+                },
+                .complete => |value| {
+                    _ = self.blueprints.complete(value.instance_id);
+                },
+                else => unreachable,
+            };
             return;
         }
         const old_revision = self.blueprints.revision;
@@ -964,6 +962,7 @@ pub const World = struct {
                 var staged = publication.chunks.iterator();
                 while (staged.next()) |entry| try shadow.put(self.allocator, entry.key_ptr.*, entry.value_ptr.*);
             },
+            .transfer, .complete => {},
             .fulfill => |value| {
                 if (remaining_instances == 0 or fulfillments.contains(value)) continue;
                 const instance = if (staged_instances.get(value.instance_id)) |slot|
@@ -1000,6 +999,12 @@ pub const World = struct {
                 }
             },
             .fulfill => |value| self.fulfillBlueprintObserved(value, observer),
+            .transfer => |value| {
+                _ = self.blueprints.acceptTransfer(value);
+            },
+            .complete => |value| {
+                _ = self.blueprints.complete(value.instance_id);
+            },
         };
         if (definitions.items.len != 0) self.blueprints.revision +%= 1;
     }
@@ -1097,9 +1102,7 @@ pub const World = struct {
     }
 
     pub fn isBlockSolid(self: *const World, block: [3]u32) ChunkNotReceivedError!bool {
-        const coords, const local = splitBlockCoords(block);
-        const chunk = self.getChunk(coords) orelse return error.ChunkNotReceived;
-        return chunk.content.getBlock(local) != .none;
+        return (self.physicalBlock(block) orelse return error.ChunkNotReceived) != .none;
     }
 
     pub fn hasPendingMeshDependency(self: *const World, coords: ChunkCoords) bool {
@@ -1125,9 +1128,76 @@ pub const World = struct {
         if (comptime @import("builtin").is_test) if (self.physical_read_counter) |counter| {
             counter.* += 1;
         };
+        return self.physicalBlock(block);
+    }
+
+    /// Effective material is distinct from raw terrain and from planned support.
+    /// Unknown discovery never authorizes movement or mutation through base air.
+    pub fn physicalBlock(self: *const World, block: [3]u32) ?BlockType {
         const coords, const local = splitBlockCoords(block);
+        const id = self.layout.encodeChunkCoords(coords);
+        if (self.construction_availability) |availability| {
+            if (!availability.chunk_available(availability.context, id)) return null;
+        }
+        // Display retention may keep several completed sources at a cell now
+        // owned by a newer site. Only the current target can select its physical
+        // source, including terrain handback received before lifecycle progress.
+        const current = self.blueprints.memberAt(block);
+        var terrain_owned = false;
+        for (self.blueprints.chunkInstances(id)) |instance_id| {
+            if (current) |member| if (instance_id != member.target.instance_id) continue;
+            const instance = self.blueprints.instances.get(instance_id) orelse return null;
+            const definition = self.blueprints.definitions.get(instance.definition_id) orelse return null;
+            const index = blueprint_runtime.definitionIndex(self.layout, instance.origin, definition.definition.size, instance.rotation, block) orelse continue;
+            if (definition.definition.cells[index] == .none) continue;
+            if (self.construction_terrain_owner) |owner| if (owner.terrain_revision(owner.context, id, instance.id, instance.lifetime)) |revision| {
+                const chunk = self.getChunk(coords) orelse return null;
+                if (chunk.chunk_revision < revision) return null;
+                terrain_owned = true;
+            };
+            const group_slot = instance.groupIndex(id) orelse return null;
+            const group = instance.target_groups[group_slot];
+            if (group.transferred) {
+                const chunk = self.getChunk(coords) orelse return null;
+                if (chunk.chunk_revision < group.terrain_revision) return null;
+            }
+        }
+        // Without an active target, every retained matching source still
+        // certifies a minimum terrain version before raw data can be used.
+        if (terrain_owned) return (self.getChunk(coords) orelse return null).content.getBlock(local);
+        for (self.pending_operations.items) |pending| {
+            if (pending.resolved_status != null or pending.operation.blueprint == null or !std.mem.eql(u32, &pending.operation.block, &block)) continue;
+            const target = self.blueprints.targetAt(block) orelse continue;
+            const intent = pending.operation.blueprint.?;
+            if (target.instance_id == intent.instance_id and target.cell_index == intent.cell_index)
+                return target.material;
+        }
+        switch (self.blueprints.physicalAt(block)) {
+            .unknown => return null,
+            .material => |material| return material,
+            .unowned => {},
+        }
         const chunk = self.getChunk(coords) orelse return null;
         return chunk.content.getBlock(local);
+    }
+
+    pub fn applyConstructionSnapshot(self: *World, snapshot: construction_stream.Snapshot) !void {
+        const identity = snapshot.identity;
+        if (identity.kind != .construction or identity.id != snapshot.id or identity.lifetime != snapshot.lifetime) return error.ConflictingSnapshot;
+        if (self.blueprints.instances.get(snapshot.id)) |old| {
+            if (old.lifetime != snapshot.lifetime) return error.ConflictingSnapshot;
+            if (snapshot.revision <= old.revision) return;
+        }
+        const definition = self.blueprints.definitions.get(snapshot.definition_id) orelse return error.UnknownDefinition;
+        var copy = try snapshot.toInstance(self.allocator);
+        var prepared = blueprint_runtime.buildSnapshotPublication(self.allocator, self.layout, definition.definition, copy, &self.blueprints) catch |err| {
+            copy.deinit(self.allocator);
+            return err;
+        };
+        defer prepared.deinit(self.allocator);
+        try self.blueprints.reserveSnapshotPublication(self.allocator, self.layout, &prepared);
+        self.blueprints.publishSnapshotPublication(&prepared);
+        self.validation_revision +%= 1;
     }
 
     pub fn previewOperation(self: *const World, operation: BlockOperation) EditResult {
@@ -1145,7 +1215,7 @@ pub const World = struct {
             &.{};
         defer if (operation.action == .remove) self.allocator.free(cells);
         const result = validateCompletedEdit(self.allocator, self.reader(), &self.blueprints, cells, operation);
-        if (result.status != .success or operation.action == .compact) return result;
+        if (result.status != .success) return result;
         const coords, const local = splitBlockCoords(operation.block);
         const chunk = self.chunks.get(self.layout.encodeChunkCoords(coords)) orelse return .{ .status = .missing_data };
         var changed: std.ArrayList(u32) = .empty;
@@ -1156,8 +1226,12 @@ pub const World = struct {
         return result;
     }
 
+    fn constructionReadRevision(self: *const World) u64 {
+        return if (self.construction_availability) |availability| availability.read_revision(availability.context) else 0;
+    }
+
     pub fn validationWindow(self: *const World, target: [3]u32) ValidationWindow {
-        var window: ValidationWindow = .{ .chunks = validationChunks(self.layout, target), .blueprint_revision = self.blueprints.revision };
+        var window: ValidationWindow = .{ .chunks = validationChunks(self.layout, target), .blueprint_revision = self.blueprints.revision, .construction_read_revision = self.constructionReadRevision() };
         for (window.chunks.ids[0..window.chunks.count], 0..) |id, i|
             window.revisions[i] = if (self.chunks.get(id)) |chunk| chunk.validation_revision else null;
         return window;
@@ -1213,20 +1287,6 @@ pub const World = struct {
         const existing = chunk.content.getBlock(local);
         if (operation.action == .put and existing != .none) return .already_exists;
         if (operation.action == .remove and existing == .none) return .already_removed;
-        if (operation.action == .compact) {
-            if (existing != .dirt) return .target_changed;
-            const capacity = @max(self.pending_operations.capacity, self.pending_operations.items.len + 1);
-            if (self.pendingOperationBytes() - self.pending_operations.capacity * @sizeOf(PendingOperation) + capacity * @sizeOf(PendingOperation) > self.pending_byte_limit) return error.Capacity;
-            try self.pending_operations.ensureTotalCapacityPrecise(self.allocator, self.pending_operations.items.len + 1);
-            const before = CellState.capture(chunk, local);
-            const status = try chunk.tryApply(self.allocator, local, .compact);
-            if (status != .success) return status;
-            self.pending_operations.appendAssumeCapacity(.{ .operation = operation, .cell_undo = before });
-            self.pending_accounted_count = self.pending_operations.items.len;
-            self.validation_revision +%= 1;
-            chunk.validation_revision = self.validation_revision;
-            return .success;
-        }
         const before = CellState.capture(chunk, local);
         if (comptime @import("builtin").is_test) if (self.road_plan_counter) |counter| {
             counter.* += 1;
@@ -1285,22 +1345,15 @@ pub const World = struct {
     }
 
     fn enqueueBlueprintFulfillment(self: *World, operation: BlockOperation) !OperationStatus {
-        const coords, const local = splitBlockCoords(operation.block);
+        const coords, _ = splitBlockCoords(operation.block);
         const chunk = self.chunks.getPtr(self.layout.encodeChunkCoords(coords)) orelse return .missing_data;
-        const before: CellState = .{ .material = .none, .road = null, .timed = null, .constructed = false, .cell_changes = chunk.cell_changes };
         const capacity = @max(self.pending_operations.capacity, self.pending_operations.items.len + 1);
         if (self.pendingOperationBytes() - self.pending_operations.capacity * @sizeOf(PendingOperation) + capacity * @sizeOf(PendingOperation) > self.pending_byte_limit) return error.Capacity;
         try self.pending_operations.ensureTotalCapacityPrecise(self.allocator, self.pending_operations.items.len + 1);
-        try chunk.metadata.constructed.ensureUnusedCapacity(self.allocator, 1);
-        const status = try chunk.prepareApply(self.allocator, local, operation.action);
-        if (status != .success) return status;
-        _ = chunk.applyPrepared(self.allocator, local, operation.action);
-        chunk.metadata.appendConstructedKnownEmptyAssumeCapacity(transformations.index(local));
-        self.pending_operations.appendAssumeCapacity(.{ .operation = operation, .cell_undo = before, .mark_constructed = true });
+        self.pending_operations.appendAssumeCapacity(.{ .operation = operation });
         self.pending_accounted_count = self.pending_operations.items.len;
         self.validation_revision +%= 1;
         chunk.validation_revision = self.validation_revision;
-        self.revealNeighbors(coords, chunk.flags);
         return .success;
     }
 
@@ -1503,7 +1556,6 @@ test "edits on both sides of a chunk border preserve neighboring contents and re
     try std.testing.expectEqual(original_upper, world.getChunk(upper).?);
 
     try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = lower_top, .action = .{ .put = .dirt } }).status);
-    try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = lower_top, .action = .compact }).status);
     const upper_bottom = [3]u32{ 3, 4, upper[2] * CHUNK_SIZE };
     try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = upper_bottom, .action = .{ .put = .dirt } }).status);
 
@@ -1512,7 +1564,7 @@ test "edits on both sides of a chunk border preserve neighboring contents and re
     try std.testing.expectEqual(0, upper_chunk.chunk_revision);
     try std.testing.expectEqual(BlockType.dirt, upper_chunk.content.getBlock(.{ 3, 4, 0 }));
     try std.testing.expectEqual(BlockType.none, upper_chunk.content.getBlock(.{ 3, 4, 1 }));
-    try std.testing.expectEqual(4, world.pending_operations.items.len);
+    try std.testing.expectEqual(3, world.pending_operations.items.len);
 }
 
 test "earth placement at the world bottom still needs its footprint" {
@@ -1803,8 +1855,8 @@ test "material rollback restores authoritative construction and ordered timers a
     _ = authority.apply(std.testing.allocator, local, .{ .put = .dirt });
     _ = authority.apply(std.testing.allocator, .{ 4, 5, 6 }, .{ .put = .dirt });
     authority.metadata.markConstructed(std.testing.allocator, index);
-    authority.metadata.timed.schedule(std.testing.allocator, .{ .block = index, .kind = .compact_dirt, .due_tick = 30 });
-    authority.metadata.timed.schedule(std.testing.allocator, .{ .block = transformations.index(.{ 4, 5, 6 }), .kind = .compact_dirt, .due_tick = 20 });
+    authority.metadata.timed.schedule(std.testing.allocator, .{ .block = index, .kind = .grow_grass, .due_tick = 30 });
+    authority.metadata.timed.schedule(std.testing.allocator, .{ .block = transformations.index(.{ 4, 5, 6 }), .kind = .grow_grass, .due_tick = 20 });
     try world.insertChunk(coords, authority.clone(std.testing.allocator));
     world.setBlockUnchecked(.{ 1, 2, 3 }, .none);
     world.pending_operations.items[0].request_id = 1;
@@ -2370,7 +2422,10 @@ test "blueprint target identity, unknown capture data, and whole-box extraction 
     var client = try World.init(std.testing.allocator, &test_layout);
     defer client.deinit();
     try insertTestBlueprint(&client, 1, .{ 30, 10, 10 }, .{ 3, 1, 1 }, &.{ .planks, .none, .planks });
-    try std.testing.expectEqual(@as(?BlockType, null), client.plannedBlock(.{ 32, 10, 10 }));
+    // Definition/progress owns target contents independently of terrain cache
+    // residency; the cavity still needs its ordinary terrain source.
+    try std.testing.expectEqual(@as(?BlockType, .planks), client.plannedBlock(.{ 32, 10, 10 }));
+    try std.testing.expectEqual(@as(?BlockType, null), client.plannedBlock(.{ 31, 10, 10 }));
     try client.insertChunk(.{ 0, 0, 0 }, WorldChunk.initEmpty());
     try std.testing.expectEqual(BlockType.planks, client.plannedBlock(.{ 30, 10, 10 }).?);
     const stale: BlockOperation = .{ .block = .{ 30, 10, 10 }, .action = .{ .put = .planks }, .blueprint = .{ .instance_id = 9, .cell_index = 0 } };
@@ -2546,8 +2601,8 @@ test "neighboring sites retain a global completion order after safe external sup
     try std.testing.expectEqual(OperationStatus.success, client.tryOperation(second).status);
     try std.testing.expectEqual(OperationStatus.success, client.tryOperation(first).status);
     try client.applyBlueprintChanges(&.{ .{ .fulfill = .{ .instance_id = 2, .cell_index = 0 } }, .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } } });
-    try std.testing.expect(!client.blueprints.instances.get(1).?.active);
-    try std.testing.expect(!client.blueprints.instances.get(2).?.active);
+    try std.testing.expectEqual(blueprint_runtime.Phase.materializing, client.blueprints.instances.get(1).?.phase);
+    try std.testing.expectEqual(blueprint_runtime.Phase.materializing, client.blueprints.instances.get(2).?.phase);
     var ordinary: block_rules.Validator = .{ .allocator = std.testing.allocator, .reader = client.reader() };
     defer ordinary.deinit();
     try std.testing.expect(ordinary.checkExisting(.{ 64, 64, 64 }) == null);
@@ -2648,7 +2703,15 @@ test "ordinary completed validation matches physical work with no local pending 
             const origin: [3]u32 = if (site == .distant) .{ 160, 160, 10 } else .{ 10, 10, 10 };
             const instance = try world.blueprints.prepareInstance(a, world.layout, 1, 1, 1, origin, 0);
             try world.blueprints.insertInstance(a, world.layout, instance);
-            if (site == .retired) try std.testing.expect(world.blueprints.fulfill(world.layout, .{ .instance_id = 1, .cell_index = 0 }));
+            if (site == .retired) {
+                try std.testing.expect(world.blueprints.fulfill(world.layout, .{ .instance_id = 1, .cell_index = 0 }));
+                for (instance.target_groups) |group| {
+                    // The prepared handback's matching static snapshot is ready.
+                    world.chunks.getPtr(group.chunk_id).?.chunk_revision = 1;
+                    try std.testing.expect(world.blueprints.acceptTransfer(.{ .instance_id = 1, .chunk_id = group.chunk_id, .terrain_revision = 1 }));
+                }
+                try std.testing.expect(world.blueprints.complete(1));
+            }
         }
         for (cases) |case| {
             const fail_index: usize = if (case.allocation_work == .exhausted) 0 else std.math.maxInt(usize);
@@ -2875,6 +2938,9 @@ fn orderedBlueprintReplacementScenario(existing_instance: bool, fail_index: ?usi
         .{ .instance = first },
         .{ .fulfill = .{ .instance_id = 2, .cell_index = 0 } },
         .{ .fulfill = .{ .instance_id = 2, .cell_index = 1 } },
+        .{ .transfer = .{ .instance_id = 2, .chunk_id = first.target_groups[0].chunk_id, .terrain_revision = 1 } },
+        .{ .transfer = .{ .instance_id = 2, .chunk_id = first.target_groups[1].chunk_id, .terrain_revision = 1 } },
+        .{ .complete = .{ .instance_id = 2 } },
         .{ .instance = replacement },
         // Late duplicates must not remove B's targets at the same cells.
         .{ .fulfill = .{ .instance_id = 2, .cell_index = 1 } },
@@ -2889,7 +2955,7 @@ fn orderedBlueprintReplacementScenario(existing_instance: bool, fail_index: ?usi
     var old_targets: [observed_cells.len]?blueprint_runtime.Target = undefined;
     for (observed_cells, &old_targets) |cell, *target| target.* = client.blueprints.targetAt(cell);
     if (existing_instance and fail_index == null) {
-        try std.testing.expectError(error.Overlap, client.applyBlueprintChanges(&.{ changes[1], changes[0] }));
+        try std.testing.expectError(error.Overlap, client.applyBlueprintChanges(&.{ .{ .instance = replacement }, changes[0] }));
         try std.testing.expectEqual(old_revision, client.blueprints.revision);
         for (observed_cells, old_targets) |cell, target| try std.testing.expectEqualDeep(target, client.blueprints.targetAt(cell));
     }
@@ -2960,6 +3026,50 @@ test "client blueprint package creates completes and replaces a site in order" {
     try std.testing.expect(!try orderedBlueprintReplacementScenario(false, null));
 }
 
+test "construction snapshot cleanup restarts for the client's full footprint" {
+    const a = std.testing.allocator;
+    var publisher = try World.init(a, &test_layout);
+    defer publisher.deinit();
+    const cells = [_]BlockType{.planks} ** 129;
+    try insertTestBlueprint(&publisher, 1, .{ 31, 10, 10 }, .{ 129, 1, 1 }, &cells);
+    for (0..cells.len) |index| try std.testing.expect(publisher.blueprints.fulfill(publisher.layout, .{ .instance_id = 1, .cell_index = @intCast(index) }));
+    for (publisher.blueprints.instances.get(1).?.target_groups) |group|
+        try std.testing.expect(publisher.blueprints.acceptTransfer(.{ .instance_id = 1, .chunk_id = group.chunk_id, .terrain_revision = 1 }));
+    try std.testing.expect(publisher.blueprints.complete(1));
+    publisher.blueprints.cleanup(a, 4);
+    const snapshot = publisher.blueprints.instances.get(1).?;
+    try std.testing.expectEqual(@as(usize, 5), snapshot.box_chunks.len);
+    try std.testing.expectEqual(@as(usize, 4), snapshot.cleanup_cursor);
+
+    var client = try World.init(a, &test_layout);
+    defer client.deinit();
+    try client.applyBlueprintChanges(&.{.{ .definition = publisher.blueprints.definitions.get(1).? }});
+    for (0..cells.len) |index| try setTestPhysical(&client, .{ 31 + @as(u32, @intCast(index)), 10, 10 }, .planks);
+    for (snapshot.box_chunks) |id| client.chunks.getPtr(id).?.chunk_revision = 1;
+    try client.applyConstructionSnapshot(construction_stream.Snapshot.borrow(.{ .world_session = 1, .kind = .construction, .id = 1, .lifetime = 1 }, snapshot));
+    // Full snapshot publication restores discovery even in the four chunks
+    // already retired by the publisher. Their cleanup progress is local state.
+    for (snapshot.box_chunks) |id| try std.testing.expectEqualSlices(u64, &.{1}, client.blueprints.chunkInstances(id));
+    const revision = client.blueprints.revision;
+    client.blueprints.cleanup(a, 4);
+    try std.testing.expect(client.blueprints.instances.contains(1));
+    try std.testing.expectEqual(@as(usize, 4), client.blueprints.instances.get(1).?.cleanup_cursor);
+    try std.testing.expectEqual(revision + 4, client.blueprints.revision);
+    for (snapshot.box_chunks[0..4]) |id| try std.testing.expectEqual(@as(usize, 0), client.blueprints.chunkInstances(id).len);
+    try std.testing.expectEqualSlices(u64, &.{1}, client.blueprints.chunkInstances(snapshot.box_chunks[4]));
+    const probes = [_][3]u32{ .{ 31, 10, 10 }, .{ 32, 10, 10 }, .{ 64, 10, 10 }, .{ 96, 10, 10 }, .{ 159, 10, 10 } };
+    for (probes) |cell| try std.testing.expectEqual(@as(?BlockType, .planks), client.physicalBlock(cell));
+
+    client.blueprints.cleanup(a, 1);
+    try std.testing.expect(!client.blueprints.instances.contains(1));
+    try std.testing.expectEqual(revision + 5, client.blueprints.revision);
+    try std.testing.expectEqual(@as(u32, 0), client.blueprints.chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), client.blueprints.cleanup_queue.items.len);
+    for (snapshot.box_chunks) |id| try std.testing.expectEqual(@as(usize, 0), client.blueprints.chunkInstances(id).len);
+    for (probes) |cell| try std.testing.expectEqual(@as(?BlockType, .planks), client.physicalBlock(cell));
+    try std.testing.expectEqual(@as(usize, 4), publisher.blueprints.instances.get(1).?.cleanup_cursor);
+}
+
 test "ordered blueprint replacement rolls back every allocation failure and retries" {
     for ([_]bool{ true, false }) |existing_instance| {
         var fail_index: usize = 0;
@@ -2982,6 +3092,9 @@ test "client fulfillment-only packages allocate nothing including completion and
         .{ .fulfill = .{ .instance_id = 1, .cell_index = 99 } },
         .{ .fulfill = .{ .instance_id = 1, .cell_index = 1 } },
         .{ .fulfill = .{ .instance_id = 1, .cell_index = 1 } },
+        .{ .transfer = .{ .instance_id = 1, .chunk_id = 0, .terrain_revision = 1 } },
+        .{ .transfer = .{ .instance_id = 1, .chunk_id = 1, .terrain_revision = 1 } },
+        .{ .complete = .{ .instance_id = 1 } },
     });
     client.allocator = a;
     try applied;
@@ -3042,11 +3155,17 @@ test "ordered blueprint replacements preserve shared sparse wrapped chunk snapsh
         .{ .fulfill = .{ .instance_id = 2, .cell_index = 1 } }, // Sparse air is not a target.
         .{ .fulfill = .{ .instance_id = 2, .cell_index = 2 } },
         .{ .fulfill = .{ .instance_id = 2, .cell_index = 2 } },
+        .{ .transfer = .{ .instance_id = 2, .chunk_id = first.target_groups[0].chunk_id, .terrain_revision = 1 } },
+        .{ .transfer = .{ .instance_id = 2, .chunk_id = first.target_groups[1].chunk_id, .terrain_revision = 1 } },
+        .{ .complete = .{ .instance_id = 2 } },
         .{ .instance = second },
         .{ .fulfill = .{ .instance_id = 2, .cell_index = 0 } },
         .{ .fulfill = .{ .instance_id = 4, .cell_index = 0 } },
         .{ .fulfill = .{ .instance_id = 4, .cell_index = 2 } },
         .{ .fulfill = .{ .instance_id = 4, .cell_index = 2 } },
+        .{ .transfer = .{ .instance_id = 4, .chunk_id = second.target_groups[0].chunk_id, .terrain_revision = 1 } },
+        .{ .transfer = .{ .instance_id = 4, .chunk_id = second.target_groups[1].chunk_id, .terrain_revision = 1 } },
+        .{ .complete = .{ .instance_id = 4 } },
         .{ .instance = third },
         .{ .fulfill = .{ .instance_id = 2, .cell_index = 2 } },
         .{ .fulfill = .{ .instance_id = 4, .cell_index = 0 } },
@@ -3181,6 +3300,8 @@ test "blueprint observer follows committed publication fulfillment and replaceme
         .{ .instance = first },
         .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } },
         .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } },
+        .{ .transfer = .{ .instance_id = 1, .chunk_id = first.target_groups[0].chunk_id, .terrain_revision = 1 } },
+        .{ .complete = .{ .instance_id = 1 } },
         .{ .instance = second },
         .{ .fulfill = .{ .instance_id = 2, .cell_index = 0 } },
         .{ .fulfill = .{ .instance_id = 2, .cell_index = 0 } },
@@ -3214,34 +3335,4 @@ test "failed blueprint preflight never notifies or fulfills preceding changes" {
     try log.expect(&.{});
     try std.testing.expect(!client.blueprints.instances.get(1).?.isFulfilled(0));
     try std.testing.expect(client.blueprints.targetAt(.{ 31, 10, 10 }) != null);
-}
-
-test "compaction ignores missing surroundings and restores dirt metadata after rejection" {
-    const a = std.testing.allocator;
-    var world = try World.init(a, &test_layout);
-    defer world.deinit();
-    const coords: ChunkCoords = .{ 1, 1, 1 };
-    const local: [3]u5 = .{ 31, 31, 31 };
-    const block: [3]u32 = .{ 63, 63, 63 };
-    const index = transformations.index(local);
-    var authority = WorldChunk.initEmpty();
-    defer authority.deinit(a);
-    try std.testing.expectEqual(OperationStatus.success, authority.apply(a, local, .{ .put = .dirt }));
-    authority.metadata.markConstructed(a, index);
-    authority.metadata.timed.schedule(a, .{ .block = index, .kind = .compact_dirt, .due_tick = 100 });
-    try world.insertChunk(coords, authority.clone(a));
-    var road_calls: usize = 0;
-    world.road_plan_counter = &road_calls;
-    try std.testing.expectEqual(OperationStatus.success, world.tryOperation(.{ .block = block, .action = .compact }).status);
-    try std.testing.expectEqual(BlockType.packed_dirt, world.getChunk(coords).?.content.getBlock(local));
-    try std.testing.expectEqual(@as(u16, 1), world.getChunk(coords).?.solid_block_count);
-    try std.testing.expectEqual(@as(usize, 1), world.getChunk(coords).?.metadata.constructed.items.len);
-    try std.testing.expectEqual(@as(usize, 0), road_calls);
-    world.pending_operations.items[0].request_id = 1;
-    world.acknowledgeOperationResult(1, .target_changed);
-    const restored = world.getChunk(coords).?;
-    try std.testing.expectEqual(BlockType.dirt, restored.content.getBlock(local));
-    try std.testing.expectEqualSlices(transformations.Event, authority.metadata.timed.events.items, restored.metadata.timed.events.items);
-    try std.testing.expectEqualSlices(transformations.BlockIndex, authority.metadata.constructed.items, restored.metadata.constructed.items);
-    try std.testing.expectEqual(@as(usize, 0), road_calls);
 }

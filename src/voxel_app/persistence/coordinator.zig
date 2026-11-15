@@ -12,6 +12,11 @@ const Road = @import("../road_data.zig").Road;
 pub const Limits = struct {
     output_bytes: usize = 32 * 1024 * 1024,
     working_bytes: usize = 64 * 1024 * 1024,
+    construction_publication_bytes: usize = 32 * 1024 * 1024,
+    command_intent_bytes: usize = 32 * 1024 * 1024,
+    /// Native construction arrays/maps and detached preparation capacity estimate;
+    /// independent from encoded blueprint-state and terrain snapshot limits.
+    construction_state_bytes: usize = 256 * 1024 * 1024,
     manifest_entries: usize = 65536,
     pending_commands: usize = 256,
     live_bytes: usize = 512 * 1024 * 1024,
@@ -36,6 +41,11 @@ pub const Status = struct {
     live_peak_bytes: usize = 0,
     live_allocation_count: u64 = 0,
     live_rejections: u64 = 0,
+    construction_publication_used_bytes: usize = 0,
+    construction_publication_peak_bytes: usize = 0,
+    construction_publication_rejections: u64 = 0,
+    construction_publication_history_bytes: usize = 0,
+    construction_publication_blocked: bool = false,
     confirmed_operations: u64 = 0,
     capture_waited_operations: u64 = 0,
     dependency_waited_operations: u64 = 0,
@@ -160,11 +170,16 @@ pub const Job = struct {
             const framing = try blueprints.summarizeEncoded(self.blueprint_changes, framing_limits);
             var supplied_framing = supplied;
             supplied_framing.new_instance_bitmap_bytes = 0;
+            supplied_framing.new_instance_portion_bytes = 0;
             if (!std.meta.eql(supplied_framing, framing)) return error.InvalidBlueprintSummary;
             const max_cells = self.store.limits.blueprints.max_cells;
             const bitmap_per_instance = max_cells / 8 + @intFromBool(max_cells % 8 != 0);
             const maximum_bitmap_bytes = std.math.mul(usize, framing.instance_count, bitmap_per_instance) catch std.math.maxInt(usize);
             if (supplied.new_instance_bitmap_bytes < framing.instance_count or supplied.new_instance_bitmap_bytes > maximum_bitmap_bytes)
+                return error.InvalidBlueprintSummary;
+            const minimum_portion_bytes = std.math.mul(usize, framing.instance_count, @sizeOf(blueprints.Portion)) catch return error.InvalidBlueprintSummary;
+            const maximum_portion_bytes = std.math.mul(usize, minimum_portion_bytes, max_cells) catch std.math.maxInt(usize);
+            if (supplied.new_instance_portion_bytes < minimum_portion_bytes or supplied.new_instance_portion_bytes > maximum_portion_bytes)
                 return error.InvalidBlueprintSummary;
             break :verified supplied;
         } else try blueprints.summarizeEncoded(self.blueprint_changes, self.store.limits.blueprints);

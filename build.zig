@@ -1,6 +1,8 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const test_filter = b.option([]const u8, "test-filter", "Run only tests whose names contain this substring");
+    const test_filters: []const []const u8 = if (test_filter) |filter| &.{filter} else &.{};
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
@@ -210,15 +212,18 @@ pub fn build(b: *std.Build) void {
     outline_benchmark_step.dependOn(&b.addRunArtifact(outline_benchmark).step);
 
     const exe_unit_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = demo_exe.root_module,
     });
     exe_unit_tests.root_module.addImport("zmath", zmath.module("root"));
 
     const voxel_exe_unit_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = voxel_exe.root_module,
     });
 
     const world_unit_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/voxel_app/world.zig"),
             .target = target,
@@ -231,6 +236,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-world", "Run chunk, road, timer, and optimistic world tests without the application lifecycle").dependOn(&b.addRunArtifact(world_unit_tests).step);
 
     const blueprint_unit_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/voxel_app/blueprint.zig"),
             .target = target,
@@ -241,7 +247,35 @@ pub fn build(b: *std.Build) void {
     blueprint_unit_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
     b.step("test-blueprint", "Run isolated blueprint compilation and bounded fulfillment tests").dependOn(&b.addRunArtifact(blueprint_unit_tests).step);
 
+    const construction_client_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/construction_client.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    construction_client_tests.root_module.linkLibrary(voxel_engine_lib);
+    construction_client_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
+    const run_construction_client_tests = b.addRunArtifact(construction_client_tests);
+    b.step("test-construction-client", "Run construction stream, discovery and render readiness tests").dependOn(&run_construction_client_tests.step);
+
+    const construction_geometry_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/construction_geometry.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    construction_geometry_tests.root_module.linkLibrary(voxel_engine_lib);
+    construction_geometry_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
+    construction_geometry_tests.root_module.addImport("zmath", zmath.module("root"));
+    const run_construction_geometry_tests = b.addRunArtifact(construction_geometry_tests);
+    b.step("test-construction-geometry", "Run culled construction geometry and boundary tests").dependOn(&run_construction_geometry_tests.step);
+
     const blueprint_ui_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/voxel_app/blueprint_tool.zig"),
             .target = target,
@@ -253,6 +287,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-blueprint-ui", "Run blueprint controller, selection, input, and capture worker lifecycle tests").dependOn(&b.addRunArtifact(blueprint_ui_tests).step);
 
     const blueprint_admission_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/voxel_app/blueprint_admission.zig"),
             .target = target,
@@ -264,6 +299,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-blueprint-admission", "Run detached blueprint destination admission and publication tests").dependOn(&b.addRunArtifact(blueprint_admission_tests).step);
 
     const blueprint_service_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/voxel_app/blueprint_service_tests.zig"),
             .target = target,
@@ -276,6 +312,20 @@ pub fn build(b: *std.Build) void {
     blueprint_service_tests.root_module.addImport("zmath", zmath.module("root"));
     const run_blueprint_service_tests = b.addRunArtifact(blueprint_service_tests);
     b.step("test-blueprint-service", "Run blueprint authority, inventory, transaction, and restart tests").dependOn(&run_blueprint_service_tests.step);
+
+    const world_service_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/world_data_service.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    world_service_tests.root_module.linkLibrary(voxel_engine_lib);
+    world_service_tests.root_module.addImport("engine", voxel_engine_lib.root_module);
+    world_service_tests.root_module.addImport("zmath", zmath.module("root"));
+    b.step("test-world-service", "Run authority tests directly, including filtered internal regressions").dependOn(&b.addRunArtifact(world_service_tests).step);
 
     const generated_support_benchmark = b.addTest(.{
         .name = "generated-support-benchmark",
@@ -341,6 +391,7 @@ pub fn build(b: *std.Build) void {
     b.step("bench-blueprint", "Measure detached blueprint compilation and working allocations").dependOn(&blueprint_benchmark_run.step);
 
     const capture_unit_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/voxel_app/persistence_capture_tests.zig"),
             .target = target,
@@ -354,6 +405,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-capture", "Run capture concurrency and storage lifecycle tests without application startup").dependOn(&b.addRunArtifact(capture_unit_tests).step);
 
     const engine_utils_unit_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/engine/utils.zig"),
             .target = target,
@@ -366,6 +418,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const space_tree_unit_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/engine/space_tree.zig"),
             .target = target,
@@ -378,6 +431,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const dynamic_slot_buffer_manager_unit_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/engine/voxel/DynamicSlotBufferManager.zig"),
             .target = target,
@@ -386,6 +440,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const voxel_utils_unit_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/engine/voxel/voxel_utils.zig"),
             .target = target,
@@ -394,6 +449,7 @@ pub fn build(b: *std.Build) void {
     });
 
     const slot_buffer_manager_unit_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/engine/voxel/SlotBufferManager.zig"),
             .target = target,
@@ -403,6 +459,7 @@ pub fn build(b: *std.Build) void {
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
     const voxel_grid_unit_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/engine/voxel_tests.zig"),
             .target = target,
@@ -413,8 +470,11 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
+    @import("zgpu").addLibraryPathsTo(voxel_grid_unit_tests);
+    voxel_grid_unit_tests.root_module.linkLibrary(zgpu.artifact("zdawn"));
     const run_voxel_grid_unit_tests = b.addRunArtifact(voxel_grid_unit_tests);
     const run_voxel_exe_unit_tests = b.addRunArtifact(voxel_exe_unit_tests);
+    b.step("test-app", "Run voxel client and application integration tests").dependOn(&run_voxel_exe_unit_tests.step);
     const run_engine_utils_unit_tests = b.addRunArtifact(engine_utils_unit_tests);
     const run_space_tree_unit_tests = b.addRunArtifact(space_tree_unit_tests);
     const run_dynamic_slot_buffer_manager_unit_tests = b.addRunArtifact(dynamic_slot_buffer_manager_unit_tests);
@@ -422,8 +482,11 @@ pub fn build(b: *std.Build) void {
     const run_slot_buffer_manager_unit_tests = b.addRunArtifact(slot_buffer_manager_unit_tests);
 
     const test_step = b.step("test", "Run unit tests for both application wrapping modes");
+    test_step.dependOn(&run_construction_client_tests.step);
+    test_step.dependOn(&run_construction_geometry_tests.step);
     test_step.dependOn(&run_blueprint_service_tests.step);
     const generation_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/voxel_app/generation_tests.zig"),
             .target = target,
@@ -460,6 +523,7 @@ pub fn build(b: *std.Build) void {
         b.step(tool.name, tool.description).dependOn(&run.step);
     }
     const persistence_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/voxel_app/persistence_tests.zig"),
             .target = target,
@@ -511,11 +575,12 @@ pub fn build(b: *std.Build) void {
             }),
         });
         test_step.dependOn(&b.addRunArtifact(render_coordinates_tests).step);
-        const hierarchy_tests = b.addTest(.{ .root_module = library.root_module });
+        const hierarchy_tests = b.addTest(.{ .filters = test_filters, .root_module = library.root_module });
         test_step.dependOn(&b.addRunArtifact(hierarchy_tests).step);
 
         // GPU checks are explicit so CPU tests work without a graphics adapter.
         const world_shader_tests = b.addTest(.{
+            .filters = test_filters,
             .root_module = b.createModule(.{
                 .root_source_file = b.path("src/engine/world_shader_tests.zig"),
                 .target = target,

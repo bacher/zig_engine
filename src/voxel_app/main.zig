@@ -47,6 +47,9 @@ const blueprint = @import("blueprint.zig");
 const blueprint_capture = @import("blueprint_capture.zig");
 const BlueprintTool = @import("blueprint_tool.zig").BlueprintTool;
 const blueprint_renderer = @import("engine").blueprint_renderer;
+const construction_stream = @import("construction_stream.zig");
+const construction_client = @import("construction_client.zig");
+const construction_geometry = @import("construction_geometry.zig");
 const placement_preview = @import("placement_preview.zig");
 const block_diagnostics = @import("block_diagnostics.zig");
 const block_messages = @import("block_messages.zig");
@@ -118,6 +121,7 @@ const Game = struct {
     current_placement_preview: ?placement_preview.Preview = null,
     block_action_error: block_messages.TimedError = .{},
     blueprint_tool: BlueprintTool = .{},
+    construction_cache: construction_client.Cache = .{},
     blueprint_renderer: ?blueprint_renderer.Renderer = null,
     blueprint_render_instances: std.ArrayList(blueprint_renderer.Instance) = .empty,
     blueprint_render_preview: ?blueprint_renderer.Preview = null,
@@ -127,6 +131,11 @@ const Game = struct {
     miniature_cells: std.ArrayList(blueprint_renderer.MiniatureCell) = .empty,
     /// Latest source revision for each loaded chunk requiring a cache update.
     miniature_dirty_chunks: std.AutoHashMapUnmanaged(u32, u64) = .empty,
+    construction_dirty_chunks: std.AutoHashMapUnmanaged(u32, u64) = .empty,
+    construction_evictions: std.AutoHashMapUnmanaged(u64, bool) = .empty,
+    construction_eviction_order: std.ArrayList(u64) = .empty,
+    construction_eviction_head: usize = 0,
+    construction_handoff_stamps: std.AutoHashMapUnmanaged(u32, construction_stream.GeometryStamp) = .empty,
     miniature_revision: u64 = 0,
     package_pending_cells: std.ArrayList(struct { block: [3]u32, material: ?voxel_chunk_module.BlockType }) = .empty,
     fractional_ticks: f64 = 0,
@@ -332,6 +341,7 @@ const Game = struct {
     }
 
     fn blueprintResultReady(game: *const Game, result: world_data_service.BlueprintResult) bool {
+        if (!game.commandResultCurrent(result.command)) return true;
         const published: BlueprintTool.Publication = if (game.world) |world| .{
             .definition_present = if (result.definition_id) |id| world.blueprints.definitions.contains(id) else false,
             .max_instance_id = world.blueprints.max_instance_id,
@@ -353,10 +363,22 @@ const Game = struct {
     }
 
     fn acceptBlueprintResult(game: *Game, result: world_data_service.BlueprintResult) void {
+        if (!game.commandResultCurrent(result.command)) return;
         if (game.blueprint_tool.acceptResult(game.allocator, result, .{ .now = game.engine.real_time, .persistent = game.persistence_store != null, .status_duration = block_messages.action_error_duration })) {
             if (game.blueprint_tool.mode == .none) game.blueprint_render_preview = null;
             game.updateBlueprintInputBlock();
         }
+    }
+
+    fn commandResultCurrent(game: *const Game, identity: ?@import("construction_state.zig").CommandIdentity) bool {
+        const command = identity orelse return true;
+        if (command.world_session == 0 or command.client_session == 0 or command.sequence == 0) return false;
+        if (game.construction_cache.world_session != 0 and command.world_session != game.construction_cache.world_session) return false;
+        if (game.world_client) |client| {
+            if (client.service.world_session != 0 and command.world_session != client.service.world_session) return false;
+            if (client.client_session != 0 and command.client_session != client.client_session) return false;
+        }
+        return true;
     }
 
     fn confirmBlueprintTool(game: *Game) void {
@@ -795,6 +817,8 @@ const Game = struct {
         if (game.world == null) {
             return;
         }
+        defer game.buildBlueprintRenderInstances();
+        defer game.retireConstructionSources();
 
         game.advanceWorldClock();
 
@@ -802,8 +826,7 @@ const Game = struct {
         game.updateMapTeleport();
         game.updateChunksAroundCamera(false);
         const has_new_chunks = game.receiveChunks();
-        // Retire client metadata even on empty-package frames, outside fulfillment.
-        game.world.?.blueprints.cleanup(game.allocator, 4);
+        game.flushConstructionRequests();
         // Synchronize blocks first, then resolve local movement against that cache.
         // Player input remains independent of mesh work and GPU upload capacity.
         game.updateGameplay(has_new_chunks);
@@ -811,12 +834,10 @@ const Game = struct {
         game.flushBlockOperations();
         game.updatePersistence();
         game.updateChunksAroundCamera(has_new_chunks);
+        game.evictConstructionSources();
         if (!game.engine.gameplay_input_blocked and game.blueprint_tool.mode == .none) game.updateBlockFocus();
-        // Miniatures publish independently of terrain, including when its upload
-        // buffers are full. Brief terrain/miniature mismatch is permitted.
-        game.rebuildMiniatureChunks();
-        game.buildBlueprintRenderInstances();
         game.rebuildDirtyChunks();
+        if (!game.rebuildConstructionChunks()) return;
         const grid = game.engine.active_scene.?.voxel_grid;
         if (!grid.hasUploadCapacity() and game.render_radius > 2) {
             std.debug.print("voxel buffer capacity reached; reducing the visible box to 5x5x5\n", .{});
@@ -829,7 +850,9 @@ const Game = struct {
             return;
         }
         game.gpu_capacity_warning = false;
-        grid.uploadToGPU(game.engine.gctx);
+        if (!grid.tryUploadToGPU(game.engine.gctx)) return;
+        game.finishConstructionGeometry();
+        game.rebuildMiniatureChunks();
     }
 
     fn advanceWorldClock(game: *Game) void {
@@ -1061,16 +1084,27 @@ const Game = struct {
 
     fn observeBlueprintInstance(context: *anyopaque, ids: []const u32) void {
         const game: *Game = @ptrCast(@alignCast(context));
-        for (ids) |id| game.markMiniatureChunkDirty(id);
+        for (ids) |id| {
+            game.markMiniatureChunkDirty(id);
+            game.markConstructionChunkAndNeighborsDirty(game.layout().decodeChunkId(id));
+        }
     }
 
     fn observeBlueprintFulfilled(context: *anyopaque, cell: [3]u32) void {
         const game: *Game = @ptrCast(@alignCast(context));
         game.markMiniatureChunkDirty(game.layout().encodeChunkCoords(world_module.splitBlockCoords(cell)[0]));
+        game.markConstructionChunkAndNeighborsDirty(world_module.splitBlockCoords(cell)[0]);
     }
 
     fn applyPackage(game: *Game, package: *world_data_service.ResponsePackage) bool {
         const world = &game.world.?;
+        if (!game.construction_cache.acceptSession(package.world_session)) {
+            package.deinit(game.allocator);
+            package.* = .{};
+            return true;
+        }
+        world.construction_availability = .{ .context = game, .chunk_available = constructionChunkAvailable, .read_revision = constructionReadRevision };
+        world.construction_terrain_owner = .{ .context = &game.construction_cache, .terrain_revision = construction_client.Cache.terrainRevision };
         // Reconciliation can roll back a later prediction in a chunk with no
         // response. Remember its effective cell, then compare the final replay.
         game.package_pending_cells.clearRetainingCapacity();
@@ -1084,11 +1118,32 @@ const Game = struct {
             .instance_published = observeBlueprintInstance,
             .fulfilled = observeBlueprintFulfilled,
         }) catch return false;
+        for (package.blueprint_changes.items) |change| if (change == .definition) {
+            game.construction_cache.definitionInstalled(game.allocator, change.definition.id) catch return false;
+        };
         for (package.blueprint_changes.items) |*change| change.deinit(game.allocator);
         package.blueprint_changes.deinit(game.allocator);
         package.blueprint_changes = .empty;
+        // Declare current subscription interest before consuming the snapshots
+        // in this same package. Unsolicited delayed object updates cannot revive
+        // a source evicted after its last interested chunk disappeared.
+        for (package.responses.items) |response| {
+            const id = game.layout().encodeChunkCoords(response.coords);
+            if (game.chunk_subscriptions.get(id) != response.subscription_id) continue;
+            if (response.composition) |composition| for (composition.sites) |reference| {
+                game.construction_cache.discover(game.allocator, id, reference) catch return false;
+            };
+        }
+        for (package.construction_updates.items) |update| {
+            game.applyConstructionUpdate(update) catch return false;
+        }
+        for (package.construction_updates.items) |*update| update.deinit(game.allocator);
+        package.construction_updates.deinit(game.allocator);
+        package.construction_updates = .empty;
+        package.releasePublication();
         for (package.responses.items) |response| {
             if (response.operation) |result| {
+                if (!game.commandResultCurrent(result.command)) continue;
                 // Rejection now restores material before snapshots are installed.
                 // Invalidate its face dependencies before the old boundary is lost.
                 if (result.status != .success) {
@@ -1106,12 +1161,44 @@ const Game = struct {
                 game.showBlockEditError(world.last_edit_result.?);
             }
         }
-        for (package.responses.items) |response| {
+        for (package.responses.items) |*owned_response| {
+            var response = owned_response.*;
             const id = game.layout().encodeChunkCoords(response.coords);
             const token = game.chunk_subscriptions.get(id);
             if (token == null or token != response.subscription_id) {
                 response.deinit(game.allocator);
                 continue;
+            }
+            if (response.composition) |composition| {
+                for (game.construction_cache.chunkReferences(id)) |reference| game.queueConstructionEviction(reference.identity.id);
+                const stamp: construction_stream.GeometryStamp = .{
+                    .subscription_id = token.?,
+                    .chunk_revision = response.chunk_revision,
+                    .mesh_revision = response.mesh_revision,
+                    .composition_revision = composition.revision,
+                };
+                const installed = game.construction_cache.installChunk(game.allocator, id, stamp, composition) catch {
+                    response.deinit(game.allocator);
+                    if (game.chunk_modes.remove(id)) game.construction_cache.invalidateReadView();
+                    continue;
+                };
+                if (!installed) {
+                    response.deinit(game.allocator);
+                    continue;
+                }
+                var owned = composition;
+                owned.deinit(game.allocator);
+                response.composition = null;
+                owned_response.composition = null;
+                if (response.composition_budget) |budget| {
+                    budget.releaseBytes(response.composition_bytes);
+                    budget.release();
+                }
+                response.composition_budget = null;
+                response.composition_bytes = 0;
+                owned_response.composition_budget = null;
+                owned_response.composition_bytes = 0;
+                game.markConstructionChunkAndNeighborsDirty(response.coords);
             }
             switch (response.data) {
                 .acknowledgement => {},
@@ -1132,7 +1219,7 @@ const Game = struct {
                             // invalidate its mode so the next streaming pass requests
                             // a fresh authoritative snapshot. No payload or extra queue
                             // survives the failed rebase, and acknowledgments stay retired.
-                            _ = game.chunk_modes.remove(id);
+                            if (game.chunk_modes.remove(id)) game.construction_cache.invalidateReadView();
                             _ = game.block_snapshot_tokens.remove(id);
                         }
                         response.deinit(game.allocator);
@@ -1158,10 +1245,11 @@ const Game = struct {
                             continue;
                         }
                     }
-                    game.engine.active_scene.?.voxel_grid.removeChunk(response.coords);
-                    if (response.data == .mesh) {
-                        game.engine.active_scene.?.voxel_grid.appendChunk(.{ .chunk_coords = response.coords, .chunk_side_data = response.data.mesh });
-                    }
+                    game.engine.active_scene.?.voxel_grid.appendChunk(.{
+                        .chunk_coords = response.coords,
+                        .chunk_side_data = if (response.data == .mesh) response.data.mesh else .{},
+                        .geometry_stamp = game.construction_cache.geometryStamp(id) orelse .{},
+                    });
                     game.loaded_chunk_ids.put(game.allocator, id, {}) catch @panic("OOM");
                     game.mesh_versions.put(game.allocator, id, .{ .chunk_revision = response.chunk_revision, .mesh_revision = response.mesh_revision }) catch @panic("OOM");
                     _ = game.dirty_chunk_ids.remove(id);
@@ -1173,6 +1261,7 @@ const Game = struct {
                     }
                     _ = game.boundary_snapshots.remove(id);
                     game.markMiniatureChunkDirty(id);
+                    game.markConstructionChunkAndNeighborsDirty(response.coords);
                 },
             }
         }
@@ -1185,6 +1274,10 @@ const Game = struct {
             if (token == null or token != response.subscription_id or (game.chunk_modes.get(id) orelse .blocks) != .blocks) continue;
             const chunk = world.getChunk(response.coords) orelse continue;
             const installed = game.mesh_versions.get(id) orelse continue;
+            if (game.construction_cache.world_session != 0) {
+                const displayed = game.engine.active_scene.?.voxel_grid.installedGeometry(response.coords, .terrain) orelse continue;
+                if (displayed.subscription_id != token.?) continue;
+            }
             if (game.boundary_snapshots.get(id)) |boundary| {
                 if (boundary.mesh_revision != response.mesh_revision) continue;
             }
@@ -1198,6 +1291,165 @@ const Game = struct {
             if (world.reader().get(.{ block[0], block[1], block[2] }) != before.material) game.markChunksAroundBlockDirty(block);
         }
         return true;
+    }
+
+    fn applyConstructionUpdate(game: *Game, update: construction_stream.Update) !void {
+        const world = &game.world.?;
+        switch (update) {
+            .snapshot => |snapshot| {
+                if (try game.construction_cache.checkSnapshot(game.allocator, snapshot) != .apply) return;
+                try world.applyConstructionSnapshot(snapshot);
+                game.construction_cache.snapshotInstalled(snapshot);
+                game.observeConstructionFootprint(snapshot.box_chunks);
+            },
+            .delta => |delta| {
+                if (try game.construction_cache.checkDelta(game.allocator, delta) != .apply) return;
+                const instance = world.blueprints.instances.get(delta.identity.id) orelse {
+                    try game.construction_cache.invalidate(game.allocator, delta.identity);
+                    return;
+                };
+                const definition = world.blueprints.definitions.get(instance.definition_id) orelse {
+                    try game.construction_cache.invalidate(game.allocator, delta.identity);
+                    return;
+                };
+                if (!try validConstructionDelta(game.allocator, delta, instance, definition.definition)) {
+                    try game.construction_cache.invalidate(game.allocator, delta.identity);
+                    return;
+                }
+                var changes: std.ArrayList(@import("blueprint_runtime.zig").Change) = .empty;
+                defer changes.deinit(game.allocator);
+                try changes.ensureTotalCapacity(game.allocator, delta.fulfilled_indices.len + delta.transfers.len + 1);
+                for (delta.fulfilled_indices) |index| changes.appendAssumeCapacity(.{ .fulfill = .{ .instance_id = delta.identity.id, .cell_index = index } });
+                for (delta.transfers) |transfer| changes.appendAssumeCapacity(.{ .transfer = transfer });
+                if (delta.phase == .complete) changes.appendAssumeCapacity(.{ .complete = .{ .instance_id = delta.identity.id } });
+                try world.applyBlueprintChangesObserved(changes.items, .{
+                    .context = game,
+                    .instance_published = observeBlueprintInstance,
+                    .fulfilled = observeBlueprintFulfilled,
+                });
+                const installed = world.blueprints.instances.getPtr(delta.identity.id).?;
+                if (delta.phase) |phase| if (installed.phase != phase) {
+                    try game.construction_cache.invalidate(game.allocator, delta.identity);
+                    return;
+                };
+                installed.revision = delta.revision;
+                game.construction_cache.deltaInstalled(delta);
+                for (delta.transfers) |transfer| game.markConstructionChunkAndNeighborsDirty(game.layout().decodeChunkId(transfer.chunk_id));
+                // A delta may restate the current phase. Fulfillment observers
+                // already invalidate its local cells; only an actual lifecycle
+                // transition changes presentation across the site's footprint.
+                if (installed.phase != instance.phase) game.observeConstructionFootprint(installed.box_chunks);
+            },
+            .retired => |retired| {
+                const retained = world.blueprints.instances.getPtr(retired.identity.id);
+                if (retained) |instance| if (instance.lifetime == retired.identity.lifetime) {
+                    if (std.mem.indexOfScalar(u64, world.blueprints.cleanup_queue.items[world.blueprints.cleanup_head..], instance.id) == null)
+                        try world.blueprints.cleanup_queue.ensureUnusedCapacity(game.allocator, 1);
+                    for (instance.box_chunks) |id| if (game.loaded_chunk_ids.contains(id)) try game.construction_cache.requestChunk(game.allocator, id);
+                };
+                if (try game.construction_cache.retire(game.allocator, retired) != .apply) return;
+                // A completion/retirement notice does not remove display data.
+                // Each selected portion waits for a matching installed mesh.
+                if (retained) |instance| {
+                    if (instance.lifetime != retired.identity.lifetime) return;
+                    if (std.mem.indexOfScalar(u64, world.blueprints.cleanup_queue.items[world.blueprints.cleanup_head..], instance.id) == null) {
+                        world.blueprints.cleanup_queue.appendAssumeCapacity(instance.id);
+                    }
+                    instance.active = false;
+                    instance.phase = .complete;
+                    instance.revision = @max(instance.revision, retired.revision);
+                    game.observeConstructionFootprint(instance.box_chunks);
+                }
+            },
+        }
+    }
+
+    fn validConstructionDelta(allocator: std.mem.Allocator, delta: construction_stream.Delta, instance: @import("blueprint_runtime.zig").Instance, definition: blueprint.Definition) !bool {
+        var fulfilled: std.AutoHashMapUnmanaged(u32, void) = .empty;
+        defer fulfilled.deinit(allocator);
+        var remaining = instance.remaining;
+        for (delta.fulfilled_indices) |index| {
+            if (index >= definition.cells.len or definition.cells[index] == .none) return false;
+            if (instance.isFulfilled(index)) continue;
+            if (instance.phase != .building) return false;
+            const entry = try fulfilled.getOrPut(allocator, index);
+            if (!entry.found_existing) {
+                if (remaining == 0) return false;
+                remaining -= 1;
+            }
+        }
+        const phase = if (instance.phase == .building and remaining == 0) .materializing else instance.phase;
+        var transfers: std.AutoHashMapUnmanaged(u32, u64) = .empty;
+        defer transfers.deinit(allocator);
+        for (delta.transfers) |transfer| {
+            if (transfer.instance_id != instance.id or transfer.terrain_revision == 0) return false;
+            const slot = instance.groupIndex(transfer.chunk_id) orelse return false;
+            const group = instance.target_groups[slot];
+            if (group.transferred) {
+                if (group.terrain_revision != transfer.terrain_revision) return false;
+                continue;
+            }
+            if (phase != .materializing) return false;
+            const entry = try transfers.getOrPut(allocator, transfer.chunk_id);
+            if (entry.found_existing and entry.value_ptr.* != transfer.terrain_revision) return false;
+            entry.value_ptr.* = transfer.terrain_revision;
+        }
+        if (transfers.count() > instance.remaining_groups) return false;
+        if (delta.phase) |requested| {
+            if (requested == .complete) return phase == .complete or (phase == .materializing and transfers.count() == instance.remaining_groups);
+            if (requested != phase) return false;
+        }
+        return true;
+    }
+
+    fn constructionReadRevision(context: *const anyopaque) u64 {
+        const game: *const Game = @ptrCast(@alignCast(context));
+        return game.construction_cache.read_revision;
+    }
+
+    fn constructionChunkAvailable(context: *const anyopaque, id: u32) bool {
+        const game: *const Game = @ptrCast(@alignCast(context));
+        if (game.construction_cache.world_session != 0) if (game.chunk_subscriptions.get(id)) |subscription| {
+            const data = game.construction_cache.geometryStamp(id) orelse return false;
+            if (data.subscription_id != subscription or !game.chunk_modes.contains(id)) return false;
+        };
+        if (!construction_client.Cache.chunkAvailable(&game.construction_cache, id)) return false;
+        const world = if (game.world) |*value| value else return false;
+        for (world.blueprints.chunkInstances(id)) |instance_id| {
+            const instance = world.blueprints.instances.get(instance_id) orelse return false;
+            if (!game.construction_cache.instanceAvailable(id, instance)) return false;
+        }
+        return true;
+    }
+
+    fn observeConstructionFootprint(game: *Game, chunks: []const u32) void {
+        for (chunks) |id| {
+            game.markMiniatureChunkDirty(id);
+            game.markConstructionChunkAndNeighborsDirty(game.layout().decodeChunkId(id));
+        }
+    }
+
+    fn flushConstructionRequests(game: *Game) void {
+        const client = game.world_client orelse return;
+        var consumed: usize = 0;
+        while (consumed < game.construction_cache.requests.items.len) : (consumed += 1) {
+            switch (game.construction_cache.requests.items[consumed]) {
+                .definition => |id| client.tryRequestBlueprintDefinition(id) catch break,
+                .snapshot => |identity| client.tryResyncConstruction(identity) catch break,
+                .chunk => |id| {
+                    if (!game.chunk_subscriptions.contains(id)) continue;
+                    const mode = game.chunk_modes.get(id) orelse .blocks;
+                    if (game.chunk_modes.remove(id)) game.construction_cache.invalidateReadView();
+                    game.requestChunkMode(game.layout().decodeChunkId(id), mode);
+                    if (!game.chunk_modes.contains(id)) break;
+                },
+            }
+        }
+        if (consumed != 0) {
+            const remaining = game.construction_cache.requests.items.len - consumed;
+            std.mem.copyForwards(construction_stream.Request, game.construction_cache.requests.items[0..remaining], game.construction_cache.requests.items[consumed..]);
+            game.construction_cache.requests.items.len = remaining;
+        }
     }
 
     fn installBoundaries(game: *Game, coords: ChunkCoords, masks: world_engine.BoundaryMasks, revision: u64) void {
@@ -1236,8 +1488,11 @@ const Game = struct {
         const id = game.layout().encodeChunkCoords(coords);
         if (game.chunk_subscriptions.contains(id) and game.chunk_modes.get(id) == mode) return;
         const token = game.world_client.?.tryRequestChunksInMode(.{ coords[0], coords[1] }, coords[2], coords[2] + 1, mode) catch return;
+        game.engine.active_scene.?.voxel_grid.cancelPendingChunkLayer(coords, .terrain);
+        game.engine.active_scene.?.voxel_grid.cancelPendingChunkLayer(coords, .construction);
         game.chunk_subscriptions.put(game.allocator, id, token) catch @panic("OOM");
         game.chunk_modes.put(game.allocator, id, mode) catch @panic("OOM");
+        game.construction_cache.invalidateReadView();
     }
 
     fn wantsBlocks(game: *const Game, coords: ChunkCoords) bool {
@@ -1335,6 +1590,7 @@ const Game = struct {
 
         game.loaded_chunk_ids.put(game.allocator, chunk_id, {}) catch @panic("OOM");
         game.markMiniatureChunkDirty(chunk_id);
+        game.markConstructionChunkAndNeighborsDirty(chunk_coords);
         game.markChunkDirtyIfLoaded(chunk_coords);
     }
 
@@ -1343,7 +1599,11 @@ const Game = struct {
     }
 
     fn removeChunkByIdIfNeeded(game: *Game, chunk_id: u32) void {
+        for (game.world.?.blueprints.chunkInstances(chunk_id)) |instance_id| game.queueConstructionEviction(instance_id);
+        for (game.construction_cache.chunkReferences(chunk_id)) |reference| game.queueConstructionEviction(reference.identity.id);
         _ = game.miniature_dirty_chunks.remove(chunk_id);
+        _ = game.construction_dirty_chunks.remove(chunk_id);
+        game.construction_cache.evictChunk(game.allocator, chunk_id);
         if (game.blueprint_renderer) |*renderer| renderer.removeMiniatureChunk(game.engine.gctx, chunk_id);
         _ = game.block_snapshot_tokens.remove(chunk_id);
         _ = game.dirty_chunk_ids.remove(chunk_id);
@@ -1374,8 +1634,7 @@ const Game = struct {
         const world = if (game.world) |*world| world else return;
         interaction.finishReconciliation(world.pending_operations.items);
         const camera = game.engine.active_scene.?.camera;
-        const compacting = interaction.requested == .secondary_mouse or (if (interaction.holding) |hold| hold.operation.action == .compact else false);
-        const mode: block_targeting.Mode = if (compacting) .removing else game.blockMode();
+        const mode = game.blockMode();
         const target = (block_targeting.findTarget(world, camera.position, camera.forwardDirection(), mode) catch null);
         if (interaction.requested) |source| {
             interaction.requested = null;
@@ -1384,16 +1643,17 @@ const Game = struct {
             const block = target orelse return;
             const coords, const local = world_module.splitBlockCoords(block);
             const chunk = world.getChunk(coords) orelse return;
-            if (compacting and chunk.content.getBlock(local) != .dirt) return;
+            _ = local;
+            const physical = world.reader().get(.{ block[0], block[1], block[2] }) orelse return;
             interaction.holding = .{
                 .source = source,
                 .operation = .{
                     .block = block,
-                    .action = if (compacting) .compact else if (interaction.inventory) |material| .{ .put = material } else .remove,
-                    .blueprint = if (!compacting and interaction.inventory != null) (if (world.blueprints.targetAt(block)) |planned_target| .{ .instance_id = planned_target.instance_id, .cell_index = planned_target.cell_index } else null) else null,
+                    .action = if (interaction.inventory) |material| .{ .put = material } else .remove,
+                    .blueprint = if (interaction.inventory != null) (if (world.blueprints.targetAt(block)) |planned_target| .{ .instance_id = planned_target.instance_id, .cell_index = planned_target.cell_index } else null) else null,
                     .player = .{ .id = game.player_id, .expected_sequence = chunk.cell_changes.sequence },
                 },
-                .material = chunk.content.getBlock(local),
+                .material = physical,
             };
             // The press happened during this frame; its preceding delta is not work.
             return;
@@ -1408,7 +1668,9 @@ const Game = struct {
             interaction.cancelHold();
             return;
         };
-        if (!chunk.cell_changes.unchangedSince(transformations.index(local), hold.operation.player.?.expected_sequence) or chunk.content.getBlock(local) != hold.material) {
+        const held_cell = hold.operation.block;
+        const physical = world.reader().get(.{ held_cell[0], held_cell[1], held_cell[2] });
+        if (!chunk.cell_changes.unchangedSince(transformations.index(local), hold.operation.player.?.expected_sequence) or physical == null or physical.? != hold.material) {
             interaction.cancelHold();
             return;
         }
@@ -1466,8 +1728,7 @@ const Game = struct {
         if (!input.focused or input.focus_changed) return;
         const world = if (game.world) |*world| world else return;
         const camera = scene.camera;
-        const compacting = if (game.block_interaction.holding) |hold| hold.operation.action == .compact else false;
-        const mode: block_targeting.Mode = if (compacting) .removing else game.blockMode();
+        const mode = game.blockMode();
         const material = game.heldMaterial() orelse game.selected_material;
         const block = (block_targeting.findTarget(world, camera.position, camera.forwardDirection(), mode) catch return) orelse return;
         if (mode == .removing) {
@@ -1549,6 +1810,7 @@ const Game = struct {
         const chunk_coords, const local = world_module.splitBlockCoords(block);
 
         game.markMiniatureChunkDirty(game.layout().encodeChunkCoords(chunk_coords));
+        game.markConstructionChunkAndNeighborsDirty(chunk_coords);
         game.markChunkDirtyIfLoaded(chunk_coords);
 
         for (std.enums.values(Side)) |side| {
@@ -1563,6 +1825,7 @@ const Game = struct {
     /// without changed boundary planes cannot change a neighboring chunk's faces.
     fn markChunkSnapshotDirty(game: *Game, chunk_coords: ChunkCoords, previous: ?world_engine.BoundaryMasks) void {
         game.markMiniatureChunkDirty(game.layout().encodeChunkCoords(chunk_coords));
+        game.markConstructionChunkAndNeighborsDirty(chunk_coords);
         game.markChunkDirtyIfLoaded(chunk_coords);
         const updated = game.world.?.getChunk(chunk_coords).?.boundaries;
         for (std.enums.values(Side)) |side| {
@@ -1593,6 +1856,180 @@ const Game = struct {
         if (!game.loaded_chunk_ids.contains(id)) return;
         game.miniature_revision +%= 1;
         game.miniature_dirty_chunks.put(game.allocator, id, game.miniature_revision) catch @panic("OOM");
+    }
+
+    fn markConstructionChunkAndNeighborsDirty(game: *Game, coords: ChunkCoords) void {
+        game.markConstructionChunkDirty(game.layout().encodeChunkCoords(coords));
+        for (std.enums.values(Side)) |side| {
+            if (world_module.adjacentChunk(game.layout(), coords, side)) |neighbor| game.markConstructionChunkDirty(game.layout().encodeChunkCoords(neighbor));
+        }
+    }
+
+    fn markConstructionChunkDirty(game: *Game, id: u32) void {
+        if (!game.loaded_chunk_ids.contains(id)) return;
+        game.miniature_revision +%= 1;
+        game.construction_dirty_chunks.put(game.allocator, id, game.miniature_revision) catch @panic("OOM");
+    }
+
+    fn includeConstructionPortion(context: *const anyopaque, id: u32, instance: @import("blueprint_runtime.zig").Instance) bool {
+        const game: *const Game = @ptrCast(@alignCast(context));
+        if (!game.loaded_chunk_ids.contains(id)) return false;
+        const group_slot = instance.groupIndex(id) orelse return false;
+        const group = instance.target_groups[group_slot];
+        if (game.construction_cache.portionReady(id, instance, group.terrain_revision)) return false;
+        // Prepare dynamic removal in the same upload batch as the matching
+        // static replacement. Neither layer changes if preparation/upload fails.
+        if (game.construction_handoff_stamps.get(id)) |stamp| if (game.construction_cache.portionReadyForGeometry(id, instance, group.terrain_revision, stamp)) return false;
+        return true;
+    }
+
+    fn rebuildConstructionChunks(game: *Game) bool {
+        const grid = game.engine.active_scene.?.voxel_grid;
+        var selection_count: usize = 0;
+        var loaded = game.loaded_chunk_ids.keyIterator();
+        while (loaded.next()) |id| {
+            for (game.world.?.blueprints.chunkInstances(id.*)) |instance_id| {
+                const instance = game.world.?.blueprints.instances.get(instance_id) orelse continue;
+                if (instance.groupIndex(id.*) != null and !game.construction_cache.hasStaticSelection(id.*, instance)) selection_count += 1;
+            }
+            const coords = game.layout().decodeChunkId(id.*);
+            const current = game.construction_cache.geometryStamp(id.*) orelse continue;
+            if (game.world.?.hasPendingMeshDependency(coords)) continue;
+            if (grid.certifyInstalledGeometry(coords, .terrain, current)) _ = game.construction_cache.geometryInstalled(id.*, current);
+        }
+        game.construction_cache.reserveStaticSelections(game.allocator, selection_count) catch return false;
+        game.construction_handoff_stamps.clearRetainingCapacity();
+        game.construction_handoff_stamps.ensureTotalCapacity(game.allocator, @intCast(grid.chunks_to_upload.items.len)) catch return false;
+        for (grid.chunks_to_upload.items) |upload| {
+            if (upload.layer != .terrain) continue;
+            const id = game.layout().encodeChunkCoords(upload.chunk_coords);
+            const current = game.construction_cache.geometryStamp(id) orelse continue;
+            if (std.meta.eql(current, upload.geometry_stamp)) game.construction_handoff_stamps.putAssumeCapacity(id, current);
+        }
+        var ready = true;
+        var iterator = game.construction_dirty_chunks.iterator();
+        while (iterator.next()) |entry| {
+            const id = entry.key_ptr.*;
+            if (!game.loaded_chunk_ids.contains(id)) {
+                _ = game.construction_dirty_chunks.remove(id);
+                continue;
+            }
+            if (!constructionChunkAvailable(game, id)) {
+                ready = false;
+                continue;
+            }
+            var mesh = construction_geometry.buildChunk(game.allocator, &game.world.?, id, .{ .context = game, .include = includeConstructionPortion }) catch {
+                ready = false;
+                continue;
+            };
+            const stamp: construction_stream.GeometryStamp = .{
+                .subscription_id = game.chunk_subscriptions.get(id) orelse 0,
+                .mesh_revision = entry.value_ptr.*,
+                .composition_revision = if (game.construction_cache.geometryStamp(id)) |data| data.composition_revision else 0,
+            };
+            grid.tryAppendChunk(.{ .chunk_coords = game.layout().decodeChunkId(id), .layer = .construction, .geometry_stamp = stamp, .chunk_side_data = mesh }) catch {
+                mesh.deinit(game.allocator);
+                ready = false;
+                continue;
+            };
+            _ = game.construction_dirty_chunks.remove(id);
+        }
+        return ready;
+    }
+
+    fn finishConstructionGeometry(game: *Game) void {
+        const grid = game.engine.active_scene.?.voxel_grid;
+        var loaded = game.loaded_chunk_ids.keyIterator();
+        while (loaded.next()) |id| {
+            if (grid.installedGeometry(game.layout().decodeChunkId(id.*), .terrain)) |stamp| {
+                _ = game.construction_cache.geometryInstalled(id.*, stamp);
+            }
+            for (game.world.?.blueprints.chunkInstances(id.*)) |instance_id| {
+                const instance = game.world.?.blueprints.instances.get(instance_id) orelse continue;
+                if (instance.groupIndex(id.*)) |slot| if (game.construction_cache.portionReady(id.*, instance, instance.target_groups[slot].terrain_revision)) {
+                    game.construction_cache.selectStaticAssumeCapacity(id.*, instance);
+                };
+            }
+        }
+    }
+
+    fn retireConstructionSources(game: *Game) void {
+        const state = &game.world.?.blueprints;
+        if (state.cleanup_head >= state.cleanup_queue.items.len) return;
+        const instance_id = state.cleanup_queue.items[state.cleanup_head];
+        const instance = state.instances.get(instance_id) orelse {
+            state.cleanup_head += 1;
+            return;
+        };
+        for (instance.box_chunks) |id| {
+            if (!game.loaded_chunk_ids.contains(id)) continue;
+            if (!game.construction_cache.instanceAvailable(id, instance)) return;
+            const visible = getChunkDistance(game.layout(), id, game.engine.active_scene.?.camera.chunk) <= game.render_radius;
+            if (visible) if (instance.groupIndex(id)) |slot| {
+                if (!game.construction_cache.portionReady(id, instance, instance.target_groups[slot].terrain_revision)) return;
+            };
+        }
+        const budget = @min(@as(usize, 4), instance.box_chunks.len - instance.cleanup_cursor);
+        // Cleanup may remove pending entries when retirement skipped final
+        // progress. Refresh only the sources in this bounded cleanup batch.
+        if (instance.remaining != 0) for (instance.box_chunks[instance.cleanup_cursor..][0..budget]) |id| game.markMiniatureChunkDirty(id);
+        state.cleanup(game.allocator, budget);
+        if (!state.instances.contains(instance_id)) _ = game.construction_cache.forgetSite(instance_id);
+    }
+
+    fn queueConstructionEviction(game: *Game, id: u64) void {
+        if (game.construction_evictions.contains(id)) return;
+        game.construction_eviction_order.ensureUnusedCapacity(game.allocator, 1) catch @panic("OOM");
+        const entry = game.construction_evictions.getOrPut(game.allocator, id) catch @panic("OOM");
+        entry.value_ptr.* = false;
+        game.construction_eviction_order.appendAssumeCapacity(id);
+    }
+
+    fn needsConstructionSource(game: *const Game, instance: @import("blueprint_runtime.zig").Instance) bool {
+        for (instance.box_chunks) |id| if (game.chunk_subscriptions.contains(id) or game.loaded_chunk_ids.contains(id)) return true;
+        for (game.world.?.pending_operations.items) |pending| if (pending.operation.blueprint) |target| {
+            if (target.instance_id == instance.id) return true;
+        };
+        return false;
+    }
+
+    fn evictConstructionSources(game: *Game) void {
+        if (game.construction_eviction_head >= game.construction_eviction_order.items.len) return;
+        const id = game.construction_eviction_order.items[game.construction_eviction_head];
+        const started = game.construction_evictions.getPtr(id).?;
+        const state = &game.world.?.blueprints;
+        const instance = state.instances.get(id) orelse {
+            _ = game.construction_cache.forgetSite(id);
+            game.finishConstructionEviction(id);
+            return;
+        };
+        const needed = game.needsConstructionSource(instance);
+        if (!started.* and needed) {
+            game.finishConstructionEviction(id);
+            return;
+        }
+        started.* = true;
+        game.construction_cache.beginEviction(id);
+        const identity = game.construction_cache.siteIdentity(id);
+        // A dependency can arrive while a large source is being evicted. Queue
+        // its resync before the final allocation-free removal, so queue pressure
+        // cannot lose the only retained descriptor needed to retry afterward.
+        if (needed and instance.box_chunks.len - instance.cleanup_cursor <= 4) {
+            if (identity) |value| game.construction_cache.requestSnapshot(game.allocator, value) catch return;
+        }
+        if (state.evictCachedInstance(game.allocator, id, 4)) {
+            if (identity) |value| game.construction_cache.endEviction(game.allocator, value, needed) catch return;
+            game.finishConstructionEviction(id);
+        }
+    }
+
+    fn finishConstructionEviction(game: *Game, id: u64) void {
+        _ = game.construction_evictions.remove(id);
+        game.construction_eviction_head += 1;
+        if (game.construction_eviction_head == game.construction_eviction_order.items.len) {
+            game.construction_eviction_order.clearRetainingCapacity();
+            game.construction_eviction_head = 0;
+        }
     }
 
     /// Camera-independent source resolution only runs for changed chunks.
@@ -1649,9 +2086,14 @@ const Game = struct {
     }
 
     fn deinitMiniatureState(game: *Game) void {
+        game.construction_cache.deinit(game.allocator);
         game.blueprint_visible_chunks.deinit(game.allocator);
         game.miniature_cells.deinit(game.allocator);
         game.miniature_dirty_chunks.deinit(game.allocator);
+        game.construction_dirty_chunks.deinit(game.allocator);
+        game.construction_evictions.deinit(game.allocator);
+        game.construction_eviction_order.deinit(game.allocator);
+        game.construction_handoff_stamps.deinit(game.allocator);
         game.package_pending_cells.deinit(game.allocator);
     }
 
@@ -1661,23 +2103,30 @@ const Game = struct {
         game.world.?.changed_road_chunks.clearRetainingCapacity();
         const voxel_grid = game.engine.active_scene.?.voxel_grid;
         const world = &game.world.?;
-        defer game.dirty_chunk_ids.clearRetainingCapacity();
-
         var iterator = game.dirty_chunk_ids.keyIterator();
         while (iterator.next()) |chunk_id| {
             const coords = game.layout().decodeChunkId(chunk_id.*);
-            const chunk = world.getChunk(coords) orelse continue;
+            const chunk = world.getChunk(coords) orelse {
+                _ = game.dirty_chunk_ids.remove(chunk_id.*);
+                continue;
+            };
             // Retained blocks may still receive neighbor changes during a handoff.
             _ = game.mesh_versions.remove(chunk_id.*);
-            voxel_grid.removeChunk(coords);
+            var geometry: voxel_chunk_module.ChunkSideData = .{};
             if (chunk.content == .blocks and !chunk.flags.is_unreachable) {
                 var climate: world_engine.ClimateMap = @splat(@splat(.temperate));
                 if (game.world_data) |service| service.preparedGenerator().fillClimateMap(.{ coords[0], coords[1] }, &climate);
-                voxel_grid.appendChunk(.{
-                    .chunk_coords = coords,
-                    .chunk_side_data = world_engine.extractChunkGeometryWithClimate(game.allocator, chunk, game.meshNeighbors(coords), &climate),
-                });
+                geometry = world_engine.tryExtractChunkGeometryWithClimate(game.allocator, chunk, game.meshNeighbors(coords), &climate) catch continue;
             }
+            voxel_grid.tryAppendChunk(.{
+                .chunk_coords = coords,
+                .chunk_side_data = geometry,
+                .geometry_stamp = game.construction_cache.geometryStamp(chunk_id.*) orelse .{},
+            }) catch {
+                geometry.deinit(game.allocator);
+                continue;
+            };
+            _ = game.dirty_chunk_ids.remove(chunk_id.*);
         }
     }
     fn meshNeighbors(game: *const Game, coords: ChunkCoords) world_engine.BoundaryMasks {
@@ -1712,11 +2161,17 @@ fn applyChunkResponse(world: *World, subscriptions: *const std.AutoHashMapUnmana
         response.deinit(world.allocator);
         return false;
     }
-    if (response.data != .blocks) return false;
+    if (response.data != .blocks) {
+        response.deinit(world.allocator);
+        return false;
+    }
     world.insertChunk(response.coords, response.data.blocks.chunk) catch {
         response.deinit(world.allocator);
         return false;
     };
+    var consumed = response;
+    consumed.data = .acknowledgement;
+    consumed.deinit(world.allocator);
     return true;
 }
 
@@ -2222,7 +2677,6 @@ fn handleMouseButtonRelease(game: *Game, params: MouseButtonParams) void {
         game.block_interaction.release(.mouse);
         game.blueprint_tool.press.mouse_down = false;
     }
-    if (params.button == .right) game.block_interaction.release(.secondary_mouse);
 }
 
 fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams, game_opaque: *anyopaque) void {
@@ -2239,7 +2693,6 @@ fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
     }
     if (game.control_mode == .player) {
         if (params.button == .left) game.block_interaction.press(.mouse);
-        if (params.button == .right) game.block_interaction.press(.secondary_mouse);
         return;
     }
     if (params.button == .left) game.queueBlockAction(switch (game.block_mode) {
@@ -4140,8 +4593,9 @@ test "chunk loads, edits, and snapshots share one rebuild using the final conten
     game.markChunksAroundBlockDirty(block);
     try std.testing.expectEqual(1, grid.chunks.items.len);
     game.rebuildDirtyChunks();
-    try std.testing.expectEqual(0, grid.chunks.items.len);
-    try std.testing.expectEqual(0, grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(1, grid.chunks.items.len);
+    try std.testing.expectEqual(1, grid.chunks_to_upload.items.len);
+    for (grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side) |side| try std.testing.expectEqual(@as(usize, 0), side.items.len);
     try std.testing.expect(game.loaded_chunk_ids.contains(chunk_id));
 
     // An empty loaded chunk can become visible again in a subsequent frame.
@@ -4325,6 +4779,40 @@ test "new subscription rejects queued snapshots from an evicted generation" {
     try std.testing.expectEqual(2, subscriptions.get(test_layout.encodeChunkCoords(coords)));
 }
 
+test "block response ownership releases discovery charges after transfer or metadata discard" {
+    const a = std.testing.allocator;
+    const Budget = @import("construction_publication_budget.zig").Budget;
+    const Wake = struct {
+        fn wake(_: *anyopaque) void {}
+    };
+    var context: u8 = 0;
+    const bytes = @sizeOf(construction_stream.SiteRef);
+    const budget = try Budget.create(a, std.testing.io, bytes, &context, Wake.wake);
+    defer budget.release();
+    defer budget.detach();
+    var world = try World.init(a, &test_layout);
+    defer world.deinit();
+    var subscriptions: std.AutoHashMapUnmanaged(u32, u64) = .empty;
+    defer subscriptions.deinit(a);
+    const coords: ChunkCoords = .{ 0, 0, 0 };
+    try subscriptions.put(a, test_layout.encodeChunkCoords(coords), 1);
+    for ([_]bool{ true, false }) |blocks| {
+        const sites = try a.dupe(construction_stream.SiteRef, &.{.{ .identity = .{ .world_session = 1, .id = 1, .lifetime = 1 }, .site_revision = 1 }});
+        try budget.reserve(bytes);
+        budget.retain();
+        try std.testing.expectEqual(blocks, applyChunkResponse(&world, &subscriptions, .{
+            .coords = coords,
+            .subscription_id = 1,
+            .composition = .{ .revision = 1, .sites = sites },
+            .composition_budget = budget,
+            .composition_bytes = bytes,
+            .data = if (blocks) .{ .blocks = .{ .chunk = WorldChunk.initEmpty() } } else .acknowledgement,
+        }));
+        try std.testing.expectEqual(@as(usize, 0), budget.used.load(.monotonic));
+        try std.testing.expectEqual(@as(usize, 1), budget.references.load(.monotonic));
+    }
+}
+
 test "unreachable chunks keep CPU blocks and queue a mesh immediately after a local reveal" {
     const allocator = std.testing.allocator;
     var grid: @import("engine").VoxelGrid = .{
@@ -4355,7 +4843,8 @@ test "unreachable chunks keep CPU blocks and queue a mesh immediately after a lo
     try game.world.?.insertChunk(.{ 1, 1, 3 }, column.generateChunk(allocator, 3));
     game.loadChunkIfNeeded(1, 1, 2);
     game.rebuildDirtyChunks();
-    try std.testing.expectEqual(0, grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(1, grid.chunks_to_upload.items.len);
+    for (grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side) |side| try std.testing.expectEqual(@as(usize, 0), side.items.len);
     try std.testing.expect(game.loaded_chunk_ids.contains(test_layout.encodeChunkCoords(coords)));
     try std.testing.expect(game.world.?.getChunk(coords).?.flags.is_unreachable);
     try std.testing.expect(try game.world.?.isBlockSolid(.{ consts.CHUNK_SIZE + 8, consts.CHUNK_SIZE + 8, 2 * consts.CHUNK_SIZE + 31 }));
@@ -4396,7 +4885,8 @@ test "unreachable chunks keep CPU blocks and queue a mesh immediately after a lo
     try game.world.?.insertChunk(remote_coords, remote_column.generateChunk(allocator, 2));
     game.loadChunkIfNeeded(5, 5, 2);
     game.rebuildDirtyChunks();
-    try std.testing.expectEqual(0, grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(1, grid.chunks_to_upload.items.len);
+    for (grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side) |side| try std.testing.expectEqual(@as(usize, 0), side.items.len);
     try game.chunk_subscriptions.put(allocator, test_layout.encodeChunkCoords(remote_coords), 2);
     var reveal = remote_column.generateChunk(allocator, 2);
     reveal.flags.is_unreachable = false;
@@ -5041,7 +5531,7 @@ test "demotion retains complete local geometry and masks until the service mesh 
     for (fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side) |side| try std.testing.expectEqual(0, side.items.len);
 }
 
-test "unreachable status completes demotion without uploading and cannot hide a later reveal" {
+test "unreachable status queues empty demotion replacement and cannot hide a later reveal" {
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
@@ -5067,7 +5557,8 @@ test "unreachable status completes demotion without uploading and cannot hide a 
     try std.testing.expectEqual(0, fixture.game.mesh_versions.get(id).?.chunk_revision);
     try std.testing.expectEqual(4, fixture.game.mesh_versions.get(id).?.mesh_revision);
     fixture.game.rebuildDirtyChunks();
-    try std.testing.expectEqual(0, fixture.grid.chunks_to_upload.items.len);
+    try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items.len);
+    for (fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side) |side| try std.testing.expectEqual(@as(usize, 0), side.items.len);
 
     // The same subscription resumes mesh delivery when its enclosure is opened.
     try fixture.apply(&.{.{ .coords = coords, .subscription_id = 2, .chunk_revision = 1, .mesh_revision = 5, .data = .{ .mesh = world_engine.extractChunkSideData(std.testing.allocator, chunk.content, @splat(.{})) } }});
@@ -5124,6 +5615,69 @@ test "movement retains certified meshes and remote boundary changes invalidate t
     try std.testing.expect(fixture.game.dirty_chunk_ids.contains(id));
     fixture.game.rebuildDirtyChunks();
     try std.testing.expectEqual(1, fixture.grid.chunks_to_upload.items[0].chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
+}
+
+test "composed service boundary updates retain edited terrain and wait for new geometry" {
+    const a = std.testing.allocator;
+    const service = try WorldDataService.create(std.testing.io, a, &test_layout, .flat);
+    defer service.destroy();
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const coords: ChunkCoords = .{ 2, 2, 3 };
+    const id = test_layout.encodeChunkCoords(coords);
+    const editor = try service.createClient();
+    const edited = try StreamingTest.serviceOperation(editor, .{
+        .block = .{ 2 * consts.CHUNK_SIZE + 8, 2 * consts.CHUNK_SIZE + 8, 3 * consts.CHUNK_SIZE + 8 },
+        .action = .remove,
+    });
+    try std.testing.expectEqual(world_module.OperationStatus.success, edited.status);
+    game.world_client = try service.createClient();
+    const token = game.world_client.?.requestChunks(.{ coords[0], coords[1] }, coords[2], coords[2] + 1);
+    try fixture.subscribe(coords, token, .blocks);
+    try fixture.waitAndApplyPackages();
+    const previous = game.construction_cache.geometryStamp(id).?;
+    try std.testing.expectEqual(@as(u64, 1), previous.chunk_revision);
+    try std.testing.expectEqual(@as(u64, 1), previous.mesh_revision);
+    try std.testing.expect(game.construction_cache.geometryInstalled(id, previous));
+    try fixture.grid.chunks.append(a, .{ .chunk_origin = coords, .geometry_stamp = previous });
+    game.rebuildDirtyChunks();
+    const previous_right_faces = fixture.upload(coords).chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len;
+    fixture.grid.cancelPendingChunkLayer(coords, .terrain);
+
+    const neighbor_edit = try StreamingTest.serviceOperation(editor, .{
+        .block = .{ 3 * consts.CHUNK_SIZE, 2 * consts.CHUNK_SIZE + 8, 3 * consts.CHUNK_SIZE + 8 },
+        .action = .remove,
+    });
+    try std.testing.expectEqual(world_module.OperationStatus.success, neighbor_edit.status);
+    try std.testing.expect(try game.world_client.?.waitPackages(&game.chunk_packages));
+    try std.testing.expectEqual(@as(usize, 1), game.chunk_packages.items.len);
+    const package = &game.chunk_packages.items[0];
+    try std.testing.expectEqual(@as(usize, 1), package.responses.items.len);
+    const response = package.responses.items[0];
+    try std.testing.expect(response.data == .boundaries);
+    try std.testing.expect(response.composition != null);
+    try std.testing.expectEqual(@as(usize, 0), response.composition.?.sites.len);
+    const terrain_revision = response.chunk_revision;
+    try std.testing.expect(game.applyPackage(package));
+    package.responses.deinit(a);
+    game.chunk_packages.clearRetainingCapacity();
+
+    try std.testing.expectEqual(@as(u64, 2), game.boundary_snapshots.get(id).?.mesh_revision);
+    try std.testing.expectEqual(previous.chunk_revision, terrain_revision);
+    try std.testing.expectEqual(previous.chunk_revision, game.world.?.getChunk(coords).?.chunk_revision);
+    try std.testing.expect(!game.boundary_snapshots.get(id).?.masks[@intFromEnum(Side.right)].contains(.right, .{ 31, 8, 8 }));
+    const current = game.construction_cache.geometryStamp(id).?;
+    try std.testing.expectEqual(previous.chunk_revision, current.chunk_revision);
+    try std.testing.expectEqual(@as(u64, 2), current.mesh_revision);
+    // New planes update data immediately, but cannot certify the resident mesh.
+    try std.testing.expectEqual(previous, fixture.grid.installedGeometry(coords, .terrain).?);
+    try std.testing.expect(!game.construction_cache.geometryInstalled(id, previous));
+    try std.testing.expect(game.dirty_chunk_ids.contains(id));
+    game.rebuildDirtyChunks();
+    try std.testing.expectEqual(current, fixture.upload(coords).geometry_stamp);
+    try std.testing.expectEqual(previous_right_faces + 1, fixture.upload(coords).chunk_side_data.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
 }
 
 test "newer boundary inputs prevent promotion reuse in either package order and reject stale planes" {
@@ -5482,108 +6036,20 @@ test "player holds E or mouse for three seconds to extract and one second to pla
     }
 }
 
-test "mouse2 compacts the aimed loose soil in three seconds with either inventory state" {
-    for ([_]?voxel_chunk_module.BlockType{ null, .sand }) |inventory| {
-        var fixture: StreamingTest = .{};
-        fixture.init();
-        defer fixture.deinit();
-        try fixture.preparePlayerToolTest();
-        const game = &fixture.game;
-        const target = StreamingTest.toolTarget();
-        fixture.changeToolMaterial(.dirt);
-        game.block_interaction.inventory = inventory;
-        handleMouseButtonPress(game, .{ .button = .right, .mods = .{} });
-        game.updateBlockTool();
-        try std.testing.expectEqual(.compact, std.meta.activeTag(game.block_interaction.holding.?.operation.action));
-        try std.testing.expectEqual(player_interaction.compaction_seconds, game.block_interaction.holding.?.duration());
-        game.updateBlockFocus();
-        try std.testing.expectEqual(StreamingTest.toolTarget(), fixture.scene.highlighted_block.?);
-        try std.testing.expectEqual(null, game.current_placement_preview);
-        fixture.engine.frame_delta = 2.75;
-        game.updateBlockTool();
-        try std.testing.expectEqual(voxel_chunk_module.BlockType.dirt, game.world.?.reader().get(.{ target[0], target[1], target[2] }).?);
-        try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
-        fixture.engine.frame_delta = 0.25;
-        game.updateBlockTool();
-        try std.testing.expectEqual(voxel_chunk_module.BlockType.packed_dirt, game.world.?.reader().get(.{ target[0], target[1], target[2] }).?);
-        try std.testing.expectEqual(inventory, game.block_interaction.inventory);
-        try std.testing.expectEqual(null, game.block_interaction.holding);
-        try std.testing.expectEqual(.compact, std.meta.activeTag(game.world.?.pending_operations.items[0].operation.action));
-        try fixture.acknowledgePlayer(1, .success, inventory);
-        game.updateBlockTool();
-        try std.testing.expectEqual(null, game.block_interaction.pending);
-        try std.testing.expectEqual(null, game.block_interaction.holding);
-        try std.testing.expectEqual(inventory, game.block_interaction.inventory);
-    }
-}
-
-test "mouse2 work cancels on release target range terrain focus and control changes" {
-    for (0..8) |cause| {
-        var fixture: StreamingTest = .{};
-        fixture.init();
-        defer fixture.deinit();
-        try fixture.preparePlayerToolTest();
-        const game = &fixture.game;
-        var spectator: std.meta.Child(@TypeOf(fixture.scene.spectator_camera)) = .{
-            .camera = &fixture.camera,
-            .input_controller = @ptrCast(&fixture.input),
-        };
-        fixture.scene.spectator_camera = &spectator;
-        fixture.changeToolMaterial(.dirt);
-        handleMouseButtonPress(game, .{ .button = .right, .mods = .{} });
-        game.updateBlockTool();
-        fixture.engine.frame_delta = 2;
-        game.updateBlockTool();
-        switch (cause) {
-            0 => handleMouseButtonRelease(game, .{ .button = .right, .mods = .{} }),
-            1 => fixture.camera.updateView(zmath.rotationY(math.pi / 2.0)),
-            2 => {
-                try game.world.?.insertChunk(test_layout.origin_chunk - ChunkCoords{ 0, 1, 0 }, WorldChunk.initEmpty());
-                fixture.camera.updatePosition(.{ 0.5, -5, 0.5 });
-            },
-            3 => fixture.changeToolMaterial(.packed_dirt),
-            4 => fixture.input.focused = false,
-            5 => fixture.input.focus_changed = true,
-            6 => game.world.?.removeChunk(test_layout.origin_chunk),
-            7 => {
-                game.player = PlayerController.init(std.testing.allocator, .{ 0.5, 0.5, 0 });
-                game.toggleControlMode();
-            },
-            else => unreachable,
-        }
-        game.updateBlockTool();
-        try std.testing.expectEqual(null, game.block_interaction.holding);
-        try std.testing.expectEqual(null, game.block_interaction.inventory);
-        try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
-    }
-}
-
-test "mouse2 ignores non-loose materials and cannot restart after early release without a press" {
+test "mouse2 does not start block work" {
     var fixture: StreamingTest = .{};
     fixture.init();
     defer fixture.deinit();
     try fixture.preparePlayerToolTest();
     const game = &fixture.game;
-    for ([_]voxel_chunk_module.BlockType{ .sand, .packed_dirt, .grass, .stone }) |material| {
-        fixture.changeToolMaterial(material);
-        handleMouseButtonPress(game, .{ .button = .right, .mods = .{} });
-        game.updateBlockTool();
-        try std.testing.expectEqual(null, game.block_interaction.holding);
-        handleMouseButtonRelease(game, .{ .button = .right, .mods = .{} });
-    }
     fixture.changeToolMaterial(.dirt);
     handleMouseButtonPress(game, .{ .button = .right, .mods = .{} });
     game.updateBlockTool();
-    fixture.engine.frame_delta = 2.9;
-    game.updateBlockTool();
-    handleMouseButtonRelease(game, .{ .button = .right, .mods = .{} });
     fixture.engine.frame_delta = 10;
     game.updateBlockTool();
     try std.testing.expectEqual(null, game.block_interaction.holding);
     try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
-    handleMouseButtonPress(game, .{ .button = .right, .mods = .{} });
-    game.updateBlockTool();
-    try std.testing.expectEqual(@as(f64, 0), game.block_interaction.holding.?.elapsed);
+    try std.testing.expectEqual(null, game.block_interaction.inventory);
 }
 
 test "early release and same-frame repress restart work without editing terrain or inventory" {
@@ -5615,7 +6081,7 @@ test "early release and same-frame repress restart work without editing terrain 
 }
 
 test "player inventory preserves mining conversions and blocks Tab X and material shortcuts" {
-    for ([_]voxel_chunk_module.BlockType{ .stone, .grass, .packed_dirt, .sand }) |material| {
+    for ([_]voxel_chunk_module.BlockType{ .stone, .grass, .dirt, .sand }) |material| {
         var fixture: StreamingTest = .{};
         fixture.init();
         defer fixture.deinit();
@@ -6366,6 +6832,61 @@ test "pending target placement preview uses the dedicated fulfillment identity" 
     try std.testing.expectEqual(@as(usize, 0), ordinary_calls);
 }
 
+test "construction support gap invalidates cached placement success while its target remains known" {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareSupportedToolTest();
+    const game = &fixture.game;
+    const world = &game.world.?;
+    const target = StreamingTest.toolTarget();
+    const placement = [3]u32{ target[0], target[1] - 1, target[2] };
+    const support_coords = world_module.splitBlockCoords(.{ placement[0], placement[1], placement[2] - 1 })[0];
+    const support_id = game.layout().encodeChunkCoords(support_coords);
+    const runtime = @import("blueprint_runtime.zig");
+    var saved: runtime.SavedDefinition = .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Support discovery"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(voxel_chunk_module.BlockType, &.{.planks}), .target_count = 1 } };
+    defer saved.deinit(a);
+    try world.applyBlueprintChanges(&.{.{ .definition = saved }});
+    // The site is away from the ray and placement footprint, but shares the
+    // lower support chunk whose completeness the physical reader requires.
+    var instance = try world.blueprints.prepareInstance(a, game.layout(), 1, 1, 1, .{ target[0] + 8, target[1] + 8, target[2] - 1 }, 0);
+    defer instance.deinit(a);
+    try world.applyBlueprintChanges(&.{.{ .instance = instance }});
+    const identity: construction_stream.Identity = .{ .world_session = 91, .id = 1, .lifetime = instance.lifetime };
+    const cache = &game.construction_cache;
+    _ = cache.acceptSession(91);
+    try cache.definitionInstalled(a, 1);
+    try cache.requestSnapshot(a, identity);
+    cache.snapshotInstalled(construction_stream.Snapshot.borrow(identity, instance));
+    try fixture.subscribe(support_coords, 77, .blocks);
+    try std.testing.expect(try cache.installChunk(a, support_id, .{ .subscription_id = 77, .composition_revision = 1 }, .{ .revision = 1, .sites = &.{.{ .identity = identity, .site_revision = instance.revision }} }));
+    var package: world_data_service.ResponsePackage = .{ .world_session = 91 };
+    try std.testing.expect(game.applyPackage(&package));
+    var preview_calls: usize = 0;
+    world.preview_call_counter = &preview_calls;
+    game.block_mode = .putting;
+    game.selected_material = .sand;
+    game.updateBlockFocus();
+    try std.testing.expectEqualDeep(placement, game.current_placement_preview.?.block);
+    try std.testing.expectEqual(world_module.OperationStatus.success, game.current_placement_preview.?.result.status);
+    const previous = game.placement_validation.?.window;
+    const support_revision = world.getChunk(support_coords).?.validation_revision;
+    game.updateBlockFocus();
+    try std.testing.expectEqual(@as(usize, 1), preview_calls);
+
+    try game.applyConstructionUpdate(.{ .delta = .{ .identity = identity, .base_revision = instance.revision + 1, .revision = instance.revision + 2 } });
+    try std.testing.expectEqual(previous.blueprint_revision, world.blueprints.revision);
+    try std.testing.expectEqual(support_revision, world.getChunk(support_coords).?.validation_revision);
+    try std.testing.expect(!previous.isCurrent(world));
+    try std.testing.expect(world.physicalBlock(placement) != null);
+    try std.testing.expect(!Game.constructionChunkAvailable(game, support_id));
+    game.updateBlockFocus();
+    try std.testing.expectEqualDeep(placement, game.current_placement_preview.?.block);
+    try std.testing.expectEqual(world_module.OperationStatus.missing_data, game.current_placement_preview.?.result.status);
+    try std.testing.expectEqual(@as(usize, 2), preview_calls);
+}
+
 test "blueprint rejection highlights the failed destination and clears on retarget or rotation" {
     const a = std.testing.allocator;
     var fixture: StreamingTest = .{};
@@ -6794,6 +7315,12 @@ const BlueprintCleanupFrameTest = struct {
     }
 };
 
+fn completeCachedSiteForTest(world: *World, id: u64) !void {
+    const groups = world.blueprints.instances.get(id).?.target_groups;
+    for (groups) |group| try world.applyBlueprintChanges(&.{.{ .transfer = .{ .instance_id = id, .chunk_id = group.chunk_id, .terrain_revision = 1 } }});
+    try world.applyBlueprintChanges(&.{.{ .complete = .{ .instance_id = id } }});
+}
+
 test "world update retires a completed client site without packages and ignores late replay" {
     const a = std.testing.allocator;
     const runtime = @import("blueprint_runtime.zig");
@@ -6808,6 +7335,9 @@ test "world update retires a completed client site without packages and ignores 
     defer site.deinit(a);
     try world.applyBlueprintChanges(&.{.{ .instance = site }});
     try world.applyBlueprintChanges(&.{.{ .fulfill = .{ .instance_id = 17, .cell_index = 0 } }});
+    try std.testing.expect(world.blueprints.instances.get(17).?.active);
+    try std.testing.expectEqual(runtime.Phase.materializing, world.blueprints.instances.get(17).?.phase);
+    try completeCachedSiteForTest(world, 17);
     try std.testing.expect(!world.blueprints.instances.get(17).?.active);
     try std.testing.expectEqual(@as(usize, 1), world.blueprints.cleanup_queue.items.len);
     try std.testing.expectEqual(@as(u32, 1), world.blueprints.chunks.count());
@@ -6871,6 +7401,7 @@ test "world update retires at most four footprint chunks while preserving a shar
     try std.testing.expectEqual(@as(usize, 5), retired.box_chunks.len);
     try world.applyBlueprintChanges(&.{ .{ .instance = retired }, .{ .instance = live } });
     try world.applyBlueprintChanges(&.{ .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } }, .{ .fulfill = .{ .instance_id = 1, .cell_index = 128 } } });
+    try completeCachedSiteForTest(world, 1);
     const revision = world.blueprints.revision;
     try f.frame();
     try std.testing.expectEqual(revision + 4, world.blueprints.revision);
@@ -6890,6 +7421,7 @@ test "world update retires at most four footprint chunks while preserving a shar
     try std.testing.expectEqual(@as(usize, 0), world.blueprints.cleanup_queue.items.len);
     try std.testing.expectEqual(@as(u64, 2), world.blueprints.targetAt(live.origin).?.instance_id);
     try world.applyBlueprintChanges(&.{.{ .fulfill = .{ .instance_id = 2, .cell_index = 0 } }});
+    try completeCachedSiteForTest(world, 2);
     try f.frame();
     try std.testing.expectEqual(@as(u32, 0), world.blueprints.instances.count());
     try std.testing.expectEqual(@as(u32, 0), world.blueprints.chunks.count());
@@ -6923,6 +7455,450 @@ fn prepareMiniatureSite(fixture: *StreamingTest, width: u32) !void {
     var instance = try game.world.?.blueprints.prepareInstance(a, game.layout(), 1, 1, 1, .{ 40, 40, 40 }, 0);
     defer instance.deinit(a);
     try game.world.?.applyBlueprintChanges(&.{.{ .instance = instance }});
+}
+
+fn applyConstructionChunkForTest(fixture: *StreamingTest, chunk: WorldChunk, stamp: construction_stream.GeometryStamp, references: []const construction_stream.SiteRef) !void {
+    const a = std.testing.allocator;
+    var package: world_data_service.ResponsePackage = .{ .world_session = 91 };
+    defer package.responses.deinit(a);
+    var snapshot = chunk;
+    snapshot.chunk_revision = stamp.chunk_revision;
+    try package.responses.append(a, .{
+        .coords = .{ 1, 1, 1 },
+        .subscription_id = stamp.subscription_id,
+        .chunk_revision = stamp.chunk_revision,
+        .mesh_revision = stamp.mesh_revision,
+        .composition = try (construction_stream.ChunkComposition{ .revision = stamp.composition_revision, .sites = references }).clone(a),
+        .data = .{ .blocks = .{ .chunk = snapshot } },
+    });
+    try std.testing.expect(fixture.game.applyPackage(&package));
+}
+
+fn testConstructionRetirementWithoutProgress(early_replacement: bool) !void {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const world = &game.world.?;
+    const cache = &game.construction_cache;
+    const coords: ChunkCoords = .{ 1, 1, 1 };
+    const cell: [3]u32 = .{ 40, 40, 40 };
+    const id = game.layout().encodeChunkCoords(coords);
+    fixture.camera.chunk = coords;
+    try fixture.subscribe(coords, 1, .blocks);
+    try world.insertChunk(coords, .initEmpty());
+    game.loadChunkIfNeeded(coords[0], coords[1], coords[2]);
+    var saved: @import("blueprint_runtime.zig").SavedDefinition = .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Missed progress"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(voxel_chunk_module.BlockType, &.{.planks}), .target_count = 1 } };
+    defer saved.deinit(a);
+    try world.applyBlueprintChanges(&.{.{ .definition = saved }});
+    var first = try world.blueprints.prepareInstance(a, game.layout(), 1, 1, 1, cell, 0);
+    defer first.deinit(a);
+    const identity: construction_stream.Identity = .{ .world_session = 91, .id = 1, .lifetime = first.lifetime };
+    _ = cache.acceptSession(91);
+    try cache.definitionInstalled(a, 1);
+    try cache.requestSnapshot(a, identity);
+    var package: world_data_service.ResponsePackage = .{ .world_session = 91 };
+    defer package.deinit(a);
+    try package.construction_updates.append(a, .{ .snapshot = try construction_stream.Snapshot.borrow(identity, first).clone(a) });
+    try std.testing.expect(game.applyPackage(&package));
+    var stamp: construction_stream.GeometryStamp = .{ .subscription_id = 1, .mesh_revision = 1, .composition_revision = 1 };
+    try applyConstructionChunkForTest(&fixture, .initEmpty(), stamp, &.{.{ .identity = identity, .site_revision = first.revision }});
+    try std.testing.expect(cache.geometryInstalled(id, stamp));
+    try fixture.grid.chunks.append(a, .{ .chunk_origin = coords, .geometry_stamp = stamp });
+    const source_stamp: construction_stream.GeometryStamp = .{ .mesh_revision = 2 };
+    try fixture.grid.chunks.append(a, .{ .chunk_origin = coords, .layer = .construction, .geometry_stamp = source_stamp });
+    var miniatures: MiniatureUpdateTest = .{};
+    game.updateMiniatureChunks(&miniatures);
+    try std.testing.expectEqual(@as(usize, 1), miniatures.records[0].count);
+
+    // Terminal retirement is all that remains once the server source/history
+    // has gone. No fulfillment or complete snapshot reaches this client.
+    try package.construction_updates.append(a, .{ .retired = .{ .identity = identity, .revision = std.math.maxInt(u64), .composition_revision = 2 } });
+    try std.testing.expect(game.applyPackage(&package));
+    game.retireConstructionSources();
+    try std.testing.expect(world.blueprints.instances.contains(1));
+    try std.testing.expectEqual(@as(u64, 1), world.blueprints.targetAt(cell).?.instance_id);
+    try std.testing.expectEqual(source_stamp, fixture.grid.installedGeometry(coords, .construction).?);
+    var second = try world.blueprints.prepareInstance(a, game.layout(), 2, 1, 1, cell, 0);
+    defer second.deinit(a);
+    const second_identity: construction_stream.Identity = .{ .world_session = 91, .id = 2, .lifetime = second.lifetime };
+    stamp.mesh_revision += 1;
+    stamp.composition_revision = 2;
+    if (early_replacement) {
+        // Updates are applied before response composition. The new snapshot
+        // must not block the very response needed to release the old source.
+        try package.construction_updates.append(a, .{ .snapshot = try construction_stream.Snapshot.borrow(second_identity, second).clone(a) });
+        try package.responses.append(a, .{
+            .coords = coords,
+            .subscription_id = 1,
+            .mesh_revision = stamp.mesh_revision,
+            .composition = try (construction_stream.ChunkComposition{ .revision = stamp.composition_revision, .sites = &.{.{ .identity = second_identity, .site_revision = second.revision }} }).clone(a),
+            .data = .{ .blocks = .{ .chunk = .initEmpty() } },
+        });
+        try std.testing.expect(game.applyPackage(&package));
+        package.responses.clearRetainingCapacity();
+        try std.testing.expectEqual(@as(u64, 2), world.blueprints.targetAt(cell).?.instance_id);
+    } else try applyConstructionChunkForTest(&fixture, .initEmpty(), stamp, &.{});
+    // Coherent air has arrived, but selected display cannot be dropped until
+    // the replacement geometry is installed successfully.
+    game.retireConstructionSources();
+    try std.testing.expect(world.blueprints.instances.contains(1));
+    try std.testing.expectEqual(source_stamp, fixture.grid.installedGeometry(coords, .construction).?);
+    game.rebuildDirtyChunks();
+    try std.testing.expect(game.rebuildConstructionChunks());
+    try std.testing.expect(fixture.grid.tryUploadToGPU(undefined));
+    game.finishConstructionGeometry();
+    try std.testing.expect(cache.hasStaticSelection(id, world.blueprints.instances.get(1).?));
+    // Cache a miniature over the coherent air before deferred cleanup. Removing
+    // its lookup must also invalidate this source on the next source update.
+    miniatures.count = 0;
+    game.updateMiniatureChunks(&miniatures);
+    try std.testing.expectEqual(@as(usize, 1), miniatures.records[0].count);
+    game.retireConstructionSources();
+    try std.testing.expect(!world.blueprints.instances.contains(1));
+    try std.testing.expect(game.miniature_dirty_chunks.contains(id));
+    miniatures.count = 0;
+    game.updateMiniatureChunks(&miniatures);
+    try std.testing.expectEqual(@as(usize, 1), miniatures.count);
+    try std.testing.expectEqual(@intFromBool(early_replacement), miniatures.records[0].count);
+    if (!early_replacement) {
+        try std.testing.expect(world.blueprints.targetAt(cell) == null);
+        try cache.requestSnapshot(a, second_identity);
+        try package.construction_updates.append(a, .{ .snapshot = try construction_stream.Snapshot.borrow(second_identity, second).clone(a) });
+        try std.testing.expect(game.applyPackage(&package));
+    }
+    try std.testing.expectEqual(@as(u64, 2), world.blueprints.targetAt(cell).?.instance_id);
+    try std.testing.expect(world.blueprints.instances.get(2).?.active);
+}
+
+test "construction retirement without final progress removes pending miniatures and admits a later site" {
+    try testConstructionRetirementWithoutProgress(false);
+}
+
+test "construction retirement without final progress admits a replacement before retained source cleanup" {
+    try testConstructionRetirementWithoutProgress(true);
+}
+
+test "construction data precedes lifecycle and failed geometry handoff retains the displayed source" {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try prepareMiniatureSite(&fixture, 1);
+    const game = &fixture.game;
+    const world = &game.world.?;
+    const coords: ChunkCoords = .{ 1, 1, 1 };
+    const id = game.layout().encodeChunkCoords(coords);
+    try world.applyBlueprintChanges(&.{.{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } }});
+    const instance = world.blueprints.instances.get(1).?;
+    const identity: construction_stream.Identity = .{ .world_session = 91, .id = 1, .lifetime = instance.lifetime };
+    const cache = &game.construction_cache;
+    _ = cache.acceptSession(91);
+    try cache.definitionInstalled(a, 1);
+    try cache.requestSnapshot(a, identity);
+    cache.snapshotInstalled(construction_stream.Snapshot.borrow(identity, instance));
+    var stamp: construction_stream.GeometryStamp = .{ .subscription_id = 1, .mesh_revision = 1, .composition_revision = 1 };
+    try applyConstructionChunkForTest(&fixture, .initEmpty(), stamp, &.{.{ .identity = identity, .site_revision = instance.revision }});
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.planks, world.physicalBlock(.{ 40, 40, 40 }).?);
+    const origin: Position = @floatFromInt(game.layout().origin_chunk * @as(ChunkCoords, @splat(consts.CHUNK_SIZE)));
+    const feet = Position{ 40.5, 40.5, 40.1 } - origin;
+    var query: terrain_collision.Query = .{ .world = world, .body = .{ .half_width = 0.2, .height = 0.5 } };
+    try std.testing.expectEqual(terrain_collision.Overlap.solid, query.overlap(feet, true));
+    try std.testing.expect((try block_targeting.cast(world, feet, .{ 1, 0, 0 })) != null);
+    // Represent an already drawn construction layer. Preparing a replacement
+    // never changes this resident stamp, including allocation and GPU failures.
+    try fixture.grid.chunks.append(a, .{ .chunk_origin = coords, .geometry_stamp = stamp });
+    const source_stamp: construction_stream.GeometryStamp = .{ .mesh_revision = 2 };
+    try fixture.grid.chunks.append(a, .{ .chunk_origin = coords, .layer = .construction, .geometry_stamp = source_stamp });
+    stamp.chunk_revision = 12;
+    stamp.mesh_revision = 13;
+    stamp.composition_revision = 2;
+    var materialized = WorldChunk.initEmpty();
+    _ = materialized.apply(a, .{ 8, 8, 8 }, .{ .put = .planks });
+    try applyConstructionChunkForTest(&fixture, materialized, stamp, &.{.{ .identity = identity, .site_revision = instance.revision + 5, .transferred = true, .terrain_revision = 12 }});
+    // A subsequent ordinary removal and discovery retirement also arrive before
+    // the separate progress stream. The old filled source cannot hide the edit.
+    stamp.chunk_revision = 13;
+    stamp.mesh_revision = 14;
+    stamp.composition_revision = 3;
+    try applyConstructionChunkForTest(&fixture, .initEmpty(), stamp, &.{});
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.none, world.physicalBlock(.{ 40, 40, 40 }).?);
+    try std.testing.expectEqual(terrain_collision.Overlap.clear, query.overlap(feet, true));
+    try std.testing.expectEqual(@as(?block_targeting.Hit, null), try block_targeting.cast(world, feet, .{ 1, 0, 0 }));
+    try std.testing.expectEqual(@import("blueprint_runtime.zig").Phase.materializing, world.blueprints.instances.get(1).?.phase);
+    try std.testing.expect(!cache.portionReady(id, instance, 0));
+    game.rebuildDirtyChunks();
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    game.allocator = failing.allocator();
+    try std.testing.expect(!game.rebuildConstructionChunks());
+    game.allocator = a;
+    try std.testing.expectEqual(source_stamp, fixture.grid.installedGeometry(coords, .construction).?);
+    try std.testing.expect(game.rebuildConstructionChunks());
+    try std.testing.expectEqual(@as(usize, 2), fixture.grid.chunks_to_upload.items.len);
+    for (fixture.grid.chunks_to_upload.items) |upload| for (upload.chunk_side_data.blocks_grouped_by_side) |side| try std.testing.expectEqual(@as(usize, 0), side.items.len);
+    // An unrelated queued upload exhausts the same GPU budget. Both replacement
+    // layers stay queued and the displayed source stays resident for retry.
+    for (0..64) |_| _ = try fixture.grid.gpu_block_buffer_manager.occupyBlock(.{ .size_exponent = 6 });
+    var blocked: voxel_chunk_module.ChunkSideData = .{};
+    try blocked.blocks_grouped_by_side[0].append(a, .{ .coords = .{ 1, 1, 1 }, .block_type = .stone });
+    try fixture.grid.tryAppendChunk(.{ .chunk_coords = .{ 3, 3, 3 }, .chunk_side_data = blocked });
+    try std.testing.expect(!fixture.grid.tryUploadToGPU(undefined));
+    try std.testing.expectEqual(source_stamp, fixture.grid.installedGeometry(coords, .construction).?);
+    try std.testing.expect(!cache.portionReady(id, instance, 0));
+    fixture.grid.cancelPendingChunkLayer(.{ 3, 3, 3 }, .terrain);
+    fixture.grid.gpu_block_buffer_manager.clear();
+    // These replacements are empty after the ordinary removal, so no graphics
+    // device is needed to exercise the real successful atomic install path.
+    try std.testing.expect(fixture.grid.tryUploadToGPU(undefined));
+    game.finishConstructionGeometry();
+    try std.testing.expectEqual(stamp, fixture.grid.installedGeometry(coords, .terrain).?);
+    try std.testing.expect(!std.meta.eql(source_stamp, fixture.grid.installedGeometry(coords, .construction).?));
+    try std.testing.expect(cache.hasStaticSelection(id, instance));
+    stamp.chunk_revision += 1;
+    stamp.mesh_revision += 1;
+    try applyConstructionChunkForTest(&fixture, .initEmpty(), stamp, &.{});
+    try std.testing.expect(!Game.includeConstructionPortion(game, id, instance));
+}
+
+fn testCurrentConstructionOwner(optimistic: bool) !void {
+    const a = std.testing.allocator;
+    const runtime = @import("blueprint_runtime.zig");
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try prepareMiniatureSite(&fixture, 1);
+    const game = &fixture.game;
+    const world = &game.world.?;
+    const cache = &game.construction_cache;
+    const coords: ChunkCoords = .{ 1, 1, 1 };
+    const id = game.layout().encodeChunkCoords(coords);
+    const cell: [3]u32 = .{ 40, 40, 40 };
+    const first = world.blueprints.instances.get(1).?;
+    const first_identity: construction_stream.Identity = .{ .world_session = 91, .id = 1, .lifetime = first.lifetime };
+    _ = cache.acceptSession(91);
+    try cache.definitionInstalled(a, 1);
+    try cache.requestSnapshot(a, first_identity);
+    var package: world_data_service.ResponsePackage = .{ .world_session = 91 };
+    defer package.deinit(a);
+    try package.construction_updates.append(a, .{ .snapshot = try construction_stream.Snapshot.borrow(first_identity, first).clone(a) });
+    try std.testing.expect(game.applyPackage(&package));
+    var base = WorldChunk.initEmpty();
+    defer base.deinit(a);
+    _ = base.apply(a, .{ 8, 8, 7 }, .{ .put = .sand });
+    var stamp: construction_stream.GeometryStamp = .{ .subscription_id = 1, .mesh_revision = 1, .composition_revision = 1 };
+    try applyConstructionChunkForTest(&fixture, base.clone(a), stamp, &.{.{ .identity = first_identity, .site_revision = first.revision }});
+    try std.testing.expect(cache.geometryInstalled(id, stamp));
+    try fixture.grid.chunks.append(a, .{ .chunk_origin = coords, .geometry_stamp = stamp });
+    const source_stamp: construction_stream.GeometryStamp = .{ .mesh_revision = 1 };
+    try fixture.grid.chunks.append(a, .{ .chunk_origin = coords, .layer = .construction, .geometry_stamp = source_stamp });
+    const first_complete: construction_stream.Delta = .{ .identity = first_identity, .base_revision = first.revision, .revision = first.revision + 3, .fulfilled_indices = &.{0}, .transfers = &.{.{ .instance_id = 1, .chunk_id = id, .terrain_revision = 1 }}, .phase = .complete };
+    try package.construction_updates.append(a, .{ .delta = try first_complete.clone(a) });
+    try std.testing.expect(game.applyPackage(&package));
+    // Completion alone cannot authorize the pre-materialization terrain data.
+    try std.testing.expectEqual(null, world.physicalBlock(cell));
+    var materialized = base.clone(a);
+    defer materialized.deinit(a);
+    _ = materialized.apply(a, .{ 8, 8, 8 }, .{ .put = .planks });
+    stamp = .{ .subscription_id = 1, .chunk_revision = 1, .mesh_revision = 2, .composition_revision = 2 };
+    try applyConstructionChunkForTest(&fixture, materialized.clone(a), stamp, &.{.{ .identity = first_identity, .site_revision = first_complete.revision, .transferred = true, .terrain_revision = 1 }});
+    stamp = .{ .subscription_id = 1, .chunk_revision = 2, .mesh_revision = 3, .composition_revision = 3 };
+    try applyConstructionChunkForTest(&fixture, base.clone(a), stamp, &.{});
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.none, world.physicalBlock(cell).?);
+
+    // The old source remains for display while a new site owns the same target.
+    var second = try world.blueprints.prepareInstance(a, game.layout(), 2, 1, 1, cell, 0);
+    defer second.deinit(a);
+    const second_identity: construction_stream.Identity = .{ .world_session = 91, .id = 2, .lifetime = second.lifetime };
+    try cache.requestSnapshot(a, second_identity);
+    try package.construction_updates.append(a, .{ .snapshot = try construction_stream.Snapshot.borrow(second_identity, second).clone(a) });
+    try std.testing.expect(game.applyPackage(&package));
+    stamp.mesh_revision += 1;
+    stamp.composition_revision += 1;
+    try applyConstructionChunkForTest(&fixture, base.clone(a), stamp, &.{.{ .identity = second_identity, .site_revision = second.revision }});
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.none, world.physicalBlock(cell).?);
+    if (optimistic) {
+        const operation: world_module.BlockOperation = .{ .block = cell, .action = .{ .put = .planks }, .blueprint = .{ .instance_id = 2, .cell_index = 0 } };
+        try std.testing.expectEqual(world_module.OperationStatus.success, world.tryOperation(operation).status);
+        world.pending_operations.items[0].request_id = 77;
+        try std.testing.expect(!world.blueprints.instances.get(2).?.isFulfilled(0));
+        try std.testing.expectEqual(voxel_chunk_module.BlockType.planks, world.physicalBlock(cell).?);
+        world.acknowledgeOperation(77);
+    }
+    const second_fill: construction_stream.Delta = .{ .identity = second_identity, .base_revision = second.revision, .revision = second.revision + 1, .fulfilled_indices = &.{0}, .phase = .materializing };
+    try package.construction_updates.append(a, .{ .delta = try second_fill.clone(a) });
+    try std.testing.expect(game.applyPackage(&package));
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.planks, world.blueprints.physicalAt(cell).material);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.planks, world.physicalBlock(cell).?);
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.none, world.getChunk(coords).?.content.getBlock(.{ 8, 8, 8 }));
+    const retained = world.blueprints.instances.get(1).?;
+    try std.testing.expectEqual(runtime.Phase.complete, retained.phase);
+    try std.testing.expect(!cache.portionReady(id, retained, 1));
+    try std.testing.expectEqual(source_stamp, fixture.grid.installedGeometry(coords, .construction).?);
+
+    // The current owner's own terrain proof still guards data before its
+    // lifecycle update, including metadata for a subsequent ordinary removal.
+    stamp = .{ .subscription_id = 1, .chunk_revision = 3, .mesh_revision = 5, .composition_revision = 5 };
+    try applyConstructionChunkForTest(&fixture, materialized.clone(a), stamp, &.{.{ .identity = second_identity, .site_revision = second_fill.revision + 1, .transferred = true, .terrain_revision = 3 }});
+    stamp = .{ .subscription_id = 1, .chunk_revision = 4, .mesh_revision = 6, .composition_revision = 6 };
+    try package.responses.append(a, .{
+        .coords = coords,
+        .subscription_id = 1,
+        .chunk_revision = stamp.chunk_revision,
+        .mesh_revision = stamp.mesh_revision,
+        .composition = try (construction_stream.ChunkComposition{ .revision = stamp.composition_revision }).clone(a),
+        .data = .{ .boundaries = @splat(.{}) },
+    });
+    try std.testing.expect(game.applyPackage(&package));
+    try std.testing.expectEqual(null, world.physicalBlock(cell));
+    package.responses.clearRetainingCapacity();
+    const second_complete: construction_stream.Delta = .{ .identity = second_identity, .base_revision = second_fill.revision, .revision = second_fill.revision + 2, .transfers = &.{.{ .instance_id = 2, .chunk_id = id, .terrain_revision = 3 }}, .phase = .complete };
+    try package.construction_updates.append(a, .{ .delta = try second_complete.clone(a) });
+    try std.testing.expect(game.applyPackage(&package));
+    // With both sources complete, every retained terrain barrier still applies:
+    // the first source's v2 proof cannot authorize data older than B's v4 proof.
+    try std.testing.expectEqual(null, world.physicalBlock(cell));
+    try applyConstructionChunkForTest(&fixture, base.clone(a), stamp, &.{});
+    try std.testing.expectEqual(voxel_chunk_module.BlockType.none, world.physicalBlock(cell).?);
+}
+
+test "construction current target takes precedence over retained sources after fulfillment" {
+    try testCurrentConstructionOwner(false);
+}
+
+test "construction current target takes precedence over retained sources during optimistic fulfillment" {
+    try testCurrentConstructionOwner(true);
+}
+
+test "construction discovery outside the visible set blocks collision and targeting until resync" {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try prepareMiniatureSite(&fixture, 1);
+    const game = &fixture.game;
+    const world = &game.world.?;
+    const coords: ChunkCoords = .{ 1, 1, 1 };
+    const instance = world.blueprints.instances.get(1).?;
+    const identity: construction_stream.Identity = .{ .world_session = 91, .id = 1, .lifetime = instance.lifetime };
+    try fixture.subscribe(coords, 2, .mesh);
+    var package: world_data_service.ResponsePackage = .{ .world_session = 91 };
+    defer package.responses.deinit(a);
+    try package.responses.append(a, .{
+        .coords = coords,
+        .subscription_id = 2,
+        .composition = try (construction_stream.ChunkComposition{ .revision = 1, .sites = &.{.{ .identity = identity, .site_revision = instance.revision }} }).clone(a),
+        .data = .unreachable_chunk,
+    });
+    try std.testing.expect(game.applyPackage(&package));
+    try std.testing.expect(!world.hasChunk(coords));
+    try std.testing.expectEqual(null, world.physicalBlock(.{ 40, 40, 40 }));
+    const origin: Position = @floatFromInt(game.layout().origin_chunk * @as(ChunkCoords, @splat(consts.CHUNK_SIZE)));
+    const feet = Position{ 40.5, 40.5, 40.1 } - origin;
+    var query: terrain_collision.Query = .{ .world = world, .body = .{ .half_width = 0.2, .height = 0.5 } };
+    try std.testing.expectEqual(terrain_collision.Overlap.missing, query.overlap(feet, true));
+    try std.testing.expectError(error.ChunkNotReceived, block_targeting.cast(world, feet, .{ 1, 0, 0 }));
+    try std.testing.expect(game.construction_cache.requests.items.len != 0);
+}
+
+test "construction invalid delta lifecycle resynchronizes before changing cached progress" {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try prepareMiniatureSite(&fixture, 2);
+    const game = &fixture.game;
+    const instance = game.world.?.blueprints.instances.get(1).?;
+    const identity: construction_stream.Identity = .{ .world_session = 91, .id = 1, .lifetime = instance.lifetime };
+    const snapshot = construction_stream.Snapshot.borrow(identity, instance);
+    _ = game.construction_cache.acceptSession(91);
+    try game.construction_cache.definitionInstalled(a, 1);
+    try game.construction_cache.requestSnapshot(a, identity);
+    game.construction_cache.snapshotInstalled(snapshot);
+    try game.applyConstructionUpdate(.{ .delta = .{ .identity = identity, .base_revision = instance.revision, .revision = instance.revision + 1, .fulfilled_indices = &.{0}, .phase = .complete } });
+    try std.testing.expect(!game.world.?.blueprints.instances.get(1).?.isFulfilled(0));
+    try std.testing.expectEqual(instance.revision, game.world.?.blueprints.instances.get(1).?.revision);
+    try game.applyConstructionUpdate(.{ .snapshot = snapshot });
+    try game.applyConstructionUpdate(.{ .delta = .{
+        .identity = identity,
+        .base_revision = instance.revision,
+        .revision = instance.revision + 1,
+        .fulfilled_indices = &.{ 0, 1 },
+        .phase = .complete,
+        .transfers = &.{.{ .instance_id = 1, .chunk_id = instance.target_groups[0].chunk_id, .terrain_revision = 0 }},
+    } });
+    try std.testing.expectEqual(@as(u32, 2), game.world.?.blueprints.instances.get(1).?.remaining);
+    try std.testing.expect(!game.world.?.blueprints.instances.get(1).?.target_groups[0].transferred);
+    try game.applyConstructionUpdate(.{ .snapshot = snapshot });
+    try game.applyConstructionUpdate(.{ .delta = .{ .identity = identity, .base_revision = instance.revision, .revision = instance.revision + 1, .fulfilled_indices = &.{0}, .phase = .building } });
+    try std.testing.expect(game.world.?.blueprints.instances.get(1).?.isFulfilled(0));
+    try std.testing.expectEqual(@as(u32, 1), game.world.?.blueprints.instances.get(1).?.remaining);
+}
+
+test "construction renewed dependency survives resync allocation failure during bounded eviction" {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try prepareMiniatureSite(&fixture, 129);
+    const game = &fixture.game;
+    const instance = game.world.?.blueprints.instances.get(1).?;
+    const identity: construction_stream.Identity = .{ .world_session = 91, .id = 1, .lifetime = instance.lifetime };
+    const cache = &game.construction_cache;
+    _ = cache.acceptSession(91);
+    try cache.definitionInstalled(a, 1);
+    try cache.requestSnapshot(a, identity);
+    cache.snapshotInstalled(construction_stream.Snapshot.borrow(identity, instance));
+    game.removeChunkByIdIfNeeded(game.layout().encodeChunkCoords(.{ 1, 1, 1 }));
+    _ = game.chunk_subscriptions.remove(game.layout().encodeChunkCoords(.{ 1, 1, 1 }));
+    game.evictConstructionSources();
+    try std.testing.expectEqual(@as(usize, 4), game.world.?.blueprints.instances.get(1).?.cleanup_cursor);
+    try fixture.subscribe(.{ 2, 1, 1 }, 2, .blocks);
+    cache.requests.clearAndFree(a);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    game.allocator = failing.allocator();
+    game.evictConstructionSources();
+    game.allocator = a;
+    try std.testing.expectEqual(@as(usize, 4), game.world.?.blueprints.instances.get(1).?.cleanup_cursor);
+    try std.testing.expect(game.construction_evictions.contains(1));
+    game.evictConstructionSources();
+    try std.testing.expect(!game.world.?.blueprints.instances.contains(1));
+    try std.testing.expect(!game.construction_evictions.contains(1));
+    try std.testing.expectEqual(@as(usize, 1), cache.requests.items.len);
+    try std.testing.expectEqual(identity, cache.requests.items[0].snapshot);
+}
+
+test "external command results from old world or client sessions cannot change player or blueprint state" {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    var service: WorldDataService = .{ .world_session = 91, .layout = &test_layout, .io = std.testing.io, .allocator = a, .worker = undefined, .worker_state = undefined };
+    var client: world_data_service.Client = .{ .service = &service, .client_session = 12 };
+    game.world_client = &client;
+    game.block_interaction.inventory = .sand;
+    game.block_interaction.pending = .{ .request_id = 77 };
+    game.blueprint_tool.mode = .capture;
+    game.blueprint_tool.save = .{ .request_id = 78, .generation = game.blueprint_tool.selection.generation };
+    const CommandIdentity = @import("construction_state.zig").CommandIdentity;
+    for ([_]CommandIdentity{
+        .{ .world_session = 90, .client_session = 12, .sequence = 1 },
+        .{ .world_session = 91, .client_session = 11, .sequence = 1 },
+    }) |command| {
+        var package: world_data_service.ResponsePackage = .{ .world_session = 91 };
+        defer package.responses.deinit(a);
+        try package.responses.append(a, .{ .subscription_id = null, .coords = .{ 0, 0, 0 }, .operation = .{ .request_id = 77, .command = command, .status = .success, .player_inventory = .{ .player_id = game.player_id, .material = .dirt } }, .data = .acknowledgement });
+        try std.testing.expect(game.applyPackage(&package));
+        try std.testing.expectEqual(voxel_chunk_module.BlockType.sand, game.block_interaction.inventory.?);
+        try std.testing.expect(!game.block_interaction.pending.?.resolved);
+        const stale_blueprint: world_data_service.BlueprintResult = .{ .request_id = 78, .command = command, .kind = .save, .status = .success, .definition_id = 1 };
+        try std.testing.expect(game.blueprintResultReady(stale_blueprint));
+        game.acceptBlueprintResult(stale_blueprint);
+        try std.testing.expectEqual(BlueprintTool.Mode.capture, game.blueprint_tool.mode);
+        try std.testing.expectEqual(@as(u64, 78), game.blueprint_tool.save.?.request_id);
+    }
+    try std.testing.expect(game.commandResultCurrent(.{ .world_session = 91, .client_session = 12, .sequence = 2 }));
 }
 
 test "visual reconciliation dirties a later prediction invalidated in another chunk" {
@@ -7044,6 +8020,129 @@ const MiniatureUpdateTest = struct {
         self.count += 1;
     }
 };
+
+fn waitBlueprintForTest(client: *world_data_service.Client, request_id: u64) !world_data_service.BlueprintResult {
+    var results: std.ArrayList(world_data_service.BlueprintResult) = .empty;
+    defer results.deinit(std.testing.allocator);
+    for (0..10_000) |_| {
+        client.takeBlueprintResults(&results);
+        for (results.items) |result| if (result.request_id == request_id) return result;
+        results.clearRetainingCapacity();
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestBlueprintTimeout;
+}
+
+test "construction progress stays local through actual service packages and resync refreshes the footprint" {
+    const a = std.testing.allocator;
+    const service = try WorldDataService.create(std.testing.io, a, &test_layout, .flat);
+    defer service.destroy();
+    const editor = try service.createClient();
+    editor.publishCheckpoint(.{ .id = 1, .feet = .{ 64.5, 72.5, 112 }, .yaw = 0, .pitch = 0 });
+    var cells = [_]voxel_chunk_module.BlockType{.none} ** 129;
+    @memset(cells[0..4], .planks);
+    cells[128] = .planks;
+    const compiled = try blueprint.compile(a, .{ .size = .{ 129, 1, 1 }, .cells = &cells }, .{ .horizontal_limit = blueprint.horizontalLimit(&test_layout) });
+    try std.testing.expect(compiled == .valid);
+    var candidate = compiled.valid;
+    const saved_request = editor.trySaveBlueprint(1, "Local progress", &candidate) catch |err| {
+        candidate.deinit(a);
+        return err;
+    };
+    const saved = try waitBlueprintForTest(editor, saved_request);
+    try std.testing.expectEqual(.success, saved.status);
+    const origin: [3]u32 = .{ 64, 72, 112 };
+    const applied = try waitBlueprintForTest(editor, try editor.tryApplyBlueprint(1, saved.definition_id.?, origin, 0));
+    try std.testing.expectEqual(@as(?world_data_service.BlueprintRejection, null), applied.rejection);
+    try std.testing.expectEqual(.success, applied.status);
+
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const world = &game.world.?;
+    game.world_client = try service.createClient();
+    for (2..7) |x| {
+        const coords: ChunkCoords = .{ @intCast(x), 2, 3 };
+        const token = game.world_client.?.requestChunks(.{ coords[0], coords[1] }, 3, 4);
+        try fixture.subscribe(coords, token, .blocks);
+    }
+    while (!fixture.settled() or !world.blueprints.instances.contains(applied.instance_id.?)) try fixture.waitAndApplyPackages();
+    const initial = world.blueprints.instances.get(applied.instance_id.?).?;
+    try std.testing.expectEqual(@as(usize, 5), initial.box_chunks.len);
+    var miniatures: MiniatureUpdateTest = .{};
+    game.updateMiniatureChunks(&miniatures);
+    try std.testing.expectEqual(@as(usize, 5), miniatures.count);
+    try std.testing.expect(game.rebuildConstructionChunks());
+    try std.testing.expectEqual(@as(usize, 5), fixture.grid.chunks_to_upload.items.len);
+    // All targets are pending, so the actual empty-layer install needs no GPU.
+    try std.testing.expect(fixture.grid.tryUploadToGPU(undefined));
+    const distant_coords: ChunkCoords = .{ 6, 2, 3 };
+    const distant_id = test_layout.encodeChunkCoords(distant_coords);
+    const distant_stamp = fixture.grid.installedGeometry(distant_coords, .construction).?;
+    game.dirty_chunk_ids.clearRetainingCapacity();
+
+    var construction_rebuilds: usize = 0;
+    for (0..4) |index| {
+        const result = try StreamingTest.serviceOperation(editor, .{
+            .block = .{ origin[0] + @as(u32, @intCast(index)), origin[1], origin[2] },
+            .action = .{ .put = .planks },
+            .blueprint = .{ .instance_id = initial.id, .cell_index = @intCast(index) },
+        });
+        try std.testing.expectEqual(world_module.OperationStatus.success, result.status);
+        try std.testing.expect(try game.world_client.?.waitPackages(&game.chunk_packages));
+        for (game.chunk_packages.items) |*package| {
+            // This observer gets the real progress delta, without terrain or
+            // whole-box metadata acknowledgments generated solely by the fill.
+            try std.testing.expectEqual(@as(usize, 0), package.responses.items.len);
+            try std.testing.expectEqual(@as(usize, 1), package.construction_updates.items.len);
+            try std.testing.expectEqual(@import("blueprint_runtime.zig").Phase.building, package.construction_updates.items[0].delta.phase.?);
+            try std.testing.expect(game.applyPackage(package));
+            package.responses.deinit(a);
+        }
+        game.chunk_packages.clearRetainingCapacity();
+        try std.testing.expect(world.blueprints.instances.get(initial.id).?.isFulfilled(@intCast(index)));
+        try std.testing.expectEqual(voxel_chunk_module.BlockType.planks, world.physicalBlock(.{ origin[0] + @as(u32, @intCast(index)), origin[1], origin[2] }).?);
+        try std.testing.expectEqual(@as(usize, 1), game.miniature_dirty_chunks.count());
+        try std.testing.expectEqual(@as(usize, 2), game.construction_dirty_chunks.count());
+        try std.testing.expect(!game.miniature_dirty_chunks.contains(distant_id));
+        try std.testing.expect(!game.construction_dirty_chunks.contains(distant_id));
+        game.updateMiniatureChunks(&miniatures);
+        try std.testing.expectEqual(@as(usize, 6) + index, miniatures.count);
+        try std.testing.expectEqual(test_layout.encodeChunkCoords(.{ 2, 2, 3 }), miniatures.records[miniatures.count - 1].id);
+        try std.testing.expect(game.rebuildConstructionChunks());
+        construction_rebuilds += fixture.grid.chunks_to_upload.items.len;
+        try std.testing.expectEqual(@as(usize, 2), fixture.grid.chunks_to_upload.items.len);
+        for (fixture.grid.chunks_to_upload.items) |upload| try std.testing.expect(upload.chunk_coords[0] == 2 or upload.chunk_coords[0] == 3);
+        try std.testing.expectEqual(distant_stamp, fixture.grid.installedGeometry(distant_coords, .construction).?);
+        fixture.grid.cancelPendingChunkLayer(.{ 2, 2, 3 }, .construction);
+        fixture.grid.cancelPendingChunkLayer(.{ 3, 2, 3 }, .construction);
+    }
+    try std.testing.expectEqual(@as(usize, 8), construction_rebuilds);
+    try std.testing.expectEqual(@as(usize, 9), miniatures.count); // Five initial sources, four changed sources.
+
+    const identity = game.construction_cache.siteIdentity(initial.id).?;
+    try game.construction_cache.invalidate(a, identity);
+    game.flushConstructionRequests();
+    try fixture.waitAndApplyPackages();
+    try std.testing.expectEqual(@as(usize, 5), game.construction_dirty_chunks.count());
+    try std.testing.expectEqual(@as(usize, 5), game.miniature_dirty_chunks.count());
+    game.updateMiniatureChunks(&miniatures);
+    try std.testing.expectEqual(@as(usize, 14), miniatures.count);
+    try std.testing.expectEqual(@as(u32, 1), world.blueprints.instances.get(initial.id).?.remaining);
+
+    // The last fill is a lifecycle change and still refreshes every source.
+    const last = try StreamingTest.serviceOperation(editor, .{
+        .block = .{ origin[0] + 128, origin[1], origin[2] },
+        .action = .{ .put = .planks },
+        .blueprint = .{ .instance_id = initial.id, .cell_index = 128 },
+    });
+    try std.testing.expectEqual(world_module.OperationStatus.success, last.status);
+    try fixture.waitAndApplyPackages();
+    try std.testing.expectEqual(@as(u32, 0), world.blueprints.instances.get(initial.id).?.remaining);
+    try std.testing.expect(world.blueprints.instances.get(initial.id).?.phase != .building);
+    try std.testing.expectEqual(@as(usize, 5), game.miniature_dirty_chunks.count());
+}
 
 test "miniature cache resolves own changes once and reuses sources for camera and neighbor terrain" {
     var fixture: StreamingTest = .{};
@@ -7170,7 +8269,9 @@ test "miniature cache invalidates accepted snapshots and clears obligations on e
     try fixture.apply(&.{.{ .coords = coords, .subscription_id = 1, .chunk_revision = 1, .data = .{ .blocks = .{ .chunk = singleTestBlock(.{ 8, 8, 8 }, 1) } } }});
     try std.testing.expect(game.miniature_dirty_chunks.contains(id));
     game.updateMiniatureChunks(&updates);
-    try std.testing.expectEqual(@as(usize, 0), updates.records[1].count);
+    // Raw terrain cannot fulfill a simulation-owned target without progress or
+    // transfer metadata. Its pending miniature remains the selected source.
+    try std.testing.expectEqual(@as(usize, 1), updates.records[1].count);
     game.markMiniatureChunkDirty(id);
     game.removeChunkByIdIfNeeded(id);
     try std.testing.expect(!game.miniature_dirty_chunks.contains(id));

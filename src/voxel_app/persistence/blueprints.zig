@@ -3,20 +3,29 @@
 const std = @import("std");
 const wire = @import("format.zig");
 const Allocator = std.mem.Allocator;
+pub const Phase = @import("../construction_state.zig").Phase;
 
 pub const Limits = struct {
     max_cells: usize = 1_048_576,
     max_definitions: usize = 4096,
-    /// Active sites; final fulfillment releases a slot within the transaction.
+    /// Building and materializing sites; accepted completion releases a slot.
     max_instances: usize = 4096,
     max_state_bytes: usize = 64 * 1024 * 1024,
     max_changes_bytes: usize = 16 * 1024 * 1024,
     max_operations: usize = 1_048_576,
+    max_grass_initializations: usize = 4096,
 };
 pub const DefinitionView = struct { id: u64, owner: u64, name: []const u8, size: [3]u32, cells: []const u8, target_count: u32 };
 pub const InstanceView = struct { id: u64, definition_id: u64, owner: u64, origin: [3]u32, rotation: u8 };
 pub const Fulfill = struct { instance_id: u64, cell_index: u32 };
-pub const Op = union(enum) { definition: DefinitionView, instance: InstanceView, fulfill: Fulfill };
+pub const Transfer = struct { instance_id: u64, chunk_id: u32, terrain_revision: u64 };
+pub const Complete = struct { instance_id: u64, completion_tick: u64, soil_group_count: u32 = 0 };
+pub const GrassKey = struct { instance_id: u64, chunk_id: u32 };
+/// Routes world-data's pending work and preserves its original completion time.
+/// Activation must also require the matching initialize_grass cell marker; this
+/// descriptor alone never authorizes a deadline on a replaced soil cell.
+pub const GrassInitialization = struct { instance: InstanceView, chunk_id: u32, completion_tick: u64 };
+pub const Op = union(enum) { definition: DefinitionView, instance: InstanceView, fulfill: Fulfill, transfer: Transfer, complete: Complete, grass_initialized: GrassKey };
 /// Allocation-free journal accounting shared by admission and capture. The
 /// encoded journal is accounted separately from prepareMemoryBound's scratch.
 pub const PrepareSummary = struct {
@@ -27,10 +36,19 @@ pub const PrepareSummary = struct {
     encoded_bytes: usize = 0,
     definition_payload_bytes: usize = 0,
     new_instance_bitmap_bytes: usize = 0,
+    new_instance_portion_bytes: usize = 0,
+    transfer_count: usize = 0,
+    completion_count: usize = 0,
+    grass_initialization_count: usize = 0,
+    grass_initialized_count: usize = 0,
 
     /// definition_cells is needed only for a new instance. Other operations
     /// pass zero. Commit the summary only after every checked addition succeeds.
     pub fn addOperation(self: *PrepareSummary, op: Op, definition_cells: usize) !void {
+        return self.addOperationWithGroups(op, definition_cells, definition_cells);
+    }
+
+    pub fn addOperationWithGroups(self: *PrepareSummary, op: Op, definition_cells: usize, target_groups: usize) !void {
         var next = self.*;
         next.operation_count = try std.math.add(usize, next.operation_count, 1);
         next.encoded_bytes = try std.math.add(usize, next.encoded_bytes, try encodedOpsSize(&.{op}));
@@ -42,8 +60,15 @@ pub const PrepareSummary = struct {
             .instance => {
                 next.instance_count = try std.math.add(usize, next.instance_count, 1);
                 next.new_instance_bitmap_bytes = try std.math.add(usize, next.new_instance_bitmap_bytes, bitmapLength(definition_cells));
+                next.new_instance_portion_bytes = try std.math.add(usize, next.new_instance_portion_bytes, try std.math.mul(usize, target_groups, @sizeOf(Portion)));
             },
             .fulfill => next.fulfillment_count = try std.math.add(usize, next.fulfillment_count, 1),
+            .transfer => next.transfer_count = try std.math.add(usize, next.transfer_count, 1),
+            .complete => |completion| {
+                next.completion_count = try std.math.add(usize, next.completion_count, 1);
+                next.grass_initialization_count = try std.math.add(usize, next.grass_initialization_count, completion.soil_group_count);
+            },
+            .grass_initialized => next.grass_initialized_count = try std.math.add(usize, next.grass_initialized_count, 1),
         }
         self.* = next;
     }
@@ -69,6 +94,9 @@ fn summarizeFraming(changes: []const u8, limits: Limits, instance_cells: usize) 
             1 => .{ .definition = try readDefinition(&r) },
             2 => .{ .instance = try readInstance(&r) },
             3 => .{ .fulfill = .{ .instance_id = try r.int(u64), .cell_index = try r.int(u32) } },
+            4 => .{ .transfer = try readTransfer(&r) },
+            5 => .{ .complete = try readComplete(&r) },
+            6 => .{ .grass_initialized = try readGrassKey(&r) },
             else => return error.InvalidBlueprint,
         };
         try result.addOperation(op, instance_cells);
@@ -108,14 +136,40 @@ pub fn prepareMemoryBound(summary: PrepareSummary, limits: Limits) !usize {
     var bytes = try std.math.mul(usize, summary.operation_count, @sizeOf(PreparedOp));
     bytes = try std.math.add(usize, bytes, summary.definition_payload_bytes);
     bytes = try std.math.add(usize, bytes, summary.new_instance_bitmap_bytes);
+    bytes = try std.math.add(usize, bytes, summary.new_instance_portion_bytes);
     bytes = try std.math.add(usize, bytes, try std.math.mul(usize, summary.fulfillment_count, @sizeOf(u32)));
-    const touched = @min(summary.fulfillment_count, try std.math.add(usize, limits.max_instances, summary.instance_count));
+    const state_changes = try std.math.add(usize, summary.fulfillment_count, try std.math.add(usize, summary.transfer_count, summary.completion_count));
+    const touched = @min(state_changes, try std.math.add(usize, limits.max_instances, summary.instance_count));
     bytes = try std.math.add(usize, bytes, try tableBytes(u64, TouchedSite, touched));
     bytes = try std.math.add(usize, bytes, try tableBytes(u64, Definition, summary.definition_count));
     bytes = try std.math.add(usize, bytes, try tableBytes(u64, Instance, summary.instance_count));
     if (summary.definition_count != 0) bytes = try std.math.add(usize, bytes, try std.math.mul(usize, 2, try tableBytes(u64, Definition, limits.max_definitions)));
     if (summary.instance_count != 0) bytes = try std.math.add(usize, bytes, try std.math.mul(usize, 2, try tableBytes(u64, Instance, limits.max_instances)));
+    bytes = try std.math.add(usize, bytes, try std.math.mul(usize, summary.transfer_count, @sizeOf(u32)));
+    bytes = try std.math.add(usize, bytes, try std.math.mul(usize, summary.transfer_count, @sizeOf(u64)));
+    // Preparation of grouping uses one bounded chunk directory alongside the
+    // final array. Its capacity is at most the number of target cells.
+    bytes = try std.math.add(usize, bytes, try std.math.mul(usize, summary.new_instance_portion_bytes, 3));
+    bytes = try std.math.add(usize, bytes, try tableBytes(GrassKey, GrassInitialization, summary.grass_initialization_count));
+    if (summary.grass_initialization_count != 0) bytes = try std.math.add(usize, bytes, try std.math.mul(usize, 2, try tableBytes(GrassKey, GrassInitialization, limits.max_grass_initializations)));
+    bytes = try std.math.add(usize, bytes, try tableBytes(GrassKey, void, summary.grass_initialized_count));
     return bytes;
+}
+
+/// Shared checkpoint admission policy. Native portion/obligation payload sizes
+/// conservatively cover their encoded representation; metadata has fixed widths.
+pub fn checkpointPolicyBytes(owned_payload_bytes: usize, definition_count: usize, instance_count: usize) !usize {
+    const definition_metadata = try std.math.mul(usize, 38, definition_count);
+    const instance_metadata = try std.math.mul(usize, 54, instance_count);
+    return std.math.add(usize, owned_payload_bytes, try std.math.add(usize, 28, try std.math.add(usize, definition_metadata, instance_metadata)));
+}
+
+pub fn instanceCheckpointPolicyBytes(bitmap_bytes: usize, portion_count: usize) !usize {
+    return std.math.add(usize, 54, try std.math.add(usize, bitmap_bytes, try std.math.mul(usize, portion_count, @sizeOf(Portion))));
+}
+
+pub fn grassCheckpointPolicyBytes(group_count: usize) !usize {
+    return std.math.mul(usize, group_count, @sizeOf(GrassInitialization));
 }
 
 pub const Definition = struct {
@@ -133,6 +187,7 @@ pub const Definition = struct {
         a.free(self.cells);
     }
 };
+pub const Portion = struct { chunk_id: u32, terrain_revision: u64 = 0, has_soil: bool = false };
 pub const Instance = struct {
     id: u64,
     definition_id: u64,
@@ -142,6 +197,10 @@ pub const Instance = struct {
     /// Dense-definition bit index, including zero bits for empty cells.
     fulfilled: []u8,
     remaining: u32,
+    phase: Phase = .building,
+    revision: u64 = 0,
+    portions: []Portion = &.{},
+    remaining_groups: u32 = 0,
     pub fn view(self: Instance) InstanceView {
         return .{ .id = self.id, .definition_id = self.definition_id, .owner = self.owner, .origin = self.origin, .rotation = self.rotation };
     }
@@ -151,6 +210,22 @@ pub const Instance = struct {
     fn mark(self: *Instance, index: usize) void {
         self.fulfilled[index / 8] |= @as(u8, 1) << @intCast(index % 8);
         self.remaining -= 1;
+        if (self.remaining == 0) self.phase = .materializing;
+        self.revision += 1;
+    }
+    pub fn portionIndex(self: Instance, chunk: u32) ?usize {
+        var low: usize = 0;
+        var high = self.portions.len;
+        while (low < high) {
+            const mid = low + (high - low) / 2;
+            if (self.portions[mid].chunk_id == chunk) return mid;
+            if (self.portions[mid].chunk_id < chunk) low = mid + 1 else high = mid;
+        }
+        return null;
+    }
+    fn deinit(self: *Instance, allocator: Allocator) void {
+        allocator.free(self.fulfilled);
+        allocator.free(self.portions);
     }
 };
 
@@ -238,10 +313,40 @@ pub fn worldCell(definition: DefinitionView, instance: InstanceView, index: usiz
     return .{ @intCast((@as(u64, instance.origin[0]) + xy[0]) % world_width), instance.origin[1] + xy[1], instance.origin[2] + z };
 }
 
+pub fn cellChunk(dimensions: [3]u32, cell: [3]u32) u32 {
+    const x_bits: u6 = @intCast(@ctz(dimensions[0]));
+    const xy_bits: u6 = @intCast(@ctz(dimensions[0]) + @ctz(dimensions[1]));
+    return @intCast(@as(u64, cell[0] / 32) | (@as(u64, cell[1] / 32) << x_bits) | (@as(u64, cell[2] / 32) << xy_bits));
+}
+
+fn preparePortions(a: Allocator, definition: DefinitionView, instance: InstanceView, dimensions: [3]u32) ![]Portion {
+    var chunks: std.AutoHashMapUnmanaged(u32, bool) = .empty;
+    defer chunks.deinit(a);
+    for (definition.cells, 0..) |material, index| {
+        if (material == 0) continue;
+        const id = cellChunk(dimensions, worldCell(definition, instance, index, dimensions[0] * 32));
+        const entry = try chunks.getOrPut(a, id);
+        if (!entry.found_existing) entry.value_ptr.* = false;
+        entry.value_ptr.* = entry.value_ptr.* or material == 2;
+    }
+    const portions = try a.alloc(Portion, chunks.count());
+    var iterator = chunks.iterator();
+    var i: usize = 0;
+    while (iterator.next()) |entry| : (i += 1) portions[i] = .{ .chunk_id = entry.key_ptr.*, .has_soil = entry.value_ptr.* };
+    const Order = struct {
+        fn less(_: void, x: Portion, y: Portion) bool {
+            return x.chunk_id < y.chunk_id;
+        }
+    };
+    std.mem.sort(Portion, portions, {}, Order.less);
+    return portions;
+}
+
 pub const State = struct {
     allocator: Allocator,
     definitions: std.AutoHashMapUnmanaged(u64, Definition) = .empty,
     instances: std.AutoHashMapUnmanaged(u64, Instance) = .empty,
+    grass_initializations: std.AutoHashMapUnmanaged(GrassKey, GrassInitialization) = .empty,
     max_definition_id: u64 = 0,
     max_instance_id: u64 = 0,
     owned_bytes: usize = 0,
@@ -258,9 +363,10 @@ pub const State = struct {
         var defs = self.definitions.valueIterator();
         while (defs.next()) |d| d.deinit(self.allocator);
         var sites = self.instances.valueIterator();
-        while (sites.next()) |i| self.allocator.free(i.fulfilled);
+        while (sites.next()) |i| i.deinit(self.allocator);
         self.definitions.deinit(self.allocator);
         self.instances.deinit(self.allocator);
+        self.grass_initializations.deinit(self.allocator);
         self.* = undefined;
     }
     pub fn clone(self: *const State, a: Allocator) !State {
@@ -277,12 +383,15 @@ pub const State = struct {
         while (sites.next()) |i| {
             var copy = i.*;
             copy.fulfilled = try a.dupe(u8, i.fulfilled);
+            errdefer a.free(copy.fulfilled);
+            copy.portions = try a.dupe(Portion, i.portions);
             out.instances.putAssumeCapacity(i.id, copy);
         }
+        out.grass_initializations = try self.grass_initializations.clone(a);
         return out;
     }
     /// Caller must establish agreement with real terrain before exposing restored
-    /// instances. This includes dirt's approved aging equivalence.
+    /// instances. Untransferred targets are raw air even after fulfillment.
     pub fn validateTerrain(self: *const State, context: anytype, comptime get: anytype, dimensions: [3]u32) !void {
         const width = try std.math.mul(u32, dimensions[0], 32);
         var sites = self.instances.valueIterator();
@@ -291,8 +400,10 @@ pub const State = struct {
             for (d.cells, 0..) |expected, index| {
                 if (expected == 0) continue;
                 const actual = try get(context, worldCell(d.view(), instance.view(), index, width));
-                if (instance.isFulfilled(index)) {
-                    if (actual != expected and !(expected == 2 and (actual == 3 or actual == 7))) return error.BlueprintTerrainMismatch;
+                const id = cellChunk(dimensions, worldCell(d.view(), instance.view(), index, width));
+                const portion = instance.portions[instance.portionIndex(id).?];
+                if (portion.terrain_revision != 0) {
+                    if (!instance.isFulfilled(index) or actual != expected) return error.BlueprintTerrainMismatch;
                 } else if (actual != 0) return error.BlueprintTerrainMismatch;
             }
         }
@@ -309,13 +420,17 @@ pub const State = struct {
         // Allocate every operation once. Fulfillment-heavy transactions no
         // longer grow 24-byte tagged unions or a u128 hash set per filled cell.
         try out.ops.ensureTotalCapacityPrecise(self.allocator, summary.operation_count);
+        try out.transfer_revisions.ensureTotalCapacityPrecise(self.allocator, summary.transfer_count);
         _ = try tableCapacity(summary.definition_count);
         _ = try tableCapacity(summary.instance_count);
         try out.definitions.ensureTotalCapacity(self.allocator, @intCast(summary.definition_count));
         try out.instances.ensureTotalCapacity(self.allocator, @intCast(summary.instance_count));
-        const touched_bound = @min(summary.fulfillment_count, try std.math.add(usize, self.instances.count(), summary.instance_count));
+        const lifecycle_changes = try std.math.add(usize, summary.fulfillment_count, try std.math.add(usize, summary.transfer_count, summary.completion_count));
+        const touched_bound = @min(lifecycle_changes, try std.math.add(usize, self.instances.count(), summary.instance_count));
         _ = try tableCapacity(touched_bound);
         try out.touched.ensureTotalCapacity(self.allocator, @intCast(touched_bound));
+        try out.grass_initializations.ensureTotalCapacity(self.allocator, @intCast(summary.grass_initialization_count));
+        try out.grass_retired.ensureTotalCapacity(self.allocator, @intCast(summary.grass_initialized_count));
         // Count fulfills per site before choosing a dense bitmap or an exact
         // sparse u32 array. Sparse batches never allocate a whole large bitmap.
         var scan: wire.Reader = .{ .bytes = changes };
@@ -334,12 +449,26 @@ pub const State = struct {
                     out.touched.putAssumeCapacity(id, .{ .count = 1 });
                 }
             },
+            4 => {
+                const transfer = try readTransfer(&scan);
+                const entry = try out.touched.getOrPut(self.allocator, transfer.instance_id);
+                if (!entry.found_existing) entry.value_ptr.* = .{};
+                entry.value_ptr.transfer_count = try std.math.add(u32, entry.value_ptr.transfer_count, 1);
+            },
+            5 => {
+                const completion = try readComplete(&scan);
+                const entry = try out.touched.getOrPut(self.allocator, completion.instance_id);
+                if (!entry.found_existing) entry.value_ptr.* = .{};
+            },
+            6 => _ = try readGrassKey(&scan),
             else => unreachable,
         };
         // Prepared maps retain completed sites until apply replays their ops.
         // Quotas and final wire size count only sites still active at this point.
         var live_instances: usize = self.instances.count();
         var maximum_live_instances = live_instances;
+        var live_grass: usize = self.grass_initializations.count();
+        var maximum_live_grass = live_grass;
         var r: wire.Reader = .{ .bytes = changes };
         while (r.pos < r.bytes.len) {
             const kind = try r.int(u8);
@@ -361,13 +490,13 @@ pub const State = struct {
                     try validateInstance(view, d.view(), dimensions);
                     var existing = self.instances.valueIterator();
                     while (existing.next()) |site| {
-                        if (out.remainingFor(site.*) == 0) continue;
+                        if (out.completedFor(site.id)) continue;
                         const other = self.definitions.get(site.definition_id).?;
                         if (boxesOverlap(view, d.view(), site.view(), other.view(), dimensions)) return error.InvalidBlueprint;
                     }
                     existing = out.instances.valueIterator();
                     while (existing.next()) |site| {
-                        if (out.remainingFor(site.*) == 0) continue;
+                        if (out.completedFor(site.id)) continue;
                         const other = out.definitions.get(site.definition_id) orelse self.definitions.get(site.definition_id).?;
                         if (boxesOverlap(view, d.view(), site.view(), other.view(), dimensions)) return error.InvalidBlueprint;
                     }
@@ -377,8 +506,12 @@ pub const State = struct {
                     out.owned_bytes = try std.math.add(usize, out.owned_bytes, bit_len);
                     if (out.owned_bytes > limits.max_state_bytes) return error.Capacity;
                     const bits = try self.allocator.alloc(u8, bit_len);
+                    errdefer self.allocator.free(bits);
                     @memset(bits, 0);
-                    out.instances.putAssumeCapacity(view.id, .{ .id = view.id, .definition_id = view.definition_id, .owner = view.owner, .origin = view.origin, .rotation = view.rotation, .fulfilled = bits, .remaining = d.target_count });
+                    const portions = try preparePortions(self.allocator, d.view(), view, dimensions);
+                    summary.new_instance_portion_bytes = try std.math.add(usize, summary.new_instance_portion_bytes, portions.len * @sizeOf(Portion));
+                    out.owned_bytes = try std.math.add(usize, out.owned_bytes, portions.len * @sizeOf(Portion));
+                    out.instances.putAssumeCapacity(view.id, .{ .id = view.id, .definition_id = view.definition_id, .owner = view.owner, .origin = view.origin, .rotation = view.rotation, .fulfilled = bits, .remaining = d.target_count, .portions = portions, .remaining_groups = @intCast(portions.len) });
                     out.max_instance_id = view.id;
                     live_instances += 1;
                     maximum_live_instances = @max(maximum_live_instances, live_instances);
@@ -390,30 +523,75 @@ pub const State = struct {
                     const d = out.definitions.get(instance.definition_id) orelse self.definitions.get(instance.definition_id) orelse return error.InvalidBlueprint;
                     if (f.cell_index >= d.cells.len or d.cells[f.cell_index] == 0 or instance.isFulfilled(f.cell_index)) return error.InvalidBlueprint;
                     const touched = out.touched.getPtr(f.instance_id).?;
-                    if (touched.marks == .none) try touched.start(self.allocator, d.cells.len, instance.remaining);
-                    if (touched.remaining == 0) return error.InvalidBlueprint;
+                    if (!touched.started) try touched.start(self.allocator, d.cells.len, instance);
+                    if (touched.remaining == 0 or touched.completed or touched.revision == std.math.maxInt(u64)) return error.InvalidBlueprint;
                     try touched.mark(f.cell_index);
                     touched.remaining -= 1;
-                    if (touched.remaining == 0) {
-                        out.owned_bytes -= instance.fulfilled.len;
-                        live_instances -= 1;
-                    }
+                    touched.revision += 1;
                     out.ops.appendAssumeCapacity(.{ .kind = .fulfill, .id = f.instance_id, .cell_index = f.cell_index });
+                },
+                4 => {
+                    const transfer = try readTransfer(&r);
+                    const instance = out.instances.get(transfer.instance_id) orelse self.instances.get(transfer.instance_id) orelse return error.InvalidBlueprint;
+                    const d = out.definitions.get(instance.definition_id) orelse self.definitions.get(instance.definition_id) orelse return error.InvalidBlueprint;
+                    const touched = out.touched.getPtr(instance.id).?;
+                    if (!touched.started) try touched.start(self.allocator, d.cells.len, instance);
+                    if (touched.remaining != 0 or touched.completed or transfer.terrain_revision == 0 or touched.remaining_groups == 0 or touched.revision == std.math.maxInt(u64)) return error.InvalidBlueprint;
+                    const group = instance.portionIndex(transfer.chunk_id) orelse return error.InvalidBlueprint;
+                    if (instance.portions[group].terrain_revision != 0) return error.InvalidBlueprint;
+                    touched.transfers[touched.transfers_used] = @intCast(group);
+                    touched.transfers_used += 1;
+                    touched.remaining_groups -= 1;
+                    touched.revision += 1;
+                    out.ops.appendAssumeCapacity(.{ .kind = .transfer, .id = instance.id, .cell_index = transfer.chunk_id });
+                    out.transfer_revisions.appendAssumeCapacity(transfer.terrain_revision);
+                },
+                5 => {
+                    const completion = try readComplete(&r);
+                    const instance = out.instances.get(completion.instance_id) orelse self.instances.get(completion.instance_id) orelse return error.InvalidBlueprint;
+                    const d = out.definitions.get(instance.definition_id) orelse self.definitions.get(instance.definition_id) orelse return error.InvalidBlueprint;
+                    const touched = out.touched.getPtr(instance.id).?;
+                    if (!touched.started) try touched.start(self.allocator, d.cells.len, instance);
+                    if (touched.remaining != 0 or touched.remaining_groups != 0 or touched.completed) return error.InvalidBlueprint;
+                    var soil_groups: u32 = 0;
+                    for (instance.portions) |portion| if (portion.has_soil) {
+                        soil_groups += 1;
+                    };
+                    if (soil_groups != completion.soil_group_count) return error.InvalidBlueprint;
+                    if (live_grass + soil_groups > limits.max_grass_initializations) return error.Capacity;
+                    for (instance.portions) |portion| if (portion.has_soil) {
+                        const key: GrassKey = .{ .instance_id = instance.id, .chunk_id = portion.chunk_id };
+                        if (self.grass_initializations.contains(key) or out.grass_initializations.contains(key)) return error.InvalidBlueprint;
+                        out.grass_initializations.putAssumeCapacity(key, .{ .instance = instance.view(), .chunk_id = portion.chunk_id, .completion_tick = completion.completion_tick });
+                    };
+                    live_grass += soil_groups;
+                    maximum_live_grass = @max(maximum_live_grass, live_grass);
+                    out.owned_bytes = out.owned_bytes - instance.fulfilled.len - instance.portions.len * @sizeOf(Portion) + soil_groups * @sizeOf(GrassInitialization);
+                    live_instances -= 1;
+                    touched.completed = true;
+                    out.ops.appendAssumeCapacity(.{ .kind = .complete, .id = instance.id });
+                },
+                6 => {
+                    const key = try readGrassKey(&r);
+                    if (out.grass_retired.contains(key) or (!out.grass_initializations.contains(key) and !self.grass_initializations.contains(key))) return error.InvalidBlueprint;
+                    out.grass_retired.putAssumeCapacity(key, {});
+                    live_grass -= 1;
+                    out.owned_bytes -= @sizeOf(GrassInitialization);
+                    out.ops.appendAssumeCapacity(.{ .kind = .grass_initialized, .id = key.instance_id, .cell_index = key.chunk_id });
                 },
                 else => unreachable,
             }
         }
         var touched = out.touched.valueIterator();
         while (touched.next()) |site| try site.checkDuplicates();
-        const definition_metadata = try std.math.mul(usize, 38, try std.math.add(usize, self.definitions.count(), out.definitions.count()));
-        const instance_metadata = try std.math.mul(usize, 41, live_instances);
-        const maximum_encoded = try std.math.add(usize, out.owned_bytes, try std.math.add(usize, 24, try std.math.add(usize, definition_metadata, instance_metadata)));
+        const maximum_encoded = try checkpointPolicyBytes(out.owned_bytes, try std.math.add(usize, self.definitions.count(), out.definitions.count()), live_instances);
         if (maximum_encoded > limits.max_state_bytes) return error.Capacity;
         try self.definitions.ensureUnusedCapacity(self.allocator, out.definitions.count());
         // Ordered completion frees slots before replacement creates consume them.
         // Reserving total created sites would retain an arbitrarily oversized map.
         _ = try tableCapacity(maximum_live_instances);
         try self.instances.ensureTotalCapacity(self.allocator, @intCast(maximum_live_instances));
+        try self.grass_initializations.ensureTotalCapacity(self.allocator, @intCast(maximum_live_grass));
         std.debug.assert(out.ops.items.len == summary.operation_count);
         out.releaseScratch();
         return out;
@@ -421,6 +599,7 @@ pub const State = struct {
 
     /// All allocations and checks occur in prepare, before the WAL commit footer.
     pub fn apply(self: *State, prepared: *Prepared) void {
+        var transfer_index: usize = 0;
         for (prepared.ops.items) |op| switch (op.kind) {
             .definition => {
                 const d = prepared.definitions.fetchRemove(op.id).?.value;
@@ -433,11 +612,24 @@ pub const State = struct {
             .fulfill => {
                 const i = self.instances.getPtr(op.id).?;
                 i.mark(op.cell_index);
-                if (i.remaining == 0) {
-                    const removed = self.instances.fetchRemove(op.id).?.value;
-                    self.allocator.free(removed.fulfilled);
-                }
             },
+            .transfer => {
+                const i = self.instances.getPtr(op.id).?;
+                i.portions[i.portionIndex(op.cell_index).?].terrain_revision = prepared.transfer_revisions.items[transfer_index];
+                transfer_index += 1;
+                i.remaining_groups -= 1;
+                i.revision += 1;
+            },
+            .complete => {
+                var removed = self.instances.fetchRemove(op.id).?.value;
+                for (removed.portions) |portion| if (portion.has_soil) {
+                    const key: GrassKey = .{ .instance_id = op.id, .chunk_id = portion.chunk_id };
+                    const initialization = prepared.grass_initializations.fetchRemove(key).?.value;
+                    self.grass_initializations.putAssumeCapacity(key, initialization);
+                };
+                removed.deinit(self.allocator);
+            },
+            .grass_initialized => _ = self.grass_initializations.remove(.{ .instance_id = op.id, .chunk_id = op.cell_index }),
         };
 
         self.max_definition_id = prepared.max_definition_id;
@@ -448,16 +640,28 @@ pub const State = struct {
 const PreparedOp = extern struct {
     id: u64,
     cell_index: u32 = 0,
-    kind: enum(u8) { definition, instance, fulfill },
+    kind: enum(u8) { definition, instance, fulfill, transfer, complete, grass_initialized },
     reserved: [3]u8 = .{ 0, 0, 0 },
 };
 const TouchedSite = struct {
     count: u32 = 0,
     used: u32 = 0,
     remaining: u32 = 0,
+    started: bool = false,
+    completed: bool = false,
+    revision: u64 = 0,
+    remaining_groups: u32 = 0,
+    transfer_count: u32 = 0,
+    transfers_used: u32 = 0,
+    transfers: []u32 = &.{},
     marks: union(enum) { none, sparse: []u32, bitmap: []u8 } = .none,
 
-    fn start(self: *TouchedSite, a: Allocator, cells: usize, remaining: u32) !void {
+    fn start(self: *TouchedSite, a: Allocator, cells: usize, instance: Instance) !void {
+        self.transfers = try a.alloc(u32, self.transfer_count);
+        errdefer {
+            a.free(self.transfers);
+            self.transfers = &.{};
+        }
         const dense_bytes = bitmapLength(cells);
         const sparse_bytes = try std.math.mul(usize, self.count, @sizeOf(u32));
         if (dense_bytes <= sparse_bytes) {
@@ -467,7 +671,10 @@ const TouchedSite = struct {
         } else {
             self.marks = .{ .sparse = try a.alloc(u32, self.count) };
         }
-        self.remaining = remaining;
+        self.remaining = instance.remaining;
+        self.remaining_groups = instance.remaining_groups;
+        self.revision = instance.revision;
+        self.started = true;
     }
     fn mark(self: *TouchedSite, index: u32) !void {
         switch (self.marks) {
@@ -485,8 +692,11 @@ const TouchedSite = struct {
         if (self.marks == .sparse) {
             const indices = self.marks.sparse[0..self.used];
             std.mem.sort(u32, indices, {}, std.sort.asc(u32));
-            for (indices[1..], indices[0 .. indices.len - 1]) |a, b| if (a == b) return error.InvalidBlueprint;
+            if (indices.len > 1) for (indices[1..], indices[0 .. indices.len - 1]) |a, b| if (a == b) return error.InvalidBlueprint;
         }
+        const transfers = self.transfers[0..self.transfers_used];
+        std.mem.sort(u32, transfers, {}, std.sort.asc(u32));
+        if (transfers.len > 1) for (transfers[1..], transfers[0 .. transfers.len - 1]) |a, b| if (a == b) return error.InvalidBlueprint;
     }
     fn deinit(self: *TouchedSite, a: Allocator) void {
         switch (self.marks) {
@@ -494,6 +704,7 @@ const TouchedSite = struct {
             .sparse => |indices| a.free(indices),
             .bitmap => |bits| a.free(bits),
         }
+        a.free(self.transfers);
     }
 };
 pub const Prepared = struct {
@@ -501,16 +712,18 @@ pub const Prepared = struct {
     definitions: std.AutoHashMapUnmanaged(u64, Definition) = .empty,
     instances: std.AutoHashMapUnmanaged(u64, Instance) = .empty,
     touched: std.AutoHashMapUnmanaged(u64, TouchedSite) = .empty,
+    grass_initializations: std.AutoHashMapUnmanaged(GrassKey, GrassInitialization) = .empty,
+    grass_retired: std.AutoHashMapUnmanaged(GrassKey, void) = .empty,
     ops: std.ArrayList(PreparedOp) = .empty,
+    transfer_revisions: std.ArrayList(u64) = .empty,
     max_definition_id: u64 = 0,
     max_instance_id: u64 = 0,
     owned_bytes: usize = 0,
     fn init(a: Allocator) Prepared {
         return .{ .allocator = a };
     }
-    fn remainingFor(self: *const Prepared, instance: Instance) u32 {
-        if (self.touched.get(instance.id)) |site| if (site.marks != .none) return site.remaining;
-        return instance.remaining;
+    fn completedFor(self: *const Prepared, id: u64) bool {
+        return if (self.touched.get(id)) |site| site.completed else false;
     }
     fn releaseScratch(self: *Prepared) void {
         var touched = self.touched.valueIterator();
@@ -522,11 +735,14 @@ pub const Prepared = struct {
         var defs = self.definitions.valueIterator();
         while (defs.next()) |d| d.deinit(self.allocator);
         var sites = self.instances.valueIterator();
-        while (sites.next()) |i| self.allocator.free(i.fulfilled);
+        while (sites.next()) |i| i.deinit(self.allocator);
         self.definitions.deinit(self.allocator);
         self.instances.deinit(self.allocator);
+        self.grass_initializations.deinit(self.allocator);
+        self.grass_retired.deinit(self.allocator);
         self.releaseScratch();
         self.ops.deinit(self.allocator);
+        self.transfer_revisions.deinit(self.allocator);
     }
 };
 
@@ -564,6 +780,15 @@ fn writeInstance(a: Allocator, out: *std.ArrayList(u8), i: InstanceView) !void {
 fn readInstance(r: *wire.Reader) !InstanceView {
     return .{ .id = try r.int(u64), .definition_id = try r.int(u64), .owner = try r.int(u64), .origin = .{ try r.int(u32), try r.int(u32), try r.int(u32) }, .rotation = try r.int(u8) };
 }
+fn readTransfer(r: *wire.Reader) !Transfer {
+    return .{ .instance_id = try r.int(u64), .chunk_id = try r.int(u32), .terrain_revision = try r.int(u64) };
+}
+fn readComplete(r: *wire.Reader) !Complete {
+    return .{ .instance_id = try r.int(u64), .completion_tick = try r.int(u64), .soil_group_count = try r.int(u32) };
+}
+fn readGrassKey(r: *wire.Reader) !GrassKey {
+    return .{ .instance_id = try r.int(u64), .chunk_id = try r.int(u32) };
+}
 pub fn encodedOpsSize(ops: []const Op) !usize {
     var length: usize = 0;
     for (ops) |op| {
@@ -575,6 +800,8 @@ pub fn encodedOpsSize(ops: []const Op) !usize {
             },
             .instance => 38,
             .fulfill => 13,
+            .transfer, .complete => 21,
+            .grass_initialized => 13,
         };
         length = try std.math.add(usize, length, bytes);
     }
@@ -600,6 +827,23 @@ pub fn encodeOps(a: Allocator, ops: []const Op) ![]u8 {
             try appendInt(a, &out, u64, f.instance_id);
             try appendInt(a, &out, u32, f.cell_index);
         },
+        .transfer => |transfer| {
+            try out.append(a, 4);
+            try appendInt(a, &out, u64, transfer.instance_id);
+            try appendInt(a, &out, u32, transfer.chunk_id);
+            try appendInt(a, &out, u64, transfer.terrain_revision);
+        },
+        .complete => |completion| {
+            try out.append(a, 5);
+            try appendInt(a, &out, u64, completion.instance_id);
+            try appendInt(a, &out, u64, completion.completion_tick);
+            try appendInt(a, &out, u32, completion.soil_group_count);
+        },
+        .grass_initialized => |key| {
+            try out.append(a, 6);
+            try appendInt(a, &out, u64, key.instance_id);
+            try appendInt(a, &out, u32, key.chunk_id);
+        },
     };
     std.debug.assert(out.items.len == size);
     return out.toOwnedSlice(a);
@@ -621,18 +865,28 @@ pub fn validateOps(bytes: []const u8, dimensions: [3]u32, limits: Limits) !void 
             if (try r.int(u64) == 0) return error.InvalidBlueprint;
             _ = try r.int(u32);
         },
+        4 => {
+            const transfer = try readTransfer(&r);
+            if (transfer.instance_id == 0 or transfer.terrain_revision == 0) return error.InvalidBlueprint;
+        },
+        5 => {
+            const completion = try readComplete(&r);
+            if (completion.instance_id == 0 or completion.soil_group_count > limits.max_grass_initializations) return error.InvalidBlueprint;
+        },
+        6 => if ((try readGrassKey(&r)).instance_id == 0) return error.InvalidBlueprint,
         else => return error.InvalidBlueprint,
     };
 }
 
 pub fn encodeState(a: Allocator, state: *const State) ![]u8 {
-    if (state.max_definition_id == 0 and state.max_instance_id == 0 and state.definitions.count() == 0 and state.instances.count() == 0) return a.alloc(u8, 0);
+    if (state.max_definition_id == 0 and state.max_instance_id == 0 and state.definitions.count() == 0 and state.instances.count() == 0 and state.grass_initializations.count() == 0) return a.alloc(u8, 0);
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(a);
     try appendInt(a, &out, u64, state.max_definition_id);
     try appendInt(a, &out, u64, state.max_instance_id);
     try appendInt(a, &out, u32, state.definitions.count());
     try appendInt(a, &out, u32, state.instances.count());
+    try appendInt(a, &out, u32, state.grass_initializations.count());
     const ids = try a.alloc(u64, @max(state.definitions.count(), state.instances.count()));
     defer a.free(ids);
     var keys = state.definitions.keyIterator();
@@ -648,7 +902,31 @@ pub fn encodeState(a: Allocator, state: *const State) ![]u8 {
         const i = state.instances.get(id).?;
         try writeInstance(a, &out, i.view());
         try appendInt(a, &out, u32, i.remaining);
+        try appendInt(a, &out, u8, @intFromEnum(i.phase));
+        try appendInt(a, &out, u64, i.revision);
         try out.appendSlice(a, i.fulfilled);
+        try appendInt(a, &out, u32, @intCast(i.portions.len));
+        for (i.portions) |portion| {
+            try appendInt(a, &out, u32, portion.chunk_id);
+            try appendInt(a, &out, u64, portion.terrain_revision);
+        }
+    }
+    const grass = try a.alloc(GrassKey, state.grass_initializations.count());
+    defer a.free(grass);
+    var grass_keys = state.grass_initializations.keyIterator();
+    n = 0;
+    while (grass_keys.next()) |key| : (n += 1) grass[n] = key.*;
+    const Order = struct {
+        fn less(_: void, x: GrassKey, y: GrassKey) bool {
+            return x.instance_id < y.instance_id or (x.instance_id == y.instance_id and x.chunk_id < y.chunk_id);
+        }
+    };
+    std.mem.sort(GrassKey, grass, {}, Order.less);
+    for (grass) |key| {
+        const initialization = state.grass_initializations.get(key).?;
+        try writeInstance(a, &out, initialization.instance);
+        try appendInt(a, &out, u32, initialization.chunk_id);
+        try appendInt(a, &out, u64, initialization.completion_tick);
     }
     return out.toOwnedSlice(a);
 }
@@ -662,10 +940,12 @@ pub fn decodeState(a: Allocator, bytes: []const u8, dimensions: [3]u32, limits: 
     state.max_instance_id = try r.int(u64);
     const dc = try r.int(u32);
     const ic = try r.int(u32);
+    const gc = try r.int(u32);
     if (state.max_definition_id == 0 and state.max_instance_id == 0 and dc == 0 and ic == 0) return error.InvalidBlueprint;
-    if (dc > limits.max_definitions or ic > limits.max_instances) return error.Capacity;
+    if (dc > limits.max_definitions or ic > limits.max_instances or gc > limits.max_grass_initializations) return error.Capacity;
     try state.definitions.ensureTotalCapacity(a, dc);
     try state.instances.ensureTotalCapacity(a, ic);
+    try state.grass_initializations.ensureTotalCapacity(a, gc);
     var previous: u64 = 0;
     for (0..dc) |_| {
         const d = try readDefinition(&r);
@@ -685,16 +965,69 @@ pub fn decodeState(a: Allocator, bytes: []const u8, dimensions: [3]u32, limits: 
         if (i.id <= previous or i.id > state.max_instance_id) return error.InvalidBlueprint;
         previous = i.id;
         const remaining = try r.int(u32);
+        const phase: Phase = switch (try r.int(u8)) {
+            0 => .building,
+            1 => .materializing,
+            else => return error.InvalidBlueprint,
+        };
+        const revision = try r.int(u64);
         const bits = try r.take((d.cells.len + 7) / 8);
         var actual: u32 = d.target_count;
         for (d.cells, 0..) |material, index| if (bits[index / 8] & (@as(u8, 1) << @intCast(index % 8)) != 0) {
             if (material == 0) return error.InvalidBlueprint;
             actual -= 1;
         };
-        if (remaining == 0 or remaining != actual) return error.InvalidBlueprint;
+        if (remaining != actual or phase == .complete or (remaining == 0) != (phase == .materializing)) return error.InvalidBlueprint;
         if (d.cells.len % 8 != 0 and bits[bits.len - 1] >> @as(u3, @intCast(d.cells.len % 8)) != 0) return error.InvalidBlueprint;
-        state.instances.putAssumeCapacity(i.id, .{ .id = i.id, .definition_id = i.definition_id, .owner = i.owner, .origin = i.origin, .rotation = i.rotation, .remaining = remaining, .fulfilled = try a.dupe(u8, bits) });
-        state.owned_bytes = try std.math.add(usize, state.owned_bytes, bits.len);
+        const portions = try preparePortions(a, d.view(), i, dimensions);
+        errdefer a.free(portions);
+        if (try r.int(u32) != portions.len) return error.InvalidBlueprint;
+        var remaining_groups: u32 = @intCast(portions.len);
+        for (portions) |*portion| {
+            if (try r.int(u32) != portion.chunk_id) return error.InvalidBlueprint;
+            portion.terrain_revision = try r.int(u64);
+            if (portion.terrain_revision != 0) {
+                if (phase != .materializing) return error.InvalidBlueprint;
+                remaining_groups -= 1;
+            }
+        }
+        const transferred_count = portions.len - remaining_groups;
+        if (revision != @as(u64, d.target_count - remaining) + transferred_count) return error.InvalidBlueprint;
+        state.instances.putAssumeCapacity(i.id, .{ .id = i.id, .definition_id = i.definition_id, .owner = i.owner, .origin = i.origin, .rotation = i.rotation, .remaining = remaining, .fulfilled = try a.dupe(u8, bits), .phase = phase, .revision = revision, .portions = portions, .remaining_groups = remaining_groups });
+        state.owned_bytes = try std.math.add(usize, state.owned_bytes, bits.len + portions.len * @sizeOf(Portion));
+    }
+    var previous_grass: ?GrassKey = null;
+    var previous_descriptor: ?InstanceView = null;
+    var descriptor_portions: []Portion = &.{};
+    defer a.free(descriptor_portions);
+    for (0..gc) |_| {
+        const descriptor = try readInstance(&r);
+        const definition = state.definitions.get(descriptor.definition_id) orelse return error.InvalidBlueprint;
+        try validateInstance(descriptor, definition.view(), dimensions);
+        if (descriptor.id > state.max_instance_id or state.instances.contains(descriptor.id)) return error.InvalidBlueprint;
+        const chunk = try r.int(u32);
+        const completion_tick = try r.int(u64);
+        const key: GrassKey = .{ .instance_id = descriptor.id, .chunk_id = chunk };
+        if (previous_grass) |previous_key| if (key.instance_id < previous_key.instance_id or (key.instance_id == previous_key.instance_id and key.chunk_id <= previous_key.chunk_id)) return error.InvalidBlueprint;
+        previous_grass = key;
+        if (previous_descriptor) |old| {
+            if (old.id == descriptor.id) {
+                if (!std.meta.eql(old, descriptor)) return error.InvalidBlueprint;
+            } else {
+                a.free(descriptor_portions);
+                descriptor_portions = &.{};
+                descriptor_portions = try preparePortions(a, definition.view(), descriptor, dimensions);
+            }
+        } else descriptor_portions = try preparePortions(a, definition.view(), descriptor, dimensions);
+        previous_descriptor = descriptor;
+        var found = false;
+        for (descriptor_portions) |portion| if (portion.chunk_id == chunk and portion.has_soil) {
+            found = true;
+            break;
+        };
+        if (!found) return error.InvalidBlueprint;
+        state.grass_initializations.putAssumeCapacity(key, .{ .instance = descriptor, .chunk_id = chunk, .completion_tick = completion_tick });
+        state.owned_bytes = try std.math.add(usize, state.owned_bytes, @sizeOf(GrassInitialization));
     }
     try r.done();
     if (state.owned_bytes > limits.max_state_bytes) return error.Capacity;
@@ -732,9 +1065,51 @@ test "incremental fulfillment preflight is atomic, checkpoints retain progress a
     var final = try restored.prepare(delta, dimensions, .{});
     defer final.deinit();
     restored.apply(&final);
+    try std.testing.expectEqual(Phase.materializing, restored.instances.get(8).?.phase);
+    var handback: std.ArrayList(Op) = .empty;
+    defer handback.deinit(a);
+    for (restored.instances.get(8).?.portions) |portion| try handback.append(a, .{ .transfer = .{ .instance_id = 8, .chunk_id = portion.chunk_id, .terrain_revision = 1 } });
+    try handback.append(a, .{ .complete = .{ .instance_id = 8, .completion_tick = 100 } });
+    const handback_bytes = try encodeOps(a, handback.items);
+    defer a.free(handback_bytes);
+    var completed = try restored.prepare(handback_bytes, dimensions, .{});
+    defer completed.deinit();
+    restored.apply(&completed);
     try std.testing.expectEqual(@as(u32, 0), restored.instances.count());
     try std.testing.expectEqual(@as(u64, 8), restored.max_instance_id);
     try std.testing.expectEqual(@as(u32, 1), restored.definitions.count());
+}
+
+test "checkpoint policy includes sparse instance portions at the exact configured boundary" {
+    const a = std.testing.allocator;
+    const dimensions: [3]u32 = .{ 512, 256, 8 };
+    var cells: [1409]u8 = @splat(0);
+    for (0..12) |index| cells[index * 128] = 2;
+    const changes = try encodeOps(a, &.{
+        .{ .definition = .{ .id = 1, .owner = 1, .name = "P", .size = .{ 1409, 1, 1 }, .cells = &cells, .target_count = 12 } },
+        .{ .instance = .{ .id = 1, .definition_id = 1, .owner = 1, .origin = .{ 10, 10, 70 }, .rotation = 0 } },
+    });
+    defer a.free(changes);
+    const exact = try std.math.add(usize, try checkpointPolicyBytes(cells.len + 1, 1, 0), try instanceCheckpointPolicyBytes((cells.len + 7) / 8, 12));
+    for ([_]bool{ false, true }) |at_limit| {
+        var state = State.init(a);
+        defer state.deinit();
+        const limits: Limits = .{ .max_state_bytes = exact - @intFromBool(!at_limit) };
+        if (!at_limit) {
+            try std.testing.expectError(error.Capacity, state.prepare(changes, dimensions, limits));
+            try std.testing.expectEqual(@as(u32, 0), state.definitions.count());
+            try std.testing.expectEqual(@as(u64, 0), state.max_instance_id);
+            continue;
+        }
+        var prepared = try state.prepare(changes, dimensions, limits);
+        defer prepared.deinit();
+        state.apply(&prepared);
+        try std.testing.expectEqual(@as(usize, 12), state.instances.get(1).?.portions.len);
+        const encoded = try encodeState(a, &state);
+        defer a.free(encoded);
+        try std.testing.expectEqual(@as(usize, 1851), encoded.len);
+        try std.testing.expect(encoded.len <= exact);
+    }
 }
 
 fn completedSiteQuotaScenario(a: Allocator, persisted: bool) !void {
@@ -747,8 +1122,8 @@ fn completedSiteQuotaScenario(a: Allocator, persisted: bool) !void {
     const fill_first: Op = .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } };
     const fill_last: Op = .{ .fulfill = .{ .instance_id = 1, .cell_index = 1 } };
     // Exactly one definition and one active site's bitmap and wire metadata fit.
-    const final_size = 24 + 38 + definition.definition.name.len + definition.definition.cells.len + 41 + 1;
-    const limits: Limits = .{ .max_instances = 1, .max_state_bytes = final_size };
+    const final_size = 28 + 38 + definition.definition.name.len + definition.definition.cells.len + 54 + 1 + 12;
+    const limits: Limits = .{ .max_instances = 1, .max_state_bytes = final_size + @sizeOf(Portion) };
     const initial = try encodeOps(a, if (persisted) &.{ definition, first, fill_first } else &.{definition});
     defer a.free(initial);
     var seed = try state.prepare(initial, dimensions, limits);
@@ -756,7 +1131,9 @@ fn completedSiteQuotaScenario(a: Allocator, persisted: bool) !void {
     state.apply(&seed);
     const before = try encodeState(a, &state);
     defer a.free(before);
-    const changes = try encodeOps(a, if (persisted) &.{ fill_last, replacement } else &.{ first, fill_first, fill_last, replacement });
+    const transfer: Op = .{ .transfer = .{ .instance_id = 1, .chunk_id = 0, .terrain_revision = 1 } };
+    const completion: Op = .{ .complete = .{ .instance_id = 1, .completion_tick = 100 } };
+    const changes = try encodeOps(a, if (persisted) &.{ fill_last, transfer, completion, replacement } else &.{ first, fill_first, fill_last, transfer, completion, replacement });
     defer a.free(changes);
     var prepared = try state.prepare(changes, dimensions, limits);
     defer prepared.deinit();
@@ -768,7 +1145,7 @@ fn completedSiteQuotaScenario(a: Allocator, persisted: bool) !void {
     try std.testing.expect(!state.instances.contains(1));
     try std.testing.expectEqual(@as(u32, 2), state.instances.get(2).?.remaining);
     try std.testing.expectEqual(@as(u64, 2), state.max_instance_id);
-    try std.testing.expectEqual(definition.definition.name.len + definition.definition.cells.len + 1, state.owned_bytes);
+    try std.testing.expectEqual(definition.definition.name.len + definition.definition.cells.len + 1 + @sizeOf(Portion), state.owned_bytes);
     const encoded = try encodeState(a, &state);
     defer a.free(encoded);
     try std.testing.expectEqual(final_size, encoded.len);
@@ -787,7 +1164,7 @@ test "same-batch completion releases transaction instance quota and encoded meta
     try completedSiteQuotaScenario(std.testing.allocator, false);
 }
 
-test "instance quota remains enforced until final fulfillment without publishing failed changes" {
+test "instance quota remains enforced through materialization without publishing failed changes" {
     const a = std.testing.allocator;
     var state = State.init(a);
     defer state.deinit();
@@ -871,7 +1248,7 @@ test "malformed progress cannot publish and decode rejects corrupt bitmaps and o
     try std.testing.expectError(error.BlueprintIdExhausted, state.nextInstanceId());
 }
 
-test "restored progress requires real terrain agreement including dirt aging and seam rotation" {
+test "restored targets require raw air until matching target chunks transfer" {
     const a = std.testing.allocator;
     var state = State.init(a);
     defer state.deinit();
@@ -882,7 +1259,7 @@ test "restored progress requires real terrain agreement including dirt aging and
     defer prepared.deinit();
     state.apply(&prepared);
     const Terrain = struct {
-        actual: u8 = 3,
+        actual: u8 = 0,
         pending: u8 = 0,
         fn get(self: @This(), cell: [3]u32) !u8 {
             if (cell[1] != 2 or cell[2] != 3) return error.BadTestCoordinate;
@@ -890,7 +1267,7 @@ test "restored progress requires real terrain agreement including dirt aging and
         }
     };
     try state.validateTerrain(Terrain{}, Terrain.get, dimensions);
-    try state.validateTerrain(Terrain{ .actual = 7 }, Terrain.get, dimensions);
+    try std.testing.expectError(error.BlueprintTerrainMismatch, state.validateTerrain(Terrain{ .actual = 2 }, Terrain.get, dimensions));
     try std.testing.expectError(error.BlueprintTerrainMismatch, state.validateTerrain(Terrain{ .actual = 10 }, Terrain.get, dimensions));
     try std.testing.expectError(error.BlueprintTerrainMismatch, state.validateTerrain(Terrain{ .pending = 2 }, Terrain.get, dimensions));
 }
@@ -950,6 +1327,8 @@ test "ordered replacement reserves live State slots instead of total created sit
     for (1..65) |id| {
         try journal.append(a, .{ .instance = .{ .id = id, .definition_id = 1, .owner = 1, .origin = .{ 1, 1, 1 }, .rotation = 0 } });
         try journal.append(a, .{ .fulfill = .{ .instance_id = id, .cell_index = 0 } });
+        try journal.append(a, .{ .transfer = .{ .instance_id = id, .chunk_id = 0, .terrain_revision = 1 } });
+        try journal.append(a, .{ .complete = .{ .instance_id = id, .completion_tick = 1 } });
     }
     const changes = try encodeOps(a, journal.items);
     defer a.free(changes);
@@ -973,6 +1352,8 @@ test "replay preparation uses actual bitmap sizes instead of capture fallback bo
     for (1..17) |id| {
         try journal.append(a, .{ .instance = .{ .id = id, .definition_id = 1, .owner = 1, .origin = .{ 1, 1, 1 }, .rotation = 0 } });
         try journal.append(a, .{ .fulfill = .{ .instance_id = id, .cell_index = 0 } });
+        try journal.append(a, .{ .transfer = .{ .instance_id = id, .chunk_id = 0, .terrain_revision = 1 } });
+        try journal.append(a, .{ .complete = .{ .instance_id = id, .completion_tick = 1 } });
     }
     const changes = try encodeOps(a, journal.items);
     defer a.free(changes);
@@ -984,4 +1365,109 @@ test "replay preparation uses actual bitmap sizes instead of capture fallback bo
     state.apply(&prepared);
     try std.testing.expectEqual(@as(u32, 0), state.instances.count());
     try std.testing.expectEqual(@as(u64, 16), state.max_instance_id);
+}
+
+fn materializationRecoveryScenario(a: Allocator) !void {
+    const fixtures = std.testing.allocator;
+    const dimensions: [3]u32 = .{ 4, 4, 4 };
+    var state = State.init(a);
+    defer state.deinit();
+    const seed = try encodeOps(fixtures, &.{
+        .{ .definition = .{ .id = 1, .owner = 7, .name = "Two soil portions", .size = .{ 3, 1, 1 }, .cells = &.{ 2, 0, 2 }, .target_count = 2 } },
+        .{ .instance = .{ .id = 9, .definition_id = 1, .owner = 7, .origin = .{ 31, 1, 1 }, .rotation = 0 } },
+        .{ .fulfill = .{ .instance_id = 9, .cell_index = 0 } },
+        .{ .fulfill = .{ .instance_id = 9, .cell_index = 2 } },
+        .{ .transfer = .{ .instance_id = 9, .chunk_id = 0, .terrain_revision = 5 } },
+    });
+    defer fixtures.free(seed);
+    {
+        var prepared = try state.prepare(seed, dimensions, .{});
+        defer prepared.deinit();
+        state.apply(&prepared);
+    }
+    try std.testing.expectEqual(Phase.materializing, state.instances.get(9).?.phase);
+    try std.testing.expectEqual(@as(u32, 1), state.instances.get(9).?.remaining_groups);
+    const checkpoint = try encodeState(a, &state);
+    defer a.free(checkpoint);
+    var restored = try decodeState(a, checkpoint, dimensions, .{});
+    defer restored.deinit();
+    const Terrain = struct {
+        wrong_second: bool = false,
+        fn get(self: @This(), cell: [3]u32) !u8 {
+            return if (cell[0] == 31 or self.wrong_second) 2 else 0;
+        }
+    };
+    try restored.validateTerrain(Terrain{}, Terrain.get, dimensions);
+    try std.testing.expectError(error.BlueprintTerrainMismatch, restored.validateTerrain(Terrain{ .wrong_second = true }, Terrain.get, dimensions));
+    const finish = try encodeOps(fixtures, &.{
+        .{ .transfer = .{ .instance_id = 9, .chunk_id = 1, .terrain_revision = 8 } },
+        .{ .complete = .{ .instance_id = 9, .completion_tick = 1000, .soil_group_count = 2 } },
+    });
+    defer fixtures.free(finish);
+    {
+        var prepared = try restored.prepare(finish, dimensions, .{});
+        defer prepared.deinit();
+        try std.testing.expect(restored.instances.contains(9));
+        try std.testing.expectEqual(@as(u32, 0), restored.grass_initializations.count());
+        restored.apply(&prepared);
+    }
+    try std.testing.expectEqual(@as(u32, 0), restored.instances.count());
+    try std.testing.expectEqual(@as(u32, 2), restored.grass_initializations.count());
+    for ([_]u32{ 0, 1 }) |chunk| {
+        const pending = restored.grass_initializations.get(.{ .instance_id = 9, .chunk_id = chunk }).?;
+        try std.testing.expectEqual(@as(u64, 1000), pending.completion_tick);
+        try std.testing.expectEqual(@as(u64, 1), pending.instance.definition_id);
+    }
+    const completed_checkpoint = try encodeState(a, &restored);
+    defer a.free(completed_checkpoint);
+    var completed = try decodeState(a, completed_checkpoint, dimensions, .{});
+    defer completed.deinit();
+    const initialize = try encodeOps(fixtures, &.{.{ .grass_initialized = .{ .instance_id = 9, .chunk_id = 0 } }});
+    defer fixtures.free(initialize);
+    {
+        var prepared = try completed.prepare(initialize, dimensions, .{});
+        defer prepared.deinit();
+        completed.apply(&prepared);
+    }
+    try std.testing.expectEqual(@as(u32, 1), completed.grass_initializations.count());
+    try std.testing.expectEqual(@as(u64, 1000), completed.grass_initializations.get(.{ .instance_id = 9, .chunk_id = 1 }).?.completion_tick);
+    if (completed.prepare(initialize, dimensions, .{})) |unexpected| {
+        var cleanup = unexpected;
+        cleanup.deinit();
+        return error.ExpectedDuplicateRejection;
+    } else |err| if (err != error.InvalidBlueprint) return err;
+}
+
+test "partial target transfers and completion grass obligations recover through every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, materializationRecoveryScenario, .{});
+}
+
+test "duplicate transfer and premature completion reject the entire prepared transition" {
+    const a = std.testing.allocator;
+    const dimensions: [3]u32 = .{ 4, 4, 4 };
+    var state = State.init(a);
+    defer state.deinit();
+    const seed = try encodeOps(a, &.{
+        .{ .definition = .{ .id = 1, .owner = 7, .name = "One", .size = .{ 1, 1, 1 }, .cells = &.{10}, .target_count = 1 } },
+        .{ .instance = .{ .id = 1, .definition_id = 1, .owner = 7, .origin = .{ 1, 1, 1 }, .rotation = 0 } },
+        .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } },
+    });
+    defer a.free(seed);
+    var prepared = try state.prepare(seed, dimensions, .{});
+    defer prepared.deinit();
+    state.apply(&prepared);
+    const before = try encodeState(a, &state);
+    defer a.free(before);
+    for ([_][]const Op{
+        &.{.{ .complete = .{ .instance_id = 1, .completion_tick = 1 } }},
+        &.{ .{ .transfer = .{ .instance_id = 1, .chunk_id = 0, .terrain_revision = 1 } }, .{ .transfer = .{ .instance_id = 1, .chunk_id = 0, .terrain_revision = 1 } } },
+        &.{.{ .transfer = .{ .instance_id = 1, .chunk_id = 1, .terrain_revision = 1 } }},
+    }) |ops| {
+        const bytes = try encodeOps(a, ops);
+        defer a.free(bytes);
+        try std.testing.expectError(error.InvalidBlueprint, state.prepare(bytes, dimensions, .{}));
+        const after = try encodeState(a, &state);
+        defer a.free(after);
+        try std.testing.expectEqualSlices(u8, before, after);
+    }
 }

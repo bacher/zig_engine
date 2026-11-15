@@ -14,6 +14,12 @@ preparation budget to combine repeated changes and limit work started in one fra
 
 ## Context
 
+The first stage's miniature cache is implemented; the FIFO preparation budget remains a
+follow-up. The newer [construction ownership implementation](construction-state-ownership.md)
+adds a separate culled mesh for filled targets. The relaxed miniature/terrain policy below
+does not weaken its dynamic/static geometry handoff: retain filled geometry until the matching
+terrain replacement is installed. These are separate publication contracts.
+
 The client immediately reconciles authoritative blocks, local edits, inventory and
 blueprint progress. Main at `b223e01` drains every dirty terrain chunk and rebuilds
 camera-relative miniature instances each frame. Full-size application previews already

@@ -131,7 +131,7 @@ pub const Reader = struct {
 
 /// Road support is independent of full-cube collision.
 pub fn supportsRoad(material: BlockType) bool {
-    return material != .none and material != .dirt and material != .sand and material != .leaves;
+    return material != .none and material != .sand and material != .leaves and material != .packed_dirt;
 }
 
 /// Ordinary stone needs a complete platform; other geological foundations
@@ -384,7 +384,6 @@ pub const Validator = struct {
 
     fn vertical(self: *Validator, cell: Cell, material: BlockType, below: BlockType) ReadError!Evaluation {
         const below_cell = cell - Cell{ 0, 0, 1 };
-        if (below == .dirt) return failure(.incompatible_support, below_cell, 0, 0);
         if (below.isEarth() or below == .clay) return self.platformFailure(.earth_requires_stable_platform, cell);
         if (below == .stone) return self.platformFailure(.missing_foundation, cell);
         if (material.isWood()) {
@@ -942,7 +941,7 @@ const Fixture = struct {
     }
 };
 
-test "loose earth needs nine cells; unknown dependencies and world seams are distinct from air" {
+test "soil needs nine cells; unknown dependencies and world seams are distinct from air" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.put(.{ 0, 10, 4 }, .dirt);
@@ -962,68 +961,63 @@ test "loose earth needs nine cells; unknown dependencies and world seams are dis
     try std.testing.expectEqual(1, failure_result.involved_count);
 }
 
-test "packed soil supports other materials only through the centered three-layer platform" {
-    var fixture: Fixture = .{};
-    defer fixture.deinit();
-    try fixture.put(.{ 10, 10, 4 }, .dirt);
-    try std.testing.expectEqual(Reason.incompatible_support, fixture.check(.{ 10, 10, 5 }, .planks).?.reason);
-    try fixture.raw(.{ 10, 10, 4 }, .packed_dirt);
-    try std.testing.expectEqual(Reason.earth_requires_stable_platform, fixture.check(.{ 10, 10, 5 }, .planks).?.reason);
-    // Compact each placed layer before adding soil above it.
-    for (0..3) |layer| {
-        const radius: i64 = 3 - @as(i64, @intCast(layer));
-        var y: i64 = -radius;
-        while (y <= radius) : (y += 1) {
-            var x: i64 = -radius;
-            while (x <= radius) : (x += 1) {
-                const cell = Cell{ 30 + x, 30 + y, 4 + @as(i64, @intCast(layer)) };
-                try fixture.put(cell, .dirt);
-                try fixture.raw(cell, .packed_dirt);
+test "bare and grassy soil support other materials through the same centered three-layer platform" {
+    for ([_]BlockType{ .dirt, .grass }) |soil| {
+        var fixture: Fixture = .{};
+        defer fixture.deinit();
+        try fixture.raw(.{ 10, 10, 4 }, soil);
+        try std.testing.expectEqual(Reason.earth_requires_stable_platform, fixture.check(.{ 10, 10, 5 }, .planks).?.reason);
+        // Soil can support the next layer immediately, while each placed cell
+        // continues to require its complete footprint.
+        for (0..3) |layer| {
+            const radius: i64 = 3 - @as(i64, @intCast(layer));
+            var y: i64 = -radius;
+            while (y <= radius) : (y += 1) {
+                var x: i64 = -radius;
+                while (x <= radius) : (x += 1) {
+                    const cell = Cell{ 30 + x, 30 + y, 4 + @as(i64, @intCast(layer)) };
+                    try fixture.put(cell, .dirt);
+                    try fixture.raw(cell, soil);
+                }
             }
         }
+        try fixture.put(.{ 30, 30, 7 }, .reinforced_concrete);
+        try std.testing.expect(fixture.check(.{ 33, 30, 7 }, .tree_trunk) != null);
     }
-    try fixture.put(.{ 30, 30, 7 }, .reinforced_concrete);
-    try std.testing.expect(fixture.check(.{ 33, 30, 7 }, .tree_trunk) != null);
 }
 
-test "loose soil supplies neither footprints nor any part of a stable platform" {
-    var fixture: Fixture = .{};
-    defer fixture.deinit();
+test "bare and grassy soil fill footprints platforms and road foundations equally" {
     const cell: Cell = .{ 20, 20, 12 };
     const corner = cell + Cell{ 1, 1, -3 };
-    for (1..4) |depth| for (0..3) |y| for (0..3) |x| {
-        try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, .dirt);
-    };
-    for ([_]BlockType{ .dirt, .sand, .tree_trunk, .planks, .crushed_stone, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive }) |material| {
-        try std.testing.expect(fixture.check(cell, material) != null);
-    }
-    // Even a single loose corner cannot complete an otherwise packed platform.
-    for (1..4) |depth| for (0..3) |y| for (0..3) |x| {
-        try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, .packed_dirt);
-    };
-    try fixture.raw(corner, .dirt);
-    for ([_]BlockType{ .tree_trunk, .planks, .crushed_stone, .rebar, .reinforced_concrete }) |material| {
-        try std.testing.expect(fixture.check(cell, material) != null);
-    }
-    try fixture.raw(corner, .packed_dirt);
-    for ([_]BlockType{ .dirt, .sand, .tree_trunk, .planks, .crushed_stone, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive }) |material| {
-        try std.testing.expect(fixture.check(cell, material) == null);
+    for ([_]BlockType{ .dirt, .grass }) |soil| {
+        var fixture: Fixture = .{};
+        defer fixture.deinit();
+        for (1..4) |depth| for (0..3) |y| for (0..3) |x| {
+            try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, soil);
+        };
+        for ([_]BlockType{ .dirt, .sand, .tree_trunk, .planks, .crushed_stone, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive }) |material| {
+            try std.testing.expect(fixture.check(cell, material) == null);
+        }
+        try fixture.raw(corner, .none);
+        for ([_]BlockType{ .tree_trunk, .planks, .crushed_stone, .rebar, .reinforced_concrete }) |material| {
+            try std.testing.expect(fixture.check(cell, material) != null);
+        }
     }
 }
 
-test "soil states retain identical own footprint requirements after compaction and grass growth" {
+test "grass cover does not change soil own nine-cell footprint requirement" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     const cell: Cell = .{ 20, 20, 4 };
     const corner = cell + Cell{ 1, 1, -1 };
-    for ([_]BlockType{ .stone, .sand, .packed_dirt, .grass, .clay, .dirt, .none }) |support| {
+    for ([_]BlockType{ .stone, .sand, .grass, .clay, .dirt, .none }) |support| {
         try fixture.raw(corner, support);
-        for ([_]BlockType{ .dirt, .packed_dirt, .grass }) |material| {
+        for ([_]BlockType{ .dirt, .grass }) |material| {
             try fixture.raw(cell, material);
             var validator: Validator = .{ .allocator = std.testing.allocator, .reader = .{ .layout = &fixture.layout, .context = &fixture, .block_at = Fixture.read } };
             defer validator.deinit();
             const rejected = validator.checkExisting(cell);
-            if (support == .dirt or support == .none) {
+            if (support == .none) {
                 try std.testing.expectEqual(Reason.earth_footprint, rejected.?.reason);
                 try std.testing.expectEqual(@as(u32, 8), rejected.?.actual);
             } else try std.testing.expect(rejected == null);
@@ -1031,7 +1025,7 @@ test "soil states retain identical own footprint requirements after compaction a
     }
 }
 
-test "compacting every neighboring soil cell preserves lateral towers at their maximum height" {
+test "clearing and growing grass preserves lateral towers at their maximum height" {
     const origin: Cell = .{ 20, 20, 7 };
     for ([_]BlockType{ .planks, .rebar, .reinforced_concrete }) |material| {
         var fixture: Fixture = .{};
@@ -1040,15 +1034,9 @@ test "compacting every neighboring soil cell preserves lateral towers at their m
         for (0..3) |offset| try fixture.existing(origin - Cell{ @intCast(offset), 0, 0 }, material);
         const height_limit = if (material.isWood()) Limits.wood_height else Limits.mineral_height;
         for (1..height_limit) |level| try fixture.existing(origin + Cell{ 0, 0, @intCast(level) }, material);
-        // Loose generated terrain under a cantilever provides no support. As its
-        // cells compact, the newly available direct route may only improve it.
-        for ([_]BlockType{ .packed_dirt, .grass }) |compacted| {
+        for ([_]BlockType{ .grass, .dirt }) |soil| {
             for (1..4) |depth| for (0..3) |y| for (0..3) |x| {
-                try fixture.raw(origin + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, .dirt);
-            };
-            try fixture.expectAllExistingValid();
-            for (1..4) |depth| for (0..3) |y| for (0..3) |x| {
-                try fixture.raw(origin + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, compacted);
+                try fixture.raw(origin + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, soil);
                 try fixture.expectAllExistingValid();
             };
         }
@@ -1078,7 +1066,7 @@ test "ordinary stone supports wood and minerals only through a complete qualifyi
         try std.testing.expectEqual(1, incomplete.involved_count);
         try std.testing.expectEqualDeep(corner, incomplete.involved[0]);
         // Every qualifying soil-platform material can also fill a stone platform corner.
-        for ([_]BlockType{ .packed_dirt, .grass, .clay, .metal_ore, .limestone, .coal, .deeprock, .crushed_stone, .rebar, .reinforced_concrete }) |qualifying| {
+        for ([_]BlockType{ .dirt, .grass, .clay, .metal_ore, .limestone, .coal, .deeprock, .crushed_stone, .rebar, .reinforced_concrete }) |qualifying| {
             try fixture.raw(corner, qualifying);
             try std.testing.expect(fixture.check(cell, material) == null);
         }
@@ -1094,7 +1082,7 @@ test "ordinary stone supports wood and minerals only through a complete qualifyi
     }
 }
 
-test "stone keeps nine-cell loose-material footprints and one-cell road support" {
+test "stone keeps nine-cell soil and sand footprints and one-cell road support" {
     const cell: Cell = .{ 20, 20, 12 };
     var fixture: Fixture = .{ .read_center = cell };
     defer fixture.deinit();
@@ -1135,7 +1123,7 @@ test "geological resource foundations retain single-cell support with unavailabl
 test "unsuitable occupied support cannot veto a legal independent lateral route" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
-    for ([_]BlockType{ .dirt, .packed_dirt, .grass, .sand, .stone }) |below| {
+    for ([_]BlockType{ .dirt, .grass, .sand, .stone }) |below| {
         try fixture.raw(.{ 10, 10, 4 }, .tree_trunk);
         try fixture.raw(.{ 10, 10, 5 }, .planks);
         try fixture.raw(.{ 11, 10, 4 }, below);
@@ -1605,7 +1593,7 @@ test "stacked overhangs keep one 28-cell window under translations, directions, 
 }
 
 test "a stable platform must fit wholly inside the window and a known closer route still suffices" {
-    for ([_]BlockType{ .stone, .packed_dirt }) |foundation| {
+    for ([_]BlockType{ .stone, .dirt }) |foundation| {
         for ([_]u32{ 27, 28 }) |reach| {
             var fixture: Fixture = .{ .layout = engine.WorldLayout.init(.{ .size_in_chunks = .{ 8, 8, 8 } }) catch unreachable, .read_center = .{ 96, 96, 64 } };
             defer fixture.deinit();
@@ -1855,11 +1843,11 @@ test "road geometry does not change structural support or material families" {
     }
 }
 
-test "loose soil sand and leaves cannot directly support construction or either road" {
+test "sand and leaves cannot directly support construction or either road" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     const cell: Cell = .{ 12, 12, 5 };
-    for ([_]BlockType{ .dirt, .sand, .leaves }) |support| {
+    for ([_]BlockType{ .sand, .leaves }) |support| {
         try fixture.raw(cell - Cell{ 0, 0, 1 }, support);
         for ([_]BlockType{ .tree_trunk, .planks, .crushed_stone, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive }) |material| {
             try std.testing.expect(fixture.check(cell, material) != null);
@@ -1872,7 +1860,7 @@ test "a complete soil platform over remaining sand restarts construction support
     defer fixture.deinit();
     const cell: Cell = .{ 12, 12, 8 };
     for (1..4) |depth| for (0..3) |y| for (0..3) |x| {
-        try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, .packed_dirt);
+        try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -@as(i64, @intCast(depth)) }, .dirt);
     };
     for (0..3) |y| for (0..3) |x| {
         try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -4 }, .sand);
@@ -1906,7 +1894,7 @@ test "mining policies explicitly preserve usable results and distinguish no-item
     for ([_]BlockType{ .metal_ore, .limestone, .clay, .coal, .deeprock, .none }) |material|
         try std.testing.expect(material.miningPolicy() == .forbidden);
     try std.testing.expectEqual(BlockType.dirt, BlockType.grass.minedType().?);
-    try std.testing.expectEqual(BlockType.dirt, BlockType.packed_dirt.minedType().?);
+    try std.testing.expect(BlockType.packed_dirt.miningPolicy() == .forbidden);
     try std.testing.expectEqual(BlockType.crushed_stone, BlockType.stone.minedType().?);
     try std.testing.expectEqual(BlockType.sand, BlockType.sand.minedType().?);
     try std.testing.expectEqual(BlockType.tree_trunk, BlockType.tree_trunk.minedType().?);
@@ -1915,7 +1903,7 @@ test "mining policies explicitly preserve usable results and distinguish no-item
     try std.testing.expectEqual(@as(?BlockType, null), BlockType.leaves.minedType());
 }
 
-test "clay uses packed-soil platforms while other geological hosts support directly" {
+test "clay uses soil platforms while other geological hosts support directly" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     const cell: Cell = .{ 12, 12, 5 };

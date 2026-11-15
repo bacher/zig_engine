@@ -10,10 +10,10 @@ pub fn calculateDataSlotSizeLevel(slots: f32) u8 {
 // 3 = 8 blocks
 // 4 = 16 blocks
 // 5 = 32 blocks
-// 6 = 64 blocks (6 is actually maximum allowed at this point)
+// 6 = 64 blocks (one base span)
 // 7 = 128 blocks
 // 8 = 256 blocks
-// 9 = 512 blocks
+// 9 = 512 blocks (maximum allocation, eight contiguous base spans)
 // 10 = 1024 blocks
 // 11 = 2048 blocks
 // 12 = 4096 blocks

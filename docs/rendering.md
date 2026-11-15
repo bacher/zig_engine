@@ -159,7 +159,13 @@ the application preview bound; instancing does not reduce screen-space overdraw.
 
 The voxel grid stores exposed-face records, not a conventional indexed mesh or a dense GPU block array. Each record contains local block coordinates and a render-material ID in four bytes. Six lists group those records by outward face direction. The vertex shader generates six vertices per face and selects atlas UVs using the render material and direction.
 
-World storage uses [`BlockType`](../src/engine/voxel/voxel_chunk.zig), with IDs 0–20 and
+Its 4 MiB face buffer uses 1 KiB slots grouped into 64 KiB base spans. Ordinary allocations
+retain their size-class packing within a base span. Oversized chunk layers reserve two,
+four, or eight contiguous base spans as one allocation, supporting every culled opaque
+32³ chunk without changing the packed shader layout. These ranges can fail under
+contiguous-space fragmentation; capacity preflight preserves resident geometry for retry.
+
+World storage uses [`BlockType`](../src/engine/voxel/voxel_chunk.zig), with IDs 0–20 (7 reserved) and
 `custom = 255`; carried items have a narrower persistence schema. `GPU_BlockInfo.block_type`
 uses the separate `RenderMaterial` enum. Shared IDs retain the same meanings, and meshing
 adds two climate appearances for saved `grass = 3` cells:
@@ -172,7 +178,8 @@ adds two climate appearances for saved `grass = 3` cells:
 
 [`world_engine_glue.zig`](../src/voxel_app/world_engine_glue.zig) applies the generator's
 column climate during both local and service mesh extraction. Saved cells remain grass;
-loose dirt, packed dirt, and sand keep their material appearances. IDs 21 and 22 belong only
+bare soil and sand keep their material appearances. The former packed-soil slot 7 is reserved;
+soil uses `dirt = 2` with optional grass cover. IDs 21 and 22 belong only
 to render payloads and are rejected by block and inventory persistence validation.
 
 [`material_color.wgsl`](../src/engine/shaders/voxel/material_color.wgsl) supplies the shared
@@ -196,6 +203,48 @@ bindings after ordinary object rendering. Road slope planes match CPU collision;
 adaptive roads use temporary inset marker geometry. See [country roads](country-roads.md).
 
 The CPU/WGSL layouts are part of the contract: chunk metadata is 112 bytes, face records are four bytes, custom block records are 48 bytes, ordinary instances are 80 bytes. Changes must keep the shader declarations and upload layout synchronized.
+
+### Construction geometry and terrain handoff
+
+Fulfilled construction targets use a separate `construction` layer in the existing voxel
+grid. [`construction_geometry.zig`](../src/voxel_app/construction_geometry.zig) emits the
+same four-byte exposed-face records as terrain. Both layers use the ordinary visible and
+shadow draw loops, so construction needs no additional shader or render pass. Pending
+miniatures retain their existing renderer. The progress bitmap and simulation's ownership do
+not prescribe the GPU layout.
+
+Construction meshing visits precomputed target groups for the changed chunk. It removes
+internal faces between fulfilled targets across chunks, separate sites, and the wrapped x
+seam. When local terrain cells are available it also removes faces hidden by that terrain.
+Mesh-only subscriptions may retain invisible faces against static terrain whose interior
+cells are unavailable; they still remove internal construction faces. This conservative
+rendering rule does not permit collision or interaction through unknown world data.
+
+An ordinary progress-only fill while a site remains building dirties its loaded chunk and
+at most six face neighbors; repeated changes coalesce in the dirty-chunk map. Full snapshots,
+resync and lifecycle/transfer changes may invalidate the larger site footprint. A chunk rebuild visits only its registered sites
+and their target groups. Face-neighbor lookups inspect the neighbor chunk's registered sites,
+and one temporary set indexes bounded optimistic fulfillments for that rebuild. Readiness
+and successful-install reconciliation currently scan the loaded chunks and their site
+references each frame. These are client presentation costs, separate from simulation work.
+
+Terrain publication includes subscription, chunk, mesh, and composition revisions. Client
+collision and interaction can use coherent materialized terrain before the progress or GPU
+streams catch up. A transferred reference, removal of a previously known reference, or a
+matching retirement watermark proves the target's terrain owner; an old empty snapshot
+received before admission does not.
+
+Visible construction remains resident until a matching terrain replacement and the dynamic
+replacement have both been prepared. `VoxelGrid` keeps resident layers while queued jobs
+are superseded, and checks GPU capacity and CPU metadata allocation before changing either
+layer. A failed build/upload retains the displayed geometry and retries. On success the
+terrain replacement and dynamic removal install in the same frame, then miniature state
+and retained sources can retire. Once a portion has switched to static geometry, newer
+ordinary edits cannot reactivate its old construction source. Visibility eviction starts a
+new selection lifetime. Retirement also clears pending targets when the final fill publication
+was missed, without dropping geometry before its handoff. Snapshot installation starts local
+cleanup from zero; the cleanup cursor is never part of the published payload. See [construction rendering validation](validation/construction-rendering.md)
+for measured geometry counts, costs, budgets, and remaining limits.
 
 ## Held-item motion
 
@@ -322,5 +371,6 @@ Frame statistics include candidate object count, uploaded instance-range size, v
 - [`material_readback.zig`](../src/engine/material_readback.zig): production WGSL color/UV readback with a transparent atlas sample, checking opaque water/leaves, the steppe top tint, and frozen top/soil UVs.
 - [`world_engine_glue.zig`](../src/voxel_app/world_engine_glue.zig), [`persistence/format.zig`](../src/voxel_app/persistence/format.zig): climate appearance selection without changing saved materials, and rejection of render-only IDs from saved blocks and inventories.
 - [`voxel_tests.zig`](../src/engine/voxel_tests.zig): face/upload data and allocator behavior without creating a GPU device.
+- [`construction_layer_readback.zig`](../src/engine/construction_layer_readback.zig): production voxel color/depth comparison before, during, and after a nonempty terrain/construction layer handoff.
 
 `zig build test` exercises the registered CPU tests under both application wrapping configurations. `zig build test-gpu` separately validates the eight specialized pipelines and their cache sharing, reference lifetimes, and allocation cleanup with headless Dawn in each compiled wrapping mode. It also validates the height-map pipeline, covering every pipeline that embeds the shared shadow sampler, and executes the production coordinate helper to compare GPU readback with CPU results at seams, half-period ties, f32 precision boundaries, and signed i32 limits, using three world widths. Its material readback executes the shared production color and UV helpers for all ordinary material IDs and all six face directions. These checks do not replace a runtime visual check of rendering, alpha/shadow agreement, SSAO, or resize.
