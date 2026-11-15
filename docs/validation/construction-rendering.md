@@ -57,6 +57,15 @@ A known placement target also invalidates its cached successful preview when a s
 support chunk develops a construction revision gap. A scalar construction-read epoch
 covers availability/composition changes without rescanning dependencies each frame.
 
+Terminal retirement without the final progress update retains display through coherent
+terrain arrival and geometry installation, then removes that site's pending lookup entries
+within the four-footprint-chunk cleanup budget and refreshes the affected miniature sources.
+Application package regressions cover a later site at the same cell both after cleanup and
+in the package carrying the terrain needed for handoff. Snapshot preparation can replace
+pending entries owned by an inactive, completed source while retaining its runtime and
+geometry; active or missing owners still reject overlap. Runtime tests cover chunk budgets,
+allocation-free cleanup, shared live targets, and cleanup preserving a replacement's target.
+
 `construction progress stays local through actual service packages and resync refreshes the
 footprint` saves and admits a sparse 129-wide, five-target site through public service APIs,
 then subscribes the application to its five footprint chunks. Four successive fills in the

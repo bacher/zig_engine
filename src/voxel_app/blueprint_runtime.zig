@@ -184,14 +184,16 @@ pub const PreparedPublication = struct {
 /// preparation; only footprint chunks are cloned and extended. Client callers
 /// may supply preceding fulfillments to filter from these owned clones.
 pub fn buildPublication(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, definition: blueprint.Definition, instance: Instance, source: *const std.AutoHashMapUnmanaged(ChunkId, ChunkIndex), fulfillments: ?*const FulfillmentSet) !PreparedPublication {
-    return buildPublicationReplacing(allocator, layout, definition, instance, source, fulfillments, null);
+    return buildPublicationReplacing(allocator, layout, definition, instance, source, fulfillments, null, null);
 }
 
 /// Replaces progress for the same immutable descriptor/lifetime. All old
-/// footprint sources remain untouched until publication succeeds.
-pub fn buildSnapshotPublication(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, definition: blueprint.Definition, instance: Instance, source: *const std.AutoHashMapUnmanaged(ChunkId, ChunkIndex)) !PreparedPublication {
+/// footprint sources remain untouched until publication succeeds. A different
+/// completed source may retain pending entries after a missed final update;
+/// only those entries can yield to the snapshot before bounded source cleanup.
+pub fn buildSnapshotPublication(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, definition: blueprint.Definition, instance: Instance, source: *const State) !PreparedPublication {
     try validateSnapshot(layout, definition, instance);
-    return buildPublicationReplacing(allocator, layout, definition, instance, source, null, instance.id);
+    return buildPublicationReplacing(allocator, layout, definition, instance, &source.chunks, null, instance.id, source);
 }
 
 /// Full/resync snapshots are uncommon and validate their complete payload once.
@@ -241,7 +243,7 @@ pub fn validateSnapshot(layout: *const engine.WorldLayout, definition: blueprint
     if (box_count != instance.box_chunks.len) return error.InvalidConstructionSnapshot;
 }
 
-fn buildPublicationReplacing(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, definition: blueprint.Definition, instance: Instance, source: *const std.AutoHashMapUnmanaged(ChunkId, ChunkIndex), fulfillments: ?*const FulfillmentSet, replacing: ?u64) !PreparedPublication {
+fn buildPublicationReplacing(allocator: std.mem.Allocator, layout: *const engine.WorldLayout, definition: blueprint.Definition, instance: Instance, source: *const std.AutoHashMapUnmanaged(ChunkId, ChunkIndex), fulfillments: ?*const FulfillmentSet, replacing: ?u64, retained: ?*const State) !PreparedPublication {
     var result: PreparedPublication = .{ .instance = instance };
     errdefer {
         var iterator = result.chunks.valueIterator();
@@ -281,7 +283,11 @@ fn buildPublicationReplacing(allocator: std.mem.Allocator, layout: *const engine
         if (material == .none or instance.isFulfilled(index)) continue;
         const cell = worldCell(layout, instance.origin, definition.size, instance.rotation, blueprint.cellAtIndex(definition.size, index)) orelse return error.InvalidFootprint;
         const chunk = result.chunks.getPtr(chunkId(layout, cell)).?;
-        if (chunk.lookup.contains(cell)) return error.Overlap;
+        if (chunk.lookup.get(cell)) |old_target| {
+            const old = if (retained) |state| state.instances.get(old_target.instance_id) else null;
+            if (old == null or old.?.active or old.?.phase != .complete) return error.Overlap;
+            _ = chunk.removeTarget(cell);
+        }
         try chunk.targets.ensureUnusedCapacity(allocator, 1);
         try chunk.lookup.put(allocator, cell, .{ .instance_id = instance.id, .cell_index = @intCast(index), .material = material, .chunk_slot = chunk.targets.items.len });
         chunk.targets.appendAssumeCapacity(cell);
@@ -758,6 +764,19 @@ pub const State = struct {
             while (budget != 0 and instance.cleanup_cursor < instance.box_chunks.len) {
                 const chunk_id = instance.box_chunks[instance.cleanup_cursor];
                 if (self.chunks.getPtr(chunk_id)) |chunk| {
+                    // Terminal client retirement can skip the final fills.
+                    // Visit only this site's prepared group, and preserve any
+                    // newer snapshot's target at the same cell. Authoritative
+                    // completion already removed all pending entries.
+                    if (instance.remaining != 0) if (instance.groupIndex(chunk_id)) |group_slot| {
+                        const definition = self.definitions.get(instance.definition_id).?.definition;
+                        for (instance.targetsOfGroup(instance.target_groups[group_slot])) |index| {
+                            if (instance.isFulfilled(index)) continue;
+                            const cell = worldCell(self.layout.?, instance.origin, definition.size, instance.rotation, blueprint.cellAtIndex(definition.size, index)).?;
+                            const target = chunk.lookup.get(cell) orelse continue;
+                            if (target.instance_id == id) _ = chunk.removeTarget(cell);
+                        }
+                    };
                     if (std.mem.indexOfScalar(u64, chunk.instances.items, id)) |slot| _ = chunk.instances.swapRemove(slot);
                     if (chunk.instances.items.len == 0 and chunk.targets.items.len == 0) {
                         var removed = self.chunks.fetchRemove(chunk_id).?.value;
@@ -947,6 +966,91 @@ test "target authority survives fulfillment and transfers independently by chunk
     try std.testing.expectEqual(@as(u64, 1), state.max_instance_id);
 }
 
+test "retirement cleanup bounds missed progress removal to the retiring site's chunk groups" {
+    const a = std.testing.allocator;
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 16, 8, 4 } });
+    var state: State = .{ .layout = &layout };
+    defer state.deinit(a);
+    const cells = try a.alloc(rules.BlockType, 129);
+    @memset(cells, .none);
+    cells[0] = .planks;
+    cells[128] = .planks;
+    try state.insertDefinition(a, .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Retiring"), .definition = .{ .size = .{ 129, 1, 1 }, .cells = cells, .target_count = 2 } });
+    try state.insertDefinition(a, .{ .id = 2, .owner = 1, .name = try a.dupe(u8, "Live"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(rules.BlockType, &.{.planks}), .target_count = 1 } });
+    const retired = try state.prepareInstance(a, &layout, 1, 1, 1, .{ 31, 10, 10 }, 0);
+    try state.insertInstance(a, &layout, retired);
+    const live = try state.prepareInstance(a, &layout, 2, 2, 1, .{ 30, 10, 10 }, 0);
+    try state.insertInstance(a, &layout, live);
+    // A client can receive terminal retirement after the final fills have left
+    // server history. Its cached pending entries still need bounded removal.
+    state.instances.getPtr(1).?.active = false;
+    state.instances.getPtr(1).?.phase = .complete;
+    state.cleanup_queue.appendAssumeCapacity(1);
+    const revision = state.revision;
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    state.cleanup(failing.allocator(), 0);
+    try std.testing.expectEqual(revision, state.revision);
+    state.cleanup(failing.allocator(), 1);
+    try std.testing.expectEqual(revision + 1, state.revision);
+    try std.testing.expectEqual(@as(usize, 1), state.instances.get(1).?.cleanup_cursor);
+    try std.testing.expect(state.targetAt(retired.origin) == null);
+    try std.testing.expectEqual(@as(u64, 1), state.targetAt(.{ 159, 10, 10 }).?.instance_id);
+    const shared = state.chunks.get(live.box_chunks[0]).?;
+    try std.testing.expectEqualSlices(u64, &.{2}, shared.instances.items);
+    try std.testing.expectEqual(@as(usize, 1), shared.targets.items.len);
+    try std.testing.expectEqual(@as(u64, 2), state.targetAt(live.origin).?.instance_id);
+    state.cleanup(failing.allocator(), 3);
+    try std.testing.expectEqual(@as(usize, 4), state.instances.get(1).?.cleanup_cursor);
+    try std.testing.expect(state.targetAt(.{ 159, 10, 10 }) != null);
+    state.cleanup(failing.allocator(), 1);
+    try std.testing.expectEqual(revision + 5, state.revision);
+    try std.testing.expect(!state.instances.contains(1));
+    try std.testing.expect(state.targetAt(.{ 159, 10, 10 }) == null);
+    try std.testing.expectEqual(@as(u32, 1), state.chunks.count());
+    try std.testing.expectEqual(@as(u64, 2), state.targetAt(live.origin).?.instance_id);
+    try std.testing.expectEqual(@as(usize, 0), state.cleanup_queue.items.len);
+}
+
+test "snapshot overlap only replaces pending entries belonging to a retained completed site" {
+    const a = std.testing.allocator;
+    const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    var state: State = .{ .layout = &layout };
+    defer state.deinit(a);
+    const cell: Cell = .{ 10, 10, 10 };
+    try state.insertDefinition(a, .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "One"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(rules.BlockType, &.{.planks}), .target_count = 1 } });
+    const definition = state.definitions.get(1).?.definition;
+    const first = try state.prepareInstance(a, &layout, 1, 1, 1, cell, 0);
+    try state.insertInstance(a, &layout, first);
+    var second = try state.prepareInstance(a, &layout, 2, 1, 1, cell, 0);
+    defer second.deinit(a);
+    try std.testing.expectError(error.Overlap, buildSnapshotPublication(a, &layout, definition, second, &state));
+    {
+        const missing = state.instances.fetchRemove(1).?.value;
+        defer state.instances.putAssumeCapacity(1, missing);
+        try std.testing.expectError(error.Overlap, buildSnapshotPublication(a, &layout, definition, second, &state));
+    }
+    state.instances.getPtr(1).?.active = false;
+    // Inactive alone is insufficient to replace an inconsistent owner.
+    try std.testing.expectError(error.Overlap, buildSnapshotPublication(a, &layout, definition, second, &state));
+    state.instances.getPtr(1).?.phase = .complete;
+    state.cleanup_queue.appendAssumeCapacity(1);
+    var copy = try second.clone(a);
+    var prepared = buildSnapshotPublication(a, &layout, definition, copy, &state) catch |err| {
+        copy.deinit(a);
+        return err;
+    };
+    defer prepared.deinit(a);
+    try std.testing.expectEqual(@as(u64, 1), state.targetAt(cell).?.instance_id);
+    try std.testing.expectEqual(@as(u64, 2), prepared.chunks.get(first.box_chunks[0]).?.lookup.get(cell).?.instance_id);
+    try state.reserveSnapshotPublication(a, &layout, &prepared);
+    state.publishSnapshotPublication(&prepared);
+    try std.testing.expect(state.instances.contains(1));
+    try std.testing.expectEqual(@as(u64, 2), state.targetAt(cell).?.instance_id);
+    state.cleanup(a, 1);
+    try std.testing.expect(!state.instances.contains(1));
+    try std.testing.expectEqual(@as(u64, 2), state.targetAt(cell).?.instance_id);
+}
+
 test "definition lookup is exact for rotations wrapped images and missing sources" {
     const a = std.testing.allocator;
     const layout = try engine.WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
@@ -991,7 +1095,7 @@ fn snapshotReplacementScenario(a: std.mem.Allocator) !void {
     snapshot.fulfilled[0] = 1;
     snapshot.remaining = 1;
     snapshot.revision = 1;
-    var prepared = buildSnapshotPublication(a, &layout, saved.definition, snapshot, &state.chunks) catch |err| {
+    var prepared = buildSnapshotPublication(a, &layout, saved.definition, snapshot, &state) catch |err| {
         snapshot.deinit(a);
         return err;
     };

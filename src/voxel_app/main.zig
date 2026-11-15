@@ -1970,6 +1970,9 @@ const Game = struct {
             };
         }
         const budget = @min(@as(usize, 4), instance.box_chunks.len - instance.cleanup_cursor);
+        // Cleanup may remove pending entries when retirement skipped final
+        // progress. Refresh only the sources in this bounded cleanup batch.
+        if (instance.remaining != 0) for (instance.box_chunks[instance.cleanup_cursor..][0..budget]) |id| game.markMiniatureChunkDirty(id);
         state.cleanup(game.allocator, budget);
         if (!state.instances.contains(instance_id)) _ = game.construction_cache.forgetSite(instance_id);
     }
@@ -7469,6 +7472,112 @@ fn applyConstructionChunkForTest(fixture: *StreamingTest, chunk: WorldChunk, sta
         .data = .{ .blocks = .{ .chunk = snapshot } },
     });
     try std.testing.expect(fixture.game.applyPackage(&package));
+}
+
+fn testConstructionRetirementWithoutProgress(early_replacement: bool) !void {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const world = &game.world.?;
+    const cache = &game.construction_cache;
+    const coords: ChunkCoords = .{ 1, 1, 1 };
+    const cell: [3]u32 = .{ 40, 40, 40 };
+    const id = game.layout().encodeChunkCoords(coords);
+    fixture.camera.chunk = coords;
+    try fixture.subscribe(coords, 1, .blocks);
+    try world.insertChunk(coords, .initEmpty());
+    game.loadChunkIfNeeded(coords[0], coords[1], coords[2]);
+    var saved: @import("blueprint_runtime.zig").SavedDefinition = .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Missed progress"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(voxel_chunk_module.BlockType, &.{.planks}), .target_count = 1 } };
+    defer saved.deinit(a);
+    try world.applyBlueprintChanges(&.{.{ .definition = saved }});
+    var first = try world.blueprints.prepareInstance(a, game.layout(), 1, 1, 1, cell, 0);
+    defer first.deinit(a);
+    const identity: construction_stream.Identity = .{ .world_session = 91, .id = 1, .lifetime = first.lifetime };
+    _ = cache.acceptSession(91);
+    try cache.definitionInstalled(a, 1);
+    try cache.requestSnapshot(a, identity);
+    var package: world_data_service.ResponsePackage = .{ .world_session = 91 };
+    defer package.deinit(a);
+    try package.construction_updates.append(a, .{ .snapshot = try (construction_stream.Snapshot{ .identity = identity, .instance = first }).clone(a) });
+    try std.testing.expect(game.applyPackage(&package));
+    var stamp: construction_stream.GeometryStamp = .{ .subscription_id = 1, .mesh_revision = 1, .composition_revision = 1 };
+    try applyConstructionChunkForTest(&fixture, .initEmpty(), stamp, &.{.{ .identity = identity, .site_revision = first.revision }});
+    try std.testing.expect(cache.geometryInstalled(id, stamp));
+    try fixture.grid.chunks.append(a, .{ .chunk_origin = coords, .geometry_stamp = stamp });
+    const source_stamp: construction_stream.GeometryStamp = .{ .mesh_revision = 2 };
+    try fixture.grid.chunks.append(a, .{ .chunk_origin = coords, .layer = .construction, .geometry_stamp = source_stamp });
+    var miniatures: MiniatureUpdateTest = .{};
+    game.updateMiniatureChunks(&miniatures);
+    try std.testing.expectEqual(@as(usize, 1), miniatures.records[0].count);
+
+    // Terminal retirement is all that remains once the server source/history
+    // has gone. No fulfillment or complete snapshot reaches this client.
+    try package.construction_updates.append(a, .{ .retired = .{ .identity = identity, .revision = std.math.maxInt(u64), .composition_revision = 2 } });
+    try std.testing.expect(game.applyPackage(&package));
+    game.retireConstructionSources();
+    try std.testing.expect(world.blueprints.instances.contains(1));
+    try std.testing.expectEqual(@as(u64, 1), world.blueprints.targetAt(cell).?.instance_id);
+    try std.testing.expectEqual(source_stamp, fixture.grid.installedGeometry(coords, .construction).?);
+    var second = try world.blueprints.prepareInstance(a, game.layout(), 2, 1, 1, cell, 0);
+    defer second.deinit(a);
+    const second_identity: construction_stream.Identity = .{ .world_session = 91, .id = 2, .lifetime = second.lifetime };
+    stamp.mesh_revision += 1;
+    stamp.composition_revision = 2;
+    if (early_replacement) {
+        // Updates are applied before response composition. The new snapshot
+        // must not block the very response needed to release the old source.
+        try package.construction_updates.append(a, .{ .snapshot = try (construction_stream.Snapshot{ .identity = second_identity, .instance = second }).clone(a) });
+        try package.responses.append(a, .{
+            .coords = coords,
+            .subscription_id = 1,
+            .mesh_revision = stamp.mesh_revision,
+            .composition = try (construction_stream.ChunkComposition{ .revision = stamp.composition_revision, .sites = &.{.{ .identity = second_identity, .site_revision = second.revision }} }).clone(a),
+            .data = .{ .blocks = .{ .chunk = .initEmpty() } },
+        });
+        try std.testing.expect(game.applyPackage(&package));
+        package.responses.clearRetainingCapacity();
+        try std.testing.expectEqual(@as(u64, 2), world.blueprints.targetAt(cell).?.instance_id);
+    } else try applyConstructionChunkForTest(&fixture, .initEmpty(), stamp, &.{});
+    // Coherent air has arrived, but selected display cannot be dropped until
+    // the replacement geometry is installed successfully.
+    game.retireConstructionSources();
+    try std.testing.expect(world.blueprints.instances.contains(1));
+    try std.testing.expectEqual(source_stamp, fixture.grid.installedGeometry(coords, .construction).?);
+    game.rebuildDirtyChunks();
+    try std.testing.expect(game.rebuildConstructionChunks());
+    try std.testing.expect(fixture.grid.tryUploadToGPU(undefined));
+    game.finishConstructionGeometry();
+    try std.testing.expect(cache.hasStaticSelection(id, world.blueprints.instances.get(1).?));
+    // Cache a miniature over the coherent air before deferred cleanup. Removing
+    // its lookup must also invalidate this source on the next source update.
+    miniatures.count = 0;
+    game.updateMiniatureChunks(&miniatures);
+    try std.testing.expectEqual(@as(usize, 1), miniatures.records[0].count);
+    game.retireConstructionSources();
+    try std.testing.expect(!world.blueprints.instances.contains(1));
+    try std.testing.expect(game.miniature_dirty_chunks.contains(id));
+    miniatures.count = 0;
+    game.updateMiniatureChunks(&miniatures);
+    try std.testing.expectEqual(@as(usize, 1), miniatures.count);
+    try std.testing.expectEqual(@intFromBool(early_replacement), miniatures.records[0].count);
+    if (!early_replacement) {
+        try std.testing.expect(world.blueprints.targetAt(cell) == null);
+        try cache.requestSnapshot(a, second_identity);
+        try package.construction_updates.append(a, .{ .snapshot = try (construction_stream.Snapshot{ .identity = second_identity, .instance = second }).clone(a) });
+        try std.testing.expect(game.applyPackage(&package));
+    }
+    try std.testing.expectEqual(@as(u64, 2), world.blueprints.targetAt(cell).?.instance_id);
+    try std.testing.expect(world.blueprints.instances.get(2).?.active);
+}
+
+test "construction retirement without final progress removes pending miniatures and admits a later site" {
+    try testConstructionRetirementWithoutProgress(false);
+}
+
+test "construction retirement without final progress admits a replacement before retained source cleanup" {
+    try testConstructionRetirementWithoutProgress(true);
 }
 
 test "construction data precedes lifecycle and failed geometry handoff retains the displayed source" {

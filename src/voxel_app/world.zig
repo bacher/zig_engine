@@ -1188,7 +1188,7 @@ pub const World = struct {
         }
         const definition = self.blueprints.definitions.get(instance.definition_id) orelse return error.UnknownDefinition;
         var copy = try instance.clone(self.allocator);
-        var prepared = blueprint_runtime.buildSnapshotPublication(self.allocator, self.layout, definition.definition, copy, &self.blueprints.chunks) catch |err| {
+        var prepared = blueprint_runtime.buildSnapshotPublication(self.allocator, self.layout, definition.definition, copy, &self.blueprints) catch |err| {
             copy.deinit(self.allocator);
             return err;
         };
