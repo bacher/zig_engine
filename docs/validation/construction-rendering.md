@@ -19,8 +19,10 @@ On the local arm64 macOS host, the 2026-11-14 ReleaseFast run measured a median 
 131,200 bytes of four-byte face records before allocator capacity/metadata, and 196,800
 generated vertices if all six directional lists are submitted. Independent full cubes would
 generate 11,520,000 vertices. This is a 58.5× reduction in that vertex count; it is not a
-measured frame-rate, GPU-time, or simulation-throughput improvement. Ordinary fills rebuild
-the affected loaded chunk and face neighbors rather than this entire site.
+measured frame-rate, GPU-time, or simulation-throughput improvement. Fills that leave the
+site building rebuild the affected loaded chunk and face neighbors, and refresh only the
+affected miniature source. Actual phase changes, including the last fill, and full discovery
+or resync snapshots can still invalidate the loaded site footprint.
 
 Reproduce the optimized sample with:
 
@@ -54,6 +56,27 @@ collision data and rejects targeting.
 A known placement target also invalidates its cached successful preview when a separate
 support chunk develops a construction revision gap. A scalar construction-read epoch
 covers availability/composition changes without rescanning dependencies each frame.
+
+`construction progress stays local through actual service packages and resync refreshes the
+footprint` saves and admits a sparse 129-wide, five-target site through public service APIs,
+then subscribes the application to its five footprint chunks. Four successive fills in the
+first chunk each deliver a building-phase delta without terrain/composition responses to the
+observer. Through the actual package callback and geometry builder, these fills produce
+eight construction chunk rebuilds (the changed chunk and its one loaded face neighbor per
+fill) and four miniature source replacements. The distant last chunk stays clean and retains
+its installed construction geometry stamp throughout. Initial discovery builds five sources;
+a requested full resync refreshes all five, and the final fill still invalidates all miniature
+sources for its lifecycle transition. These are deterministic CPU work counts; local nonempty
+meshes are prepared but not uploaded, so this check does not measure GPU or frame latency.
+
+Before the fix, the transport regression produced five metadata responses on the first
+ordinary fill. With only that server fan-out removed, the application regression still found
+five dirty miniature sources because an unchanged phase was treated as a lifecycle change.
+Run the package regression with:
+
+```sh
+zig build test-app -Dtest-filter='construction progress stays local' --summary all
+```
 
 `voxel_grid.zig` checks independent terrain/construction replacement, queued supersession,
 cancellation without resident removal, maximum packed face offsets and vertex counts, and

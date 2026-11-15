@@ -2095,6 +2095,10 @@ pub const WorldDataService = struct {
             self.construction_publications.items[self.construction_publication_head] = value;
             self.construction_publication_head = (self.construction_publication_head + 1) % limit;
         }
+        // Ordinary fills change progress through the construction stream. The
+        // box's membership and ownership need no metadata refresh until a
+        // lifecycle transition (including the last fill) or portion transfer.
+        if (fulfilled_index != null and instance.phase == .building) return;
         for (instance.box_chunks) |id| for (self.clients.items) |client| {
             if (client.subscriptions.getPtr(id)) |sub| sub.composition_pending = true;
         };
@@ -8760,6 +8764,83 @@ test "construction transport batches revisions and retirement carries its compos
     try std.testing.expectEqual(@as(u64, 6), retired.revision);
     try std.testing.expectEqual(fixture.service.construction_composition_revision, retired.composition_revision);
     try std.testing.expectEqual(@as(u32, 0), client.construction_subscriptions.count());
+}
+
+test "construction transport keeps building progress local and publishes lifecycle discovery" {
+    var fixture: ConstructionTransportFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const a = std.testing.allocator;
+    var cells = [_]rules.BlockType{.none} ** 129;
+    @memset(cells[0..4], .planks);
+    cells[128] = .planks;
+    try fixture.definition(&cells);
+    const identity = try fixture.site(1, .{ 64, 64, 112 });
+    const client = &fixture.clients[0];
+    for (2..7) |x| try client.subscriptions.put(a, test_layout.encodeChunkCoords(.{ @intCast(x), 2, 3 }), .{ .id = x, .mode = .blocks });
+    fixture.service.flushPackages();
+    try std.testing.expectEqual(@as(usize, 5), client.responses.items.items[0].responses.items.len);
+    for (client.responses.items.items) |*package| package.deinit(a);
+    client.responses.items.clearRetainingCapacity();
+
+    for (0..4) |index| {
+        try fixture.fill(1, @intCast(index));
+        fixture.service.flushPackages();
+        try std.testing.expectEqual(@as(usize, 1), client.responses.items.items.len);
+        const package = client.responses.items.items[0];
+        // No terrain/composition package is needed solely to advance progress.
+        try std.testing.expectEqual(@as(usize, 0), package.responses.items.len);
+        try std.testing.expectEqual(@as(usize, 1), package.construction_updates.items.len);
+        try std.testing.expectEqual(blueprint_runtime.Phase.building, package.construction_updates.items[0].delta.phase.?);
+        try std.testing.expectEqualSlices(u32, &.{@intCast(index)}, package.construction_updates.items[0].delta.fulfilled_indices);
+        for (client.responses.items.items) |*owned| owned.deinit(a);
+        client.responses.items.clearRetainingCapacity();
+    }
+
+    try fixture.fill(1, 128);
+    fixture.service.flushPackages();
+    const last_fill = client.responses.items.items[0];
+    try std.testing.expectEqual(blueprint_runtime.Phase.materializing, last_fill.construction_updates.items[0].delta.phase.?);
+    try std.testing.expectEqual(@as(usize, 5), last_fill.responses.items.len);
+    for (last_fill.responses.items) |response| {
+        try std.testing.expectEqual(@as(u64, 5), response.composition.?.sites[0].site_revision);
+        try std.testing.expect(!response.composition.?.sites[0].transferred);
+    }
+    for (client.responses.items.items) |*owned| owned.deinit(a);
+    client.responses.items.clearRetainingCapacity();
+
+    const transfer: blueprint_runtime.Transfer = .{ .instance_id = 1, .chunk_id = test_layout.encodeChunkCoords(.{ 2, 2, 3 }), .terrain_revision = 9 };
+    try std.testing.expect(fixture.service.worker_state.blueprints.acceptTransfer(transfer));
+    fixture.service.markConstructionChanged(1, null, transfer);
+    fixture.service.flushPackages();
+    try std.testing.expectEqual(@as(usize, 5), client.responses.items.items[0].responses.items.len);
+    for (client.responses.items.items[0].responses.items) |response| if (response.coords[0] == 2) {
+        try std.testing.expect(response.composition.?.sites[0].transferred);
+        try std.testing.expectEqual(@as(u64, 9), response.composition.?.sites[0].terrain_revision);
+    };
+    for (client.responses.items.items) |*owned| owned.deinit(a);
+    client.responses.items.clearRetainingCapacity();
+
+    try fixture.service.ensureConstructionSubscription(client, identity, true, true);
+    fixture.service.flushPackages();
+    const resync = client.responses.items.items[0].construction_updates.items[0].snapshot;
+    try std.testing.expectEqual(blueprint_runtime.Phase.materializing, resync.instance.phase);
+    try std.testing.expect(resync.instance.target_groups[0].transferred);
+    try std.testing.expectEqual(@as(usize, 5), resync.instance.box_chunks.len);
+    for (client.responses.items.items) |*owned| owned.deinit(a);
+    client.responses.items.clearRetainingCapacity();
+
+    const final_transfer: blueprint_runtime.Transfer = .{ .instance_id = 1, .chunk_id = test_layout.encodeChunkCoords(.{ 6, 2, 3 }), .terrain_revision = 10 };
+    try std.testing.expect(fixture.service.worker_state.blueprints.acceptTransfer(final_transfer));
+    fixture.service.markConstructionChanged(1, null, final_transfer);
+    try std.testing.expect(fixture.service.worker_state.blueprints.complete(1));
+    fixture.service.markConstructionChanged(1, null, null);
+    fixture.service.flushPackages();
+    const completed = client.responses.items.items[0];
+    try std.testing.expectEqual(blueprint_runtime.Phase.complete, completed.construction_updates.items[0].delta.phase.?);
+    try std.testing.expectEqual(fixture.service.construction_composition_revision, completed.construction_updates.items[1].retired.composition_revision);
+    try std.testing.expectEqual(@as(usize, 5), completed.responses.items.len);
+    for (completed.responses.items) |response| try std.testing.expectEqual(@as(usize, 0), response.composition.?.sites.len);
 }
 
 test "construction transport overwrites bounded history and resynchronizes with a current snapshot" {

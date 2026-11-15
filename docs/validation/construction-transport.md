@@ -15,6 +15,13 @@ callers subscribe first to retain a live site outside terrain visibility. A stal
 replace a current subscription. Definitions are immutable and cached per client;
 multiple sites sharing a definition do not repeatedly send its contents.
 
+Ordinary fills that leave a site building publish progress deltas without scheduling
+whole-box metadata acknowledgments. The composition watermark still advances so pending
+terrain responses refresh their discovery revision fences. Last-fill phase transitions,
+portion transfers, admission and completion retain their discovery publications. The
+transport locality regression covers repeated fills across a five-chunk box, last-fill
+discovery, transfer terrain revisions, resync and completion reference removal.
+
 Definition/subscription/resync/unsubscribe requests share a service-wide admission
 counter capped by `pending_commands` (256 by default). Consumption releases a slot;
 queue allocation failure or shutdown rejects submission without retaining a slot.
