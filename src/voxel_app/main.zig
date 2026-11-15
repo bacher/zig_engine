@@ -1298,9 +1298,9 @@ const Game = struct {
         switch (update) {
             .snapshot => |snapshot| {
                 if (try game.construction_cache.checkSnapshot(game.allocator, snapshot) != .apply) return;
-                try world.applyConstructionSnapshot(snapshot.identity, snapshot.instance);
+                try world.applyConstructionSnapshot(snapshot);
                 game.construction_cache.snapshotInstalled(snapshot);
-                game.observeConstructionFootprint(snapshot.instance.box_chunks);
+                game.observeConstructionFootprint(snapshot.box_chunks);
             },
             .delta => |delta| {
                 if (try game.construction_cache.checkDelta(game.allocator, delta) != .apply) return;
@@ -6858,7 +6858,7 @@ test "construction support gap invalidates cached placement success while its ta
     _ = cache.acceptSession(91);
     try cache.definitionInstalled(a, 1);
     try cache.requestSnapshot(a, identity);
-    cache.snapshotInstalled(.{ .identity = identity, .instance = instance });
+    cache.snapshotInstalled(construction_stream.Snapshot.borrow(identity, instance));
     try fixture.subscribe(support_coords, 77, .blocks);
     try std.testing.expect(try cache.installChunk(a, support_id, .{ .subscription_id = 77, .composition_revision = 1 }, .{ .revision = 1, .sites = &.{.{ .identity = identity, .site_revision = instance.revision }} }));
     var package: world_data_service.ResponsePackage = .{ .world_session = 91 };
@@ -7500,7 +7500,7 @@ fn testConstructionRetirementWithoutProgress(early_replacement: bool) !void {
     try cache.requestSnapshot(a, identity);
     var package: world_data_service.ResponsePackage = .{ .world_session = 91 };
     defer package.deinit(a);
-    try package.construction_updates.append(a, .{ .snapshot = try (construction_stream.Snapshot{ .identity = identity, .instance = first }).clone(a) });
+    try package.construction_updates.append(a, .{ .snapshot = try construction_stream.Snapshot.borrow(identity, first).clone(a) });
     try std.testing.expect(game.applyPackage(&package));
     var stamp: construction_stream.GeometryStamp = .{ .subscription_id = 1, .mesh_revision = 1, .composition_revision = 1 };
     try applyConstructionChunkForTest(&fixture, .initEmpty(), stamp, &.{.{ .identity = identity, .site_revision = first.revision }});
@@ -7528,7 +7528,7 @@ fn testConstructionRetirementWithoutProgress(early_replacement: bool) !void {
     if (early_replacement) {
         // Updates are applied before response composition. The new snapshot
         // must not block the very response needed to release the old source.
-        try package.construction_updates.append(a, .{ .snapshot = try (construction_stream.Snapshot{ .identity = second_identity, .instance = second }).clone(a) });
+        try package.construction_updates.append(a, .{ .snapshot = try construction_stream.Snapshot.borrow(second_identity, second).clone(a) });
         try package.responses.append(a, .{
             .coords = coords,
             .subscription_id = 1,
@@ -7565,7 +7565,7 @@ fn testConstructionRetirementWithoutProgress(early_replacement: bool) !void {
     if (!early_replacement) {
         try std.testing.expect(world.blueprints.targetAt(cell) == null);
         try cache.requestSnapshot(a, second_identity);
-        try package.construction_updates.append(a, .{ .snapshot = try (construction_stream.Snapshot{ .identity = second_identity, .instance = second }).clone(a) });
+        try package.construction_updates.append(a, .{ .snapshot = try construction_stream.Snapshot.borrow(second_identity, second).clone(a) });
         try std.testing.expect(game.applyPackage(&package));
     }
     try std.testing.expectEqual(@as(u64, 2), world.blueprints.targetAt(cell).?.instance_id);
@@ -7597,7 +7597,7 @@ test "construction data precedes lifecycle and failed geometry handoff retains t
     _ = cache.acceptSession(91);
     try cache.definitionInstalled(a, 1);
     try cache.requestSnapshot(a, identity);
-    cache.snapshotInstalled(.{ .identity = identity, .instance = instance });
+    cache.snapshotInstalled(construction_stream.Snapshot.borrow(identity, instance));
     var stamp: construction_stream.GeometryStamp = .{ .subscription_id = 1, .mesh_revision = 1, .composition_revision = 1 };
     try applyConstructionChunkForTest(&fixture, .initEmpty(), stamp, &.{.{ .identity = identity, .site_revision = instance.revision }});
     try std.testing.expectEqual(voxel_chunk_module.BlockType.planks, world.physicalBlock(.{ 40, 40, 40 }).?);
@@ -7681,7 +7681,7 @@ fn testCurrentConstructionOwner(optimistic: bool) !void {
     try cache.requestSnapshot(a, first_identity);
     var package: world_data_service.ResponsePackage = .{ .world_session = 91 };
     defer package.deinit(a);
-    try package.construction_updates.append(a, .{ .snapshot = try (construction_stream.Snapshot{ .identity = first_identity, .instance = first }).clone(a) });
+    try package.construction_updates.append(a, .{ .snapshot = try construction_stream.Snapshot.borrow(first_identity, first).clone(a) });
     try std.testing.expect(game.applyPackage(&package));
     var base = WorldChunk.initEmpty();
     defer base.deinit(a);
@@ -7711,7 +7711,7 @@ fn testCurrentConstructionOwner(optimistic: bool) !void {
     defer second.deinit(a);
     const second_identity: construction_stream.Identity = .{ .world_session = 91, .id = 2, .lifetime = second.lifetime };
     try cache.requestSnapshot(a, second_identity);
-    try package.construction_updates.append(a, .{ .snapshot = try (construction_stream.Snapshot{ .identity = second_identity, .instance = second }).clone(a) });
+    try package.construction_updates.append(a, .{ .snapshot = try construction_stream.Snapshot.borrow(second_identity, second).clone(a) });
     try std.testing.expect(game.applyPackage(&package));
     stamp.mesh_revision += 1;
     stamp.composition_revision += 1;
@@ -7810,7 +7810,7 @@ test "construction invalid delta lifecycle resynchronizes before changing cached
     const game = &fixture.game;
     const instance = game.world.?.blueprints.instances.get(1).?;
     const identity: construction_stream.Identity = .{ .world_session = 91, .id = 1, .lifetime = instance.lifetime };
-    const snapshot: construction_stream.Snapshot = .{ .identity = identity, .instance = instance };
+    const snapshot = construction_stream.Snapshot.borrow(identity, instance);
     _ = game.construction_cache.acceptSession(91);
     try game.construction_cache.definitionInstalled(a, 1);
     try game.construction_cache.requestSnapshot(a, identity);
@@ -7848,7 +7848,7 @@ test "construction renewed dependency survives resync allocation failure during 
     _ = cache.acceptSession(91);
     try cache.definitionInstalled(a, 1);
     try cache.requestSnapshot(a, identity);
-    cache.snapshotInstalled(.{ .identity = identity, .instance = instance });
+    cache.snapshotInstalled(construction_stream.Snapshot.borrow(identity, instance));
     game.removeChunkByIdIfNeeded(game.layout().encodeChunkCoords(.{ 1, 1, 1 }));
     _ = game.chunk_subscriptions.remove(game.layout().encodeChunkCoords(.{ 1, 1, 1 }));
     game.evictConstructionSources();

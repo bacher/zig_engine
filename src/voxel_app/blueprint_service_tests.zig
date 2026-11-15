@@ -150,7 +150,7 @@ const Harness = struct {
         switch (update) {
             .snapshot => |snapshot| {
                 if (try self.construction_cache.checkSnapshot(a, snapshot) != .apply) return;
-                try self.local.applyConstructionSnapshot(snapshot.identity, snapshot.instance);
+                try self.local.applyConstructionSnapshot(snapshot);
                 self.construction_cache.snapshotInstalled(snapshot);
             },
             .delta => |delta| {

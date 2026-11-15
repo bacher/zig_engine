@@ -149,7 +149,7 @@ pub const Cache = struct {
     }
 
     pub fn checkSnapshot(self: *Cache, allocator: std.mem.Allocator, snapshot: stream.Snapshot) !Decision {
-        const value = snapshot.instance;
+        const value = snapshot;
         if (snapshot.identity.id != value.id or snapshot.identity.lifetime != value.lifetime) return .ignored;
         const known = (try self.ensureSite(allocator, snapshot.identity)) orelse return .ignored;
         if (known.retired or known.evicting or value.revision < known.revision or (value.revision == known.revision and !known.needs_snapshot)) return .ignored;
@@ -166,7 +166,7 @@ pub const Cache = struct {
         const known = self.sites.getPtr(snapshot.identity.id).?;
         const required = known.required_revision;
         const references = known.references;
-        known.* = .{ .identity = snapshot.identity, .revision = snapshot.instance.revision, .required_revision = required, .definition_id = snapshot.instance.definition_id, .needs_snapshot = false, .references = references };
+        known.* = .{ .identity = snapshot.identity, .revision = snapshot.revision, .required_revision = required, .definition_id = snapshot.definition_id, .needs_snapshot = false, .references = references };
         self.invalidateReadView();
         self.dropSatisfiedSnapshotRequests(known.*);
     }
@@ -473,7 +473,8 @@ fn testIdentity(id: u64) Identity {
 }
 
 fn testSnapshot(id: u64, revision: u64) stream.Snapshot {
-    return .{ .identity = testIdentity(id), .instance = .{
+    return .{
+        .identity = testIdentity(id),
         .id = id,
         .lifetime = id,
         .definition_id = 7,
@@ -484,7 +485,7 @@ fn testSnapshot(id: u64, revision: u64) stream.Snapshot {
         .remaining = 0,
         .box_chunks = &.{},
         .revision = revision,
-    } };
+    };
 }
 
 test "construction snapshots share definitions and delta gaps require a snapshot" {
@@ -576,44 +577,46 @@ test "terrain readiness does not retire display before matching geometry install
     try cache.definitionInstalled(allocator, 7);
     var snapshot = testSnapshot(1, 9);
     var groups = [_]runtime.TargetGroup{.{ .chunk_id = 2, .first = 0, .count = 1, .transferred = true, .terrain_revision = 12 }};
-    snapshot.instance.target_groups = &groups;
+    snapshot.target_groups = &groups;
     try cache.requestSnapshot(allocator, snapshot.identity);
     _ = try cache.checkSnapshot(allocator, snapshot);
     cache.snapshotInstalled(snapshot);
+    var instance = try snapshot.toInstance(allocator);
+    defer instance.deinit(allocator);
     const reference: stream.SiteRef = .{ .identity = snapshot.identity, .site_revision = 9, .transferred = true, .terrain_revision = 12 };
     const stamp: stream.GeometryStamp = .{ .subscription_id = 3, .chunk_revision = 12, .mesh_revision = 30, .composition_revision = 4 };
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 4, .sites = &.{reference} }));
     try std.testing.expect(Cache.chunkAvailable(&cache, 2));
-    try std.testing.expect(!cache.portionReady(2, snapshot.instance, 12));
+    try std.testing.expect(!cache.portionReady(2, instance, 12));
     var stale = stamp;
     stale.mesh_revision -= 1;
     try std.testing.expect(!cache.geometryInstalled(2, stale));
-    try std.testing.expect(!cache.portionReady(2, snapshot.instance, 12));
+    try std.testing.expect(!cache.portionReady(2, instance, 12));
     // Failed/retried builds leave the same selected source. Static metadata may
     // precede a separate lifecycle update; only successful install switches it.
     try std.testing.expect(cache.geometryInstalled(2, stamp));
-    try std.testing.expect(cache.portionReady(2, snapshot.instance, 12));
+    try std.testing.expect(cache.portionReady(2, instance, 12));
     var remeshed = stamp;
     remeshed.mesh_revision += 1;
     try std.testing.expect(try cache.installChunk(allocator, 2, remeshed, .{ .revision = 4, .sites = &.{reference} }));
-    try std.testing.expect(!cache.portionReady(2, snapshot.instance, 12));
+    try std.testing.expect(!cache.portionReady(2, instance, 12));
     try std.testing.expect(cache.geometryInstalled(2, remeshed));
-    try std.testing.expect(cache.portionReady(2, snapshot.instance, 12));
+    try std.testing.expect(cache.portionReady(2, instance, 12));
     var edited = stamp;
     edited.chunk_revision += 1;
     edited.mesh_revision += 1;
     edited.composition_revision += 1;
     try std.testing.expect(try cache.installChunk(allocator, 2, edited, .{ .revision = 5 }));
     try std.testing.expect(!cache.geometryInstalled(2, stamp));
-    try std.testing.expect(!cache.portionReady(2, snapshot.instance, 12));
+    try std.testing.expect(!cache.portionReady(2, instance, 12));
     try std.testing.expect(cache.geometryInstalled(2, edited));
-    try std.testing.expect(cache.portionReady(2, snapshot.instance, 12));
+    try std.testing.expect(cache.portionReady(2, instance, 12));
     try std.testing.expect(!try cache.installChunk(allocator, 2, stamp, .{ .revision = 4, .sites = &.{reference} }));
     var reloaded = edited;
     reloaded.subscription_id += 1;
     try std.testing.expect(try cache.installChunk(allocator, 2, reloaded, .{ .revision = 5 }));
     try std.testing.expect(!cache.geometryInstalled(2, edited));
-    try std.testing.expect(!cache.portionReady(2, snapshot.instance, 12));
+    try std.testing.expect(!cache.portionReady(2, instance, 12));
     cache.evictChunk(allocator, 2);
     try std.testing.expect(!cache.geometryInstalled(2, reloaded));
 }
@@ -654,9 +657,11 @@ test "construction terrain ownership can precede lifecycle progress and survives
     try cache.definitionInstalled(allocator, 7);
     var snapshot = testSnapshot(1, 2);
     var groups = [_]runtime.TargetGroup{.{ .chunk_id = 2, .first = 0, .count = 1 }};
-    snapshot.instance.target_groups = &groups;
+    snapshot.target_groups = &groups;
     try cache.requestSnapshot(allocator, snapshot.identity);
     cache.snapshotInstalled(snapshot);
+    var instance = try snapshot.toInstance(allocator);
+    defer instance.deinit(allocator);
     var stamp: stream.GeometryStamp = .{ .subscription_id = 1, .chunk_revision = 0, .mesh_revision = 1, .composition_revision = 1 };
     // Empty metadata received before admission cannot hand ownership to terrain.
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 1 }));
@@ -672,27 +677,27 @@ test "construction terrain ownership can precede lifecycle progress and survives
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 3, .sites = &.{transferred} }));
     try std.testing.expectEqual(@as(?u64, 12), Cache.terrainRevision(&cache, 2, 1, 1));
     try std.testing.expect(Cache.chunkAvailable(&cache, 2));
-    try std.testing.expect(cache.instanceAvailable(2, snapshot.instance));
-    try std.testing.expect(!cache.portionReady(2, snapshot.instance, 0));
+    try std.testing.expect(cache.instanceAvailable(2, instance));
+    try std.testing.expect(!cache.portionReady(2, instance, 0));
     // A lost progress chain does not override coherent transferred terrain.
     _ = try cache.checkDelta(allocator, .{ .identity = snapshot.identity, .base_revision = 19, .revision = 20 });
     try std.testing.expect(Cache.chunkAvailable(&cache, 2));
-    try std.testing.expect(cache.instanceAvailable(2, snapshot.instance));
+    try std.testing.expect(cache.instanceAvailable(2, instance));
     stamp.chunk_revision = 14;
     stamp.mesh_revision = 15;
     stamp.composition_revision = 4;
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 4 }));
     try std.testing.expectEqual(@as(?u64, 14), Cache.terrainRevision(&cache, 2, 1, 1));
-    try std.testing.expect(cache.instanceAvailable(2, snapshot.instance));
+    try std.testing.expect(cache.instanceAvailable(2, instance));
     try std.testing.expect(cache.geometryInstalled(2, stamp));
-    try std.testing.expect(cache.portionReady(2, snapshot.instance, 0));
+    try std.testing.expect(cache.portionReady(2, instance, 0));
     try cache.reserveStaticSelections(allocator, 1);
-    cache.selectStaticAssumeCapacity(2, snapshot.instance);
+    cache.selectStaticAssumeCapacity(2, instance);
     stamp.chunk_revision += 1;
     stamp.mesh_revision += 1;
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 4 }));
     // A newer ordinary edit never revives old construction geometry.
-    try std.testing.expect(cache.portionReady(2, snapshot.instance, 0));
+    try std.testing.expect(cache.portionReady(2, instance, 0));
 }
 
 test "construction retirement after a gap requires its composition watermark" {
@@ -703,27 +708,29 @@ test "construction retirement after a gap requires its composition watermark" {
     try cache.definitionInstalled(allocator, 7);
     var snapshot = testSnapshot(1, 2);
     var groups = [_]runtime.TargetGroup{.{ .chunk_id = 2, .first = 0, .count = 1 }};
-    snapshot.instance.target_groups = &groups;
-    snapshot.instance.phase = .complete;
+    snapshot.target_groups = &groups;
+    snapshot.phase = .complete;
     try cache.requestSnapshot(allocator, snapshot.identity);
     cache.snapshotInstalled(snapshot);
+    var instance = try snapshot.toInstance(allocator);
+    defer instance.deinit(allocator);
     var stamp: stream.GeometryStamp = .{ .subscription_id = 1, .chunk_revision = 0, .mesh_revision = 1, .composition_revision = 1 };
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 1 }));
     _ = try cache.checkDelta(allocator, .{ .identity = snapshot.identity, .base_revision = 19, .revision = 20 });
     _ = try cache.retire(allocator, .{ .identity = snapshot.identity, .revision = 21, .composition_revision = 5 });
-    try std.testing.expect(!cache.instanceAvailable(2, snapshot.instance));
+    try std.testing.expect(!cache.instanceAvailable(2, instance));
     try std.testing.expectEqual(null, Cache.terrainRevision(&cache, 2, 1, 1));
     try std.testing.expect(cache.geometryInstalled(2, stamp));
-    try std.testing.expect(!cache.portionReady(2, snapshot.instance, 0));
+    try std.testing.expect(!cache.portionReady(2, instance, 0));
     stamp.chunk_revision = 12;
     stamp.mesh_revision = 13;
     stamp.composition_revision = 5;
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 5 }));
-    try std.testing.expect(cache.instanceAvailable(2, snapshot.instance));
+    try std.testing.expect(cache.instanceAvailable(2, instance));
     try std.testing.expectEqual(@as(?u64, 12), Cache.terrainRevision(&cache, 2, 1, 1));
-    try std.testing.expect(!cache.portionReady(2, snapshot.instance, 0));
+    try std.testing.expect(!cache.portionReady(2, instance, 0));
     try std.testing.expect(cache.geometryInstalled(2, stamp));
-    try std.testing.expect(cache.portionReady(2, snapshot.instance, 0));
+    try std.testing.expect(cache.portionReady(2, instance, 0));
 }
 
 test "construction eviction rejects delayed updates and fresh discovery subscribes again" {
@@ -735,12 +742,14 @@ test "construction eviction rejects delayed updates and fresh discovery subscrib
     const snapshot = testSnapshot(1, 2);
     try cache.requestSnapshot(allocator, snapshot.identity);
     cache.snapshotInstalled(snapshot);
+    var instance = try snapshot.toInstance(allocator);
+    defer instance.deinit(allocator);
     const stamp: stream.GeometryStamp = .{ .subscription_id = 1, .chunk_revision = 12, .mesh_revision = 13, .composition_revision = 1 };
     const reference: stream.SiteRef = .{ .identity = snapshot.identity, .site_revision = 2, .transferred = true, .terrain_revision = 12 };
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 1, .sites = &.{reference} }));
     cache.beginEviction(1);
     try std.testing.expect(!Cache.chunkAvailable(&cache, 2));
-    try std.testing.expect(!cache.instanceAvailable(2, snapshot.instance));
+    try std.testing.expect(!cache.instanceAvailable(2, instance));
     try std.testing.expectEqual(Decision.ignored, try cache.checkSnapshot(allocator, testSnapshot(1, 3)));
     cache.evictChunk(allocator, 2);
     try cache.endEviction(allocator, snapshot.identity, false);
@@ -768,4 +777,9 @@ fn exerciseRetirementAllocation(allocator: std.mem.Allocator) !void {
 
 test "construction retirement allocation failures preserve a retryable source" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseRetirementAllocation, .{});
+}
+
+test "construction snapshot payload benchmark" {
+    if (@import("builtin").mode != .ReleaseFast) return error.SkipZigTest;
+    try @import("construction_snapshot_benchmark.zig").run();
 }

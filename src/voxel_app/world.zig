@@ -18,6 +18,7 @@ const ChunkMetadata = @import("chunk_metadata.zig").Metadata;
 const roads = @import("roads.zig");
 pub const block_rules = @import("block_rules.zig");
 const blueprint = @import("blueprint.zig");
+const construction_stream = @import("construction_stream.zig");
 pub const blueprint_runtime = @import("blueprint_runtime.zig");
 
 /// Synchronous notifications for committed changes only. Footprint slices are
@@ -1180,14 +1181,15 @@ pub const World = struct {
         return chunk.content.getBlock(local);
     }
 
-    pub fn applyConstructionSnapshot(self: *World, identity: blueprint_runtime.Identity, instance: blueprint_runtime.Instance) !void {
-        if (identity.kind != .construction or identity.id != instance.id or identity.lifetime != instance.lifetime) return error.ConflictingSnapshot;
-        if (self.blueprints.instances.get(instance.id)) |old| {
-            if (old.lifetime != instance.lifetime) return error.ConflictingSnapshot;
-            if (instance.revision <= old.revision) return;
+    pub fn applyConstructionSnapshot(self: *World, snapshot: construction_stream.Snapshot) !void {
+        const identity = snapshot.identity;
+        if (identity.kind != .construction or identity.id != snapshot.id or identity.lifetime != snapshot.lifetime) return error.ConflictingSnapshot;
+        if (self.blueprints.instances.get(snapshot.id)) |old| {
+            if (old.lifetime != snapshot.lifetime) return error.ConflictingSnapshot;
+            if (snapshot.revision <= old.revision) return;
         }
-        const definition = self.blueprints.definitions.get(instance.definition_id) orelse return error.UnknownDefinition;
-        var copy = try instance.clone(self.allocator);
+        const definition = self.blueprints.definitions.get(snapshot.definition_id) orelse return error.UnknownDefinition;
+        var copy = try snapshot.toInstance(self.allocator);
         var prepared = blueprint_runtime.buildSnapshotPublication(self.allocator, self.layout, definition.definition, copy, &self.blueprints) catch |err| {
             copy.deinit(self.allocator);
             return err;
@@ -3044,7 +3046,7 @@ test "construction snapshot cleanup restarts for the client's full footprint" {
     try client.applyBlueprintChanges(&.{.{ .definition = publisher.blueprints.definitions.get(1).? }});
     for (0..cells.len) |index| try setTestPhysical(&client, .{ 31 + @as(u32, @intCast(index)), 10, 10 }, .planks);
     for (snapshot.box_chunks) |id| client.chunks.getPtr(id).?.chunk_revision = 1;
-    try client.applyConstructionSnapshot(.{ .world_session = 1, .kind = .construction, .id = 1, .lifetime = 1 }, snapshot);
+    try client.applyConstructionSnapshot(construction_stream.Snapshot.borrow(.{ .world_session = 1, .kind = .construction, .id = 1, .lifetime = 1 }, snapshot));
     // Full snapshot publication restores discovery even in the four chunks
     // already retired by the publisher. Their cleanup progress is local state.
     for (snapshot.box_chunks) |id| try std.testing.expectEqualSlices(u64, &.{1}, client.blueprints.chunkInstances(id));

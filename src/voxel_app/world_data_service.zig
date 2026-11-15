@@ -2197,13 +2197,14 @@ pub const WorldDataService = struct {
 
     fn publishConstructionSnapshot(self: *WorldDataService, client: *Client, known: *ConstructionSubscription, instance: blueprint_runtime.Instance) !void {
         try self.publishConstructionDefinition(client, instance.definition_id);
-        const bytes = @sizeOf(construction_stream.Update) + instance.fulfilled.len + instance.box_chunks.len * @sizeOf(ChunkId) + instance.target_groups.len * @sizeOf(blueprint_runtime.TargetGroup) + instance.target_indices.len * @sizeOf(u32);
+        const snapshot = construction_stream.Snapshot.borrow(known.identity, instance);
+        const bytes = @sizeOf(construction_stream.Update) + snapshot.estimatedOwnedBytes();
         try self.chargeConstructionPublication(client, bytes);
         errdefer self.unchargeConstructionPublication(client, bytes);
-        var copy = try instance.clone(self.allocator);
+        var copy = try snapshot.clone(self.allocator);
         errdefer copy.deinit(self.allocator);
         try client.pending.construction_updates.ensureTotalCapacityPrecise(self.allocator, client.pending.construction_updates.items.len + 1);
-        client.pending.construction_updates.appendAssumeCapacity(.{ .snapshot = .{ .identity = known.identity, .instance = copy } });
+        client.pending.construction_updates.appendAssumeCapacity(.{ .snapshot = copy });
         known.revision = instance.revision;
         known.resync = false;
     }
@@ -8824,9 +8825,9 @@ test "construction transport keeps building progress local and publishes lifecyc
     try fixture.service.ensureConstructionSubscription(client, identity, true, true);
     fixture.service.flushPackages();
     const resync = client.responses.items.items[0].construction_updates.items[0].snapshot;
-    try std.testing.expectEqual(blueprint_runtime.Phase.materializing, resync.instance.phase);
-    try std.testing.expect(resync.instance.target_groups[0].transferred);
-    try std.testing.expectEqual(@as(usize, 5), resync.instance.box_chunks.len);
+    try std.testing.expectEqual(blueprint_runtime.Phase.materializing, resync.phase);
+    try std.testing.expect(resync.target_groups[0].transferred);
+    try std.testing.expectEqual(@as(usize, 5), resync.box_chunks.len);
     for (client.responses.items.items) |*owned| owned.deinit(a);
     client.responses.items.clearRetainingCapacity();
 
@@ -8859,8 +8860,8 @@ test "construction transport overwrites bounded history and resynchronizes with 
     try fixture.service.prepareConstructionPublication(client);
     try std.testing.expectEqual(@as(usize, 1), client.pending.construction_updates.items.len);
     const snapshot = client.pending.construction_updates.items[0].snapshot;
-    try std.testing.expectEqual(@as(u64, 3), snapshot.instance.revision);
-    try std.testing.expectEqual(@as(u32, 1), snapshot.instance.remaining);
+    try std.testing.expectEqual(@as(u64, 3), snapshot.revision);
+    try std.testing.expectEqual(@as(u32, 1), snapshot.remaining);
 }
 
 test "construction transport keeps explicit interest and rejects stale identity requests" {
@@ -8987,7 +8988,7 @@ fn exerciseConstructionPublicationAllocationFailure(allocator: std.mem.Allocator
     }
     for (client.pending.construction_updates.items) |update| switch (update) {
         .snapshot => |snapshot| {
-            const instance = snapshot.instance;
+            const instance = snapshot;
             owned_bytes += instance.fulfilled.len + instance.box_chunks.len * @sizeOf(ChunkId) + instance.target_groups.len * @sizeOf(blueprint_runtime.TargetGroup) + instance.target_indices.len * @sizeOf(u32);
         },
         .delta => |value| owned_bytes += value.fulfilled_indices.len * @sizeOf(u32) + value.transfers.len * @sizeOf(blueprint_runtime.Transfer),
@@ -9088,7 +9089,7 @@ test "construction transport resynchronizes stale discovery after a lost retirem
     try cache.definitionInstalled(a, 1);
     try cache.requestSnapshot(a, identity);
     cache.snapshotInstalled(initial);
-    const stale: construction_stream.ChunkComposition = .{ .revision = fixture.service.construction_composition_revision, .sites = &.{.{ .identity = identity, .site_revision = initial.instance.revision }} };
+    const stale: construction_stream.ChunkComposition = .{ .revision = fixture.service.construction_composition_revision, .sites = &.{.{ .identity = identity, .site_revision = initial.revision }} };
     try std.testing.expect(try cache.installChunk(a, id, .{ .subscription_id = 10, .chunk_revision = 0, .mesh_revision = 0, .composition_revision = stale.revision }, stale));
     fixture.clearPending(0);
     const transfer: blueprint_runtime.Transfer = .{ .instance_id = 1, .chunk_id = id, .terrain_revision = 9 };
