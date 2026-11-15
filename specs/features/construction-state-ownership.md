@@ -1,8 +1,8 @@
 ---
 service: zig_engine
 created: 2026-11-12
-updated: 2026-11-14
-status: approved
+updated: 2026-11-15
+status: partially-implemented
 ---
 
 # Move active construction targets into simulation state
@@ -13,6 +13,10 @@ Make simulation the authoritative owner of active construction target cells, inc
 physical contents, progress, and saved state. Clients compose an almost static terrain layer
 with immutable blueprint definitions and compact construction progress. Completed constructions
 materialize into world-data chunks in bounded background work.
+
+**Status: partially implemented.** Core implementation tasks T1–T12 are complete in
+[PR #66](https://github.com/bacher/zig_engine/pull/66). Remaining validation, optional
+optimization, and subsequent warehouse integration are tracked separately in T13–T16 below.
 
 The ownership, publication, and lifecycle contracts below are approved. The implementation
 uses the existing service executor, separate construction meshes with internal-face culling,
@@ -35,7 +39,7 @@ Before this change, `world_data_service.zig` wrote completed blocks into terrain
 pending-target index dropped entries on fulfillment, and the last fill released the site and
 its restrictions. Persistence likewise retired the instance on its last fulfillment.
 Filled targets now retain discovery until handback, and a fully filled site remains active while
-materializing. This spec explicitly supersedes blueprint R32's immediate release and the soil
+materializing. This spec explicitly supersedes blueprint R32's former immediate release and the soil
 compaction/active-target aging rules. Q6 retains grass covering at admission and moves grass
 initialization for built soil to world-data after completion. Other blueprint contracts remain
 in force except the soil equivalence explicitly described there.
@@ -166,7 +170,7 @@ enqueue cost only; it cannot establish the benefit of this ownership change.
   work until initialized. Retry/restart cannot lose, duplicate, or reset deadlines, and delayed
   initialization must respect subsequent ordinary edits and their cell/timer lifetimes.
 - R29: Grass is surface cover, not a change in structural capability. Use one soil support
-  baseline for bare and grassy soil: current packed-soil behavior,
+  baseline for bare and grassy soil: the pre-change packed-soil behavior,
   including its own footprint/platform requirements. Remove loose-soil exclusions consistently
   from ordinary rules, blueprint normalization/certification, and the five-neighbor predicate;
   preserve that predicate's bound and resource identity across cover changes.
@@ -423,7 +427,7 @@ and their tests explicitly, with the appropriate ruleset/save gates. Reuse the a
 preparation and world-data grass scheduler, removing their dependence on compaction. Keep the
 single soil material's resource identity and structural behavior independent of grass cover.
 
-**Confirmed soil support:** use current packed-soil support capabilities
+**Confirmed soil support:** use the pre-change packed-soil support capabilities
 for both bare and grassy soil, retaining soil's own footprint/platform requirements. Clearing
 grass must not weaken an existing foundation; growing grass must not strengthen it. Remove the
 old loose-soil support exclusion from ordinary rules and the cheap fulfillment predicate, and
@@ -712,7 +716,7 @@ remain integration obligations for the subsequent warehouse implementation.
 
 ## Out of Scope
 
-- Runtime implementation, benchmarks, deployment, or save-format changes in this documentation PR.
+- Warehouse gameplay and stock records; only their shared integration boundary belongs here.
 - NPC scheduler/task/cargo decomposition, new cancellation/refund UI, or whole-box ownership.
 - A separate simulation thread, parallel region executor, universal transaction framework,
   independent owner saves, or an adopted best-effort resource-loss exception.
@@ -822,7 +826,23 @@ state. Measure and fault-test these before claiming a performance improvement.
   measurements and comparison with Q2 alternatives remain open under Q7. Complete mixed
   warehouse cases AC55–AC60 when that feature is implemented.
 
-## Implementation evidence
+### Follow-ups
+
+- [ ] T13 — Required validation: complete Q7 end-to-end, whole-frame and target-PC workloads,
+  including subscription churn, save/publication pressure and long-running completion bursts.
+- [ ] T14 — Required comparison: measure equivalent completed work for Q2 ownership/execution
+  alternatives; component benchmarks alone do not establish an architectural speedup.
+- [ ] T15 — Optional optimization: evaluate compact construction snapshots and reuse of client
+  grouping for the same definition/lifetime. The [payload comparison](../../docs/validation/construction-transport.md#snapshot-payload-boundary)
+  measures a prototype; production snapshots still carry grouping arrays. Preserve validation,
+  source lifetime and local cleanup semantics. This is separate from warehouse Q25 deltas.
+- [ ] T16 — Subsequent feature integration: implement warehouses on Q8's shared foundation and
+  execute mixed cases AC55–AC60. Warehouse gameplay is not part of this implementation.
+
+T13/T14 keep validation open; T16 depends on the next feature. T15 is optional and does not
+by itself block completion of the current contracts. T-val summarizes the remaining checks.
+
+### Implementation evidence
 
 | Contract | Evidence and scope |
 | --- | --- |
@@ -839,7 +859,7 @@ dispatch; the geometry timing excludes the full frame and GPU execution. Complet
 warehouse checks AC55–AC60 after warehouse implementation. Keep broader end-to-end and
 alternative comparisons open rather than treating the component measurements as those results.
 
-Integrated verification on 2026-11-14:
+Initial integrated verification on 2026-11-14 (historical baseline, before the review fixes):
 
 - `zig build install test -Doptimize=ReleaseFast -j2 --summary all`: 60/60 build steps,
   2,637 tests passed and 8 skipped.
@@ -847,3 +867,15 @@ Integrated verification on 2026-11-14:
   the one ReleaseFast-only measurement was skipped in Debug.
 - `zig build test-gpu -Doptimize=ReleaseFast -j2 --summary all`: 20/20 steps,
   126/126 tests passed on the Metal adapter, covering both wrapping modes.
+
+Review hardening through `8253acf` additionally covers current-owner precedence over retained
+sources, local invalidation for ordinary fills, boundary-only terrain revisions, retirement
+without a final progress update, and fresh local cleanup cursors on snapshot replacement.
+Snapshots now have a dedicated immutable payload boundary rather than embedding a runtime
+instance. See the transport and rendering reports for the cases and remaining costs.
+
+Recorded scoped verification at that revision: construction-client 123 passed/1 benchmark
+skipped, world 354 passed, application 839 passed/2 skipped, blueprint-service 656 passed/2
+skipped, and direct transport 16 passed. Two ReleaseFast snapshot benchmark runs passed
+3/3 each. These targets overlap; do not add their counts. The integrated and GPU suites above
+were not rerun for these final review fixes or this documentation reconciliation.

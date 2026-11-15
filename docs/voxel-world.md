@@ -1,6 +1,6 @@
 # Voxel world, streaming, and editing
 
-The voxel application combines deterministic terrain generation with an in-memory authoritative service, a small editable block cache on the main thread, and GPU face geometry for a larger neighborhood. The engine's voxel grid handles upload/residency; it does not own the world's block contents or command protocol.
+The voxel application combines deterministic terrain generation, world-data terrain and simulation-owned construction state on a shared service executor, a composed main-thread cache, and GPU geometry for a larger neighborhood. Persistent worlds capture terrain, player and construction state together. The engine's voxel grid handles upload/residency; it does not own the world's block contents or command protocol.
 
 ## Space and contents
 
@@ -189,6 +189,13 @@ workload and measured scope.
 A load is a continuing subscription, not just a one-time fetch. Its request ID becomes the subscription token for the requested chunks. Loading a different representation or reloading replaces the token; delayed replies and eviction requests from an older generation must not affect the new subscription.
 
 Commands carry intent, never replacement chunk snapshots. A put requires air and valid structural support; a remove requires an occupied cell and must preserve constructed blocks' support. Status is `success`, `already_exists`, `already_removed`, `constraint_violation`, `missing_data`, `resource_exhausted`, `inventory_mismatch`, or `target_changed`. Results include structured failure diagnostics and the mined material where applicable. Each command gets an acknowledgment, including conflicts. Commands from one endpoint preserve submission order; commands from different endpoints are ordered by the shared request queue, without a separate cross-client ordering promise. Simulation-time advancement shares this queue.
+
+Construction discovery accompanies terrain subscriptions, while shared immutable definitions
+and per-instance progress have their own publications. Initial/resync snapshots use the typed
+`construction_stream.Snapshot` descriptor with read-only progress/grouping arrays; later index
+deltas name exact base/result revisions. This is currently an in-process representation, not
+a fixed network encoding. Snapshot installation creates client-owned state and resets local
+cleanup progress. See [transport and payload validation](validation/construction-transport.md).
 
 External Save, Apply, player resource operations, and ordinary edits share a bounded
 live-session command ledger. Typed identities bind the complete intent; pending

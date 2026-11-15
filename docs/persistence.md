@@ -130,7 +130,7 @@ The exit drain includes submitted blueprint applications while their detached ad
 pending, and preserves their order with later mutations. A failed application resolves its
 command fence without publishing an instance.
 
-Saved player state includes identity, feet position, yaw, pitch, and the material in the one-slot inventory. Inventory changes belong to authoritative terrain transfers and are captured in the same snapshot. Movement checkpoints preserve the service-owned inventory. Velocity, climbing state, partial interaction holds, pending client predictions, and transient movement history are reset on startup. Format 5 uses inventory schema 1. Restored collision is checked against authoritative terrain before gameplay starts.
+Saved player state includes identity, feet position, yaw, pitch, and the material in the one-slot inventory. Inventory changes belong to authoritative transfers, including coherent construction fulfillment across the world-data inventory and simulation target owners, and are captured in the same snapshot. Movement checkpoints preserve the service-owned inventory. Velocity, climbing state, partial interaction holds, pending client predictions, and transient movement history are reset on startup. Format 5 uses inventory schema 1. Restored collision is checked against authoritative terrain before gameplay starts.
 
 ## Storage and ownership
 
@@ -154,7 +154,7 @@ The durability contract is local APFS on macOS. Network filesystems, other platf
 
 Live chunks, temporary preparation, source pins, and encoded output have different ownership lifetimes. A pin does not allocate a second block array. Empty blocks/metadata stay allocation-free; allocated capacities and temporary overlaps matter more than used lengths. Process RSS includes allocator overhead, graphics, client copies, and other storage beyond persistence counters. The separate resource-budgeting feature will provide global policy.
 
-Lazy dirt/grass timers may unload once exact-version base and pin rules permit it. Loading registers them; catch-up runs in the next eligible block-timer pass using original deadlines and current conditions. No elapsed offline time is added. Economy and cross-chunk NPC scheduling remain separate future work.
+Lazy grass-growth timers and non-executable construction initialization markers may unload once exact-version base and pin rules permit it. Loading registers executable timers; catch-up runs in the next eligible block-timer pass using original deadlines and current composed cover. Unknown cover defers growth. Initialization markers instead wait for construction completion work. No elapsed offline time is added. Economy and cross-chunk NPC scheduling remain separate future work.
 
 ## Validation and measurements
 

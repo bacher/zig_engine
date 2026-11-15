@@ -2,15 +2,19 @@
 
 This is an initial description extracted from the source and existing documentation on 2026-10-06. It records current behavior for review; it is not a specification of the intended final engine. The review points below distinguish observations from decisions that still need the owner's input. The extraction used static source inspection, not a new visual or performance validation run.
 
+Construction ownership, transport and soil descriptions were reconciled with PR #66 on
+2026-11-15. Validation scope and outstanding measurements are recorded in the linked reports.
+
 ## System overview
 
 The project is a Zig 3D engine with two executable applications. The engine supplies a window integration, scene objects, camera controls, asset loading, GPU resources, and a fixed sequence of rendering passes. The demo application assembles a scene to exercise those facilities. The voxel application adds generated terrain, asynchronous world access, streaming, optimistic editing, and a small simulation worker.
 
-The voxel world has three distinct kinds of state:
+The voxel world has four distinct kinds of state:
 
-1. The world-data service's authoritative generated and modified blocks.
-2. The main thread's block cache, with unacknowledged local edits applied on top of authoritative snapshots.
-3. The engine's GPU geometry, which represents exposed faces rather than complete block contents.
+1. World-data-owned terrain and player inventory.
+2. Simulation-owned construction targets and lifecycle, backed by immutable blueprint definitions.
+3. The main thread's composed terrain/construction cache, with unacknowledged local edits applied on top of authoritative snapshots.
+4. The engine's GPU geometry, which represents exposed faces rather than complete block contents.
 
 Changes flow from application commands to the service and back through subscriptions. Rendering consumes the resulting geometry; it does not decide whether a block edit is valid.
 
@@ -19,14 +23,15 @@ flowchart TD
     Demo[Demo application] --> Engine
     Main[Voxel application main thread] --> Engine
     Main -->|load, evict, edit| Service[World-data service worker]
-    Simulation[Simulation worker] -->|its own client endpoint| Service
+    Simulation[Demonstration simulation worker] -->|its own client endpoint| Service
     Service -->|frozen borrowed sources| Capture[Persistence encoder]
     Capture -->|bounded encoded output| Writer[WAL writer]
     Service -->|async generation-safe reads| Base[Installed base]
     Writer --> Disk[Durable WAL and base compaction]
     Service --> Generator[Deterministic terrain generator]
-    Service -->|packages of blocks, masks, or faces| Main
-    Main --> Cache[Optimistic block cache]
+    Service -->|terrain blocks, masks, or faces| Main
+    Service -->|construction snapshots and progress deltas| Main
+    Main --> Cache[Composed optimistic world cache]
     Cache -->|local face extraction| Upload[GPU upload queue]
     Main --> Upload
     Engine --> Scene[Active scene]
@@ -36,7 +41,10 @@ flowchart TD
     Grid --> GPU
 ```
 
-The arrows show responsibilities and data flow, not separate processes. The service and simulation are concurrent tasks in the same application.
+The arrows show responsibilities and data flow, not separate processes. Construction state
+and world-data use the same service executor and coordinated capture while retaining separate
+authority. The concurrent demonstration worker is a separate endpoint producer, not the owner
+or executor of construction state.
 
 ## Code map
 
@@ -58,6 +66,10 @@ The arrows show responsibilities and data flow, not separate processes. The serv
 | [`world_generator.zig`](../src/voxel_app/world_generator.zig), [`perlin_noise.zig`](../src/voxel_app/perlin_noise.zig) | Deterministic heightmap terrain and flat test terrain. |
 | [`persistence/`](../src/voxel_app/persistence) | Versioned codecs, bounded encoding, WAL, recovery, compaction, macOS durability adapter, and crash model. |
 | [`timer_kernel.zig`](../src/voxel_app/timer_kernel.zig) | Fallible local block-timer planning and allocation-free commit through a fixed cutoff. |
+| [`blueprint_runtime.zig`](../src/voxel_app/blueprint_runtime.zig) | Simulation-owned construction progress, membership and lifecycle. |
+| [`construction_stream.zig`](../src/voxel_app/construction_stream.zig), [`construction_client.zig`](../src/voxel_app/construction_client.zig) | Typed construction publications, replicas, resync and handoff. |
+| [`construction_commands.zig`](../src/voxel_app/construction_commands.zig) | Shared external-intent ledger with bounded replay/acknowledgment. |
+| [`construction_geometry.zig`](../src/voxel_app/construction_geometry.zig) | Separate culled geometry for fulfilled targets. |
 | [`simulation_worker.zig`](../src/voxel_app/simulation_worker.zig) | A second world client that repeatedly edits one block. |
 | [`player_controller.zig`](../src/voxel_app/player_controller.zig), [`terrain_collision.zig`](../src/voxel_app/terrain_collision.zig) | Application-owned player body, gravity, jumping/climbing, terrain sweeps, and recovery against the local block cache. |
 | [`gltf_loader/`](../gltf_loader) | Local glTF JSON, geometry, texture, skin, and animation input support. |
@@ -150,7 +162,10 @@ before releasing site restrictions. Composed reads, safe immutable snapshots, an
 span both domains. `blueprint_runtime.State` holds progress and target-bearing chunk groups;
 `construction_stream` and `construction_client` carry typed snapshots, batched index deltas,
 discovery and per-portion handoff state. Filled targets use a separate culled voxel mesh;
-pending targets retain miniature rendering. [Warehouses follow construction](../specs/features/construction-state-ownership.md#q8--construction-first-then-warehouse-integration)
+pending targets retain miniature rendering. Full snapshots use a dedicated payload with
+read-only arrays; executor-local cleanup cursors never cross that boundary. Compact payloads
+and client grouping reuse remain [measured follow-ups](validation/construction-transport.md#snapshot-payload-boundary).
+[Warehouses follow construction](../specs/features/construction-state-ownership.md#q8--construction-first-then-warehouse-integration)
 and extend that simulation-state/capture boundary with distinct inventory records and full-object
 snapshots. Common identity and query paths must distinguish real built targets from packed cargo;
 a construction's completion must never materialize or retire a warehouse in its cavity.

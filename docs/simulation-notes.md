@@ -1,8 +1,8 @@
 # Simulation notes
 
-These notes capture gameplay intent, constraints, and architecture decisions for the upcoming simulation. They accompany the [game vision](game-vision.md) and [design principles](../DESIGN_PRINCIPLES.md). They describe planned behavior and retain alternatives where no choice has been made; the selected first-version warehouse execution does not determine the full economy's scaling architecture.
+These notes capture gameplay intent, constraints, and architecture decisions for the upcoming simulation. They accompany the [game vision](game-vision.md) and [design principles](../DESIGN_PRINCIPLES.md). Construction ownership and shared capture are implemented; warehouse gameplay and the broader economy remain planned. These notes retain alternatives where no choice has been made; the selected first-version warehouse execution does not determine the full economy's scaling architecture.
 
-The [open questions](simulation-open-questions.md) track remaining decisions. Implement [construction ownership first, then warehouses](../specs/features/construction-state-ownership.md#q8--construction-first-then-warehouse-integration), sharing the simulation-state and capture boundary while retaining distinct records, world-query semantics, and publication policies. The [warehouse specification](../specs/features/warehouses.md) settles first-version storage behavior; full logistics allocation and other marked follow-ups remain separate work.
+The [open questions](simulation-open-questions.md) track remaining decisions. The implemented foundation follows [construction ownership first, then warehouses](../specs/features/construction-state-ownership.md#q8--construction-first-then-warehouse-integration), sharing the simulation-state and capture boundary while retaining distinct records, world-query semantics, and publication policies. The [warehouse specification](../specs/features/warehouses.md) settles first-version storage behavior; full logistics allocation and other marked follow-ups remain separate work.
 
 ## Primary scenario and player intervention
 
@@ -95,8 +95,9 @@ accepts coherent live transitions plus shared save capture/WAL without disk sync
 per item. Its implementation must prioritize automatic work.
 
 The [construction state ownership spec](../specs/features/construction-state-ownership.md)
-selects actual simulation ownership of nonempty blueprint targets and later materialization
-into current world-data chunks. Cavities and foundations remain world-data-owned. Targets stay
+implements actual simulation ownership of nonempty blueprint targets and later materialization
+into current world-data chunks. Cells outside this site's targets retain their existing owner;
+that can be world-data or another site whose fulfilled targets supply support. Targets stay
 air in base terrain while simulation owns them; chunk references plus immutable definitions
 provide discovery without in-cell markers. Full-lifetime membership retains fulfilled targets
 through materialization, alongside a separate pending-target index.

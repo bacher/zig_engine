@@ -1,7 +1,7 @@
 ---
 service: zig_engine
 created: 2026-11-11
-updated: 2026-11-14
+updated: 2026-11-15
 status: approved
 ---
 
@@ -37,7 +37,9 @@ This specification records decisions agreed on 2026-11-11/12. The implementation
 below was originally checked against `main` at `d5d95d9`. The selected implementation baseline
 now includes the [construction ownership change](construction-state-ownership.md#q8--construction-first-then-warehouse-integration)
 first, including its composed readers, shared simulation/capture boundary, and unified soil.
-These features remain unimplemented; references to old terrain/soil representations below are
+Warehouse gameplay remains unimplemented. Construction ownership, unified soil, coherent
+capture and the shared external-command ledger are implemented in PR #66; their remaining
+validation is tracked in that spec. References to old terrain/soil representations below are
 historical context, not a requirement to restore them for warehouses.
 
 - [Design principles](../../DESIGN_PRINCIPLES.md) prioritize whole-world simulation
@@ -1990,7 +1992,15 @@ defines the shared boundary and comparison of authorities. Reuse its simulation-
 service executor, coherent capture/WAL integration, typed discovery/session lifetimes, and
 composed world consumers. This supersedes the earlier plan to implement warehouses independently
 of construction ownership/soil changes. It does not require warehouses to exist before that
-construction work; the construction stage can use player inventory and controlled internal work.
+construction work; the construction stage uses player inventory and controlled internal work.
+
+**IMPLEMENTATION BASELINE 2026-11-15.** Construction provides the shared executor/capture and
+composed-read paths, plus the [bounded external-command ledger](../../docs/validation/construction-commands.md).
+Extend that ledger with warehouse intents and typed outcomes. The
+[construction transport](../../docs/validation/construction-transport.md) supplies identity,
+publication accounting and lifetime patterns; warehouse records, claims, full snapshots and
+mixed integration checks still need implementation. Construction progress deltas and its
+optional compact-snapshot work do not change Q24/Q25's warehouse publication decision.
 
 Warehouse objects add C/I/A, configuration and lifecycle under Q16, not construction progress
 bits. Keep Q24 full snapshots in the first warehouse version even though constructions use
@@ -2649,9 +2659,10 @@ missing nearby dependencies without delaying simulation. No first-version wareho
 choice remains open. Engineering preparation and validation below still apply; this discussion
 has not implemented the feature.
 
-Engineering preparation remains: finalize records/version gates, bounded command-result
-retention and acknowledgment, coherent object/claim admission and retirement, save capture/load
-integration, subscription lifetimes/budgets, and staged implementation/verification. These
+Engineering preparation remains: finalize warehouse records/version gates, extend the shared
+command ledger with warehouse intents using its existing bounded retention/acknowledgment,
+and implement coherent object/claim admission and retirement, save capture/load integration,
+subscription lifetimes/budgets, and staged verification. These
 concretize accepted contracts; routine field/container/API choices need not become new gameplay
 questions. Review choices that change observable behavior or established performance priorities.
 
@@ -2817,8 +2828,9 @@ late replies, floor changes, and restored claims require explicit ownership/avai
 
 - [ ] T5: Finalize concrete data/API changes and implementation phases against the accepted
   resource-accounting and readiness contracts; no warehouse gameplay decision remains open.
-- [ ] T15: Finalize warehouse preparation/commit, bounded Q23 retry bookkeeping, failure
-  handling, save integration, and Q24 subscription implementation under selected Q22 execution.
+- [ ] T15: Finalize warehouse preparation/commit, extend the implemented command ledger with
+  Q23 warehouse intents, and add failure handling, save integration, and Q24 subscriptions
+  under selected Q22 execution.
   Integrate with the already implemented construction handback and Q21 soil model under Q27;
   Q20 accounting exceptions and the full logistics scheduler remain separate follow-ups.
 

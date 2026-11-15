@@ -9,6 +9,11 @@ The first PR is based on main `b223e01`. It replaces sources synchronously and r
 main's terrain/service-mesh paths. GPU resource retirement, subscription checks, source
 limits and cache invalidation remain required independently of visual coherence.
 
+The newer [construction rendering report](construction-rendering.md) covers filled dynamic
+targets and their mandatory handoff to static geometry. The relaxed miniature policy and
+historical measurements here do not permit gaps during that handoff. The miniature FIFO
+budget remains a separate unimplemented follow-up.
+
 ## Current synchronous cache
 
 `replaceMiniatureChunk` validates data and capacity, reserves metadata, creates/uploads

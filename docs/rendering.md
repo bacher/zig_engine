@@ -210,7 +210,7 @@ Fulfilled construction targets use a separate `construction` layer in the existi
 grid. [`construction_geometry.zig`](../src/voxel_app/construction_geometry.zig) emits the
 same four-byte exposed-face records as terrain. Both layers use the ordinary visible and
 shadow draw loops, so construction needs no additional shader or render pass. Pending
-miniatures retain their existing renderer. The wire bitmap and simulation's ownership do
+miniatures retain their existing renderer. The progress bitmap and simulation's ownership do
 not prescribe the GPU layout.
 
 Construction meshing visits precomputed target groups for the changed chunk. It removes
@@ -220,8 +220,9 @@ Mesh-only subscriptions may retain invisible faces against static terrain whose 
 cells are unavailable; they still remove internal construction faces. This conservative
 rendering rule does not permit collision or interaction through unknown world data.
 
-An ordinary source change dirties its loaded chunk and at most six face neighbors; repeated
-changes coalesce in the dirty-chunk map. A chunk rebuild visits only its registered sites
+An ordinary progress-only fill while a site remains building dirties its loaded chunk and
+at most six face neighbors; repeated changes coalesce in the dirty-chunk map. Full snapshots,
+resync and lifecycle/transfer changes may invalidate the larger site footprint. A chunk rebuild visits only its registered sites
 and their target groups. Face-neighbor lookups inspect the neighbor chunk's registered sites,
 and one temporary set indexes bounded optimistic fulfillments for that rebuild. Readiness
 and successful-install reconciliation currently scan the loaded chunks and their site
@@ -240,7 +241,9 @@ layer. A failed build/upload retains the displayed geometry and retries. On succ
 terrain replacement and dynamic removal install in the same frame, then miniature state
 and retained sources can retire. Once a portion has switched to static geometry, newer
 ordinary edits cannot reactivate its old construction source. Visibility eviction starts a
-new selection lifetime. See [construction rendering validation](validation/construction-rendering.md)
+new selection lifetime. Retirement also clears pending targets when the final fill publication
+was missed, without dropping geometry before its handoff. Snapshot installation starts local
+cleanup from zero; the cleanup cursor is never part of the published payload. See [construction rendering validation](validation/construction-rendering.md)
 for measured geometry counts, costs, budgets, and remaining limits.
 
 ## Held-item motion

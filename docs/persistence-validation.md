@@ -1,7 +1,15 @@
 # Persistence v1 validation
 
-Format 4 persists the complete unfinished-work key set atomically with each world
-snapshot. It removes the global road-drain save barrier while preserving source ownership,
+Current saves use format 7, including simulation-owned construction progress, partial
+materialization and grass initialization. See [construction authority validation](validation/construction-authority.md)
+for that implementation and [the ownership spec](../specs/features/construction-state-ownership.md#implementation-evidence)
+for dated verification and open follow-ups. The campaigns and totals below belong to their
+original implementation stages; this documentation update does not rerun them.
+
+## Format 4 unfinished-work campaign (historical)
+
+Format 4 introduced persistence of the complete unfinished-work key set atomically with each
+world snapshot. It removed the global road-drain save barrier while preserving source ownership,
 selected command prefixes, foreground read gates, and normal retry policy. Background
 road-only reads/errors remain deferred-work state; shared reads promoted by a foreground
 consumer use the ordinary save-read gate. Reloading a queued chunk restarts its runtime
@@ -77,7 +85,7 @@ The focused targets isolate codec/storage, capture concurrency, and world/timer/
 | Crash boundaries | `persistence/io_model.zig` through storage tests: separate file/directory durability, uncertain synchronization survival/loss, replacement and retirement, stable lock release, atomic multi-chunk/global/player snapshots. |
 | Capture ownership | `persistence/lifecycle_tests.zig`: independent write/sync gates, cancellation before/after commit authorization, source release before durability, exactly-once releases, arbitrary player priority sets, borrowed-source mutation after release, bounded admission/output. |
 | Mutation preparation | `world.zig`, `roads.zig`, `world_data_service.zig`: complete write sets, fallible resource preparation, atomic road edits and revision publication, independent origin snapshots and coalesced observer state. |
-| Lazy block timers | `timer_kernel.zig` and service tests: fixed cutoff, original deadlines, finite local chains, incremental/large-step equivalence, stale-event consumption, edit-before-catch-up behavior, eviction/reload. |
+| Lazy block timers | `timer_kernel.zig` and service tests: fixed cutoff, original deadlines, terminal grass growth, incremental/large-step equivalence, stale-event consumption, edit-before-catch-up behavior, eviction/reload. |
 | Seeded service restart | `persistence_service_tests.zig`: three seeds with four save/restart rounds each; independent blocks/revisions/global/player model, unsaved suffix loss, base/WAL recovery and async reload. |
 | Client and shutdown | World/application/service tests: bounded optimistic edits, reconciliation, allocation-failed snapshot renewal, final-save admission fence, persisted players, initialization cleanup. |
 
