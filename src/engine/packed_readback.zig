@@ -12,7 +12,7 @@ const side = 128;
 const pixels = side * side;
 const bytes = pixels * 4;
 const background = [4]u8{ 32, 64, 96, 255 };
-const Case = enum { cube_front, cube_top, cube_hidden, cube_shadowed, cube_seam, packaging_front, packaging_inside, packaging_top, pallet_top, road_top, cargo_pallet_top, marker, stopped_marker, cube_oblique, road_oblique, cargo_pallet_oblique, marker_oblique, stopped_oblique, mixed_batch, shadow_front, shadow_inside, shadow_top };
+const Case = enum { cube_front, cube_top, cube_hidden, cube_shadowed, cube_seam, packaging_front, packaging_inside, packaging_top, pallet_top, road_top, cargo_pallet_top, marker, stopped_marker, cube_oblique, road_oblique, cargo_pallet_oblique, marker_oblique, stopped_oblique, mixed_batch, shadow_pallet, shadow_front, shadow_inside, shadow_top };
 const cases = std.enums.values(Case);
 
 pub fn check(device: wgpu.Device, mapping: *callbacks.MapResponse) !void {
@@ -137,11 +137,11 @@ fn checkOwned(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse, real
     const pallet_item = cargo.Instance{ .local = .{ 0, 0, 0 }, .material = 23 };
     for (cases, 0..) |case, index| {
         const top = switch (case) {
-            .cube_top, .packaging_top, .pallet_top, .road_top, .cargo_pallet_top, .marker, .stopped_marker, .shadow_top => true,
+            .cube_top, .packaging_top, .pallet_top, .road_top, .cargo_pallet_top, .marker, .stopped_marker, .shadow_pallet, .shadow_top => true,
             else => false,
         };
         const inside = case == .packaging_inside or case == .shadow_inside;
-        const shadow = case == .shadow_front or case == .shadow_inside or case == .shadow_top;
+        const shadow = case == .shadow_pallet or case == .shadow_front or case == .shadow_inside or case == .shadow_top;
         const oblique = case == .cube_oblique or case == .road_oblique or case == .cargo_pallet_oblique or case == .marker_oblique or case == .stopped_oblique;
         var matrix: zmath.Mat = @splat(@splat(0));
         matrix[0][0] = 1.6;
@@ -176,7 +176,7 @@ fn checkOwned(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse, real
         switch (case) {
             .cube_front, .cube_top, .cube_hidden, .cube_shadowed, .cube_oblique, .cube_seam => source.faces = &faces,
             .packaging_front, .packaging_inside, .packaging_top, .shadow_front, .shadow_inside, .shadow_top => source.packaging = &.{item},
-            .pallet_top => source.pallets = &.{pallet_item},
+            .pallet_top, .shadow_pallet => source.pallets = &.{pallet_item},
             .road_top => source.models = &.{item},
             .cargo_pallet_top => source.models = &.{pallet_item},
             .road_oblique => {
@@ -214,7 +214,9 @@ fn checkOwned(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse, real
         defer pass.release();
         pass.setBindGroup(0, scene_binding, &.{ 0, 0, 0, 0, 0 });
         pass.setBindGroup(1, atlas_binding, &.{});
-        pass.setBindGroup(2, light_binding, &.{0});
+        // Match Engine.draw: shadow passes receive scene + atlas only. Binding
+        // the sampled shadow map while writing it would create a feedback hazard.
+        if (!shadow) pass.setBindGroup(2, light_binding, &.{0});
         const draws_before = renderer.stats().draw_calls;
         renderer.draw(gctx, pass, shadow);
         if (case == .mixed_batch) try std.testing.expectEqual(@as(u64, 2), renderer.stats().draw_calls - draws_before);
@@ -240,7 +242,7 @@ fn checkOwned(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse, real
 fn writeArtifacts(directory: []const u8, data: []const u8, real_atlas: bool) !void {
     const allocator = std.testing.allocator;
     for (cases) |case| {
-        if (@intFromEnum(case) >= @intFromEnum(Case.shadow_front)) continue;
+        if (@intFromEnum(case) >= @intFromEnum(Case.shadow_pallet)) continue;
         const image = try allocator.alloc(u8, 15 + pixels * 3);
         defer allocator.free(image);
         @memcpy(image[0..15], "P6\n128 128\n255\n");
@@ -335,6 +337,9 @@ fn inspect(data: []const u8) !void {
     }
     try std.testing.expectEqual(@as(f32, 1), floatAt(data, .shadow_top, 0.3, 0.185, false));
     try std.testing.expect(floatAt(data, .shadow_top, 0.5, 0.8, false) < 1);
+    try std.testing.expectEqual(@as(f32, 1), floatAt(data, .shadow_pallet, 0.3, 0.185, false));
+    try std.testing.expect(floatAt(data, .shadow_pallet, 0.3, 0.08, false) < 1);
+    try std.testing.expectEqual(floatAt(data, .shadow_pallet, 0.3, 0.08, true), floatAt(data, .shadow_pallet, 0.3, 0.08, false));
 }
 
 fn measureUpdates(renderer: *cargo.Renderer, gctx: *zgpu.GraphicsContext) !void {

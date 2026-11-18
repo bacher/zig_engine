@@ -1,12 +1,12 @@
 struct PackedFace { x: u32, y: u32, z: u32, material: u32, direction: u32, owner: u32, }
 struct PackedInstance { x: u32, y: u32, z: u32, material: u32, owner: u32, }
 struct PackedMarker { x: u32, y: u32, z: u32, material: u32, disabled: u32, owner: u32, }
-@group(3) @binding(0) var<storage, read> packed_chunks: array<vec4i>;
-@group(3) @binding(1) var<storage, read> packed_faces: array<PackedFace>;
-@group(3) @binding(2) var<storage, read> packed_models: array<PackedInstance>;
-@group(3) @binding(3) var<storage, read> packed_packaging: array<PackedInstance>;
-@group(3) @binding(4) var<storage, read> packed_pallets: array<PackedInstance>;
-@group(3) @binding(5) var<storage, read> packed_markers: array<PackedMarker>;
+@group(PACKED_SOURCE_GROUP) @binding(0) var<storage, read> packed_chunks: array<vec4i>;
+@group(PACKED_SOURCE_GROUP) @binding(1) var<storage, read> packed_faces: array<PackedFace>;
+@group(PACKED_SOURCE_GROUP) @binding(2) var<storage, read> packed_models: array<PackedInstance>;
+@group(PACKED_SOURCE_GROUP) @binding(3) var<storage, read> packed_packaging: array<PackedInstance>;
+@group(PACKED_SOURCE_GROUP) @binding(4) var<storage, read> packed_pallets: array<PackedInstance>;
+@group(PACKED_SOURCE_GROUP) @binding(5) var<storage, read> packed_markers: array<PackedMarker>;
 
 struct PackedVertex {
     vertex: VoxelVertex,

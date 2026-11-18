@@ -24,7 +24,7 @@ Tests run with both finite and wrapped x coordinates.
 ## GPU evidence
 
 `src/engine/packed_readback.zig` renders through the production renderer, pipelines, vertex
-expansion and fragment shaders on Dawn. Its 22 cases check:
+expansion and fragment shaders on Dawn. Its 23 cases check:
 
 - Resource color beneath opaque cube packaging, distinct wooden artwork and straps;
   hardware face culling, scene-depth occlusion and directional-shadow sampling.
@@ -37,6 +37,17 @@ expansion and fragment shaders on Dawn. Its 22 cases check:
   and cutout shadow holes. Flat advisory markers do not cast shadows onto their own pallet.
 - Chunk-relative coordinates near the end of a 131,072-chunk x axis and across its wrapped
   seam, plus a mixed-model fixture asserting two draws across two independent sources.
+
+The 2026-11-18 loose-pallet shadow regression uses the same caller bindings as the engine:
+scene at group 0 and material atlas at group 1, without a sampled shadow-map group. With the
+original shared color/shadow layout, this reproduces `No bind group set at group index 2`
+on `Draw(288, 1, 0, 0)` in both world modes. The earlier fixture bound a sampled-light group
+even during shadow rendering and masked the runtime failure. Shadow pipelines now use a
+separate three-group layout, with packed source data at group 2. Color pipelines keep sampled
+lighting at group 2 and packed sources at group 3. The test checks the pallet's shadow depth
+and board gaps; shadow rendering never needs to bind the map it is currently producing.
+After the fix, the full ReleaseSafe GPU suite passed in both world modes on Apple M4 Max/Metal,
+and `zig build install -Doptimize=ReleaseFast -j2 --summary all` passed all 25 build steps.
 
 The allocation-failure sweep checks preservation of the old source, including failures
 after one GPU buffer grows and a later category fails to reserve. Dense-buffer churn checks

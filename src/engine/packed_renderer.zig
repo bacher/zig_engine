@@ -24,11 +24,13 @@ pub const GPU_Marker = extern struct { local: [3]u32, material: u32, disabled: u
 pub const model_vertex_count: u32 = 288;
 pub const packaging_vertex_count: u32 = model_vertex_count + 36;
 pub const category_count = 5;
+const color_source_group = 3;
+const shadow_source_group = 2;
 const vertex_counts = [category_count]u32{ 6, model_vertex_count, packaging_vertex_count, model_vertex_count, 6 };
 const entry_points = [category_count][*:0]const u8{ "faces", "models", "packaging", "pallets", "markers" };
 pub const geometry_shader = @embedFile("shaders/voxel/block_geometry.wgsl") ++ @embedFile("shaders/voxel/adaptive_geometry.wgsl") ++ @embedFile("shaders/voxel/pallet_geometry.wgsl") ++ @embedFile("shaders/packed_geometry.wgsl");
-pub const color_shader = geometry_shader ++ @embedFile("shaders/packed_vs.wgsl") ++ @embedFile("shaders/voxel/material_color.wgsl") ++ @embedFile("shaders/shadow_map/sampling.wgsl") ++ @embedFile("shaders/packed_appearance.wgsl") ++ @embedFile("shaders/packed_fs.wgsl");
-pub const shadow_shader = geometry_shader ++ @embedFile("shaders/voxel/material_color.wgsl") ++ @embedFile("shaders/packed_appearance.wgsl") ++ @embedFile("shaders/packed_shadow.wgsl");
+pub const color_shader = std.fmt.comptimePrint("const PACKED_SOURCE_GROUP = {d}u;\n", .{color_source_group}) ++ geometry_shader ++ @embedFile("shaders/packed_vs.wgsl") ++ @embedFile("shaders/voxel/material_color.wgsl") ++ @embedFile("shaders/shadow_map/sampling.wgsl") ++ @embedFile("shaders/packed_appearance.wgsl") ++ @embedFile("shaders/packed_fs.wgsl");
+pub const shadow_shader = std.fmt.comptimePrint("const PACKED_SOURCE_GROUP = {d}u;\n", .{shadow_source_group}) ++ geometry_shader ++ @embedFile("shaders/voxel/material_color.wgsl") ++ @embedFile("shaders/packed_appearance.wgsl") ++ @embedFile("shaders/packed_shadow.wgsl");
 
 pub const Stats = struct {
     sources: usize = 0,
@@ -150,6 +152,11 @@ pub const Renderer = struct {
         });
         const pipeline_layout = gctx.createPipelineLayout(&.{ layouts.scene.bind_group_layout_handle, layouts.regular.bind_group_layout_handle, layouts.shadow_map.bind_group_layout_handle, layout });
         defer gctx.releaseResource(pipeline_layout);
+        // Shadow casting never samples a shadow map. Keep the geometry group
+        // contiguous so no unused sampled-shadow bind group is required while
+        // that same texture is the active render target.
+        const shadow_pipeline_layout = gctx.createPipelineLayout(&.{ layouts.scene.bind_group_layout_handle, layouts.regular.bind_group_layout_handle, layout });
+        defer gctx.releaseResource(shadow_pipeline_layout);
         const module = zgpu.createWgslShaderModule(gctx.device, source.ptr, "packed cargo");
         defer module.release();
         const shadow_module = zgpu.createWgslShaderModule(gctx.device, shadow_source.ptr, "packed cargo shadows");
@@ -160,7 +167,7 @@ pub const Renderer = struct {
         for (entry_points, 0..) |entry, i| {
             const primitive = wgpu.PrimitiveState{ .topology = .triangle_list, .front_face = .ccw, .cull_mode = if (i == 2) .none else .back };
             pipelines[i] = gctx.createRenderPipeline(pipeline_layout, .{ .label = "packed cargo", .primitive = primitive, .depth_stencil = &.{ .format = .depth32_float, .depth_write_enabled = true, .depth_compare = .less }, .vertex = .{ .module = module, .entry_point = entry }, .fragment = &.{ .module = module, .entry_point = "main", .targets = &targets, .target_count = targets.len } });
-            shadows[i] = gctx.createRenderPipeline(pipeline_layout, .{ .label = "packed cargo shadow", .primitive = primitive, .depth_stencil = &.{ .format = .depth32_float, .depth_write_enabled = true, .depth_compare = .less }, .vertex = .{ .module = shadow_module, .entry_point = entry }, .fragment = &.{ .module = shadow_module, .entry_point = "main", .targets = &shadow_targets, .target_count = shadow_targets.len } });
+            shadows[i] = gctx.createRenderPipeline(shadow_pipeline_layout, .{ .label = "packed cargo shadow", .primitive = primitive, .depth_stencil = &.{ .format = .depth32_float, .depth_write_enabled = true, .depth_compare = .less }, .vertex = .{ .module = shadow_module, .entry_point = entry }, .fragment = &.{ .module = shadow_module, .entry_point = "main", .targets = &shadow_targets, .target_count = shadow_targets.len } });
         }
         var result: Renderer = .{ .allocator = allocator, .sources = .init(allocator), .chunk_buffer = gctx.createBuffer(.{ .label = "packed source chunks", .usage = .{ .storage = true, .copy_dst = true }, .size = 16 }), .faces = .init(gctx), .models = .init(gctx), .packaging = .init(gctx), .pallets = .init(gctx), .markers = .init(gctx), .layout = layout, .binding = undefined, .pipelines = pipelines, .shadow_pipelines = shadows };
         result.binding = result.createBinding(gctx);
@@ -331,15 +338,16 @@ pub const Renderer = struct {
     pub fn upload(self: *Renderer, gctx: *zgpu.GraphicsContext) void {
         inline for (.{ "faces", "models", "packaging", "pallets", "markers" }) |name| @field(self, name).upload(gctx, &self.counters);
     }
-    /// Caller supplies ordinary scene/atlas/light groups0..2. All retained
-    /// sources draw together; there is no camera-facing index or side grouping.
+    /// Caller supplies scene/atlas groups0..1 and the sampled-light group2 only
+    /// for color rendering. All retained sources draw together; there is no
+    /// camera-facing index or side grouping.
     pub fn draw(self: *Renderer, gctx: *zgpu.GraphicsContext, pass: wgpu.RenderPassEncoder, shadow: bool) void {
         inline for (.{ "faces", "models", "packaging", "pallets", "markers" }, 0..) |name, i| {
             // Flat advisory icons do not cast shadows onto their own pallet.
             const count: u32 = @intCast(@field(self, name).entries.items.len);
             if (count != 0 and (!shadow or i != 4)) {
                 pass.setPipeline(gctx.lookupResource(if (shadow) self.shadow_pipelines[i] else self.pipelines[i]).?);
-                pass.setBindGroup(3, gctx.lookupResource(self.binding).?, &.{});
+                pass.setBindGroup(if (shadow) shadow_source_group else color_source_group, gctx.lookupResource(self.binding).?, &.{});
                 pass.draw(vertex_counts[i], count, 0, 0);
                 if (shadow) self.counters.shadow_draw_calls += 1 else self.counters.draw_calls += 1;
                 self.counters.vertex_invocations += @as(u64, vertex_counts[i]) * count;
