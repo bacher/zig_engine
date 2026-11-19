@@ -20,6 +20,8 @@ pub const Limits = struct {
     construction_state_bytes: usize = 256 * 1024 * 1024,
     manifest_entries: usize = 65536,
     pending_commands: usize = 256,
+    /// Per-client live warehouse interests, independent of queued control work.
+    warehouse_subscriptions: usize = 4096,
     live_bytes: usize = 512 * 1024 * 1024,
     capture_wait_ns: u64 = 500 * std.time.ns_per_ms,
     player_wait_ns: u64 = 100 * std.time.ns_per_ms,

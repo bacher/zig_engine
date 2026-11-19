@@ -624,14 +624,17 @@ pub const Client = struct {
     fn enqueueWarehouseControlLocked(self: *Client, request: Request) SubmitError!void {
         const service = self.service;
         if (service.requests.is_closed or service.is_shutting_down.load(.acquire)) return error.ServiceStopped;
-        if (service.outstanding_construction_controls.load(.monotonic) >= service.limits.pending_commands) return error.Busy;
+        // Releases have their own bounded allowance: retained subscribes must
+        // never consume the admission needed to free a live subscription slot.
+        const outstanding = service.warehouseControlCounter(std.meta.activeTag(request));
+        if (outstanding.load(.monotonic) >= service.limits.pending_commands) return error.Busy;
         var owned = request;
         switch (owned) {
             .warehouse_subscribe, .warehouse_resync, .warehouse_unsubscribe => |*control| control.counted = true,
             else => unreachable,
         }
         try service.requests.items.append(service.allocator, owned);
-        _ = service.outstanding_construction_controls.fetchAdd(1, .acq_rel);
+        _ = outstanding.fetchAdd(1, .acq_rel);
         service.requests.not_empty.signal(service.io);
     }
 
@@ -1048,6 +1051,11 @@ pub const WorldDataService = struct {
     construction_publication_budget: ?*PublicationBudget = null,
     construction_publication_wakeup: bool = false,
     outstanding_construction_controls: std.atomic.Value(usize) = .init(0),
+    outstanding_warehouse_subscriptions: std.atomic.Value(usize) = .init(0),
+    outstanding_warehouse_unsubscribes: std.atomic.Value(usize) = .init(0),
+    /// Worker-owned desired interests rejected by live capacity or allocation
+    /// pressure. Each retains its ingress reservation; storage is prepared at startup.
+    pending_warehouse_subscriptions: std.ArrayList(WarehouseControl) = .empty,
     /// Worker-owned; avoid taking the external-command lock on simulation-only turns.
     external_blueprint_delivery_pending: bool = false,
     command_budget: commands.Budget = .{},
@@ -1225,7 +1233,9 @@ pub const WorldDataService = struct {
         errdefer self.pending.deinit(allocator);
         errdefer self.waiting_reads.deinit(allocator);
         errdefer self.retry_reads.deinit(allocator);
+        errdefer self.pending_warehouse_subscriptions.deinit(allocator);
         try self.pending.ensureTotalCapacityPrecise(allocator, limits.pending_commands);
+        try self.pending_warehouse_subscriptions.ensureTotalCapacityPrecise(allocator, limits.pending_commands);
         const read_capacity = try std.math.mul(usize, limits.pending_commands, 2);
         try self.waiting_reads.ensureTotalCapacityPrecise(allocator, read_capacity);
         try self.retry_reads.ensureTotalCapacityPrecise(allocator, read_capacity);
@@ -1425,6 +1435,7 @@ pub const WorldDataService = struct {
         self.pending.deinit(self.allocator);
         self.waiting_reads.deinit(self.allocator);
         self.retry_reads.deinit(self.allocator);
+        self.pending_warehouse_subscriptions.deinit(self.allocator);
         self.read_pending.deinit(self.allocator);
         self.deferred_reads.deinit(self.allocator);
         self.read_failed.deinit(self.allocator);
@@ -1452,6 +1463,7 @@ pub const WorldDataService = struct {
             if (self.destroy_requested.load(.acquire) and !self.shutdown_started) {
                 self.shutdown_started = true;
                 self.is_shutting_down.store(true, .release);
+                self.discardPendingWarehouseSubscriptions();
                 self.lifecycle.queued = null;
                 self.compaction_requested = false;
                 if (self.job) |job| job.cancel();
@@ -1971,7 +1983,6 @@ pub const WorldDataService = struct {
         const construction_control_counted = switch (request) {
             .blueprint_definition => |read| read.counted,
             .construction_subscribe, .construction_resync, .construction_unsubscribe => |read| read.counted,
-            .warehouse_subscribe, .warehouse_resync, .warehouse_unsubscribe => |read| read.counted,
             else => false,
         };
         if (construction_control_counted) {
@@ -2507,11 +2518,20 @@ pub const WorldDataService = struct {
     }
 
     fn processWarehouseControl(self: *WorldDataService, request: Request, control: WarehouseControl) void {
+        var retained = false;
+        defer if (!retained) self.releaseWarehouseControl(control, std.meta.activeTag(request));
+        if (self.is_shutting_down.load(.acquire)) return;
         const subscriptions = &control.client.warehouse_subscriptions;
         if (request == .warehouse_unsubscribe) {
             if (subscriptions.get(control.identity.id)) |known| if (known.token == control.token and known.identity.eql(control.identity)) {
                 _ = subscriptions.remove(control.identity.id);
             };
+            for (self.pending_warehouse_subscriptions.items, 0..) |pending, index| {
+                if (pending.client == control.client and pending.token == control.token and pending.identity.eql(control.identity)) {
+                    self.releaseWarehouseControl(self.pending_warehouse_subscriptions.orderedRemove(index), .warehouse_subscribe);
+                    break;
+                }
+            }
             return;
         }
         if (request == .warehouse_resync) {
@@ -2520,9 +2540,71 @@ pub const WorldDataService = struct {
             }
             return;
         }
-        if (subscriptions.get(control.identity.id)) |known| if (control.token <= known.token) return;
-        if (!subscriptions.contains(control.identity.id) and subscriptions.count() >= self.limits.pending_commands) return;
-        subscriptions.put(self.allocator, control.identity.id, .{ .identity = control.identity, .token = control.token }) catch |err| self.retryConstructionAfterFailure(err);
+        for (self.pending_warehouse_subscriptions.items, 0..) |pending, index| {
+            if (pending.client != control.client or pending.identity.id != control.identity.id) continue;
+            if (control.token <= pending.token) return;
+            self.releaseWarehouseControl(self.pending_warehouse_subscriptions.orderedRemove(index), .warehouse_subscribe);
+            break;
+        }
+        const waiting = for (self.pending_warehouse_subscriptions.items) |pending| {
+            if (pending.client == control.client) break true;
+        } else false;
+        // A release and fresh subscribe can share a request batch. Give older
+        // waiters the free slot at publication; existing live renewals need none.
+        if ((subscriptions.contains(control.identity.id) or !waiting) and self.installWarehouseSubscription(control)) return;
+        // Counted ingress bounds all retained subscribes. This append cannot
+        // allocate after installation failed, including on OutOfMemory.
+        self.pending_warehouse_subscriptions.appendAssumeCapacity(control);
+        retained = true;
+    }
+
+    fn warehouseControlCounter(self: *WorldDataService, kind: std.meta.Tag(Request)) *std.atomic.Value(usize) {
+        return switch (kind) {
+            .warehouse_subscribe => &self.outstanding_warehouse_subscriptions,
+            // Resync stays transient, independently of retained subscriptions.
+            .warehouse_resync => &self.outstanding_construction_controls,
+            .warehouse_unsubscribe => &self.outstanding_warehouse_unsubscribes,
+            else => unreachable,
+        };
+    }
+
+    fn releaseWarehouseControl(self: *WorldDataService, control: WarehouseControl, kind: std.meta.Tag(Request)) void {
+        if (!control.counted) return;
+        const outstanding = self.warehouseControlCounter(kind);
+        const previous = outstanding.fetchSub(1, .release);
+        std.debug.assert(previous != 0);
+    }
+
+    /// Returns true once installed or superseded. Capacity failures wait for a
+    /// release; allocation failures also arrange a bounded wall-clock wakeup.
+    fn installWarehouseSubscription(self: *WorldDataService, control: WarehouseControl) bool {
+        const subscriptions = &control.client.warehouse_subscriptions;
+        if (subscriptions.getPtr(control.identity.id)) |known| {
+            if (control.token > known.token) known.* = .{ .identity = control.identity, .token = control.token };
+            return true;
+        }
+        if (subscriptions.count() >= self.limits.warehouse_subscriptions) return false;
+        subscriptions.put(self.allocator, control.identity.id, .{ .identity = control.identity, .token = control.token }) catch |err| {
+            self.retryConstructionAfterFailure(err);
+            return false;
+        };
+        return true;
+    }
+
+    fn retryWarehouseSubscriptions(self: *WorldDataService, client: *Client) void {
+        var index: usize = 0;
+        while (index < self.pending_warehouse_subscriptions.items.len) {
+            const control = self.pending_warehouse_subscriptions.items[index];
+            if (control.client == client and self.installWarehouseSubscription(control)) {
+                // Preserve arrival order so churn cannot starve older waiters.
+                self.releaseWarehouseControl(self.pending_warehouse_subscriptions.orderedRemove(index), .warehouse_subscribe);
+            } else index += 1;
+        }
+    }
+
+    fn discardPendingWarehouseSubscriptions(self: *WorldDataService) void {
+        for (self.pending_warehouse_subscriptions.items) |control| self.releaseWarehouseControl(control, .warehouse_subscribe);
+        self.pending_warehouse_subscriptions.clearRetainingCapacity();
     }
 
     fn evaluatedCommandPrefix(self: *WorldDataService, client: *Client) u64 {
@@ -2567,28 +2649,36 @@ pub const WorldDataService = struct {
         // This executor does not evaluate commands during the publication
         // batch, so every object can share one coherent command-prefix cut.
         var resolved_sequence: ?u64 = null;
-        var it = client.warehouse_subscriptions.iterator();
-        while (it.next()) |entry| {
-            const known = entry.value_ptr;
-            const record = self.worker_state.warehouses.get(known.identity);
-            if (record) |value| {
-                if (!known.resync and known.revision == value.revision) continue;
-                if (resolved_sequence == null) resolved_sequence = self.evaluatedCommandPrefix(client);
-                var snapshot: warehouse_stream.Snapshot = .{ .identity = value.identity, .record = value, .subscription_id = known.token, .resolved_sequence = resolved_sequence.? };
-                if (client.registered_player_id) |id| if (self.players.get(id)) |player| {
-                    snapshot.player_inventory = .{ .player_id = id, .material = if (player.inventory) |material| @enumFromInt(material) else null };
-                };
-                try self.queueWarehouseUpdate(client, .{ .snapshot = snapshot });
-                known.revision = value.revision;
-                known.resync = false;
-            } else {
-                const retired = known.identity.world_session == self.world_session and known.identity.kind == .warehouse and known.identity.id < self.worker_state.warehouses.next_id;
-                try self.queueWarehouseUpdate(client, if (retired)
-                    .{ .retired = .{ .identity = known.identity, .subscription_id = known.token } }
-                else
-                    .{ .unavailable = .{ .identity = known.identity, .subscription_id = known.token } });
-                client.warehouse_subscriptions.removeByPtr(entry.key_ptr);
+        while (true) {
+            self.retryWarehouseSubscriptions(client);
+            var released = false;
+            var it = client.warehouse_subscriptions.iterator();
+            while (it.next()) |entry| {
+                const known = entry.value_ptr;
+                const record = self.worker_state.warehouses.get(known.identity);
+                if (record) |value| {
+                    if (!known.resync and known.revision == value.revision) continue;
+                    if (resolved_sequence == null) resolved_sequence = self.evaluatedCommandPrefix(client);
+                    var snapshot: warehouse_stream.Snapshot = .{ .identity = value.identity, .record = value, .subscription_id = known.token, .resolved_sequence = resolved_sequence.? };
+                    if (client.registered_player_id) |id| if (self.players.get(id)) |player| {
+                        snapshot.player_inventory = .{ .player_id = id, .material = if (player.inventory) |material| @enumFromInt(material) else null };
+                    };
+                    try self.queueWarehouseUpdate(client, .{ .snapshot = snapshot });
+                    known.revision = value.revision;
+                    known.resync = false;
+                } else {
+                    const retired = known.identity.world_session == self.world_session and known.identity.kind == .warehouse and known.identity.id < self.worker_state.warehouses.next_id;
+                    try self.queueWarehouseUpdate(client, if (retired)
+                        .{ .retired = .{ .identity = known.identity, .subscription_id = known.token } }
+                    else
+                        .{ .unavailable = .{ .identity = known.identity, .subscription_id = known.token } });
+                    client.warehouse_subscriptions.removeByPtr(entry.key_ptr);
+                    released = true;
+                }
             }
+            // Retirement/unavailability may have released a slot needed by an
+            // accepted interest. Retry it in this publication turn as well.
+            if (!released or self.pending_warehouse_subscriptions.items.len == 0) break;
         }
     }
 
@@ -14518,6 +14608,7 @@ const WarehouseAuthorityFixture = struct {
         errdefer self.deinit();
         try self.service.clients.append(a, &self.client);
         try self.service.players.put(a, 1, .{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+        try self.service.pending_warehouse_subscriptions.ensureTotalCapacityPrecise(a, self.service.limits.pending_commands);
     }
 
     fn restore(self: *@This(), saved: *storage.Store) !void {
@@ -14565,6 +14656,8 @@ const WarehouseAuthorityFixture = struct {
         self.client.subscriptions.deinit(a);
         self.client.warehouse_results.deinit(a);
         self.client.warehouse_subscriptions.deinit(a);
+        self.service.discardPendingWarehouseSubscriptions();
+        self.service.pending_warehouse_subscriptions.deinit(a);
         self.client.command_ledger.deinit(a, &self.service.command_budget);
         self.service.clients.deinit(a);
         self.service.players.deinit(a);
@@ -14608,6 +14701,13 @@ const WarehouseAuthorityFixture = struct {
         var result: [3]f64 = undefined;
         for (0..3) |axis| result[axis] = @as(f64, @floatFromInt(cell[axis])) - @as(f64, @floatFromInt(test_layout.origin_chunk[axis] * CHUNK_SIZE)) + 0.5;
         return result;
+    }
+
+    fn drainRequests(self: *@This()) void {
+        var batch: std.ArrayList(Request) = .empty;
+        defer batch.deinit(self.service.allocator);
+        self.service.requests.takeAll(self.service.io, &batch);
+        for (batch.items) |request| self.service.processRequest(request);
     }
 };
 
@@ -14670,6 +14770,215 @@ test "warehouse authority manual transfer preserves player stock and accepted in
     try std.testing.expectEqual(@as(?u8, @intFromEnum(rules.BlockType.dirt)), fixture.service.players.get(1).?.inventory);
     try std.testing.expect(!outcome.warehouse.?.enabled);
     try state.validate(a);
+}
+
+test "warehouse authority subscriptions outlive the pending command queue limit" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    service.limits.pending_commands = 1;
+    const state = &service.worker_state.warehouses;
+    const first = try state.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 10, 10, 70 }, .{ 1, 1 }), .dirt);
+    const second = try state.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 14, 10, 70 }, .{ 1, 1 }), .dirt);
+    const first_token = try fixture.client.trySubscribeWarehouse(first.identity);
+    fixture.drainRequests();
+    const second_token = try fixture.client.trySubscribeWarehouse(second.identity);
+    fixture.drainRequests();
+    try std.testing.expectEqual(@as(u32, 2), fixture.client.warehouse_subscriptions.count());
+    try fixture.client.tryUnsubscribeWarehouse(first.identity, first_token);
+    fixture.drainRequests();
+    try fixture.client.tryResyncWarehouse(second.identity, second_token);
+    fixture.drainRequests();
+    try service.prepareWarehousePublication(&fixture.client);
+    try std.testing.expectEqual(@as(usize, 1), fixture.client.pending.warehouse_updates.items.len);
+    const snapshot = fixture.client.pending.warehouse_updates.items[0].snapshot;
+    try std.testing.expect(snapshot.identity.eql(second.identity));
+    try std.testing.expectEqual(second_token, snapshot.subscription_id);
+}
+
+test "warehouse authority retained subscriptions recover capacity without another client request" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    service.limits.pending_commands = 1;
+    service.limits.warehouse_subscriptions = 1;
+    const state = &service.worker_state.warehouses;
+    const first = try state.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 10, 10, 70 }, .{ 1, 1 }), .dirt);
+    const second = try state.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 14, 10, 70 }, .{ 1, 1 }), .dirt);
+    const first_token = try fixture.client.trySubscribeWarehouse(first.identity);
+    fixture.drainRequests();
+    const second_token = try fixture.client.trySubscribeWarehouse(second.identity);
+    fixture.drainRequests();
+    try std.testing.expectEqual(@as(usize, 1), service.pending_warehouse_subscriptions.items.len);
+    try std.testing.expectEqual(@as(usize, 1), service.outstanding_warehouse_subscriptions.load(.monotonic));
+    try std.testing.expectError(error.Busy, fixture.client.trySubscribeWarehouse(first.identity));
+    // Retained warehouse admissions cannot block active resyncs or unrelated
+    // construction controls. Their original transient queue remains bounded.
+    try fixture.client.tryResyncWarehouse(first.identity, first_token);
+    fixture.drainRequests();
+    try fixture.client.tryRequestBlueprintDefinition(1);
+    try std.testing.expectError(error.Busy, fixture.client.tryRequestBlueprintDefinition(2));
+    fixture.drainRequests();
+    try std.testing.expectEqual(@as(usize, 0), service.outstanding_construction_controls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), service.outstanding_warehouse_subscriptions.load(.monotonic));
+    // Release traffic progresses under saturation but has its own queue bound.
+    try fixture.client.tryUnsubscribeWarehouse(first.identity, first_token + 1);
+    try std.testing.expectError(error.Busy, fixture.client.tryUnsubscribeWarehouse(first.identity, first_token));
+    fixture.drainRequests();
+    try service.prepareWarehousePublication(&fixture.client);
+    try std.testing.expectEqual(@as(u32, 1), fixture.client.warehouse_subscriptions.count());
+    try std.testing.expectEqual(@as(usize, 1), fixture.client.pending.warehouse_updates.items.len);
+    try std.testing.expect(fixture.client.pending.warehouse_updates.items[0].snapshot.identity.eql(first.identity));
+    try fixture.client.tryUnsubscribeWarehouse(first.identity, first_token);
+    fixture.drainRequests();
+    try service.prepareWarehousePublication(&fixture.client);
+    try std.testing.expectEqual(@as(usize, 0), service.pending_warehouse_subscriptions.items.len);
+    try std.testing.expectEqual(@as(usize, 0), service.outstanding_warehouse_subscriptions.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 0), service.outstanding_warehouse_unsubscribes.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), fixture.client.warehouse_subscriptions.count());
+    try std.testing.expectEqual(@as(usize, 2), fixture.client.pending.warehouse_updates.items.len);
+    const snapshot = fixture.client.pending.warehouse_updates.items[1].snapshot;
+    try std.testing.expect(snapshot.identity.eql(second.identity));
+    try std.testing.expectEqual(second_token, snapshot.subscription_id);
+}
+
+test "warehouse authority retained subscriptions retry allocation pressure beside live publications" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    service.limits.pending_commands = 1;
+    const state = &service.worker_state.warehouses;
+    var records: [7]warehouse_state.Record = undefined;
+    for (&records, 0..) |*record, index| {
+        record.* = try state.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 10 + @as(u32, @intCast(index)) * 4, 10, 70 }, .{ 1, 1 }), .dirt);
+        if (index == records.len - 1) break;
+        const token = try fixture.client.trySubscribeWarehouse(record.identity);
+        fixture.drainRequests();
+        try std.testing.expectEqual(token, fixture.client.warehouse_subscriptions.get(record.identity.id).?.token);
+    }
+    try service.prepareWarehousePublication(&fixture.client);
+    // Six live entries fill the initial eight-slot map's admission capacity.
+    const desired = records[records.len - 1];
+    const token = try fixture.client.trySubscribeWarehouse(desired.identity);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+    service.allocator = failing.allocator();
+    fixture.drainRequests();
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), service.pending_warehouse_subscriptions.items.len);
+    try std.testing.expectEqual(@as(usize, 1), service.outstanding_warehouse_subscriptions.load(.monotonic));
+    try std.testing.expect(service.construction_retry_deadline != null);
+    try state.ensureRevision();
+    try state.getPtr(records[0].identity).?.put(.dirt, 1);
+    state.commitChanged();
+    try service.prepareWarehousePublication(&fixture.client);
+    var published_change = false;
+    for (fixture.client.pending.warehouse_updates.items) |update| if (update.snapshot.identity.eql(records[0].identity)) {
+        published_change = update.snapshot.record.stock == 1;
+    };
+    try std.testing.expect(published_change);
+    try std.testing.expectEqual(@as(usize, 1), service.pending_warehouse_subscriptions.items.len);
+    service.allocator = a;
+    // Exercise the existing idle-worker wake, with no rediscovery or resync.
+    service.construction_retry_deadline = persistence.now(service.io) - 1;
+    service.checkWatchdog();
+    try std.testing.expect(service.async_progress);
+    try service.prepareWarehousePublication(&fixture.client);
+    try std.testing.expectEqual(@as(usize, 0), service.pending_warehouse_subscriptions.items.len);
+    try std.testing.expectEqual(@as(usize, 0), service.outstanding_warehouse_subscriptions.load(.monotonic));
+    var published_desired = false;
+    for (fixture.client.pending.warehouse_updates.items) |update| if (update.snapshot.identity.eql(desired.identity)) {
+        published_desired = update.snapshot.subscription_id == token;
+    };
+    try std.testing.expect(published_desired);
+}
+
+test "warehouse authority retained subscriptions admit older waiters before new arrivals" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    service.limits.pending_commands = 4;
+    service.limits.warehouse_subscriptions = 1;
+    var records: [5]warehouse_state.Record = undefined;
+    var tokens: [5]u64 = undefined;
+    for (0..4) |index| {
+        records[index] = try service.worker_state.warehouses.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 10 + @as(u32, @intCast(index)) * 4, 10, 70 }, .{ 1, 1 }), .dirt);
+        tokens[index] = try fixture.client.trySubscribeWarehouse(records[index].identity);
+        fixture.drainRequests();
+    }
+    try fixture.client.tryUnsubscribeWarehouse(records[0].identity, tokens[0]);
+    fixture.drainRequests();
+    try service.prepareWarehousePublication(&fixture.client);
+    try std.testing.expect(fixture.client.warehouse_subscriptions.contains(records[1].identity.id));
+    // Renewing an already-live interest consumes no slot and still progresses.
+    tokens[1] = try fixture.client.trySubscribeWarehouse(records[1].identity);
+    fixture.drainRequests();
+    try std.testing.expectEqual(tokens[1], fixture.client.warehouse_subscriptions.get(records[1].identity.id).?.token);
+    records[4] = try service.worker_state.warehouses.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 26, 10, 70 }, .{ 1, 1 }), .dirt);
+    // The fresh arrival shares a request batch with the release. It must not
+    // take the open slot before the older retained interest can retry.
+    try fixture.client.tryUnsubscribeWarehouse(records[1].identity, tokens[1]);
+    tokens[4] = try fixture.client.trySubscribeWarehouse(records[4].identity);
+    fixture.drainRequests();
+    try service.prepareWarehousePublication(&fixture.client);
+    try std.testing.expect(fixture.client.warehouse_subscriptions.contains(records[2].identity.id));
+    try std.testing.expectEqual(tokens[2], fixture.client.pending.warehouse_updates.items[1].snapshot.subscription_id);
+}
+
+test "warehouse authority retained subscription cancellation renewal and shutdown do not resurrect tokens" {
+    const a = std.testing.allocator;
+    const Outcome = enum { recover, cancel, shutdown };
+    for (std.enums.values(Outcome)) |outcome| {
+        var fixture: WarehouseAuthorityFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const service = &fixture.service;
+        const record = try service.worker_state.warehouses.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 10, 10, 70 }, .{ 1, 1 }), .dirt);
+        const old = try fixture.client.trySubscribeWarehouse(record.identity);
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+        service.allocator = failing.allocator();
+        fixture.drainRequests();
+        service.allocator = a;
+        const renewed = try fixture.client.trySubscribeWarehouse(record.identity);
+        service.allocator = failing.allocator();
+        fixture.drainRequests();
+        service.allocator = a;
+        try std.testing.expectEqual(@as(usize, 1), service.pending_warehouse_subscriptions.items.len);
+        try std.testing.expectEqual(renewed, service.pending_warehouse_subscriptions.items[0].token);
+        try fixture.client.tryUnsubscribeWarehouse(record.identity, old);
+        fixture.drainRequests();
+        try std.testing.expectEqual(@as(usize, 1), service.pending_warehouse_subscriptions.items.len);
+        switch (outcome) {
+            .recover => {},
+            .cancel => {
+                try fixture.client.tryUnsubscribeWarehouse(record.identity, renewed);
+                service.allocator = failing.allocator();
+                fixture.drainRequests();
+                service.allocator = a;
+            },
+            .shutdown => {
+                // Match the worker's shutdown transition, including a final
+                // accepted control already in the request mailbox.
+                _ = try fixture.client.trySubscribeWarehouse(record.identity);
+                service.is_shutting_down.store(true, .release);
+                service.discardPendingWarehouseSubscriptions();
+                fixture.drainRequests();
+            },
+        }
+        try service.prepareWarehousePublication(&fixture.client);
+        try std.testing.expectEqual(@as(usize, 0), service.pending_warehouse_subscriptions.items.len);
+        try std.testing.expectEqual(@as(usize, 0), service.outstanding_warehouse_subscriptions.load(.monotonic));
+        try std.testing.expectEqual(@as(usize, 0), service.outstanding_warehouse_unsubscribes.load(.monotonic));
+        try std.testing.expectEqual(@as(usize, if (outcome == .recover) 1 else 0), fixture.client.pending.warehouse_updates.items.len);
+        if (outcome == .recover) try std.testing.expectEqual(renewed, fixture.client.pending.warehouse_updates.items[0].snapshot.subscription_id);
+    }
 }
 
 test "warehouse authority object publications coalesce independently of discovery and stale tokens" {

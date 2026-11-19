@@ -84,6 +84,20 @@ The real-service dispatcher test also passed in Debug. These checks cover:
 - Complete loose/member base-pallet sources for both mesh and block subscriptions, no terrain
   pallet faces, unchanged terrain on stock-only mutation, and a full-chunk 64 KiB source cap
   with release/retry and explicit empty replacement.
+- Warehouse subscription admission beyond the pending-command queue limit; retained live-capacity
+  and allocation failures recover without rediscovery or another client request. Saturated
+  admission still permits bounded unsubscribe traffic, while cancellation, renewal, stale
+  tokens and shutdown release the appropriate reservations without resurrecting subscriptions.
+
+The service allows 4,096 live warehouse subscriptions per client independently of the default
+256 admitted subscription requests. Accepted subscriptions awaiting capacity or allocation retain
+their service-wide admission reservation in startup-allocated storage of `pending_commands`
+scalar intents. Arrival order prevents new waiters from starving older ones. Warehouse
+unsubscribes have a separate service-wide allowance of `pending_commands` queued controls so
+releases can progress under saturation. Construction controls and warehouse resyncs retain
+their existing transient allowance of `pending_commands`; waiting warehouse admissions cannot
+block them. Allocation failures use the existing bounded watchdog wake; live-capacity failures
+retry during publication after a release.
 
 Version 8 also round-trips a pallet in the persisted player slot. Warehouse metadata is a
 complete compact domain snapshot only when changed, sharing the terrain/construction/player
