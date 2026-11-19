@@ -9,7 +9,7 @@ pub const MovementCollision = enum { none, full_cube };
 /// A type property shared by all instances. Occupancy/meshing rules stay separate.
 pub fn movementCollision(block: engine.voxel_chunk.BlockType) MovementCollision {
     return switch (block) {
-        .none => .none,
+        .none, .pallet => .none,
         // Water remains a solid cube until swimming/fluid movement is introduced.
         .stone,
         .dirt,

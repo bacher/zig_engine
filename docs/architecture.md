@@ -113,7 +113,7 @@ Rendering, camera orientation, and local movement consume monotonic frame elapse
 
 The engine exposes independent `setPaused` and `setGameplayInputBlocked` methods. Pause transitions discard the transition frame interval so the paused interval never becomes movement; input transitions release/restore cursor capture and reset mouse deltas without changing simulation time. The voxel app cancels holds and queued controls in `onGameplayInputChanged` and gates background simulation in `onPauseChanged`. Its menu policy can disable pausing for future multiplayer sessions while still blocking input. The application draws its menu after its other UI and dispatches Resume/Exit actions itself; the engine contains no menu state or rendering.
 
-The first warehouse implementation will share the world-service executor while retaining separate world-data and simulation state domains. The full economy's scaling topology and processing cadence remain open. A separate worker at 20 or 40 steps/s was an exploratory option, not a requirement; the [simulation timing rules](simulation-notes.md#world-time-and-no-offline-progress) do not require fixed processing ticks. The current simulation worker remains the two-second block-edit example, and the world-data service remains command-driven. [Warehouse Q22](../specs/features/warehouses.md#q22--initial-execution-of-simulation-owned-warehouses) records this selected initial execution, its load-validation requirement, and retained independent/partitioned alternatives; no runtime topology change has been made. Main-thread render/meshing stalls can still delay visible feedback. Player collisions use the latest delivered cache state, including optimistic edits, rather than waiting for authoritative worker state.
+The warehouse implementation shares the world-service executor while retaining separate world-data and simulation state domains. The full economy's scaling topology and processing cadence remain open. A separate worker at 20 or 40 steps/s was an exploratory option, not a requirement; the [simulation timing rules](simulation-notes.md#world-time-and-no-offline-progress) do not require fixed processing ticks. The current simulation worker remains the two-second block-edit example, and the world-data service remains command-driven. [Warehouse Q22](../specs/features/warehouses.md#q22--initial-execution-of-simulation-owned-warehouses) records this initial execution, its load-validation requirement, and retained independent/partitioned alternatives. Warehouse stock and accepted deliveries use local bounded transitions on that executor; the example simulation worker does not become a courier scheduler. Main-thread render/meshing stalls can still delay visible feedback. Player collisions use the latest delivered cache state, including optimistic edits, rather than waiting for authoritative worker state.
 
 ## Ownership and concurrency boundaries
 
@@ -169,7 +169,21 @@ and client grouping reuse remain [measured follow-ups](validation/construction-t
 and extend that simulation-state/capture boundary with distinct inventory records and full-object
 snapshots. Common identity and query paths must distinguish real built targets from packed cargo;
 a construction's completion must never materialize or retire a warehouse in its cavity.
-Warehouse runtime records and the mixed integration cases remain future work.
+`warehouse_state` owns stock, active capacity, lifecycle, derived layouts and envelope claims;
+`warehouse_deliveries` retains accepted cargo and destination promises. `warehouse_commands`
+extends the shared external-command ledger, while automatic batches use executor-local APIs.
+`warehouse_stream` and `warehouse_client` provide identity-only chunk discovery, independently
+subscribed scalar snapshots, evaluated-command fences and optimistic reconciliation. Movement
+reads packed occupancy separately from support/capture reads. The v8 persistence transaction
+captures terrain, construction, warehouse/delivery records and player inventory together.
+Native evidence and remaining workload limits are in [warehouse validation](validation/warehouses.md).
+
+Packed rendering is independent of terrain mesh residency and shaders. Cube goods use flat
+explicit-direction exposed-face records; irregular goods and full packaging use separate
+instanced batches. Sources retain chunk-relative coordinates and update on relevant logical
+changes. Loose pallets use an auxiliary source for both block and mesh subscriptions, allowing
+cargo and the free-base pallet/icon to switch without remeshing terrain. See
+[packed blocks](packed-blocks.md) for shared appearance and physics contracts.
 
 The general [save compatibility policy](persistence.md#save-compatibility) applies to the
 whole world, including blueprints. There is one current game logic; blueprint definitions

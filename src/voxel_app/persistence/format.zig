@@ -1,10 +1,10 @@
 //! Versioned wire codecs. All wire storage is bytes, never native struct layout.
 const std = @import("std");
 const generation_settings = @import("../generation_settings.zig");
-// Version 7 moves active target contents/progress into simulation and removes
-// packed soil. Older development worlds have incompatible rules and ownership.
-pub const current_write_version: u32 = 7;
-pub const minimum_readable_version: u32 = 7;
+// Version 8 adds warehouse objects and accepted cargo/promise snapshots to the
+// same world transaction. Older development worlds are intentionally rejected.
+pub const current_write_version: u32 = 8;
+pub const minimum_readable_version: u32 = 8;
 pub const Uuid = [16]u8;
 pub const Digest = [32]u8;
 pub const cell_count = 32768;
@@ -72,7 +72,7 @@ pub const Chunk = struct {
 /// Wire material IDs are independent of the runtime enum's native representation.
 pub fn validBlockMaterial(material: u8) bool {
     return switch (material) {
-        0...6, 8...20, 255 => true,
+        0...6, 8...20, 23, 255 => true,
         else => false,
     };
 }
@@ -267,7 +267,7 @@ fn validatePlayer(player: Player) Error!void {
     if (!std.math.isFinite(player.yaw) or !std.math.isFinite(player.pitch)) return error.InvalidFormat;
     // Persist only placeable inventory materials, including the adaptive-road item.
     if (player.inventory) |material| switch (material) {
-        2, 4, 5, 6, 8...14 => {},
+        2, 4, 5, 6, 8...14, 23 => {},
         else => return error.InvalidFormat,
     };
 }
@@ -860,7 +860,7 @@ test "all metadata sections may reach independent bounds and full wire record ca
 pub const max_chunk_record_bytes = maximum_chunk_size;
 
 test "inventory schema roundtrips all carried materials and migrates legacy empty players" {
-    for ([_]?u8{ null, 2, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14 }) |material| {
+    for ([_]?u8{ null, 2, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 23 }) |material| {
         const player: Player = .{ .id = 4, .feet = .{ 1, 2, 3 }, .yaw = 0.5, .pitch = 0.25, .inventory = material };
         const encoded = try encodePlayer(player);
         try std.testing.expectEqualDeep(player, try decodePlayer(&encoded));

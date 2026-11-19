@@ -2,7 +2,7 @@
 service: zig_engine
 created: 2026-11-11
 updated: 2026-11-15
-status: approved
+status: partially-implemented
 ---
 
 # Add pallet warehouses
@@ -23,7 +23,9 @@ implementation. Q23 fixes live-session command retries and resynchronization aft
 change. Q24 selects independent object subscriptions with complete snapshots. Q20–Q21
 discuss accounting tradeoffs and soil transformations; Q25 records incremental publication
 as a deferred follow-up for evaluation. Q26 selects reserved-halo displacement recovery.
-Concrete implementation and performance measurements remain separate work.
+Q28 selects complete changed-domain capture and command-time viewpoints; Q29 selects packed
+rendering. Core warehouse implementation is present; validation evidence and remaining
+performance/publication follow-ups are listed under Tasks and in the linked reports.
 
 Q16 makes the warehouse a persistent simulation object addressed by WarehouseId. The
 central layout origin remains a coordinate for bounds and hashing; no pallet owns stock.
@@ -37,9 +39,9 @@ This specification records decisions agreed on 2026-11-11/12. The implementation
 below was originally checked against `main` at `d5d95d9`. The selected implementation baseline
 now includes the [construction ownership change](construction-state-ownership.md#q8--construction-first-then-warehouse-integration)
 first, including its composed readers, shared simulation/capture boundary, and unified soil.
-Warehouse gameplay remains unimplemented. Construction ownership, unified soil, coherent
-capture and the shared external-command ledger are implemented in PR #66; their remaining
-validation is tracked in that spec. References to old terrain/soil representations below are
+Warehouse implementation extends construction ownership, unified soil, coherent capture and
+the shared external-command ledger from PR #66. Native authority/client/GPU validation is
+recorded below; broader target-hardware and full-economy workload validation remains open. References to old terrain/soil representations below are
 historical context, not a requirement to restore them for warehouses.
 
 - [Design principles](../../DESIGN_PRINCIPLES.md) prioritize whole-world simulation
@@ -163,14 +165,15 @@ historical context, not a requirement to restore them for warehouses.
   for excessive deliveries, not ordinary replenishment targets. No operation may make
   stock negative or exceed physical capacity. Incoming reservations also consume this
   ceiling under R31–R33; R53/Q2 defines the reduced-capacity target and admission ceiling.
-- R13: Stored items use reusable packed-block rendering: the contained material cube,
-  pallet texture on the bottom face and lower part of every side, and binding straps on
-  every side. The material remains visually identifiable from outside: pallet/strap artwork
-  covers limited regions, and its transparent gaps reveal the underlying resource texture,
-  not the world behind the cube. Do not replace the material with a uniformly opaque crate
-  surface or make the whole cargo cube translucent. Packaging is not another inventory
-  item. Geometry remains within each unit cell; the loose pallet's height does not increase
-  stack spacing. Reuse this material-plus-packaging appearance outside warehouses (Q13).
+- R13: Stored items use reusable packed-block rendering. Full-cube materials retain their
+  resource texture with pallet artwork on the bottom/lower side faces and binding straps;
+  gaps in that artwork reveal the resource. Irregular materials retain their ordinary base
+  model inside a full-cell packaging model: a complete bottom pallet and two-sided straps,
+  including the top. Adaptive roads use their unformed model; pallet cargo is uniformly
+  scaled to 90% and centered in the cell. Its packaging pallet has the same size and appearance
+  as an empty warehouse base pallet. Only opaque surfaces, cutout texels and geometric holes
+  are used; no semitransparent blending. Packaging adds no inventory item or stack spacing.
+  Reuse this appearance outside warehouses; Q29 selects the separate rendering paths.
 - R14: Packed items collide as full occupied cells regardless of their material's normal
   shape, but supply no construction support. This includes platform, road, and blueprint
   support checks. Their special stacking rules belong to storage, not ordinary placement.
@@ -252,7 +255,9 @@ historical context, not a requirement to restore them for warehouses.
 - R26: Packed geometry participates in scene depth, lighting, shadows, and post-processing.
   Drawing after the chunk mesh means another world-geometry path, not a GUI overlay.
   Unchanged camera frames reuse source data. Stock changes must not require terrain remeshing.
-  Changes only to promised capacity I do not require rebuilding cargo geometry.
+  Changes only to promised capacity I do not require rebuilding cargo geometry. Q29 selects
+  explicit-direction face records and instanced irregular goods in dedicated packed pipelines;
+  ordinary terrain shaders incur no packaging sampling or conditional packaging work.
 - R27: Capture simulation warehouse objects, task/cargo/reservation state, world claims
   and members, and associated player inventory changes as one coherent saved outcome.
   Restore objects/discovery indexes before accepting dependent operations; independent
@@ -457,7 +462,8 @@ historical context, not a requirement to restore them for warehouses.
   not apply to ordinary terrain-pallet removal or placement.
 - R46: Pallet items may be stored as warehouse cargo. One pallet contributes one stock unit
   and occupies one derived unit cell, with the shared packed appearance and full-cube
-  cargo collision. It is not a terrain pallet or another warehouse member and supplies no
+  cargo collision. Its visual model is centered and uniformly scaled to 90% under Q29,
+  inside a full-size packaging pallet and straps. It is not a terrain pallet or another warehouse member and supplies no
   construction support. Player put/take uses the same roughly 100 ms transfer as other cargo;
   taking returns exactly one ordinary carried pallet. Packaging artwork creates no additional
   pallet item. Installing/removing the recovered pallet in terrain still uses R45's ordinary
@@ -540,7 +546,7 @@ historical context, not a requirement to restore them for warehouses.
   or their effects. Keep goods and marker visibility coherent within each published visual
   snapshot, reuse unchanged sources, and preserve registration/revision ownership across
   deferred work. New changes must not postpone work merely to wait for a quiet period.
-  Per-frame work budgets and CPU/GPU representation remain implementation choices to measure;
+  Q29 selects CPU/GPU representation; per-frame work budgets still require measurement;
   this policy does not promise a hard one-frame freshness bound under overload.
 
 ### Cross-chunk warehouse discovery
@@ -696,17 +702,18 @@ historical context, not a requirement to restore them for warehouses.
   unregistered pallet. At least one pallet of that current candidate must be within reach.
   For management, at least one current member pallet or currently occupied cargo cell of
   the addressed registration must be within reach. Use R43's inclusive four-metre
-  camera-to-nearest-full-cell-vertex metric from the current mode's viewpoint and wrapped X
-  handling. Bound the query to this candidate/registration. The original hit need
+  camera-to-nearest-full-cell-vertex metric from the current mode's viewpoint captured in
+  the command at submission, with wrapped X handling (Q28). Bound the query to this candidate/registration. The original hit need
   not survive, and reach is never measured to the layout origin or a formerly occupied slot.
   Once the dialog is open, confirmation needs no fresh cursor ray, camera facing, or line of
   sight; opening the dialog and ordinary stock actions retain R41/R43's targeting rules.
   If out of reach, keep the dialog available for viewing, disable/reject mutations with an
   out-of-reach reason, and leave world/inventory state unchanged. Missing required data cannot
   prove reach or identity. Recheck locally before submission and authoritatively at evaluation;
-  update UI availability when the viewpoint or relevant object state changes. Moving after an
-  operation is accepted does not cancel it; Q23 retries replay its result without a new reach
-  test. An open subscription alone never grants remote mutation rights.
+  update UI availability when the viewpoint or relevant object state changes. Moving after
+  submission does not cancel the command, including while it awaits evaluation; the server
+  checks its captured viewpoint against current members/cargo. Q23 retries replay the retained
+  result without a new reach test. An open subscription alone never grants remote mutation rights.
 
 ### Blueprint capture boundary
 
@@ -1263,7 +1270,8 @@ the originally clicked item has disappeared. Creation still begins from the orig
 cell and revalidates its current component. Out-of-range dialogs remain viewable, but cannot
 mutate state until reach is restored. Confirmation uses distance instead of repeating camera
 targeting while the dialog owns the cursor. Falling or displacement never pauses simulation
-or cancels already accepted work.
+or cancels already submitted work. Q28 fixes the viewpoint at command submission while
+authority still rechecks current object state.
 
 **CONFIRMED 2026-11-11 — ordinary put/arrival overlap.** Extend the existing repacking
 policy (Q1/R30) to otherwise valid manual puts and accepted delivery arrivals. Apply the
@@ -1436,20 +1444,13 @@ markers. When the last item leaves a column, its current material icon or disabl
 reappears on the base pallet. Active-column settings remain available in the warehouse menu;
 there is no duplicate cargo-top badge or through-cargo/world overlay.
 
-The resource itself stays visible in each packed cube. Retain its ordinary material texture
-and apply pallet artwork along the bottom/lower sides plus binding straps across the sides.
-Those marks cover only part of the surface; gaps in their texture reveal the original resource.
-The player can identify the cargo without opening the menu or relying on a material icon.
-Transparent packaging texels do not make holes through the resource or alter full-cube
-collision/support rules. A generic opaque crate replacing the resource texture would not
-satisfy this appearance requirement. This same reusable packed appearance applies to future
-workstation buffers and other owners, independently of warehouse layout and marker policies.
+The resource stays identifiable between the pallet and straps. Full cubes composite packaging
+artwork onto their exterior faces; uncovered texels show the resource. Irregular goods retain
+visible shape and holes, with real packaging geometry under Q29. Neither appearance changes
+full-cell collision or provides structural support. The shared renderer serves other cargo
+owners without depending on warehouse layout or marker policy. Suppress the ordinary base
+pallet when cargo occupies its cell: the packed item supplies that cell's pallet appearance.
 
-A suitable implementation is compositing resource and packaging samples with a coverage
-mask in an opaque material shader. Outside the mask, keep the resource material; within it,
-apply the pallet/strap artwork. This avoids requiring transparent-object sorting or a separate
-coplanar packaging surface. It is an implementation recommendation, not a selected shader API
-or measured performance result. Avoid z-fighting/double pallet geometry at the lowest item.
 Use one coherent presentation snapshot for goods and marker occupancy, even when visual
 publication is coalesced; a column must not show both cargo and its free-pallet marker.
 
@@ -1475,12 +1476,10 @@ one visual snapshot. Unchanged warehouse sources need no rebuild/upload solely b
 new frame is drawn. Existing registration/revision/lifetime checks prevent delayed work
 from resurrecting an unregistered warehouse or replacing newer presentation with older data.
 
-Renderer representation and per-frame work budgets remain implementation review. Compare
-compact per-warehouse GPU state/procedural instances with cached per-item instances built
-only on change, using measurements rather than choosing a time budget from the interaction
-duration. Coalescing saves repeated preparation work; it does not establish measured frame
-smoothness. Marker rules do not permit assuming unloaded warehouse data proves a column
-empty; streaming availability remains Q12.
+Q29 selects the renderer representation. Measure preparation, uploads, retained data and
+GPU work on observed/unobserved workloads before setting per-frame work budgets. Coalescing
+saves repeated preparation work; it does not establish measured frame smoothness. Marker rules
+do not permit assuming unloaded warehouse data proves a column empty; availability remains Q12.
 
 ### Q14 — Registration checks and consistency
 
@@ -1755,7 +1754,7 @@ Simulation still needs only immutable definition materials plus progress, not gr
 [PR #64](https://github.com/bacher/zig_engine/pull/64) already made direct blueprint fulfillment
 writes target-local. Application covering and world-data grass machinery can be reused, with
 composed exposure checks and the removal of compaction prerequisites. The construction implementation
-now applies these rules under world format 7; current semantics are described in
+introduced these rules under world format 7; warehouses advance the shared format to 8, and current semantics are described in
 [block placement](../../docs/block-placement.md#simulation-time-and-transformations).
 No measured performance gain over the previous architecture is claimed.
 
@@ -2015,9 +2014,68 @@ cargo stays packed, with no structural support, blueprint capture identity, or g
 Unified real soil follows construction Q6. Use Q8's mixed acceptance cases together with this
 spec's criteria; no complete supplier/courier scheduler or generic object framework is required.
 
+
+### Q28 — Initial capture representation and command viewpoint
+
+**CONFIRMED 2026-11-15.** When warehouse or accepted-delivery state has changed since the
+last durable capture, encode one complete compact snapshot of those records in the same
+world transaction as terrain, construction and player state. Unchanged warehouse state
+reuses the previous saved state. Local stock transitions do not scan all warehouses or
+write to disk individually. Capture/validation work may scan the bounded records; measure
+its CPU time, temporary allocations and retained memory separately from ordinary transfers.
+A failed capture remains dirty, and later mutations cannot be cleared by an older save's
+acknowledgment. Incremental per-object persistence is a possible measured optimization, not
+a requirement of this first implementation; Q25 concerns client publication separately.
+
+Each external warehouse intent captures the current mode's camera position at submission.
+The authority validates finite/numerically safe coordinates and evaluates the ordinary reach
+metric against the current candidate or registration, using that captured position. It does
+not require a separate authoritative player/observer movement stream. Movement after submission
+cannot cancel the queued action; changed warehouse state can still reject it. New commands use
+new positions, and live dialogs continue updating local availability. Observer cameras outside
+the finite playable volume retain ordinary edge-targeting behavior; numerical validation does
+not impose a new camera-volume restriction. Retries keep the original payload and Q23 outcome.
+
+Q29 separately selects the packed rendering representation.
+
+### Q29 — Explicit packed faces and instanced irregular goods
+
+**CONFIRMED 2026-11-15.** The maximum warehouse contains 150 units. For full-cube goods,
+prepare a flat buffer of exposed faces carrying local `(x, y, z, material, direction)`.
+The vertex shader expands each record into a quad. Do not group faces by direction or build
+terrain-style camera-view index tables. Submit all directions in one batched category draw;
+ordinary hardware backface culling is permitted. Remove internal faces only where the adjacent
+rendered shape fully occludes them: full-cell collision alone cannot justify culling against
+an irregular item with holes. Stock changes rebuild affected sources, not terrain meshes.
+
+Use a dedicated packed fragment shader to composite resource and pallet/strap artwork on
+cube faces. Cube packaging has no internal pallet geometry. No packaging samples or branches
+are added to ordinary terrain shaders. Explicit direction records trade a larger per-face
+layout for simpler updates; this is a selected design, not a measured speedup claim.
+
+Irregular goods use instanced geometry: adaptive roads use the ordinary unformed, non-sloped
+model, and pallet cargo uses the original pallet uniformly scaled to 90% around the unit-cell
+center. Batch all visible irregular goods in one category draw, with a separate instanced draw
+for their packaging. Packaging consists of a real, complete pallet at the cell bottom, equal
+in size and appearance to an empty warehouse base pallet, and straps around the full unit
+cube. Straps may float around a smaller item; render both sides, including the inner opposite
+side and top visible through gaps. Share pallet geometry/artwork across loose/base/packaging
+roles. The smaller pallet cargo remains distinct from its full-size packaging pallet.
+
+All surfaces are opaque or cutout; holes may expose the scene for irregular goods. Use the
+same hole/coverage rules in color, depth and shadows. Do not introduce semitransparent sorting.
+Both paths use ordinary scene depth, lighting and shadows, preserve chunk-relative precision
+and wrapped X, and leave R14 full-cell physics and no-support semantics unchanged.
+
+Batch across retained visible sources without one draw per item or rebuilding all sources for
+a local stock change. Keep markers, cargo and occupied-base suppression on one presentation
+snapshot, with change-driven uploads under Q13. Measure CPU derivation/bookkeeping, uploaded
+bytes, retained/transient memory, draw counts and GPU cost separately. Instancing a common
+model template may cost extra vertices; report that tradeoff rather than assuming it is free.
+
 ## Acceptance Criteria
 
-These criteria cover Q1–Q18, Q22–Q24, and Q26–Q27, including inventory authorities, shared
+These criteria cover Q1–Q18, Q22–Q24, and Q26–Q29, including inventory authorities, shared
 execution, retries, subscriptions, displacement recovery, construction integration, and the
 save baseline, plus repository invariants. Concrete
 data/API integration and implementation phases still require review; they do not claim
@@ -2344,8 +2402,8 @@ that runtime implementation or performance validation has been completed.
   active/disabled configuration; cargo and markers use the same presentation snapshot.
 - AC108: GIVEN any supported packed material WHEN viewed without a dialog or material badge
   THEN exposed portions of its resource texture remain identifiable between pallet/strap
-  artwork; transparent packaging regions show the resource rather than background, and the
-  cargo retains full-cube collision with no construction support.
+  artwork; cube packaging gaps show the resource, while irregular geometry retains its holes
+  under Q29. Both retain full-cell collision with no construction support.
 - AC109: GIVEN several warehouse changes before visual preparation WHEN a snapshot is
   prepared THEN it may render the latest coherent state directly without intermediate
   images, while all accepted resource operations retain their accounting effects.
@@ -2541,8 +2599,9 @@ that runtime implementation or performance validation has been completed.
   defaults even if coordinates are reused; loading an existing registration instead restores
   its saved settings, and changing its material preserves stopped intent.
 - AC169: GIVEN an open management dialog WHEN falling or displacement moves the viewpoint
-  beyond four metres from every current member/cargo cell THEN new mutations are disabled
-  locally and rejected on authoritative evaluation without side effects, while viewing,
+  beyond four metres from every current member/cargo cell before submission THEN new mutations
+  are disabled locally; intents carrying that out-of-range position are rejected by authority
+  without side effects, while viewing,
   physics, and simulation continue; returning within reach permits otherwise valid actions.
 - AC170: GIVEN an open management dialog whose original cargo hit has been removed/repacked
   WHEN another current member or occupied cargo cell is within the inclusive reach limit
@@ -2561,9 +2620,10 @@ that runtime implementation or performance validation has been completed.
   with no pallets or other unsupported source materials WHEN capture validates THEN only
   ordinary capture materials become targets and cargo cells stay empty; no inventory,
   registration, or reservation is serialized into the definition.
-- AC175: GIVEN an accepted dialog command followed by movement out of reach WHEN it completes
-  or its retained result is retried THEN Q23 preserves its single outcome without cancellation
-  or a new reach test; a new command still requires current reach.
+- AC175: GIVEN a submitted dialog command followed by movement out of reach before evaluation
+  WHEN authority processes it THEN reach uses the captured viewpoint and current object state;
+  movement alone does not cancel it. Retried retained results preserve Q23's single outcome
+  without reevaluation; a new command captures the new viewpoint and must pass reach again.
 
 - AC176: GIVEN the construction ownership baseline WHEN warehouses are implemented THEN they
   extend its simulation-state and coherent capture/execution boundary with typed records rather
@@ -2580,6 +2640,21 @@ that runtime implementation or performance validation has been completed.
 - AC180: GIVEN real bare/grassy soil floors and stored soil cargo WHEN querying support/capture
   or running grass work THEN only eligible real floors can support pallets, cargo is excluded
   from structural/capture reads and timers, and no loose/compacted state is reintroduced.
+
+- AC181: GIVEN full-cube cargo WHEN preparing its renderer source THEN exposed face records
+  carry direction explicitly, without direction groups or camera-view index tables, and only
+  visually occluded faces are removed; an irregular neighbor's collision cube cannot hide gaps.
+- AC182: GIVEN ordinary terrain and packed goods WHEN rendering THEN dedicated packed shaders
+  provide packaging without adding packaging texture samples or branches to terrain shaders.
+- AC183: GIVEN adaptive-road or pallet cargo WHEN drawn THEN the road uses its unformed model
+  and the pallet is uniformly scaled to 90% at cell center; both have complete full-size bottom
+  pallet geometry and full-cell straps visible from both sides, including the top and inside.
+- AC184: GIVEN irregular goods across visible sources WHEN submitting scene geometry THEN goods
+  and packaging each use a batched category draw, not per-item draws; changing one source does
+  not rebuild every unchanged source. Color/depth/shadows agree on cutout and geometric holes.
+- AC185: GIVEN a base column gaining or losing cargo WHEN its visual snapshot is installed THEN
+  goods, free-base pallet visibility and markers change coherently, without duplicate pallet
+  surfaces, stale icons, or a terrain remesh caused solely by the stock change.
 
 ## Constraints
 
@@ -2608,7 +2683,7 @@ that runtime implementation or performance validation has been completed.
 
 ## Out of Scope
 
-Runtime implementation in this discussion; pallet crafting and pallet blueprint support;
+Pallet crafting and pallet blueprint support;
 full courier scheduling, route search, supplier matching, and production recipes;
 perishable/partial food crates; workbench
 implementation; new road behavior; a universal pattern language; released-save migrations;
@@ -2617,8 +2692,8 @@ The general observer material-selection menu is also deferred; this feature adds
 for pallets and uses the existing selected-material value.
 In-place expansion, shrink, and merging are deferred under Q11; current footprint changes
 require unregister, ordinary rebuilding, and new registration.
-Concrete warehouse interfaces for capacity, cargo handover, and lifecycle still require
-design before simulation uses them. Q2/Q3/Q4 fix reduced-capacity demand/admission/layout,
+Executor-local warehouse interfaces implement capacity, accepted cargo handover and lifecycle;
+the future scheduler must establish its own routing/payment prerequisites before calling them. Q2/Q3/Q4 fix reduced-capacity demand/admission/layout,
 departure reservations, and stop/enable contracts. Full demand allocation and exceptional
 failure/cancellation remain separate work rather than being implied by excluding the scheduler.
 
@@ -2651,25 +2726,23 @@ Implementation sequence under the agreed contracts:
 
 The initial execution model (Q22), external-command retry boundary (Q23), and independent
 object subscriptions with complete snapshots (Q24) are selected. They do not need another
-architecture choice before starting first-version warehouse implementation.
+architecture choice for this first-version implementation.
 
 Q26 closes the remaining displacement decision: use the registered warehouse's base-level
 halo when ordinary bounded recovery fails, prefer loaded full-body destinations, and acquire
 missing nearby dependencies without delaying simulation. No first-version warehouse gameplay
-choice remains open. Engineering preparation and validation below still apply; this discussion
-has not implemented the feature.
+choice remains open. The implementation and evidence below concretize these contracts; broader
+load validation remains separate from functional correctness.
 
-Engineering preparation remains: finalize warehouse records/version gates, extend the shared
-command ledger with warehouse intents using its existing bounded retention/acknowledgment,
-and implement coherent object/claim admission and retirement, save capture/load integration,
-subscription lifetimes/budgets, and staged verification. These
-concretize accepted contracts; routine field/container/API choices need not become new gameplay
-questions. Review choices that change observable behavior or established performance priorities.
+The implementation extends the common command ledger with warehouse intents, owns records
+and claims in the service's simulation domain, and integrates coherent v8 save/load, independent
+subscriptions, prediction and packed rendering. Routine field/container/API choices preserve
+accepted gameplay. Review future changes that alter behavior or performance priorities.
 
 Select representative observed/unobserved warehouse workloads and record CPU, memory,
 publication, persistence, and mixed streaming costs before declaring the implementation ready.
-Numeric acceptance budgets and renderer representation can be refined through implementation
-measurements; they do not require settling the entire future economy upfront.
+Q29 fixes renderer representation; numeric acceptance budgets can be refined through
+implementation measurements; they do not require settling the entire future economy upfront.
 
 First-version warehouses use the implemented construction-ownership and Q21 soil baseline
 under Q27. They do not depend on full routing/supplier allocation/NPC scheduling or Q25
@@ -2681,7 +2754,7 @@ courier scheduler to this feature.
 
 Q1–Q18 settle warehouse behavior, simulation authority, world-data-owned player inventory,
 and the coherent live-commit/shared-capture baseline. First-version execution and retry
-contracts follow Q22/Q23; concrete access/capture integration remains implementation work;
+contracts follow Q22/Q23; concrete integration is documented in the evidence below;
 Q19/Q27 select the preceding construction ownership implementation; Q20 keeps accounting
 exceptions unselected and Q21 adopts construction's soil model. Q22 selects initial shared
 execution; Q23 fixes external command retry lifetimes. Q24 selects object subscriptions and complete snapshots; Q25 defers incremental publication evaluation. Review the concrete
@@ -2695,9 +2768,9 @@ implementation choices below against those contracts:
 - Extend logical collision/targeting and the existing bounded player-recovery path. Review
   Q26 halo fallback and bounded dependency loading when no candidate is ready, without deleting
   stock, changing the deterministic layout, or treating unknown cells as a free destination.
-- Compare compact owner-driven GPU geometry with cached item instances using observed and
+- Validate Q29 explicit-direction faces and instanced irregular goods using observed and
   unobserved workloads. Measure authority/index/publication work, client derivation, GPU
-  updates, and memory separately before selecting representation and per-frame budgets.
+  updates, and memory separately before selecting per-frame budgets.
 
 The separate logistics design owns route search and endpoint selection for Q15, supplier
 allocation, and exceptional delivery outcomes. The warehouse spec provides admission,
@@ -2728,8 +2801,8 @@ and warehouse lifecycle accounting. Q5 derives selectors/direction from the orig
 chunk-local coordinates without authoritative random state. Q1 excludes authoritative
 column heights, item positions, and layout history. Simulation task records own individual
 deliveries, their cargo, and promises; their relationship to aggregate I is coherent.
-Q22 fixes initial execution ownership and Q23 fixes retry lifetime. Record layout, bounded
-retry encoding, and capture integration remain implementation review.
+Q22 fixes initial execution ownership and Q23 fixes retry lifetime. `warehouse_state.zig`,
+`warehouse_commands.zig` and `persistence/warehouses.zig` implement the records and capture boundary.
 Q17 retains world-data-owned player inventory; Q18 specifies the accepted commit/capture
 baseline; Q19 selects simulation-owned construction targets, with mechanisms detailed
 in the separate [construction spec](construction-state-ownership.md).
@@ -2738,12 +2811,13 @@ Q12 selects derived per-chunk WarehouseId/registration/bounds entries over the f
 with at most eight entries per warehouse. They hold no independent stock or active-count
 copy. Client snapshots and layout/collision/GPU caches remain derived. Spatial claims retain
 multiple owners of shared clearance and retire each independently; no per-air-cell record
-is prescribed. Field widths, wire tags, and save version are not chosen.
+is prescribed. World format 8 stores explicit records described in
+[the persistence format](../formats/world-persistence-v1.md), independently of native layout.
 
 ### API Changes
 
 Required logical operations: register, put, take, configure, stop, enable, and unregister.
-Q4 defines management preconditions; concrete API encoding remains unselected.
+Q4 defines management preconditions; `warehouse_commands.Action` encodes external intents.
 Expose stock transfers independently of ordinary terrain puts/removes, preserving batched
 server access. Delivery acceptance must include aggregate capacity reservation; handover
 consumes that delivery's promise instead of issuing an unreserved put. These are coherent
@@ -2796,8 +2870,8 @@ late replies, floor changes, and restored claims require explicit ownership/avai
   to change the physical footprint; active-column capacity settings remain separate.
   Q14 confirms advisory previews without temporary claims and current coherent confirmation.
   Q13 confirms markers only on empty base pallets, identifiable packaged resources, and
-  change-driven coalesced visuals without intentional delay; renderer representation and
-  preparation budgets remain implementation review.
+  change-driven coalesced visuals without intentional delay; Q29 selects explicit-direction
+  cube faces and instanced irregular goods/packaging. Preparation budgets require measurement.
   Q12 confirms envelope-wide chunk warehouse identity references without stock copies, local claim
   discovery, and near-data unknown guards while retaining distant visual omission.
   Index encoding/recovery and subscription/retention mechanics remain implementation review.
@@ -2826,9 +2900,9 @@ late replies, floor changes, and restored claims require explicit ownership/avai
 
 ### Implementation preparation
 
-- [ ] T5: Finalize concrete data/API changes and implementation phases against the accepted
+- [x] T5: Finalize concrete data/API changes and implementation phases against the accepted
   resource-accounting and readiness contracts; no warehouse gameplay decision remains open.
-- [ ] T15: Finalize warehouse preparation/commit, extend the implemented command ledger with
+- [x] T15: Finalize warehouse preparation/commit, extend the implemented command ledger with
   Q23 warehouse intents, and add failure handling, save integration, and Q24 subscriptions
   under selected Q22 execution.
   Integrate with the already implemented construction handback and Q21 soil model under Q27;
@@ -2836,16 +2910,17 @@ late replies, floor changes, and restored claims require explicit ownership/avai
 
 ### Phase 1 — Authority and shared semantics
 
-- [ ] T6: Add pallet capabilities, one-cell support and support-loss guards, and pure
+- [x] T6: Add pallet capabilities, one-cell support and support-loss guards, and pure
   warehouse layout/occupancy functions; exclude pallets from all construction support paths.
-- [ ] T7: Add simulation-object registration, bounded lookup/reservations, and mutation guards.
-- [ ] T8: Add coherent stock/configuration/lifecycle transfers and persistent records;
+- [x] T7: Add simulation-object registration, bounded lookup/reservations, and mutation guards.
+- [x] T8: Add coherent stock/configuration/lifecycle transfers and persistent records;
   integrate delivery reservations, handover, and retry/recovery invariants with simulation.
 
 ### Phase 2 — Client and presentation
 
-- [ ] T9: Add subscription updates, prediction/reconciliation, and near-data availability.
-- [ ] T10: Add reusable packed rendering, pallet icons, collision, targeting, and dialogs.
+- [x] T9: Add subscription updates, prediction/reconciliation, and near-data availability.
+- [x] T10: Add Q29 reusable packed face/instance rendering, real irregular packaging,
+  coherent pallet icons/base suppression, collision, targeting, and dialogs.
 
 ### Follow-up — Incremental object publication (deferred)
 
@@ -2855,6 +2930,63 @@ late replies, floor changes, and restored claims require explicit ownership/avai
 
 ### Validation
 
-- [ ] T-val: Verify resolved acceptance criteria, including AC176–AC180 and construction
-  AC55–AC60 for mixed identities, reads, handback, capture and publication; verify cross-client/
-  authority agreement, failure/retry/save/load conservation, bounded work, and measured resources.
+- [ ] T-val (partial): Native authority/client, allocation/fault, GPU and mixed construction
+  cases now cover the implemented contracts, including AC176–AC185 and construction AC55–AC60.
+  Component resource measurements are recorded below. Complete T22's sustained target-hardware
+  and whole-frame validation before closing broader performance acceptance.
+
+
+### Implementation evidence and remaining work
+
+Core implementation uses `warehouse_layout`, `warehouse_recognition`, `warehouse_claims`,
+`warehouse_state` and `warehouse_deliveries` for bounded geometry, lifecycle and resource
+transitions. `warehouse_commands` extends the common live-session ledger; `warehouse_stream`
+and `warehouse_client` separate discovery, authoritative snapshots and prediction. Application
+integration adds observer pallet selection, registration/management dialogs, fast transfers,
+full-cell cargo targeting/collision and bounded recovery. Pallet terrain is a real item with
+its own support rules; stock never becomes terrain or blueprint-capture content.
+
+[Native warehouse validation](../../docs/validation/warehouses.md) records coherent v8 capture,
+restore, retry/failure checks, observed/unobserved service workloads and requested allocation
+bounds. [Packed rendering validation](../../docs/validation/warehouse-rendering.md) records
+production GPU readbacks, actual-atlas images, dense-buffer failure/churn tests and source-update
+costs in finite/wrapped worlds. These reports distinguish native/canonical data, client sources,
+CPU work, asynchronous uploads and submitted vertices; none claims a whole-economy speedup.
+
+Mixed integration exercises same-numbered construction/warehouse IDs, a warehouse snapshot
+advancing while construction resynchronizes, and retirement of only the construction owner.
+The service freezes partial construction handback with a player transfer and accepted cargo/
+promise, restores that cut and replays handover without duplicating resources. Real construction
+soil gains grass after completion while packed dirt remains outside timer/support/capture views.
+See `main.zig`, `construction_commands.zig` and the warehouse authority fixtures in
+`world_data_service.zig` for those regression scenarios.
+
+Integrated verification on 2026-11-15:
+
+- `zig build install test -Doptimize=ReleaseFast -j2 --summary all`: 66/66 build steps,
+  3,168 tests passed and 8 skipped; both applications built.
+- `zig build test-gpu -Doptimize=ReleaseSafe`: full GPU suite passed in finite and wrapped
+  worlds, including production packed rendering/readback and scene lifetime checks.
+- Focused ReleaseSafe warehouse service: 56 passed and one expected ReleaseFast measurement
+  skip. Mixed frozen construction/warehouse recovery also passed in Debug.
+- Zig formatting, `git diff --check` and changed-document local file links pass.
+
+Target totals overlap and must not be added. GPU fixtures inspect production color/depth/shadow
+paths; the images omit final postprocessing and do not substitute for a whole-frame workload.
+
+The initial policies cap authoritative warehouses and retained deliveries at 4,096 each;
+client records, references and visual directories have separate bounds. These are explicit
+resource limits with rejection/retry, not a promise that 4,096 simultaneously busy visible
+warehouses fit every target PC. Accepted cargo is never discarded to satisfy a cap.
+
+- [ ] T22: Validate sustained mixed construction/warehouse/terrain activity, many clients,
+  subscription churn, completion bursts and save pressure on target PCs, including whole-frame
+  and GPU execution timings. Component CPU timings and GPU correctness checks do not close this.
+- [ ] T23: Evaluate measured rendering refinements (per-frame preparation budgets, common-model
+  padding versus separate model draws) only if workloads justify them; preserve Q29 appearance
+  and local invalidation. No additional render representation choice blocks the initial feature.
+
+T19 remains the explicitly deferred evaluation of incremental object publication. Full courier
+routing, supplier selection, food payment and exceptional delivery policies remain separate
+features. The spec stays partially implemented while required broader validation remains open;
+these follow-ups do not mean warehouse stock, interaction or rendering is still a design-only proposal.

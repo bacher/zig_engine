@@ -383,9 +383,11 @@ pub const ValidationWindow = struct {
     revisions: [27]?u64 = undefined,
     blueprint_revision: u64 = 0,
     construction_read_revision: u64 = 0,
+    warehouse_revision: u64 = 0,
 
     pub fn isCurrent(self: *const ValidationWindow, world: *const World) bool {
         if (self.blueprint_revision != world.blueprints.revision) return false;
+        if (self.warehouse_revision != world.warehouses.revision) return false;
         if (self.construction_read_revision != world.constructionReadRevision()) return false;
         for (self.chunks.ids[0..self.chunks.count], 0..) |id, i| {
             const revision = if (world.chunks.get(id)) |chunk| chunk.validation_revision else null;
@@ -498,6 +500,7 @@ pub fn validateBlueprintFulfillment(physical: block_rules.Reader, state: *const 
     if (!operation.action.put.isPlaceable() or !blueprint.materialMatches(target.material, operation.action.put)) return .{ .status = .inventory_mismatch };
     const cell: block_rules.Cell = .{ operation.block[0], operation.block[1], operation.block[2] };
     if (physical.immutable_at) |immutable| if (immutable(physical.context, operation.block)) return .{ .status = .constraint_violation, .failure = .{ .reason = .immutable_cell, .subject = cell } };
+    if (physical.mutation_allowed) |allowed| if (allowed(physical.context, operation.block, target.material)) |failure| return .{ .status = if (failure.reason == .missing_data) .missing_data else .constraint_violation, .failure = failure };
     const actual = physical.get(cell) orelse return .{ .status = .missing_data };
     if (actual == .deeprock or operation.action.put == .deeprock) return .{ .status = .constraint_violation, .failure = .{ .reason = .immutable_cell, .subject = cell } };
     if (actual != .none) return .{ .status = .already_exists };
@@ -591,6 +594,7 @@ pub const World = struct {
     allocator: std.mem.Allocator,
     chunks: ChunksHashMap = .empty,
     blueprints: blueprint_runtime.State = .{},
+    warehouses: @import("warehouse_client.zig").Cache = .{},
     construction_availability: ?struct {
         context: *const anyopaque,
         chunk_available: *const fn (*const anyopaque, ChunkId) bool,
@@ -621,7 +625,7 @@ pub const World = struct {
     pub fn init(allocator: std.mem.Allocator, layout: *const WorldLayout) !World {
         const owned_layout = try allocator.create(WorldLayout);
         owned_layout.* = layout.*;
-        return .{ .allocator = allocator, .layout = owned_layout, .blueprints = .{ .layout = owned_layout } };
+        return .{ .allocator = allocator, .layout = owned_layout, .blueprints = .{ .layout = owned_layout }, .warehouses = .{ .world_size = owned_layout.size_in_blocks } };
     }
 
     pub fn deinit(self: *World) void {
@@ -629,6 +633,7 @@ pub const World = struct {
         while (iterator.next()) |chunk| chunk.deinit(self.allocator);
         self.chunks.deinit(self.allocator);
         self.blueprints.deinit(self.allocator);
+        self.warehouses.deinit(self.allocator);
         for (self.pending_operations.items) |*pending| {
             pending.road_undo.deinit(self.allocator);
             pending.road_formations.deinit(self.allocator);
@@ -852,7 +857,7 @@ pub const World = struct {
     }
 
     pub fn reader(self: *const World) block_rules.Reader {
-        return .{ .layout = self.layout, .context = @constCast(self), .block_at = readBlock, .custom_shape_at = readShape, .immutable_at = immutableAt, .playable_y_inset = self.playable_y_inset };
+        return .{ .layout = self.layout, .context = @constCast(self), .block_at = readBlock, .custom_shape_at = readShape, .immutable_at = immutableAt, .mutation_allowed = warehouseMutationAllowed, .playable_y_inset = self.playable_y_inset };
     }
 
     /// Captures the merged local logical view without treating missing blocks as
@@ -1101,6 +1106,23 @@ pub const World = struct {
         return self.chunks.getPtr(self.layout.encodeChunkCoords(coords)).?.ensureData(self.allocator);
     }
 
+    /// Packed goods have movement/target identity without becoming material for
+    /// support, capture, transformations, or construction handback.
+    pub fn warehouseOccupancy(self: *const World, block: [3]u32) @import("warehouse_client.zig").Occupancy {
+        const coords, _ = splitBlockCoords(block);
+        return self.warehouses.occupancy(self.layout.encodeChunkCoords(coords), self.layout.size_in_blocks[0], block);
+    }
+
+    fn warehouseMutationAllowed(context: *anyopaque, block: [3]u32, replacement: BlockType) ?block_rules.Failure {
+        const self: *const World = @ptrCast(@alignCast(context));
+        const coords, _ = splitBlockCoords(block);
+        if (self.warehouses.claimed(self.layout.encodeChunkCoords(coords), self.layout.size_in_blocks[0], block)) {
+            const before = self.physicalBlock(block) orelse return .{ .reason = .missing_data, .subject = .{ block[0], block[1], block[2] } };
+            if (before != replacement) return .{ .reason = .warehouse_claim, .subject = .{ block[0], block[1], block[2] } };
+        }
+        return null;
+    }
+
     pub fn isBlockSolid(self: *const World, block: [3]u32) ChunkNotReceivedError!bool {
         return (self.physicalBlock(block) orelse return error.ChunkNotReceived) != .none;
     }
@@ -1231,7 +1253,7 @@ pub const World = struct {
     }
 
     pub fn validationWindow(self: *const World, target: [3]u32) ValidationWindow {
-        var window: ValidationWindow = .{ .chunks = validationChunks(self.layout, target), .blueprint_revision = self.blueprints.revision, .construction_read_revision = self.constructionReadRevision() };
+        var window: ValidationWindow = .{ .chunks = validationChunks(self.layout, target), .blueprint_revision = self.blueprints.revision, .construction_read_revision = self.constructionReadRevision(), .warehouse_revision = self.warehouses.revision };
         for (window.chunks.ids[0..window.chunks.count], 0..) |id, i|
             window.revisions[i] = if (self.chunks.get(id)) |chunk| chunk.validation_revision else null;
         return window;

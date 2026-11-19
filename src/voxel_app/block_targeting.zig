@@ -121,14 +121,25 @@ fn castInternal(world: *const World, position: Position, direction: Position, pl
         if (exit > distance) {
             if (coordinates.fromStorage(world.layout, cell)) |block| {
                 // Pending targets use their full logical cube while remaining physically air.
-                const physical_solid = try world.isBlockSolid(block);
+                const cargo = switch (world.warehouseOccupancy(block)) {
+                    .cargo => true,
+                    .unknown => return error.ChunkNotReceived,
+                    else => false,
+                };
+                const physical_solid = cargo or try world.isBlockSolid(block);
                 if (planned_targets and !physical_solid and world.blueprints.targetAt(block) != null) {
                     return .{ .block = block, .placement = block, .distance = distance };
                 }
                 if (physical_solid) {
                     var hit_distance = distance;
                     var hit_step = entry_step;
-                    if (world.customShape(block)) |shape| if (shape == .slope) {
+                    if (!cargo and world.physicalBlock(block) == .pallet) {
+                        if (lowBoxHit(start - @as(Position, @floatFromInt(cell)), forward, traversal_limit)) |hit| {
+                            hit_distance = hit.distance;
+                            if (hit.step) |normal| hit_step = normal;
+                        } else hit_distance = std.math.inf(f64);
+                    }
+                    if (!cargo) if (world.customShape(block)) |shape| if (shape == .slope) {
                         const origin: Position = @floatFromInt(cell);
                         const fraction = shape.sweep(start - origin, forward * @as(Position, @splat(traversal_limit)), @splat(0), @splat(0));
                         if (fraction) |t| {
@@ -167,6 +178,32 @@ fn castInternal(world: *const World, position: Position, direction: Position, pl
         }
     }
     return null;
+}
+
+/// One analytic low box, independent of decorative pallet planks and gaps.
+fn lowBoxHit(start: Position, forward: Position, limit: f64) ?struct { distance: f64, step: ?Cell } {
+    var enter: f64 = 0;
+    var leave = limit;
+    var normal: ?Cell = null;
+    inline for (0..3) |axis| {
+        const high: f64 = if (axis == 2) 0.2 else 1;
+        if (forward[axis] == 0) {
+            if (start[axis] < 0 or start[axis] > high) return null;
+        } else {
+            const a = -start[axis] / forward[axis];
+            const b = (high - start[axis]) / forward[axis];
+            const near = @min(a, b);
+            if (near > enter) {
+                enter = near;
+                var step: Cell = @splat(0);
+                step[axis] = if (forward[axis] > 0) 1 else -1;
+                normal = step;
+            }
+            leave = @min(leave, @max(a, b));
+            if (enter > leave) return null;
+        }
+    }
+    return if (leave >= 0 and enter <= limit) .{ .distance = enter, .step = normal } else null;
 }
 
 const Fixture = @import("terrain_test_fixture.zig").Fixture;
@@ -563,4 +600,25 @@ test "physical casts skip planned targets while placement retains them at either
         try std.testing.expectEqual(coordinates.fromWorld(world.layout, backing).?, hit.block);
         try std.testing.expectEqual(coordinates.fromWorld(world.layout, .{ distance + 4, 0, 0 }).?, hit.placement.?);
     }
+}
+
+test "warehouse pallet low box skips high rays while cargo targets a full cube" {
+    var fixture = try Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ 0, 0, 0 }, .pallet);
+    fixture.set(.{ 2, 0, 0 }, .stone);
+    try expectHit(&fixture.world, .{ -1.5, 0.5, 0.5 }, .{ 1, 0, 0 }, .{ 2, 0, 0 }, .{ 1, 0, 0 }, 3.5);
+    try expectHit(&fixture.world, .{ -1.5, 0.5, 0.1 }, .{ 1, 0, 0 }, .{ 0, 0, 0 }, .{ -1, 0, 0 }, 1.5);
+    try expectHit(&fixture.world, .{ 0.5, 0.5, 1 }, .{ 0, 0, -1 }, .{ 0, 0, 0 }, .{ 0, 0, 1 }, 0.8);
+    const cell = coordinates.fromWorld(fixture.world.layout, .{ 0, 0, 0 }).?;
+    const record: @import("warehouse_state.zig").Record = .{ .identity = .{ .kind = .warehouse, .world_session = 91, .id = 1, .lifetime = 1 }, .geometry = try @import("warehouse_layout.zig").Geometry.fromMinimum(fixture.world.layout.size_in_blocks, cell, .{ 1, 1 }), .material = .pallet, .stock = 1, .active = 1, .revision = 1 };
+    const cache = &fixture.world.warehouses;
+    _ = cache.acceptSession(91);
+    const id = fixture.world.layout.encodeChunkCoords(@import("world.zig").splitBlockCoords(cell)[0]);
+    _ = try cache.installChunk(std.testing.allocator, id, 1, 1, &.{.{ .identity = record.identity, .geometry = record.geometry }});
+    cache.subscribed(record.identity, 7);
+    _ = cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 7 } });
+    try expectHit(&fixture.world, .{ -1.5, 0.5, 0.5 }, .{ 1, 0, 0 }, .{ 0, 0, 0 }, .{ -1, 0, 0 }, 1.5);
+    // The composed support/capture view remains the terrain pallet.
+    try std.testing.expectEqual(engine.voxel_chunk.BlockType.pallet, fixture.world.physicalBlock(cell).?);
 }

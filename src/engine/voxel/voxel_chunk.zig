@@ -71,10 +71,11 @@ pub const BlockType = enum(u8) {
     clay = 18,
     coal = 19,
     deeprock = 20,
+    pallet = 23,
     custom = 255,
 
     pub fn occludesFaces(self: BlockType) bool {
-        return self != .none and self != .custom and self != .country_road_adaptive;
+        return self != .none and self != .custom and self != .country_road_adaptive and self != .pallet;
     }
 
     pub fn isRoad(self: BlockType) bool {
@@ -112,9 +113,22 @@ pub const BlockType = enum(u8) {
         return self.isStablePlatformMaterial() or self.isWood();
     }
 
+    /// Cargo eligibility is independent of terrain shape and floor support.
+    pub fn canStoreInWarehouse(self: BlockType) bool {
+        return switch (self) {
+            .dirt, .sand, .snow, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive, .pallet => true,
+            else => false,
+        };
+    }
+
+    /// Pallets use one real, eligible material directly below them (Q7).
+    pub fn canSupportPallet(self: BlockType) bool {
+        return self.isStructural() or self == .country_road_solid;
+    }
+
     pub fn isPlaceable(self: BlockType) bool {
         return switch (self) {
-            .dirt, .water, .sand, .snow, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive => true,
+            .dirt, .water, .sand, .snow, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive, .pallet => true,
             else => false,
         };
     }
@@ -125,7 +139,7 @@ pub const BlockType = enum(u8) {
             .stone => .{ .yields = .crushed_stone },
             .dirt, .grass => .{ .yields = .dirt },
             .custom => .{ .yields = .country_road_adaptive },
-            .water, .sand, .snow, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive => .{ .yields = self },
+            .water, .sand, .snow, .crushed_stone, .tree_trunk, .planks, .rebar, .reinforced_concrete, .country_road_solid, .country_road_adaptive, .pallet => .{ .yields = self },
             .leaves => .remove_without_item,
             else => .forbidden,
         };
@@ -170,6 +184,7 @@ pub const RenderMaterial = enum(u8) {
     deeprock = 20,
     grass_steppe = 21,
     grass_frozen = 22,
+    pallet = 23,
     custom = 255,
 
     pub fn fromBlock(block: BlockType) RenderMaterial {

@@ -51,6 +51,13 @@ const construction_stream = @import("construction_stream.zig");
 const construction_client = @import("construction_client.zig");
 const construction_geometry = @import("construction_geometry.zig");
 const placement_preview = @import("placement_preview.zig");
+const warehouse_stream = @import("warehouse_stream.zig");
+const warehouse_commands = @import("warehouse_commands.zig");
+const warehouse_tool_module = @import("warehouse_tool.zig");
+const warehouse_layout = @import("warehouse_layout.zig");
+const warehouse_reach = @import("warehouse_reach.zig");
+const warehouse_recognition = @import("warehouse_recognition.zig");
+const packed_geometry = @import("packed_geometry.zig");
 const block_diagnostics = @import("block_diagnostics.zig");
 const block_messages = @import("block_messages.zig");
 const held_block = @import("engine").held_block;
@@ -122,6 +129,11 @@ const Game = struct {
     block_action_error: block_messages.TimedError = .{},
     blueprint_tool: BlueprintTool = .{},
     construction_cache: construction_client.Cache = .{},
+    warehouse_tool: warehouse_tool_module.Tool = .{},
+    warehouse_subscriptions_dirty: bool = false,
+    packed_cache: packed_geometry.Cache = .{},
+    packed_extra_pallets: std.ArrayList(u16) = .empty,
+    packed_capacity_warning: bool = false,
     blueprint_renderer: ?blueprint_renderer.Renderer = null,
     blueprint_render_instances: std.ArrayList(blueprint_renderer.Instance) = .empty,
     blueprint_render_preview: ?blueprint_renderer.Preview = null,
@@ -163,6 +175,7 @@ const Game = struct {
     fn clearToolInputs(game: *Game) void {
         game.block_interaction.loseFocus();
         game.blueprint_tool.press.loseFocus();
+        game.warehouse_tool.cancelHold();
         game.tool_commands.clearRetainingCapacity();
         game.jump_requested = false;
         game.engine.input_controller.cursor_position_delta = .{ 0, 0 };
@@ -172,7 +185,7 @@ const Game = struct {
 
     fn updateBlueprintInputBlock(game: *Game) void {
         game.clearToolInputs();
-        game.engine.setGameplayInputBlocked(game.overlay != .none or game.blueprint_tool.controlsBlocked());
+        game.engine.setGameplayInputBlocked(game.overlay != .none or game.blueprint_tool.controlsBlocked() or game.warehouse_tool.dialog != null);
     }
 
     fn discardBlueprintDraft(game: *Game) void {
@@ -443,6 +456,346 @@ const Game = struct {
             name,
         );
         return pressed;
+    }
+
+    fn warehouseHit(game: *Game) ?block_targeting.Hit {
+        const world = if (game.world) |*world| world else return null;
+        const camera = (game.engine.active_scene orelse return null).camera;
+        const hit = (block_targeting.cast(world, camera.position, camera.forwardDirection()) catch return null) orelse return null;
+        return if (block_targeting.withinReach(world.layout, camera.position, hit.block)) hit else null;
+    }
+
+    fn warehouseActor(game: *Game) warehouse_commands.Actor {
+        const position = game.engine.active_scene.?.camera.position;
+        return .{ .player_id = if (game.control_mode == .player) game.player_id else null, .viewpoint = .{ position[0], position[1], position[2] } };
+    }
+
+    fn warehousePallet(context: *const anyopaque, cell: [3]u32) ?bool {
+        const world: *const World = @ptrCast(@alignCast(context));
+        return (world.physicalBlock(cell) orelse return null) == .pallet;
+    }
+
+    fn warehouseWithinReach(game: *Game, geometry: warehouse_layout.Geometry, order: ?*const warehouse_layout.Layout, stock: u16, active: u8) bool {
+        const camera = game.engine.active_scene.?.camera;
+        return warehouse_reach.withinReach(game.layout(), geometry, order, stock, active, camera.position);
+    }
+
+    fn closeWarehouseDialog(game: *Game) void {
+        if (game.warehouse_tool.dialog) |dialog| if (dialog == .management) {
+            game.world.?.warehouses.pin(dialog.management, .dialog, false);
+            game.warehouse_subscriptions_dirty = true;
+        };
+        game.warehouse_tool.close();
+        game.updateBlueprintInputBlock();
+    }
+
+    fn openWarehouseInView(game: *Game) void {
+        const world = if (game.world) |*world| world else return;
+        const hit = game.warehouseHit() orelse return;
+        switch (world.warehouseOccupancy(hit.block)) {
+            .cargo, .member => |record| {
+                game.warehouse_tool.dialog = .{ .management = record.identity };
+                game.warehouse_tool.selected_material = record.material;
+                game.warehouse_tool.active_columns = record.active;
+                world.warehouses.pin(record.identity, .dialog, true);
+            },
+            .unknown => {
+                game.block_action_error.show("Waiting for warehouse data.", game.engine.time);
+                return;
+            },
+            else => {
+                if (world.physicalBlock(hit.block) != .pallet) return;
+                const geometry = warehouse_recognition.recognize(world.layout.size_in_blocks, hit.block, .{ .context = world, .pallet = warehousePallet }) catch {
+                    game.block_action_error.show(warehouse_tool_module.message(.invalid_base), game.engine.time);
+                    return;
+                };
+                if (!game.warehousePreviewValid(geometry)) return;
+                game.warehouse_tool.dialog = .{ .creation = .{ .aim_cell = hit.block, .geometry = geometry } };
+            },
+        }
+        game.warehouse_tool.error_message = null;
+        game.warehouse_subscriptions_dirty = true;
+        game.updateBlueprintInputBlock();
+    }
+
+    fn warehousePreviewValid(game: *Game, geometry: warehouse_layout.Geometry) bool {
+        const world = &game.world.?;
+        const chunks = @import("warehouse_claims.zig").chunks(world.layout.size_in_blocks, geometry) catch return false;
+        for (chunks.coords[0..chunks.count]) |coords| {
+            const id = world.layout.encodeChunkCoords(.{ @intCast(coords[0]), @intCast(coords[1]), @intCast(coords[2]) });
+            for (world.warehouses.chunkReferences(id)) |reference| {
+                const entry = world.warehouses.objects.get(reference.identity) orelse {
+                    game.block_action_error.show(warehouse_tool_module.message(.missing_data), game.engine.time);
+                    return false;
+                };
+                if (entry.retired) continue;
+                if (!@import("warehouse_claims.zig").compatible(world.layout.size_in_blocks, geometry, reference.geometry)) {
+                    game.block_action_error.show(warehouse_tool_module.message(.conflicting_claim), game.engine.time);
+                    return false;
+                }
+            }
+        }
+        var z: i8 = 0;
+        while (z < 6) : (z += 1) {
+            var y = geometry.bounds.ymin - 1;
+            while (y <= geometry.bounds.ymax + 1) : (y += 1) {
+                var x = geometry.bounds.xmin - 1;
+                while (x <= geometry.bounds.xmax + 1) : (x += 1) {
+                    const cell = geometry.worldCell(world.layout.size_in_blocks, .{ x, y, z }) orelse return false;
+                    const material = world.physicalBlock(cell) orelse {
+                        game.block_action_error.show(warehouse_tool_module.message(.missing_data), game.engine.time);
+                        return false;
+                    };
+                    if (world.blueprints.memberAt(cell) != null) {
+                        game.block_action_error.show(warehouse_tool_module.message(.conflicting_claim), game.engine.time);
+                        return false;
+                    }
+                    if (geometry.containsMember(.{ x, y, z })) {
+                        if (material != .pallet) return false;
+                        const below = geometry.worldCell(world.layout.size_in_blocks, .{ x, y, -1 }) orelse return false;
+                        const floor = world.physicalBlock(below) orelse return false;
+                        if (!floor.canSupportPallet()) {
+                            game.block_action_error.show(warehouse_tool_module.message(.invalid_support), game.engine.time);
+                            return false;
+                        }
+                    } else if (material != .none) {
+                        game.block_action_error.show(warehouse_tool_module.message(.obstructed), game.engine.time);
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    fn submitWarehouseAction(game: *Game, action: warehouse_commands.Action) ?@import("construction_commands.zig").Submission {
+        const client = game.world_client orelse return null;
+        return client.trySubmitWarehouse(.{ .actor = game.warehouseActor(), .action = action }) catch {
+            game.warehouse_tool.error_message = warehouse_tool_module.message(.busy);
+            return null;
+        };
+    }
+
+    fn beginWarehouseTransfer(game: *Game, record: @import("warehouse_state.zig").Record, cell: [3]u32, putting: bool, material: voxel_chunk_module.BlockType, player: bool) bool {
+        const rejection: ?warehouse_commands.Rejection = if (putting and material != record.material) .wrong_material else if (putting and !record.canAdd(1)) .full else if (!putting and record.stock == 0) .empty else null;
+        if (rejection) |reason| {
+            game.block_action_error.show(warehouse_tool_module.message(reason), game.engine.time);
+            return false;
+        }
+        // Reserve all client fallible prediction storage before admitting authority.
+        const cache = &game.world.?.warehouses;
+        if (cache.pending.items.len >= cache.limits.pending) return false;
+        cache.pending.ensureUnusedCapacity(game.allocator, 1) catch return false;
+        const submission = game.submitWarehouseAction(.{ .transfer = .{ .identity = record.identity, .aim_cell = cell, .material = material, .direction = if (putting) .put else .take } }) orelse return false;
+        cache.predict(game.allocator, .{ .request_id = submission.request_id, .command = submission.command, .identity = record.identity, .delta = if (putting) 1 else -1, .material = record.material }) catch unreachable;
+        if (player) {
+            game.block_interaction.inventory = if (putting) null else record.material;
+            game.block_interaction.pending = .{ .request_id = submission.request_id };
+            game.warehouse_tool.pending_player = submission.request_id;
+            game.warehouse_tool.pending_player_sequence = submission.command.sequence;
+            game.warehouse_tool.inventory_fence = 0;
+        }
+        if (game.player) |*body| body.terrainChanged();
+        game.clearBlockFocus();
+        return true;
+    }
+
+    fn updatePlayerWarehouseTool(game: *Game) bool {
+        const world = &game.world.?;
+        const interaction = &game.block_interaction;
+        if (game.warehouse_tool.pending_player != null) return true;
+        const hit = game.warehouseHit();
+        const record: ?@import("warehouse_state.zig").Record = if (hit) |value| switch (world.warehouseOccupancy(value.block)) {
+            .cargo, .member => |record| record,
+            else => null,
+        } else null;
+        if (game.warehouse_tool.hold) |*hold| {
+            if (hit == null or record == null or !std.meta.eql(hold.identity, record.?.identity) or !std.meta.eql(hold.aim_cell, hit.?.block)) {
+                game.warehouse_tool.cancelHold();
+                return true;
+            }
+            if (std.math.isFinite(game.engine.frame_delta) and game.engine.frame_delta > 0) hold.elapsed += game.engine.frame_delta;
+            if (hold.elapsed >= warehouse_tool_module.transfer_seconds) {
+                const captured = hold.*;
+                game.warehouse_tool.hold = null;
+                _ = game.beginWarehouseTransfer(record.?, captured.aim_cell, captured.putting, captured.material, true);
+            }
+            return true;
+        }
+        if (record) |value| {
+            interaction.holding = null;
+            if (interaction.requested) |source| {
+                interaction.requested = null;
+                if (interaction.pending != null or world.pending_operations.items.len != 0) return true;
+                game.warehouse_tool.hold = .{ .source = source, .identity = value.identity, .aim_cell = hit.?.block, .material = interaction.inventory orelse value.material, .putting = interaction.inventory != null };
+            }
+            return true;
+        }
+        return false;
+    }
+
+    fn editWarehouseInView(game: *Game, action: BlockAction) bool {
+        const hit = game.warehouseHit() orelse return false;
+        const record = switch (game.world.?.warehouseOccupancy(hit.block)) {
+            .cargo, .member => |value| value,
+            .unknown => return true,
+            else => return false,
+        };
+        _ = game.beginWarehouseTransfer(record, hit.block, action == .place, if (action == .place) action.place else record.material, false);
+        return true;
+    }
+
+    fn flushWarehouseSubscriptions(game: *Game) void {
+        if (!game.warehouse_subscriptions_dirty) return;
+        const client = game.world_client orelse return;
+        const cache = &game.world.?.warehouses;
+        var index: usize = 0;
+        while (index < cache.controls.items.len) {
+            const identity = cache.controls.items[index];
+            const entry = cache.objects.getPtr(identity) orelse {
+                _ = cache.controls.swapRemove(index);
+                continue;
+            };
+            if (!entry.needed()) {
+                if (entry.subscription_id != 0) client.tryUnsubscribeWarehouse(entry.identity, entry.subscription_id) catch {
+                    index += 1;
+                    continue;
+                };
+                game.packed_cache.releaseObject(game.layout(), .{ .identity = identity, .geometry = entry.geometry });
+                cache.forget(identity);
+            } else {
+                if (!entry.retired and entry.subscription_id == 0) {
+                    const token = client.trySubscribeWarehouse(entry.identity) catch {
+                        index += 1;
+                        continue;
+                    };
+                    cache.subscribed(entry.identity, token);
+                } else if (!entry.retired and entry.resync) {
+                    client.tryResyncWarehouse(entry.identity, entry.subscription_id) catch {
+                        index += 1;
+                        continue;
+                    };
+                    // Keep the old cut as a monotonicity guard while resync
+                    // keeps logical occupancy unknown until a full reply.
+                }
+                entry.control_queued = false;
+            }
+            _ = cache.controls.swapRemove(index);
+        }
+        game.warehouse_subscriptions_dirty = cache.controls.items.len != 0;
+    }
+
+    fn receiveWarehouseResults(game: *Game) void {
+        const client = game.world_client orelse return;
+        var results: std.ArrayList(warehouse_commands.Result) = .empty;
+        defer results.deinit(game.allocator);
+        client.takeWarehouseResults(&results);
+        for (results.items) |result| {
+            if (!game.commandResultCurrent(result.command)) continue;
+            const cache = &game.world.?.warehouses;
+            const matched = cache.resolveResult(result.request_id, result.warehouse, result.retired, result.resolved_sequence);
+            var logical_changed = matched;
+            _ = game.warehouse_tool.acknowledgePlayer(result, game.player_id, &game.block_interaction);
+            if (game.warehouse_tool.pending_dialog == result.request_id) {
+                const dialog_active = game.warehouse_tool.dialog != null and !game.warehouse_tool.pending_dialog_closed;
+                game.warehouse_tool.pending_dialog = null;
+                game.warehouse_tool.pending_dialog_closed = false;
+                if (result.status == .success and dialog_active) {
+                    game.closeWarehouseDialog();
+                    if (result.retired) |identity| if (cache.objects.getPtr(identity)) |entry| {
+                        entry.retired = true;
+                        entry.record = null;
+                        entry.resync = false;
+                        cache.queueVisual(identity);
+                        cache.revision +%= 1;
+                        logical_changed = true;
+                    };
+                    if (result.warehouse) |record| {
+                        _ = cache.ensure(game.allocator, .{ .identity = record.identity, .geometry = record.geometry }) catch continue;
+                        logical_changed = cache.acceptResultRecord(record, result.resolved_sequence) or logical_changed;
+                        const current = cache.record(record.identity) orelse continue;
+                        game.warehouse_tool.dialog = .{ .management = record.identity };
+                        game.warehouse_tool.selected_material = current.material;
+                        game.warehouse_tool.active_columns = current.active;
+                        cache.pin(record.identity, .dialog, true);
+                        game.updateBlueprintInputBlock();
+                    }
+                }
+            }
+            if (logical_changed) if (game.player) |*player| player.terrainChanged();
+            if (result.rejection) |reason| {
+                game.warehouse_tool.error_message = warehouse_tool_module.message(reason);
+                game.block_action_error.show(warehouse_tool_module.message(reason), game.engine.time);
+            }
+            game.warehouse_subscriptions_dirty = true;
+        }
+    }
+
+    fn drawWarehouseUI(game: *Game) void {
+        const dialog = game.warehouse_tool.dialog orelse return;
+        const screen = zgui.io.getDisplaySize();
+        zgui.setNextWindowPos(.{ .x = screen[0] / 2, .y = screen[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
+        _ = zgui.begin("Warehouse", .{ .flags = .{ .always_auto_resize = true, .no_collapse = true, .no_saved_settings = true } });
+        defer zgui.end();
+        const busy = game.warehouse_tool.pending_dialog != null;
+        switch (dialog) {
+            .creation => |candidate| {
+                zgui.text("Pallet base: {d} by {d}", .{ candidate.geometry.bounds.width(), candidate.geometry.bounds.height() });
+                zgui.textUnformatted("Choose the material to store:");
+                zgui.beginDisabled(.{ .disabled = busy });
+                for (warehouse_tool_module.materials) |material| {
+                    if (zgui.radioButton(@tagName(material), .{ .active = game.warehouse_tool.selected_material == material })) game.warehouse_tool.selected_material = material;
+                }
+                const nearby = game.warehouseWithinReach(candidate.geometry, null, 0, 0);
+                zgui.beginDisabled(.{ .disabled = !nearby });
+                if (zgui.button("Register warehouse", .{})) {
+                    const geometry = warehouse_recognition.recognize(game.layout().size_in_blocks, candidate.aim_cell, .{ .context = &game.world.?, .pallet = warehousePallet }) catch null;
+                    if (geometry) |current| {
+                        if (game.warehouseWithinReach(current, null, 0, 0) and game.warehousePreviewValid(current)) if (game.submitWarehouseAction(.{ .register = .{ .aim_cell = candidate.aim_cell, .material = game.warehouse_tool.selected_material } })) |submission| {
+                            game.warehouse_tool.pending_dialog = submission.request_id;
+                        };
+                    } else game.warehouse_tool.error_message = warehouse_tool_module.message(.invalid_base);
+                }
+                zgui.endDisabled();
+                if (!nearby) zgui.textUnformatted(warehouse_tool_module.message(.out_of_reach));
+                zgui.endDisabled();
+            },
+            .management => |identity| {
+                if (game.world.?.warehouses.record(identity)) |record| {
+                    zgui.text("Material: {s}", .{@tagName(record.material)});
+                    zgui.text("Stock: {d}  Incoming: {d}", .{ record.stock, record.incoming });
+                    zgui.text("Target: {d}  Active capacity: {d}  Physical capacity: {d}", .{ @as(u16, record.active) * 4, record.activeCapacity(), record.physicalCapacity() });
+                    zgui.text("Automatic work: {s}  Obligations: {d}", .{ if (record.enabled) @as([]const u8, "Enabled") else "Stopped", record.obligations });
+                    const order = &game.world.?.warehouses.objects.getPtr(identity).?.derived_layout;
+                    const nearby = game.warehouseWithinReach(record.geometry, order, record.stock, record.active);
+                    zgui.beginDisabled(.{ .disabled = busy or !nearby });
+                    if (zgui.button(if (record.enabled) "Stop automatic work" else "Enable automatic work", .{})) {
+                        if (game.submitWarehouseAction(if (record.enabled) .{ .stop = identity } else .{ .enable = identity })) |submission| game.warehouse_tool.pending_dialog = submission.request_id;
+                    }
+                    _ = zgui.sliderInt("Active columns", .{ .v = &game.warehouse_tool.active_columns, .min = 0, .max = record.geometry.bounds.count() });
+                    if (zgui.button("Apply capacity", .{})) if (game.submitWarehouseAction(.{ .configure = .{ .identity = identity, .active_columns = @intCast(game.warehouse_tool.active_columns) } })) |submission| {
+                        game.warehouse_tool.pending_dialog = submission.request_id;
+                    };
+                    zgui.beginDisabled(.{ .disabled = !record.canManage() });
+                    for (warehouse_tool_module.materials) |material| {
+                        if (zgui.radioButton(@tagName(material), .{ .active = game.warehouse_tool.selected_material == material })) game.warehouse_tool.selected_material = material;
+                    }
+                    if (zgui.button("Change material", .{})) if (game.submitWarehouseAction(.{ .material = .{ .identity = identity, .material = game.warehouse_tool.selected_material } })) |submission| {
+                        game.warehouse_tool.pending_dialog = submission.request_id;
+                    };
+                    if (zgui.button("Unregister warehouse", .{})) if (game.submitWarehouseAction(.{ .unregister = identity })) |submission| {
+                        game.warehouse_tool.pending_dialog = submission.request_id;
+                    };
+                    zgui.endDisabled();
+                    zgui.endDisabled();
+                    if (!nearby) zgui.textUnformatted(warehouse_tool_module.message(.out_of_reach));
+                    if (!record.canManage()) zgui.textUnformatted("Material changes and unregister require stopped, empty, obligation-free storage.");
+                } else zgui.textUnformatted("Waiting for current warehouse data or registration retirement.");
+            },
+        }
+        if (game.warehouse_tool.error_message) |message| zgui.textUnformatted(message);
+        if (busy) zgui.textUnformatted("Waiting for authority...");
+        if (zgui.button("Close", .{})) game.closeWarehouseDialog();
     }
 
     fn drawBlueprintUI(game: *Game) void {
@@ -827,6 +1180,8 @@ const Game = struct {
         game.updateChunksAroundCamera(false);
         const has_new_chunks = game.receiveChunks();
         game.flushConstructionRequests();
+        game.receiveWarehouseResults();
+        game.flushWarehouseSubscriptions();
         // Synchronize blocks first, then resolve local movement against that cache.
         // Player input remains independent of mesh work and GPU upload capacity.
         game.updateGameplay(has_new_chunks);
@@ -837,6 +1192,7 @@ const Game = struct {
         game.evictConstructionSources();
         if (!game.engine.gameplay_input_blocked and game.blueprint_tool.mode == .none) game.updateBlockFocus();
         game.rebuildDirtyChunks();
+        game.rebuildPackedChunks();
         if (!game.rebuildConstructionChunks()) return;
         const grid = game.engine.active_scene.?.voxel_grid;
         if (!grid.hasUploadCapacity() and game.render_radius > 2) {
@@ -1017,6 +1373,7 @@ const Game = struct {
         const scene = game.engine.active_scene.?;
         game.held_motion.reset();
         game.block_interaction.cancelHold();
+        game.warehouse_tool.cancelHold();
         game.clearBlockFocus();
         game.jump_requested = false;
         player.resetJumpInput();
@@ -1103,6 +1460,7 @@ const Game = struct {
             package.* = .{};
             return true;
         }
+        _ = world.warehouses.acceptSession(package.world_session);
         world.construction_availability = .{ .context = game, .chunk_available = constructionChunkAvailable, .read_revision = constructionReadRevision };
         world.construction_terrain_owner = .{ .context = &game.construction_cache, .terrain_revision = construction_client.Cache.terrainRevision };
         // Reconciliation can roll back a later prediction in a chunk with no
@@ -1129,11 +1487,38 @@ const Game = struct {
         // a source evicted after its last interested chunk disappeared.
         for (package.responses.items) |response| {
             const id = game.layout().encodeChunkCoords(response.coords);
-            if (game.chunk_subscriptions.get(id) != response.subscription_id) continue;
+            const token = game.chunk_subscriptions.get(id) orelse continue;
+            if (token != response.subscription_id) continue;
             if (response.composition) |composition| for (composition.sites) |reference| {
                 game.construction_cache.discover(game.allocator, id, reference) catch return false;
             };
         }
+        for (package.responses.items) |*response| {
+            const id = game.layout().encodeChunkCoords(response.coords);
+            const token = game.chunk_subscriptions.get(id) orelse continue;
+            if (token != response.subscription_id) continue;
+            if (response.warehouse_refs) |references| {
+                _ = world.warehouses.installChunk(game.allocator, id, token, response.warehouse_revision, references) catch return false;
+                game.markPackedChunkDirty(id);
+                game.allocator.free(references);
+                response.warehouse_refs = null;
+                game.warehouse_subscriptions_dirty = true;
+            }
+            if (response.pallet_visuals) |indices| {
+                _ = game.packed_cache.installPallets(game.allocator, id, token, response.pallet_visual_revision, indices) catch return false;
+                game.allocator.free(indices);
+                response.pallet_visuals = null;
+            }
+        }
+        for (package.warehouse_updates.items) |update| {
+            if (world.warehouses.apply(update)) {
+                if (update == .snapshot) game.warehouse_tool.rebaseInventory(update.snapshot, game.player_id, &game.block_interaction);
+                game.warehouse_subscriptions_dirty = true;
+                if (game.player) |*player| player.terrainChanged();
+            }
+        }
+        package.warehouse_updates.deinit(game.allocator);
+        package.warehouse_updates = .empty;
         for (package.construction_updates.items) |update| {
             game.applyConstructionUpdate(update) catch return false;
         }
@@ -1261,6 +1646,7 @@ const Game = struct {
                     }
                     _ = game.boundary_snapshots.remove(id);
                     game.markMiniatureChunkDirty(id);
+                    game.markPackedChunkDirty(id);
                     game.markConstructionChunkAndNeighborsDirty(response.coords);
                 },
             }
@@ -1503,6 +1889,21 @@ const Game = struct {
     fn refreshPinnedChunks(game: *Game) void {
         game.pinned_chunks.clearRetainingCapacity();
         for (game.blueprint_tool.source_chunks.items) |id| game.pinned_chunks.put(game.allocator, id, {}) catch @panic("OOM");
+        if (game.warehouse_tool.dialog) |dialog| if (dialog == .creation) {
+            const geometry = dialog.creation.geometry;
+            if (@import("warehouse_claims.zig").chunks(game.layout().size_in_blocks, geometry)) |sources| {
+                for (sources.coords[0..sources.count]) |coords| game.pinned_chunks.put(game.allocator, game.layout().encodeChunkCoords(.{ @intCast(coords[0]), @intCast(coords[1]), @intCast(coords[2]) }), {}) catch @panic("OOM");
+            } else |_| {}
+            // A base at a vertical chunk edge also needs its real floor source.
+            var y = geometry.bounds.ymin;
+            while (y <= geometry.bounds.ymax) : (y += 1) {
+                var x = geometry.bounds.xmin;
+                while (x <= geometry.bounds.xmax) : (x += 1) {
+                    const floor = geometry.worldCell(game.layout().size_in_blocks, .{ x, y, -1 }) orelse continue;
+                    game.pinned_chunks.put(game.allocator, game.layout().encodeChunkCoords(world_module.splitBlockCoords(floor)[0]), {}) catch @panic("OOM");
+                }
+            }
+        };
         // A detached debug camera must not evict the frozen player's collision data.
         if (game.player) |*player| {
             const centre = game.layout().getChunkCoords(player.position);
@@ -1590,6 +1991,7 @@ const Game = struct {
 
         game.loaded_chunk_ids.put(game.allocator, chunk_id, {}) catch @panic("OOM");
         game.markMiniatureChunkDirty(chunk_id);
+        game.markPackedChunkDirty(chunk_id);
         game.markConstructionChunkAndNeighborsDirty(chunk_coords);
         game.markChunkDirtyIfLoaded(chunk_coords);
     }
@@ -1604,6 +2006,9 @@ const Game = struct {
         _ = game.miniature_dirty_chunks.remove(chunk_id);
         _ = game.construction_dirty_chunks.remove(chunk_id);
         game.construction_cache.evictChunk(game.allocator, chunk_id);
+        game.world.?.warehouses.removeChunk(game.allocator, chunk_id);
+        game.packed_cache.releaseTerrain(game.allocator, chunk_id);
+        game.warehouse_subscriptions_dirty = true;
         if (game.blueprint_renderer) |*renderer| renderer.removeMiniatureChunk(game.engine.gctx, chunk_id);
         _ = game.block_snapshot_tokens.remove(chunk_id);
         _ = game.dirty_chunk_ids.remove(chunk_id);
@@ -1620,6 +2025,7 @@ const Game = struct {
         defer game.tool_commands.clearRetainingCapacity();
         if (!input.focused or input.focus_changed) {
             game.block_interaction.loseFocus();
+            game.warehouse_tool.cancelHold();
             return;
         }
         if (game.control_mode == .player) {
@@ -1634,6 +2040,7 @@ const Game = struct {
         const world = if (game.world) |*world| world else return;
         interaction.finishReconciliation(world.pending_operations.items);
         const camera = game.engine.active_scene.?.camera;
+        if (game.updatePlayerWarehouseTool()) return;
         const mode = game.blockMode();
         const target = (block_targeting.findTarget(world, camera.position, camera.forwardDirection(), mode) catch null);
         if (interaction.requested) |source| {
@@ -1728,6 +2135,12 @@ const Game = struct {
         if (!input.focused or input.focus_changed) return;
         const world = if (game.world) |*world| world else return;
         const camera = scene.camera;
+        if (game.warehouseHit()) |hit| {
+            if (world.warehouseOccupancy(hit.block) == .cargo or world.warehouseOccupancy(hit.block) == .member) {
+                scene.highlighted_block = hit.block;
+                return;
+            }
+        }
         const mode = game.blockMode();
         const material = game.heldMaterial() orelse game.selected_material;
         const block = (block_targeting.findTarget(world, camera.position, camera.forwardDirection(), mode) catch return) orelse return;
@@ -1768,6 +2181,7 @@ const Game = struct {
         const world = if (game.world) |*world| world else return;
         world.last_edit_result = null;
         const camera = game.engine.active_scene.?.camera;
+        if (game.editWarehouseInView(action)) return;
         const edited_block = (block_targeting.findTarget(world, camera.position, camera.forwardDirection(), switch (action) {
             .remove => .removing,
             .place => .putting,
@@ -1810,6 +2224,7 @@ const Game = struct {
         const chunk_coords, const local = world_module.splitBlockCoords(block);
 
         game.markMiniatureChunkDirty(game.layout().encodeChunkCoords(chunk_coords));
+        game.markPackedChunkDirty(game.layout().encodeChunkCoords(chunk_coords));
         game.markConstructionChunkAndNeighborsDirty(chunk_coords);
         game.markChunkDirtyIfLoaded(chunk_coords);
 
@@ -1825,6 +2240,7 @@ const Game = struct {
     /// without changed boundary planes cannot change a neighboring chunk's faces.
     fn markChunkSnapshotDirty(game: *Game, chunk_coords: ChunkCoords, previous: ?world_engine.BoundaryMasks) void {
         game.markMiniatureChunkDirty(game.layout().encodeChunkCoords(chunk_coords));
+        game.markPackedChunkDirty(game.layout().encodeChunkCoords(chunk_coords));
         game.markConstructionChunkAndNeighborsDirty(chunk_coords);
         game.markChunkDirtyIfLoaded(chunk_coords);
         const updated = game.world.?.getChunk(chunk_coords).?.boundaries;
@@ -2085,7 +2501,99 @@ const Game = struct {
         }
     }
 
+    fn markPackedChunkDirty(game: *Game, id: u32) void {
+        if (!game.loaded_chunk_ids.contains(id)) return;
+        if (!game.packed_cache.chunks.contains(id)) {
+            _ = game.packed_cache.installPallets(game.allocator, id, game.chunk_subscriptions.get(id) orelse 0, 0, &.{}) catch return;
+        }
+        game.packed_cache.mark(id);
+    }
+
+    fn packedPalletMaterial(context: ?*const anyopaque, cell: [3]u32) ?voxel_chunk_module.BlockType {
+        const world: *const World = @ptrCast(@alignCast(context.?));
+        const coords, const local = world_module.splitBlockCoords(cell);
+        const chunk = world.getChunk(coords) orelse return null;
+        return chunk.content.getBlock(local);
+    }
+
+    fn flushPackedChanges(game: *Game) void {
+        const cache = &game.world.?.warehouses;
+        var index: usize = 0;
+        while (index < cache.visual_changes.items.len) {
+            const identity = cache.visual_changes.items[index];
+            const entry = cache.objects.getPtr(identity) orelse {
+                _ = cache.visual_changes.swapRemove(index);
+                continue;
+            };
+            const reference: warehouse_stream.Reference = .{ .identity = identity, .geometry = entry.geometry };
+            if (entry.needed() and !entry.retired) {
+                game.packed_cache.retainObject(game.allocator, game.layout(), reference) catch {
+                    index += 1;
+                    continue;
+                };
+            } else game.packed_cache.releaseObject(game.layout(), reference);
+            entry.visual_queued = false;
+            _ = cache.visual_changes.swapRemove(index);
+        }
+    }
+
+    fn updatePackedChunks(game: *Game, updater: anytype) void {
+        game.flushPackedChanges();
+        game.packed_extra_pallets.ensureTotalCapacity(game.allocator, game.world.?.pending_operations.items.len) catch return;
+        var iterator = game.packed_cache.chunks.iterator();
+        while (iterator.next()) |entry| {
+            const id = entry.key_ptr.*;
+            const chunk = entry.value_ptr;
+            if (!chunk.terrain_retained and chunk.references.items.len == 0) {
+                if (chunk.uploaded) updater.remove(@as(u64, id) + 1);
+                game.packed_cache.remove(game.allocator, id);
+                continue;
+            }
+            if (!chunk.dirty) continue;
+            game.packed_extra_pallets.clearRetainingCapacity();
+            for (game.world.?.pending_operations.items) |pending| {
+                if (pending.operation.action != .put or pending.operation.action.put != .pallet) continue;
+                const coords, const local = world_module.splitBlockCoords(pending.operation.block);
+                if (game.layout().encodeChunkCoords(coords) != id) continue;
+                game.packed_extra_pallets.appendAssumeCapacity(transformations.index(local));
+            }
+            var geometry = packed_geometry.buildReferences(game.allocator, &game.world.?.warehouses, chunk.references.items, game.layout().decodeChunkId(id), chunk.pallets, game.packed_extra_pallets.items, .{ .context = &game.world.?, .material_at = packedPalletMaterial }) catch continue;
+            defer geometry.deinit(game.allocator);
+            if (geometry.bytes() == 0) {
+                if (chunk.uploaded) updater.remove(@as(u64, id) + 1);
+                chunk.uploaded = false;
+                chunk.dirty = false;
+                continue;
+            }
+            updater.replace(@as(u64, id) + 1, geometry.source(game.layout().decodeChunkId(id), chunk.revision)) catch {
+                if (!game.packed_capacity_warning) std.debug.print("packed cargo source capacity reached; retaining latest source for retry\n", .{});
+                game.packed_capacity_warning = true;
+                continue;
+            };
+            chunk.dirty = false;
+            chunk.uploaded = true;
+        }
+    }
+
+    fn rebuildPackedChunks(game: *Game) void {
+        const Upload = struct {
+            scene: *Scene,
+            gctx: *zgpu.GraphicsContext,
+
+            fn replace(self: @This(), id: u64, source: @import("engine").packed_renderer.Source) !void {
+                try self.scene.packed_renderer.upsertSource(self.gctx, id, source);
+            }
+
+            fn remove(self: @This(), id: u64) void {
+                self.scene.packed_renderer.removeSource(self.gctx, id);
+            }
+        };
+        game.updatePackedChunks(Upload{ .scene = game.engine.active_scene.?, .gctx = game.engine.gctx });
+    }
+
     fn deinitMiniatureState(game: *Game) void {
+        game.packed_cache.deinit(game.allocator);
+        game.packed_extra_pallets.deinit(game.allocator);
         game.construction_cache.deinit(game.allocator);
         game.blueprint_visible_chunks.deinit(game.allocator);
         game.miniature_cells.deinit(game.allocator);
@@ -2529,6 +3037,7 @@ fn onGameplayInputChanged(engine: *Engine, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
     game.block_interaction.loseFocus();
     game.blueprint_tool.press.loseFocus();
+    game.warehouse_tool.cancelHold();
     game.tool_commands.clearRetainingCapacity();
     game.jump_requested = false;
     if (game.player) |*player| {
@@ -2577,6 +3086,10 @@ fn onUIKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque)
 
 fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
     if (game.exit_requested) return true;
+    if (game.warehouse_tool.dialog != null) {
+        if (key_params.key == .escape) game.closeWarehouseDialog();
+        return true;
+    }
     const action: BlueprintTool.Action = switch (key_params.key) {
         .escape => .escape,
         .z => .capture,
@@ -2628,7 +3141,7 @@ fn handleKeyPress(game: *Game, key_params: KeyParams) void {
         .e => if (!key_params.mods.control) {
             if (game.control_mode == .player) game.block_interaction.press(.key) else game.queueBlockAction(.{ .place = game.selected_material });
         },
-        .one, .two, .three, .four, .five, .six, .seven, .eight => {
+        .one, .two, .three, .four, .five, .six, .seven, .eight, .nine => {
             if (game.control_mode != .spectator) return;
             game.selected_material = switch (key_params.key) {
                 .one => .dirt,
@@ -2639,6 +3152,7 @@ fn handleKeyPress(game: *Game, key_params: KeyParams) void {
                 .six => .reinforced_concrete,
                 .seven => .country_road_solid,
                 .eight => .country_road_adaptive,
+                .nine => .pallet,
                 else => unreachable,
             };
             std.debug.print("selected material: {s}\n", .{@tagName(game.selected_material)});
@@ -2661,6 +3175,7 @@ fn onKeyRelease(_: *Engine, params: KeyParams, game_opaque: *anyopaque) void {
 fn handleKeyRelease(game: *Game, params: KeyParams) void {
     if (params.key == .e) {
         game.block_interaction.release(.key);
+        game.warehouse_tool.release(.key);
         // Capture uses immediate presses, so a release before the next frame
         // ends the held source without cancelling its queued confirmation.
         game.blueprint_tool.press.key_down = false;
@@ -2675,6 +3190,7 @@ fn onMouseButtonRelease(_: *Engine, params: MouseButtonParams, game_opaque: *any
 fn handleMouseButtonRelease(game: *Game, params: MouseButtonParams) void {
     if (params.button == .left) {
         game.block_interaction.release(.mouse);
+        game.warehouse_tool.release(.mouse);
         game.blueprint_tool.press.mouse_down = false;
     }
 }
@@ -2689,6 +3205,10 @@ fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
     if (game.exit_requested or game.engine.gameplay_input_blocked) return;
     if (game.blueprint_tool.mode != .none) {
         if (params.button == .left and (game.blueprint_tool.mode == .capture or game.blueprint_tool.mode == .preview)) game.blueprint_tool.press.press(.mouse);
+        return;
+    }
+    if (params.button == .right) {
+        game.openWarehouseInView();
         return;
     }
     if (game.control_mode == .player) {
@@ -2743,6 +3263,7 @@ fn onRender(engine: *Engine, _: wgpu.RenderPassEncoder, game_opaque: *anyopaque)
         game.handleMapAction(game.map_state.draw(game.allocator, engine.gctx, service.preparedGenerator(), game.mapView(scene)));
     };
     game.drawBlueprintUI();
+    game.drawWarehouseUI();
     drawPersistence(game);
     if (game.overlay == .menu) if (menu.draw(engine.paused)) |action| game.handleMenuAction(action);
 }
@@ -3709,6 +4230,7 @@ test "crosshair and fonts follow DPI changes without accumulating style rounding
 
 test {
     _ = menu;
+    _ = warehouse_reach;
     _ = world_map;
     _ = world_module;
     _ = world_generator;
@@ -8279,4 +8801,624 @@ test "miniature cache invalidates accepted snapshots and clears obligations on e
     try std.testing.expect(game.miniature_dirty_chunks.contains(id));
     game.updateMiniatureChunks(&updates);
     try std.testing.expectEqual(@as(usize, 3), updates.count);
+}
+
+test "warehouse modal consumes Escape without pausing or replaying a held action" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    // Also compile the current dialog rendering path without requiring a GPU.
+    game.drawWarehouseUI();
+    const origin = StreamingTest.toolTarget();
+    game.block_interaction.press(.key);
+    game.warehouse_tool.dialog = .{ .creation = .{ .aim_cell = origin, .geometry = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, origin, .{ 1, 1 }) } };
+    game.updateBlueprintInputBlock();
+    try std.testing.expect(!fixture.engine.paused);
+    try std.testing.expect(fixture.engine.gameplay_input_blocked);
+    try std.testing.expect(game.block_interaction.requested == null);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .e, .mods = .{} }));
+    try std.testing.expect(game.block_interaction.requested == null);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expect(game.warehouse_tool.dialog == null);
+    try std.testing.expectEqual(Game.Overlay.none, game.overlay);
+    try std.testing.expect(!fixture.engine.paused and !fixture.engine.gameplay_input_blocked);
+    try std.testing.expect(game.block_interaction.requested == null);
+}
+
+test "warehouse creation preview allows shared unknown halos but rejects body conflicts" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const world = &game.world.?;
+    const minimum = [3]u32{ 40, 40, 40 };
+    const candidate = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, minimum, .{ 1, 1 });
+    try world.insertChunk(.{ 1, 1, 1 }, WorldChunk.initEmpty());
+    world.setBlockUnchecked(.{ 40, 40, 39 }, .stone);
+    world.setBlockUnchecked(minimum, .pallet);
+    world.pending_operations.clearRetainingCapacity();
+    const identity: warehouse_stream.Identity = .{ .kind = .warehouse, .world_session = 91, .id = 1, .lifetime = 1 };
+    _ = world.warehouses.acceptSession(91);
+    const id = game.layout().encodeChunkCoords(.{ 1, 1, 1 });
+    const other = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, .{ 42, 40, 40 }, .{ 1, 1 });
+    _ = try world.warehouses.installChunk(game.allocator, id, 1, 1, &.{.{ .identity = identity, .geometry = other }});
+    // Its object snapshot is unknown; immutable geometry still proves halo sharing.
+    try std.testing.expect(world.warehouses.record(identity) == null);
+    try std.testing.expect(game.warehousePreviewValid(candidate));
+    world.warehouses.removeChunk(game.allocator, id);
+    world.warehouses.forget(identity);
+    const adjacent = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, .{ 41, 40, 40 }, .{ 1, 1 });
+    _ = try world.warehouses.installChunk(game.allocator, id, 1, 2, &.{.{ .identity = identity, .geometry = adjacent }});
+    try std.testing.expect(!game.warehousePreviewValid(candidate));
+}
+
+test "warehouse Mouse2 management keeps physics live and reads current lifecycle state" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.preparePlayerToolTest();
+    const game = &fixture.game;
+    const target = StreamingTest.toolTarget();
+    fixture.changeToolMaterial(.pallet);
+    game.player = PlayerController.init(game.allocator, .{ 0.5, 0.5, 2 });
+    const cache = &game.world.?.warehouses;
+    _ = cache.acceptSession(91);
+    var record: @import("warehouse_state.zig").Record = .{
+        .identity = .{ .kind = .warehouse, .world_session = 91, .id = 1, .lifetime = 1 },
+        .geometry = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, target, .{ 1, 1 }),
+        .material = .sand,
+        .active = 1,
+        .stock = 1,
+        .revision = 1,
+    };
+    const coords, _ = world_module.splitBlockCoords(target);
+    _ = try cache.installChunk(game.allocator, game.layout().encodeChunkCoords(coords), 1, 1, &.{.{ .identity = record.identity, .geometry = record.geometry }});
+    cache.subscribed(record.identity, 1);
+    _ = cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 1 } });
+    handleMouseButtonPress(game, .{ .button = .right, .mods = .{} });
+    try std.testing.expectEqual(record.identity, game.warehouse_tool.dialog.?.management);
+    try std.testing.expect(fixture.engine.gameplay_input_blocked and !fixture.engine.paused);
+    try fixture.input.pressed_keys.put(.w, {});
+    fixture.input.cursor_position_delta = .{ 20, -10 };
+    fixture.engine.frame_delta = 0.1;
+    fixture.engine.time = 0.1;
+    game.updateGameplay(false);
+    try std.testing.expect(game.player.?.position[2] < 2);
+    try std.testing.expectEqual(@as(f64, 0.5), game.player.?.position[0]);
+    try std.testing.expectEqual(@as(f64, 0.5), game.player.?.position[1]);
+    try std.testing.expectEqual(@as(f32, 0), game.player.?.yaw);
+    record.enabled = false;
+    record.stock = 0;
+    record.incoming = 1;
+    record.obligations = 1;
+    record.revision = 2;
+    _ = cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 1 } });
+    try std.testing.expect(!cache.record(game.warehouse_tool.dialog.?.management).?.canManage());
+    record.incoming = 0;
+    record.obligations = 0;
+    record.revision = 3;
+    _ = cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 1 } });
+    try std.testing.expect(cache.record(game.warehouse_tool.dialog.?.management).?.canManage());
+    handleMouseButtonPress(game, .{ .button = .left, .mods = .{} });
+    try std.testing.expect(game.block_interaction.requested == null);
+    try std.testing.expectEqual(record.identity, game.warehouse_tool.dialog.?.management);
+}
+
+test "warehouse blueprint capture excludes cargo and rejects real registered pallets" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const world = &game.world.?;
+    try world.insertChunk(.{ 1, 1, 1 }, WorldChunk.initEmpty());
+    world.setBlockUnchecked(.{ 40, 40, 40 }, .pallet);
+    world.pending_operations.clearRetainingCapacity();
+    const record: @import("warehouse_state.zig").Record = .{
+        .identity = .{ .kind = .warehouse, .world_session = 91, .id = 1, .lifetime = 1 },
+        .geometry = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, .{ 40, 40, 40 }, .{ 1, 1 }),
+        .material = .sand,
+        .active = 1,
+        .stock = 2,
+        .revision = 1,
+    };
+    const cache = &world.warehouses;
+    _ = cache.acceptSession(91);
+    _ = try cache.installChunk(game.allocator, game.layout().encodeChunkCoords(.{ 1, 1, 1 }), 1, 1, &.{.{ .identity = record.identity, .geometry = record.geometry }});
+    cache.subscribed(record.identity, 1);
+    _ = cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 1 } });
+    try std.testing.expect(world.warehouseOccupancy(.{ 40, 40, 41 }) == .cargo);
+    const upper = [_]voxel_chunk_module.BlockType{world.plannedBlock(.{ 40, 40, 41 }).?};
+    const base = [_]voxel_chunk_module.BlockType{world.plannedBlock(.{ 40, 40, 40 }).?};
+    const cargo_only = try blueprint.compile(game.allocator, .{ .size = .{ 1, 1, 1 }, .cells = &upper }, .{ .horizontal_limit = 64 });
+    try std.testing.expectEqual(blueprint.DiagnosticCode.empty, cargo_only.invalid.code);
+    const with_pallet = try blueprint.compile(game.allocator, .{ .size = .{ 1, 1, 1 }, .cells = &base }, .{ .horizontal_limit = 64 });
+    try std.testing.expectEqual(blueprint.DiagnosticCode.invalid_contents, with_pallet.invalid.code);
+    try std.testing.expectEqual(@as(u16, 2), cache.record(record.identity).?.stock);
+}
+
+const PackedUpdateTest = struct {
+    calls: usize = 0,
+    removes: usize = 0,
+    faces: usize = 0,
+    pallets: usize = 0,
+    markers: usize = 0,
+    failed_id: ?u64 = null,
+
+    fn replace(self: *@This(), id: u64, source: @import("engine").packed_renderer.Source) !void {
+        if (self.failed_id == id) return error.TestPackedUploadFailure;
+        self.calls += 1;
+        self.faces += source.faces.len;
+        self.pallets += source.pallets.len;
+        self.markers += source.markers.len;
+    }
+
+    fn remove(self: *@This(), _: u64) void {
+        self.removes += 1;
+    }
+};
+
+test "warehouse auxiliary data on delayed unsubscribed operation replies cannot recreate sources" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const allocator = game.allocator;
+    try fixture.apply(&.{.{
+        .coords = .{ 1, 1, 1 },
+        .subscription_id = null,
+        .operation = .{ .request_id = 1, .status = .success },
+        .warehouse_refs = try allocator.dupe(warehouse_stream.Reference, &.{}),
+        .pallet_visuals = try allocator.dupe(u16, &.{1}),
+        .data = .acknowledgement,
+    }});
+    try std.testing.expectEqual(@as(u32, 0), game.world.?.warehouses.chunks.count());
+    try std.testing.expectEqual(@as(u32, 0), game.packed_cache.chunks.count());
+}
+
+test "warehouse full snapshots skip revisions independently of same-ID construction gaps and retirement" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try prepareMiniatureSite(&fixture, 1);
+    const game = &fixture.game;
+    const allocator = game.allocator;
+    const first = game.world.?.blueprints.instances.get(1).?;
+    const construction_identity: construction_stream.Identity = .{ .kind = .construction, .world_session = 91, .id = first.id, .lifetime = first.lifetime };
+    _ = game.construction_cache.acceptSession(91);
+    try game.construction_cache.definitionInstalled(allocator, 1);
+    var record: @import("warehouse_state.zig").Record = .{
+        .identity = .{ .kind = .warehouse, .world_session = 91, .id = first.id, .lifetime = first.lifetime },
+        .geometry = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, .{ 48, 48, 40 }, .{ 1, 1 }),
+        .material = .dirt,
+        .active = 1,
+        .stock = 1,
+        .revision = 1,
+    };
+    const cache = &game.world.?.warehouses;
+    _ = cache.acceptSession(91);
+    _ = try cache.ensure(allocator, .{ .identity = record.identity, .geometry = record.geometry });
+    cache.subscribed(record.identity, 7);
+    var package: world_data_service.ResponsePackage = .{ .world_session = 91 };
+    defer package.deinit(allocator);
+    try package.responses.append(allocator, .{
+        .coords = .{ 1, 1, 1 },
+        .subscription_id = 1,
+        .warehouse_revision = 1,
+        .warehouse_refs = try allocator.dupe(warehouse_stream.Reference, &.{.{ .identity = record.identity, .geometry = record.geometry }}),
+        .composition = try (construction_stream.ChunkComposition{ .revision = 1, .sites = &.{.{ .identity = construction_identity, .site_revision = first.revision }} }).clone(allocator),
+        .data = .acknowledgement,
+    });
+    try package.construction_updates.append(allocator, .{ .snapshot = try construction_stream.Snapshot.borrow(construction_identity, first).clone(allocator) });
+    try package.warehouse_updates.append(allocator, .{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 7 } });
+    try std.testing.expect(game.applyPackage(&package));
+    package.responses.clearRetainingCapacity();
+    try std.testing.expect(!game.construction_cache.sites.get(1).?.needs_snapshot);
+    try std.testing.expectEqual(@as(u16, 1), cache.record(record.identity).?.stock);
+
+    record.stock = 4;
+    record.revision = 7;
+    try package.warehouse_updates.append(allocator, .{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 7 } });
+    try package.construction_updates.append(allocator, .{ .delta = try (construction_stream.Delta{ .identity = construction_identity, .base_revision = first.revision + 1, .revision = first.revision + 2, .fulfilled_indices = &.{0} }).clone(allocator) });
+    try std.testing.expect(game.applyPackage(&package));
+    try std.testing.expect(game.construction_cache.sites.get(1).?.needs_snapshot);
+    try std.testing.expectEqual(@as(u32, 1), game.world.?.blueprints.instances.get(1).?.remaining);
+    try std.testing.expectEqual(@as(u16, 4), cache.record(record.identity).?.stock);
+    try std.testing.expectEqual(@as(u64, 7), cache.record(record.identity).?.revision);
+    var updates: PackedUpdateTest = .{};
+    game.updatePackedChunks(&updates);
+    try std.testing.expectEqual(@as(usize, 18), updates.faces);
+
+    try package.construction_updates.append(allocator, .{ .retired = .{ .identity = construction_identity, .revision = 9, .composition_revision = 2 } });
+    try std.testing.expect(game.applyPackage(&package));
+    try std.testing.expect(game.construction_cache.sites.get(1).?.retired);
+    try std.testing.expect(!game.world.?.blueprints.instances.get(1).?.active);
+    try std.testing.expectEqual(@as(u16, 4), cache.record(record.identity).?.stock);
+    try std.testing.expect(!cache.objects.get(record.identity).?.retired);
+    game.updatePackedChunks(&updates);
+    try std.testing.expectEqual(@as(usize, 1), updates.calls);
+    try std.testing.expect(game.world.?.warehouseOccupancy(.{ 48, 48, 40 }) == .cargo);
+}
+
+test "warehouse presentation reconstructs full footprint without member terrain and retains functional pins" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const cache = &game.world.?.warehouses;
+    _ = cache.acceptSession(91);
+    const record: @import("warehouse_state.zig").Record = .{
+        .identity = .{ .kind = .warehouse, .world_session = 91, .id = 1, .lifetime = 1 },
+        .geometry = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, .{ 30, 30, 31 }, .{ 5, 5 }),
+        .material = .dirt,
+        .active = 25,
+        .stock = 150,
+        .revision = 1,
+    };
+    const id = game.layout().encodeChunkCoords(.{ 0, 0, 0 });
+    _ = try cache.installChunk(game.allocator, id, 1, 1, &.{.{ .identity = record.identity, .geometry = record.geometry }});
+    var updates: PackedUpdateTest = .{};
+    game.updatePackedChunks(&updates);
+    try std.testing.expectEqual(@as(usize, 25), updates.pallets);
+    try std.testing.expectEqual(@as(usize, 0), updates.markers);
+    cache.subscribed(record.identity, 1);
+    try std.testing.expect(cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 1 } }));
+    updates = .{};
+    game.updatePackedChunks(&updates);
+    try std.testing.expectEqual(@as(usize, 8), updates.calls);
+    try std.testing.expectEqual(@as(usize, 170), updates.faces);
+    try std.testing.expectEqual(@as(usize, 0), updates.pallets);
+    try std.testing.expectEqual(@as(u32, 0), game.world.?.chunks.count());
+    try std.testing.expectEqual(@as(u32, 0), game.dirty_chunk_ids.count());
+    game.updatePackedChunks(&updates);
+    try std.testing.expectEqual(@as(usize, 8), updates.calls);
+    cache.pin(record.identity, .dialog, true);
+    cache.removeChunk(game.allocator, id);
+    game.updatePackedChunks(&updates);
+    try std.testing.expectEqual(@as(u32, 8), game.packed_cache.chunks.count());
+    cache.pin(record.identity, .dialog, false);
+    game.updatePackedChunks(&updates);
+    try std.testing.expectEqual(@as(u32, 0), game.packed_cache.chunks.count());
+    try std.testing.expectEqual(@as(usize, 8), updates.removes);
+}
+
+test "warehouse presentation coalesces latest cuts and retries failed source uploads" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const cache = &game.world.?.warehouses;
+    _ = cache.acceptSession(91);
+    var record: @import("warehouse_state.zig").Record = .{
+        .identity = .{ .kind = .warehouse, .world_session = 91, .id = 1, .lifetime = 1 },
+        .geometry = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, .{ 40, 40, 40 }, .{ 1, 1 }),
+        .material = .dirt,
+        .active = 1,
+        .stock = 1,
+        .revision = 1,
+    };
+    const id = game.layout().encodeChunkCoords(.{ 1, 1, 1 });
+    _ = try cache.installChunk(game.allocator, id, 1, 1, &.{.{ .identity = record.identity, .geometry = record.geometry }});
+    cache.subscribed(record.identity, 1);
+    _ = cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 1 } });
+    var updates: PackedUpdateTest = .{ .failed_id = @as(u64, id) + 1 };
+    game.updatePackedChunks(&updates);
+    try std.testing.expect(game.packed_cache.chunks.get(id).?.dirty);
+    record.stock = 2;
+    record.revision = 2;
+    _ = cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 1 } });
+    record.stock = 3;
+    record.revision = 3;
+    _ = cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 1 } });
+    updates.failed_id = null;
+    game.updatePackedChunks(&updates);
+    try std.testing.expectEqual(@as(usize, 1), updates.calls);
+    try std.testing.expectEqual(@as(usize, 14), updates.faces);
+    record.incoming = 1;
+    record.revision = 4;
+    _ = cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 1 } });
+    game.updatePackedChunks(&updates);
+    try std.testing.expectEqual(@as(usize, 1), updates.calls);
+    try std.testing.expectEqual(@as(u32, 0), game.dirty_chunk_ids.count());
+}
+
+test "warehouse commands capture the active player or spectator camera at submission" {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    var service: WorldDataService = .{ .world_session = 91, .layout = &test_layout, .io = std.testing.io, .allocator = a, .worker = undefined, .worker_state = undefined };
+    defer service.requests.items.deinit(a);
+    var client: world_data_service.Client = .{ .service = &service, .client_session = 12 };
+    defer client.command_ledger.deinit(a, &service.command_budget);
+    const game = &fixture.game;
+    game.world_client = &client;
+    game.control_mode = .player;
+    game.player_id = 77;
+    const identity: warehouse_stream.Identity = .{ .kind = .warehouse, .world_session = 91, .id = 1, .lifetime = 1 };
+    const player_view = [3]f64{ 12.25, 23.5, 34.75 };
+    fixture.camera.updatePosition(player_view);
+    _ = game.submitWarehouseAction(.{ .stop = identity }) orelse return error.SubmissionFailed;
+    const spectator_view = [3]f64{ -56.25, 67.5, 78.75 };
+    fixture.camera.updatePosition(spectator_view);
+    game.control_mode = .spectator;
+    _ = game.submitWarehouseAction(.{ .enable = identity }) orelse return error.SubmissionFailed;
+    fixture.camera.updatePosition(.{ 99, 100, 101 });
+
+    try std.testing.expectEqual(@as(usize, 2), service.requests.items.items.len);
+    const player_payload = service.requests.items.items[0].warehouse.payload;
+    const spectator_payload = service.requests.items.items[1].warehouse.payload;
+    try std.testing.expectEqual(player_view, player_payload.actor.viewpoint);
+    try std.testing.expectEqual(@as(?u64, 77), player_payload.actor.player_id);
+    try std.testing.expectEqual(spectator_view, spectator_payload.actor.viewpoint);
+    try std.testing.expectEqual(@as(?u64, null), spectator_payload.actor.player_id);
+    try std.testing.expectEqual(player_payload, client.command_ledger.records.items[0].intent.warehouse);
+    try std.testing.expectEqual(spectator_payload, client.command_ledger.records.items[1].intent.warehouse);
+}
+
+test "warehouse dialog reach follows current camera and includes member edges and occupied upper cargo" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const geometry = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, StreamingTest.toolTarget(), .{ 5, 5 });
+    const order = warehouse_layout.Layout.init(geometry);
+    fixture.camera.updatePosition(.{ 7.5, 5.5, 0.5 });
+    try std.testing.expect(!block_targeting.withinReach(game.layout(), fixture.camera.position, geometry.origin));
+    try std.testing.expect(game.warehouseWithinReach(geometry, null, 0, 0));
+    fixture.camera.updatePosition(.{ 2.5, 5.5, 9.5 });
+    try std.testing.expect(!game.warehouseWithinReach(geometry, &order, 0, 25));
+    try std.testing.expect(game.warehouseWithinReach(geometry, &order, 150, 25));
+    fixture.camera.updatePosition(.{ 2.5, 5.5, 12 });
+    try std.testing.expect(!game.warehouseWithinReach(geometry, &order, 150, 25));
+}
+
+test "warehouse Q mode switches require a fresh transfer press and preserve submitted ownership" {
+    const a = std.testing.allocator;
+    for ([_]player_interaction.Source{ .key, .mouse }) |source| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        try fixture.preparePlayerToolTest();
+        fixture.changeToolMaterial(.pallet);
+        const game = &fixture.game;
+        game.player = PlayerController.init(a, .{ 0.5, 0.5, 0 });
+        game.player.?.pitch = -0.35;
+        game.player.?.applyCamera(&fixture.camera);
+        var spectator: std.meta.Child(@TypeOf(@as(Scene, undefined).spectator_camera)) = .{
+            .camera = &fixture.camera,
+            .input_controller = @ptrCast(&fixture.input),
+        };
+        fixture.scene.spectator_camera = &spectator;
+        fixture.scene.spectator_enabled = false;
+        const target = StreamingTest.toolTarget();
+        const record: @import("warehouse_state.zig").Record = .{
+            .identity = .{ .kind = .warehouse, .world_session = 91, .id = 1, .lifetime = 1 },
+            .geometry = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, target, .{ 1, 1 }),
+            .material = .dirt,
+            .active = 1,
+            .stock = 1,
+            .revision = 1,
+        };
+        const cache = &game.world.?.warehouses;
+        try std.testing.expect(cache.acceptSession(91));
+        const coords, _ = world_module.splitBlockCoords(target);
+        _ = try cache.installChunk(a, game.layout().encodeChunkCoords(coords), 1, 1, &.{.{ .identity = record.identity, .geometry = record.geometry }});
+        cache.subscribed(record.identity, 7);
+        try std.testing.expect(cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 7 } }));
+        var service: WorldDataService = .{ .world_session = 91, .layout = &test_layout, .io = std.testing.io, .allocator = a, .worker = undefined, .worker_state = undefined };
+        defer service.requests.items.deinit(a);
+        var client: world_data_service.Client = .{ .service = &service, .client_session = 12 };
+        defer client.command_ledger.deinit(a, &service.command_budget);
+        defer client.warehouse_results.items.deinit(a);
+        game.world_client = &client;
+        switch (source) {
+            .key => handleKeyPress(game, .{ .key = .e, .mods = .{} }),
+            .mouse => handleMouseButtonPress(game, .{ .button = .left, .mods = .{} }),
+        }
+        game.updateBlockTool();
+        try std.testing.expectEqual(source, game.warehouse_tool.hold.?.source);
+        fixture.engine.frame_delta = 0.05;
+        game.updateBlockTool();
+        try std.testing.expectApproxEqAbs(@as(f64, 0.05), game.warehouse_tool.hold.?.elapsed, 0.000001);
+        handleKeyPress(game, .{ .key = .q, .mods = .{} });
+        try std.testing.expectEqual(.spectator, game.control_mode);
+        try std.testing.expect(game.warehouse_tool.hold == null);
+        handleKeyPress(game, .{ .key = .q, .mods = .{} });
+        try std.testing.expectEqual(.player, game.control_mode);
+        try std.testing.expect(if (source == .key) game.block_interaction.key_down else game.block_interaction.mouse_down);
+        fixture.engine.frame_delta = warehouse_tool_module.transfer_seconds;
+        game.updateBlockTool();
+        game.updateBlockTool();
+        try std.testing.expect(game.warehouse_tool.hold == null);
+        try std.testing.expect(game.block_interaction.requested == null);
+        try std.testing.expect(game.block_interaction.inventory == null);
+        try std.testing.expect(game.block_interaction.pending == null);
+        try std.testing.expectEqual(@as(usize, 0), service.requests.items.items.len);
+        try std.testing.expectEqual(@as(usize, 0), cache.pending.items.len);
+        try std.testing.expectEqual(@as(u16, 1), cache.record(record.identity).?.stock);
+        // A fresh press starts from zero; the cancelled 50 ms cannot count.
+        switch (source) {
+            .key => {
+                handleKeyRelease(game, .{ .key = .e, .mods = .{} });
+                handleKeyPress(game, .{ .key = .e, .mods = .{} });
+            },
+            .mouse => {
+                handleMouseButtonRelease(game, .{ .button = .left, .mods = .{} });
+                handleMouseButtonPress(game, .{ .button = .left, .mods = .{} });
+            },
+        }
+        fixture.engine.frame_delta = 0.05;
+        game.updateBlockTool();
+        try std.testing.expectEqual(@as(f64, 0), game.warehouse_tool.hold.?.elapsed);
+        game.updateBlockTool();
+        try std.testing.expect(game.warehouse_tool.hold != null);
+        try std.testing.expectEqual(@as(usize, 0), service.requests.items.items.len);
+        game.updateBlockTool();
+        try std.testing.expect(game.warehouse_tool.hold == null);
+        const request_id = game.warehouse_tool.pending_player.?;
+        const sequence = game.warehouse_tool.pending_player_sequence.?;
+        const inventory_fence = game.warehouse_tool.inventory_fence;
+        try std.testing.expectEqual(voxel_chunk_module.BlockType.dirt, game.block_interaction.inventory.?);
+        try std.testing.expectEqual(@as(u16, 0), cache.record(record.identity).?.stock);
+        for (0..2) |index| {
+            handleKeyPress(game, .{ .key = .q, .mods = .{} });
+            try std.testing.expectEqual(@as(@TypeOf(game.control_mode), if (index == 0) .spectator else .player), game.control_mode);
+            try std.testing.expectEqual(request_id, game.warehouse_tool.pending_player.?);
+            try std.testing.expectEqual(sequence, game.warehouse_tool.pending_player_sequence.?);
+            try std.testing.expectEqual(inventory_fence, game.warehouse_tool.inventory_fence);
+            try std.testing.expectEqual(request_id, game.block_interaction.pending.?.request_id.?);
+            try std.testing.expectEqual(voxel_chunk_module.BlockType.dirt, game.block_interaction.inventory.?);
+            try std.testing.expectEqual(@as(usize, 1), service.requests.items.items.len);
+            try std.testing.expectEqual(@as(usize, 1), cache.pending.items.len);
+            try std.testing.expectEqual(request_id, cache.pending.items[0].request_id);
+        }
+        try client.warehouse_results.items.append(a, .{
+            .request_id = request_id,
+            .resolved_sequence = sequence,
+            .status = .rejected,
+            .rejection = .inventory_mismatch,
+            .warehouse = record,
+            .player_inventory = .{ .player_id = game.player_id, .material = null },
+        });
+        game.receiveWarehouseResults();
+        try std.testing.expect(game.warehouse_tool.pending_player == null);
+        try std.testing.expect(game.warehouse_tool.pending_player_sequence == null);
+        try std.testing.expect(game.block_interaction.pending == null);
+        try std.testing.expect(game.block_interaction.inventory == null);
+        try std.testing.expectEqual(@as(usize, 0), cache.pending.items.len);
+        try std.testing.expectEqual(@as(u16, 1), cache.record(record.identity).?.stock);
+        game.updateBlockTool();
+        try std.testing.expect(game.warehouse_tool.hold == null);
+        try std.testing.expectEqual(@as(usize, 1), service.requests.items.items.len);
+    }
+}
+
+test "warehouse held transfer requires a fresh press after camera reach or focus loss" {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.prepareToolTest();
+    const game = &fixture.game;
+    const target = StreamingTest.toolTarget();
+    game.world.?.setBlockUnchecked(target, .pallet);
+    game.world.?.pending_operations.clearRetainingCapacity();
+    const geometry = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, target, .{ 1, 1 });
+    const record: @import("warehouse_state.zig").Record = .{ .identity = .{ .kind = .warehouse, .world_session = 91, .id = 1, .lifetime = 1 }, .geometry = geometry, .material = .dirt, .active = 1, .stock = 1, .revision = 1 };
+    const cache = &game.world.?.warehouses;
+    try std.testing.expect(cache.acceptSession(91));
+    const coords, _ = world_module.splitBlockCoords(target);
+    _ = try cache.installChunk(a, game.layout().encodeChunkCoords(coords), 1, 1, &.{.{ .identity = record.identity, .geometry = geometry }});
+    cache.subscribed(record.identity, 7);
+    try std.testing.expect(cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 7 } }));
+    var service: WorldDataService = .{ .world_session = 91, .layout = &test_layout, .io = std.testing.io, .allocator = a, .worker = undefined, .worker_state = undefined };
+    defer service.requests.items.deinit(a);
+    var client: world_data_service.Client = .{ .service = &service, .client_session = 12 };
+    defer client.command_ledger.deinit(a, &service.command_budget);
+    game.world_client = &client;
+    game.control_mode = .player;
+    game.block_interaction.press(.key);
+    try std.testing.expect(game.updatePlayerWarehouseTool());
+    try std.testing.expect(game.warehouse_tool.hold != null);
+    fixture.camera.updatePosition(.{ 0.5, -10, 0.5 });
+    fixture.engine.frame_delta = warehouse_tool_module.transfer_seconds;
+    try std.testing.expect(game.updatePlayerWarehouseTool());
+    try std.testing.expect(game.warehouse_tool.hold == null);
+    fixture.camera.updatePosition(.{ 0.5, 0.5, 0.5 });
+    game.block_interaction.release(.key);
+    game.block_interaction.press(.key);
+    try std.testing.expect(game.updatePlayerWarehouseTool());
+    try std.testing.expect(game.warehouse_tool.hold != null);
+    fixture.input.focused = false;
+    game.updateBlockTool();
+    fixture.input.focused = true;
+    game.updateBlockTool();
+    try std.testing.expect(game.warehouse_tool.hold == null);
+    try std.testing.expect(game.block_interaction.inventory == null);
+    try std.testing.expect(game.block_interaction.pending == null);
+    try std.testing.expectEqual(@as(usize, 0), service.requests.items.items.len);
+    try std.testing.expectEqual(@as(usize, 0), cache.pending.items.len);
+    try std.testing.expectEqual(@as(u16, 1), cache.record(record.identity).?.stock);
+}
+
+test "warehouse dialog result absorbs an earlier transfer without reviving stale stock during resync" {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    var service: WorldDataService = .{ .world_session = 91, .layout = &test_layout, .io = std.testing.io, .allocator = a, .worker = undefined, .worker_state = undefined };
+    defer service.requests.items.deinit(a);
+    var client: world_data_service.Client = .{ .service = &service, .client_session = 12 };
+    defer client.warehouse_results.items.deinit(a);
+    game.world_client = &client;
+    const geometry = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, StreamingTest.toolTarget(), .{ 1, 1 });
+    var record: @import("warehouse_state.zig").Record = .{ .identity = .{ .kind = .warehouse, .world_session = 91, .id = 1, .lifetime = 1 }, .geometry = geometry, .material = .dirt, .active = 1, .stock = 2, .revision = 1 };
+    const cache = &game.world.?.warehouses;
+    try std.testing.expect(cache.acceptSession(91));
+    _ = try cache.ensure(a, .{ .identity = record.identity, .geometry = geometry });
+    cache.subscribed(record.identity, 7);
+    try std.testing.expect(cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 7 } }));
+    try cache.predict(a, .{ .request_id = 1, .command = .{ .world_session = 91, .client_session = 12, .sequence = 1 }, .identity = record.identity, .delta = 1, .material = .dirt });
+    game.warehouse_tool.dialog = .{ .management = record.identity };
+    game.warehouse_tool.pending_dialog = 2;
+    record.stock = 3;
+    record.revision = 3;
+    record.enabled = false;
+    try client.warehouse_results.items.append(a, .{ .request_id = 2, .resolved_sequence = 2, .status = .success, .warehouse = record });
+    game.receiveWarehouseResults();
+    try std.testing.expectEqual(@as(u16, 3), cache.record(record.identity).?.stock);
+    try std.testing.expectEqual(@as(usize, 1), cache.pending.items.len);
+    try std.testing.expect(game.warehouse_tool.pending_dialog == null);
+    try std.testing.expectEqual(record.identity, game.warehouse_tool.dialog.?.management);
+
+    cache.invalidate(record.identity);
+    game.flushWarehouseSubscriptions();
+    try std.testing.expect(cache.record(record.identity) == null);
+    try std.testing.expectEqual(@as(usize, 1), service.requests.items.items.len);
+    record.enabled = true;
+    record.revision = 2;
+    try client.warehouse_results.items.append(a, .{ .request_id = 1, .resolved_sequence = 1, .status = .success, .warehouse = record });
+    game.receiveWarehouseResults();
+    try std.testing.expectEqual(@as(usize, 0), cache.pending.items.len);
+    try std.testing.expect(cache.record(record.identity) == null);
+    record.enabled = false;
+    record.revision = 3;
+    try std.testing.expect(cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 7, .resolved_sequence = 2 } }));
+    try std.testing.expectEqual(@as(u16, 3), cache.record(record.identity).?.stock);
+    try std.testing.expect(!cache.record(record.identity).?.enabled);
+}
+
+test "warehouse result after closing its dialog cannot reopen or replace another modal" {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    var service: WorldDataService = .{ .world_session = 91, .layout = &test_layout, .io = std.testing.io, .allocator = a, .worker = undefined, .worker_state = undefined };
+    defer service.requests.items.deinit(a);
+    var client: world_data_service.Client = .{ .service = &service, .client_session = 12 };
+    defer client.command_ledger.deinit(a, &service.command_budget);
+    defer client.warehouse_results.items.deinit(a);
+    game.world_client = &client;
+    const geometry = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, StreamingTest.toolTarget(), .{ 1, 1 });
+    const record: @import("warehouse_state.zig").Record = .{ .identity = .{ .kind = .warehouse, .world_session = 91, .id = 1, .lifetime = 1 }, .geometry = geometry, .material = .dirt, .active = 1, .revision = 2, .enabled = false };
+    try std.testing.expect(game.world.?.warehouses.acceptSession(91));
+    game.warehouse_tool.dialog = .{ .management = record.identity };
+    const submission = game.submitWarehouseAction(.{ .stop = record.identity }) orelse return error.SubmissionFailed;
+    game.warehouse_tool.pending_dialog = submission.request_id;
+    game.closeWarehouseDialog();
+    try std.testing.expectEqual(@as(usize, 1), service.requests.items.items.len);
+    try std.testing.expectEqual(submission.request_id, game.warehouse_tool.pending_dialog.?);
+    var other = record.identity;
+    other.id = 2;
+    other.lifetime = 2;
+    game.warehouse_tool.dialog = .{ .management = other };
+    game.updateBlueprintInputBlock();
+    try client.warehouse_results.items.append(a, .{ .request_id = submission.request_id, .resolved_sequence = 1, .status = .success, .warehouse = record });
+    game.receiveWarehouseResults();
+    try std.testing.expectEqual(other, game.warehouse_tool.dialog.?.management);
+    try std.testing.expect(game.warehouse_tool.pending_dialog == null);
+    try std.testing.expect(fixture.engine.gameplay_input_blocked);
 }

@@ -288,6 +288,7 @@ pub const PlayerController = struct {
             if (query.overlap(position, false) == .clear) return self.restore(position);
         }
         if (self.nearestClear(query, recovery_radius)) |position| return self.restore(position);
+        if (query.warehouseHalo(self.position)) |position| return self.restore(position);
         return false;
     }
 

@@ -1,7 +1,8 @@
 # Persistence v1 validation
 
-Current saves use format 7, including simulation-owned construction progress, partial
-materialization and grass initialization. See [construction authority validation](validation/construction-authority.md)
+Current saves use format 8, adding warehouse stock and accepted deliveries to simulation-owned
+construction progress, partial materialization and grass initialization. See
+[warehouse validation](validation/warehouses.md) for the new snapshot/restore checks. See [construction authority validation](validation/construction-authority.md)
 for that implementation and [the ownership spec](../specs/features/construction-state-ownership.md#implementation-evidence)
 for dated verification and open follow-ups. The campaigns and totals below belong to their
 original implementation stages; this documentation update does not rerun them.

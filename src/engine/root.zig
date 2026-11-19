@@ -43,3 +43,4 @@ test {
 }
 
 pub const blueprint_renderer = @import("blueprint_renderer.zig");
+pub const packed_renderer = @import("packed_renderer.zig");

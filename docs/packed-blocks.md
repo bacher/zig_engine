@@ -2,7 +2,7 @@
 
 A packed block is one material unit represented as cargo. Warehouses, workstation input and
 output buffers, and other storage owners can reuse its appearance and interaction semantics.
-This document defines the shared concept; implementation is pending. The
+This document defines the shared concept implemented by the packed renderer and warehouse owner. The
 [warehouse specification](../specs/features/warehouses.md) owns warehouse-specific rules.
 
 ## Ownership
@@ -30,18 +30,26 @@ materialization affects target cells only and cannot convert nearby packed stock
 
 ## Appearance
 
-Render a material cube with pallet artwork along the bottom of all side faces and on the
-bottom face, plus binding straps on each side. Keep the resource recognizable between those
-marks. Transparent gaps in the packaging reveal the opaque material, not the world behind
-it; a generic opaque crate hiding its contents does not satisfy this contract.
+Full-cube materials keep their ordinary resource texture. Composite pallet artwork onto the
+bottom and lower sides, with binding straps across the cube faces. Gaps in this artwork show
+the underlying resource, not holes through the cube. This path has no internal pallet geometry.
+Use a dedicated packed shader; ordinary terrain shaders have no packaging samples or branches.
 
-A coverage-mask blend in an opaque shader is a suitable approach without requiring a
-particular shader API or transparent-object sorting. Keep the geometry in its original unit
-cell for unit-spaced stacking. Packaging is distinct from a loose terrain pallet: it creates
-no separate item, structure membership, or support dependency. Warehouse
+Irregular goods retain their base models. Adaptive roads use the unformed, non-sloped model;
+pallet cargo is uniformly scaled to 90% and centered in its unit cell. These goods have separate
+packaging geometry: a complete bottom pallet identical in size and appearance to an empty
+warehouse base pallet, plus straps around the full unit cube. Straps are visible from both
+sides, including their inside and top, and may float around a smaller resource model. The
+smaller cargo pallet and full-size packaging pallet have distinct visual roles.
+
+Use opaque surfaces, alpha cutout and real geometric holes, without semitransparent blending.
+Holes between irregular goods or pallet boards can reveal the scene; color, depth and shadow
+passes must agree on coverage. Packaging remains within the unit cell and adds no stack spacing,
+resource, structure membership or support dependency. Warehouse
 [pallet rules](../specs/features/warehouses.md#q7--pallet-support-and-the-floor) and
 [empty-base markers](../specs/features/warehouses.md#q13--markers-packaging-and-visual-freshness)
-belong to that feature.
+belong to that feature. When cargo fills a base cell, suppress its ordinary base pallet and
+marker coherently; the packed item supplies the pallet appearance.
 
 Use scene depth, materials, lighting, directional shadows, and post-processing. Share geometry
 or shader functions across cargo owners, batch visible instances, and preserve chunk-relative
@@ -75,8 +83,14 @@ removal order, observer behavior, or input bindings; those are defined in wareho
 Authoritative inventory, client prediction/collision, and GPU sources have different lifetimes.
 Publish coherent logical state and derive geometry only for relevant observed owners. Reuse
 unchanged sources; an analytic slot query may avoid constructing render geometry for collision.
-Compare compact owner records with cached instances through measurements before choosing a
-renderer. Do not expand unobserved storage into per-item scene objects by default.
+The selected [renderer](../specs/features/warehouses.md#q29--explicit-packed-faces-and-instanced-irregular-goods)
+uses flat exposed-face records `(x, y, z, material, direction)` for cubes, expanded into quads
+in the vertex shader without direction grouping or camera-view index tables. Cull only faces
+hidden by actual opaque geometry, not an irregular neighbor's collision cube. Batch irregular
+goods and their packaging into separate instanced category draws across visible sources.
+Update affected sources without rebuilding all unchanged goods. Measure CPU bookkeeping,
+uploads, memory and GPU work, including any padded model-template vertices. Do not expand
+unobserved storage into per-item scene objects by default.
 
 Player transfer duration adds no corresponding delay to simulation processing. Batched
 mutations/publication must retain every accepted resource effect. Logical collision and actor

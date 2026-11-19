@@ -14,6 +14,7 @@ pub fn description(reason: rules.Reason) []const u8 {
         .sand_footprint => "Sand requires a filled 3x3 support layer below it.",
         .mining_forbidden => "This material cannot be mined yet.",
         .immutable_cell => "Deeprock cannot be changed.",
+        .warehouse_claim => "This space is reserved by a warehouse.",
         .earth_requires_stable_platform => "Building on soil requires a filled 3x3x3 platform below the block.",
         .incompatible_support => "The material below cannot support this block.",
         .missing_foundation => "A suitable foundation is missing.",

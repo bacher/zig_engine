@@ -4,6 +4,10 @@ const format = @import("format.zig");
 const storage = @import("storage.zig");
 const adapter = @import("io.zig");
 const coordinator = @import("coordinator.zig");
+// V8 writes the transaction header, global/player data, blueprint length/data,
+// pending-work length/data and warehouse retention prefix before any chunk.
+// File.write visits the adapter even for the empty player/blueprint/work slices.
+const transaction_prefix_writes = 8;
 const Mode = enum { write_stall, sync_stall, write_failure, queued_write_failure, sync_failure, footer_cancel, before_cancel, priority, tiny_output, tiny_working, manifest_limit };
 const Gate = struct {
     io: std.Io,
@@ -82,12 +86,11 @@ fn scenario(mode: Mode) !void {
     var gate: Gate = .{
         .io = io,
         .operation = if (mode == .write_stall or mode == .write_failure or mode == .queued_write_failure or mode == .footer_cancel or mode == .before_cancel) .write else .full_sync,
-        // Header, global, empty players, blueprint length/data, pending-work
-        // length/data, chunk; the ninth adapter write is the commit footer.
-        .skip_writes = if (mode == .footer_cancel) 8 else if (mode == .queued_write_failure) 7 else 0,
+        // One chunk follows the prefix; its next write is the commit footer.
+        .skip_writes = if (mode == .footer_cancel) transaction_prefix_writes + 1 else if (mode == .queued_write_failure) transaction_prefix_writes else 0,
     };
     const stalls = mode == .queued_write_failure or mode == .write_stall or mode == .sync_stall or mode == .footer_cancel or mode == .before_cancel;
-    var faults: adapter.Faults = .{ .operation = gate.operation, .enabled = mode == .write_failure or mode == .sync_failure or mode == .queued_write_failure, .after = if (mode == .queued_write_failure) 7 else 0, .hook = if (stalls) Gate.hook else null, .context = &gate };
+    var faults: adapter.Faults = .{ .operation = gate.operation, .enabled = mode == .write_failure or mode == .sync_failure or mode == .queued_write_failure, .after = if (mode == .queued_write_failure) transaction_prefix_writes else 0, .hook = if (stalls) Gate.hook else null, .context = &gate };
     store.setFaults(&faults);
     defer store.setFaults(null);
     var blocks: [32768]u8 = undefined;
@@ -192,6 +195,7 @@ fn scenario(mode: Mode) !void {
             try std.testing.expect(charged > queued_bytes);
         }
         if (mode == .footer_cancel) {
+            try std.testing.expectEqual(@as(usize, transaction_prefix_writes + 2), gate.writes);
             try std.testing.expect(job.commit_started);
             const started = coordinator.now(io);
             job.cancel();
@@ -236,7 +240,7 @@ fn scenario(mode: Mode) !void {
         try std.testing.expect(job.output_head < job.output.items.len);
     }
     for (gate.release_counts[0..count]) |released_count| try std.testing.expectEqual(@as(u8, 1), released_count);
-    if (mode == .before_cancel) try std.testing.expect(gate.writes < 9);
+    if (mode == .before_cancel) try std.testing.expect(gate.writes < transaction_prefix_writes + 2);
 }
 test "cancellation releases all sources while real writer remains stalled and queue bounded" {
     try scenario(.write_stall);

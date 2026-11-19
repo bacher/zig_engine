@@ -45,6 +45,7 @@ pub const Scene = struct {
     space_tree: *SpaceTree(GameObject),
     voxel_grid: *VoxelGrid,
     voxel_bind_group: BindGroup,
+    packed_renderer: @import("packed_renderer.zig").Renderer,
     camera: *Camera,
     spectator_camera: *SpectatorCamera,
     /// Applications can drive the camera themselves while retaining the debug controller.
@@ -145,6 +146,9 @@ pub const Scene = struct {
         );
         errdefer voxel_bind_group.deinit(engine.gctx);
 
+        var packed_renderer = try @import("packed_renderer.zig").Renderer.init(allocator, engine.gctx, scene.layout, &engine.bind_group_layouts);
+        errdefer packed_renderer.deinit(engine.gctx);
+
         const game_objects = try std.ArrayList(*GameObject).initCapacity(allocator, capacity);
 
         scene.* = .{
@@ -159,6 +163,7 @@ pub const Scene = struct {
             .space_tree = space_tree,
             .voxel_grid = voxel_grid,
             .voxel_bind_group = voxel_bind_group,
+            .packed_renderer = packed_renderer,
             .camera = camera,
             .spectator_camera = spectator_camera,
             .previous_frame_time = 0,
@@ -191,6 +196,7 @@ pub const Scene = struct {
 
         scene.voxel_bind_group.deinit(gctx);
         scene.voxel_grid.deinit(gctx);
+        scene.packed_renderer.deinit(gctx);
 
         for (scene.game_objects.items) |game_object| game_object.deinit(gctx);
         scene.game_objects.deinit(scene.allocator);

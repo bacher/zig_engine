@@ -47,6 +47,14 @@ pub const Query = struct {
         const block = coordinates.fromWorld(self.world.layout, cell) orelse return .{ .occupancy = .solid };
         if (!coordinates.isPlayableY(self.world.layout, block[1], self.world.playable_y_inset)) return .{ .occupancy = .solid };
         const chunk_coords, _ = @import("world.zig").splitBlockCoords(block);
+        switch (self.world.warehouseOccupancy(block)) {
+            .cargo => return .{ .occupancy = .solid },
+            .unknown => {
+                if (report_missing) self.missing_chunk = self.missing_chunk orelse chunk_coords;
+                return .{ .occupancy = .missing };
+            },
+            else => {},
+        }
         const material = self.world.reader().get(.{ block[0], block[1], block[2] }) orelse {
             if (report_missing) self.missing_chunk = self.missing_chunk orelse chunk_coords;
             return .{ .occupancy = .missing };
@@ -58,6 +66,70 @@ pub const Query = struct {
             .occupancy = if (movementCollision(material) == .full_cube) .solid else .clear,
             .shape = if (material == .custom) self.world.customShape(block) else null,
         };
+    }
+
+    /// Search only halos of cargo actually intersecting this body. Candidate
+    /// full-body sources are already inside the player's pinned 3x3x3 chunk
+    /// neighborhood (a warehouse spans at most five cells plus its halo).
+    pub fn warehouseHalo(self: *Query, feet: Position) ?Position {
+        const bounds = self.body.bounds(feet);
+        const first = bounds.firstCell();
+        const last = bounds.lastCell();
+        var best: ?Position = null;
+        var best_distance = @import("std").math.inf(f64);
+        var seen: [8]@import("construction_state.zig").Identity = undefined;
+        var seen_count: usize = 0;
+        var z = first[2];
+        while (z <= last[2]) : (z += 1) {
+            var y = first[1];
+            while (y <= last[1]) : (y += 1) {
+                var x = first[0];
+                while (x <= last[0]) : (x += 1) {
+                    const block = coordinates.fromWorld(self.world.layout, .{ x, y, z }) orelse continue;
+                    const owner = switch (self.world.warehouseOccupancy(block)) {
+                        .cargo => |record| record,
+                        else => continue,
+                    };
+                    var duplicate = false;
+                    for (seen[0..seen_count]) |identity| if (@import("std").meta.eql(identity, owner.identity)) {
+                        duplicate = true;
+                        break;
+                    };
+                    if (duplicate) continue;
+                    if (seen_count < seen.len) {
+                        seen[seen_count] = owner.identity;
+                        seen_count += 1;
+                    }
+                    var dy = owner.geometry.bounds.ymin - 1;
+                    while (dy <= owner.geometry.bounds.ymax + 1) : (dy += 1) {
+                        var dx = owner.geometry.bounds.xmin - 1;
+                        while (dx <= owner.geometry.bounds.xmax + 1) : (dx += 1) {
+                            if (owner.geometry.bounds.contains(.{ dx, dy })) continue;
+                            const cell = owner.geometry.worldCell(self.world.layout.size_in_blocks, .{ dx, dy, 0 }) orelse continue;
+                            var world_cell = @as(Cell, .{ cell[0], cell[1], cell[2] }) - @as(Cell, self.world.layout.origin_chunk) * @as(Cell, @splat(engine.chunk_utils.CHUNK_SIZE));
+                            // Use the nearest wrapped copy, including repeated trips.
+                            if (comptime engine.WorldLayout.wrap_x) {
+                                const width: i64 = self.world.layout.size_in_blocks[0];
+                                const current_x: i64 = @intFromFloat(@floor(feet[0]));
+                                world_cell[0] = current_x + @mod(world_cell[0] - current_x + @divTrunc(width, 2), width) - @divTrunc(width, 2);
+                            }
+                            const destination = cellPosition(world_cell);
+                            const delta = destination - feet;
+                            const distance = @reduce(.Add, delta * delta);
+                            if (distance >= best_distance) continue;
+                            switch (self.overlap(destination, true)) {
+                                .clear => {
+                                    best = destination;
+                                    best_distance = distance;
+                                },
+                                else => {},
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return best;
     }
 
     pub fn overlap(self: *Query, feet: Position, report_missing: bool) Overlap {
@@ -270,4 +342,35 @@ pub fn overlapsBlock(body: Body, feet: Position, layout: *const engine.WorldLayo
     const bounds = body.bounds(feet);
     return @reduce(.And, bounds.max > min + @as(Position, @splat(epsilon))) and
         @reduce(.And, bounds.min < min + @as(Position, @splat(1 - epsilon)));
+}
+
+test "warehouse cargo collision and halo recovery use logical state before graphics" {
+    const std = @import("std");
+    var fixture = try @import("terrain_test_fixture.zig").Fixture.init();
+    defer fixture.deinit();
+    fixture.set(.{ 0, 0, 0 }, .pallet);
+    var query: Query = .{ .world = &fixture.world, .body = .{} };
+    try std.testing.expectEqual(Overlap.clear, query.overlap(.{ 0.5, 0.5, 0 }, false));
+    fixture.fill(.{ -1, -1, 0 }, .{ 1, 1, 1 }, .stone);
+    fixture.fill(.{ -1, -1, 0 }, .{ -1, -1, 1 }, .none);
+    const origin = coordinates.fromWorld(fixture.world.layout, .{ 0, 0, 0 }).?;
+    const record: @import("warehouse_state.zig").Record = .{ .identity = .{ .kind = .warehouse, .world_session = 91, .id = 1, .lifetime = 1 }, .geometry = try @import("warehouse_layout.zig").Geometry.fromMinimum(fixture.world.layout.size_in_blocks, origin, .{ 1, 1 }), .material = .sand, .stock = 1, .active = 1, .revision = 1 };
+    const cache = &fixture.world.warehouses;
+    _ = cache.acceptSession(91);
+    const source_chunks = try @import("warehouse_claims.zig").chunks(fixture.world.layout.size_in_blocks, record.geometry);
+    for (source_chunks.coords[0..source_chunks.count]) |coords| {
+        const id = fixture.world.layout.encodeChunkCoords(.{ @intCast(coords[0]), @intCast(coords[1]), @intCast(coords[2]) });
+        _ = try cache.installChunk(std.testing.allocator, id, 1, 1, &.{.{ .identity = record.identity, .geometry = record.geometry }});
+    }
+    cache.subscribed(record.identity, 7);
+    _ = cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 7 } });
+    try std.testing.expectEqual(Overlap.solid, query.overlap(.{ 0.5, 0.5, 0 }, false));
+    // Contradictory occupied halo is excluded; the free corner is legal with no
+    // support or path requirement. The result is a complete 1.8m body check.
+    const destination = query.warehouseHalo(.{ 0.5, 0.5, 0 }).?;
+    try std.testing.expectEqualDeep(Position{ -0.5, -0.5, 0 }, destination);
+    try std.testing.expectEqual(Overlap.clear, query.overlap(destination, false));
+    cache.invalidate(record.identity);
+    try std.testing.expectEqual(Overlap.missing, query.overlap(.{ 0.5, 0.5, 0 }, false));
+    try std.testing.expect(query.warehouseHalo(.{ 0.5, 0.5, 0 }) == null);
 }

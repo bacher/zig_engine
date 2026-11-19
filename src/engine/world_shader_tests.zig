@@ -11,6 +11,22 @@ const terrain_pipeline = @import("pipelines/terrain_height_map_pipeline.zig");
 const custom_readback = @import("custom_block_readback.zig");
 const material_readback = @import("material_readback.zig");
 
+test "packed cargo preserves opaque faces, pallet holes, interior straps, scene depth and shadows" {
+    var uncaptured: ValidationResponse = .{};
+    var validation: ValidationResponse = .{};
+    var mapping: coordinate_readback.MapResponse = .{};
+    const gpu = try HeadlessDawn.init();
+    defer gpu.deinit();
+    gpu.device.setUncapturedErrorCallback(ValidationResponse.callback, &uncaptured);
+    gpu.device.pushErrorScope(.validation);
+    const checked = @import("packed_readback.zig").check(gpu.device, &mapping);
+    _ = gpu.device.popErrorScope(ValidationResponse.callback, &validation);
+    try coordinate_readback.waitForCallback(gpu.device, &validation.done);
+    try std.testing.expectEqual(@as(usize, 0), validation.errors);
+    try checked;
+    try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
+}
+
 // Dawn's native entry points, also used by zgpu.GraphicsContext.create.
 extern fn dniCreate() ?*anyopaque;
 extern fn dniDestroy(instance: ?*anyopaque) void;

@@ -11,12 +11,14 @@ pub const Intent = union(enum) {
     operation: struct { operation: world.BlockOperation, target: ?state.Identity = null },
     apply: struct { owner: u64, definition_id: u64, origin: [3]u32, rotation: u2 },
     save: struct { owner: u64, name: []const u8, definition: blueprint.Definition },
+    warehouse: @import("warehouse_commands.zig").Payload,
 
     pub fn eql(a: Intent, b: Intent) bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
         return switch (a) {
             .operation => |value| std.meta.eql(value, b.operation),
             .apply => |value| std.meta.eql(value, b.apply),
+            .warehouse => |value| std.meta.eql(value, b.warehouse),
             .save => |value| value.owner == b.save.owner and std.mem.eql(u8, value.name, b.save.name) and
                 std.meta.eql(value.definition.size, b.save.definition.size) and value.definition.target_count == b.save.definition.target_count and
                 std.mem.eql(rules.BlockType, value.definition.cells, b.save.definition.cells),
@@ -50,6 +52,7 @@ pub const Intent = union(enum) {
 pub const Outcome = union(enum) {
     operation: struct { status: world.OperationStatus, failure: ?rules.Failure = null, mined_type: ?rules.BlockType = null },
     blueprint: @import("blueprint_result.zig").Result,
+    warehouse: @import("warehouse_commands.zig").Result,
 };
 pub const Submission = struct {
     request_id: u64,
@@ -224,6 +227,27 @@ test "command ledger shares bounds and distinguishes target kind lifetime and pa
     try std.testing.expectEqual(@as(u64, 1), second.next_sequence);
 }
 
+test "warehouse and construction union intents cannot reuse a live command key" {
+    const allocator = std.testing.allocator;
+    const command: Identity = .{ .world_session = 7, .client_session = 9, .sequence = 1 };
+    const construction_intent: Intent = .{ .operation = .{ .operation = .{ .block = .{ 1, 2, 3 }, .action = .{ .put = .dirt }, .blueprint = .{ .instance_id = 1, .cell_index = 0 } }, .target = .{ .kind = .construction, .world_session = 7, .id = 1, .lifetime = 1 } } };
+    const warehouse_intent: Intent = .{ .warehouse = .{ .actor = .{ .player_id = 1, .viewpoint = .{ 1, 2, 3 } }, .action = .{ .transfer = .{ .identity = .{ .kind = .warehouse, .world_session = 7, .id = 1, .lifetime = 1 }, .aim_cell = .{ 1, 2, 3 }, .material = .dirt, .direction = .put } } } };
+    for ([_]bool{ false, true }) |warehouse_first| {
+        var budget: Budget = .{};
+        var ledger: Ledger = .{};
+        defer ledger.deinit(allocator, &budget);
+        const original = if (warehouse_first) warehouse_intent else construction_intent;
+        const changed = if (warehouse_first) construction_intent else warehouse_intent;
+        _ = try ledger.admit(allocator, &budget, command, 1, original);
+        try std.testing.expectError(error.ConflictingCommand, ledger.admit(allocator, &budget, command, 2, changed));
+        try std.testing.expectEqual(@as(usize, 1), ledger.records.items.len);
+        try std.testing.expect(Intent.eql(original, ledger.records.items[0].intent));
+        ledger.complete(1, if (warehouse_first) .{ .warehouse = .{ .request_id = 1, .command = command, .status = .success } } else .{ .operation = .{ .status = .success } });
+        try std.testing.expectError(error.ConflictingCommand, ledger.admit(allocator, &budget, command, 3, changed));
+        try std.testing.expectEqual(.replayed, (try ledger.admit(allocator, &budget, command, 4, original)).disposition);
+    }
+}
+
 fn exerciseSaveOwnership(allocator: std.mem.Allocator) !void {
     var budget: Budget = .{};
     var ledger: Ledger = .{};
@@ -265,4 +289,32 @@ test "command ledger byte cap shares record capacity and both Save payload reser
     const operation: Intent = .{ .operation = .{ .operation = .{ .block = .{ 1, 2, 3 }, .action = .remove } } };
     try std.testing.expectError(error.Busy, ledger.admit(a, &budget, next, 2, operation));
     try std.testing.expectEqual(@as(u64, 2), ledger.next_sequence);
+}
+
+test "warehouse intent retries bind actor registration material and complete inventory cut" {
+    const a = std.testing.allocator;
+    var ledger: Ledger = .{};
+    var budget: Budget = .{ .record_limit = 1 };
+    defer ledger.deinit(a, &budget);
+    const command: Identity = .{ .world_session = 7, .client_session = 8, .sequence = 1 };
+    const registration: state.Identity = .{ .world_session = 7, .kind = .warehouse, .id = 9, .lifetime = 9 };
+    const intent: Intent = .{ .warehouse = .{ .actor = .{ .player_id = 1, .viewpoint = .{ 1, 2, 3 } }, .action = .{ .transfer = .{ .identity = registration, .aim_cell = .{ 10, 2, 3 }, .material = .dirt, .direction = .put } } } };
+    try std.testing.expectEqual(.queued, (try ledger.admit(a, &budget, command, 123, intent)).disposition);
+    var changed = intent;
+    changed.warehouse.action.transfer.identity.lifetime += 1;
+    try std.testing.expectError(error.ConflictingCommand, ledger.admit(a, &budget, command, 124, changed));
+    changed = intent;
+    changed.warehouse.action.transfer.material = .sand;
+    try std.testing.expectError(error.ConflictingCommand, ledger.admit(a, &budget, command, 124, changed));
+    changed = intent;
+    changed.warehouse.actor.viewpoint[2] += 1;
+    try std.testing.expectError(error.ConflictingCommand, ledger.admit(a, &budget, command, 124, changed));
+    ledger.complete(1, .{ .warehouse = .{ .request_id = 123, .command = command, .status = .success, .resolved_sequence = 1, .player_inventory = .{ .player_id = 1, .material = null } } });
+    const replay = try ledger.admit(a, &budget, command, 999, intent);
+    try std.testing.expectEqual(.replayed, replay.disposition);
+    try std.testing.expectEqual(@as(u64, 123), replay.request_id);
+    try std.testing.expectEqual(@as(u64, 1), replay.outcome.?.warehouse.resolved_sequence);
+    try std.testing.expect(replay.outcome.?.warehouse.player_inventory.?.material == null);
+    try std.testing.expect(ledger.acknowledge(a, &budget, 1));
+    try std.testing.expectError(error.StaleCommand, ledger.admit(a, &budget, command, 1000, intent));
 }

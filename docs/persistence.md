@@ -34,7 +34,7 @@ versions only, not intermediate development builds, including builds between rel
 
 The game runs one current gameplay/construction logic. It does not select historical rules
 from a world or blueprint. Compatibility with older file encodings is separate: the current
-implementation writes and reads format 7. Formats 1–6 are incompatible development
+implementation writes and reads format 8. Formats 1–7 are incompatible development
 saves and are rejected as whole worlds. The base and WAL readers enforce the supported inclusive
 range through `minimum_readable_version` and `current_write_version`.
 
@@ -46,7 +46,9 @@ saved blueprint libraries, and unfinished construction sites together. Generator
 identity/version guards likewise reject unsupported algorithms. All accepted saves use the
 current game logic.
 
-Version 7 stores construction lifecycle, target-chunk ownership transfers, and pending
+Version 8 adds simulation-owned warehouses and accepted delivery cargo to the coherent
+terrain/construction/player snapshot. Pallet material has explicit ID 23. Version 7 introduced
+construction lifecycle, target-chunk ownership transfers, and pending
 post-completion grass initialization. Bare and grassy soil share support rules; legacy
 packed-soil value 7 and compaction events are rejected. Both version gates advance together.
 Platform-only direct stone foundations and portable blueprint certification remain.
@@ -60,12 +62,14 @@ authoritative state refresh; uncertain old requests are not automatically replay
 commands. A command may be present in the saved state even if its reply was not received.
 This preserves the shared coherent save boundary and does not relax persistent delivery/task
 recovery. Construction establishes this boundary for external Save/Apply and block operations;
-warehouses will add their typed intents. The service retains at most `pending_commands`
+warehouses use the same boundary for registration, stock transfers, configuration and lifecycle.
+The service retains at most `pending_commands`
 unacknowledged records globally, under a separate 32 MiB command-storage budget. In-process
 result collection acknowledges receipt; a future wire adapter uses explicit acknowledgment.
 An acknowledged sequence stays below the endpoint's retirement frontier and cannot execute
-again. Retry results contain scalar outcomes and immutable IDs, never old mutable inventory
-or terrain snapshots. Automatic simulation operations use their own lifecycle and bypass
+again. Warehouse results retain their evaluated stock/inventory cut with a resolved command
+prefix; client reconciliation uses that fence so a late result cannot overwrite newer state.
+Terrain operation retries retain scalar outcomes and immutable IDs. Automatic simulation operations use their own lifecycle and bypass
 the external-command ledger.
 
 ## Saving and exit
@@ -122,7 +126,32 @@ edits. Processing keeps the 16-work-unit budget, counting seeds and completion/r
 with fair repeat passes and immediate yield on dependency, source-hold, or error waits.
 See [unfinished world work](../specs/features/deferred-world-work.md).
 
-Simulation and block timers pause while snapshot sources are held. The encoder releases sources as independent records become available, allowing gameplay to resume before disk synchronization. Conflicting player edits remain pending. Ordinary waits can cancel capture safely; saving that falls sufficiently behind can prioritize completion with visible status. UI/rendering continue, but world-changing actions may wait. Actual disk errors cannot be solved by prioritization; unsaved state stays dirty for retry.
+Warehouse capture freezes one complete compact record set only when the warehouse domain
+has changed since its last durable capture. The set includes registration IDs/lifetimes,
+geometry, material, enabled/active configuration, stock, incoming capacity promises, obligations,
+accepted cargo and task completion highwaters. An unchanged domain writes an eight-byte
+retention marker. Its full snapshot shares the terrain, construction, player and global WAL
+footer; there is no disk synchronization per transfer or delivery item. Manual transfers commit
+stock and the authoritative player slot together. Automatic work uses bounded local batches
+on the same service executor, with coherent individual outcomes and ordinary batched publication.
+
+Each warehouse mutation preflights its generation before changing resources. Capture records
+that generation; only its durable commit acknowledges it. Later mutations remain dirty when
+an older writer finishes, and preparation/write failure leaves the changed generation dirty.
+Capture admits the encoded snapshot and conservative validation/replacement memory before
+allocating it. Defaults bound records to 4,096 warehouses, 4,096 retained delivery tasks and
+2 MiB encoded bytes; these limits are separate from terrain manifests and native state.
+
+Recovery renews the world session, validates linear warehouse/delivery accounting, rebuilds
+derived layouts and spatial claims, and checks actual member pallets, the whole reserved
+envelope and real support. Support reads compose simulation-owned construction targets with
+terrain, including partially materialized sites. Conflicting targets, missing members/support,
+obstructions or inconsistent cargo/promises fail before the service starts. Runtime claims,
+client subscriptions, visual pallet sources, command responses and GPU caches are derived.
+An accepted delivery retains cargo and its reserved capacity across restart; repeated handover
+cannot duplicate stock. No full scheduler, workforce-food system or offline simulation is added.
+
+Simulation and block timers pause while snapshot sources are held. The encoder releases sources as independent records become available, allowing gameplay to resume before disk synchronization. Warehouse-only local transitions can continue against their frozen byte snapshot. Conflicting player edits remain pending. Ordinary waits can cancel capture safely; saving that falls sufficiently behind can prioritize completion with visible status. UI/rendering continue, but world-changing actions may wait. Actual disk errors cannot be solved by prioritization; unsaved state stays dirty for retry.
 
 Closing the window or choosing Exit from the Escape menu stops producers and drains existing edits before publishing the final player checkpoint and save. The final capture is exempt from ordinary gameplay wait deadlines. After a failure or five seconds without meaningful progress, the dialog provides retry/wait, cancel exit, or explicit quit without saving. Quitting without saving may lose changes since the last durable snapshot. A durable WAL remains recoverable if final compaction fails.
 
@@ -146,6 +175,12 @@ Capture computes the exact encoded journal size before its working-memory check,
 allocates that buffer once. A successful durable commit retires only its captured operation
 prefix; changes accepted while it was writing remain dirty for the next transaction.
 
+`warehouses.zig` owns the canonical warehouse/delivery codec and its count-based memory
+preflight. Store owns the last committed encoded image; an active capture owns a separate
+immutable image and the writer prepares its replacement before commit authorization. The
+base stores the complete image; WAL uses either a replacement image or the retention marker.
+Compaction freezes its own generation while later commits can update the live Store image.
+
 `save_lifecycle.zig` owns save policy on the service thread: the active attempt, a queued drain's command fence and retry allowance, cancellation policy, and watchdog deadlines. An older attempt can still be writing while a newer request drains. The service supplies observations of its source holds, pending reads, queries, and compactor, then executes the lifecycle's decisions. The lifecycle allocates no buffers, starts no workers, and performs no I/O.
 
 The service retains chunk ownership, dependency discovery, revision bookkeeping, and status metrics. Source release resumes simulation independently of durable completion. The encoder/writer still arbitrates cancellation against commit authorization; only its result establishes whether an attempt was cancelled. Application exit retains its existing wait, retry, cancel-exit, and quit choices. The shared typed work-key representation supplies the initial road obligation only; future NPC state and scheduling need their own semantics and handlers.
@@ -160,6 +195,8 @@ Lazy grass-growth timers and non-executable construction initialization markers 
 
 ```sh
 zig build test-persistence
+zig build test-world-service -Dtest-filter=warehouse -Doptimize=ReleaseSafe
+zig build test-world-service -Dtest-filter='warehouse authority representative' -Doptimize=ReleaseFast
 zig build test-blueprint-service
 zig build test-capture
 zig test src/voxel_app/persistence/save_lifecycle.zig

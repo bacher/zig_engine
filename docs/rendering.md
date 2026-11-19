@@ -165,7 +165,7 @@ four, or eight contiguous base spans as one allocation, supporting every culled 
 32³ chunk without changing the packed shader layout. These ranges can fail under
 contiguous-space fragmentation; capacity preflight preserves resident geometry for retry.
 
-World storage uses [`BlockType`](../src/engine/voxel/voxel_chunk.zig), with IDs 0–20 (7 reserved) and
+World storage uses [`BlockType`](../src/engine/voxel/voxel_chunk.zig), with IDs 0–20 (7 reserved), `pallet = 23`, and
 `custom = 255`; carried items have a narrower persistence schema. `GPU_BlockInfo.block_type`
 uses the separate `RenderMaterial` enum. Shared IDs retain the same meanings, and meshing
 adds two climate appearances for saved `grass = 3` cells:
@@ -203,6 +203,42 @@ bindings after ordinary object rendering. Road slope planes match CPU collision;
 adaptive roads use temporary inset marker geometry. See [country roads](country-roads.md).
 
 The CPU/WGSL layouts are part of the contract: chunk metadata is 112 bytes, face records are four bytes, custom block records are 48 bytes, ordinary instances are 80 bytes. Changes must keep the shader declarations and upload layout synchronized.
+
+### Packed goods and pallets
+
+The [packed renderer](../src/engine/packed_renderer.zig) is an owner-neutral scene layer with
+its own color/shadow pipelines. Ordinary terrain shaders do not sample packaging. Application
+[packed geometry](../src/voxel_app/packed_geometry.zig) derives warehouse sources from the same
+presentation snapshot as empty-pallet icons and disabled crosses. Stock changes do not remesh
+terrain. Logical collision and player recovery follow current stock independently of GPU work.
+
+Cube goods use a flat exposed-face list carrying local coordinates, material and direction:
+20 bytes at the application boundary, 24 bytes on the GPU including a source-table index.
+There are no directional groups or camera-view index tables. The vertex shader expands each
+face into six vertices; hardware backface culling rejects away-facing triangles. Interior
+faces are culled during source preparation. A full 5×5×6 cubic warehouse has 170 exterior
+unit faces. This count is geometric, not a measured frame-time result.
+
+Irregular cargo and its packaging each use one instanced category draw across retained sources.
+The shared 288-vertex goods template represents either the standard 198-vertex unformed adaptive
+road (90 unused vertices form degenerate triangles) or an eight-cuboid pallet. Pallet cargo is
+uniformly scaled to 90% at cell center. Packaging supplies a full-size bottom pallet plus six
+cutout strap faces, 324 vertices per item. Straps surround the full cell and render from both
+sides; the packaging pipeline disables face culling. Cube goods instead composite pallet/strap
+artwork only on their exterior faces. No semitransparent blending is used. Empty pallets share
+the real pallet geometry, and advisory top markers do not cast shadows onto their own pallet.
+
+Dense buffers batch faces, goods models, packaging, empty pallets and markers separately.
+A source update replaces only its records; swap-removal repairs reverse references for moved
+records, and uploads affected spans. Geometric buffer growth can copy existing records. The
+source table stores chunk coordinates so shaders rebase before converting local positions to
+floating point, including wrapped X. Unchanged sources need no upload for a camera-only frame.
+The renderer exposes counts, capacity bytes, uploaded bytes/calls, moved records and submitted
+vertices; these distinguish update costs from draw counts and GPU execution time.
+
+The [shared contract](packed-blocks.md) separates appearance from full-cell collision and lack
+of construction support. [Warehouse Q29](../specs/features/warehouses.md#q29--explicit-packed-faces-and-instanced-irregular-goods)
+records the selected representation and validation expectations.
 
 ### Construction geometry and terrain handoff
 

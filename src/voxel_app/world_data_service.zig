@@ -34,6 +34,14 @@ const blueprint_soil = @import("blueprint_soil.zig");
 const blueprint_admission_region = @import("blueprint_admission_region.zig");
 const blueprint_road_updates = @import("blueprint_road_updates.zig");
 const construction_stream = @import("construction_stream.zig");
+pub const warehouse_commands = @import("warehouse_commands.zig");
+pub const warehouse_stream = @import("warehouse_stream.zig");
+const warehouse_state = @import("warehouse_state.zig");
+const warehouse_claims = @import("warehouse_claims.zig");
+const warehouse_layout = @import("warehouse_layout.zig");
+const warehouse_reach = @import("warehouse_reach.zig");
+const warehouse_recognition = @import("warehouse_recognition.zig");
+const warehouse_wire = @import("persistence/warehouses.zig");
 const PublicationBudget = @import("construction_publication_budget.zig").Budget;
 pub const commands = @import("construction_commands.zig");
 const background_work_log = std.log.scoped(.background_world_work);
@@ -155,6 +163,13 @@ pub const ChunkResponse = struct {
     operation: ?OperationResult = null,
     chunk_revision: u64 = 0,
     mesh_revision: u64 = 0,
+    warehouse_refs: ?[]warehouse_stream.Reference = null,
+    warehouse_revision: u64 = 0,
+    /// Complete independent base-pallet source for this chunk, including loose
+    /// pallets. Indices use the canonical x + 32*y + 1024*z block ordering.
+    /// A present empty slice clears the source; null carries no replacement.
+    pallet_visuals: ?[]const u16 = null,
+    pallet_visual_revision: u64 = 0,
     composition: ?construction_stream.ChunkComposition = null,
     composition_budget: ?*PublicationBudget = null,
     composition_bytes: usize = 0,
@@ -169,6 +184,8 @@ pub const ChunkResponse = struct {
     },
 
     pub fn deinit(self: ChunkResponse, allocator: std.mem.Allocator) void {
+        if (self.warehouse_refs) |refs| allocator.free(refs);
+        if (self.pallet_visuals) |cells| allocator.free(cells);
         if (self.composition) |value| {
             var owned = value;
             owned.deinit(allocator);
@@ -195,6 +212,7 @@ pub const ResponsePackage = struct {
     responses: std.ArrayList(ChunkResponse) = .empty,
     blueprint_changes: std.ArrayList(blueprint_runtime.Change) = .empty,
     construction_updates: std.ArrayList(construction_stream.Update) = .empty,
+    warehouse_updates: std.ArrayList(warehouse_stream.Update) = .empty,
     publication_budget: ?*PublicationBudget = null,
     publication_bytes: usize = 0,
 
@@ -205,6 +223,7 @@ pub const ResponsePackage = struct {
         self.blueprint_changes.deinit(allocator);
         for (self.construction_updates.items) |*update| update.deinit(allocator);
         self.construction_updates.deinit(allocator);
+        self.warehouse_updates.deinit(allocator);
         self.releasePublication();
     }
 
@@ -228,6 +247,16 @@ const Subscription = struct {
     blocks_pending: bool = false,
     composition_pending: bool = true,
 };
+
+const WarehouseSubscription = struct {
+    identity: warehouse_stream.Identity,
+    token: u64,
+    revision: ?u64 = null,
+    resync: bool = true,
+    pending_index: ?usize = null,
+};
+const WarehouseControl = struct { client: *Client, identity: warehouse_stream.Identity, token: u64, counted: bool = false };
+const WarehouseRequest = struct { client: *Client, request_id: u64, payload: warehouse_commands.Payload, command: ?commands.Identity = null };
 
 const ConstructionSubscription = struct {
     identity: construction_stream.Identity,
@@ -367,6 +396,10 @@ const Request = union(enum) {
     blueprint_apply: BlueprintApplyRequest,
     blueprint_prepared: *BlueprintAdmissionTask,
     blueprint_definition: struct { client: *Client, id: u64, counted: bool = false },
+    warehouse: WarehouseRequest,
+    warehouse_subscribe: WarehouseControl,
+    warehouse_resync: WarehouseControl,
+    warehouse_unsubscribe: WarehouseControl,
     construction_subscribe: ConstructionSiteRequest,
     construction_resync: ConstructionSiteRequest,
     construction_unsubscribe: ConstructionSiteRequest,
@@ -396,6 +429,7 @@ const Request = union(enum) {
 
 fn requestClient(request: Request) *Client {
     return switch (request) {
+        .warehouse => |value| value.client,
         .operation => |value| value.client,
         .blueprint_save => |value| value.client,
         .blueprint_apply => |value| value.client,
@@ -418,6 +452,7 @@ pub const Client = struct {
     /// Value-only query replies never consume chunk packages or create subscriptions.
     space_responses: Mailbox(StandingSpaceResponse) = .{},
     blueprint_results: Mailbox(BlueprintResult) = .{},
+    warehouse_results: Mailbox(warehouse_commands.Result) = .{},
     /// Worker-owned successful Save identities, scoped to this endpoint's
     /// lifetime. Automatic transport identities and explicit retry keys differ.
     blueprint_save_keys: std.AutoHashMapUnmanaged(BlueprintSaveKey, u64) = .empty,
@@ -436,6 +471,7 @@ pub const Client = struct {
     /// Only accessed by the service worker. Values identify subscription generations.
     subscriptions: std.AutoHashMapUnmanaged(ChunkId, Subscription) = .empty,
     construction_subscriptions: std.AutoHashMapUnmanaged(u64, ConstructionSubscription) = .empty,
+    warehouse_subscriptions: std.AutoHashMapUnmanaged(u64, WarehouseSubscription) = .empty,
     construction_definitions: std.AutoHashMapUnmanaged(u64, void) = .empty,
     blueprint_library_pending: bool = false,
 
@@ -478,6 +514,21 @@ pub const Client = struct {
     fn submitExternalLocked(self: *Client, requested: ?commands.Identity, intent: commands.Intent, request: Request) !commands.Submission {
         const service = self.service;
         if (service.requests.is_closed or service.is_shutting_down.load(.acquire)) return error.ServiceStopped;
+        // Malformed floating-point payloads never consume an identity. NaNs
+        // would otherwise make an identical retry compare unequal to itself.
+        if (intent == .warehouse) {
+            for (intent.warehouse.actor.viewpoint) |coordinate| {
+                if (!std.math.isFinite(coordinate) or @abs(coordinate) >= 0x1p62) return error.InvalidCommandSession;
+            }
+            const aimed = switch (intent.warehouse.action) {
+                .register => |value| value.aim_cell,
+                .transfer => |value| value.aim_cell,
+                else => null,
+            };
+            if (aimed) |cell| for (0..3) |axis| {
+                if (cell[axis] >= service.layout.size_in_blocks[axis]) return error.InvalidCommandSession;
+            };
+        }
         const external = requested != null or (!self.simulation and service.world_session != 0);
         var owned = request;
         var submission: commands.Submission = undefined;
@@ -505,6 +556,7 @@ pub const Client = struct {
                 .operation => |*edit| edit.command = identity,
                 .blueprint_save => |*save| save.command = identity,
                 .blueprint_apply => |*apply| apply.command = identity,
+                .warehouse => |*edit| edit.command = identity,
                 else => unreachable,
             }
         } else {
@@ -528,6 +580,63 @@ pub const Client = struct {
         self.service.requests.mutex.lockUncancelable(self.service.io);
         defer self.service.requests.mutex.unlock(self.service.io);
         return self.submitExternalLocked(command, .{ .operation = .{ .operation = operation, .target = target } }, .{ .operation = .{ .client = self, .request_id = self.next_request_id, .operation = operation, .target = target } });
+    }
+
+    pub fn tryWarehouseCommand(self: *Client, command: commands.Identity, payload: warehouse_commands.Payload) !commands.Submission {
+        self.service.requests.mutex.lockUncancelable(self.service.io);
+        defer self.service.requests.mutex.unlock(self.service.io);
+        return self.submitExternalLocked(command, .{ .warehouse = payload }, .{ .warehouse = .{ .client = self, .request_id = self.next_request_id, .payload = payload } });
+    }
+
+    pub fn trySubmitWarehouse(self: *Client, payload: warehouse_commands.Payload) !commands.Submission {
+        self.service.requests.mutex.lockUncancelable(self.service.io);
+        defer self.service.requests.mutex.unlock(self.service.io);
+        return self.submitExternalLocked(null, .{ .warehouse = payload }, .{ .warehouse = .{ .client = self, .request_id = self.next_request_id, .payload = payload } });
+    }
+
+    pub fn takeWarehouseResults(self: *Client, out: *std.ArrayList(warehouse_commands.Result)) void {
+        self.warehouse_results.takeAll(self.service.io, out);
+        for (out.items) |result| {
+            if (result.command) |identity| _ = self.acknowledgeExternalCommand(identity);
+        }
+    }
+
+    pub fn trySubscribeWarehouse(self: *Client, identity: warehouse_stream.Identity) SubmitError!u64 {
+        self.service.requests.mutex.lockUncancelable(self.service.io);
+        defer self.service.requests.mutex.unlock(self.service.io);
+        const token = self.next_request_id;
+        try self.enqueueWarehouseControlLocked(.{ .warehouse_subscribe = .{ .client = self, .identity = identity, .token = token } });
+        self.next_request_id = std.math.add(u64, token, 1) catch @panic("subscription IDs exhausted");
+        return token;
+    }
+
+    pub fn tryResyncWarehouse(self: *Client, identity: warehouse_stream.Identity, token: u64) SubmitError!void {
+        self.service.requests.mutex.lockUncancelable(self.service.io);
+        defer self.service.requests.mutex.unlock(self.service.io);
+        try self.enqueueWarehouseControlLocked(.{ .warehouse_resync = .{ .client = self, .identity = identity, .token = token } });
+    }
+
+    pub fn tryUnsubscribeWarehouse(self: *Client, identity: warehouse_stream.Identity, token: u64) SubmitError!void {
+        self.service.requests.mutex.lockUncancelable(self.service.io);
+        defer self.service.requests.mutex.unlock(self.service.io);
+        try self.enqueueWarehouseControlLocked(.{ .warehouse_unsubscribe = .{ .client = self, .identity = identity, .token = token } });
+    }
+
+    fn enqueueWarehouseControlLocked(self: *Client, request: Request) SubmitError!void {
+        const service = self.service;
+        if (service.requests.is_closed or service.is_shutting_down.load(.acquire)) return error.ServiceStopped;
+        // Releases have their own bounded allowance: retained subscribes must
+        // never consume the admission needed to free a live subscription slot.
+        const outstanding = service.warehouseControlCounter(std.meta.activeTag(request));
+        if (outstanding.load(.monotonic) >= service.limits.pending_commands) return error.Busy;
+        var owned = request;
+        switch (owned) {
+            .warehouse_subscribe, .warehouse_resync, .warehouse_unsubscribe => |*control| control.counted = true,
+            else => unreachable,
+        }
+        try service.requests.items.append(service.allocator, owned);
+        _ = outstanding.fetchAdd(1, .acq_rel);
+        service.requests.not_empty.signal(service.io);
     }
 
     pub fn tryApplyBlueprintCommand(self: *Client, command: commands.Identity, owner: u64, definition_id: u64, origin: [3]u32, rotation: u2) !commands.Submission {
@@ -895,6 +1004,7 @@ pub const Client = struct {
             package.blueprint_changes.deinit(self.service.allocator);
             for (package.construction_updates.items) |*update| update.deinit(self.service.allocator);
             package.construction_updates.deinit(self.service.allocator);
+            package.warehouse_updates.deinit(self.service.allocator);
             package.releasePublication();
         }
         packages.deinit(self.service.allocator);
@@ -938,9 +1048,15 @@ pub const WorldDataService = struct {
     construction_publication_head: usize = 0,
     construction_publication_sequence: u64 = 0,
     construction_composition_revision: u64 = 0,
+    warehouse_discovery_revision: u64 = 0,
     construction_publication_budget: ?*PublicationBudget = null,
     construction_publication_wakeup: bool = false,
     outstanding_construction_controls: std.atomic.Value(usize) = .init(0),
+    outstanding_warehouse_subscriptions: std.atomic.Value(usize) = .init(0),
+    outstanding_warehouse_unsubscribes: std.atomic.Value(usize) = .init(0),
+    /// Worker-owned desired interests rejected by live capacity or allocation
+    /// pressure. Each retains its ingress reservation; storage is prepared at startup.
+    pending_warehouse_subscriptions: std.ArrayList(WarehouseControl) = .empty,
     /// Worker-owned; avoid taking the external-command lock on simulation-only turns.
     external_blueprint_delivery_pending: bool = false,
     command_budget: commands.Budget = .{},
@@ -1047,6 +1163,8 @@ pub const WorldDataService = struct {
     lifecycle: save_lifecycle.Lifecycle = .{},
     player_generation: u64 = 0,
     captured_player_generation: u64 = 0,
+    durable_warehouse_revision: u64 = 0,
+    captured_warehouse_revision: ?u64 = null,
     initial_tick: u64 = 0,
     const ConstructionWork = struct { instance_id: u64, next_group: usize = 0, attempts_left: usize = 0, stalled: bool = false };
     const Pending = struct { request: Request, since: i96, waiting_for_journal: bool = false };
@@ -1098,6 +1216,7 @@ pub const WorldDataService = struct {
         };
         try io.randomSecure(std.mem.asBytes(&self.world_session));
         if (self.world_session == 0) self.world_session = 1;
+        self.worker_state.warehouses = warehouse_state.State.init(self.world_session, @bitCast(self.layout.size_in_blocks));
         self.construction_publication_budget = try PublicationBudget.create(allocator, io, limits.construction_publication_bytes, self, wakeConstructionPublication);
         errdefer if (self.construction_publication_budget) |publication| publication.release();
         // No asynchronous task owns self until initialization is complete.
@@ -1105,6 +1224,7 @@ pub const WorldDataService = struct {
         errdefer self.players.deinit(allocator);
         errdefer self.restored_players.deinit(allocator);
         errdefer self.worker_state.blueprints.deinit(allocator);
+        errdefer self.worker_state.warehouses.deinit(allocator);
         errdefer self.blueprint_road_queue.deinit(allocator);
         errdefer self.construction_work.deinit(allocator);
         errdefer self.construction_grass.deinit(allocator);
@@ -1114,7 +1234,9 @@ pub const WorldDataService = struct {
         errdefer self.pending.deinit(allocator);
         errdefer self.waiting_reads.deinit(allocator);
         errdefer self.retry_reads.deinit(allocator);
+        errdefer self.pending_warehouse_subscriptions.deinit(allocator);
         try self.pending.ensureTotalCapacityPrecise(allocator, limits.pending_commands);
+        try self.pending_warehouse_subscriptions.ensureTotalCapacityPrecise(allocator, limits.pending_commands);
         const read_capacity = try std.math.mul(usize, limits.pending_commands, 2);
         try self.waiting_reads.ensureTotalCapacityPrecise(allocator, read_capacity);
         try self.retry_reads.ensureTotalCapacityPrecise(allocator, read_capacity);
@@ -1133,6 +1255,7 @@ pub const WorldDataService = struct {
                 try self.restored_players.put(allocator, player.id, player);
             }
             try self.restoreBlueprints(saved);
+            try self.restoreWarehouses(saved);
             try self.restoreDeferredWork(saved);
         }
         // Start idle background consumers first. If worker startup fails, join
@@ -1285,6 +1408,8 @@ pub const WorldDataService = struct {
             client.responses.deinit(self.allocator);
             client.space_responses.deinit(self.allocator);
             client.blueprint_results.deinit(self.allocator);
+            client.warehouse_results.deinit(self.allocator);
+            client.warehouse_subscriptions.deinit(self.allocator);
             client.blueprint_save_keys.deinit(self.allocator);
             client.subscriptions.deinit(self.allocator);
             client.construction_subscriptions.deinit(self.allocator);
@@ -1311,6 +1436,7 @@ pub const WorldDataService = struct {
         self.pending.deinit(self.allocator);
         self.waiting_reads.deinit(self.allocator);
         self.retry_reads.deinit(self.allocator);
+        self.pending_warehouse_subscriptions.deinit(self.allocator);
         self.read_pending.deinit(self.allocator);
         self.deferred_reads.deinit(self.allocator);
         self.read_failed.deinit(self.allocator);
@@ -1338,6 +1464,7 @@ pub const WorldDataService = struct {
             if (self.destroy_requested.load(.acquire) and !self.shutdown_started) {
                 self.shutdown_started = true;
                 self.is_shutting_down.store(true, .release);
+                self.discardPendingWarehouseSubscriptions();
                 self.lifecycle.queued = null;
                 self.compaction_requested = false;
                 if (self.job) |job| job.cancel();
@@ -1403,6 +1530,7 @@ pub const WorldDataService = struct {
 
     fn flushPackages(self: *WorldDataService) void {
         self.flushExternalBlueprintOutcomes();
+        self.flushWarehouseOutcomes();
         self.status.construction_publication_blocked = false;
         // Publish observers before command originators, preserving the useful property
         // that an operation reply follows its observer notifications.
@@ -1418,6 +1546,10 @@ pub const WorldDataService = struct {
                 self.prepareConstructionPublication(client) catch |err| {
                     self.retryConstructionAfterFailure(err);
                     if (err == error.ConstructionPublicationCapacity) self.flushConstructionPrefix(client) catch |prefix_error| self.retryConstructionAfterFailure(prefix_error);
+                };
+                self.prepareWarehousePublication(client) catch |err| {
+                    self.retryConstructionAfterFailure(err);
+                    self.flushConstructionPrefix(client) catch {};
                 };
                 // Observer snapshots coalesce to the final authoritative state in this
                 // batch. Retain the subscription intent until owned delivery is secured.
@@ -1513,6 +1645,8 @@ pub const WorldDataService = struct {
                     }
                     if (response.composition) |old| if (old.revision != self.construction_composition_revision) self.clearResponseComposition(response);
                     const id = self.layout.encodeChunkCoords(response.coords);
+                    discovery_bytes += self.worker_state.warehouses.claims.chunkReferences(.{ @intCast(response.coords[0]), @intCast(response.coords[1]), @intCast(response.coords[2]) }).len * @sizeOf(warehouse_stream.Reference);
+                    discovery_bytes += self.palletVisualCount(id) * @sizeOf(u16);
                     for (self.worker_state.blueprints.chunkInstances(id)) |instance_id| {
                         const instance = self.worker_state.blueprints.instances.get(instance_id) orelse continue;
                         if (instance.active) discovery_bytes += @sizeOf(construction_stream.SiteRef);
@@ -1541,7 +1675,7 @@ pub const WorldDataService = struct {
                         sub.composition_pending = false;
                     };
                 }
-                if (client.pending.responses.items.len == 0 and client.pending.blueprint_changes.items.len == 0 and client.pending.construction_updates.items.len == 0) continue;
+                if (client.pending.responses.items.len == 0 and client.pending.blueprint_changes.items.len == 0 and client.pending.construction_updates.items.len == 0 and client.pending.warehouse_updates.items.len == 0) continue;
                 client.pending.world_session = self.world_session;
                 client.responses.tryPush(self.io, self.allocator, client.pending) catch |err| {
                     self.retryConstructionAfterFailure(err);
@@ -1557,22 +1691,28 @@ pub const WorldDataService = struct {
     }
 
     fn flushConstructionPrefix(self: *WorldDataService, client: *Client) !void {
-        if (client.pending.blueprint_changes.items.len == 0 and client.pending.construction_updates.items.len == 0) return;
+        if (client.pending.blueprint_changes.items.len == 0 and client.pending.construction_updates.items.len == 0 and client.pending.warehouse_updates.items.len == 0) return;
         const prefix: ResponsePackage = .{
             .world_session = self.world_session,
             .blueprint_changes = client.pending.blueprint_changes,
             .construction_updates = client.pending.construction_updates,
+            .warehouse_updates = client.pending.warehouse_updates,
             .publication_budget = client.pending.publication_budget,
             .publication_bytes = client.pending.publication_bytes,
         };
         try client.responses.tryPush(self.io, self.allocator, prefix);
         client.pending.blueprint_changes = .empty;
         client.pending.construction_updates = .empty;
+        client.pending.warehouse_updates = .empty;
         client.pending.publication_budget = null;
         client.pending.publication_bytes = 0;
     }
 
     fn clearResponseComposition(self: *WorldDataService, response: *ChunkResponse) void {
+        if (response.warehouse_refs) |refs| self.allocator.free(refs);
+        response.warehouse_refs = null;
+        if (response.pallet_visuals) |cells| self.allocator.free(cells);
+        response.pallet_visuals = null;
         if (response.composition) |*old| old.deinit(self.allocator);
         if (response.composition_budget) |budget| {
             budget.releaseBytes(response.composition_bytes);
@@ -1584,24 +1724,56 @@ pub const WorldDataService = struct {
     }
 
     fn composeResponse(self: *WorldDataService, response: *ChunkResponse) !void {
-        if (response.composition) |old| if (old.revision == self.construction_composition_revision) return;
         const id = self.layout.encodeChunkCoords(response.coords);
+        // A saved edited chunk must be resident before its auxiliary source can
+        // be published. Natural terrain never contains player-built pallets.
+        if (!self.requireBase(id)) return error.DependencyPending;
+        const pallet_revision = if (self.worker_state.modified_chunks.get(id)) |chunk| chunk.chunk_revision else 0;
+        if (response.composition) |old| if (old.revision == self.construction_composition_revision and response.warehouse_revision == self.warehouse_discovery_revision and response.pallet_visuals != null and response.pallet_visual_revision == pallet_revision) return;
         var count: usize = 0;
         for (self.worker_state.blueprints.chunkInstances(id)) |instance_id| {
             const instance = self.worker_state.blueprints.instances.get(instance_id) orelse return error.UnknownConstruction;
             count += @intFromBool(instance.active);
         }
-        const bytes = count * @sizeOf(construction_stream.SiteRef);
+        const warehouse_refs = self.worker_state.warehouses.claims.chunkReferences(.{ @intCast(response.coords[0]), @intCast(response.coords[1]), @intCast(response.coords[2]) });
+        const pallet_count = self.palletVisualCount(id);
+        const bytes = count * @sizeOf(construction_stream.SiteRef) + warehouse_refs.len * @sizeOf(warehouse_stream.Reference) + pallet_count * @sizeOf(u16);
         if (self.construction_publication_budget) |budget| try budget.reserve(bytes);
         errdefer if (self.construction_publication_budget) |budget| budget.releaseBytes(bytes);
         const composition = try self.chunkComposition(id);
+        errdefer {
+            var owned = composition;
+            owned.deinit(self.allocator);
+        }
+        const refs = try self.allocator.dupe(warehouse_stream.Reference, warehouse_refs);
+        errdefer self.allocator.free(refs);
+        const pallets = try self.allocator.alloc(u16, pallet_count);
+        errdefer self.allocator.free(pallets);
+        if (self.worker_state.modified_chunks.get(id)) |chunk| if (chunk.content == .blocks) {
+            var index: usize = 0;
+            for (std.mem.asBytes(&chunk.content.blocks.blocks), 0..) |material, cell| if (material == @intFromEnum(rules.BlockType.pallet)) {
+                pallets[index] = @intCast(cell);
+                index += 1;
+            };
+            std.debug.assert(index == pallets.len);
+        };
         self.clearResponseComposition(response);
+        response.warehouse_refs = refs;
+        response.warehouse_revision = self.warehouse_discovery_revision;
+        response.pallet_visuals = pallets;
+        response.pallet_visual_revision = pallet_revision;
         response.composition = composition;
         if (self.construction_publication_budget) |budget| {
             budget.retain();
             response.composition_budget = budget;
             response.composition_bytes = bytes;
         }
+    }
+
+    fn palletVisualCount(self: *const WorldDataService, id: ChunkId) usize {
+        const chunk = self.worker_state.modified_chunks.get(id) orelse return 0;
+        if (chunk.content == .empty) return 0;
+        return std.mem.count(u8, std.mem.asBytes(&chunk.content.blocks.blocks), &.{@intFromEnum(rules.BlockType.pallet)});
     }
 
     /// Builds once and fans out owned copies only to mesh subscribers awaiting this state.
@@ -1782,7 +1954,7 @@ pub const WorldDataService = struct {
 
     fn processRequest(self: *WorldDataService, request: Request) void {
         // Only mutations/checkpoints join the retained FIFO. Reads and completions always progress.
-        const ordered = request == .operation or request == .blueprint_save or request == .blueprint_apply;
+        const ordered = request == .operation or request == .blueprint_save or request == .blueprint_apply or request == .warehouse;
         if (request == .load_chunks and self.is_shutting_down.load(.acquire)) {
             if (request.load_chunks.counted) _ = self.outstanding_loads.fetchSub(1, .release);
             return;
@@ -1819,6 +1991,8 @@ pub const WorldDataService = struct {
             std.debug.assert(previous != 0);
         }
         switch (request) {
+            .warehouse => |edit| self.processWarehouse(edit),
+            .warehouse_subscribe, .warehouse_resync, .warehouse_unsubscribe => |control| self.processWarehouseControl(request, control),
             .blueprint_definition => |read| {
                 _ = read.client.construction_definitions.remove(read.id);
                 read.client.blueprint_library_pending = true;
@@ -2102,6 +2276,448 @@ pub const WorldDataService = struct {
         for (instance.box_chunks) |id| for (self.clients.items) |client| {
             if (client.subscriptions.getPtr(id)) |sub| sub.composition_pending = true;
         };
+    }
+
+    fn processWarehouse(self: *WorldDataService, edit: WarehouseRequest) void {
+        self.processWarehouseAtView(edit, edit.payload.actor.viewpoint);
+    }
+
+    fn warehouseCellInReach(self: *const WorldDataService, viewpoint: [3]f64, cell: [3]u32) bool {
+        return @import("block_targeting.zig").withinReach(self.layout, viewpoint, cell);
+    }
+
+    fn warehouseGeometryInReach(self: *const WorldDataService, viewpoint: [3]f64, geometry: warehouse_layout.Geometry, record: ?warehouse_state.Record) bool {
+        if (record) |value| {
+            const order = self.worker_state.warehouses.layoutFor(value.identity);
+            return warehouse_reach.withinReach(self.layout, geometry, order, value.stock, value.active, viewpoint);
+        }
+        return warehouse_reach.withinReach(self.layout, geometry, null, 0, 0, viewpoint);
+    }
+
+    /// The pose source is selected by the outer request/evaluation protocol.
+    /// This entry point revalidates geometry, reach and every resource condition
+    /// against one service turn; replay bypasses it through the common ledger.
+    fn processWarehouseAtView(self: *WorldDataService, edit: WarehouseRequest, viewpoint: [3]f64) void {
+        self.read_discovered = false;
+        self.operation_deferred = false;
+        var result: warehouse_commands.Result = .{ .request_id = edit.request_id, .command = edit.command, .status = .rejected };
+        var context: ReadContext = .{ .state = &self.worker_state, .allocator = self.allocator };
+        defer context.deinit();
+        var geometry: ?warehouse_layout.Geometry = null;
+        const action = edit.payload.action;
+        var ready = true;
+        for (viewpoint) |coordinate| if (!std.math.isFinite(coordinate) or @abs(coordinate) >= 0x1p62) {
+            ready = false;
+            result.rejection = .invalid_actor;
+        };
+        if (ready and action == .register) {
+            if (!action.register.material.canStoreInWarehouse()) {
+                ready = false;
+                result.rejection = .invalid_material;
+            } else {
+                geometry = self.currentWarehouseCandidate(&context, action.register.aim_cell) catch |err| blk: {
+                    ready = false;
+                    result.rejection = warehouseRejection(err);
+                    break :blk null;
+                };
+                if (geometry) |candidate| if (!self.warehouseGeometryInReach(viewpoint, candidate, null)) {
+                    ready = false;
+                    result.rejection = .out_of_reach;
+                };
+            }
+        } else if (ready) {
+            if (self.worker_state.warehouses.get(action.target().?)) |record| {
+                const reachable = if (action == .transfer) self.warehouseCellInReach(viewpoint, action.transfer.aim_cell) else self.warehouseGeometryInReach(viewpoint, record.geometry, record);
+                if (!reachable) {
+                    ready = false;
+                    result.rejection = .out_of_reach;
+                }
+            } else {
+                ready = false;
+                result.rejection = .invalid_registration;
+            }
+        }
+        // Missing persisted dependencies are acquired before the first state
+        // mutation. Keep this admitted intent and its original command identity.
+        if (self.read_discovered) {
+            self.pending.pushFront(self.allocator, .{ .request = .{ .warehouse = edit }, .since = self.processing_since orelse persistence.now(self.io) }) catch @panic("OOM");
+            self.operation_deferred = true;
+            return;
+        }
+        const replies = &edit.client.warehouse_results;
+        if (edit.command == null) {
+            replies.mutex.lockUncancelable(self.io);
+            replies.items.ensureUnusedCapacity(self.allocator, 1) catch {
+                replies.mutex.unlock(self.io);
+                self.pending.pushFront(self.allocator, .{ .request = .{ .warehouse = edit }, .since = self.processing_since orelse persistence.now(self.io) }) catch @panic("OOM");
+                self.operation_deferred = true;
+                self.retryConstructionAfterFailure(error.OutOfMemory);
+                return;
+            };
+        }
+        defer if (edit.command == null) replies.mutex.unlock(self.io);
+        if (ready) result = self.tryWarehouseAction(edit, geometry) catch |err| .{ .request_id = edit.request_id, .command = edit.command, .status = .rejected, .rejection = switch (err) {
+            error.WrongMaterial => .wrong_material,
+            error.InventoryMismatch => .inventory_mismatch,
+            error.InvalidActor => .invalid_actor,
+            error.NotEmpty => .not_empty,
+            error.Obligations => .obligations,
+            else => warehouseRejection(err),
+        } };
+        if (result.warehouse == null and result.retired == null) {
+            if (action.target()) |identity| result.warehouse = self.worker_state.warehouses.get(identity);
+        }
+        if (edit.payload.actor.player_id) |id| if (self.players.get(id)) |player| {
+            result.player_inventory = .{ .player_id = id, .material = if (player.inventory) |raw| @enumFromInt(raw) else null };
+        };
+        if (result.status == .success) self.lifecycle.unsaved_work = true;
+        result.resolved_sequence = self.evaluatedCommandPrefixIncluding(edit.client, if (edit.command) |identity| identity.sequence else null);
+        self.completeExternal(edit.client, edit.command, .{ .warehouse = result });
+        if (edit.command == null) {
+            replies.items.appendAssumeCapacity(result);
+            replies.not_empty.signal(self.io);
+        }
+        edit.client.resolved_request = @max(edit.client.resolved_request, edit.request_id);
+        self.applyEligibleCheckpoint(edit.client);
+    }
+
+    const WarehouseCandidate = struct {
+        context: *ReadContext,
+        fn pallet(raw: *const anyopaque, cell: [3]u32) ?bool {
+            const self: *const WarehouseCandidate = @ptrCast(@alignCast(raw));
+            return (ReadContext.read(self.context, cell) orelse return null) == .pallet;
+        }
+    };
+
+    fn currentWarehouseCandidate(self: *WorldDataService, context: *ReadContext, clicked: [3]u32) !warehouse_layout.Geometry {
+        const candidate: WarehouseCandidate = .{ .context = context };
+        const geometry = try warehouse_recognition.recognize(self.layout.size_in_blocks, clicked, .{ .context = &candidate, .pallet = WarehouseCandidate.pallet });
+        const inset = self.worker_state.generator.playableYInset();
+        const ymin = @as(i64, geometry.origin[1]) + geometry.bounds.ymin - 1;
+        const ymax = @as(i64, geometry.origin[1]) + geometry.bounds.ymax + 1;
+        if (ymin < inset or ymax >= self.layout.size_in_blocks[1] - inset) return error.OutOfBounds;
+        if (!try self.worker_state.warehouses.claims.canInsert(self.layout.size_in_blocks, geometry)) return error.ConflictingClaim;
+        var y = geometry.bounds.ymin;
+        while (y <= geometry.bounds.ymax) : (y += 1) {
+            var x = geometry.bounds.xmin;
+            while (x <= geometry.bounds.xmax) : (x += 1) {
+                const floor = geometry.worldCell(self.layout.size_in_blocks, .{ x, y, -1 }) orelse return error.InvalidSupport;
+                const material = ReadContext.read(context, floor) orelse return error.MissingData;
+                if (!material.canSupportPallet()) return error.InvalidSupport;
+            }
+        }
+        var z: i8 = 0;
+        while (z < warehouse_layout.levels) : (z += 1) {
+            y = geometry.bounds.ymin - 1;
+            while (y <= geometry.bounds.ymax + 1) : (y += 1) {
+                var x = geometry.bounds.xmin - 1;
+                while (x <= geometry.bounds.xmax + 1) : (x += 1) {
+                    const cell = geometry.worldCell(self.layout.size_in_blocks, .{ x, y, z }) orelse return error.OutOfBounds;
+                    // The whole active site's target set includes already
+                    // transferred targets through final materialization.
+                    if (self.worker_state.blueprints.memberAt(cell) != null) return error.ConflictingClaim;
+                    const material = ReadContext.read(context, cell) orelse return error.MissingData;
+                    if (material != (if (geometry.containsMember(.{ x, y, z })) rules.BlockType.pallet else .none)) return error.Obstructed;
+                }
+            }
+        }
+        if (context.failure) |err| return err;
+        return geometry;
+    }
+
+    fn warehouseRejection(err: anyerror) warehouse_commands.Rejection {
+        return switch (err) {
+            error.InvalidMaterial => .invalid_material,
+            error.InvalidActiveCount => .invalid_capacity,
+            error.EmptyStock => .empty,
+            error.CapacityExceeded => .full,
+            error.NotStopped => .enabled,
+            error.MissingWarehouse, error.InvalidIdentity => .invalid_registration,
+            error.MissingData, error.DependencyPending => .missing_data,
+            error.InvalidSupport => .invalid_support,
+            error.ConflictingClaim => .conflicting_claim,
+            error.Obstructed => .obstructed,
+            error.NotPallet, error.NonRectangular, error.Oversized, error.OutOfBounds, error.InvalidBounds, error.InvalidGeometry => .invalid_base,
+            else => .busy,
+        };
+    }
+
+    /// The caller establishes authoritative current reach before entering this
+    /// owner transition. No mutation below can yield or fail after changing a fact.
+    fn tryWarehouseAction(self: *WorldDataService, edit: WarehouseRequest, geometry: ?warehouse_layout.Geometry) !warehouse_commands.Result {
+        const payload = edit.payload;
+        const state = &self.worker_state.warehouses;
+        var result: warehouse_commands.Result = .{ .request_id = edit.request_id, .command = edit.command, .status = .success };
+        if (payload.actor.player_id) |id| {
+            if (edit.client.registered_player_id != id or !self.players.contains(id)) return error.InvalidActor;
+        }
+        if (payload.action == .register) {
+            const record = try state.register(self.allocator, geometry orelse return error.InvalidGeometry, payload.action.register.material);
+            self.warehouseDiscoveryChanged(record.geometry);
+            result.warehouse = record;
+            return result;
+        }
+        const identity = payload.action.target().?;
+        const record = state.getPtr(identity) orelse return error.MissingWarehouse;
+        try state.ensureRevision();
+        const before = record.revision;
+        switch (payload.action) {
+            .register => unreachable,
+            .transfer => |transfer| {
+                const relative = record.geometry.relativeCell(self.layout.size_in_blocks[0], transfer.aim_cell) orelse return error.MissingWarehouse;
+                if (!record.geometry.containsMember(relative) and !state.occupied(identity, transfer.aim_cell)) return error.MissingWarehouse;
+                if (transfer.direction == .put and transfer.material != record.material) return error.WrongMaterial;
+                var player: ?*format.Player = null;
+                if (payload.actor.player_id) |id| {
+                    player = self.players.getPtr(id).?;
+                    const valid = if (transfer.direction == .put) player.?.inventory == @as(?u8, @intFromEnum(transfer.material)) else player.?.inventory == null;
+                    if (!valid) return error.InventoryMismatch;
+                }
+                if (transfer.direction == .put) {
+                    try record.put(transfer.material, 1);
+                    if (player) |owner| owner.inventory = null;
+                } else {
+                    const material = try record.take(1);
+                    if (player) |owner| owner.inventory = @intFromEnum(material);
+                }
+                if (player) |_| self.player_generation +%= 1;
+            },
+            .configure => |configure| {
+                _ = try record.setActive(configure.active_columns);
+            },
+            .stop => {
+                _ = try record.setEnabled(false);
+            },
+            .enable => {
+                _ = try record.setEnabled(true);
+            },
+            .material => |change| {
+                if (!record.canManage()) return if (record.enabled) error.NotStopped else if (record.stock != 0) error.NotEmpty else error.Obligations;
+                _ = try record.changeMaterial(change.material);
+            },
+            .unregister => {
+                if (!record.canManage()) return if (record.enabled) error.NotStopped else if (record.stock != 0) error.NotEmpty else error.Obligations;
+                const removed = try state.unregister(self.allocator, identity);
+                self.warehouseDiscoveryChanged(removed.geometry);
+                result.retired = identity;
+                return result;
+            },
+        }
+        if (record.revision != before) state.commitChanged();
+        result.warehouse = record.*;
+        return result;
+    }
+
+    fn processWarehouseControl(self: *WorldDataService, request: Request, control: WarehouseControl) void {
+        var retained = false;
+        defer if (!retained) self.releaseWarehouseControl(control, std.meta.activeTag(request));
+        if (self.is_shutting_down.load(.acquire)) return;
+        const subscriptions = &control.client.warehouse_subscriptions;
+        if (request == .warehouse_unsubscribe) {
+            if (subscriptions.get(control.identity.id)) |known| if (known.token == control.token and known.identity.eql(control.identity)) {
+                _ = subscriptions.remove(control.identity.id);
+            };
+            for (self.pending_warehouse_subscriptions.items, 0..) |pending, index| {
+                if (pending.client == control.client and pending.token == control.token and pending.identity.eql(control.identity)) {
+                    self.releaseWarehouseControl(self.pending_warehouse_subscriptions.orderedRemove(index), .warehouse_subscribe);
+                    break;
+                }
+            }
+            return;
+        }
+        if (request == .warehouse_resync) {
+            if (subscriptions.getPtr(control.identity.id)) |known| {
+                if (known.token == control.token and known.identity.eql(control.identity)) known.resync = true;
+            }
+            return;
+        }
+        for (self.pending_warehouse_subscriptions.items, 0..) |pending, index| {
+            if (pending.client != control.client or pending.identity.id != control.identity.id) continue;
+            if (control.token <= pending.token) return;
+            self.releaseWarehouseControl(self.pending_warehouse_subscriptions.orderedRemove(index), .warehouse_subscribe);
+            break;
+        }
+        const waiting = for (self.pending_warehouse_subscriptions.items) |pending| {
+            if (pending.client == control.client) break true;
+        } else false;
+        // A release and fresh subscribe can share a request batch. Give older
+        // waiters the free slot at publication; existing live renewals need none.
+        if ((subscriptions.contains(control.identity.id) or !waiting) and self.installWarehouseSubscription(control)) return;
+        // Counted ingress bounds all retained subscribes. This append cannot
+        // allocate after installation failed, including on OutOfMemory.
+        self.pending_warehouse_subscriptions.appendAssumeCapacity(control);
+        retained = true;
+    }
+
+    fn warehouseControlCounter(self: *WorldDataService, kind: std.meta.Tag(Request)) *std.atomic.Value(usize) {
+        return switch (kind) {
+            .warehouse_subscribe => &self.outstanding_warehouse_subscriptions,
+            // Resync stays transient, independently of retained subscriptions.
+            .warehouse_resync => &self.outstanding_construction_controls,
+            .warehouse_unsubscribe => &self.outstanding_warehouse_unsubscribes,
+            else => unreachable,
+        };
+    }
+
+    fn releaseWarehouseControl(self: *WorldDataService, control: WarehouseControl, kind: std.meta.Tag(Request)) void {
+        if (!control.counted) return;
+        const outstanding = self.warehouseControlCounter(kind);
+        const previous = outstanding.fetchSub(1, .release);
+        std.debug.assert(previous != 0);
+    }
+
+    /// Returns true once installed or superseded. Capacity failures wait for a
+    /// release; allocation failures also arrange a bounded wall-clock wakeup.
+    fn installWarehouseSubscription(self: *WorldDataService, control: WarehouseControl) bool {
+        const subscriptions = &control.client.warehouse_subscriptions;
+        if (subscriptions.getPtr(control.identity.id)) |known| {
+            if (control.token > known.token) known.* = .{ .identity = control.identity, .token = control.token };
+            return true;
+        }
+        if (subscriptions.count() >= self.limits.warehouse_subscriptions) return false;
+        subscriptions.put(self.allocator, control.identity.id, .{ .identity = control.identity, .token = control.token }) catch |err| {
+            self.retryConstructionAfterFailure(err);
+            return false;
+        };
+        return true;
+    }
+
+    fn retryWarehouseSubscriptions(self: *WorldDataService, client: *Client) void {
+        var index: usize = 0;
+        while (index < self.pending_warehouse_subscriptions.items.len) {
+            const control = self.pending_warehouse_subscriptions.items[index];
+            if (control.client == client and self.installWarehouseSubscription(control)) {
+                // Preserve arrival order so churn cannot starve older waiters.
+                self.releaseWarehouseControl(self.pending_warehouse_subscriptions.orderedRemove(index), .warehouse_subscribe);
+            } else index += 1;
+        }
+    }
+
+    fn discardPendingWarehouseSubscriptions(self: *WorldDataService) void {
+        for (self.pending_warehouse_subscriptions.items) |control| self.releaseWarehouseControl(control, .warehouse_subscribe);
+        self.pending_warehouse_subscriptions.clearRetainingCapacity();
+    }
+
+    fn evaluatedCommandPrefix(self: *WorldDataService, client: *Client) u64 {
+        return self.evaluatedCommandPrefixIncluding(client, null);
+    }
+
+    fn evaluatedCommandPrefixIncluding(self: *WorldDataService, client: *Client, completing: ?u64) u64 {
+        self.requests.mutex.lockUncancelable(self.io);
+        defer self.requests.mutex.unlock(self.io);
+        var prefix = client.command_ledger.retired_through;
+        for (client.command_ledger.records.items) |record| {
+            if (record.sequence != prefix + 1 or (record.outcome == null and completing != record.sequence)) break;
+            prefix = record.sequence;
+        }
+        return prefix;
+    }
+
+    fn queueWarehouseUpdate(self: *WorldDataService, client: *Client, update: warehouse_stream.Update) !void {
+        const key = switch (update) {
+            inline else => |value| .{ value.identity, value.subscription_id },
+        };
+        const subscription = client.warehouse_subscriptions.getPtr(key[0].id);
+        if (subscription) |known| if (known.pending_index) |index| if (index < client.pending.warehouse_updates.items.len) {
+            const pending = &client.pending.warehouse_updates.items[index];
+            const previous = switch (pending.*) {
+                inline else => |value| .{ value.identity, value.subscription_id },
+            };
+            if (key[0].eql(previous[0]) and key[1] == previous[1]) {
+                pending.* = update;
+                return;
+            }
+        };
+        const bytes = @sizeOf(warehouse_stream.Update);
+        try self.chargeConstructionPublication(client, bytes);
+        errdefer self.unchargeConstructionPublication(client, bytes);
+        try client.pending.warehouse_updates.ensureTotalCapacityPrecise(self.allocator, client.pending.warehouse_updates.items.len + 1);
+        if (subscription) |known| known.pending_index = client.pending.warehouse_updates.items.len;
+        client.pending.warehouse_updates.appendAssumeCapacity(update);
+    }
+
+    fn prepareWarehousePublication(self: *WorldDataService, client: *Client) !void {
+        // This executor does not evaluate commands during the publication
+        // batch, so every object can share one coherent command-prefix cut.
+        var resolved_sequence: ?u64 = null;
+        while (true) {
+            self.retryWarehouseSubscriptions(client);
+            var released = false;
+            var it = client.warehouse_subscriptions.iterator();
+            while (it.next()) |entry| {
+                const known = entry.value_ptr;
+                const record = self.worker_state.warehouses.get(known.identity);
+                if (record) |value| {
+                    if (!known.resync and known.revision == value.revision) continue;
+                    if (resolved_sequence == null) resolved_sequence = self.evaluatedCommandPrefix(client);
+                    var snapshot: warehouse_stream.Snapshot = .{ .identity = value.identity, .record = value, .subscription_id = known.token, .resolved_sequence = resolved_sequence.? };
+                    if (client.registered_player_id) |id| if (self.players.get(id)) |player| {
+                        snapshot.player_inventory = .{ .player_id = id, .material = if (player.inventory) |material| @enumFromInt(material) else null };
+                    };
+                    try self.queueWarehouseUpdate(client, .{ .snapshot = snapshot });
+                    known.revision = value.revision;
+                    known.resync = false;
+                } else {
+                    const retired = known.identity.world_session == self.world_session and known.identity.kind == .warehouse and known.identity.id < self.worker_state.warehouses.next_id;
+                    try self.queueWarehouseUpdate(client, if (retired)
+                        .{ .retired = .{ .identity = known.identity, .subscription_id = known.token } }
+                    else
+                        .{ .unavailable = .{ .identity = known.identity, .subscription_id = known.token } });
+                    client.warehouse_subscriptions.removeByPtr(entry.key_ptr);
+                    released = true;
+                }
+            }
+            // Retirement/unavailability may have released a slot needed by an
+            // accepted interest. Retry it in this publication turn as well.
+            if (!released or self.pending_warehouse_subscriptions.items.len == 0) break;
+        }
+    }
+
+    fn flushWarehouseOutcomes(self: *WorldDataService) void {
+        self.requests.mutex.lockUncancelable(self.io);
+        defer self.requests.mutex.unlock(self.io);
+        for (self.clients.items) |client| for (client.command_ledger.records.items) |*record| {
+            if (record.delivered) continue;
+            const outcome = record.outcome orelse continue;
+            if (outcome != .warehouse) continue;
+            client.warehouse_results.tryPush(self.io, self.allocator, outcome.warehouse) catch |err| {
+                self.retryConstructionAfterFailure(err);
+                continue;
+            };
+            record.delivered = true;
+        };
+    }
+
+    fn warehouseDiscoveryChanged(self: *WorldDataService, geometry: warehouse_layout.Geometry) void {
+        self.warehouse_discovery_revision +%= 1;
+        const touched = warehouse_claims.chunks(@bitCast(self.layout.size_in_blocks), geometry) catch unreachable;
+        for (touched.coords[0..touched.count]) |coord| for (self.clients.items) |client| {
+            const id = self.layout.encodeChunkCoords(.{ @intCast(coord[0]), @intCast(coord[1]), @intCast(coord[2]) });
+            if (client.subscriptions.getPtr(id)) |sub| sub.composition_pending = true;
+        };
+    }
+
+    const WarehouseSimulationTransition = union(enum) {
+        start: struct { id: u64, source: warehouse_state.Identity, destination: warehouse_state.Identity, material: rules.BlockType, quantity: u16 },
+        handover: u64,
+    };
+    const WarehouseSimulationResult = warehouse_state.Error!warehouse_state.Transition;
+    const warehouse_simulation_batch_limit = 128;
+
+    /// Executor-only access for simulation work whose routing, payment and
+    /// timing prerequisites the caller has already established. Each result is
+    /// coherent independently; a failed item does not roll back earlier work.
+    /// The ordinary worker publication/save boundaries observe the whole batch.
+    fn applyWarehouseSimulationBatch(self: *WorldDataService, transitions: []const WarehouseSimulationTransition, results: []WarehouseSimulationResult) !void {
+        if (transitions.len > warehouse_simulation_batch_limit or results.len != transitions.len) return error.InvalidBatch;
+        if (self.is_shutting_down.load(.acquire)) return error.ServiceStopped;
+        const state = &self.worker_state.warehouses;
+        const before = state.revision;
+        for (transitions, results) |transition, *result| result.* = switch (transition) {
+            .start => |start| state.startDelivery(self.allocator, start.id, start.source, start.destination, start.material, start.quantity),
+            .handover => |id| state.handover(id),
+        };
+        if (state.revision != before) self.lifecycle.unsaved_work = true;
     }
 
     fn constructionIdentity(self: *const WorldDataService, instance: blueprint_runtime.Instance) construction_stream.Identity {
@@ -2654,57 +3270,58 @@ pub const WorldDataService = struct {
         self.applyEligibleCheckpoint(save.client);
     }
 
-    fn restoreBlueprints(self: *WorldDataService, saved: *storage.Store) !void {
-        const Restore = struct {
-            service: *WorldDataService,
-            store: *storage.Store,
-            blocks: std.AutoHashMapUnmanaged(ChunkId, *[32768]u8) = .empty,
+    const RestoreTerrain = struct {
+        service: *WorldDataService,
+        store: *storage.Store,
+        blocks: std.AutoHashMapUnmanaged(ChunkId, *[32768]u8) = .empty,
 
-            fn get(context: *@This(), block: [3]u32) !u8 {
-                const coords, const local = world_module.splitBlockCoords(block);
-                const id = context.service.layout.encodeChunkCoords(coords);
-                const data = context.blocks.get(id) orelse blk: {
-                    var source_bytes = context.blocks.count() *| @sizeOf([32768]u8) +|
-                        blueprint_runtime.estimatedMapBytes(ChunkId, *[32768]u8, context.blocks.capacity());
-                    if (@sizeOf([32768]u8) > blueprint_admission.default_max_snapshot_bytes -| source_bytes) {
-                        // Validation streams across arbitrarily many saved chunks;
-                        // cache capacity cannot make an admitted world unopenable.
-                        context.clearBlocks();
-                        source_bytes = 0;
-                    }
-                    var source_window: @import("construction_allocation_window.zig").Window = .{ .backing = context.service.allocator, .limit = blueprint_admission.default_max_snapshot_bytes, .used = source_bytes, .peak = source_bytes };
-                    const owned = try source_window.allocator().create([32768]u8);
-                    errdefer context.service.allocator.destroy(owned);
-                    if (try context.store.readChunk(context.service.allocator, id)) |encoded| {
-                        defer context.service.allocator.free(encoded);
-                        var decoded = try format.decodeChunk(context.service.allocator, context.store.world_uuid, encoded, context.store.dimensions);
-                        defer decoded.deinit(context.service.allocator);
-                        @memcpy(owned, decoded.blocks);
-                    } else {
-                        const generator = ColumnGenerator.init(&context.service.worker_state.generator, .{ coords[0], coords[1] });
-                        const chunk = try generator.tryGenerateChunk(context.service.allocator, coords[2]);
-                        defer chunk.deinit(context.service.allocator);
-                        const raw = chunk.content.toData();
-                        @memcpy(owned, std.mem.asBytes(&raw.blocks));
-                    }
-                    try context.blocks.put(source_window.allocator(), id, owned);
-                    break :blk owned;
-                };
-                return data[transformations.index(local)];
-            }
-            fn clearBlocks(context: *@This()) void {
-                var values = context.blocks.valueIterator();
-                while (values.next()) |value| context.service.allocator.destroy(value.*);
-                context.blocks.deinit(context.service.allocator);
-                context.blocks = .empty;
-            }
-            fn deinit(context: *@This()) void {
-                context.clearBlocks();
-            }
-        };
-        var restore: Restore = .{ .service = self, .store = saved };
+        fn get(context: *@This(), block: [3]u32) !u8 {
+            const coords, const local = world_module.splitBlockCoords(block);
+            const id = context.service.layout.encodeChunkCoords(coords);
+            const data = context.blocks.get(id) orelse blk: {
+                var source_bytes = context.blocks.count() *| @sizeOf([32768]u8) +|
+                    blueprint_runtime.estimatedMapBytes(ChunkId, *[32768]u8, context.blocks.capacity());
+                if (@sizeOf([32768]u8) > blueprint_admission.default_max_snapshot_bytes -| source_bytes) {
+                    // Validation streams across arbitrarily many saved chunks;
+                    // cache capacity cannot make an admitted world unopenable.
+                    context.clearBlocks();
+                    source_bytes = 0;
+                }
+                var source_window: @import("construction_allocation_window.zig").Window = .{ .backing = context.service.allocator, .limit = blueprint_admission.default_max_snapshot_bytes, .used = source_bytes, .peak = source_bytes };
+                const owned = try source_window.allocator().create([32768]u8);
+                errdefer context.service.allocator.destroy(owned);
+                if (try context.store.readChunk(context.service.allocator, id)) |encoded| {
+                    defer context.service.allocator.free(encoded);
+                    var decoded = try format.decodeChunk(context.service.allocator, context.store.world_uuid, encoded, context.store.dimensions);
+                    defer decoded.deinit(context.service.allocator);
+                    @memcpy(owned, decoded.blocks);
+                } else {
+                    const generator = ColumnGenerator.init(&context.service.worker_state.generator, .{ coords[0], coords[1] });
+                    const chunk = try generator.tryGenerateChunk(context.service.allocator, coords[2]);
+                    defer chunk.deinit(context.service.allocator);
+                    const raw = chunk.content.toData();
+                    @memcpy(owned, std.mem.asBytes(&raw.blocks));
+                }
+                try context.blocks.put(source_window.allocator(), id, owned);
+                break :blk owned;
+            };
+            return data[transformations.index(local)];
+        }
+        fn clearBlocks(context: *@This()) void {
+            var values = context.blocks.valueIterator();
+            while (values.next()) |value| context.service.allocator.destroy(value.*);
+            context.blocks.deinit(context.service.allocator);
+            context.blocks = .empty;
+        }
+        fn deinit(context: *@This()) void {
+            context.clearBlocks();
+        }
+    };
+
+    fn restoreBlueprints(self: *WorldDataService, saved: *storage.Store) !void {
+        var restore: RestoreTerrain = .{ .service = self, .store = saved };
         defer restore.deinit();
-        try saved.blueprints.validateTerrain(&restore, Restore.get, saved.dimensions);
+        try saved.blueprints.validateTerrain(&restore, RestoreTerrain.get, saved.dimensions);
         var accepted_instances = saved.blueprints.instances.valueIterator();
         while (accepted_instances.next()) |instance| for (instance.portions) |portion| {
             const raw_revision = if (saved.index.get(portion.chunk_id)) |location| location.revision else 0;
@@ -2755,6 +3372,53 @@ pub const WorldDataService = struct {
         if (try self.persistedConstructionBytes() > saved.limits.blueprints.max_state_bytes) return error.Capacity;
     }
 
+    fn restoreWarehouses(self: *WorldDataService, saved: *storage.Store) !void {
+        var state = try warehouse_wire.decodeState(self.allocator, saved.warehouses, @bitCast(self.layout.size_in_blocks), self.world_session, saved.limits.warehouses);
+        errdefer state.deinit(self.allocator);
+        var terrain: RestoreTerrain = .{ .service = self, .store = saved };
+        defer terrain.deinit();
+        var records = state.records.valueIterator();
+        while (records.next()) |record| {
+            const geometry = record.geometry;
+            const inset = self.worker_state.generator.playableYInset();
+            const ymin = @as(i64, geometry.origin[1]) + geometry.bounds.ymin - 1;
+            const ymax = @as(i64, geometry.origin[1]) + geometry.bounds.ymax + 1;
+            if (ymin < inset or ymax >= self.layout.size_in_blocks[1] - inset) return error.InvalidWarehouseTerrain;
+            var y = geometry.bounds.ymin;
+            while (y <= geometry.bounds.ymax) : (y += 1) {
+                var x = geometry.bounds.xmin;
+                while (x <= geometry.bounds.xmax) : (x += 1) {
+                    const cell = geometry.worldCell(self.layout.size_in_blocks, .{ x, y, -1 }) orelse return error.InvalidWarehouseTerrain;
+                    if (!(try self.restoredWarehouseMaterial(&terrain, cell)).canSupportPallet()) return error.InvalidWarehouseTerrain;
+                }
+            }
+            var z: i8 = 0;
+            while (z < warehouse_layout.levels) : (z += 1) {
+                y = geometry.bounds.ymin - 1;
+                while (y <= geometry.bounds.ymax + 1) : (y += 1) {
+                    var x = geometry.bounds.xmin - 1;
+                    while (x <= geometry.bounds.xmax + 1) : (x += 1) {
+                        const cell = geometry.worldCell(self.layout.size_in_blocks, .{ x, y, z }) orelse return error.InvalidWarehouseTerrain;
+                        if (self.worker_state.blueprints.memberAt(cell) != null) return error.InvalidWarehouseTerrain;
+                        const expected: rules.BlockType = if (geometry.containsMember(.{ x, y, z })) .pallet else .none;
+                        if (try self.restoredWarehouseMaterial(&terrain, cell) != expected) return error.InvalidWarehouseTerrain;
+                    }
+                }
+            }
+        }
+        self.worker_state.warehouses.deinit(self.allocator);
+        self.worker_state.warehouses = state;
+        self.durable_warehouse_revision = state.revision;
+    }
+
+    fn restoredWarehouseMaterial(self: *WorldDataService, terrain: *RestoreTerrain, cell: [3]u32) !rules.BlockType {
+        return switch (self.worker_state.blueprints.physicalAt(cell)) {
+            .unknown => error.InvalidWarehouseTerrain,
+            .material => |material| material,
+            .unowned => @enumFromInt(try terrain.get(cell)),
+        };
+    }
+
     fn beginBlueprintApplication(self: *WorldDataService, apply: BlueprintApplyRequest) void {
         self.operation_deferred = false;
         self.read_discovered = false;
@@ -2794,6 +3458,7 @@ pub const WorldDataService = struct {
         };
         errdefer instance.deinit(self.allocator);
         if (state.overlaps(self.layout, instance)) return error.Overlap;
+        try self.checkWarehouseBlueprintTargets(saved.definition, instance);
         // One completion registers all of this site's soil groups atomically.
         // A site larger than the quota could never finish after admission.
         const soil_groups = constructionSoilGroupCount(saved.definition, instance);
@@ -2952,6 +3617,14 @@ pub const WorldDataService = struct {
         }
     }
 
+    fn checkWarehouseBlueprintTargets(self: *const WorldDataService, definition: blueprint.Definition, instance: blueprint_runtime.Instance) !void {
+        for (definition.cells, 0..) |material, index| {
+            if (material == .none) continue;
+            const cell = blueprint_runtime.worldCell(self.layout, instance.origin, definition.size, instance.rotation, blueprint.cellAtIndex(definition.size, index)) orelse return error.InvalidFootprint;
+            if (self.worker_state.warehouses.claims.claimed(self.layout.size_in_blocks[0], cell)) return error.Overlap;
+        }
+    }
+
     fn commitBlueprintApplication(self: *WorldDataService, task: *BlueprintAdmissionTask) !void {
         const state = &self.worker_state.blueprints;
         if (state.revision != task.snapshot.overlay_revision) return error.StalePreparation;
@@ -2993,6 +3666,7 @@ pub const WorldDataService = struct {
             if (sources > self.limits.manifest_entries) return error.JournalBackpressure;
         }
         const proposed = prepared.publication.instance;
+        try self.checkWarehouseBlueprintTargets(task.definition, proposed);
         try self.reserveBlueprintJournalWithTerrain(.{ .instance = .{ .id = proposed.id, .definition_id = proposed.definition_id, .owner = proposed.owner, .origin = proposed.origin, .rotation = proposed.rotation } }, additional_chunks);
         var native = try self.constructionWindow(0);
         state.reservePublication(native.allocator(), self.layout, &prepared.publication) catch |err| {
@@ -3701,7 +4375,7 @@ pub const WorldDataService = struct {
     /// are at most twelve cells, their candidate seeds add one, and revelation reaches
     /// one face neighbor. Include all z planes touched by covering/uncovering soil.
     fn admissible(self: *WorldDataService, request: Request) bool {
-        if (request == .operation or request == .blueprint_save or request == .blueprint_apply) {
+        if (request == .operation or request == .blueprint_save or request == .blueprint_apply or request == .warehouse) {
             if (self.blueprint_task != null) return false;
         }
         if (request != .operation) return true;
@@ -3871,6 +4545,10 @@ pub const WorldDataService = struct {
         self.blueprint_journal_summary = blueprint_summary;
         const blueprint_prepare_bytes = try blueprint_wire.prepareMemoryBound(blueprint_summary, store.limits.blueprints);
         const journal_capacity_bytes = try std.math.mul(usize, self.blueprint_journal.capacity, @sizeOf(blueprint_wire.Op));
+        const warehouse_changed = self.worker_state.warehouses.revision != self.durable_warehouse_revision;
+        const warehouse_snapshot_bytes = if (warehouse_changed) try warehouse_wire.encodedSize(self.worker_state.warehouses.records.count(), self.worker_state.warehouses.delivery_state.records.count()) else 0;
+        const warehouse_prepare_bytes = if (warehouse_changed) try warehouse_wire.preparationMemoryBoundCounts(self.worker_state.warehouses.records.count(), self.worker_state.warehouses.delivery_state.records.count(), store.limits.warehouses) else 0;
+        const warehouse_capture_bytes = try std.math.add(usize, try std.math.mul(usize, warehouse_snapshot_bytes, 2), warehouse_prepare_bytes);
         for (self.clients.items) |client| {
             client.checkpoint_mutex.lockUncancelable(self.io);
             if (client.latest_checkpoint) |latest| {
@@ -3902,6 +4580,7 @@ pub const WorldDataService = struct {
         preflight_bytes = try std.math.add(usize, preflight_bytes, blueprint_change_bytes);
         preflight_bytes = try std.math.add(usize, preflight_bytes, blueprint_prepare_bytes);
         preflight_bytes = try std.math.add(usize, preflight_bytes, journal_capacity_bytes);
+        preflight_bytes = try std.math.add(usize, preflight_bytes, warehouse_capture_bytes);
         // A bounded smaller queue lets an admitted journal drain without
         // dropping operations or separating blueprint progress from terrain.
         var job_limits = self.limits;
@@ -3918,6 +4597,8 @@ pub const WorldDataService = struct {
         errdefer self.allocator.free(blueprint_changes);
         const pending_work = try self.blueprint_road_queue.snapshotEncoded(self.allocator, store.dimensions, store.limits.max_pending_work);
         errdefer self.allocator.free(pending_work);
+        const warehouse_snapshot = if (warehouse_changed) try warehouse_wire.encodeState(self.allocator, &self.worker_state.warehouses, store.limits.warehouses) else null;
+        errdefer if (warehouse_snapshot) |bytes| self.allocator.free(bytes);
         var sources: std.ArrayList(persistence.Source) = .empty;
         errdefer sources.deinit(self.allocator);
         try sources.ensureTotalCapacityPrecise(self.allocator, source_count);
@@ -3957,9 +4638,9 @@ pub const WorldDataService = struct {
         const bookkeeping = try std.math.add(usize, try std.math.mul(usize, self.completion_ring.capacity, @sizeOf(persistence.Event)), try std.math.add(usize, try std.math.mul(usize, self.source_holds.capacity(), @sizeOf(u32) + @sizeOf(u64) + 16), try std.math.add(usize, try std.math.mul(usize, sources.capacity, @sizeOf(persistence.Source)), try std.math.add(usize, player_ids.len * @sizeOf(u64), 256))));
         const frozen = try sources.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(frozen);
-        job.* = .{ .allocator = self.allocator, .io = self.io, .store = store, .store_mutex = &self.store_mutex, .limits = job_limits, .notify = .{ .context = self, .send = notifyPersistence }, .epoch = self.capture_epoch, .sequence = try std.math.add(u64, self.status.durable_sequence, 1), .tick = self.worker_state.tick, .final = final, .sources = frozen, .players = players, .player_count = self.players.count(), .blueprint_changes = blueprint_changes, .blueprint_summary = blueprint_summary, .blueprint_journal_reserved_bytes = journal_capacity_bytes, .pending_work = pending_work };
+        job.* = .{ .allocator = self.allocator, .io = self.io, .store = store, .store_mutex = &self.store_mutex, .limits = job_limits, .notify = .{ .context = self, .send = notifyPersistence }, .epoch = self.capture_epoch, .sequence = try std.math.add(u64, self.status.durable_sequence, 1), .tick = self.worker_state.tick, .final = final, .sources = frozen, .players = players, .player_count = self.players.count(), .blueprint_changes = blueprint_changes, .blueprint_summary = blueprint_summary, .blueprint_journal_reserved_bytes = journal_capacity_bytes, .pending_work = pending_work, .warehouse_snapshot = warehouse_snapshot };
         const job_manifest = try std.math.mul(usize, source_count, @sizeOf(persistence.Source) + 2 + @sizeOf([]u8));
-        const job_baseline = try std.math.add(usize, try std.math.add(usize, blueprint_prepare_bytes, try persistence.pendingWorkMemoryBound(pending_work.len)), try std.math.add(usize, job_limits.output_bytes, try std.math.add(usize, job_manifest, try std.math.add(usize, players.len + blueprint_changes.len, try std.math.add(usize, scratch_peak, @sizeOf(persistence.Job))))));
+        const job_baseline = try std.math.add(usize, warehouse_capture_bytes, try std.math.add(usize, try std.math.add(usize, blueprint_prepare_bytes, try persistence.pendingWorkMemoryBound(pending_work.len)), try std.math.add(usize, job_limits.output_bytes, try std.math.add(usize, job_manifest, try std.math.add(usize, players.len + blueprint_changes.len, try std.math.add(usize, scratch_peak, @sizeOf(persistence.Job)))))));
         job.extra_working_bytes = @max(bookkeeping, preflight_bytes - job_baseline);
         for (frozen) |source| self.source_holds.putAssumeCapacity(source.id, source.revision);
         errdefer self.source_holds.clearRetainingCapacity();
@@ -3968,6 +4649,7 @@ pub const WorldDataService = struct {
         const started = persistence.now(self.io);
         self.lifecycle.started(.{ .id = intent, .final = final }, job.epoch, started);
         self.captured_player_generation = self.player_generation;
+        self.captured_warehouse_revision = if (warehouse_changed) self.worker_state.warehouses.revision else null;
         self.captured_work_generation = self.blueprint_road_queue.generation;
         self.captured_blueprint_operations = self.blueprint_journal.items.len;
         self.captured_blueprint_summary = blueprint_summary;
@@ -4013,6 +4695,8 @@ pub const WorldDataService = struct {
                 self.status.durable_sequence = job.sequence;
                 self.status.sequence = job.sequence;
                 self.status.wal_committed_ns = committed_at;
+                if (self.captured_warehouse_revision) |revision| self.durable_warehouse_revision = revision;
+                self.captured_warehouse_revision = null;
                 for (job.sources) |source| self.wal_revisions.putAssumeCapacity(source.id, source.revision);
                 const committed_ops = self.captured_blueprint_operations;
                 std.debug.assert(committed_ops <= self.blueprint_journal.items.len);
@@ -4036,7 +4720,7 @@ pub const WorldDataService = struct {
                     self.blueprint_journal.deinit(self.allocator);
                     self.blueprint_journal = .empty;
                 }
-                self.lifecycle.unsaved_work = self.player_generation != self.captured_player_generation or remaining_ops != 0 or self.blueprint_road_queue.generation != self.captured_work_generation;
+                self.lifecycle.unsaved_work = self.player_generation != self.captured_player_generation or remaining_ops != 0 or self.blueprint_road_queue.generation != self.captured_work_generation or self.worker_state.warehouses.revision != self.durable_warehouse_revision;
                 var live = self.worker_state.modified_chunks.iterator();
                 while (live.next()) |entry| if (self.wal_revisions.get(entry.key_ptr.*) != entry.value_ptr.chunk_revision) {
                     self.lifecycle.unsaved_work = true;
@@ -4071,6 +4755,8 @@ pub const WorldDataService = struct {
                 // finalization failure still leaves that durable progress valid.
                 const committed = self.lifecycle.active.?.stage == .finalizing;
                 self.job = null;
+                // An uncommitted capture never acknowledges this generation.
+                self.captured_warehouse_revision = null;
                 const completion = self.lifecycle.finished(finished.epoch, finished.failure).?;
                 job.deinit();
                 self.status.active = false;
@@ -4292,6 +4978,18 @@ pub const WorldDataService = struct {
         if (self.catalog == null) return true;
         var ready = true;
         switch (request) {
+            .warehouse => |edit| {
+                if (edit.payload.action != .register) return true;
+                const clicked = edit.payload.action.register.aim_cell;
+                for ([_]i64{ -5, 0, 5 }) |dx| for ([_]i64{ -5, 0, 5 }) |dy| for ([_]i64{ -1, 0, 5 }) |dz| {
+                    const x = @mod(@as(i64, clicked[0]) + dx, self.layout.size_in_blocks[0]);
+                    const y = @as(i64, clicked[1]) + dy;
+                    const z = @as(i64, clicked[2]) + dz;
+                    if (y < 0 or y >= self.layout.size_in_blocks[1] or z < 0 or z >= self.layout.size_in_blocks[2]) continue;
+                    const coords: ChunkCoords = .{ @intCast(@divFloor(x, CHUNK_SIZE)), @intCast(@divFloor(y, CHUNK_SIZE)), @intCast(@divFloor(z, CHUNK_SIZE)) };
+                    ready = self.requireBase(self.layout.encodeChunkCoords(coords)) and ready;
+                };
+            },
             .operation => |edit| {
                 if (edit.operation.blueprint != null) {
                     const small = self.blueprintDependencies(edit.operation);
@@ -4431,6 +5129,7 @@ const ReadContext = struct {
     chunks: world_module.ChunksHashMap = .empty,
     failure: ?anyerror = null,
     read_count: u64 = 0,
+    mutation_reads: u64 = 0,
 
     fn immutableAt(context: *anyopaque, block: [3]u32) bool {
         const self: *ReadContext = @ptrCast(@alignCast(context));
@@ -4438,7 +5137,30 @@ const ReadContext = struct {
     }
 
     fn reader(self: *ReadContext) rules.Reader {
-        return .{ .layout = self.state.layout, .context = self, .block_at = read, .custom_shape_at = readShape, .immutable_at = immutableAt, .playable_y_inset = self.state.generator.playableYInset() };
+        return .{ .layout = self.state.layout, .context = self, .block_at = read, .custom_shape_at = readShape, .immutable_at = immutableAt, .mutation_allowed = mutationAllowed, .playable_y_inset = self.state.generator.playableYInset() };
+    }
+
+    fn mutationAllowed(raw: *anyopaque, block: [3]u32, replacement: rules.BlockType) ?rules.Failure {
+        const self: *ReadContext = @ptrCast(@alignCast(raw));
+        const cell: rules.Cell = .{ block[0], block[1], block[2] };
+        if (self.state.warehouses.claims.claimed(self.state.layout.size_in_blocks[0], block)) {
+            const existing = self.readForMutation(block) orelse return .{ .reason = .missing_data, .subject = cell };
+            return if (existing == replacement) null else .{ .reason = .would_invalidate_structure, .subject = cell };
+        }
+        // An eligible replacement preserves any pallet support without needing
+        // to read the cell above. This is the common construction fill path.
+        if (!replacement.canSupportPallet() and block[2] + 1 < self.state.layout.size_in_blocks[2]) {
+            var above = block;
+            above[2] += 1;
+            const material = self.readForMutation(above) orelse return .{ .reason = .missing_data, .subject = .{ above[0], above[1], above[2] } };
+            if (material == .pallet) return .{ .reason = .would_remove_support, .subject = cell };
+        }
+        return null;
+    }
+
+    fn readForMutation(self: *ReadContext, block: [3]u32) ?rules.BlockType {
+        self.mutation_reads += 1;
+        return ReadContext.read(self, block);
     }
 
     fn deinit(self: *ReadContext) void {
@@ -4499,6 +5221,7 @@ const WorkerState = struct {
     layout: *const WorldLayout,
     generator: PreparedWorldGenerator,
     blueprints: blueprint_runtime.State = .{},
+    warehouses: warehouse_state.State = .{},
     /// Committed edits survive cache eviction. Untouched chunks are regenerated on demand.
     modified_chunks: std.AutoHashMapUnmanaged(ChunkId, WorldChunk) = .empty,
     /// Immutable generated data, independently bounded and never captured as
@@ -4632,6 +5355,7 @@ const WorkerState = struct {
 
     fn deinit(self: *WorkerState, allocator: std.mem.Allocator) void {
         self.blueprints.deinit(allocator);
+        self.warehouses.deinit(allocator);
         var iterator = self.modified_chunks.valueIterator();
         while (iterator.next()) |chunk| chunk.deinit(self.liveAllocator(allocator));
         self.modified_chunks.deinit(allocator);
@@ -4895,7 +5619,9 @@ const WorkerState = struct {
         var context: ReadContext = .{ .state = self, .allocator = allocator };
         defer context.deinit();
         var diagnostics = world_module.validateBlueprintFulfillment(context.reader(), &self.blueprints, operation);
-        const support_reads = context.read_count -| 1; // The separate target occupancy read is not support.
+        // Occupancy and warehouse write-guard reads are separate from the
+        // bounded construction support proof measured by this counter.
+        const support_reads = context.read_count -| context.mutation_reads -| 1;
         std.debug.assert(support_reads <= 5);
         self.blueprint_last_support_reads = @intCast(support_reads);
         self.blueprint_support_reads +%= support_reads;
@@ -13857,4 +14583,1217 @@ test "construction persisted quota reserves partial sites and grass obligations 
         try std.testing.expectEqual(.resource_exhausted, replies.items[0].status);
         try std.testing.expectEqual(.success, replies.items[1].status);
     }
+}
+
+const WarehouseAuthorityFixture = struct {
+    service: WorldDataService,
+    client: Client,
+
+    fn init(self: *@This()) !void {
+        return self.initWithAllocator(std.testing.allocator);
+    }
+
+    fn initWithAllocator(self: *@This(), a: std.mem.Allocator) !void {
+        self.service = .{ .world_session = 73, .layout = &test_layout, .io = std.testing.io, .allocator = a, .worker = undefined, .worker_state = .{ .layout = &test_layout, .generator = try WorldGenerator.prepare(.flat, a, &test_layout), .warehouses = warehouse_state.State.init(73, test_layout.size_in_blocks) } };
+        self.client = .{ .service = &self.service, .registered_player_id = 1 };
+        errdefer self.deinit();
+        try self.service.clients.append(a, &self.client);
+        try self.service.players.put(a, 1, .{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+        try self.service.pending_warehouse_subscriptions.ensureTotalCapacityPrecise(a, self.service.limits.pending_commands);
+    }
+
+    fn restore(self: *@This(), saved: *storage.Store) !void {
+        const a = std.testing.allocator;
+        try self.init();
+        errdefer self.deinit();
+        self.service.world_session += 1;
+        self.service.store = saved;
+        self.service.worker_state.persistence_service = &self.service;
+        self.service.worker_state.tick = try format.decodeGlobal(saved.global);
+        self.service.status.sequence = saved.sequence;
+        self.service.status.durable_sequence = saved.sequence;
+        self.service.players.clearRetainingCapacity();
+        var players: format.Reader = .{ .bytes = saved.players };
+        for (0..@intCast(saved.player_count)) |_| {
+            const player = try format.readPlayer(&players);
+            try self.service.players.put(a, player.id, player);
+        }
+        var catalog = try saved.snapshotCatalog();
+        defer catalog.deinit();
+        var chunks = saved.index.keyIterator();
+        while (chunks.next()) |id| {
+            var read = (try catalog.prepareRead(id.*)).?;
+            defer read.deinit();
+            var chunk = try self.service.readPersisted(&read);
+            self.service.worker_state.modified_chunks.put(a, id.*, chunk) catch |err| {
+                chunk.deinit(a);
+                return err;
+            };
+            try self.service.wal_revisions.put(a, id.*, chunk.chunk_revision);
+        }
+        try self.service.restoreBlueprints(saved);
+        try self.service.restoreWarehouses(saved);
+    }
+
+    fn deinit(self: *@This()) void {
+        const a = self.service.allocator;
+        if (self.service.job) |job| {
+            job.cancel();
+            job.deinit();
+        }
+        self.client.pending.deinit(a);
+        for (self.client.responses.items.items) |*package| package.deinit(a);
+        self.client.responses.deinit(a);
+        self.client.subscriptions.deinit(a);
+        self.client.warehouse_results.deinit(a);
+        self.client.warehouse_subscriptions.deinit(a);
+        self.service.discardPendingWarehouseSubscriptions();
+        self.service.pending_warehouse_subscriptions.deinit(a);
+        self.client.command_ledger.deinit(a, &self.service.command_budget);
+        self.service.clients.deinit(a);
+        self.service.players.deinit(a);
+        self.service.requests.deinit(a);
+        self.service.pending.deinit(a);
+        self.service.completion_ring.deinit(a);
+        self.service.source_holds.deinit(a);
+        self.service.wal_revisions.deinit(a);
+        self.service.base_revisions.deinit(a);
+        self.service.blueprint_journal.deinit(a);
+        deinitConstructionTestState(&self.service);
+        self.service.blueprint_road_queue.deinit(a);
+        self.service.dirty_meshes.deinit(a);
+        if (self.service.catalog) |*catalog| catalog.deinit();
+        self.service.worker_state.deinit(a);
+        if (self.service.construction_publication_budget) |budget| {
+            budget.detach();
+            budget.release();
+        }
+    }
+
+    fn base(self: *@This(), minimum: [3]u32, size: [2]u8) !warehouse_layout.Geometry {
+        const a = self.service.allocator;
+        for (0..size[1]) |y| for (0..size[0]) |x| {
+            const cell: [3]u32 = .{ minimum[0] + @as(u32, @intCast(x)), minimum[1] + @as(u32, @intCast(y)), minimum[2] };
+            const coords, const local = world_module.splitBlockCoords(cell);
+            const entry = try self.service.worker_state.modified_chunks.getOrPut(a, test_layout.encodeChunkCoords(coords));
+            if (!entry.found_existing) entry.value_ptr.* = WorldChunk.initEmpty();
+            const blocks = try entry.value_ptr.tryEnsureData(a);
+            if (blocks.blocks[local[2]][local[1]][local[0]] == .none) entry.value_ptr.solid_block_count += 1;
+            blocks.blocks[local[2]][local[1]][local[0]] = .pallet;
+            std.debug.assert(local[2] != 0);
+            if (blocks.blocks[local[2] - 1][local[1]][local[0]] == .none) entry.value_ptr.solid_block_count += 1;
+            blocks.blocks[local[2] - 1][local[1]][local[0]] = .stone;
+            entry.value_ptr.chunk_revision += 1;
+        };
+        return warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, minimum, size);
+    }
+
+    fn view(cell: [3]u32) [3]f64 {
+        var result: [3]f64 = undefined;
+        for (0..3) |axis| result[axis] = @as(f64, @floatFromInt(cell[axis])) - @as(f64, @floatFromInt(test_layout.origin_chunk[axis] * CHUNK_SIZE)) + 0.5;
+        return result;
+    }
+
+    fn drainRequests(self: *@This()) void {
+        var batch: std.ArrayList(Request) = .empty;
+        defer batch.deinit(self.service.allocator);
+        self.service.requests.takeAll(self.service.io, &batch);
+        for (batch.items) |request| self.service.processRequest(request);
+    }
+};
+
+test "warehouse authority current candidate guards full clearance floor and planned targets" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const clicked: [3]u32 = .{ 10, 10, 70 };
+    const geometry = try fixture.base(clicked, .{ 2, 2 });
+    var context: ReadContext = .{ .state = &fixture.service.worker_state, .allocator = a };
+    defer context.deinit();
+    try std.testing.expectEqualDeep(geometry, try fixture.service.currentWarehouseCandidate(&context, clicked));
+    const coords, _ = world_module.splitBlockCoords(clicked);
+    const chunk = fixture.service.worker_state.modified_chunks.getPtr(test_layout.encodeChunkCoords(coords)).?;
+    chunk.content.blocks.blocks[11][9][9] = .planks; // diagonal top halo z=75
+    try std.testing.expectError(error.Obstructed, fixture.service.currentWarehouseCandidate(&context, clicked));
+    chunk.content.blocks.blocks[11][9][9] = .none;
+    chunk.content.blocks.blocks[5][10][10] = .sand;
+    try std.testing.expectError(error.InvalidSupport, fixture.service.currentWarehouseCandidate(&context, clicked));
+    chunk.content.blocks.blocks[5][10][10] = .stone;
+    try fixture.service.worker_state.blueprints.insertDefinition(a, .{ .id = 1, .owner = 1, .name = try a.dupe(u8, "Halo target"), .definition = .{ .size = .{ 1, 1, 1 }, .cells = try a.dupe(rules.BlockType, &.{.planks}), .target_count = 1 } });
+    const site = try fixture.service.worker_state.blueprints.prepareInstance(a, &test_layout, 1, 1, 1, .{ 9, 9, 75 }, 0);
+    try fixture.service.worker_state.blueprints.insertInstance(a, &test_layout, site);
+    try std.testing.expectError(error.ConflictingClaim, fixture.service.currentWarehouseCandidate(&context, clicked));
+    try std.testing.expectEqual(@as(u32, 0), fixture.service.worker_state.warehouses.records.count());
+}
+
+test "warehouse authority manual transfer preserves player stock and accepted incoming room" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const geometry = try fixture.base(.{ 10, 10, 70 }, .{ 1, 1 });
+    const state = &fixture.service.worker_state.warehouses;
+    const destination = try state.register(a, geometry, .dirt);
+    const source = try state.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 14, 10, 70 }, .{ 1, 1 }), .dirt);
+    try state.ensureRevision();
+    try state.getPtr(source.identity).?.put(.dirt, 2);
+    try state.getPtr(destination.identity).?.put(.dirt, 4);
+    state.commitChanged();
+    _ = try state.startDelivery(a, 1, source.identity, destination.identity, .dirt, 2);
+    fixture.service.players.getPtr(1).?.inventory = @intFromEnum(rules.BlockType.dirt);
+    const request: WarehouseRequest = .{ .client = &fixture.client, .request_id = 1, .payload = .{ .actor = .{ .player_id = 1, .viewpoint = WarehouseAuthorityFixture.view(.{ 10, 10, 70 }) }, .action = .{ .transfer = .{ .identity = destination.identity, .aim_cell = .{ 10, 10, 70 }, .material = .dirt, .direction = .put } } } };
+    try std.testing.expectError(error.CapacityExceeded, fixture.service.tryWarehouseAction(request, null));
+    try std.testing.expectEqual(@as(u16, 4), state.get(destination.identity).?.stock);
+    try std.testing.expectEqual(@as(?u8, @intFromEnum(rules.BlockType.dirt)), fixture.service.players.get(1).?.inventory);
+    try state.ensureRevision();
+    _ = try state.getPtr(destination.identity).?.setActive(0);
+    _ = try state.getPtr(destination.identity).?.setEnabled(false);
+    state.commitChanged();
+    _ = try state.handover(1);
+    _ = try state.handover(1);
+    try std.testing.expectEqual(@as(u16, 6), state.get(destination.identity).?.stock);
+    fixture.service.players.getPtr(1).?.inventory = null;
+    var take = request;
+    take.payload.action.transfer.direction = .take;
+    const outcome = try fixture.service.tryWarehouseAction(take, null);
+    try std.testing.expectEqual(@as(u16, 5), outcome.warehouse.?.stock);
+    try std.testing.expectEqual(@as(?u8, @intFromEnum(rules.BlockType.dirt)), fixture.service.players.get(1).?.inventory);
+    try std.testing.expect(!outcome.warehouse.?.enabled);
+    try state.validate(a);
+}
+
+test "warehouse authority subscriptions outlive the pending command queue limit" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    service.limits.pending_commands = 1;
+    const state = &service.worker_state.warehouses;
+    const first = try state.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 10, 10, 70 }, .{ 1, 1 }), .dirt);
+    const second = try state.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 14, 10, 70 }, .{ 1, 1 }), .dirt);
+    const first_token = try fixture.client.trySubscribeWarehouse(first.identity);
+    fixture.drainRequests();
+    const second_token = try fixture.client.trySubscribeWarehouse(second.identity);
+    fixture.drainRequests();
+    try std.testing.expectEqual(@as(u32, 2), fixture.client.warehouse_subscriptions.count());
+    try fixture.client.tryUnsubscribeWarehouse(first.identity, first_token);
+    fixture.drainRequests();
+    try fixture.client.tryResyncWarehouse(second.identity, second_token);
+    fixture.drainRequests();
+    try service.prepareWarehousePublication(&fixture.client);
+    try std.testing.expectEqual(@as(usize, 1), fixture.client.pending.warehouse_updates.items.len);
+    const snapshot = fixture.client.pending.warehouse_updates.items[0].snapshot;
+    try std.testing.expect(snapshot.identity.eql(second.identity));
+    try std.testing.expectEqual(second_token, snapshot.subscription_id);
+}
+
+test "warehouse authority retained subscriptions recover capacity without another client request" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    service.limits.pending_commands = 1;
+    service.limits.warehouse_subscriptions = 1;
+    const state = &service.worker_state.warehouses;
+    const first = try state.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 10, 10, 70 }, .{ 1, 1 }), .dirt);
+    const second = try state.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 14, 10, 70 }, .{ 1, 1 }), .dirt);
+    const first_token = try fixture.client.trySubscribeWarehouse(first.identity);
+    fixture.drainRequests();
+    const second_token = try fixture.client.trySubscribeWarehouse(second.identity);
+    fixture.drainRequests();
+    try std.testing.expectEqual(@as(usize, 1), service.pending_warehouse_subscriptions.items.len);
+    try std.testing.expectEqual(@as(usize, 1), service.outstanding_warehouse_subscriptions.load(.monotonic));
+    try std.testing.expectError(error.Busy, fixture.client.trySubscribeWarehouse(first.identity));
+    // Retained warehouse admissions cannot block active resyncs or unrelated
+    // construction controls. Their original transient queue remains bounded.
+    try fixture.client.tryResyncWarehouse(first.identity, first_token);
+    fixture.drainRequests();
+    try fixture.client.tryRequestBlueprintDefinition(1);
+    try std.testing.expectError(error.Busy, fixture.client.tryRequestBlueprintDefinition(2));
+    fixture.drainRequests();
+    try std.testing.expectEqual(@as(usize, 0), service.outstanding_construction_controls.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 1), service.outstanding_warehouse_subscriptions.load(.monotonic));
+    // Release traffic progresses under saturation but has its own queue bound.
+    try fixture.client.tryUnsubscribeWarehouse(first.identity, first_token + 1);
+    try std.testing.expectError(error.Busy, fixture.client.tryUnsubscribeWarehouse(first.identity, first_token));
+    fixture.drainRequests();
+    try service.prepareWarehousePublication(&fixture.client);
+    try std.testing.expectEqual(@as(u32, 1), fixture.client.warehouse_subscriptions.count());
+    try std.testing.expectEqual(@as(usize, 1), fixture.client.pending.warehouse_updates.items.len);
+    try std.testing.expect(fixture.client.pending.warehouse_updates.items[0].snapshot.identity.eql(first.identity));
+    try fixture.client.tryUnsubscribeWarehouse(first.identity, first_token);
+    fixture.drainRequests();
+    try service.prepareWarehousePublication(&fixture.client);
+    try std.testing.expectEqual(@as(usize, 0), service.pending_warehouse_subscriptions.items.len);
+    try std.testing.expectEqual(@as(usize, 0), service.outstanding_warehouse_subscriptions.load(.monotonic));
+    try std.testing.expectEqual(@as(usize, 0), service.outstanding_warehouse_unsubscribes.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 1), fixture.client.warehouse_subscriptions.count());
+    try std.testing.expectEqual(@as(usize, 2), fixture.client.pending.warehouse_updates.items.len);
+    const snapshot = fixture.client.pending.warehouse_updates.items[1].snapshot;
+    try std.testing.expect(snapshot.identity.eql(second.identity));
+    try std.testing.expectEqual(second_token, snapshot.subscription_id);
+}
+
+test "warehouse authority retained subscriptions retry allocation pressure beside live publications" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    service.limits.pending_commands = 1;
+    const state = &service.worker_state.warehouses;
+    var records: [7]warehouse_state.Record = undefined;
+    for (&records, 0..) |*record, index| {
+        record.* = try state.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 10 + @as(u32, @intCast(index)) * 4, 10, 70 }, .{ 1, 1 }), .dirt);
+        if (index == records.len - 1) break;
+        const token = try fixture.client.trySubscribeWarehouse(record.identity);
+        fixture.drainRequests();
+        try std.testing.expectEqual(token, fixture.client.warehouse_subscriptions.get(record.identity.id).?.token);
+    }
+    try service.prepareWarehousePublication(&fixture.client);
+    // Six live entries fill the initial eight-slot map's admission capacity.
+    const desired = records[records.len - 1];
+    const token = try fixture.client.trySubscribeWarehouse(desired.identity);
+    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+    service.allocator = failing.allocator();
+    fixture.drainRequests();
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 1), service.pending_warehouse_subscriptions.items.len);
+    try std.testing.expectEqual(@as(usize, 1), service.outstanding_warehouse_subscriptions.load(.monotonic));
+    try std.testing.expect(service.construction_retry_deadline != null);
+    try state.ensureRevision();
+    try state.getPtr(records[0].identity).?.put(.dirt, 1);
+    state.commitChanged();
+    try service.prepareWarehousePublication(&fixture.client);
+    var published_change = false;
+    for (fixture.client.pending.warehouse_updates.items) |update| if (update.snapshot.identity.eql(records[0].identity)) {
+        published_change = update.snapshot.record.stock == 1;
+    };
+    try std.testing.expect(published_change);
+    try std.testing.expectEqual(@as(usize, 1), service.pending_warehouse_subscriptions.items.len);
+    service.allocator = a;
+    // Exercise the existing idle-worker wake, with no rediscovery or resync.
+    service.construction_retry_deadline = persistence.now(service.io) - 1;
+    service.checkWatchdog();
+    try std.testing.expect(service.async_progress);
+    try service.prepareWarehousePublication(&fixture.client);
+    try std.testing.expectEqual(@as(usize, 0), service.pending_warehouse_subscriptions.items.len);
+    try std.testing.expectEqual(@as(usize, 0), service.outstanding_warehouse_subscriptions.load(.monotonic));
+    var published_desired = false;
+    for (fixture.client.pending.warehouse_updates.items) |update| if (update.snapshot.identity.eql(desired.identity)) {
+        published_desired = update.snapshot.subscription_id == token;
+    };
+    try std.testing.expect(published_desired);
+}
+
+test "warehouse authority retained subscriptions admit older waiters before new arrivals" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    service.limits.pending_commands = 4;
+    service.limits.warehouse_subscriptions = 1;
+    var records: [5]warehouse_state.Record = undefined;
+    var tokens: [5]u64 = undefined;
+    for (0..4) |index| {
+        records[index] = try service.worker_state.warehouses.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 10 + @as(u32, @intCast(index)) * 4, 10, 70 }, .{ 1, 1 }), .dirt);
+        tokens[index] = try fixture.client.trySubscribeWarehouse(records[index].identity);
+        fixture.drainRequests();
+    }
+    try fixture.client.tryUnsubscribeWarehouse(records[0].identity, tokens[0]);
+    fixture.drainRequests();
+    try service.prepareWarehousePublication(&fixture.client);
+    try std.testing.expect(fixture.client.warehouse_subscriptions.contains(records[1].identity.id));
+    // Renewing an already-live interest consumes no slot and still progresses.
+    tokens[1] = try fixture.client.trySubscribeWarehouse(records[1].identity);
+    fixture.drainRequests();
+    try std.testing.expectEqual(tokens[1], fixture.client.warehouse_subscriptions.get(records[1].identity.id).?.token);
+    records[4] = try service.worker_state.warehouses.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 26, 10, 70 }, .{ 1, 1 }), .dirt);
+    // The fresh arrival shares a request batch with the release. It must not
+    // take the open slot before the older retained interest can retry.
+    try fixture.client.tryUnsubscribeWarehouse(records[1].identity, tokens[1]);
+    tokens[4] = try fixture.client.trySubscribeWarehouse(records[4].identity);
+    fixture.drainRequests();
+    try service.prepareWarehousePublication(&fixture.client);
+    try std.testing.expect(fixture.client.warehouse_subscriptions.contains(records[2].identity.id));
+    try std.testing.expectEqual(tokens[2], fixture.client.pending.warehouse_updates.items[1].snapshot.subscription_id);
+}
+
+test "warehouse authority retained subscription cancellation renewal and shutdown do not resurrect tokens" {
+    const a = std.testing.allocator;
+    const Outcome = enum { recover, cancel, shutdown };
+    for (std.enums.values(Outcome)) |outcome| {
+        var fixture: WarehouseAuthorityFixture = undefined;
+        try fixture.init();
+        defer fixture.deinit();
+        const service = &fixture.service;
+        const record = try service.worker_state.warehouses.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 10, 10, 70 }, .{ 1, 1 }), .dirt);
+        const old = try fixture.client.trySubscribeWarehouse(record.identity);
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0, .resize_fail_index = 0 });
+        service.allocator = failing.allocator();
+        fixture.drainRequests();
+        service.allocator = a;
+        const renewed = try fixture.client.trySubscribeWarehouse(record.identity);
+        service.allocator = failing.allocator();
+        fixture.drainRequests();
+        service.allocator = a;
+        try std.testing.expectEqual(@as(usize, 1), service.pending_warehouse_subscriptions.items.len);
+        try std.testing.expectEqual(renewed, service.pending_warehouse_subscriptions.items[0].token);
+        try fixture.client.tryUnsubscribeWarehouse(record.identity, old);
+        fixture.drainRequests();
+        try std.testing.expectEqual(@as(usize, 1), service.pending_warehouse_subscriptions.items.len);
+        switch (outcome) {
+            .recover => {},
+            .cancel => {
+                try fixture.client.tryUnsubscribeWarehouse(record.identity, renewed);
+                service.allocator = failing.allocator();
+                fixture.drainRequests();
+                service.allocator = a;
+            },
+            .shutdown => {
+                // Match the worker's shutdown transition, including a final
+                // accepted control already in the request mailbox.
+                _ = try fixture.client.trySubscribeWarehouse(record.identity);
+                service.is_shutting_down.store(true, .release);
+                service.discardPendingWarehouseSubscriptions();
+                fixture.drainRequests();
+            },
+        }
+        try service.prepareWarehousePublication(&fixture.client);
+        try std.testing.expectEqual(@as(usize, 0), service.pending_warehouse_subscriptions.items.len);
+        try std.testing.expectEqual(@as(usize, 0), service.outstanding_warehouse_subscriptions.load(.monotonic));
+        try std.testing.expectEqual(@as(usize, 0), service.outstanding_warehouse_unsubscribes.load(.monotonic));
+        try std.testing.expectEqual(@as(usize, if (outcome == .recover) 1 else 0), fixture.client.pending.warehouse_updates.items.len);
+        if (outcome == .recover) try std.testing.expectEqual(renewed, fixture.client.pending.warehouse_updates.items[0].snapshot.subscription_id);
+    }
+}
+
+test "warehouse authority object publications coalesce independently of discovery and stale tokens" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const state = &fixture.service.worker_state.warehouses;
+    const record = try state.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 31, 31, 31 }, .{ 2, 2 }), .dirt);
+    const control: WarehouseControl = .{ .client = &fixture.client, .identity = record.identity, .token = 10 };
+    fixture.service.processWarehouseControl(.{ .warehouse_subscribe = control }, control);
+    try fixture.service.prepareWarehousePublication(&fixture.client);
+    try std.testing.expectEqual(@as(usize, 1), fixture.client.pending.warehouse_updates.items.len);
+    try state.ensureRevision();
+    try state.getPtr(record.identity).?.put(.dirt, 1);
+    state.commitChanged();
+    try fixture.service.prepareWarehousePublication(&fixture.client);
+    try std.testing.expectEqual(@as(usize, 1), fixture.client.pending.warehouse_updates.items.len);
+    try std.testing.expectEqual(@as(u16, 1), fixture.client.pending.warehouse_updates.items[0].snapshot.record.stock);
+    var stale = control;
+    stale.token = 9;
+    fixture.service.processWarehouseControl(.{ .warehouse_unsubscribe = stale }, stale);
+    try std.testing.expect(fixture.client.warehouse_subscriptions.contains(record.identity.id));
+    var response: ChunkResponse = .{ .coords = .{ 1, 1, 1 }, .subscription_id = 1, .data = .acknowledgement };
+    defer response.deinit(a);
+    try fixture.service.composeResponse(&response);
+    try std.testing.expectEqual(@as(usize, 1), response.warehouse_refs.?.len);
+    try std.testing.expect(response.warehouse_refs.?[0].identity.eql(record.identity));
+    try std.testing.expectEqual(@as(u64, 0), fixture.service.warehouse_discovery_revision);
+    fixture.service.processWarehouseControl(.{ .warehouse_unsubscribe = control }, control);
+    try std.testing.expect(!fixture.client.warehouse_subscriptions.contains(record.identity.id));
+}
+
+test "warehouse authority publishes loose and member pallet sources to mesh and block subscribers" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    const geometry = try fixture.base(.{ 10, 10, 70 }, .{ 2, 1 });
+    _ = try fixture.base(.{ 20, 10, 70 }, .{ 1, 1 }); // Loose pallet.
+    const record = try service.worker_state.warehouses.register(a, geometry, .dirt);
+    const coords: ChunkCoords = .{ 0, 0, 2 };
+    const id = test_layout.encodeChunkCoords(coords);
+    for ([_]Representation{ .mesh, .blocks }, 0..) |mode, index| {
+        try fixture.client.subscriptions.put(a, id, .{ .id = index + 1, .mode = mode, .mesh_pending = mode == .mesh, .blocks_pending = mode == .blocks });
+        if (mode == .mesh) service.publishMesh(coords);
+        service.flushPackages();
+        const packages = fixture.client.responses.items.items;
+        try std.testing.expectEqual(index + 1, packages.len);
+        const response = packages[index].responses.items[0];
+        try std.testing.expectEqual(index + 1, response.subscription_id.?);
+        try std.testing.expectEqual(@as(usize, 3), response.pallet_visuals.?.len);
+        try std.testing.expectEqualSlices(u16, &.{ transformations.index(.{ 10, 10, 6 }), transformations.index(.{ 11, 10, 6 }), transformations.index(.{ 20, 10, 6 }) }, response.pallet_visuals.?);
+        try std.testing.expectEqual(@as(usize, 1), response.warehouse_refs.?.len);
+        try std.testing.expectEqual(service.worker_state.modified_chunks.get(id).?.chunk_revision, response.pallet_visual_revision);
+        if (mode == .mesh) for (response.data.mesh.blocks_grouped_by_side) |faces| {
+            for (faces.items) |face| try std.testing.expect(face.block_type != .pallet);
+        };
+    }
+    const revision = service.worker_state.modified_chunks.get(id).?.chunk_revision;
+    try service.worker_state.warehouses.getPtr(record.identity).?.put(.dirt, 1);
+    try service.worker_state.warehouses.touch();
+    service.flushPackages();
+    try std.testing.expectEqual(@as(usize, 2), fixture.client.responses.items.items.len);
+    try std.testing.expectEqual(revision, service.worker_state.modified_chunks.get(id).?.chunk_revision);
+}
+
+test "warehouse authority bounds full chunk pallet sources and retries after publication pressure" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    const coords: ChunkCoords = .{ 0, 0, 2 };
+    const id = test_layout.encodeChunkCoords(coords);
+    var chunk = WorldChunk.initEmpty();
+    const data = try chunk.tryEnsureData(a);
+    @memset(std.mem.asBytes(&data.blocks), @intFromEnum(rules.BlockType.pallet));
+    chunk.chunk_revision = 1;
+    try service.worker_state.modified_chunks.put(a, id, chunk);
+    service.construction_publication_budget = try PublicationBudget.create(a, std.testing.io, 65536, service, WorldDataService.wakeConstructionPublication);
+    const budget = service.construction_publication_budget.?;
+    var first: ChunkResponse = .{ .coords = coords, .subscription_id = 1, .data = .{ .mesh = .{} } };
+    defer first.deinit(a);
+    try service.composeResponse(&first);
+    try std.testing.expectEqual(@as(usize, 32768), first.pallet_visuals.?.len);
+    try std.testing.expectEqual(@as(usize, 65536), budget.used.load(.acquire));
+    try service.composeResponse(&first); // Identical source is retained at the cap.
+    var blocked: ChunkResponse = .{ .coords = coords, .subscription_id = 2, .data = .{ .mesh = .{} } };
+    defer blocked.deinit(a);
+    try std.testing.expectError(error.ConstructionPublicationCapacity, service.composeResponse(&blocked));
+    try std.testing.expect(blocked.pallet_visuals == null);
+    service.clearResponseComposition(&first);
+    try service.composeResponse(&blocked);
+    try std.testing.expectEqual(@as(usize, 65536), budget.peak.load(.acquire));
+    service.clearResponseComposition(&blocked);
+    @memset(std.mem.asBytes(&data.blocks), @intFromEnum(rules.BlockType.none));
+    service.worker_state.modified_chunks.getPtr(id).?.chunk_revision = 2;
+    try service.composeResponse(&blocked);
+    try std.testing.expectEqual(@as(usize, 0), blocked.pallet_visuals.?.len);
+    try std.testing.expectEqual(@as(u64, 2), blocked.pallet_visual_revision);
+    try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
+}
+
+test "warehouse authority command retry result and publication share one inventory fence" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const state = &fixture.service.worker_state.warehouses;
+    const record = try state.register(a, try warehouse_layout.Geometry.fromMinimum(test_layout.size_in_blocks, .{ 10, 10, 70 }, .{ 1, 1 }), .dirt);
+    fixture.service.players.getPtr(1).?.inventory = @intFromEnum(rules.BlockType.dirt);
+    const payload: warehouse_commands.Payload = .{ .actor = .{ .player_id = 1, .viewpoint = WarehouseAuthorityFixture.view(.{ 10, 10, 70 }) }, .action = .{ .transfer = .{ .identity = record.identity, .aim_cell = .{ 10, 10, 70 }, .material = .dirt, .direction = .put } } };
+    const command = fixture.client.nextExternalCommand();
+    _ = try fixture.client.tryWarehouseCommand(command, payload);
+    const admitted = fixture.service.requests.items.items[0].warehouse;
+    fixture.service.requests.items.clearRetainingCapacity();
+    fixture.service.processWarehouseAtView(admitted, payload.actor.viewpoint);
+    const repeated = try fixture.client.tryWarehouseCommand(command, payload);
+    try std.testing.expectEqual(.replayed, repeated.disposition);
+    try std.testing.expectEqual(@as(u64, 1), repeated.outcome.?.warehouse.resolved_sequence);
+    try std.testing.expectEqual(@as(u16, 1), state.get(record.identity).?.stock);
+    try std.testing.expect(fixture.service.players.get(1).?.inventory == null);
+    const control: WarehouseControl = .{ .client = &fixture.client, .identity = record.identity, .token = 10 };
+    fixture.service.processWarehouseControl(.{ .warehouse_subscribe = control }, control);
+    try fixture.service.prepareWarehousePublication(&fixture.client);
+    const snapshot = fixture.client.pending.warehouse_updates.items[0].snapshot;
+    try std.testing.expectEqual(@as(u64, 1), snapshot.resolved_sequence);
+    try std.testing.expectEqual(@as(u16, 1), snapshot.record.stock);
+    try std.testing.expect(snapshot.player_inventory.?.material == null);
+    // Publishing the snapshot does not acknowledge or retire the command result.
+    try std.testing.expectEqual(@as(usize, 1), fixture.client.command_ledger.records.items.len);
+    fixture.service.flushWarehouseOutcomes();
+    var replies: std.ArrayList(warehouse_commands.Result) = .empty;
+    defer replies.deinit(a);
+    fixture.client.takeWarehouseResults(&replies);
+    try std.testing.expectEqual(@as(usize, 1), replies.items.len);
+    try std.testing.expectEqual(@as(usize, 0), fixture.client.command_ledger.records.items.len);
+    try std.testing.expectError(error.StaleCommand, fixture.client.tryWarehouseCommand(command, payload));
+    var malformed = payload;
+    malformed.actor.viewpoint[0] = std.math.nan(f64);
+    const next = fixture.client.nextExternalCommand();
+    try std.testing.expectError(error.InvalidCommandSession, fixture.client.tryWarehouseCommand(next, malformed));
+    try std.testing.expectEqual(next.sequence, fixture.client.nextExternalCommand().sequence);
+}
+
+test "warehouse authority shared write guards protect members clearance and surviving pallet floor" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const cell: [3]u32 = .{ 10, 10, 70 };
+    const geometry = try fixture.base(cell, .{ 1, 1 });
+    const state = &fixture.service.worker_state.warehouses;
+    const record = try state.register(a, geometry, .dirt);
+    var context: ReadContext = .{ .state = &fixture.service.worker_state, .allocator = a };
+    defer context.deinit();
+    var composed: blueprint_runtime.CompletedReader = .{ .physical = context.reader(), .state = &fixture.service.worker_state.blueprints };
+    const member = mutation_guard.validateWrites(composed.reader(), &.{.{ .block = cell, .material = .none }}).?;
+    try std.testing.expectEqual(rules.Reason.would_invalidate_structure, member.reason);
+    const border = mutation_guard.validateWrites(context.reader(), &.{.{ .block = .{ 9, 9, 75 }, .material = .planks }}).?;
+    try std.testing.expectEqual(rules.Reason.would_invalidate_structure, border.reason);
+    const floor = mutation_guard.validateWrites(context.reader(), &.{.{ .block = .{ 10, 10, 69 }, .material = .none }}).?;
+    try std.testing.expectEqual(rules.Reason.would_remove_support, floor.reason);
+    try std.testing.expect(mutation_guard.validateWrites(context.reader(), &.{.{ .block = .{ 10, 10, 69 }, .material = .reinforced_concrete }}) == null);
+    try state.ensureRevision();
+    _ = try state.getPtr(record.identity).?.setEnabled(false);
+    state.commitChanged();
+    _ = try state.unregister(a, record.identity);
+    try std.testing.expect(mutation_guard.validateWrites(context.reader(), &.{.{ .block = cell, .material = .none }}) == null);
+    try std.testing.expectEqual(rules.Reason.would_remove_support, mutation_guard.validateWrites(context.reader(), &.{.{ .block = .{ 10, 10, 69 }, .material = .none }}).?.reason);
+}
+
+test "warehouse authority evaluates captured viewpoints against current occupied geometry and replays the result" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    const state = &service.worker_state.warehouses;
+    const record = try state.register(a, try fixture.base(.{ 10, 10, 70 }, .{ 1, 1 }), .dirt);
+    const payload: warehouse_commands.Payload = .{ .actor = .{ .player_id = 1, .viewpoint = WarehouseAuthorityFixture.view(.{ 10, 10, 79 }) }, .action = .{ .stop = record.identity } };
+    const command = fixture.client.nextExternalCommand();
+    _ = try fixture.client.tryWarehouseCommand(command, payload);
+    const admitted = service.requests.items.items[0].warehouse;
+    service.requests.items.clearRetainingCapacity();
+    // A queued pose can reach newly occupied upper cargo, while subsequent
+    // movement of the player does not change that captured command viewpoint.
+    try state.getPtr(record.identity).?.put(.dirt, 6);
+    try state.touch();
+    service.players.getPtr(1).?.feet = .{ 1000, 1000, 1000 };
+    service.processWarehouse(admitted);
+    const first = try fixture.client.tryWarehouseCommand(command, payload);
+    try std.testing.expectEqual(.success, first.outcome.?.warehouse.status);
+    var second_payload = payload;
+    second_payload.action = .{ .enable = record.identity };
+    const next = fixture.client.nextExternalCommand();
+    _ = try fixture.client.tryWarehouseCommand(next, second_payload);
+    const second = service.requests.items.items[0].warehouse;
+    service.requests.items.clearRetainingCapacity();
+    _ = try state.getPtr(record.identity).?.take(6);
+    try state.touch();
+    service.processWarehouse(second);
+    const rejected = try fixture.client.tryWarehouseCommand(next, second_payload);
+    try std.testing.expectEqual(.out_of_reach, rejected.outcome.?.warehouse.rejection.?);
+    const retry = try fixture.client.tryWarehouseCommand(command, payload);
+    try std.testing.expectEqual(.success, retry.outcome.?.warehouse.status);
+    try std.testing.expect(!state.get(record.identity).?.enabled);
+}
+
+test "warehouse authority observer viewpoint may reach edge cargo from above the finite world" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const state = &fixture.service.worker_state.warehouses;
+    const record = try state.register(a, try fixture.base(.{ 10, 10, test_layout.size_in_blocks[2] - 6 }, .{ 1, 1 }), .dirt);
+    try state.getPtr(record.identity).?.put(.dirt, 6);
+    try state.touch();
+    fixture.service.processWarehouse(.{ .client = &fixture.client, .request_id = 1, .payload = .{ .actor = .{ .viewpoint = WarehouseAuthorityFixture.view(.{ 10, 10, test_layout.size_in_blocks[2] + 3 }) }, .action = .{ .stop = record.identity } } });
+    try std.testing.expectEqual(.success, fixture.client.warehouse_results.items.items[0].status);
+}
+
+const WarehousePersistenceTest = struct {
+    path: [:0]u8,
+    store: storage.Store,
+    store_open: bool,
+    authority: WarehouseAuthorityFixture,
+
+    fn init(self: *@This()) !void {
+        return self.initWithAllocator(std.testing.allocator);
+    }
+
+    fn initWithAllocator(self: *@This(), a: std.mem.Allocator) !void {
+        var uuid: [16]u8 = undefined;
+        std.c.arc4random_buf(&uuid, uuid.len);
+        self.path = try std.fmt.allocPrintSentinel(a, "/private/tmp/warehouse-coherent-{x}", .{uuid}, 0);
+        errdefer a.free(self.path);
+        const dimensions: [3]u32 = @bitCast(test_layout.size_in_chunks);
+        const descriptor = try format.encodeDescriptor(a, .{ .dimensions = dimensions, .generator_id = format.generator_id, .seed = 0, .settings = &format.flat_settings });
+        defer a.free(descriptor);
+        const global = format.encodeGlobal(0);
+        self.store = try storage.Store.create(a, self.path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{});
+        self.store_open = true;
+        errdefer self.store.deinit();
+        try self.authority.initWithAllocator(a);
+        self.authority.service.store = &self.store;
+        self.authority.service.limits.output_bytes = 64 * 1024;
+    }
+
+    fn reopen(self: *@This()) !void {
+        if (self.authority.service.catalog) |*catalog| catalog.deinit();
+        self.authority.service.catalog = null;
+        self.store.deinit();
+        self.store_open = false;
+        self.store = try storage.Store.open(self.authority.service.allocator, self.path, .{});
+        self.store_open = true;
+    }
+
+    fn deinit(self: *@This()) void {
+        const a = self.authority.service.allocator;
+        self.authority.deinit();
+        if (self.store_open) self.store.deinit();
+        std.Io.Dir.cwd().deleteTree(std.testing.io, self.path) catch {};
+        a.free(self.path);
+    }
+};
+
+fn waitWarehouseCommand(client: *Client, submission: commands.Submission, payload: warehouse_commands.Payload) !warehouse_commands.Result {
+    const deadline = persistence.now(std.testing.io) + 10 * std.time.ns_per_s;
+    while (persistence.now(std.testing.io) < deadline) {
+        const retry = try client.tryWarehouseCommand(submission.command, payload);
+        if (retry.outcome) |outcome| return outcome.warehouse;
+        try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestWarehouseTimeout;
+}
+
+test "warehouse authority public dispatcher saves retried stock and player transfers at one fence" {
+    const a = std.testing.allocator;
+    const fixture = try PersistenceFixture.init(.{});
+    defer fixture.deinit();
+    const client = try fixture.service.createClient();
+    const pallet: [3]u32 = .{ 10, 10, 49 };
+    try std.testing.expectEqual(.success, try PersistenceFixture.operation(client, .{ .block = .{ 10, 10, 48 }, .action = .{ .put = .dirt } }));
+    try std.testing.expectEqual(.success, try PersistenceFixture.operation(client, .{ .block = pallet, .action = .{ .put = .pallet } }));
+    client.publishCheckpoint(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+    var viewpoint: [3]f64 = undefined;
+    inline for (0..3) |axis| viewpoint[axis] = @as(f64, @floatFromInt(pallet[axis])) - @as(f64, @floatFromInt(fixture.layout.origin_chunk[axis] * CHUNK_SIZE)) + 0.5;
+    const registration: warehouse_commands.Payload = .{ .actor = .{ .player_id = 1, .viewpoint = viewpoint }, .action = .{ .register = .{ .aim_cell = pallet, .material = .pallet } } };
+    const registered = try waitWarehouseCommand(client, try client.trySubmitWarehouse(registration), registration);
+    try std.testing.expectEqual(.success, registered.status);
+    const identity = registered.warehouse.?.identity;
+    const seed: warehouse_commands.Payload = .{ .actor = .{ .viewpoint = viewpoint }, .action = .{ .transfer = .{ .identity = identity, .aim_cell = pallet, .material = .pallet, .direction = .put } } };
+    const seeded = try waitWarehouseCommand(client, try client.trySubmitWarehouse(seed), seed);
+    try std.testing.expectEqual(@as(u16, 1), seeded.warehouse.?.stock);
+    var take = seed;
+    take.actor.player_id = 1;
+    take.action.transfer.direction = .take;
+    const submitted = try client.trySubmitWarehouse(take);
+    const intent = fixture.service.requestSave(true);
+    const taken = try waitWarehouseCommand(client, submitted, take);
+    try std.testing.expectEqual(.success, taken.status);
+    try std.testing.expectEqual(@as(u16, 0), taken.warehouse.?.stock);
+    try std.testing.expectEqual(@as(?rules.BlockType, .pallet), taken.player_inventory.?.material);
+    const saved = try fixture.waitSave(intent);
+    try std.testing.expectEqual(.complete, saved.phase);
+    var state = try warehouse_wire.decodeState(a, fixture.store.warehouses, @bitCast(fixture.layout.size_in_blocks), 99, .{});
+    defer state.deinit(a);
+    try std.testing.expectEqual(@as(u16, 0), state.records.get(identity.id).?.stock);
+    var players: format.Reader = .{ .bytes = fixture.store.players };
+    try std.testing.expectEqual(@as(?u8, @intFromEnum(rules.BlockType.pallet)), (try format.readPlayer(&players)).inventory);
+    const replay = try client.tryWarehouseCommand(submitted.command, take);
+    try std.testing.expectEqual(.replayed, replay.disposition);
+    try std.testing.expectEqual(@as(u16, 0), replay.outcome.?.warehouse.warehouse.?.stock);
+}
+
+test "warehouse authority capture freezes cargo inventory and terrain while later handover stays dirty" {
+    const a = std.testing.allocator;
+    var fixture: WarehousePersistenceTest = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const authority = &fixture.authority;
+    const service = &authority.service;
+    const state = &service.worker_state.warehouses;
+    const source = try state.register(a, try authority.base(.{ 10, 10, 70 }, .{ 2, 2 }), .dirt);
+    const destination = try state.register(a, try authority.base(.{ 20, 10, 70 }, .{ 2, 2 }), .dirt);
+    try state.getPtr(source.identity).?.put(.dirt, 7);
+    service.players.getPtr(1).?.inventory = @intFromEnum(rules.BlockType.dirt);
+    service.processWarehouse(.{ .client = &authority.client, .request_id = 1, .payload = .{ .actor = .{ .player_id = 1, .viewpoint = WarehouseAuthorityFixture.view(.{ 10, 10, 70 }) }, .action = .{ .transfer = .{ .identity = source.identity, .aim_cell = .{ 10, 10, 70 }, .material = .dirt, .direction = .put } } } });
+    var results: [1]WorldDataService.WarehouseSimulationResult = undefined;
+    try service.applyWarehouseSimulationBatch(&.{.{ .start = .{ .id = 1, .source = source.identity, .destination = destination.identity, .material = .dirt, .quantity = 3 } }}, &results);
+    try std.testing.expectEqual(.applied, try results[0]);
+    const captured_revision = state.revision;
+    try service.beginCapture(1, false);
+    try std.testing.expect(service.job.?.warehouse_snapshot != null);
+    try service.applyWarehouseSimulationBatch(&.{.{ .handover = 1 }}, &results);
+    try std.testing.expectEqual(.applied, try results[0]);
+    try BlueprintJournalBudgetTest.waitJob(service);
+    try std.testing.expectEqual(captured_revision, service.durable_warehouse_revision);
+    try std.testing.expect(service.lifecycle.unsaved_work);
+    var frozen = try warehouse_wire.decodeState(a, fixture.store.warehouses, test_layout.size_in_blocks, 99, .{});
+    defer frozen.deinit(a);
+    try std.testing.expectEqual(@as(u16, 5), frozen.records.get(source.identity.id).?.stock);
+    try std.testing.expectEqual(@as(u16, 3), frozen.records.get(destination.identity.id).?.incoming);
+    try std.testing.expectEqual(@as(u16, 3), frozen.delivery_state.records.get(1).?.cargo);
+    var players: format.Reader = .{ .bytes = fixture.store.players };
+    try std.testing.expectEqual(@as(?u8, null), (try format.readPlayer(&players)).inventory);
+    try fixture.store.compact();
+    const saved_blocks = (try fixture.store.readChunk(a, test_layout.encodeChunkCoords(.{ 0, 0, 2 }))).?;
+    defer a.free(saved_blocks);
+    var terrain = try format.decodeChunk(a, fixture.store.world_uuid, saved_blocks, fixture.store.dimensions);
+    defer terrain.deinit(a);
+    try std.testing.expectEqual(@intFromEnum(rules.BlockType.pallet), terrain.blocks[transformations.index(.{ 10, 10, 6 })]);
+    try service.beginCapture(2, false);
+    try BlueprintJournalBudgetTest.waitJob(service);
+    try std.testing.expectEqual(state.revision, service.durable_warehouse_revision);
+    try std.testing.expect(!service.lifecycle.unsaved_work);
+    const unchanged = fixture.store.warehouses.ptr;
+    try service.beginCapture(3, false);
+    try std.testing.expectEqual(null, service.job.?.warehouse_snapshot);
+    try BlueprintJournalBudgetTest.waitJob(service);
+    try std.testing.expect(unchanged == fixture.store.warehouses.ptr);
+    try fixture.store.compact();
+    const restored = try WorldDataService.createPersistent(std.testing.io, a, &test_layout, .flat, &fixture.store, .{});
+    defer restored.destroy();
+    try std.testing.expect(restored.world_session != source.identity.world_session);
+    try std.testing.expect(restored.worker_state.warehouses.get(source.identity) == null);
+    const after = restored.worker_state.warehouses.records.get(destination.identity.id).?;
+    try std.testing.expectEqual(@as(u16, 3), after.stock);
+    try std.testing.expectEqual(@as(u16, 0), after.incoming);
+    try std.testing.expectEqual(@as(u64, 1), restored.worker_state.warehouses.delivery_state.completed_through);
+    try std.testing.expectEqual(state.revision, restored.durable_warehouse_revision);
+}
+
+test "warehouse authority failed capture retains dirty generation and retries one coherent cut" {
+    const a = std.testing.allocator;
+    var fixture: WarehousePersistenceTest = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const authority = &fixture.authority;
+    const service = &authority.service;
+    const state = &service.worker_state.warehouses;
+    const record = try state.register(a, try authority.base(.{ 10, 10, 70 }, .{ 1, 1 }), .dirt);
+    service.players.getPtr(1).?.inventory = @intFromEnum(rules.BlockType.dirt);
+    const request: WarehouseRequest = .{ .client = &authority.client, .request_id = 1, .payload = .{ .actor = .{ .player_id = 1, .viewpoint = WarehouseAuthorityFixture.view(.{ 10, 10, 70 }) }, .action = .{ .transfer = .{ .identity = record.identity, .aim_cell = .{ 10, 10, 70 }, .material = .dirt, .direction = .put } } } };
+    const generation = state.revision;
+    state.revision = std.math.maxInt(u64);
+    try std.testing.expectError(error.RevisionExhausted, service.tryWarehouseAction(request, null));
+    try std.testing.expectEqual(@as(u16, 0), state.get(record.identity).?.stock);
+    try std.testing.expect(service.players.get(1).?.inventory != null);
+    state.revision = generation;
+    service.processWarehouse(request);
+    const changed = state.revision;
+    service.limits.working_bytes = 1;
+    try std.testing.expectError(error.WorkingCapacityExceeded, service.beginCapture(1, false));
+    try std.testing.expect(service.job == null and service.captured_warehouse_revision == null);
+    service.limits.working_bytes = 64 * 1024 * 1024;
+    var failure: @import("persistence/io.zig").Faults = .{ .operation = .write, .partial_write = 17 };
+    fixture.store.setFaults(&failure);
+    try service.beginCapture(2, false);
+    const deadline = persistence.now(std.testing.io) + 10 * std.time.ns_per_s;
+    while (service.job != null and persistence.now(std.testing.io) < deadline) {
+        service.drainPersistenceEvents();
+        if (service.job != null) try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expect(service.job == null and service.captured_warehouse_revision == null);
+    try std.testing.expectEqual(@as(u64, 0), service.durable_warehouse_revision);
+    try std.testing.expectEqual(@as(u64, 0), fixture.store.sequence);
+    try std.testing.expectEqual(@as(usize, 0), fixture.store.warehouses.len);
+    try std.testing.expect(service.lifecycle.unsaved_work);
+    fixture.store.setFaults(null);
+    try service.beginCapture(3, false);
+    try BlueprintJournalBudgetTest.waitJob(service);
+    try std.testing.expectEqual(changed, service.durable_warehouse_revision);
+    try std.testing.expect(!service.lifecycle.unsaved_work);
+    var restored = try warehouse_wire.decodeState(a, fixture.store.warehouses, state.world_size, 99, .{});
+    defer restored.deinit(a);
+    try std.testing.expectEqual(@as(u16, 1), restored.records.get(record.identity.id).?.stock);
+    var players: format.Reader = .{ .bytes = fixture.store.players };
+    try std.testing.expectEqual(@as(?u8, null), (try format.readPlayer(&players)).inventory);
+}
+
+test "warehouse authority recovery composes partial construction with one frozen cargo promise and player cut" {
+    const a = std.testing.allocator;
+    var fixture: WarehousePersistenceTest = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.authority.service;
+    const geometry = try fixture.authority.base(.{ 31, 10, 70 }, .{ 2, 1 });
+    for ([_][3]u32{ .{ 31, 10, 69 }, .{ 32, 10, 69 } }) |cell| {
+        const coords, const local = world_module.splitBlockCoords(cell);
+        const chunk = service.worker_state.modified_chunks.getPtr(test_layout.encodeChunkCoords(coords)).?;
+        (try chunk.tryEnsureData(a)).blocks[local[2]][local[1]][local[0]] = .none;
+        chunk.solid_block_count -= 1;
+    }
+    try installFulfillmentTestSite(&service.worker_state, a, .{ 31, 10, 69 }, .{ 2, 1, 1 }, &.{ .planks, .planks });
+    const construction = &service.worker_state.blueprints;
+    const definition = construction.definitions.get(1).?;
+    const instance = construction.instances.get(1).?;
+    const operations = [_]blueprint_wire.Op{
+        .{ .definition = .{ .id = definition.id, .owner = definition.owner, .name = definition.name, .size = definition.definition.size, .cells = std.mem.sliceAsBytes(definition.definition.cells), .target_count = definition.definition.target_count } },
+        .{ .instance = .{ .id = instance.id, .definition_id = instance.definition_id, .owner = instance.owner, .origin = instance.origin, .rotation = instance.rotation } },
+        .{ .fulfill = .{ .instance_id = 1, .cell_index = 0 } },
+        .{ .fulfill = .{ .instance_id = 1, .cell_index = 1 } },
+    };
+    for (operations) |operation| {
+        try service.reserveBlueprintJournal(operation);
+        service.appendBlueprintJournal(operation);
+    }
+    try std.testing.expect(construction.fulfill(&test_layout, .{ .instance_id = 1, .cell_index = 0 }));
+    try std.testing.expect(construction.fulfill(&test_layout, .{ .instance_id = 1, .cell_index = 1 }));
+    try service.materializeConstructionPortion(1, 1);
+    const state = &service.worker_state.warehouses;
+    const source = try state.register(a, geometry, .dirt);
+    const destination = try state.register(a, try fixture.authority.base(.{ 44, 10, 70 }, .{ 2, 1 }), .dirt);
+    try state.getPtr(source.identity).?.put(.dirt, 7);
+    service.players.getPtr(1).?.inventory = @intFromEnum(rules.BlockType.dirt);
+    const transfer: WarehouseRequest = .{ .client = &fixture.authority.client, .request_id = 1, .payload = .{ .actor = .{ .player_id = 1, .viewpoint = WarehouseAuthorityFixture.view(.{ 31, 10, 70 }) }, .action = .{ .transfer = .{ .identity = source.identity, .aim_cell = .{ 31, 10, 70 }, .material = .dirt, .direction = .put } } } };
+    const put = try service.tryWarehouseAction(transfer, null);
+    try std.testing.expectEqual(@as(u16, 8), put.warehouse.?.stock);
+    try std.testing.expectEqual(@as(?u8, null), service.players.get(1).?.inventory);
+    var results: [1]WorldDataService.WarehouseSimulationResult = undefined;
+    try service.applyWarehouseSimulationBatch(&.{.{ .start = .{ .id = 1, .source = source.identity, .destination = destination.identity, .material = .dirt, .quantity = 3 } }}, &results);
+    try std.testing.expectEqual(.applied, try results[0]);
+    var context: ReadContext = .{ .state = &service.worker_state, .allocator = a };
+    defer context.deinit();
+    try std.testing.expectEqual(.planks, context.reader().get(.{ 31, 10, 69 }).?);
+    try std.testing.expectEqual(.planks, context.reader().get(.{ 32, 10, 69 }).?);
+    try service.beginCapture(1, false);
+    // These later accepted effects must not leak into the partial-construction cut.
+    try service.applyWarehouseSimulationBatch(&.{.{ .handover = 1 }}, &results);
+    try std.testing.expectEqual(.applied, try results[0]);
+    var take = transfer;
+    take.payload.action.transfer.direction = .take;
+    _ = try service.tryWarehouseAction(take, null);
+    try BlueprintJournalBudgetTest.waitJob(service);
+    try fixture.reopen();
+    {
+        var restored: WarehouseAuthorityFixture = undefined;
+        try restored.restore(&fixture.store);
+        defer restored.deinit();
+        const resumed = &restored.service;
+        const warehouses = &resumed.worker_state.warehouses;
+        const saved_source = warehouses.records.get(source.identity.id).?;
+        const saved_destination = warehouses.records.get(destination.identity.id).?;
+        try std.testing.expect(!saved_source.identity.eql(source.identity));
+        try std.testing.expectEqual(@as(u32, 2), warehouses.records.count());
+        try std.testing.expectEqual(@as(u32, 1), resumed.worker_state.blueprints.instances.get(1).?.remaining_groups);
+        try std.testing.expectEqualDeep(geometry, saved_source.geometry);
+        try std.testing.expectEqual(@as(u16, 5), saved_source.stock);
+        try std.testing.expectEqual(@as(u16, 0), saved_destination.stock);
+        try std.testing.expectEqual(@as(u16, 3), saved_destination.incoming);
+        try std.testing.expectEqual(@as(u16, 3), warehouses.delivery_state.records.get(1).?.cargo);
+        try std.testing.expectEqual(@as(u16, 3), warehouses.delivery_state.records.get(1).?.remaining_promise);
+        try std.testing.expectEqual(@as(u32, 1), saved_source.obligations);
+        try std.testing.expectEqual(@as(u32, 1), saved_destination.obligations);
+        try std.testing.expectEqual(@as(?u8, null), resumed.players.get(1).?.inventory);
+        try std.testing.expectEqual(.none, resumed.worker_state.modified_chunks.get(ConstructionOwnershipTest.left).?.content.getBlock(.{ 31, 10, 5 }));
+        try std.testing.expectEqual(.planks, resumed.worker_state.modified_chunks.get(ConstructionOwnershipTest.right).?.content.getBlock(.{ 0, 10, 5 }));
+        var reads: ReadContext = .{ .state = &resumed.worker_state, .allocator = a };
+        defer reads.deinit();
+        for ([_][3]u32{ .{ 31, 10, 69 }, .{ 32, 10, 69 } }) |floor| {
+            try std.testing.expectEqual(.planks, reads.reader().get(.{ floor[0], floor[1], floor[2] }).?);
+            try std.testing.expect(resumed.worker_state.blueprints.memberAt(floor) != null);
+        }
+        for ([_][3]u32{ .{ 30, 9, 75 }, .{ 43, 9, 75 } }) |halo| try std.testing.expect(warehouses.claims.claimed(test_layout.size_in_blocks[0], halo));
+        try resumed.applyWarehouseSimulationBatch(&.{.{ .start = .{ .id = 1, .source = saved_source.identity, .destination = saved_destination.identity, .material = .dirt, .quantity = 3 } }}, &results);
+        try std.testing.expectEqual(.replayed, try results[0]);
+        for ([_]warehouse_state.Transition{ .applied, .replayed }) |expected| {
+            try resumed.applyWarehouseSimulationBatch(&.{.{ .handover = 1 }}, &results);
+            try std.testing.expectEqual(expected, try results[0]);
+        }
+        try std.testing.expectEqual(@as(u16, 5), warehouses.records.get(source.identity.id).?.stock);
+        try std.testing.expectEqual(@as(u16, 3), warehouses.records.get(destination.identity.id).?.stock);
+        try std.testing.expectEqual(@as(u16, 0), warehouses.records.get(destination.identity.id).?.incoming);
+        try std.testing.expectEqual(@as(u64, 1), warehouses.delivery_state.completed_through);
+        try std.testing.expectEqual(@as(?u8, null), resumed.players.get(1).?.inventory);
+        var resumed_transfer = transfer;
+        resumed_transfer.client = &restored.client;
+        resumed_transfer.payload.action.transfer.identity = saved_source.identity;
+        // The same take/put pair is legal before and after the final handback.
+        for (0..2) |phase| {
+            resumed_transfer.payload.action.transfer.direction = .take;
+            const taken = try resumed.tryWarehouseAction(resumed_transfer, null);
+            try std.testing.expectEqual(@as(u16, 4), taken.warehouse.?.stock);
+            try std.testing.expectEqual(@as(?u8, @intFromEnum(rules.BlockType.dirt)), resumed.players.get(1).?.inventory);
+            resumed_transfer.payload.action.transfer.direction = .put;
+            const returned = try resumed.tryWarehouseAction(resumed_transfer, null);
+            try std.testing.expectEqual(@as(u16, 5), returned.warehouse.?.stock);
+            try std.testing.expectEqual(@as(?u8, null), resumed.players.get(1).?.inventory);
+            if (phase == 0) {
+                try resumed.materializeConstructionPortion(1, 0);
+                try resumed.completeConstruction(1);
+                for ([_][3]u32{ .{ 31, 10, 69 }, .{ 32, 10, 69 } }) |floor| try std.testing.expect(resumed.worker_state.blueprints.memberAt(floor) == null);
+                for ([_][3]u32{ .{ 30, 9, 75 }, .{ 43, 9, 75 } }) |halo| try std.testing.expect(warehouses.claims.claimed(test_layout.size_in_blocks[0], halo));
+            }
+        }
+        try warehouses.validate(a);
+        try resumed.beginCapture(2, false);
+        try BlueprintJournalBudgetTest.waitJob(resumed);
+    }
+    try fixture.store.compact();
+    var restored: WarehouseAuthorityFixture = undefined;
+    try restored.restore(&fixture.store);
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(u32, 2), restored.service.worker_state.warehouses.records.count());
+    try std.testing.expectEqual(@as(u32, 0), restored.service.worker_state.blueprints.instances.count());
+    try std.testing.expectEqual(@as(u16, 5), restored.service.worker_state.warehouses.records.get(source.identity.id).?.stock);
+    try std.testing.expectEqual(@as(u16, 3), restored.service.worker_state.warehouses.records.get(destination.identity.id).?.stock);
+    try std.testing.expectEqual(@as(u16, 0), restored.service.worker_state.warehouses.records.get(destination.identity.id).?.incoming);
+    try std.testing.expectEqual(@as(u32, 0), restored.service.worker_state.warehouses.records.get(source.identity.id).?.obligations);
+    try std.testing.expectEqual(@as(u32, 0), restored.service.worker_state.warehouses.records.get(destination.identity.id).?.obligations);
+    try std.testing.expectEqual(@as(u64, 1), restored.service.worker_state.warehouses.delivery_state.completed_through);
+    try std.testing.expectEqual(@as(u32, 0), restored.service.worker_state.warehouses.delivery_state.records.count());
+    try std.testing.expectEqual(@as(?u8, null), restored.service.players.get(1).?.inventory);
+    try restored.service.applyWarehouseSimulationBatch(&.{.{ .handover = 1 }}, &results);
+    try std.testing.expectEqual(.replayed, try results[0]);
+    try std.testing.expectEqual(@as(u16, 3), restored.service.worker_state.warehouses.records.get(destination.identity.id).?.stock);
+    try restored.service.worker_state.warehouses.validate(a);
+}
+
+test "warehouse authority soil cargo stays outside support and grass while real construction soil completes" {
+    const a = std.testing.allocator;
+    var fixture: WarehouseAuthorityFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    const state = &service.worker_state;
+    const id = test_layout.encodeChunkCoords(.{ 0, 0, 2 });
+    const geometry = try fixture.base(.{ 10, 10, 70 }, .{ 1, 1 });
+    const chunk = state.modified_chunks.getPtr(id).?;
+    try std.testing.expectEqual(.success, try chunk.tryApply(a, .{ 10, 10, 5 }, .remove));
+    // The target soil has a real nine-cell foundation. Its pallet and another
+    // target provide two independent covers beside an exposed soil target.
+    for (9..12) |y| for (9..16) |x| {
+        try std.testing.expectEqual(.success, try chunk.tryApply(a, .{ @intCast(x), @intCast(y), 4 }, .{ .put = .stone }));
+    };
+    try installFulfillmentTestSite(state, a, .{ 10, 10, 69 }, .{ 5, 1, 2 }, &.{
+        .dirt, .none, .dirt, .none, .dirt,
+        .none, .none, .none, .none, .planks,
+    });
+    for ([_]u32{ 0, 2, 4, 9 }) |index| try std.testing.expect(state.blueprints.fulfill(&test_layout, .{ .instance_id = 1, .cell_index = index }));
+    var reads: ReadContext = .{ .state = state, .allocator = a };
+    defer reads.deinit();
+    try std.testing.expectEqual(.dirt, reads.reader().get(.{ 10, 10, 69 }).?);
+    try std.testing.expectEqualDeep(geometry, try service.currentWarehouseCandidate(&reads, .{ 10, 10, 70 }));
+    const record = try state.warehouses.register(a, geometry, .dirt);
+    try state.warehouses.getPtr(record.identity).?.put(.dirt, 2);
+    try state.warehouses.touch();
+    service.players.getPtr(1).?.inventory = @intFromEnum(rules.BlockType.dirt);
+    const stock_before = state.warehouses.records.get(record.identity.id).?;
+    const generation_before = state.warehouses.revision;
+    // Packed soil collides through its owner, but the shared physical reader
+    // exposes only the real pallet and empty upper cell to support/capture work.
+    try std.testing.expect(state.warehouses.occupied(record.identity, .{ 10, 10, 71 }));
+    try std.testing.expectEqual(.pallet, reads.reader().get(.{ 10, 10, 70 }).?);
+    try std.testing.expectEqual(.none, reads.reader().get(.{ 10, 10, 71 }).?);
+    var pallet_support: rules.Validator = .{ .allocator = a, .reader = reads.reader(), .edit = .{ .cell = .{ 10, 10, 70 }, .material = .pallet } };
+    defer pallet_support.deinit();
+    try std.testing.expect(pallet_support.checkPlacement(.{ 10, 10, 70 }, .pallet) == null);
+    var cargo_support: rules.Validator = .{ .allocator = a, .reader = reads.reader(), .edit = .{ .cell = .{ 10, 10, 72 }, .material = .pallet } };
+    defer cargo_support.deinit();
+    try std.testing.expectEqual(rules.Reason.incompatible_support, cargo_support.checkPlacement(.{ 10, 10, 72 }, .pallet).?.reason);
+    try std.testing.expect(!rules.BlockType.pallet.canSupportPallet());
+    try service.materializeConstructionPortion(1, 0);
+    try std.testing.expectEqual(@as(usize, 3), state.modified_chunks.get(id).?.metadata.timed.events.items.len);
+    for (state.modified_chunks.get(id).?.metadata.timed.events.items) |event| {
+        try std.testing.expectEqual(transformations.Kind.initialize_grass, event.kind);
+        try std.testing.expectEqual(@as(u5, 5), transformations.coordinates(event.block)[2]);
+    }
+    state.tick = 100;
+    try service.completeConstruction(1);
+    try std.testing.expectEqual(@as(usize, 1), service.construction_grass.items.len);
+    try service.initializeConstructionGrass(service.construction_grass.items[0]);
+    const initialized = state.modified_chunks.get(id).?;
+    try std.testing.expectEqual(@as(usize, 1), initialized.metadata.timed.events.items.len);
+    try std.testing.expectEqual(transformations.Kind.grow_grass, initialized.metadata.timed.events.items[0].kind);
+    try std.testing.expectEqual(transformations.index(.{ 12, 10, 5 }), initialized.metadata.timed.events.items[0].block);
+    try std.testing.expectEqual(@as(u64, 100) + transformations.transformation_delay, initialized.metadata.timed.events.items[0].due_tick);
+    state.tick = 100 + transformations.transformation_delay;
+    try std.testing.expect(state.transformChunk(a, .{ 0, 0, 2 }));
+    const grown = state.modified_chunks.get(id).?;
+    try std.testing.expectEqual(.dirt, grown.content.getBlock(.{ 10, 10, 5 }));
+    try std.testing.expectEqual(.grass, grown.content.getBlock(.{ 12, 10, 5 }));
+    try std.testing.expectEqual(.dirt, grown.content.getBlock(.{ 14, 10, 5 }));
+    try std.testing.expectEqual(.pallet, grown.content.getBlock(.{ 10, 10, 6 }));
+    try std.testing.expectEqual(.none, grown.content.getBlock(.{ 10, 10, 7 }));
+    try std.testing.expectEqual(@as(usize, 0), grown.metadata.timed.events.items.len);
+    try std.testing.expectEqualDeep(stock_before, state.warehouses.records.get(record.identity.id).?);
+    try std.testing.expectEqual(generation_before, state.warehouses.revision);
+    try std.testing.expectEqual(@as(?u8, @intFromEnum(rules.BlockType.dirt)), service.players.get(1).?.inventory);
+    try std.testing.expect(state.warehouses.claims.claimed(test_layout.size_in_blocks[0], .{ 9, 9, 75 }));
+    try state.warehouses.validate(a);
+}
+
+test "warehouse authority recovery rejects a missing member floor or obstructed envelope before worker startup" {
+    const a = std.testing.allocator;
+    var fixture: WarehousePersistenceTest = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.authority.service;
+    _ = try service.worker_state.warehouses.register(a, try fixture.authority.base(.{ 10, 10, 70 }, .{ 1, 1 }), .dirt);
+    try service.beginCapture(1, false);
+    try BlueprintJournalBudgetTest.waitJob(service);
+    try fixture.store.compact();
+    const id = test_layout.encodeChunkCoords(.{ 0, 0, 2 });
+    const original = (try fixture.store.readChunk(a, id)).?;
+    defer a.free(original);
+    for (0..3) |case| {
+        var terrain = try format.decodeChunk(a, fixture.store.world_uuid, original, fixture.store.dimensions);
+        defer terrain.deinit(a);
+        const local: [3]u5 = switch (case) {
+            0 => .{ 10, 10, 5 },
+            1 => .{ 10, 10, 6 },
+            else => .{ 9, 9, 11 },
+        };
+        terrain.blocks[transformations.index(local)] = if (case == 2) @intFromEnum(rules.BlockType.planks) else 0;
+        terrain.revision = case + 2;
+        const corrupted_cut = try format.encodeChunk(a, fixture.store.world_uuid, terrain.view());
+        defer a.free(corrupted_cut);
+        try fixture.store.beginSnapshot(case + 2, fixture.store.global, fixture.store.players, fixture.store.player_count, 1);
+        try fixture.store.appendChunk(corrupted_cut);
+        _ = try fixture.store.commitSnapshot();
+        try fixture.store.compact();
+        try std.testing.expectError(error.InvalidWarehouseTerrain, WorldDataService.createPersistent(std.testing.io, a, &test_layout, .flat, &fixture.store, .{}));
+    }
+}
+
+const WarehouseAuthorityMeasurement = struct {
+    const Budget = @import("persistence/budget.zig").Budget;
+    const count = 4096;
+    const rounds = 16;
+    const Sample = struct {
+        wall: i96,
+        cpu: i96,
+        live: usize,
+        allocations: u64,
+        fn begin(meter: *Budget) @This() {
+            const stats = meter.stats();
+            meter.peak.store(stats.used, .release);
+            return .{ .wall = persistence.now(std.testing.io), .cpu = Io.Clock.cpu_thread.now(std.testing.io).toNanoseconds(), .live = stats.used, .allocations = stats.allocations };
+        }
+        fn report(self: @This(), meter: *Budget, observed: bool, phase: []const u8) void {
+            const stats = meter.stats();
+            std.debug.print("warehouse-authority observed={} phase={s} wall_ms={d:.3} cpu_ms={d:.3} allocations={d} retained_bytes={d} peak_extra_bytes={d}\n", .{ observed, phase, @as(f64, @floatFromInt(persistence.now(std.testing.io) - self.wall)) / std.time.ns_per_ms, @as(f64, @floatFromInt(Io.Clock.cpu_thread.now(std.testing.io).toNanoseconds() - self.cpu)) / std.time.ns_per_ms, stats.allocations - self.allocations, stats.used, stats.peak - self.live });
+        }
+    };
+
+    fn run(observed: bool) !void {
+        var meter = Budget.init(std.testing.allocator, 128 * 1024 * 1024);
+        const a = meter.allocator();
+        {
+            var fixture: WarehousePersistenceTest = undefined;
+            try fixture.initWithAllocator(a);
+            defer fixture.deinit();
+            const authority = &fixture.authority;
+            const service = &authority.service;
+            const state = &service.worker_state.warehouses;
+            service.limits.pending_commands = count;
+            const seed_sample = Sample.begin(&meter);
+            for (0..count) |index| {
+                const minimum: [3]u32 = .{ @intCast(10 + index % 64 * 8), @intCast(10 + index / 64 * 8), 70 };
+                const record = try state.register(a, try authority.base(minimum, .{ 2, 2 }), .dirt);
+                try state.getPtr(record.identity).?.put(.dirt, 12);
+                if (observed) try authority.client.warehouse_subscriptions.put(a, record.identity.id, .{ .identity = record.identity, .token = record.identity.id });
+            }
+            try state.touch();
+            try service.prepareWarehousePublication(&authority.client);
+            seed_sample.report(&meter, observed, "seed-and-first-publication");
+            const index_sample = Sample.begin(&meter);
+            for (0..count * rounds) |index| {
+                const record = state.records.get(index % count + 1).?;
+                try std.testing.expect(state.claims.claimed(state.world_size[0], record.geometry.origin));
+                const first_slot = state.layoutFor(record.identity).?.slotAt(record.active, 0).?;
+                try std.testing.expect(state.occupied(record.identity, record.geometry.worldCell(state.world_size, first_slot).?));
+            }
+            index_sample.report(&meter, observed, "65536-claim-and-occupancy-queries");
+            const mutation_sample = Sample.begin(&meter);
+            var transitions: [128]WorldDataService.WarehouseSimulationTransition = undefined;
+            var results: [128]WorldDataService.WarehouseSimulationResult = undefined;
+            var next_delivery: u64 = 1;
+            var publications: usize = authority.client.pending.warehouse_updates.items.len;
+            var authority_cpu_ns: i96 = 0;
+            var publication_cpu_ns: i96 = 0;
+            var terrain_cpu_ns: i96 = 0;
+            for (0..rounds) |round| {
+                for (0..count / 128) |group| {
+                    for (0..64) |slot| {
+                        const first = state.records.get(@intCast(group * 128 + slot * 2 + 1)).?.identity;
+                        const second = state.records.get(first.id + 1).?.identity;
+                        transitions[slot] = .{ .start = .{ .id = next_delivery, .source = if (round % 2 == 0) first else second, .destination = if (round % 2 == 0) second else first, .material = .dirt, .quantity = 1 } };
+                        transitions[64 + slot] = .{ .handover = next_delivery };
+                        next_delivery += 1;
+                    }
+                    const authority_started = Io.Clock.cpu_thread.now(std.testing.io).toNanoseconds();
+                    try service.applyWarehouseSimulationBatch(&transitions, &results);
+                    authority_cpu_ns += Io.Clock.cpu_thread.now(std.testing.io).toNanoseconds() - authority_started;
+                    for (results) |result| try std.testing.expectEqual(.applied, try result);
+                    if (observed) {
+                        const publication_started = Io.Clock.cpu_thread.now(std.testing.io).toNanoseconds();
+                        try service.prepareWarehousePublication(&authority.client);
+                        publication_cpu_ns += Io.Clock.cpu_thread.now(std.testing.io).toNanoseconds() - publication_started;
+                        publications += 128;
+                    }
+                }
+                // Ordinary service-owned terrain work shares this executor.
+                const cell: [3]u32 = .{ 610, 610, 70 };
+                if (round == 0) {
+                    const coords, const local = world_module.splitBlockCoords(cell);
+                    var chunk = WorldChunk.initEmpty();
+                    (try chunk.tryEnsureData(a)).blocks[local[2] - 1][local[1]][local[0]] = .reinforced_concrete;
+                    chunk.solid_block_count = 1;
+                    chunk.chunk_revision = 1;
+                    try service.worker_state.modified_chunks.put(a, test_layout.encodeChunkCoords(coords), chunk);
+                }
+                const terrain_started = Io.Clock.cpu_thread.now(std.testing.io).toNanoseconds();
+                service.processAdmitted(.{ .operation = .{ .client = &authority.client, .request_id = round + 1, .operation = .{ .block = cell, .action = if (round % 2 == 0) .{ .put = .pallet } else .remove } } });
+                terrain_cpu_ns += Io.Clock.cpu_thread.now(std.testing.io).toNanoseconds() - terrain_started;
+                if (authority.client.pending.responses.items[authority.client.pending.responses.items.len - 1].operation.?.status != .success) std.debug.print("warehouse pressure terrain round={d} failure={any}\n", .{ round, authority.client.pending.responses.items[authority.client.pending.responses.items.len - 1].operation.?.failure });
+                try std.testing.expectEqual(.success, authority.client.pending.responses.items[authority.client.pending.responses.items.len - 1].operation.?.status);
+            }
+            mutation_sample.report(&meter, observed, "65536-transitions-with-terrain-and-publication");
+            std.debug.print("warehouse-authority observed={} isolated_authority_cpu_ms={d:.3} isolated_publication_cpu_ms={d:.3} isolated_terrain_cpu_ms={d:.3}\n", .{ observed, @as(f64, @floatFromInt(authority_cpu_ns)) / std.time.ns_per_ms, @as(f64, @floatFromInt(publication_cpu_ns)) / std.time.ns_per_ms, @as(f64, @floatFromInt(terrain_cpu_ns)) / std.time.ns_per_ms });
+            try std.testing.expectEqual(@as(u32, 0), state.delivery_state.records.count());
+            const active_first = next_delivery;
+            for (0..count / 256) |group| {
+                for (&transitions, 0..) |*transition, slot| {
+                    const source = state.records.get(@intCast((group * 128 + slot) * 2 + 1)).?.identity;
+                    transition.* = .{ .start = .{ .id = next_delivery, .source = source, .destination = state.records.get(source.id + 1).?.identity, .material = .dirt, .quantity = 1 } };
+                    next_delivery += 1;
+                }
+                try service.applyWarehouseSimulationBatch(&transitions, &results);
+                for (results) |result| try std.testing.expectEqual(.applied, try result);
+            }
+            const native = state.estimatedOwnedBytes();
+            const capture_sample = Sample.begin(&meter);
+            try service.beginCapture(1, false);
+            const working = service.job.?.working_reserved_bytes;
+            const encoded = service.job.?.warehouse_snapshot.?.len;
+            const sources = service.job.?.sources.len;
+            capture_sample.report(&meter, observed, "changed-capture");
+            // Continue local warehouse work and publication while terrain
+            // sources and a frozen warehouse cut belong to the real writer.
+            const pressure_sample = Sample.begin(&meter);
+            for (0..count / 256) |group| {
+                for (&transitions, 0..) |*transition, slot| transition.* = .{ .handover = active_first + group * 128 + slot };
+                try service.applyWarehouseSimulationBatch(&transitions, &results);
+                for (results) |result| try std.testing.expectEqual(.applied, try result);
+                try service.prepareWarehousePublication(&authority.client);
+                if (observed) publications += 256;
+            }
+            try BlueprintJournalBudgetTest.waitJob(service);
+            const output_peak = service.status.output_peak_bytes;
+            pressure_sample.report(&meter, observed, "writer-complete-with-2048-handovers");
+            try std.testing.expect(service.lifecycle.unsaved_work);
+            try service.beginCapture(2, false);
+            try BlueprintJournalBudgetTest.waitJob(service);
+            const unchanged_sample = Sample.begin(&meter);
+            try service.beginCapture(3, false);
+            try std.testing.expect(service.job.?.warehouse_snapshot == null);
+            unchanged_sample.report(&meter, observed, "unchanged-capture");
+            try BlueprintJournalBudgetTest.waitJob(service);
+            std.debug.print("warehouse-authority observed={} warehouses={d} transitions={d} terrain_operations={d} snapshots_prepared={d} snapshots_retained={d} native_state_bytes={d} encoded_bytes={d} sources={d} working_reserved_bytes={d} output_peak_bytes={d}\n", .{ observed, count, count * (rounds + 1), rounds, publications, authority.client.pending.warehouse_updates.items.len, native, encoded, sources, working, output_peak });
+            try fixture.store.compact();
+            const recovery_sample = Sample.begin(&meter);
+            var restored: WarehouseAuthorityFixture = undefined;
+            try restored.initWithAllocator(a);
+            defer restored.deinit();
+            try restored.service.restoreWarehouses(&fixture.store);
+            recovery_sample.report(&meter, observed, "recover-and-validate-terrain");
+        }
+        try std.testing.expectEqual(@as(usize, 0), meter.stats().used);
+        try std.testing.expectEqual(@as(u64, 0), meter.stats().rejections);
+    }
+};
+
+test "warehouse authority representative workload measurement" {
+    if (@import("builtin").mode != .ReleaseFast) return error.SkipZigTest;
+    try WarehouseAuthorityMeasurement.run(false);
+    try WarehouseAuthorityMeasurement.run(true);
+}
+
+test {
+    _ = warehouse_reach;
 }

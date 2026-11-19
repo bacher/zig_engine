@@ -5,11 +5,12 @@ pub const io = @import("io.zig");
 const format = @import("format.zig");
 pub const blueprint_records = @import("blueprints.zig");
 const deferred_work = @import("../deferred_world_work.zig");
+pub const warehouse_records = @import("warehouses.zig");
 pub const Uuid = [16]u8;
 pub const Digest = [32]u8;
 pub const SnapshotIdentity = struct { sequence: u64, digest: Digest };
-pub const Limits = struct { max_chunks: usize = 1_000_000, max_segments: usize = 128, max_players_bytes: usize = 16 * 1024 * 1024, max_pending_work: usize = 4096, blueprints: blueprint_records.Limits = .{} };
-pub const Initial = struct { world_uuid: Uuid, descriptor: []const u8, global: []const u8, players: []const u8, player_count: u64, chunks: []const []const u8 = &.{}, blueprints: []const u8 = &.{}, pending_work: []const u8 = &.{} };
+pub const Limits = struct { max_chunks: usize = 1_000_000, max_segments: usize = 128, max_players_bytes: usize = 16 * 1024 * 1024, max_pending_work: usize = 4096, blueprints: blueprint_records.Limits = .{}, warehouses: warehouse_records.Limits = .{} };
+pub const Initial = struct { world_uuid: Uuid, descriptor: []const u8, global: []const u8, players: []const u8, player_count: u64, chunks: []const []const u8 = &.{}, blueprints: []const u8 = &.{}, pending_work: []const u8 = &.{}, warehouses: []const u8 = &.{} };
 const HeaderSize = 120;
 const MaxRecord = 1_212_501;
 const Location = struct { file: io.File, offset: u64, length: u32, revision: u64 };
@@ -28,6 +29,7 @@ const Transaction = struct {
     chunks: std.AutoHashMap(u32, Location),
     blueprint_changes: blueprint_records.Prepared,
     pending_work: []u8,
+    warehouses: ?[]u8 = null,
 };
 pub const Store = struct {
     allocator: std.mem.Allocator,
@@ -42,6 +44,7 @@ pub const Store = struct {
     blueprints: blueprint_records.State = .{ .allocator = std.heap.page_allocator },
     /// Canonical complete set belonging to the latest durable snapshot.
     pending_work: []u8 = &.{},
+    warehouses: []u8 = &.{},
     sequence: u64,
     digest: Digest,
     base: io.File,
@@ -80,6 +83,7 @@ pub const Store = struct {
         try format.validatePlayers(initial.players, initial.player_count);
         if (initial.players.len > limits.max_players_bytes) return error.Capacity;
         try deferred_work.validate(initial.pending_work, desc.dimensions, limits.max_pending_work);
+        try validateWarehouses(a, initial.warehouses, desc.dimensions, limits.warehouses);
         var blueprints = try blueprint_records.decodeState(a, initial.blueprints, desc.dimensions, limits.blueprints);
         errdefer blueprints.deinit();
         var hash = hasher("ZGW-INIT-1\x00");
@@ -97,6 +101,8 @@ pub const Store = struct {
         hash.update(initial.blueprints);
         hashInt(&hash, u64, initial.pending_work.len);
         hash.update(initial.pending_work);
+        hashInt(&hash, u64, initial.warehouses.len);
+        hash.update(initial.warehouses);
         hashInt(&hash, u64, initial.chunks.len);
         if (initial.chunks.len > limits.max_chunks) return error.Capacity;
         var last_id: ?u32 = null;
@@ -119,6 +125,8 @@ pub const Store = struct {
         const pending_work = try a.dupe(u8, initial.pending_work);
         errdefer a.free(pending_work);
         self.pending_work = pending_work;
+        self.warehouses = try a.dupe(u8, initial.warehouses);
+        errdefer a.free(self.warehouses);
         self.blueprints = blueprints;
         errdefer {
             self.index.deinit();
@@ -192,7 +200,13 @@ pub const Store = struct {
         try base.read(&work_prefix, work_start);
         const work_len = get(u64, &work_prefix, 0);
         if (work_len > try deferred_work.encodedSize(limits.max_pending_work)) return error.Capacity;
-        const chunk_start = try add(try add(work_start, 8), work_len);
+        const warehouse_start = try add(try add(work_start, 8), work_len);
+        if (warehouse_start > size or size - warehouse_start < 8) return error.Corruption;
+        var warehouse_prefix: [8]u8 = undefined;
+        try base.read(&warehouse_prefix, warehouse_start);
+        const warehouse_len = get(u64, &warehouse_prefix, 0);
+        if (warehouse_len > limits.warehouses.max_bytes) return error.Capacity;
+        const chunk_start = try add(try add(warehouse_start, 8), warehouse_len);
         if (try add(try add(chunk_start, chunk_len), 32) != size) return error.Corruption;
         const descriptor = try readAlloc(a, base, 120, descriptor_len);
         errdefer if (!owned) a.free(descriptor);
@@ -212,6 +226,8 @@ pub const Store = struct {
         self.blueprints = try blueprint_records.decodeState(a, blueprint_bytes, desc.dimensions, limits.blueprints);
         self.pending_work = try readAlloc(a, base, work_start + 8, work_len);
         try deferred_work.validate(self.pending_work, desc.dimensions, limits.max_pending_work);
+        self.warehouses = try readAlloc(a, base, warehouse_start + 8, warehouse_len);
+        try validateWarehouses(a, self.warehouses, desc.dimensions, limits.warehouses);
         var anchor = hasher("ZGW-INIT-1\x00");
         anchor.update(&self.world_uuid);
         hashInt(&anchor, u32, version);
@@ -227,6 +243,8 @@ pub const Store = struct {
         anchor.update(blueprint_bytes);
         hashInt(&anchor, u64, work_len);
         anchor.update(self.pending_work);
+        hashInt(&anchor, u64, warehouse_len);
+        anchor.update(self.warehouses);
         hashInt(&anchor, u64, chunk_count);
         var cursor = chunk_start;
         var previous: ?u32 = null;
@@ -271,6 +289,7 @@ pub const Store = struct {
         self.allocator.free(self.players);
         self.blueprints.deinit();
         self.allocator.free(self.pending_work);
+        self.allocator.free(self.warehouses);
         self.* = undefined;
     }
     pub fn snapshotCatalog(self: *const Store) !BaseCatalog {
@@ -321,12 +340,18 @@ pub const Store = struct {
     /// Replaces the complete pending-work set in the same transaction as its terrain.
     /// Older wrappers retain the current set; callers pass an empty set here to clear it.
     pub fn beginSnapshotWithState(self: *Store, sequence: u64, global: []const u8, players: []const u8, player_count: u64, changed_count: u64, blueprint_changes: []const u8, pending_work: []const u8) !void {
+        return self.beginSnapshotWithSimulation(sequence, global, players, player_count, changed_count, blueprint_changes, pending_work, null);
+    }
+    /// A null warehouse snapshot retains the prior complete state. An empty
+    /// non-null slice explicitly replaces it with the empty initial state.
+    pub fn beginSnapshotWithSimulation(self: *Store, sequence: u64, global: []const u8, players: []const u8, player_count: u64, changed_count: u64, blueprint_changes: []const u8, pending_work: []const u8, warehouses: ?[]const u8) !void {
         if (self.phase != .ready or self.transaction != null) return error.WriterBusy;
         if (sequence <= self.sequence) return error.InvalidSequence;
         if (players.len > self.limits.max_players_bytes or changed_count > self.limits.max_chunks) return error.Capacity;
         _ = try format.decodeGlobal(global);
         try format.validatePlayers(players, player_count);
         try deferred_work.validate(pending_work, self.dimensions, self.limits.max_pending_work);
+        if (warehouses) |bytes| try validateWarehouses(self.allocator, bytes, self.dimensions, self.limits.warehouses);
         var prepared = try self.blueprints.prepare(blueprint_changes, self.dimensions, self.limits.blueprints);
         errdefer if (self.transaction == null) prepared.deinit();
         if (self.active == null) try self.newSegment();
@@ -341,7 +366,9 @@ pub const Store = struct {
         errdefer if (self.transaction == null) self.allocator.free(p);
         const work = try self.allocator.dupe(u8, pending_work);
         errdefer if (self.transaction == null) self.allocator.free(work);
-        var tx: Transaction = .{ .sequence = sequence, .global = g, .players = p, .player_count = player_count, .expected = changed_count, .start = s.end, .cursor = s.end, .hash = hasher("ZGW-WALTX-1\x00"), .chunks = std.AutoHashMap(u32, Location).init(self.allocator), .blueprint_changes = prepared, .pending_work = work };
+        const warehouse_copy = if (warehouses) |bytes| try self.allocator.dupe(u8, bytes) else null;
+        errdefer if (self.transaction == null) if (warehouse_copy) |bytes| self.allocator.free(bytes);
+        var tx: Transaction = .{ .sequence = sequence, .global = g, .players = p, .player_count = player_count, .expected = changed_count, .start = s.end, .cursor = s.end, .hash = hasher("ZGW-WALTX-1\x00"), .chunks = std.AutoHashMap(u32, Location).init(self.allocator), .blueprint_changes = prepared, .pending_work = work, .warehouses = warehouse_copy };
         tx.hash.update(&s.header);
         var header: [84]u8 = @splat(0);
         @memcpy(header[0..8], "ZGTXBEG1");
@@ -366,6 +393,10 @@ pub const Store = struct {
         put(u64, &work_prefix, 0, pending_work.len);
         try self.append(&work_prefix);
         try self.append(pending_work);
+        var warehouse_prefix: [8]u8 = undefined;
+        put(u64, &warehouse_prefix, 0, if (warehouses) |bytes| bytes.len else std.math.maxInt(u64));
+        try self.append(&warehouse_prefix);
+        if (warehouses) |bytes| try self.append(bytes);
     }
     pub fn appendChunk(self: *Store, bytes: []const u8) !void {
         if (self.phase != .appending) return error.WriterBusy;
@@ -428,6 +459,10 @@ pub const Store = struct {
         self.blueprints.apply(&tx.blueprint_changes);
         self.allocator.free(self.pending_work);
         self.pending_work = tx.pending_work;
+        if (tx.warehouses) |bytes| {
+            self.allocator.free(self.warehouses);
+            self.warehouses = bytes;
+        }
         tx.blueprint_changes.deinit();
         tx.chunks.deinit();
         self.transaction = null;
@@ -453,6 +488,7 @@ pub const Store = struct {
             self.allocator.free(tx.players);
             tx.blueprint_changes.deinit();
             self.allocator.free(tx.pending_work);
+            if (tx.warehouses) |bytes| self.allocator.free(bytes);
             tx.chunks.deinit();
             self.transaction = null;
         }
@@ -525,8 +561,11 @@ pub const Store = struct {
         errdefer a.free(players);
         const pending_work = try a.dupe(u8, self.pending_work);
         errdefer a.free(pending_work);
+        const warehouses = try a.dupe(u8, self.warehouses);
+        errdefer a.free(warehouses);
         var frozen: Store = .{ .allocator = a, .directory = dir, .limits = self.limits, .world_uuid = self.world_uuid, .dimensions = self.dimensions, .descriptor = descriptor, .global = global, .players = players, .player_count = self.player_count, .sequence = self.sequence, .digest = self.digest, .base = base, .base_sequence = self.base_sequence, .index = std.AutoHashMap(u32, Location).init(a) };
         frozen.pending_work = pending_work;
+        frozen.warehouses = warehouses;
         frozen.blueprints = try self.blueprints.clone(a);
         frozen.base_format_version = self.base_format_version;
         errdefer {
@@ -782,6 +821,25 @@ pub const Store = struct {
             defer self.allocator.free(pending_work);
             cursor = try add(cursor, work_len);
             try deferred_work.validate(pending_work, self.dimensions, self.limits.max_pending_work);
+            if (size - cursor < 8) {
+                segment.tail = true;
+                break;
+            }
+            var warehouse_prefix: [8]u8 = undefined;
+            try file.read(&warehouse_prefix, cursor);
+            cursor = try add(cursor, 8);
+            const warehouse_length = get(u64, &warehouse_prefix, 0);
+            const retains_warehouses = warehouse_length == std.math.maxInt(u64);
+            const warehouse_len = if (retains_warehouses) 0 else warehouse_length;
+            if (warehouse_len > self.limits.warehouses.max_bytes) return error.Capacity;
+            if (warehouse_len > size - cursor) {
+                segment.tail = true;
+                break;
+            }
+            const warehouse_bytes = try readAlloc(self.allocator, file, cursor, warehouse_len);
+            defer self.allocator.free(warehouse_bytes);
+            cursor = try add(cursor, warehouse_len);
+            if (!retains_warehouses) try validateWarehouses(self.allocator, warehouse_bytes, self.dimensions, self.limits.warehouses);
             var hash = hasher("ZGW-WALTX-1\x00");
             hash.update(&segment.header);
             hash.update(&header);
@@ -791,6 +849,8 @@ pub const Store = struct {
             hash.update(blueprint_changes);
             hash.update(&work_prefix);
             hash.update(pending_work);
+            hash.update(&warehouse_prefix);
+            hash.update(warehouse_bytes);
             var changed = std.AutoHashMap(u32, Location).init(self.allocator);
             defer changed.deinit();
             var n: u64 = 0;
@@ -845,6 +905,8 @@ pub const Store = struct {
                 errdefer self.allocator.free(new_players);
                 const new_work = try self.allocator.dupe(u8, pending_work);
                 errdefer self.allocator.free(new_work);
+                const new_warehouses = if (!retains_warehouses) try self.allocator.dupe(u8, warehouse_bytes) else null;
+                errdefer if (new_warehouses) |bytes| self.allocator.free(bytes);
                 var prepared = try self.blueprints.prepare(blueprint_changes, self.dimensions, self.limits.blueprints);
                 defer prepared.deinit();
                 var it = changed.iterator();
@@ -857,6 +919,10 @@ pub const Store = struct {
                 self.blueprints.apply(&prepared);
                 self.allocator.free(self.pending_work);
                 self.pending_work = new_work;
+                if (new_warehouses) |bytes| {
+                    self.allocator.free(self.warehouses);
+                    self.warehouses = bytes;
+                }
                 self.sequence = sequence;
                 self.digest = digest;
             }
@@ -938,7 +1004,8 @@ pub const Store = struct {
         if (blueprint_bytes.len > self.limits.blueprints.max_state_bytes) return error.Capacity;
         const blueprint_start = try add(player_start, self.players.len);
         const work_start = try add(try add(blueprint_start, 8), blueprint_bytes.len);
-        const chunk_start = try add(try add(work_start, 8), self.pending_work.len);
+        const warehouse_start = try add(try add(work_start, 8), self.pending_work.len);
+        const chunk_start = try add(try add(warehouse_start, 8), self.warehouses.len);
         try output.write(self.descriptor, 120);
         try output.write(self.global, 120 + self.descriptor.len);
         try output.write(self.players, player_start);
@@ -950,6 +1017,10 @@ pub const Store = struct {
         put(u64, &work_prefix, 0, self.pending_work.len);
         try output.write(&work_prefix, work_start);
         try output.write(self.pending_work, work_start + 8);
+        var warehouse_prefix: [8]u8 = undefined;
+        put(u64, &warehouse_prefix, 0, self.warehouses.len);
+        try output.write(&warehouse_prefix, warehouse_start);
+        try output.write(self.warehouses, warehouse_start + 8);
         var cursor = chunk_start;
         for (ids, 0..) |id, i| {
             try self.checkpoint();
@@ -1202,6 +1273,139 @@ const Fixture = struct {
         self.store = try Store.open(std.testing.allocator, self.path, .{});
     }
 };
+
+test "warehouse persistence commits stock cargo promises and player state at one crash boundary" {
+    const a = std.testing.allocator;
+    const model = @import("../warehouse_state.zig");
+    var f = try Fixture.init();
+    defer f.deinit();
+    var state = model.State.init(17, .{ 128, 128, 128 });
+    defer state.deinit(a);
+    const source = try state.register(a, try model.Geometry.fromMinimum(state.world_size, .{ 10, 10, 70 }, .{ 2, 2 }), .dirt);
+    const destination = try state.register(a, try model.Geometry.fromMinimum(state.world_size, .{ 20, 10, 70 }, .{ 2, 2 }), .dirt);
+    try state.getPtr(source.identity).?.put(.dirt, 8);
+    const before = try warehouse_records.encodeState(a, &state, .{});
+    defer a.free(before);
+    const tick = format.encodeGlobal(12);
+    const player_before = try format.encodePlayer(.{ .id = 9, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0, .inventory = @intFromEnum(model.BlockType.dirt) });
+    const player_after = try format.encodePlayer(.{ .id = 9, .feet = .{ 1, 2, 3 }, .yaw = 0, .pitch = 0 });
+    try f.store.beginSnapshotWithSimulation(1, &tick, &player_before, 1, 0, &.{}, &.{}, before);
+    _ = try f.store.commitSnapshot();
+    _ = try state.startDelivery(a, 1, source.identity, destination.identity, .dirt, 3);
+    const traveling = try warehouse_records.encodeState(a, &state, .{});
+    defer a.free(traveling);
+    try f.store.beginSnapshotWithSimulation(2, &tick, &player_after, 1, 0, &.{}, &.{}, traveling);
+    try f.reopen(); // Complete payload without a commit footer owns nothing.
+    try std.testing.expectEqualSlices(u8, before, f.store.warehouses);
+    try std.testing.expectEqualSlices(u8, &player_before, f.store.players);
+    try f.store.beginSnapshotWithSimulation(2, &tick, &player_after, 1, 0, &.{}, &.{}, traveling);
+    var sync_failure: io.Faults = .{ .operation = .full_sync };
+    f.store.setFaults(&sync_failure);
+    try std.testing.expectError(error.Io, f.store.commitSnapshot());
+    try f.reopen(); // A complete unacknowledged footer recovers the entire cut.
+    try std.testing.expectEqualSlices(u8, traveling, f.store.warehouses);
+    try std.testing.expectEqualSlices(u8, &player_after, f.store.players);
+    _ = try state.handover(1);
+    const arrived = try warehouse_records.encodeState(a, &state, .{});
+    defer a.free(arrived);
+    try f.store.beginSnapshotWithSimulation(3, &tick, &player_after, 1, 0, &.{}, &.{}, arrived);
+    try f.reopen();
+    try std.testing.expectEqualSlices(u8, traveling, f.store.warehouses);
+    var restored = try warehouse_records.decodeState(a, f.store.warehouses, state.world_size, 99, .{});
+    defer restored.deinit(a);
+    try std.testing.expectEqual(@as(u16, 3), restored.records.get(destination.identity.id).?.incoming);
+    _ = try restored.handover(1);
+    _ = try restored.handover(1);
+    try std.testing.expectEqual(@as(u16, 3), restored.records.get(destination.identity.id).?.stock);
+    try f.store.beginSnapshotWithSimulation(3, &tick, &player_after, 1, 0, &.{}, &.{}, arrived);
+    _ = try f.store.commitSnapshot();
+    try f.reopen();
+    try std.testing.expectEqualSlices(u8, arrived, f.store.warehouses);
+}
+
+test "warehouse persistence retains unchanged snapshots and freezes compaction generations" {
+    const a = std.testing.allocator;
+    const model = @import("../warehouse_state.zig");
+    var f = try Fixture.init();
+    defer f.deinit();
+    var state = model.State.init(17, .{ 128, 128, 128 });
+    defer state.deinit(a);
+    _ = try state.register(a, try model.Geometry.fromMinimum(state.world_size, .{ 10, 10, 70 }, .{ 2, 2 }), .pallet);
+    const initial = try warehouse_records.encodeState(a, &state, .{});
+    defer a.free(initial);
+    const tick = format.encodeGlobal(1);
+    try f.store.beginSnapshotWithSimulation(1, &tick, &.{}, 0, 0, &.{}, &.{}, initial);
+    _ = try f.store.commitSnapshot();
+    const segment = f.store.segments.items[f.store.active.?];
+    const start = segment.end;
+    try f.store.beginSnapshot(2, &tick, &.{}, 0, 0);
+    _ = try f.store.commitSnapshot();
+    try std.testing.expectEqual(@as(u64, 84 + 10 + 8 + 8 + 8 + 56), f.store.segments.items[f.store.active.?].end - start);
+    try std.testing.expectEqualSlices(u8, initial, f.store.warehouses);
+    var compact = try f.store.prepareCompaction();
+    var compact_alive = true;
+    defer if (compact_alive) compact.deinit();
+    try f.store.beginSnapshotWithSimulation(3, &tick, &.{}, 0, 0, &.{}, &.{}, &.{});
+    _ = try f.store.commitSnapshot();
+    try compact.run();
+    try f.store.installCompaction(&compact);
+    try std.testing.expectEqualSlices(u8, initial, compact.store.warehouses);
+    try std.testing.expectEqual(@as(usize, 0), f.store.warehouses.len);
+    compact.deinit();
+    compact_alive = false;
+    try f.reopen();
+    try std.testing.expectEqual(@as(u64, 3), f.store.sequence);
+    try std.testing.expectEqual(@as(usize, 0), f.store.warehouses.len);
+}
+
+test "warehouse persistence preparation failures preserve the preceding durable cut" {
+    const a = std.testing.allocator;
+    const model = @import("../warehouse_state.zig");
+    var f = try Fixture.init();
+    defer f.deinit();
+    var state = model.State.init(17, .{ 128, 128, 128 });
+    defer state.deinit(a);
+    const record = try state.register(a, try model.Geometry.fromMinimum(state.world_size, .{ 10, 10, 70 }, .{ 2, 2 }), .dirt);
+    const before = try warehouse_records.encodeState(a, &state, .{});
+    defer a.free(before);
+    const tick = format.encodeGlobal(1);
+    try f.store.beginSnapshotWithSimulation(1, &tick, &.{}, 0, 0, &.{}, &.{}, before);
+    _ = try f.store.commitSnapshot();
+    try state.getPtr(record.identity).?.put(.dirt, 1);
+    try state.touch();
+    const changed = try warehouse_records.encodeState(a, &state, .{});
+    defer a.free(changed);
+    const malformed = try a.dupe(u8, changed);
+    defer a.free(malformed);
+    malformed[48 + 35] = 1; // An incoming promise without its accepted task.
+    try std.testing.expectError(error.InvalidObligations, f.store.beginSnapshotWithSimulation(2, &tick, &.{}, 0, 0, &.{}, &.{}, malformed));
+    try std.testing.expectEqual(Phase.ready, f.store.phase);
+    var succeeded = false;
+    var failures: usize = 0;
+    for (0..64) |fail_index| {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index, .resize_fail_index = 0 });
+        f.store.allocator = failing.allocator();
+        const attempt = f.store.beginSnapshotWithSimulation(2, &tick, &.{}, 0, 0, &.{}, &.{}, changed);
+        f.store.allocator = a;
+        if (attempt) |_| {
+            try f.store.cancelSnapshot();
+            succeeded = true;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(Phase.ready, f.store.phase);
+            try std.testing.expect(f.store.transaction == null);
+            failures += 1;
+        }
+        try std.testing.expectEqualSlices(u8, before, f.store.warehouses);
+        try std.testing.expectEqual(@as(u64, 1), f.store.sequence);
+        if (succeeded) break;
+    }
+    try std.testing.expect(succeeded and failures > 5);
+    try f.store.beginSnapshotWithSimulation(2, &tick, &.{}, 0, 0, &.{}, &.{}, changed);
+    _ = try f.store.commitSnapshot();
+    try f.reopen();
+    try std.testing.expectEqualSlices(u8, changed, f.store.warehouses);
+}
 
 test "torn append and failed truncation/fullflush require successful repair before retry" {
     var f = try Fixture.init();
@@ -2268,7 +2472,7 @@ test "modeled torn pending-work length and keys cannot publish a partial snapsho
         try f.store.beginSnapshotWithState(1, &tick, &.{}, 0, 1, &.{}, &pending);
         const tx = &f.store.transaction.?;
         const file = f.store.segments.items[f.store.active.?].file;
-        try file.truncate(tx.cursor - pending.len - 8 + cut);
+        try file.truncate(tx.cursor - pending.len - 16 + cut);
         try file.sync();
         try model.crash(.lose_unsynced);
         try f.reopen();
@@ -2299,7 +2503,7 @@ test "checksummed unknown pending-work kinds are rejected from base and WAL" {
         defer a.free(original);
         const corrupted = try a.dupe(u8, original);
         defer a.free(corrupted);
-        const work_offset = if (from_wal) original.len - 56 - pending.len else offset: {
+        const work_offset = if (from_wal) original.len - 56 - 8 - pending.len else offset: {
             const blueprint_start = 120 + descriptor.len + tick.len;
             break :offset blueprint_start + 8 + get(u64, original, blueprint_start) + 8;
         };
@@ -2398,4 +2602,10 @@ test "construction transfer completion and grass activation recover atomically a
             }
         }
     };
+}
+
+fn validateWarehouses(a: std.mem.Allocator, bytes: []const u8, dimensions: [3]u32, limits: warehouse_records.Limits) !void {
+    const size: [3]u32 = .{ try std.math.mul(u32, dimensions[0], 32), try std.math.mul(u32, dimensions[1], 32), try std.math.mul(u32, dimensions[2], 32) };
+    var decoded = try warehouse_records.decodeState(a, bytes, size, 0, limits);
+    defer decoded.deinit(a);
 }
