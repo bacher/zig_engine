@@ -60,8 +60,23 @@ For production mainland, the local conservative rectangle field is zero at actua
 - Fresh full logs: [old](old-full-12345-9.txt), [exact](exact-full-12345-9.txt), [approximate](approx-full-12345-9.txt).
 - [Evidence manifest](evidence-manifest.json): protocol, source inventories, binary/file hashes, site differences and fingerprint terminology. The full source inventories are retained separately in `source-manifests.json`; compact preservation can omit them.
 - Exact source changes: [exact](exact-source.diff), [approximate](approx-source.diff), each relative to the old snapshot. Blank diff context-line spaces are normalized.
-- `probe-source/` retains the standalone query/cross-section harness and its input modules. `plot_cross_section.py` uses ReportLab LinePlot 4.4.9; SVG was rasterized with Sharp. `parse_generation_log.py` parses the raw full logs without rerunning benchmarks.
+- `probe-source/` retains the standalone query/cross-section harness and its input modules. `plot_cross_section.py` uses ReportLab LinePlot 4.4.9; SVG was rasterized with Sharp. `parse_generation_log.py` parses both the archived raw full logs and current benchmark output without rerunning benchmarks.
+
+The parser accepts archived `mesh` and current `surface` record names, preserving the
+names found in its input so the archived summaries remain reproducible. It checks both
+beach settings, derives the site count from `representative_replay sites=...`, and rejects
+missing site timings, face output fields, or startup metrics. Run its regression checks with:
+
+```shell
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s docs/validation/world-generation/coast-comparison -v
+```
+
+The [current-output fixture](fixtures/current-generation-half-12345-1.txt) is the unmodified
+combined output of `zig build benchmark-generation -Doptimize=ReleaseFast -- 12345 1 half`,
+captured on 2026-11-19. It contains 17 sites per beach setting; the three archived logs
+contain 11 each. The tests compare complete parsed archive data against the recorded
+summaries and exercise missing timing, output, startup, and replay records.
 
 No production source was changed by this comparison run. Final integrated production validation is recorded in the [parent validation report](../README.md).
 
-The evidence manifest also records `write_report.py`, an omitted report-generation scratch script retained in the original temporary evidence directory. During repository preservation, `site-results.csv` was converted from CRLF to LF without changing values; its manifest entry hashes the LF copy and preserves the original CRLF hash and byte count. All other included manifest files retain their original bytes. README is not included in that manifest; its final navigation line and this preservation note document the copying changes.
+The evidence manifest also records `write_report.py`, an omitted report-generation scratch script retained in the original temporary evidence directory. During repository preservation, `site-results.csv` was converted from CRLF to LF without changing values; its manifest entry hashes the LF copy and preserves the original CRLF hash and byte count. The parser was subsequently updated for current benchmark names, variable site counts, and complete-record validation; its manifest entry records the current hash and retains the original comparison hash, size, and Git revision. All other included manifest files retain their original bytes. README is not included in that manifest.

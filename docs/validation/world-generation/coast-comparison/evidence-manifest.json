@@ -151,8 +151,14 @@
       "bytes": 20372
     },
     "parse_generation_log.py": {
-      "sha256": "f46b0c3b8b1de1fba66637b82b500f9570be5ef408baab216002fe847bb577a3",
-      "bytes": 3002
+      "sha256": "481f4093393f193747599608bd872287bebed12c6b49610ea04de163126b3a49",
+      "bytes": 5575,
+      "comparison_version": {
+        "sha256": "f46b0c3b8b1de1fba66637b82b500f9570be5ef408baab216002fe847bb577a3",
+        "bytes": 3002,
+        "git_revision": "6c9b7fd020d1d8c0b11cf117c99e112432c0644d"
+      },
+      "revision_note": "Updated after the comparison to accept mesh and surface labels, derive site counts from replay records, and reject incomplete metrics."
     },
     "plot_cross_section.py": {
       "sha256": "c3d70cb64fabf3a0f8feb38e047a1b362ddab26152ec91e661ab33e9affeed99",

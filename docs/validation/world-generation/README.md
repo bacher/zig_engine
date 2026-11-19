@@ -3,8 +3,9 @@
 Updated on 2026-10-26 for G1–G7 and AC1–AC52 of the
 [world generation specification](../../../specs/features/world-generation.md).
 Archived benchmark logs retain their original `mesh`/`meshing` labels for what is now
-called `surface`/surface extraction. Current benchmarks and the log parser use only the
-new names. Recorded measurements and their hashes are preserved.
+called `surface`/surface extraction. Current benchmarks emit the new names; the log parser
+also accepts the archived labels and preserves the input names in its output. Recorded
+measurements and their hashes are preserved.
 
 The default profile is generator **2 / version 1**, natural, seed **12345**, with
 **2048 × 1024 × 32 chunks**. Beaches are available but disabled by default.
