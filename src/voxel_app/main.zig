@@ -1381,6 +1381,7 @@ const Game = struct {
         const scene = game.engine.active_scene.?;
         game.held_motion.reset();
         game.block_interaction.cancelHold();
+        game.warehouse_tool.cancelHold();
         game.clearBlockFocus();
         game.jump_requested = false;
         player.resetJumpInput();
@@ -9176,6 +9177,127 @@ test "warehouse dialog reach follows current camera and includes member edges an
     try std.testing.expect(game.warehouseWithinReach(geometry, 150, 25));
     fixture.camera.updatePosition(.{ 2.5, 5.5, 12 });
     try std.testing.expect(!game.warehouseWithinReach(geometry, 150, 25));
+}
+
+test "warehouse Q mode switches require a fresh transfer press and preserve submitted ownership" {
+    const a = std.testing.allocator;
+    for ([_]player_interaction.Source{ .key, .mouse }) |source| {
+        var fixture: StreamingTest = .{};
+        fixture.init();
+        defer fixture.deinit();
+        try fixture.preparePlayerToolTest();
+        fixture.changeToolMaterial(.pallet);
+        const game = &fixture.game;
+        game.player = PlayerController.init(a, .{ 0.5, 0.5, 0 });
+        game.player.?.pitch = -0.35;
+        game.player.?.applyCamera(&fixture.camera);
+        var spectator: std.meta.Child(@TypeOf(@as(Scene, undefined).spectator_camera)) = .{
+            .camera = &fixture.camera,
+            .input_controller = @ptrCast(&fixture.input),
+        };
+        fixture.scene.spectator_camera = &spectator;
+        fixture.scene.spectator_enabled = false;
+        const target = StreamingTest.toolTarget();
+        const record: @import("warehouse_state.zig").Record = .{
+            .identity = .{ .kind = .warehouse, .world_session = 91, .id = 1, .lifetime = 1 },
+            .geometry = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, target, .{ 1, 1 }),
+            .material = .dirt,
+            .active = 1,
+            .stock = 1,
+            .revision = 1,
+        };
+        const cache = &game.world.?.warehouses;
+        try std.testing.expect(cache.acceptSession(91));
+        const coords, _ = world_module.splitBlockCoords(target);
+        _ = try cache.installChunk(a, game.layout().encodeChunkCoords(coords), 1, 1, &.{.{ .identity = record.identity, .geometry = record.geometry }});
+        cache.subscribed(record.identity, 7);
+        try std.testing.expect(cache.apply(.{ .snapshot = .{ .identity = record.identity, .record = record, .subscription_id = 7 } }));
+        var service: WorldDataService = .{ .world_session = 91, .layout = &test_layout, .io = std.testing.io, .allocator = a, .worker = undefined, .worker_state = undefined };
+        defer service.requests.items.deinit(a);
+        var client: world_data_service.Client = .{ .service = &service, .client_session = 12 };
+        defer client.command_ledger.deinit(a, &service.command_budget);
+        defer client.warehouse_results.items.deinit(a);
+        game.world_client = &client;
+        switch (source) {
+            .key => handleKeyPress(game, .{ .key = .e, .mods = .{} }),
+            .mouse => handleMouseButtonPress(game, .{ .button = .left, .mods = .{} }),
+        }
+        game.updateBlockTool();
+        try std.testing.expectEqual(source, game.warehouse_tool.hold.?.source);
+        fixture.engine.frame_delta = 0.05;
+        game.updateBlockTool();
+        try std.testing.expectApproxEqAbs(@as(f64, 0.05), game.warehouse_tool.hold.?.elapsed, 0.000001);
+        handleKeyPress(game, .{ .key = .q, .mods = .{} });
+        try std.testing.expectEqual(.spectator, game.control_mode);
+        try std.testing.expect(game.warehouse_tool.hold == null);
+        handleKeyPress(game, .{ .key = .q, .mods = .{} });
+        try std.testing.expectEqual(.player, game.control_mode);
+        try std.testing.expect(if (source == .key) game.block_interaction.key_down else game.block_interaction.mouse_down);
+        fixture.engine.frame_delta = warehouse_tool_module.transfer_seconds;
+        game.updateBlockTool();
+        game.updateBlockTool();
+        try std.testing.expect(game.warehouse_tool.hold == null);
+        try std.testing.expect(game.block_interaction.requested == null);
+        try std.testing.expect(game.block_interaction.inventory == null);
+        try std.testing.expect(game.block_interaction.pending == null);
+        try std.testing.expectEqual(@as(usize, 0), service.requests.items.items.len);
+        try std.testing.expectEqual(@as(usize, 0), cache.pending.items.len);
+        try std.testing.expectEqual(@as(u16, 1), cache.record(record.identity).?.stock);
+        // A fresh press starts from zero; the cancelled 50 ms cannot count.
+        switch (source) {
+            .key => {
+                handleKeyRelease(game, .{ .key = .e, .mods = .{} });
+                handleKeyPress(game, .{ .key = .e, .mods = .{} });
+            },
+            .mouse => {
+                handleMouseButtonRelease(game, .{ .button = .left, .mods = .{} });
+                handleMouseButtonPress(game, .{ .button = .left, .mods = .{} });
+            },
+        }
+        fixture.engine.frame_delta = 0.05;
+        game.updateBlockTool();
+        try std.testing.expectEqual(@as(f64, 0), game.warehouse_tool.hold.?.elapsed);
+        game.updateBlockTool();
+        try std.testing.expect(game.warehouse_tool.hold != null);
+        try std.testing.expectEqual(@as(usize, 0), service.requests.items.items.len);
+        game.updateBlockTool();
+        try std.testing.expect(game.warehouse_tool.hold == null);
+        const request_id = game.warehouse_tool.pending_player.?;
+        const sequence = game.warehouse_tool.pending_player_sequence.?;
+        const inventory_fence = game.warehouse_tool.inventory_fence;
+        try std.testing.expectEqual(voxel_chunk_module.BlockType.dirt, game.block_interaction.inventory.?);
+        try std.testing.expectEqual(@as(u16, 0), cache.record(record.identity).?.stock);
+        for (0..2) |index| {
+            handleKeyPress(game, .{ .key = .q, .mods = .{} });
+            try std.testing.expectEqual(@as(@TypeOf(game.control_mode), if (index == 0) .spectator else .player), game.control_mode);
+            try std.testing.expectEqual(request_id, game.warehouse_tool.pending_player.?);
+            try std.testing.expectEqual(sequence, game.warehouse_tool.pending_player_sequence.?);
+            try std.testing.expectEqual(inventory_fence, game.warehouse_tool.inventory_fence);
+            try std.testing.expectEqual(request_id, game.block_interaction.pending.?.request_id.?);
+            try std.testing.expectEqual(voxel_chunk_module.BlockType.dirt, game.block_interaction.inventory.?);
+            try std.testing.expectEqual(@as(usize, 1), service.requests.items.items.len);
+            try std.testing.expectEqual(@as(usize, 1), cache.pending.items.len);
+            try std.testing.expectEqual(request_id, cache.pending.items[0].request_id);
+        }
+        try client.warehouse_results.items.append(a, .{
+            .request_id = request_id,
+            .resolved_sequence = sequence,
+            .status = .rejected,
+            .rejection = .inventory_mismatch,
+            .warehouse = record,
+            .player_inventory = .{ .player_id = game.player_id, .material = null },
+        });
+        game.receiveWarehouseResults();
+        try std.testing.expect(game.warehouse_tool.pending_player == null);
+        try std.testing.expect(game.warehouse_tool.pending_player_sequence == null);
+        try std.testing.expect(game.block_interaction.pending == null);
+        try std.testing.expect(game.block_interaction.inventory == null);
+        try std.testing.expectEqual(@as(usize, 0), cache.pending.items.len);
+        try std.testing.expectEqual(@as(u16, 1), cache.record(record.identity).?.stock);
+        game.updateBlockTool();
+        try std.testing.expect(game.warehouse_tool.hold == null);
+        try std.testing.expectEqual(@as(usize, 1), service.requests.items.items.len);
+    }
 }
 
 test "warehouse held transfer requires a fresh press after camera reach or focus loss" {
