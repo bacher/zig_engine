@@ -1,5 +1,5 @@
 //! Camera-independent packed cargo sources. A warehouse cut supplies both goods
-//! and empty-base markers; neither the terrain mesh nor a pallet owns inventory.
+//! and empty-base markers; neither the terrain surface nor a pallet owns inventory.
 const std = @import("std");
 const engine = @import("engine");
 const renderer = engine.packed_renderer;
@@ -46,7 +46,7 @@ pub const Geometry = struct {
 
 pub const PalletFilter = struct {
     context: ?*const anyopaque = null,
-    /// Null means a mesh-only chunk: retain its authoritative auxiliary source.
+    /// Null means a surface-only chunk: retain its authoritative auxiliary source.
     material_at: ?*const fn (?*const anyopaque, layout.Cell) ?voxel.BlockType = null,
 };
 
@@ -159,7 +159,7 @@ pub const Chunk = struct {
     references: std.ArrayList(stream.Reference) = .empty,
 };
 
-/// Auxiliary sources survive mesh/block promotions; a new subscription token can
+/// Auxiliary sources survive surface/block promotions; a new subscription token can
 /// replace them, while delayed replies and allocation failures cannot roll them back.
 pub const Cache = struct {
     chunks: std.AutoHashMapUnmanaged(ChunkId, Chunk) = .empty,
@@ -353,7 +353,7 @@ test "packed markers require real empty bases and share the predicted cargo cut"
     try std.testing.expectEqual(occupied.pallets.items.len + 1, unknown.pallets.items.len);
 }
 
-test "packed auxiliary sources retain latest tokens through mesh block handoff" {
+test "packed auxiliary sources retain latest tokens through surface block handoff" {
     const allocator = std.testing.allocator;
     var cache: Cache = .{};
     defer cache.deinit(allocator);

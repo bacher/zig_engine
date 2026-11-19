@@ -28,7 +28,7 @@ The probe additionally checks 474,777 adjacent same-mainland pairs at six select
 
 Fresh full runs executed serially old→exact→approx in one reserved quiet window, seed 12345, nine samples per site/workload, both beach settings. All commands exited 0. The old baseline includes current climate-transition handling and per-column material reuse, matching the exact/approx material path. It is not the older pre-cleanup timing baseline.
 
-Each cell below gives beaches **off / on**, milliseconds. Preparation/traversal rows are single observations; other rows are medians of nine samples. The workload includes the indicated chunk hashes; meshing and GPU/disk work are excluded from those workload rows.
+Each cell below gives beaches **off / on**, milliseconds. Preparation/traversal rows are single observations; other rows are medians of nine samples. The workload includes the indicated chunk hashes; surface extraction and GPU/disk work are excluded from those workload rows.
 
 | Workload | Old | Exact | Approximate |
 |---|---:|---:|---:|
@@ -40,7 +40,7 @@ Each cell below gives beaches **off / on**, milliseconds. Preparation/traversal 
 | Mainland coast column initialization | 0.105 / 0.188 | 0.336 / 0.573 | 0.119 / 0.195 |
 | Dense forest column initialization | 0.186 / 0.201 | 1.932 / 1.944 | 0.203 / 0.211 |
 
-All 11 selected site X/Y/Z coordinates happen to match across these three runs. Generated outputs still differ: `mainland_coast` and `steep_shore` chunk/boundary/climate/mesh digests change in both beach settings. The other 18 of 22 site digests agree for this seed. Coast scalars also differ at many unchanged-digest sites. Absolute regeneration times therefore are not a pure speedup comparison of identical worlds, and this limited measurement cannot distinguish small timing differences from noise. All site positions, medians, face counts and digests are in [site-results.csv](site-results.csv) and the [parsed logs](full-regeneration-summary.json).
+All 11 selected site X/Y/Z coordinates happen to match across these three runs. Generated outputs still differ: `mainland_coast` and `steep_shore` chunk/boundary/climate/surface digests change in both beach settings. The other 18 of 22 site digests agree for this seed. Coast scalars also differ at many unchanged-digest sites. Absolute regeneration times therefore are not a pure speedup comparison of identical worlds, and this limited measurement cannot distinguish small timing differences from noise. All site positions, medians, face counts and digests are in [site-results.csv](site-results.csv) and the [parsed logs](full-regeneration-summary.json).
 
 | Requested-memory counter | Old | Exact | Approximate |
 |---|---:|---:|---:|

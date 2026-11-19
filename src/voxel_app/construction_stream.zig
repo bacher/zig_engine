@@ -163,7 +163,7 @@ pub const SiteRef = struct {
     terrain_revision: u64 = 0,
 };
 
-/// Attached to blocks, mesh-only and empty/unreachable publications alike. The
+/// Attached to blocks, surface-only and empty/unreachable publications alike. The
 /// revision orders discovery/transfer changes independently of block contents.
 pub const ChunkComposition = struct {
     revision: u64 = 0,
@@ -179,7 +179,7 @@ pub const ChunkComposition = struct {
     }
 };
 
-/// All fields must still match when a prepared mesh becomes drawable. Merely
+/// All fields must still match when a prepared surface becomes drawable. Merely
 /// receiving its data or putting an upload on the queue does not install it.
 pub const GeometryStamp = @import("engine").voxel_chunk.GeometryStamp;
 

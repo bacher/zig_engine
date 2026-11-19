@@ -26,7 +26,7 @@ Both runs used the same 256 seeds (12345, then 0–254), default dimensions,
 ReleaseFast on an Apple M4 Max, and three warmups. The runs executed serially.
 The timer includes geography allocations and coast preparation, excludes
 deinitialization and diagnostic printing, and does not include deposits,
-first-start selection, meshing, disk, or GPU work. These measurements on one
+first-start selection, surface extraction, disk, or GPU work. These measurements on one
 platform do not establish a latency guarantee.
 
 The separate [full seed suite](../README.md#seed-suite-measurements) measures

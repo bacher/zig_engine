@@ -7,7 +7,7 @@ This report accompanies the implementation of [the blueprint specification](../s
 Active targets now store fulfillment in simulation; raw terrain remains air until per-chunk
 materialization. Composed reads include filled targets for support, targeting, and collision.
 The frame and extraction restrictions last through whole-site materialization. A separate
-culled construction mesh stays visible until its static replacement is installed on the GPU.
+culled construction surface stays visible until its static replacement is installed on the GPU.
 
 Soil has one structural material with optional grass, no compaction, and identical bare/grassy
 support. Admission clears grass below miniatures atomically. Active target soil remains bare;
@@ -87,7 +87,7 @@ splits immediate miniature caching from a pending FIFO preparation PR. The cache
 single resident source per chunk and one synchronous temporary replacement. Source/chunk
 limits, subscription identity, resource lifetime and exact invalidation remain required;
 terrain/miniature paired staging is removed. Terrain keeps its existing extraction,
-service-mesh and upload paths. Cache maintenance runs before terrain-capacity early returns.
+service-surface and upload paths. Cache maintenance runs before terrain-capacity early returns.
 
 The [measurement report](validation/construction-visuals.md) separates fresh synchronous-API
 renderer verification from historical prepared-API timings. On Apple M4 Max/Metal,
@@ -106,7 +106,7 @@ they are not measurements of its new implementation.
 1,909 tests passed and eight existing skips. `zig build test -Doptimize=Debug -j4 --summary all`
 passed all 47 steps with 1,916 tests and one existing skip. Formatting and diff checks pass.
 Client coverage includes exact dirty hooks, blueprint no-ops/commit order/preflight,
-prediction rejection/cross-chunk replay, mesh-only fulfillment, stale/accepted snapshots,
+prediction rejection/cross-chunk replay, surface-only fulfillment, stale/accepted snapshots,
 retryable failure with shrinking progress and eviction/reload.
 
 The second PR will add FIFO, at most four whole chunk preparations and a two-millisecond
@@ -160,7 +160,7 @@ the dense/spread cases. Thread-CPU medians closely match elapsed time. Fill/road
 differences are small and noisy; the observed scheduling change is removal of the
 road-only admission hold. Zero here means the fixture admits later edits immediately;
 it does not measure zero end-to-end edit latency. The fixture uses `store=null` and omits
-storage, source capture, the outer mesh/package loop, and frame timing.
+storage, source capture, the outer surface/package loop, and frame timing.
 
 A separate production `snapshotEncoded` benchmark used 4,096 reverse-inserted keys to
 exercise canonical sorting. Three warm runs of 1,000 captures each averaged
@@ -194,7 +194,7 @@ A temporary ReleaseFast harness compared production code at `918caeb` with the n
 | 128 sites in 128 chunks | Narrow validation/revised queue, budget 1 | 8.770 ms | 4.403 ms | 4.411 ms | 640 |
 | 128 sites in 128 chunks | Narrow validation/revised queue, budget 16 | 8.714 ms | 4.446 ms | 4.450 ms | 40 |
 
-Thread-CPU medians for the dense/spread drains were 652.465/85.708 ms at baseline, 4.018/4.403 ms with narrow validation at budget 1, and 3.814/4.422 ms at budget 16. Narrow validation accounts for the large reduction; budget-1 versus budget-16 timing differences are small and noisy. Batching reduces processor turns while preserving the same 520/640 work units and 512 seeds. This harness omits the outer worker's mesh/package scheduling overhead, so it does not isolate the full throughput effect of fewer worker turns. Every variant verifies identical resulting slopes, exactly 8,192 physical support reads, at most five per fill, and zero ordinary-validation calls during fulfillment. Fills remain around 8–9 ms per 8,192 placements in this fixture. Fairness/cursor regressions separately exercise continuous edits; the quiescent timing fixture does not measure dirty repeat passes. Resident timings exclude storage/dependency waits and do not establish whole-game FPS or worst-case save latency. Durable capture still waits for roads; the persistence protocol and recovery format are unchanged.
+Thread-CPU medians for the dense/spread drains were 652.465/85.708 ms at baseline, 4.018/4.403 ms with narrow validation at budget 1, and 3.814/4.422 ms at budget 16. Narrow validation accounts for the large reduction; budget-1 versus budget-16 timing differences are small and noisy. Batching reduces processor turns while preserving the same 520/640 work units and 512 seeds. This harness omits the outer worker's surface/package scheduling overhead, so it does not isolate the full throughput effect of fewer worker turns. Every variant verifies identical resulting slopes, exactly 8,192 physical support reads, at most five per fill, and zero ordinary-validation calls during fulfillment. Fills remain around 8–9 ms per 8,192 placements in this fixture. Fairness/cursor regressions separately exercise continuous edits; the quiescent timing fixture does not measure dirty repeat passes. Resident timings exclude storage/dependency waits and do not establish whole-game FPS or worst-case save latency. Durable capture still waits for roads; the persistence protocol and recovery format are unchanged.
 
 The AC114-only results below are historical and predate narrow validation and 16-unit batching.
 
@@ -209,7 +209,7 @@ Before AC115, a temporary ReleaseFast harness ran the same resident 128-site/8,1
 
 Thread-CPU medians track elapsed time: fixed fills use 8.738/9.107 ms and fixed road drains use 679.609/89.707 ms. The measured fill difference is 0.265–0.464 ms per 8,192 placements in this fixture; it is not an isolated instruction-cost measurement. Each version retains exactly 8,192 physical support reads, at most five per fill, and zero ordinary-validation calls. The new gates add constant-time scheduling checks, without per-fill support searches or road planning. In those pre-AC115 runs, dense road plans validated more affected constructions under the broad completed-world rules, so fewer queued chunks did not imply a cheaper drain.
 
-Waiting moves the remaining road work ahead of capture and holds later edits for that drain; it does not repeat the road work. These resident microbenchmarks exclude storage/dependency waits, mesh/package processing, and full application scheduling. They establish neither a frame-time bound nor a worst-case save latency, and the small timing differences are not whole-game throughput claims. The recorded runs below predate AC114.
+Waiting moves the remaining road work ahead of capture and holds later edits for that drain; it does not repeat the road work. These resident microbenchmarks exclude storage/dependency waits, surface/package processing, and full application scheduling. They establish neither a frame-time bound nor a worst-case save latency, and the small timing differences are not whole-game throughput claims. The recorded runs below predate AC114.
 
 Ordered client packages under AC113 passed `zig build test-world -Doptimize=Debug --summary all`: 280 tests passed. The existing-site replacement, same-package replacement, and allocation-failure/retry regressions failed before the fix with `Overlap`. Six added tests cover those cases, inverse-order rejection, unrelated shared-chunk targets, sparse wrapped A/B/C replacement chains, unknown-instance fills ignored at their package position, duplicate/invalid/air fills, valid package replay before and after cleanup, immutable borrowed payloads, and fulfillment-only completion with zero allocation attempts. The failure sweep checks unchanged targets, progress, cleanup queue, revision, and ID maxima after each induced allocation failure, then successfully retries the same package. `zig build test -Doptimize=Debug --summary all` passed 47/47 steps and 1,657 tests, with one existing skip. `zig build install test -Doptimize=ReleaseFast --summary all` passed 55/55 steps and 1,650 tests, with eight existing skips. The 128-site/8,192-fill fixture retains 8,192 support reads and zero ordinary-validation calls. Ordering adds transient mixed-package bookkeeping and filtering of already-cloned footprint indexes; it adds no structural support work or bitmap copy per fill. Formatting and diff checks pass.
 
@@ -272,9 +272,9 @@ The same-height XY fallback and absolute-height update use AC96–AC101 for came
 
 ## Measurements
 
-See [the detailed benchmark report](validation/blueprints.md) for compiler/admission timings, allocation measurements, workload construction, and exclusions. Requested allocations exclude backing allocator pages and GPU/driver memory. Detached compiler/admission measurements exclude source streaming, rendering, meshing, and storage latency; they are not end-to-end frame timings.
+See [the detailed benchmark report](validation/blueprints.md) for compiler/admission timings, allocation measurements, workload construction, and exclusions. Requested allocations exclude backing allocator pages and GPU/driver memory. Detached compiler/admission measurements exclude source streaming, rendering, surface extraction, and storage latency; they are not end-to-end frame timings.
 
-The service tests verify coalescing and compact journal size separately from the support-read bound. Terrain meshing, ordinary metadata growth, snapshot delivery at batch boundaries, and persistence still have costs; the five-cell promise applies to structural fulfillment approval.
+The service tests verify coalescing and compact journal size separately from the support-read bound. Terrain surface extraction, ordinary metadata growth, snapshot delivery at batch boundaries, and persistence still have costs; the five-cell promise applies to structural fulfillment approval.
 
 ## Interactive checks
 

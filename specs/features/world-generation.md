@@ -278,7 +278,7 @@ and the format-7 gate. Other generation requirements and historical measurements
   for every new material and use the same generation source as actual chunks.
 - R34: Provide reproducible diagnostic maps and seed-batch measurements for continent
   connectivity, land coverage, climate areas over world and land, relief, vegetation,
-  deposit locations/effective sizes, starting access, preparation cost, and forest mesh
+  deposit locations/effective sizes, starting access, preparation cost, and forest surface
   pressure. Full/fine land-coverage measurements are optional offline diagnostics, not a
   runtime dependency of climate queries or chunk regeneration. Statistical tuning claims
   must be distinguished from deterministic invariants. Preparation reports distinguish
@@ -658,7 +658,7 @@ consolidation tasks remain separate.
 - AC16: GIVEN temperate forest and meadow regions WHEN sampling tree density and biome
   boundaries THEN forests contain substantially more trees, boundaries cut across chunks,
   frozen columns contain no trees/bushes, and steppe/desert match configured scarcity. [R26]
-- AC17: GIVEN foliage WHEN colliding, building, mining, and meshing THEN it has the agreed
+- AC17: GIVEN foliage WHEN colliding, building, mining, and extracting surfaces THEN it has the agreed
   opaque cube behavior, provides no structural support or useful item, and configured
   no-item clearing succeeds without a constructed-tree rejection or a null-result panic;
   trunk mining continues to yield the trunk item. [R27, R36–R37]
@@ -695,11 +695,11 @@ consolidation tasks remain separate.
   guaranteed starter sand. [R20, R23]
 - AC26: GIVEN untouched coastline, island, forest, and deposit fixtures WHEN regenerating
   them after column-cache eviction, fresh preparation/restart, and reordered requests THEN
-  complete block hashes, climate IDs, and derived boundary/mesh data agree, without saving
+  complete block hashes, climate IDs, and derived boundary/surface data agree, without saving
   pristine chunks or relying on shared advancing random state. [R30–R31, R35]
 - AC27: GIVEN the same prepared geography with beaches enabled/disabled WHEN running cached
   and cache-evicted regeneration workloads THEN sample counts, allocations/scratch, column
-  build and chunk/mesh times are reported separately, and any enabled beach default meets
+  build and chunk/surface times are reported separately, and any enabled beach default meets
   the measured regeneration budget without increasing residency to hide its cost. [R20, R32, R35]
 - AC28: GIVEN an unconfigured material or an unconfigured ore/limestone/clay/coal block
   WHEN player prediction, authority, spectator edits, or simulation requests its removal
@@ -1516,11 +1516,11 @@ ordinary success/acknowledgement path but no inventory assignment; replace uncon
 acknowledgement, rollback, the next interaction, and saving an empty slot after leaf removal.
 
 For rendering, prefer a distinct `RenderMaterialId` in the existing face type byte: resolve
-soil appearance from the column when meshing, preserve authoritative `BlockType`, and reserve
+soil appearance from the column during surface extraction, preserve authoritative `BlockType`, and reserve
 the render palette independently. Select the ordinary green, steppe yellow, or frozen snow
 appearance from the single climate ID, with no transition weights, interpolated palette,
 or extra GPU climate binding. This is a rendering derivation, never a saved block conversion.
-Keep climate resolution shared by service meshing and optimistic client remeshing. Loose
+Keep climate resolution shared by service surface extraction and optimistic client surface rebuilding. Loose
 soil in hand keeps its ordinary loose-soil appearance. The desert branch uses baseline
 appearance for imported soil as specified in R15, rather than an undefined palette case.
 
@@ -1633,17 +1633,17 @@ average or relying only on cached results:
 - Repeated vertical chunk generation from one cached column.
 - Revisit more than 64 distinct horizontal columns and regenerate their chunks after the
   current bounded column cache has actually discarded them; repeat the traversal.
-- Complete generation/meshing workloads on plains, mainland/island coasts, steep shores,
+- Complete generation/surface extraction workloads on plains, mainland/island coasts, steep shores,
   desert, dense forests, deposits, and the X seam.
 
 Record terrain/feature sample counts, candidate maxima, allocations, peak owned scratch,
-median/p95 wall time, and throughput. Separate generator work from meshing, disk, and GPU
+median/p95 wall time, and throughput. Separate generator work from surface extraction, disk, and GPU
 upload costs. The beach comparison holds terrain heights/water occupancy fixed; differing
 surface sand and resulting tree eligibility are expected, with stable layer seed streams.
 Publish the measured budget before enabling beaches by default; no numerical speedup or
 small percentage overhead is claimed by this design alone.
 
-Hash original blocks and derived boundary/mesh results across repeated requests, explicit
+Hash original blocks and derived boundary/surface results across repeated requests, explicit
 cache eviction, different traversal orders, and fresh preparation/restart. Include negative/
 wrapped-equivalent X coordinates and vertical chunks sharing a crown/deposit. Saved edited
 chunks separately verify override authority. The benchmark must run without persisting
@@ -1656,7 +1656,7 @@ pristine chunks, enlarging cache limits, or redoing global preparation on each r
 | G1: Environment foundation | Versioned natural/flat profiles, classified preparation failures, larger default, pure climate queries, polar inset and finite floor, diagnostics | `src/voxel_app/consts.zig`, `world_generator.zig`, `world_environment.zig`, `generation_preparation.zig`, `terrain_collision.zig`, `standing_space.zig`, `main.zig` |
 | G2: Land and relief | Connected continents and smaller islands, ocean, ranges, desert lowlands, surface layering, deterministic deeprock, safe first-start region | `natural_generator.zig`, `generation_geography.zig`, `generation_desert.zig`, `generation_hash.zig`, `world_data_service.zig` |
 | G3: Materials and geology | Shared mining policy and mutation guard before material edit integration; opaque water, climate soil palette, sand local rules, deeprock direct foundations, indexed deposits, starter resources | `src/engine/voxel/voxel_chunk.zig`, `src/engine/shaders/voxel/`, `src/voxel_app/block_rules.zig`, `world_engine_glue.zig`, `player_interaction.zig`, `world_data_service.zig`, `world.zig` |
-| G4: Vegetation | Forest/meadow fields, leaves with null-safe no-item clearing, complete cross-chunk trees, mesh pressure checks | `generation_vegetation.zig`, `world_generator.zig`, voxel/collision/render material code, `player_interaction.zig` |
+| G4: Vegetation | Forest/meadow fields, leaves with null-safe no-item clearing, complete cross-chunk trees, surface pressure checks | `generation_vegetation.zig`, `world_generator.zig`, voxel/collision/render material code, `player_interaction.zig` |
 | G5: Integration | Mutation guard verification, validated bottom restoration, both-profile save/reopen and legacy rejection, edited-chunk authority, bounded caches, shortcut oracle, regeneration benchmarks, debug maps | `src/voxel_app/world.zig`, `src/voxel_app/persistence/format.zig`, `main.zig`, `world_data_service.zig`, generator/service/GPU tests |
 | G6: Peak bodies and vertical scale | Pointed asymmetric peak bodies on a shared centerline, variable widths/heights and saddles, half-depth sea, actual 95%-depth high summits, bounded deterministic queries | `generation_mountains.zig`, `generation_geography.zig`, `natural_generator.zig`, `generation_preparation.zig`, generation tests and diagnostics |
 | G7: Temperate landforms | Coherent flatland/rolling/hilly profiles, continuous climate and shore composition, independent forest labels, exact tree clearance, flatland/rolling first starts, maps and measured tuning | `generation_temperate.zig`, `generation_geography.zig`, `world_environment.zig`, `natural_generator.zig`, `generation_vegetation.zig`, `generation_vegetation_tests.zig`, generation tests, `generation_map.zig`, `generation_diagnostics.zig` |
@@ -1701,7 +1701,7 @@ merely because their environmental inputs exist.
 - **Forest face budget:** trees add substantial ordinary voxel faces. Exercise dense mixed
   forest/coast chunks against existing 4-MiB face capacity and 64-KiB per-chunk allocation,
   boundary invalidation, shadows, and capacity fallback. Do not silently truncate trees to
-  hide a mesh-capacity failure.
+  hide a surface-capacity failure.
 - **Precision and reproducibility:** use canonical integer feature coordinates and stable
   hashes, validated periodic noise, explicit tie breaks, and bounded numerical operations.
   Golden outputs are versioned; supported builds must agree at material/boundary decisions.
@@ -1716,7 +1716,7 @@ persistence regressions, the existing CPU/build suite, and relevant headless GPU
 Add visual overview layers for climate, continents, relief, vegetation, and resources;
 inspect close views of transitions, sand/rock contact, water, and seam-crossing forests.
 Record hardware/build mode, memory/candidate maxima, preparation time, query throughput,
-and observed mesh allocation pressure. Do not claim the current 8/16-GB gameplay budget
+and observed surface allocation pressure. Do not claim the current 8/16-GB gameplay budget
 merely from a compact macro map; complete residency remains separately measured.
 
 ## Tasks
@@ -1784,7 +1784,7 @@ merely from a compact macro map; complete residency remains separately measured.
   shared guard alongside T20 before integrating new material edits; verify rejected
   transactions have no partial effects and filtered plans preserve the floor. [R39]
 - [x] T9: Add render-only climate soil appearances and opaque blue water, preserving saved
-  soil and timers; verify CPU/GPU material layout and optimistic remeshing. [R13–R14, R19]
+  soil and timers; verify CPU/GPU material layout and optimistic surface rebuilding. [R13–R14, R19]
 - [x] T10: Implement distinct granular footprints, constructed-sand dependencies, and sand
   support rejection for buildings/roads, including seam and missing-data cases. [R16–R17]
 - [x] T22: Recognize one exposed deeprock cell as a stable direct foundation in shared
@@ -1883,7 +1883,7 @@ merely from a compact macro map; complete residency remains separately measured.
   [R32, R34, R42, AC36, AC38]
 - [x] T19: Implement the deterministic regeneration hash oracle and benchmark cached versus
   evicted columns, including the beach toggle and actual bounded-cache churn. Publish
-  measured preparation/query/generation/meshing costs and owned scratch limits. [R30–R35]
+  measured preparation/query/generation/surface extraction costs and owned scratch limits. [R30–R35]
 - [x] T-val: Verify all AC1–AC38 for G1–G5, including current AC22 environmental flags,
   AC23 permitted platforms, AC28–AC35 mining/floor/foundation contracts, and AC36–AC38
   profile identity/topology/failure handling; keep future F1–F3 tasks

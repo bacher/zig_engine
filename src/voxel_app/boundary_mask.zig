@@ -28,7 +28,7 @@ pub const BoundaryMask = struct {
     }
 };
 
-/// For a chunk's own boundaries, indexed by its outward side. For meshing dependencies,
+/// For a chunk's own boundaries, indexed by its outward side. For surface extraction dependencies,
 /// indexed by the receiving chunk's side and containing the neighbor's opposite plane.
 pub const BoundaryMasks = [6]BoundaryMask;
 

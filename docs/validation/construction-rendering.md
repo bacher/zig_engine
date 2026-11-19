@@ -3,7 +3,7 @@
 The selected renderer keeps separate terrain and construction layers in the existing voxel
 grid. Full construction blocks use culled voxel faces; pending miniatures retain their
 existing renderer. The implementation follows construction ownership Q3–Q5 and the approved
-renderer decision. Mesh-only clients may retain invisible overlap faces against static
+renderer decision. Surface-only clients may retain invisible overlap faces against static
 terrain, while construction-to-construction faces are culled across chunk/site boundaries.
 
 ## Reference geometry measurement
@@ -48,9 +48,9 @@ sticky static selection after ordinary edits, and eviction followed by fresh dis
 `main.zig` exercises the actual package callback and both physical/render transitions. A
 materialized chunk and subsequent ordinary removal arrive before the progress stream:
 collision and targeting immediately use the coherent raw data, while the displayed source
-remains resident through a mesh-preparation allocation failure and GPU-budget failure.
+remains resident through a surface-preparation allocation failure and GPU-budget failure.
 The real successful empty-layer install path replaces both resident stamps together and
-selects static ownership. A newer ordinary publication keeps that selection. A mesh-only
+selects static ownership. A newer ordinary publication keeps that selection. A surface-only
 subscription outside the visible set with unresolved construction state reports missing
 collision data and rejects targeting.
 A known placement target also invalidates its cached successful preview when a separate
@@ -76,7 +76,7 @@ fill) and four miniature source replacements. The distant last chunk stays clean
 its installed construction geometry stamp throughout. Initial discovery builds five sources;
 a requested full resync refreshes all five, and the final fill still invalidates all miniature
 sources for its lifecycle transition. These are deterministic CPU work counts; local nonempty
-meshes are prepared but not uploaded, so this check does not measure GPU or frame latency.
+surfaces are prepared but not uploaded, so this check does not measure GPU or frame latency.
 
 Before the fix, the transport regression produced five metadata responses on the first
 ordinary fill. With only that server fan-out removed, the application regression still found
@@ -115,7 +115,7 @@ up to 16,384 faces. Larger allocations reserve two, four, or eight contiguous em
 spans, supporting up to 131,072 records without changing the GPU metadata/shader layout or
 splitting a logical chunk. All ten size classes can coexist; there is no eight-class limit.
 
-Opaque 32³ voxel meshing emits at most 16,384 faces per direction, 98,304 total, and 49,152
+Opaque 32³ voxel surface extraction emits at most 16,384 faces per direction, 98,304 total, and 49,152
 per three-direction view. Packed shader counts/offsets remain within `u16`; CPU list
 prefixes and draw vertex multiplication use wider integers. The supported column fixture's
 41,472 records contain 165,888 bytes and round to a 256 KiB allocation. The maximum
@@ -125,7 +125,7 @@ Power-of-two rounding and size-class packing still waste some buffer space. Over
 allocations additionally require contiguous free base spans, so fragmentation can reject
 an upload despite enough free bytes in separate ranges. Capacity failure retains the
 displayed and queued geometry for retry; visibility reduction can release resident ranges.
-Allocator compaction and mesh subdivision are not implemented.
+Allocator compaction and surface subdivision are not implemented.
 
 The loaded-chunk readiness/selection sweep is still per frame, and every dirty construction
 chunk rebuild visits its entire target group. Worst-case repeated fills in a dense chunk,

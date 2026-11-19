@@ -231,7 +231,7 @@ pub const Cache = struct {
         if (self.chunks.getPtr(id)) |old| {
             if (stamp.subscription_id < old.data.subscription_id) return false;
             if (stamp.subscription_id == old.data.subscription_id and
-                (stamp.chunk_revision < old.data.chunk_revision or stamp.mesh_revision < old.data.mesh_revision or composition.revision < old.composition.revision)) return false;
+                (stamp.chunk_revision < old.data.chunk_revision or stamp.surface_revision < old.data.surface_revision or composition.revision < old.composition.revision)) return false;
         } else if (self.chunks.count() >= self.limits.chunks) return error.ConstructionCacheCapacity;
         const previous_refs = if (self.chunks.get(id)) |old| old.composition.sites.len else 0;
         if (composition.sites.len > self.limits.discovery_refs -| (self.discovery_ref_count - previous_refs)) return error.ConstructionCacheCapacity;
@@ -439,7 +439,7 @@ pub const Cache = struct {
     }
 
     /// Membership and data ownership can retire earlier than the visible source.
-    /// A newer post-completion mesh also qualifies; its stamp has been checked at
+    /// A newer post-completion surface also qualifies; its stamp has been checked at
     /// installation and cannot be replaced by an older queued job.
     pub fn portionReady(self: *const Cache, id: ChunkId, instance: runtime.Instance, terrain_revision: u64) bool {
         if (self.hasStaticSelection(id, instance)) return true;
@@ -541,7 +541,7 @@ test "discovery is unknown until its definition and compatible construction arri
         .{ .identity = testIdentity(1), .site_revision = 5 },
         .{ .identity = testIdentity(2), .site_revision = 8 },
     };
-    const stamp: stream.GeometryStamp = .{ .subscription_id = 11, .chunk_revision = 3, .mesh_revision = 5, .composition_revision = 2 };
+    const stamp: stream.GeometryStamp = .{ .subscription_id = 11, .chunk_revision = 3, .surface_revision = 5, .composition_revision = 2 };
     try std.testing.expect(try cache.installChunk(allocator, 6, stamp, .{ .revision = 2, .sites = &references }));
     try std.testing.expect(!Cache.chunkAvailable(&cache, 6));
     try cache.definitionInstalled(allocator, 7);
@@ -584,27 +584,27 @@ test "terrain readiness does not retire display before matching geometry install
     var instance = try snapshot.toInstance(allocator);
     defer instance.deinit(allocator);
     const reference: stream.SiteRef = .{ .identity = snapshot.identity, .site_revision = 9, .transferred = true, .terrain_revision = 12 };
-    const stamp: stream.GeometryStamp = .{ .subscription_id = 3, .chunk_revision = 12, .mesh_revision = 30, .composition_revision = 4 };
+    const stamp: stream.GeometryStamp = .{ .subscription_id = 3, .chunk_revision = 12, .surface_revision = 30, .composition_revision = 4 };
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 4, .sites = &.{reference} }));
     try std.testing.expect(Cache.chunkAvailable(&cache, 2));
     try std.testing.expect(!cache.portionReady(2, instance, 12));
     var stale = stamp;
-    stale.mesh_revision -= 1;
+    stale.surface_revision -= 1;
     try std.testing.expect(!cache.geometryInstalled(2, stale));
     try std.testing.expect(!cache.portionReady(2, instance, 12));
     // Failed/retried builds leave the same selected source. Static metadata may
     // precede a separate lifecycle update; only successful install switches it.
     try std.testing.expect(cache.geometryInstalled(2, stamp));
     try std.testing.expect(cache.portionReady(2, instance, 12));
-    var remeshed = stamp;
-    remeshed.mesh_revision += 1;
-    try std.testing.expect(try cache.installChunk(allocator, 2, remeshed, .{ .revision = 4, .sites = &.{reference} }));
+    var rebuilt_surface = stamp;
+    rebuilt_surface.surface_revision += 1;
+    try std.testing.expect(try cache.installChunk(allocator, 2, rebuilt_surface, .{ .revision = 4, .sites = &.{reference} }));
     try std.testing.expect(!cache.portionReady(2, instance, 12));
-    try std.testing.expect(cache.geometryInstalled(2, remeshed));
+    try std.testing.expect(cache.geometryInstalled(2, rebuilt_surface));
     try std.testing.expect(cache.portionReady(2, instance, 12));
     var edited = stamp;
     edited.chunk_revision += 1;
-    edited.mesh_revision += 1;
+    edited.surface_revision += 1;
     edited.composition_revision += 1;
     try std.testing.expect(try cache.installChunk(allocator, 2, edited, .{ .revision = 5 }));
     try std.testing.expect(!cache.geometryInstalled(2, stamp));
@@ -662,7 +662,7 @@ test "construction terrain ownership can precede lifecycle progress and survives
     cache.snapshotInstalled(snapshot);
     var instance = try snapshot.toInstance(allocator);
     defer instance.deinit(allocator);
-    var stamp: stream.GeometryStamp = .{ .subscription_id = 1, .chunk_revision = 0, .mesh_revision = 1, .composition_revision = 1 };
+    var stamp: stream.GeometryStamp = .{ .subscription_id = 1, .chunk_revision = 0, .surface_revision = 1, .composition_revision = 1 };
     // Empty metadata received before admission cannot hand ownership to terrain.
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 1 }));
     try std.testing.expectEqual(null, Cache.terrainRevision(&cache, 2, 1, 1));
@@ -671,7 +671,7 @@ test "construction terrain ownership can precede lifecycle progress and survives
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 2, .sites = &.{pending} }));
     try std.testing.expectEqual(null, Cache.terrainRevision(&cache, 2, 1, 1));
     stamp.chunk_revision = 12;
-    stamp.mesh_revision = 13;
+    stamp.surface_revision = 13;
     stamp.composition_revision = 3;
     const transferred: stream.SiteRef = .{ .identity = snapshot.identity, .site_revision = 20, .transferred = true, .terrain_revision = 12 };
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 3, .sites = &.{transferred} }));
@@ -684,7 +684,7 @@ test "construction terrain ownership can precede lifecycle progress and survives
     try std.testing.expect(Cache.chunkAvailable(&cache, 2));
     try std.testing.expect(cache.instanceAvailable(2, instance));
     stamp.chunk_revision = 14;
-    stamp.mesh_revision = 15;
+    stamp.surface_revision = 15;
     stamp.composition_revision = 4;
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 4 }));
     try std.testing.expectEqual(@as(?u64, 14), Cache.terrainRevision(&cache, 2, 1, 1));
@@ -694,7 +694,7 @@ test "construction terrain ownership can precede lifecycle progress and survives
     try cache.reserveStaticSelections(allocator, 1);
     cache.selectStaticAssumeCapacity(2, instance);
     stamp.chunk_revision += 1;
-    stamp.mesh_revision += 1;
+    stamp.surface_revision += 1;
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 4 }));
     // A newer ordinary edit never revives old construction geometry.
     try std.testing.expect(cache.portionReady(2, instance, 0));
@@ -714,7 +714,7 @@ test "construction retirement after a gap requires its composition watermark" {
     cache.snapshotInstalled(snapshot);
     var instance = try snapshot.toInstance(allocator);
     defer instance.deinit(allocator);
-    var stamp: stream.GeometryStamp = .{ .subscription_id = 1, .chunk_revision = 0, .mesh_revision = 1, .composition_revision = 1 };
+    var stamp: stream.GeometryStamp = .{ .subscription_id = 1, .chunk_revision = 0, .surface_revision = 1, .composition_revision = 1 };
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 1 }));
     _ = try cache.checkDelta(allocator, .{ .identity = snapshot.identity, .base_revision = 19, .revision = 20 });
     _ = try cache.retire(allocator, .{ .identity = snapshot.identity, .revision = 21, .composition_revision = 5 });
@@ -723,7 +723,7 @@ test "construction retirement after a gap requires its composition watermark" {
     try std.testing.expect(cache.geometryInstalled(2, stamp));
     try std.testing.expect(!cache.portionReady(2, instance, 0));
     stamp.chunk_revision = 12;
-    stamp.mesh_revision = 13;
+    stamp.surface_revision = 13;
     stamp.composition_revision = 5;
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 5 }));
     try std.testing.expect(cache.instanceAvailable(2, instance));
@@ -744,7 +744,7 @@ test "construction eviction rejects delayed updates and fresh discovery subscrib
     cache.snapshotInstalled(snapshot);
     var instance = try snapshot.toInstance(allocator);
     defer instance.deinit(allocator);
-    const stamp: stream.GeometryStamp = .{ .subscription_id = 1, .chunk_revision = 12, .mesh_revision = 13, .composition_revision = 1 };
+    const stamp: stream.GeometryStamp = .{ .subscription_id = 1, .chunk_revision = 12, .surface_revision = 13, .composition_revision = 1 };
     const reference: stream.SiteRef = .{ .identity = snapshot.identity, .site_revision = 2, .transferred = true, .terrain_revision = 12 };
     try std.testing.expect(try cache.installChunk(allocator, 2, stamp, .{ .revision = 1, .sites = &.{reference} }));
     cache.beginEviction(1);

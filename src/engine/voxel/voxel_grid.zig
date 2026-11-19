@@ -228,12 +228,12 @@ pub const VoxelGrid = struct {
     }
 
     /// Discovery-only changes can certify already installed, identical bytes.
-    /// Content/mesh revisions and subscription incarnation must all still match.
+    /// Content/surface revisions and subscription incarnation must all still match.
     pub fn certifyInstalledGeometry(self: *Self, coords: ChunkCoords, layer: Layer, stamp: GeometryStamp) bool {
         for (self.chunks.items) |*chunk| {
             if (chunk.layer != layer or !@reduce(.And, chunk.chunk_origin == coords)) continue;
             const installed = chunk.geometry_stamp;
-            if (installed.subscription_id != stamp.subscription_id or installed.chunk_revision != stamp.chunk_revision or installed.mesh_revision != stamp.mesh_revision) return false;
+            if (installed.subscription_id != stamp.subscription_id or installed.chunk_revision != stamp.chunk_revision or installed.surface_revision != stamp.surface_revision) return false;
             if (stamp.composition_revision < installed.composition_revision) return false;
             chunk.geometry_stamp = stamp;
             return true;
@@ -637,21 +637,21 @@ test "construction and terrain replacements retain displayed layers until instal
         grid.chunks_to_upload.deinit(allocator);
     }
     const coords: ChunkCoords = .{ 1, 2, 3 };
-    try grid.chunks.append(allocator, .{ .chunk_origin = coords, .geometry_stamp = .{ .mesh_revision = 1 } });
-    try grid.chunks.append(allocator, .{ .chunk_origin = coords, .layer = .construction, .geometry_stamp = .{ .mesh_revision = 2 } });
-    try grid.tryAppendChunk(.{ .chunk_coords = coords, .chunk_side_data = .{}, .geometry_stamp = .{ .mesh_revision = 3 } });
-    try grid.tryAppendChunk(.{ .chunk_coords = coords, .layer = .construction, .chunk_side_data = .{}, .geometry_stamp = .{ .mesh_revision = 4 } });
-    try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.mesh_revision);
-    try std.testing.expectEqual(@as(u64, 2), grid.installedGeometry(coords, .construction).?.mesh_revision);
+    try grid.chunks.append(allocator, .{ .chunk_origin = coords, .geometry_stamp = .{ .surface_revision = 1 } });
+    try grid.chunks.append(allocator, .{ .chunk_origin = coords, .layer = .construction, .geometry_stamp = .{ .surface_revision = 2 } });
+    try grid.tryAppendChunk(.{ .chunk_coords = coords, .chunk_side_data = .{}, .geometry_stamp = .{ .surface_revision = 3 } });
+    try grid.tryAppendChunk(.{ .chunk_coords = coords, .layer = .construction, .chunk_side_data = .{}, .geometry_stamp = .{ .surface_revision = 4 } });
+    try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.surface_revision);
+    try std.testing.expectEqual(@as(u64, 2), grid.installedGeometry(coords, .construction).?.surface_revision);
     try std.testing.expectEqual(@as(usize, 2), grid.chunks_to_upload.items.len);
-    try grid.tryAppendChunk(.{ .chunk_coords = coords, .chunk_side_data = .{}, .geometry_stamp = .{ .mesh_revision = 5 } });
+    try grid.tryAppendChunk(.{ .chunk_coords = coords, .chunk_side_data = .{}, .geometry_stamp = .{ .surface_revision = 5 } });
     try std.testing.expectEqual(@as(usize, 2), grid.chunks_to_upload.items.len);
     grid.cancelPendingChunkLayer(coords, .terrain);
     try std.testing.expectEqual(@as(usize, 1), grid.chunks_to_upload.items.len);
-    try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.mesh_revision);
+    try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.surface_revision);
     grid.removeChunkLayer(coords, .terrain);
     try std.testing.expectEqual(null, grid.installedGeometry(coords, .terrain));
-    try std.testing.expectEqual(@as(u64, 2), grid.installedGeometry(coords, .construction).?.mesh_revision);
+    try std.testing.expectEqual(@as(u64, 2), grid.installedGeometry(coords, .construction).?.surface_revision);
 }
 
 test "construction upload capacity failure keeps resident display and queued work" {
@@ -667,20 +667,20 @@ test "construction upload capacity failure keeps resident display and queued wor
     const coords: ChunkCoords = .{ 1, 2, 3 };
     try grid.chunks.append(allocator, .{
         .chunk_origin = coords,
-        .geometry_stamp = .{ .mesh_revision = 1 },
+        .geometry_stamp = .{ .surface_revision = 1 },
         .gpu_residence_info = .{ .faces_count_per_view = @splat(0), .chunk_index = 0, .data_slot_index = 0, .data_slot_size_level = MAX_SPAN_SIZE_EXPONENT },
     });
-    var mesh: @import("voxel_chunk.zig").ChunkSideData = .{};
-    for (&mesh.blocks_grouped_by_side) |*side| {
+    var surface: @import("voxel_chunk.zig").ChunkSideData = .{};
+    for (&surface.blocks_grouped_by_side) |*side| {
         try side.resize(allocator, 16_384);
         @memset(side.items, .{ .coords = .{ 1, 1, 1 }, .block_type = .stone });
     }
-    try grid.tryAppendChunk(.{ .chunk_coords = coords, .layer = .construction, .chunk_side_data = mesh });
+    try grid.tryAppendChunk(.{ .chunk_coords = coords, .layer = .construction, .chunk_side_data = surface });
     try std.testing.expect(!grid.hasUploadCapacity());
     try std.testing.expect(!grid.tryUploadToGPU(undefined));
-    try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.mesh_revision);
+    try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.surface_revision);
     try std.testing.expectEqual(@as(usize, 1), grid.chunks_to_upload.items.len);
     grid.chunks_to_upload.items[0].layer = .terrain;
     try std.testing.expect(grid.hasUploadCapacity());
-    try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.mesh_revision);
+    try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.surface_revision);
 }

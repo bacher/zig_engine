@@ -2,6 +2,10 @@
 
 Updated on 2026-10-26 for G1–G7 and AC1–AC52 of the
 [world generation specification](../../../specs/features/world-generation.md).
+Archived benchmark logs retain their original `mesh`/`meshing` labels for what is now
+called `surface`/surface extraction. Current benchmarks and the log parser use only the
+new names. Recorded measurements and their hashes are preserved.
+
 The default profile is generator **2 / version 1**, natural, seed **12345**, with
 **2048 × 1024 × 32 chunks**. Beaches are available but disabled by default.
 
@@ -199,7 +203,7 @@ Controlled fixtures separately test overlapping bodies, centerline knots and sea
 
 The nine seed/profile regression worlds additionally compare actual summit, saddle, and
 gorge chunks against the point oracle, boundary masks, material counts, X wrapping,
-fresh preparation, and derived mesh hashes.
+fresh preparation, and derived surface hashes.
 
 ## PR review corrections
 
@@ -290,7 +294,7 @@ player-scale results above are retained from 2026-10-23; shaders and material
 rendering were unchanged by these review corrections, climate tuning, and land
 growth/spawn/desert/mountain/temperate changes. They were not rerun for this extension.
 Those GPU checks compile production shaders and read back material
-colors; climate soil meshing and saved-material identity also have CPU tests. Prior manual inspection covered
+colors; climate soil surface extraction and saved-material identity also have CPU tests. Prior manual inspection covered
 spawn terrain and nearby forest, not every climate or water configuration.
 
 The subsequent shared coast-fringe and named benchmark-site refactor was checked on
@@ -304,11 +308,11 @@ geometry/distance fixtures remain unchanged.
 | --- | --- |
 | AC1–AC5, AC11, AC22, AC24 | Layout/bounds tests, climate ordering and map/point equivalence, environment flags, configuration validation, seed-suite area measurements; exact boundary means across eight seeds and ordering/wrapping across 64 seeds and four layouts |
 | AC2, AC37 | Protected-path construction above; final-column reduced and adversarial topology tests |
-| AC6–AC10, AC17, AC23, AC35 | Shared material/support tests, timer regressions, render-only climate meshing, GPU material/shadow checks, sand and single-cell deeprock foundation tests |
+| AC6–AC10, AC17, AC23, AC35 | Shared material/support tests, timer regressions, render-only climate surface extraction, GPU material/shadow checks, sand and single-cell deeprock foundation tests |
 | AC12–AC16 | Effective deposit counts and distribution below; starter dry-route checks; tree density, full-form overlap, XYZ-chunk and seam tests |
 | AC18, AC30–AC34 | Whole-body polar/lower-Z bounds, independent collision guard, canonical floor oracle, shared write-set guard, indirect/optimistic edit and corrupt base/WAL restoration tests |
 | AC19, AC28–AC29, AC36 | Shared forbidden/no-item mining tests; natural and flat save/reopen, inventory/climate/fingerprint equality, legacy/profile/runtime mismatch rejection |
-| AC20–AC21, AC25–AC27 | Slow material oracle, conservative occupancy/enclosure checks, beach overlay fixtures, cached/evicted generation and mesh benchmark below |
+| AC20–AC21, AC25–AC27 | Slow material oracle, conservative occupancy/enclosure checks, beach overlay fixtures, cached/evicted generation and surface benchmark below |
 | AC38 | Zero-attempt preflight, deterministic candidate rejection, eight-attempt exhaustion, terminal allocation/budget/cancellation injection, categorized diagnostics |
 | AC43–AC47 | Pointed/asymmetric profile and derivative fixtures, connected centerline and X-seam fixtures, climate cover, nine seed/profile summit/pass/gorge oracle/restart checks, 256-seed actual heights, recorded sections and memory/timing checks |
 | AC39–AC42 | Pure-field slope/purity/patch tests, actual coast/island/seam/climate fixtures, stone desert mountain and biome-eligibility checks, two-pass seed counts, block-scale profiles, dune/flat replay hashes |
@@ -385,7 +389,7 @@ hashes and both full prepared-world fingerprints agree across those builds.
 Seventeen representative sites, including all three temperate landforms, both desert
 biomes, and actual summit/pass/gorge columns, also agree after
 actual 96-column cache churn, reverse traversal, and fresh preparation; hashes
-include blocks, climate, boundary masks, and derived mesh data. Enclosure is
+include blocks, climate, boundary masks, and derived surface data. Enclosure is
 checked separately by generator tests and conservative generation bounds.
 
 | ReleaseFast workload | Beaches off | Beaches on |
@@ -418,9 +422,9 @@ improvement does not imply the same gain for regeneration. Inline mountain descr
 still contribute 6,744 retained/peak bytes without extra allocation requests. The new
 landform environment field increases each cached column by 4,096 bytes, as accounted below.
 Beaches remain **off by default**.
-The logs separately report column, chunk-fill, and meshing times, throughput,
+The logs separately report column, chunk-fill, and surface extraction times, throughput,
 allocation calls/resizes, and p95. Retained environment/border sample counts
-explicitly exclude internal feature probes. Mesh timing uses already prepared
+explicitly exclude internal feature probes. Surface timing uses already prepared
 chunks/neighbors; neither disk nor GPU uploads are included.
 
 Preparation makes eight allocation requests and retains **687,224 bytes**,

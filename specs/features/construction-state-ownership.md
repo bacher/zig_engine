@@ -19,7 +19,7 @@ materialize into world-data chunks in bounded background work.
 optimization, and mixed warehouse validation are tracked separately in T13–T16 below.
 
 The ownership, publication, and lifecycle contracts below are approved. The implementation
-uses the existing service executor, separate construction meshes with internal-face culling,
+uses the existing service executor, separate construction surfaces with internal-face culling,
 bounded publication, and shared capture. Validation and measured limitations are recorded
 under Q7. The subsequent [warehouse implementation](warehouses.md#implementation-evidence-and-remaining-work)
 extends the same boundaries; its reports track mixed acceptance cases and remaining load validation.
@@ -141,7 +141,7 @@ enqueue cost only; it cannot establish the benefit of this ownership change.
   composition state, including during partial materialization and discovery retirement.
 - R23: Distinguish terrain-data readiness from render readiness. For a portion still selected
   for display, retain its dynamic presentation until matching static geometry is installed
-  and ready to draw; receiving a snapshot or queuing a mesh build/upload is insufficient.
+  and ready to draw; receiving a snapshot or queuing a surface build/upload is insufficient.
   Activate the replacement and remove the old presentation in the same displayed frame,
   without a hole or duplicate. Collision/interaction may adopt newer coherent authoritative
   data independently of GPU readiness. Completion notices and stale data/jobs cannot erase
@@ -294,7 +294,7 @@ snapshot plus subsequent deltas; reject old/duplicate updates, detect gaps, and 
 state rather than guessing. Admission, completion, subscription removal, and materialization
 are separately versioned lifecycle changes. A lost or reordered reply cannot resurrect a site.
 
-Collision/interaction needs may retain a subscription outside the visible set. A mesh-only
+Collision/interaction needs may retain a subscription outside the visible set. A surface-only
 terrain subscriber also needs construction discovery and snapshots. If required data is
 missing, defer dependent actions and use existing missing-world collision behavior rather
 than walking through assumed air. Server support, routing, and validation likewise compose
@@ -349,7 +349,7 @@ Clients reconcile matching terrain data and composition state per chunk, then sw
 presentation only when the corresponding static geometry is installed and ready for display.
 If a transfer notice arrives first, retain the dynamic portion while awaiting terrain data.
 If static data arrives first, use its composition metadata to prepare the replacement, but do
-not hide the dynamic portion merely because a mesh build/upload has been queued. Delayed or
+not hide the dynamic portion merely because a surface build/upload has been queued. Delayed or
 retryably failed geometry preparation/upload retains the previous presentation for portions
 still selected for display, while collision/interaction can adopt newer coherent data without
 waiting for the GPU.
@@ -453,8 +453,8 @@ and publication reordering at every lifecycle boundary. Record limits and uncert
 Q2 alternatives; revisit the design if composed reads or retained state erase the intended gain.
 
 **IMPLEMENTATION CHECKPOINT 2026-11-14.** The selected rendering path is a separate
-construction mesh using ordinary voxel face records and shaders. It culls adjacent fulfilled
-construction faces across site/chunk seams. Mesh-only terrain may retain hidden interface
+construction surface using ordinary voxel face records and shaders. It culls adjacent fulfilled
+construction faces across site/chunk seams. Surface-only terrain may retain hidden interface
 faces; it does not require transmitting terrain cells. Static replacement and dynamic removal
 install together after allocation/capacity preflight, while coherent physical data may advance
 earlier. See [render validation](../../docs/validation/construction-rendering.md).
@@ -640,7 +640,7 @@ belong to the subsequent warehouse implementation and its linked evidence report
   are enumerated/validated THEN that neighbor participates despite absence from terrain metadata.
 - AC39: GIVEN required collision/support state outside the visible set WHEN a client needs it
   THEN it retains/loads the relevant construction state or uses missing-data behavior, never air.
-- AC40: GIVEN a mesh-only terrain subscription WHEN a site changes or transfers THEN discovery
+- AC40: GIVEN a surface-only terrain subscription WHEN a site changes or transfers THEN discovery
   and construction updates still provide the effective world independent of GPU pass choice.
 - AC41: GIVEN a fill affecting road geometry WHEN accepted THEN its bounded deferred follow-up
   remains coherent with current owners and captures without a synchronous per-fill road rebuild.
@@ -675,7 +675,7 @@ belong to the subsequent warehouse implementation and its linked evidence report
   completes after its dependencies and processing capacity remain available; later arrivals
   cannot indefinitely starve either site's ready work.
 - AC53: GIVEN matching terrain data/composition metadata but a delayed or retryably failed
-  mesh build/upload for a visible portion WHEN client frames advance THEN dynamic presentation
+  surface build/upload for a visible portion WHEN client frames advance THEN dynamic presentation
   remains while collision/interaction can use the newer coherent data; on successful current
   geometry installation it switches without a hole or duplicate, and superseded jobs cannot
   activate stale geometry.
@@ -815,7 +815,7 @@ state. Measure and fault-test these before claiming a performance improvement.
   unify bare/grassy soil support in ordinary rules, certification, and cheap fulfillment;
   update format gates, tests, and documentation.
 - [x] T10: Add immutable definition caching, initial snapshots, batched deltas, subscriptions, and resync.
-- [x] T11: Audit ordinary/dependent validation, road obligations, mesh boundaries, and raw-air shortcuts.
+- [x] T11: Audit ordinary/dependent validation, road obligations, surface boundaries, and raw-air shortcuts.
 - [x] T12: Establish Q8's reusable simulation-state/capture and typed command/discovery boundaries
   during construction implementation; record AC55–AC60 as mixed integration checks for the
   subsequent warehouse implementation, without implementing warehouse gameplay in this stage.

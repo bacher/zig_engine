@@ -15,7 +15,7 @@ zig build run_voxel -- --ephemeral                   # Run without saving
 zig build test        # Run registered unit/regression tests
 zig build test-persistence # Run CPU persistence format/storage tests
 zig build test-world-service # Run world authority, construction and command protocol tests
-zig build test-construction-client test-construction-geometry # Run construction streaming and meshing tests
+zig build test-construction-client test-construction-geometry # Run construction streaming and surface extraction tests
 zig build test-warehouse test-warehouse-client test-packed-geometry # Run warehouse state, client and geometry tests
 zig build test-generation # Run geography/topology/regeneration regressions
 zig build generation-map -Doptimize=ReleaseFast -- /tmp/world.ppm 12345 3
@@ -99,11 +99,11 @@ The voxel app displays a small white circular crosshair with a black outline at 
 
 The player starts standing on the current block surface. Before the first frame, the world-data service finds a supported position near the preferred spawn point using current blocks, including committed edits. It checks an empty 2×2×3 volume and support under the player's actual feet.
 
-The world-data service owns ordinary terrain and player inventory; simulation owns active construction targets on the same service executor. Clients compose shared blueprint definitions and progress with terrain, then switch to ordinary chunks as completed sites materialize. The main thread applies edits optimistically and reconciles them against subscribed snapshots. The normal neighborhood retains blocks in a 3×3×3 core and requests surrounding geometry within a 7×7×7 box; outstanding edits pin chunks during reconciliation. Both local and service meshes use neighbor boundary masks and the same exposed-face extractor.
+The world-data service owns ordinary terrain and player inventory; simulation owns active construction targets on the same service executor. Clients compose shared blueprint definitions and progress with terrain, then switch to ordinary chunks as completed sites materialize. The main thread applies edits optimistically and reconciles them against subscribed snapshots. The normal neighborhood retains blocks in a 3×3×3 core and requests surrounding geometry within a 7×7×7 box; outstanding edits pin chunks during reconciliation. Both local and service surfaces use neighbor boundary masks and the same exposed-face extractor.
 
 The fixed GPU face buffer is 4 MiB. Capacity pressure reduces the outer box to 5×5×5; uploads remain pending if that still cannot fit. Saved worlds retain modified blocks, historical reveal flags, construction/road metadata, lazy block timers, world time, player checkpoints, and each player's carried block. Autosave attempts run every 60 seconds, with base compaction every 10 minutes and a final save on exit. See [persistence](docs/persistence.md) for explicit world creation/opening and failure behavior. A separate simulation worker edits one surface block through its own service endpoint.
 
-See [voxel world, streaming, and editing](docs/voxel-world.md) for the full protocol, handoff, meshing, and shutdown behavior.
+See [voxel world, streaming, and editing](docs/voxel-world.md) for the full protocol, handoff, surface extraction, and shutdown behavior.
 
 ## Large-world rendering
 

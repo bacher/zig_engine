@@ -100,7 +100,7 @@ zig build-obj docs/research/world-configuration-kernels.zig -O ReleaseFast \
   -femit-bin=/tmp/world-configuration-kernels.o
 ```
 
-This is compiler-output evidence, not an elapsed-time or frame-rate benchmark. These scalar kernels do not include surrounding vector code, map operations, cache misses, meshing, or GPU execution. They show which optimizations are lost by a direct rewrite and which can be retained explicitly; they do not quantify the application's overall speed difference.
+This is compiler-output evidence, not an elapsed-time or frame-rate benchmark. These scalar kernels do not include surrounding vector code, map operations, cache misses, surface extraction, or GPU execution. They show which optimizations are lost by a direct rewrite and which can be retained explicitly; they do not quantify the application's overall speed difference.
 
 ## Wrapping semantics and terrain
 

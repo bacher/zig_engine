@@ -44,11 +44,14 @@ def parse(path):
                 section['sites'][site]['output'] = parsed
             else:
                 section['sites'][site]['samples'] = parsed
-        elif line.startswith(('chunk_fill:', 'meshing_prepared_chunk_and_neighbors:')):
+        elif line.startswith(('chunk_fill:', 'surface_extraction_prepared_chunk_and_neighbors:')):
             section['sites'][site][line.split(':')[0]] = fields(line)
         elif line.startswith(('cold_column_plus_surface_chunk:', 'cached_column_vertical_chunks:')):
             section['workloads'][line.split(':')[0]] = fields(line)
-        elif line.startswith(('cache_churn ', 'representative_replay ', 'mesh_start ', 'restart_fingerprint ')):
+        elif line.startswith((
+            'cache_churn ', 'representative_replay ', 'surface_start ',
+            'restart_fingerprint ',
+        )):
             section[line.split()[0]] = fields(line)
         elif line.startswith('prepared_fingerprint='):
             section['prepared_fingerprint'] = fields(line)

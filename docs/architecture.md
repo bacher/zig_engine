@@ -60,7 +60,7 @@ or executor of construction state.
 | [`pipelines/`](../src/engine/pipelines), [`bind_group_layouts/`](../src/engine/bind_group_layouts), [`shaders/`](../src/engine/shaders) | GPU pipeline construction, binding layouts, and WGSL behavior. |
 | [`voxel/`](../src/engine/voxel) | Face records, upload queues, GPU residency, and slot allocation. |
 | [`src/demo_app/main.zig`](../src/demo_app/main.zig) | Example scene construction, object updates, and GUI integration. |
-| [`src/voxel_app/main.zig`](../src/voxel_app/main.zig) | Streaming policy, response reconciliation, tools, meshing, and upload coordination. |
+| [`src/voxel_app/main.zig`](../src/voxel_app/main.zig) | Streaming policy, response reconciliation, tools, surface extraction, and upload coordination. |
 | [`world.zig`](../src/voxel_app/world.zig) | Block contents, operations, local cache, and optimistic replay. |
 | [`world_data_service.zig`](../src/voxel_app/world_data_service.zig) | Command ordering, authoritative revisions, subscriptions, batching, and retained modifications. |
 | [`world_generator.zig`](../src/voxel_app/world_generator.zig), [`perlin_noise.zig`](../src/voxel_app/perlin_noise.zig) | Deterministic heightmap terrain and flat test terrain. |
@@ -104,7 +104,7 @@ Before entering its render loop, the voxel application starts the world-data ser
 2. Handle window close through the optional application close callback. The application handles Escape in `onUIKeyPress` and owns its menu state and rendering; its Exit action calls `Engine.requestExit`, which invokes the same close callback. The voxel app can defer exit while it drains and saves, continuing the render loop.
 3. Sample monotonic elapsed time independently of GPU statistics, advance gameplay time and frame delta unless paused, reset frame statistics, and poll mouse state/cursor capture. Storage and shutdown deadlines use a separate monotonic real-time clock.
 4. Update the active scene's camera aspect ratio and its optional spectator controller. The spectator controller is inactive while paused or gameplay input is blocked.
-5. Call the application's `onUpdate` callback. The voxel app receives block updates, advances the player against the resulting local cache, refreshes streaming, rebuilds meshes, and uploads geometry here.
+5. Call the application's `onUpdate` callback. The voxel app receives block updates, advances the player against the resulting local cache, refreshes streaming, rebuilds surfaces, and uploads geometry here.
 6. Draw the active scene, post-process, and invoke `onRender` for overlays.
 7. Submit GPU commands and present. Handle a reported swapchain resize.
 8. Remove released keys from the held-key state.
@@ -113,7 +113,7 @@ Rendering, camera orientation, and local movement consume monotonic frame elapse
 
 The engine exposes independent `setPaused` and `setGameplayInputBlocked` methods. Pause transitions discard the transition frame interval so the paused interval never becomes movement; input transitions release/restore cursor capture and reset mouse deltas without changing simulation time. The voxel app cancels holds and queued controls in `onGameplayInputChanged` and gates background simulation in `onPauseChanged`. Its menu policy can disable pausing for future multiplayer sessions while still blocking input. The application draws its menu after its other UI and dispatches Resume/Exit actions itself; the engine contains no menu state or rendering.
 
-The warehouse implementation shares the world-service executor while retaining separate world-data and simulation state domains. The full economy's scaling topology and processing cadence remain open. A separate worker at 20 or 40 steps/s was an exploratory option, not a requirement; the [simulation timing rules](simulation-notes.md#world-time-and-no-offline-progress) do not require fixed processing ticks. The current simulation worker remains the two-second block-edit example, and the world-data service remains command-driven. [Warehouse Q22](../specs/features/warehouses.md#q22--initial-execution-of-simulation-owned-warehouses) records this initial execution, its load-validation requirement, and retained independent/partitioned alternatives. Warehouse stock and accepted deliveries use local bounded transitions on that executor; the example simulation worker does not become a courier scheduler. Main-thread render/meshing stalls can still delay visible feedback. Player collisions use the latest delivered cache state, including optimistic edits, rather than waiting for authoritative worker state.
+The warehouse implementation shares the world-service executor while retaining separate world-data and simulation state domains. The full economy's scaling topology and processing cadence remain open. A separate worker at 20 or 40 steps/s was an exploratory option, not a requirement; the [simulation timing rules](simulation-notes.md#world-time-and-no-offline-progress) do not require fixed processing ticks. The current simulation worker remains the two-second block-edit example, and the world-data service remains command-driven. [Warehouse Q22](../specs/features/warehouses.md#q22--initial-execution-of-simulation-owned-warehouses) records this initial execution, its load-validation requirement, and retained independent/partitioned alternatives. Warehouse stock and accepted deliveries use local bounded transitions on that executor; the example simulation worker does not become a courier scheduler. Main-thread render/surface extraction stalls can still delay visible feedback. Player collisions use the latest delivered cache state, including optimistic edits, rather than waiting for authoritative worker state.
 
 ## Ownership and concurrency boundaries
 
@@ -126,7 +126,7 @@ The warehouse implementation shares the world-service executor while retaining s
 | Standalone textures returned by `loadTexture` | Caller; destroy after every borrowing model (normally after engine teardown). |
 | Authoritative world state, client endpoints, request/reply queues | `WorldDataService`. Only its worker accesses authoritative state while running. |
 | Local block cache, outstanding commands, streaming state, player/controller and five-second position history | Voxel application's main thread. |
-| Face arrays in a received mesh | Receiver, until ownership transfers to `VoxelGrid`'s upload queue. |
+| Face arrays in a received surface | Receiver, until ownership transfers to `VoxelGrid`'s upload queue. |
 
 GPU operations run on the application thread. The service generates data and face records without accessing GPU resources. Each producer/consumer thread uses its own client endpoint; a client's request-ID counter is not a shared multi-thread API. Service mailboxes use short mutex-protected sections, and an allocator used by the service must support concurrent allocation.
 
@@ -161,7 +161,7 @@ subscriptions carry progress, and bounded per-chunk materialization returns cell
 before releasing site restrictions. Composed reads, safe immutable snapshots, and shared capture
 span both domains. `blueprint_runtime.State` holds progress and target-bearing chunk groups;
 `construction_stream` and `construction_client` carry typed snapshots, batched index deltas,
-discovery and per-portion handoff state. Filled targets use a separate culled voxel mesh;
+discovery and per-portion handoff state. Filled targets use a separate culled voxel surface;
 pending targets retain miniature rendering. Full snapshots use a dedicated payload with
 read-only arrays; executor-local cleanup cursors never cross that boundary. Compact payloads
 and client grouping reuse remain [measured follow-ups](validation/construction-transport.md#snapshot-payload-boundary).
@@ -178,11 +178,11 @@ reads packed occupancy separately from support/capture reads. The v8 persistence
 captures terrain, construction, warehouse/delivery records and player inventory together.
 Native evidence and remaining workload limits are in [warehouse validation](validation/warehouses.md).
 
-Packed rendering is independent of terrain mesh residency and shaders. Cube goods use flat
+Packed rendering is independent of terrain surface residency and shaders. Cube goods use flat
 explicit-direction exposed-face records; irregular goods and full packaging use separate
 instanced batches. Sources retain chunk-relative coordinates and update on relevant logical
-changes. Loose pallets use an auxiliary source for both block and mesh subscriptions, allowing
-cargo and the free-base pallet/icon to switch without remeshing terrain. See
+changes. Loose pallets use an auxiliary source for both block and surface subscriptions, allowing
+cargo and the free-base pallet/icon to switch without rebuilding terrain surfaces. See
 [packed blocks](packed-blocks.md) for shared appearance and physics contracts.
 
 The general [save compatibility policy](persistence.md#save-compatibility) applies to the

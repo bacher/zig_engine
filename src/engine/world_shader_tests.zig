@@ -247,7 +247,7 @@ test "GPU construction layer keeps identical color and depth through queued terr
     try std.testing.expectEqual(@as(usize, 0), uncaptured.errors);
 }
 
-test "GPU oversized construction mesh keeps packed face addresses through terrain handoff" {
+test "GPU oversized construction surface keeps packed face addresses through terrain handoff" {
     var uncaptured: ValidationResponse = .{};
     var validation: ValidationResponse = .{};
     var mapping: coordinate_readback.MapResponse = .{};

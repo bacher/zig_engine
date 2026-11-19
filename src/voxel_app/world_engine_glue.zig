@@ -98,9 +98,9 @@ test "column climate changes covered soil appearance without changing saved mate
     data.blocks[2][5][2] = .dirt;
     data.blocks[2][5][4] = .dirt;
     climate[5] = @splat(.frozen);
-    var mesh = try tryExtractChunkSideDataWithClimate(allocator, .{ .blocks = &data }, @splat(.{}), &climate);
-    defer mesh.deinit(allocator);
-    const tops = mesh.blocks_grouped_by_side[@intFromEnum(voxel.Side.top)].items;
+    var surface = try tryExtractChunkSideDataWithClimate(allocator, .{ .blocks = &data }, @splat(.{}), &climate);
+    defer surface.deinit(allocator);
+    const tops = surface.blocks_grouped_by_side[@intFromEnum(voxel.Side.top)].items;
     for (appearances, 0..) |appearance, i| {
         try std.testing.expectEqual(appearance, tops[i].block_type);
         try std.testing.expectEqual(voxel.BlockType.grass, data.blocks[2][3][i * 2]);
@@ -117,9 +117,9 @@ test "neighbor masks cull matching faces and retain real exterior surfaces" {
     var neighbors: BoundaryMasks = @splat(.{});
     neighbors[@intFromEnum(voxel.Side.left)] = .{ .rows = @splat(std.math.maxInt(u32)) };
     neighbors[@intFromEnum(voxel.Side.top)] = .{ .rows = @splat(std.math.maxInt(u32)) };
-    var mesh = extractChunkSideData(allocator, .{ .blocks = &solid }, neighbors);
-    defer mesh.deinit(allocator);
-    for (mesh.blocks_grouped_by_side, 0..) |faces, i| {
+    var surface = extractChunkSideData(allocator, .{ .blocks = &solid }, neighbors);
+    defer surface.deinit(allocator);
+    for (surface.blocks_grouped_by_side, 0..) |faces, i| {
         const expected: usize = if (i == @intFromEnum(voxel.Side.left) or i == @intFromEnum(voxel.Side.top)) 0 else CHUNK_SIZE * CHUNK_SIZE;
         try std.testing.expectEqual(expected, faces.items.len);
     }
@@ -132,15 +132,15 @@ test "neighbor masks cull matching faces and retain real exterior surfaces" {
     try std.testing.expectEqual([3]u8{ 0, 8, 7 }, opened.blocks_grouped_by_side[0].items[0].coords);
 }
 
-fn exerciseFallibleMesh(allocator: std.mem.Allocator) !void {
+fn exerciseFallibleSurface(allocator: std.mem.Allocator) !void {
     var solid = @import("world_chunk_data.zig").WorldChunkData.initSolid();
-    var mesh = try tryExtractChunkSideData(allocator, .{ .blocks = &solid }, @splat(.{}));
-    defer mesh.deinit(allocator);
-    var copy = try mesh.tryClone(allocator);
+    var surface = try tryExtractChunkSideData(allocator, .{ .blocks = &solid }, @splat(.{}));
+    defer surface.deinit(allocator);
+    var copy = try surface.tryClone(allocator);
     defer copy.deinit(allocator);
     for (copy.blocks_grouped_by_side) |faces| try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE, faces.items.len);
 }
 
-test "mesh preparation and transfer cloning clean up every allocation failure" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseFallibleMesh, .{});
+test "surface preparation and transfer cloning clean up every allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseFallibleSurface, .{});
 }

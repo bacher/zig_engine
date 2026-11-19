@@ -120,7 +120,7 @@ three-pixel width and opacity, and translucent orange for involved blocks or mis
 support cells. See [placement diagnostics](block-placement.md#edits-and-diagnostics).
 
 The correction adds one cached block lookup per distinct diagnostic cell and a six-bit
-camera-facing face mask. It adds no world support searches or mesh rebuilds. A persistent
+camera-facing face mask. It adds no world support searches or surface rebuilds. A persistent
 11,440-byte storage buffer holds up to 65 instances (64 engine overlays plus an optional
 ordinary focused cell). The shader selects records with `instance_index`; fragments receive
 the same index without interpolation. Only the active prefix is uploaded, using 176 bytes
@@ -157,7 +157,7 @@ regressions compare instanced and individual draws at 20, 34, and 65 cells, incl
 correction masks and a visible-only focused cell. Profile GPU stroke coverage before raising
 the application preview bound; instancing does not reduce screen-space overdraw.
 
-The voxel grid stores exposed-face records, not a conventional indexed mesh or a dense GPU block array. Each record contains local block coordinates and a render-material ID in four bytes. Six lists group those records by outward face direction. The vertex shader generates six vertices per face and selects atlas UVs using the render material and direction.
+The voxel grid uses the `surface` representation: exposed-face records containing local block coordinates and a render-material ID in four bytes. Six lists group those records by outward face direction; fully occluded ordinary blocks contribute no records. The vertex shader generates six vertices per face and selects atlas UVs using the render material and direction. This compact payload reduces GPU storage and upload bandwidth.
 
 Its 4 MiB face buffer uses 1 KiB slots grouped into 64 KiB base spans. Ordinary allocations
 retain their size-class packing within a base span. Oversized chunk layers reserve two,
@@ -167,7 +167,7 @@ contiguous-space fragmentation; capacity preflight preserves resident geometry f
 
 World storage uses [`BlockType`](../src/engine/voxel/voxel_chunk.zig), with IDs 0–20 (7 reserved), `pallet = 23`, and
 `custom = 255`; carried items have a narrower persistence schema. `GPU_BlockInfo.block_type`
-uses the separate `RenderMaterial` enum. Shared IDs retain the same meanings, and meshing
+uses the separate `RenderMaterial` enum. Shared IDs retain the same meanings, and surface extraction
 adds two climate appearances for saved `grass = 3` cells:
 
 | Column climate | Render material | Appearance |
@@ -177,7 +177,7 @@ adds two climate appearances for saved `grass = 3` cells:
 | Frozen | `grass_frozen = 22` | Snow-textured top with ordinary soil sides and bottom. |
 
 [`world_engine_glue.zig`](../src/voxel_app/world_engine_glue.zig) applies the generator's
-column climate during both local and service mesh extraction. Saved cells remain grass;
+column climate during both local and service surface extraction. Saved cells remain grass;
 bare soil and sand keep their material appearances. The former packed-soil slot 7 is reserved;
 soil uses `dirt = 2` with optional grass cover. IDs 21 and 22 belong only
 to render payloads and are rejected by block and inventory persistence validation.
@@ -189,12 +189,12 @@ atlas texel is transparent. Their cube faces write depth and cast solid shadows.
 materials (IDs 16–20) use tinted existing atlas tiles. Climate cover changes the top
 appearance without changing stored soil or its interaction rules.
 
-Chunk metadata describes eight combinations of three directions, one direction from each axis. The draw's instance index encodes the chunk metadata index and the selected direction combination. The visible pass chooses a combination from the signed camera/chunk delta. When any delta component is zero, it draws opposite combinations 0 and 7 to cover all six sides. This selection affects submitted faces, not the authoritative mesh contents.
+Chunk metadata describes eight combinations of three directions, one direction from each axis. The draw's instance index encodes the chunk metadata index and the selected direction combination. The visible pass chooses a combination from the signed camera/chunk delta. When any delta component is zero, it draws opposite combinations 0 and 7 to cover all six sides. This selection affects submitted faces, not the authoritative surface contents.
 
 Each shadow cascade draws combinations 0 and 7 for every GPU-resident voxel chunk, regardless of camera direction. Thus the same resident geometry supplies both visible and shadow passes. Chunks that have no uploaded faces are absent from that loop; distant unloaded terrain does not cast voxel shadows.
 
 Custom cells (block value 255) do not enter the face lists and do not occlude neighboring
-ordinary faces. Separate descriptors accompany local/service mesh payloads. A custom-only
+ordinary faces. Separate descriptors accompany local/service surface payloads. A custom-only
 chunk can have zero ordinary faces. `VoxelGrid` retains its descriptors and uploads 48-byte
 records to a separate 4 MiB storage buffer. The forward pass submits custom blocks as
 separate instances in one draw after ordinary voxel/object geometry, before SSAO. Each shadow cascade also uses one
@@ -209,7 +209,7 @@ The CPU/WGSL layouts are part of the contract: chunk metadata is 112 bytes, face
 The [packed renderer](../src/engine/packed_renderer.zig) is an owner-neutral scene layer with
 its own color/shadow pipelines. Ordinary terrain shaders do not sample packaging. Application
 [packed geometry](../src/voxel_app/packed_geometry.zig) derives warehouse sources from the same
-presentation snapshot as empty-pallet icons and disabled crosses. Stock changes do not remesh
+presentation snapshot as empty-pallet icons and disabled crosses. Stock changes do not rebuild
 terrain. Logical collision and player recovery follow current stock independently of GPU work.
 
 Cube goods use a flat exposed-face list carrying local coordinates, material and direction:
@@ -249,10 +249,10 @@ shadow draw loops, so construction needs no additional shader or render pass. Pe
 miniatures retain their existing renderer. The progress bitmap and simulation's ownership do
 not prescribe the GPU layout.
 
-Construction meshing visits precomputed target groups for the changed chunk. It removes
+Construction surface extraction visits precomputed target groups for the changed chunk. It removes
 internal faces between fulfilled targets across chunks, separate sites, and the wrapped x
 seam. When local terrain cells are available it also removes faces hidden by that terrain.
-Mesh-only subscriptions may retain invisible faces against static terrain whose interior
+Surface-only subscriptions may retain invisible faces against static terrain whose interior
 cells are unavailable; they still remove internal construction faces. This conservative
 rendering rule does not permit collision or interaction through unknown world data.
 
@@ -264,7 +264,7 @@ and one temporary set indexes bounded optimistic fulfillments for that rebuild. 
 and successful-install reconciliation currently scan the loaded chunks and their site
 references each frame. These are client presentation costs, separate from simulation work.
 
-Terrain publication includes subscription, chunk, mesh, and composition revisions. Client
+Terrain publication includes subscription, chunk, surface, and composition revisions. Client
 collision and interaction can use coherent materialized terrain before the progress or GPU
 streams catch up. A transferred reference, removal of a previously known reference, or a
 matching retirement watermark proves the target's terrain owner; an old empty snapshot

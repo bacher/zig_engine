@@ -181,10 +181,17 @@ workload and measured scope.
 | Request | Meaning |
 | --- | --- |
 | Load a column/range in block mode | Subscribe each chunk to full block snapshots and neighbor occupancy planes. |
-| Load a column/range in mesh mode | Subscribe each chunk to exposed-face geometry or unreachable status. |
+| Load a column/range in surface mode | Subscribe each chunk to exposed-face geometry or unreachable status. |
 | Evict a chunk with its token | End that subscription only if the supplied token is still current. |
 | Submit a block operation | Apply one `put(type)` or `remove` at validated global storage block coordinates. |
 | Submit up to 64 block operations | Admit the entire packet and execute its individually identified operations in order. |
+
+The two representations are `blocks` and `surface`. Surface payloads contain local block
+coordinates and render materials for exposed faces, grouped by the six outward sides;
+fully occluded ordinary blocks are omitted. Custom blocks travel as separate draw records.
+The voxel shader generates face vertices from these compact records, reducing GPU storage
+and upload bandwidth. Surface data cannot reconstruct the full block contents for queries
+or edits.
 
 A load is a continuing subscription, not just a one-time fetch. Its request ID becomes the subscription token for the requested chunks. Loading a different representation or reloading replaces the token; delayed replies and eviction requests from an older generation must not affect the new subscription.
 
@@ -236,7 +243,7 @@ results. Do not retry an already submitted packet as a new submission merely
 because its results are still pending: that creates new command identities.
 Each operation holds its admission slot until its result is collected. The last
 batch ID gates subsequent player checkpoints; existing save fences, loading,
-journal retries, snapshot/mesh publication, and shutdown rules apply per command.
+journal retries, snapshot/surface publication, and shutdown rules apply per command.
 The caller may immediately reuse/free its input slice after submission.
 
 This optional transport path reduces producer synchronization and counter work.
@@ -250,17 +257,17 @@ remains a separate option. See [submission validation and measurements](validati
 | --- | --- |
 | `subscription_id` | Current request/subscription generation and representation. |
 | `chunk_revision` (`u32`) | Authoritative block contents and flags; advances on successful edits and permanent reveals. Optimistic edits do not advance it. |
-| `mesh_revision` (`u64`) | Meshing-input invalidation, including neighbor changes. Zero means untouched inputs; later values come from the service's increasing invalidation sequence. |
+| `surface_revision` (`u64`) | Invalidation of surface extraction inputs, including neighbor changes. Zero means untouched inputs; later values come from the service's increasing invalidation sequence. |
 
-An interior edit changes its own chunk/mesh. A face/edge/corner edit additionally invalidates the one/two/three touched face neighbors. A neighbor's mesh revision may change without its block contents or chunk revision changing. This is why chunk revision alone cannot certify reusable geometry.
+An interior edit changes its own chunk/surface. A face/edge/corner edit additionally invalidates the one/two/three touched face neighbors. A neighbor's surface revision may change without its block contents or chunk revision changing. This is why chunk revision alone cannot certify reusable geometry.
 
-When replacing cached blocks with a snapshot, the render client compares the old and reconciled boundary occupancy masks. It rebuilds face neighbors only for changed planes; interior edits and material-only changes rebuild the edited chunk. The first accepted block snapshot in each subscription, including a promotion that still retains old blocks, conservatively invalidates all loaded face neighbors. Removing a local meshing dependency does the same.
+When replacing cached blocks with a snapshot, the render client compares the old and reconciled boundary occupancy masks. It rebuilds face neighbors only for changed planes; interior edits and material-only changes rebuild the edited chunk. The first accepted block snapshot in each subscription, including a promotion that still retains old blocks, conservatively invalidates all loaded face neighbors. Removing a local surface extraction dependency does the same.
 
-The worker batches currently queued requests, coalesces affected mesh builds, builds once for the relevant final state, and distributes owned copies to mesh subscribers. It sends unchanged blocks again only when needed for a block snapshot, such as a flag-changing reveal; neighbor-only occupancy updates use boundary payloads.
+The worker batches currently queued requests, coalesces affected surface builds, builds once for the relevant final state, and distributes owned copies to surface subscribers. It sends unchanged blocks again only when needed for a block snapshot, such as a flag-changing reveal; neighbor-only occupancy updates use boundary payloads.
 
-For each client, related snapshots, boundary updates, mesh results, and command acknowledgments are placed in one `ResponsePackage`. Final block snapshots are certified against final neighbor inputs before publication. Render consumers apply whole packages before any local rebuild/upload, so related updates cannot be partly applied across rendered frames. Several packages may be consumed in one frame before the one local rebuild phase.
+For each client, related snapshots, boundary updates, surface results, and command acknowledgments are placed in one `ResponsePackage`. Final block snapshots are certified against final neighbor inputs before publication. Render consumers apply whole packages before any local rebuild/upload, so related updates cannot be partly applied across rendered frames. Several packages may be consumed in one frame before the one local rebuild phase.
 
-Initial distant mesh loads are queued. The worker performs at most one between request batches, checking for newly queued edits/block loads again afterward. A mesh build is synchronous on that worker; this is prioritization between builds, not preemption inside a build.
+Initial distant surface loads are queued. The worker performs at most one between request batches, checking for newly queued edits/block loads again afterward. A surface build is synchronous on that worker; this is prioritization between builds, not preemption inside a build.
 
 ## Optimistic cache and frame reconciliation
 
@@ -276,22 +283,22 @@ The world update sequence is:
 4. For each package, retire all acknowledged commands first, including failed commands, then accept payloads with current tokens/modes/revisions.
 5. Replace accepted block snapshots and replay remaining pending operations over them.
 6. Advance local player movement/recovery against the resulting cache, then refresh streaming/pinning again.
-7. Rebuild dirty local meshes once from the resulting cache and neighbor inputs.
+7. Rebuild dirty local surfaces once from the resulting cache and neighbor inputs.
 8. Preflight and upload queued face geometry.
 
-A failed operation's snapshot rolls back that edit without losing later pending edits. An acknowledgment remains useful even after the corresponding subscription was evicted: it retires pending work, but its stale payload cannot resurrect the evicted chunk. Older chunk/mesh/boundary revisions are rejected within their relevant cache paths.
+A failed operation's snapshot rolls back that edit without losing later pending edits. An acknowledgment remains useful even after the corresponding subscription was evicted: it retires pending work, but its stale payload cannot resurrect the evicted chunk. Older chunk/surface/boundary revisions are rejected within their relevant cache paths.
 
 This is asynchronous reconciliation. Local cached blocks may temporarily differ from the service because they include pending edits. GPU geometry represents the state available to the last completed upload.
 
 ## Streaming and representation handoffs
 
-The normal camera neighborhood uses Chebyshev distance: the largest axis chunk delta, with the shortest wrapped x delta. Chunks at distance at most 1 are requested as blocks (a 3-by-3-by-3 core); distance at most 3 is the total display neighborhood (7 by 7 by 7), with the rest requested as meshes. Neighborhoods are clipped at y/z storage boundaries. Requests proceed from nearest shells outward.
+The normal camera neighborhood uses Chebyshev distance: the largest axis chunk delta, with the shortest wrapped x delta. Chunks at distance at most 1 are requested as blocks (a 3-by-3-by-3 core); distance at most 3 is the total display neighborhood (7 by 7 by 7), with the rest requested as surfaces. Neighborhoods are clipped at y/z storage boundaries. Requests proceed from nearest shells outward.
 
 27 block chunks is a steady-state target around each relevant position. The player's 3-by-3-by-3 collision neighborhood is pinned in block mode, including while its camera is detached for spectating. Outstanding edits also pin the edited chunk and any touched face neighbors until acknowledgment. Pins can extend beyond the current display box. A distant spectator camera therefore retains both its display/block neighborhood and the player's collision neighborhood. In-flight representation changes can retain more CPU blocks temporarily.
 
-For demotion from blocks to mesh, the old blocks, masks, and display remain available until the new mesh/unreachable response arrives. Then the CPU blocks and fallback masks are released. Retained demoted blocks no longer override authoritative neighbor planes because their block subscription has ended.
+For demotion from blocks to surface, the old blocks, masks, and display remain available until the new surface/unreachable response arrives. Then the CPU blocks and fallback masks are released. Retained demoted blocks no longer override authoritative neighbor planes because their block subscription has ended.
 
-For promotion from mesh to blocks, the old display remains until blocks and neighbor masks arrive. The application can reuse the authoritative geometry if both revisions match and there are no pending edits affecting its own or neighboring meshing inputs. Otherwise it rebuilds locally. Mesh-mode state on the main thread retains version metadata; received face arrays and separate custom block descriptors move directly to the upload queue.
+For promotion from surface to blocks, the old display remains until blocks and neighbor masks arrive. The application can reuse the authoritative geometry if both revisions match and there are no pending edits affecting its own or neighboring surface extraction inputs. Otherwise it rebuilds locally. Surface-mode state on the main thread retains version metadata; received face arrays and separate custom block descriptors move directly to the upload queue.
 
 A chunk with zero extracted faces still has a live subscription. It may contain solid blocks, and later edits can expose geometry. Empty chunks, zero-face chunks, and unreachable chunks are different states.
 
@@ -301,7 +308,7 @@ The service and local cache use the same face extractor. It walks solid blocks a
 
 A boundary plane has one bit per block, represented as 32 rows of 32 bits: 128 bytes per plane and 768 bytes for six planes. Opposite faces use matching, unmirrored coordinates. Own masks update at most three bits per block edit and also derive the six solid-face flags. Masks stay on the CPU.
 
-Block subscriptions receive authoritative neighbor masks with their initial snapshot and coalesced updates when neighbor boundary occupancy changes, even if the changed neighbor lies outside the client's requested box. For local meshing, a loaded block-mode neighbor's own masks take precedence, including optimistic edits. Other neighbors use the service's fallback masks. Missing dependencies temporarily count as air and expose faces.
+Block subscriptions receive authoritative neighbor masks with their initial snapshot and coalesced updates when neighbor boundary occupancy changes, even if the changed neighbor lies outside the client's requested box. For local surface extraction, a loaded block-mode neighbor's own masks take precedence, including optimistic edits. Other neighbors use the service's fallback masks. Missing dependencies temporarily count as air and expose faces.
 
 Every accepted fallback update is retained, even when it currently changes no geometry. The application rebuilds only if changed occupancy meets a solid boundary block and that plane is not overridden by a loaded optimistic neighbor. This preserves inputs for later placements/handoffs without needless rebuilds.
 
@@ -311,7 +318,7 @@ The extractor does not depend on camera position or merge adjacent faces into la
 
 A generated chunk can be marked unreachable when all six neighboring walls enclosing it are fully solid. Terrain certification uses the column heightmap plus a one-block strip beyond each horizontal face. Outer y/z boundary chunks remain reachable, since an enclosing wall is absent; x is periodic.
 
-Unreachable block-mode chunks still receive full blocks but skip rendering. Unreachable mesh-mode chunks receive status and revisions without face arrays/GPU uploads. Both remain subscribed. Opening a neighboring wall reveals the chunk locally immediately and authoritatively when the edit commits, triggering the appropriate payload for each subscriber.
+Unreachable block-mode chunks still receive full blocks but skip rendering. Unreachable surface-mode chunks receive status and revisions without face arrays/GPU uploads. Both remain subscribed. Opening a neighboring wall reveals the chunk locally immediately and authoritatively when the edit commits, triggering the appropriate payload for each subscriber.
 
 Reveals are permanent: rebuilding the enclosing wall does not set the unreachable flag again. The service increments the revealed chunk's revision and retains that state even if it had not previously been subscribed.
 
@@ -385,8 +392,8 @@ use the common retry ledger, and reconcile stock/inventory against evaluated-com
 chunk discovery covers the whole reserved envelope; functional pins keep needed objects through
 visual eviction. Missing nearby object data blocks cargo-dependent queries. Packed geometry uses
 all member chunks reconstructed from known bounds, even if only one discovery chunk is resident.
-Block and mesh replies carry complete auxiliary pallet lists, so cargo/empty base/icons can change
-without terrain remeshing. See [packed blocks](packed-blocks.md) and
+Block and surface replies carry complete auxiliary pallet lists, so cargo/empty base/icons can change
+without rebuilding terrain surfaces. See [packed blocks](packed-blocks.md) and
 [warehouse rendering validation](validation/warehouse-rendering.md).
 
 The simulation worker initially loads the central chunk column, finds the surface at its horizontal midpoint, then evicts those subscriptions. It submits one dirt put, waits for the result, and waits two seconds between subsequent operations. A successful put switches the next action to remove; a failed put retries a put. Removal switches back to putting. It communicates only through its own service endpoint, so visible changes arrive on the main thread through ordinary subscriptions. This is a concurrency example, not a broader NPC simulation system.
@@ -398,7 +405,7 @@ The simulation worker initially loads the central chunk column, finds the surfac
 | [`world.zig`](../src/voxel_app/world.zig) | Contents, edit preconditions, replay/rollback, stale snapshots, and reveals. |
 | [`world_data_service.zig`](../src/voxel_app/world_data_service.zig) | Queue ordering, conflicts, tokens, broadcasts/packages, revisions, masks, eviction, caches, and shutdown. |
 | [`standing_space.zig`](../src/voxel_app/standing_space.zig), [`block_collision.zig`](../src/voxel_app/block_collision.zig) | Supported-space search, clearance versus real support, finite bounds, nearest offsets, and shared collision geometry. |
-| [`main.zig`](../src/voxel_app/main.zig) | Streaming/pinning, handoffs, package application, mesh reuse, mask precedence, camera tools, and capacity fallback. |
+| [`main.zig`](../src/voxel_app/main.zig) | Streaming/pinning, handoffs, package application, surface reuse, mask precedence, camera tools, and capacity fallback. |
 | [`block_targeting.zig`](../src/voxel_app/block_targeting.zig) | Camera rays, candidate cube reach by nearest vertex, hit faces, bounds, missing chunks, and wrapped seams. |
 | [`world_generator.zig`](../src/voxel_app/world_generator.zig), [`natural_generator.zig`](../src/voxel_app/natural_generator.zig), [`generation_tests.zig`](../src/voxel_app/generation_tests.zig) | Natural/flat profiles, deterministic geography, material oracle, periodic X, and enclosure certification. |
 | [`generation_desert.zig`](../src/voxel_app/generation_desert.zig), [`generation_geography.zig`](../src/voxel_app/generation_geography.zig) | Dunes/flats fields, lowland slopes and shore transitions, mountain integration, and climate-appropriate feet versus exposed upper/steeper stone. |

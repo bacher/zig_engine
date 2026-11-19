@@ -37,7 +37,7 @@ Workload median milliseconds, again listing both run medians.
 
 Plains, deposit-heavy, forest and vertical fills improve in this comparison. Water/empty-dominated ocean, polar and several coastal fills regress by a few microseconds because the uniform loop prepares floor and candidate inputs for every horizontal column even when all cells take early material exits. This evidence does not support a general speedup claim.
 
-All 22 site digests, face counts and chunk/mesh requested-memory counters match across all four paired runs. Start digests and metadata fingerprints match for both beach settings. Each run also reports matching derived mesh, boundary and climate hashes after eviction and restart. The start digest is `ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a`; metadata fingerprint is `d17867cf8466f4cb`.
+All 22 site digests, face counts and chunk/surface requested-memory counters match across all four paired runs. Start digests and metadata fingerprints match for both beach settings. Each run also reports matching derived surface, boundary and climate hashes after eviction and restart. The start digest is `ff545b0034f3e164fa9b6aeca23bcf716fe836a8f51838be17211911a75f4c7a`; metadata fingerprint is `d17867cf8466f4cb`.
 
 Identical size counters: 7 preparation allocations; 2,122,224 peak requested preparation bytes; 418,288 live prepared bytes; 27,200 column bytes, including 27,168 natural-column bytes; 64 cached columns; 1,740,800 retained-column upper-bound bytes; 32,768 chunk scratch stack bytes.
 
