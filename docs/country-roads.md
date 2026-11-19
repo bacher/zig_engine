@@ -62,7 +62,7 @@ Unformed sections use full-cube collision; formed sections use a solid convex vo
 the cell floor to the inclined surface.
 
 Custom cells neither emit ordinary voxel faces nor hide neighboring ordinary faces.
-Boundary masks and enclosure flags follow the same rule. Both local and authoritative mesh
+Boundary masks and enclosure flags follow the same rule. Both local and authoritative surface
 payloads carry separate custom draw descriptors. Each descriptor defines one independent
 block, submitted as an instance after ordinary geometry, with scene depth, atlas textures,
 normals, post-processing, and directional shadows. Custom-only chunks remain renderable
@@ -74,7 +74,7 @@ draws even if ordinary uploads are waiting for capacity. Custom records are rebu
 when resident custom descriptors change; ordinary-only chunk changes leave the buffer clean.
 Instances share up to two draws per pass, grouping formed slopes (36 vertices) separately
 from unformed blocks (198 vertices). Both groups use the custom renderer in the forward
-pass and three shadow cascades. Their geometry stays outside chunk meshes.
+pass and three shadow cascades. Their geometry stays outside chunk surfaces.
 
 Formation and reversion update every affected chunk's revision and travel in the service's
 atomic response packages. Saved orientations survive subscription eviction in service
@@ -92,7 +92,7 @@ mutation, and restore/evaluate its road transition before advancing to the next 
 Undo records are rebuilt against that baseline. Earlier commands cannot acquire formations
 caused by later materials, and removing a member revokes ownership before a later replacement
 can form a crossing. Rejections use the same rebase for remaining commands and invalidate
-the edited cell's neighboring meshes. Successful acknowledgments retire commands in service
+the edited cell's neighboring surfaces. Successful acknowledgments retire commands in service
 submission order, retaining their effects as the baseline for later pending commands.
 
 Pending formations retain their chosen direction when later crossings make the final pattern

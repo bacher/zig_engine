@@ -69,7 +69,7 @@ the other depth-1 comparisons remain near parity. No timing threshold is asserte
 
 These measurements concern retained-queue bookkeeping only. They exclude
 request synchronization, physical validation, terrain/progress/inventory mutation,
-meshing, snapshots, persistence I/O, and client publication. They do not establish
+surface extraction, snapshots, persistence I/O, and client publication. They do not establish
 whole-service throughput, NPC capacity, or an improvement for edits that never
 enter the retained queue. All per-command result, ordering, retry, save-prefix,
 and payload ownership semantics remain unchanged.

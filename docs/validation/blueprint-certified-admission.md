@@ -103,7 +103,7 @@ cases have no nearby constructions, 14,336 real rebar cells, or 14,336 pending r
 targets in six nonoverlapping sites. Definitions and resident-world setup are
 excluded. Timed stages are detached region collection, snapshot cloning and helper
 preparation. They exclude loading/generation, service scheduling, journal/source
-waits, final preflight/publication, persistence, client meshing and rendering.
+waits, final preflight/publication, persistence, client surface extraction and rendering.
 These are helper measurements, not whole-server throughput or FPS measurements.
 
 ## Admission results

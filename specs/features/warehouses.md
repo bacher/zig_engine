@@ -48,9 +48,9 @@ historical context, not a requirement to restore them for warehouses.
   throughput, coherent resource ownership, simulation precedence over conflicting player
   edits, bounded local work, and explicit discussion of gameplay simplifications.
 - [Voxel world](../../docs/voxel-world.md) separates authoritative world data, predicted
-  client state, and GPU geometry. Block and mesh subscriptions already support custom draws.
+  client state, and GPU geometry. Block and surface subscriptions already support custom draws.
 - [Country roads](../../docs/country-roads.md) demonstrate pattern recognition, saved
-  metadata, shape-aware collision, and instanced geometry outside ordinary terrain meshes.
+  metadata, shape-aware collision, and instanced geometry outside ordinary terrain surfaces.
   They do not yet supply a general structure registry or warehouse stock protocol.
 - [Construction rules](../../docs/block-placement.md), [blueprints](blueprints.md), and
   [monotone additions](monotone-block-additions.md) distinguish physical terrain and planned
@@ -239,9 +239,9 @@ historical context, not a requirement to restore them for warehouses.
 
 ### Streaming, persistence, and performance
 
-- R24: Both block and mesh subscriptions expose warehouse discovery references; object
+- R24: Both block and surface subscriptions expose warehouse discovery references; object
   snapshots/updates provide enough state to reconstruct contents independently of terrain
-  geometry. Object-only changes must reach relevant subscribers even if a chunk mesh has
+  geometry. Object-only changes must reach relevant subscribers even if a chunk surface has
   zero faces or does not change. Reservation-only updates change client admission state
   even when C is unchanged. R60/Q24 selects independent object subscriptions and complete
   snapshots; concrete transport encoding and budgets remain implementation choices.
@@ -253,8 +253,8 @@ historical context, not a requirement to restore them for warehouses.
   R52/Q12 requires current object state or unknown-data guards for nearby cargo
   collision/interaction. The distant visual allowance does not establish empty storage.
 - R26: Packed geometry participates in scene depth, lighting, shadows, and post-processing.
-  Drawing after the chunk mesh means another world-geometry path, not a GUI overlay.
-  Unchanged camera frames reuse source data. Stock changes must not require terrain remeshing.
+  Drawing after the chunk surface means another world-geometry path, not a GUI overlay.
+  Unchanged camera frames reuse source data. Stock changes must not require rebuilding terrain surfaces.
   Changes only to promised capacity I do not require rebuilding cargo geometry. Q29 selects
   explicit-direction face records and instanced irregular goods in dedicated packed pipelines;
   ordinary terrain shaders incur no packaging sampling or conditional packaging work.
@@ -563,7 +563,7 @@ historical context, not a requirement to restore them for warehouses.
   as empty terrain. Known halo clearance remains traversable under ordinary collision rules
   while its placement claim stays enforced. Queries use local entries and WarehouseId
   lookup without scanning all warehouses. Deduplicate presentation ownership by warehouse
-  identity across chunk references and mesh/block handoffs. Reject stale object/revision/
+  identity across chunk references and surface/block handoffs. Reject stale object/revision/
   subscription lifetimes. Index encoding/recovery and object subscription/retention mechanics
   remain implementation review; loading one designated pallet chunk is not required.
 
@@ -663,7 +663,7 @@ historical context, not a requirement to restore them for warehouses.
 
 ### Warehouse object subscriptions
 
-- R60: Use Q24's independent, deduplicated object subscriptions for both block and mesh clients.
+- R60: Use Q24's independent, deduplicated object subscriptions for both block and surface clients.
   Start from chunk discovery and functional dependencies; retain needed logical state independently
   of GPU residency and release subscriptions when no reference/dependency remains. Publish compact
   complete snapshots in the first implementation, coalescing to the latest revision without a
@@ -1422,7 +1422,7 @@ of GPU preparation. Missing data never proves a free player-recovery destination
 Any intersecting chunk can discover WarehouseId. Its object snapshot describes the complete
 footprint; the terrain chunk containing the layout origin does not need to be loaded.
 Deduplicate one presentation owner per registration across references, with object revision
-and subscription-lifetime guards through mesh/block handoffs, eviction, and delayed replies.
+and subscription-lifetime guards through surface/block handoffs, eviction, and delayed replies.
 This removes the former physical-anchor dependency without requiring writable stock copies
 in chunks. Q24 selects subscription/retention behavior and complete snapshots; concrete
 encoding, limits, and integration remain implementation review, including teleport,
@@ -1792,7 +1792,7 @@ holds while readers/encoding require them. A single mutation executor does not m
 snapshot readers safe by itself. Existing independent read/encode/write work can remain outside
 the mutation executor; disk/network waits and GPU work do not belong in its live commit section.
 
-The current service drains request batches and prepares/publishes dirty meshes on its worker.
+The current service drains request batches and prepares/publishes dirty surfaces on its worker.
 Reusing it unchanged does not demonstrate sustainable simulation throughput. Give competing
 work bounded turns and apply simulation conflict precedence explicitly, preserving command and
 save fences; ordinary FIFO order does not establish that priority. Measure throughput and
@@ -1858,8 +1858,8 @@ for the first implementation.** Q12 supplies envelope-wide discovery, independen
 and unknown-data guards. Q25 records incremental publication as a follow-up to evaluate.
 
 On the first reference from a subscribed terrain chunk, request/subscribe to the warehouse by
-identity. Block and mesh modes use the same object channel. Multiple chunk references share
-one subscription/cache entry per registration; changes between mesh and block representations
+identity. Block and surface modes use the same object channel. Multiple chunk references share
+one subscription/cache entry per registration; changes between surface and block representations
 must not create duplicate owners or discard an otherwise needed snapshot. Near collision,
 targeting, player recovery, open management, and pending commands can retain object state in
 addition to terrain references. Requests are driven by reference/dependency changes, not a
@@ -1880,7 +1880,7 @@ required result. Resource operations still all execute; client presentation need
 intermediate count. Unregister publishes retirement for that registration. A late snapshot
 cannot resurrect it, and late operation replies follow Q23 without regressing current state.
 Stock/configuration updates do not rewrite fixed chunk discovery entries or require rebuilding
-ordinary terrain meshes solely to display changed cargo.
+ordinary terrain surfaces solely to display changed cargo.
 
 Release a client subscription after its final chunk reference and functional retention reason
 are gone. Keep logical state needed by movement/interaction independently of GPU residency.
@@ -1956,7 +1956,7 @@ recovery relocation, so no walkable route or swept path through the cargo is req
 Center the player's horizontal position within the chosen halo cell and put the feet at
 z0. The current body is 0.6 blocks wide and 1.8 blocks tall, fitting within one horizontal
 cell and two vertical cells of the reserved six-cell height. Validate the whole body against
-current logical terrain/cargo, playable bounds, and wrapped coordinates; GPU mesh residency
+current logical terrain/cargo, playable bounds, and wrapped coordinates; GPU surface residency
 is irrelevant. R37 protects floors under pallets only. The halo guarantees an empty volume,
 not a supporting floor; this decision adds no new floor/admission rule. Existing recovery
 permits clear unsupported space, and ordinary gravity applies after relocation.
@@ -2046,7 +2046,7 @@ The vertex shader expands each record into a quad. Do not group faces by directi
 terrain-style camera-view index tables. Submit all directions in one batched category draw;
 ordinary hardware backface culling is permitted. Remove internal faces only where the adjacent
 rendered shape fully occludes them: full-cell collision alone cannot justify culling against
-an irregular item with holes. Stock changes rebuild affected sources, not terrain meshes.
+an irregular item with holes. Stock changes rebuild affected sources, not terrain surfaces.
 
 Use a dedicated packed fragment shader to composite resource and pallet/strap artwork on
 cube faces. Cube packaging has no internal pallet geometry. No packaging samples or branches
@@ -2123,12 +2123,12 @@ that runtime implementation or performance validation has been completed.
   disabled and stock is conserved; its empty base pallets display red crosses while occupied
   columns emit no marker. Goods may repack from count/configuration alone, with detailed
   reduced-capacity policy under Q2.
-- AC20: GIVEN mesh-only terrain subscriptions and a warehouse subscription WHEN stock changes
-  THEN the object update reaches the client and updates derived goods independently of terrain meshes.
+- AC20: GIVEN surface-only terrain subscriptions and a warehouse subscription WHEN stock changes
+  THEN the object update reaches the client and updates derived goods independently of terrain surfaces.
 - AC21: GIVEN visible member chunks without the object snapshot WHEN drawing the distant warehouse
   THEN missing cargo is permitted; WHEN current object data arrives THEN contents become
   renderable even if the terrain chunk containing the layout origin is still absent.
-- AC22: GIVEN an eviction, mesh/block handoff, or re-registration at the same origin WHEN a
+- AC22: GIVEN an eviction, surface/block handoff, or re-registration at the same origin WHEN a
   late old response arrives THEN it cannot duplicate contents or revive the previous registration.
 - AC23: GIVEN a save during accepted warehouse/player changes WHEN reopening THEN stock,
   carried items, material, bounds, and registration describe one coherent captured state.
@@ -2556,7 +2556,7 @@ that runtime implementation or performance validation has been completed.
   current inventory/object snapshots cannot regress, and persistent delivery cargo, promises,
   and task completion retain their own coherent recovery semantics.
 
-- AC156: GIVEN several block/mesh chunk references to one registration WHEN discovered or
+- AC156: GIVEN several block/surface chunk references to one registration WHEN discovered or
   switched between representations THEN one object subscription/cache entry serves them without
   requiring the layout-origin chunk or duplicating warehouse presentation.
 - AC157: GIVEN multiple accepted warehouse changes before publication WHEN a client update
@@ -2654,7 +2654,7 @@ that runtime implementation or performance validation has been completed.
   not rebuild every unchanged source. Color/depth/shadows agree on cutout and geometric holes.
 - AC185: GIVEN a base column gaining or losing cargo WHEN its visual snapshot is installed THEN
   goods, free-base pallet visibility and markers change coherently, without duplicate pallet
-  surfaces, stale icons, or a terrain remesh caused solely by the stock change.
+  surfaces, stale icons, or a terrain rebuild caused solely by the stock change.
 
 ## Constraints
 
@@ -2763,7 +2763,7 @@ implementation choices below against those contracts:
 - Specify pallet encoding, simulation object and chunk-reference records, registration/revision
   identity, and save/recovery order. Keep stock canonical and restore claims before dependent edits.
 - Specify stock/configuration operations, delivery-reservation coordination, retries, and
-  optimistic rebase. Review object-state updates, unregister tombstones, mesh/block handoffs,
+  optimistic rebase. Review object-state updates, unregister tombstones, surface/block handoffs,
   near-object retention, and stale responses against resource and subscription invariants.
 - Extend logical collision/targeting and the existing bounded player-recovery path. Review
   Q26 halo fallback and bounded dependency loading when no candidate is ready, without deleting
@@ -2823,8 +2823,8 @@ server access. Delivery acceptance must include aggregate capacity reservation; 
 consumes that delivery's promise instead of issuing an unreserved put. These are coherent
 transition contracts, not a requirement for separate network round trips or a particular
 transaction API. Clients need sufficient reserved-capacity state for put prediction.
-Subscriptions need object updates/tombstones independent of ordinary meshes.
-Block and mesh subscriptions also expose Q12's chunk-local discovery entries; nearby
+Subscriptions need object updates/tombstones independent of ordinary surfaces.
+Block and surface subscriptions also expose Q12's chunk-local discovery entries; nearby
 dependent queries must be able to request current state by WarehouseId.
 Registration identity, failures, retries, and prediction rebase need concrete contracts.
 

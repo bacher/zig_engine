@@ -80,7 +80,7 @@ or road cells become a slope. Unregister restores surviving members' ordinary vi
 rendering both replacement geometry and suppressed members. Appearance alone grants neither
 collision nor support. Warehouse contents use reusable [packed blocks](packed-blocks.md).
 
-Block and mesh consumers need relevant discovery/object state independently of terrain faces.
+Block and surface consumers need relevant discovery/object state independently of terrain faces.
 Derived geometry needs a clear owner and lifetime through handoffs, eviction, and late replies.
 Visual omission, logical unknown-data handling, and functional retention are separate policies;
 warehouse [Q12](../specs/features/warehouses.md#q12--missing-warehouse-state-discovery-and-streaming-ownership)

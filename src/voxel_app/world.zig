@@ -66,7 +66,7 @@ pub const ChunkContent = union(enum) {
     }
 };
 
-/// Authoritative block contents and flags. Meshing additionally consults face neighbors.
+/// Authoritative block contents and flags. Surface extraction additionally consults face neighbors.
 pub const WorldChunk = struct {
     content: ChunkContent,
     flags: ChunkFlags,
@@ -1127,7 +1127,7 @@ pub const World = struct {
         return (self.physicalBlock(block) orelse return error.ChunkNotReceived) != .none;
     }
 
-    pub fn hasPendingMeshDependency(self: *const World, coords: ChunkCoords) bool {
+    pub fn hasPendingSurfaceDependency(self: *const World, coords: ChunkCoords) bool {
         for (self.pending_operations.items) |pending| {
             for (pending.road_undo.items) |entry| {
                 const road_coords, _ = splitBlockCoords(entry.block);

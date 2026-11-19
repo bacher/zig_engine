@@ -6,7 +6,7 @@ pub const epsilon: f64 = 0.0000001;
 
 pub const MovementCollision = enum { none, full_cube };
 
-/// A type property shared by all instances. Occupancy/meshing rules stay separate.
+/// A type property shared by all instances. Occupancy/surface extraction rules stay separate.
 pub fn movementCollision(block: engine.voxel_chunk.BlockType) MovementCollision {
     return switch (block) {
         .none, .pallet => .none,

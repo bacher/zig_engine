@@ -16,7 +16,7 @@ preparation budget to combine repeated changes and limit work started in one fra
 
 The first stage's miniature cache is implemented; the FIFO preparation budget remains a
 follow-up. The newer [construction ownership implementation](construction-state-ownership.md)
-adds a separate culled mesh for filled targets. The relaxed miniature/terrain policy below
+adds a separate culled surface for filled targets. The relaxed miniature/terrain policy below
 does not weaken its dynamic/static geometry handoff: retain filled geometry until the matching
 terrain replacement is installed. These are separate publication contracts.
 
@@ -79,10 +79,10 @@ frame smoothness.
   the same client call, independently of terrain upload; expose no prepared handle or
   persistent staged generation. Release every retired owned buffer/binding exactly once
   through the graphics resource lifecycle.
-- R10: Preserve the existing terrain extraction, service-mesh acceptance and upload paths
+- R10: Preserve the existing terrain extraction, service-surface acceptance and upload paths
   in the cache PR. Miniature maintenance must run even when terrain uploads cannot fit.
   Do not add a terrain/miniature transaction, retained paired batch or additional streaming
-  mesh owner merely to coordinate the two displays.
+  surface owner merely to coordinate the two displays.
 - R11: Remove dirty/queued miniature work and release cached sources on unload or teardown.
   Validate asynchronous responses against the active subscription; late old responses
   cannot restore evicted cache state. A reload builds from the current logical state.
@@ -156,7 +156,7 @@ frame smoothness.
   quarter-size placement, textures and depth agree, and diagnostics/previews/rails retain
   their behavior.
 - AC10: GIVEN local edits, accepted/rejected replies, blueprint publications/fulfillments
-  and mesh/block handoffs WHEN reconciliation completes THEN logical state stays correct,
+  and surface/block handoffs WHEN reconciliation completes THEN logical state stays correct,
   affected miniature chunks become dirty and converge, neighbor-only terrain changes reuse
   sources and no-op blueprint replays emit no visual notification.
 - AC11: GIVEN allocation failure or miniature capacity pressure WHEN source replacement
@@ -178,7 +178,7 @@ GPU resource retirement is mandatory even though visual pairing is relaxed.
 ## Out of Scope
 
 Strict terrain/miniature pairing, persistent prepared GPU generations, upload-capacity
-transactions, new service-mesh staging, mandatory dirty age, NPC/economy scheduling,
+transactions, new service-surface staging, mandatory dirty age, NPC/economy scheduling,
 authoritative batching/protocol changes, persistence changes, per-cell terrain patching,
 exposed-face miniature culling, world-wide visual transactions, hard visual-latency
 guarantees, distance priorities and renderer-wide memory-budget redesign.
@@ -188,7 +188,7 @@ guarantees, distance priorities and renderer-wide memory-budget redesign.
 ### Approach
 
 The first PR adds a separate miniature dirty set while retaining main's immediate terrain
-drain and service-mesh path. Collect only affected chunks' latest targets/occupancy, replace
+drain and service-surface path. Collect only affected chunks' latest targets/occupancy, replace
 their cache synchronously and update transforms during drawing. Run cache maintenance
 before terrain-capacity early returns. Observe effective blueprint commits and compare
 pending-operation cell materials across reconciliation so prediction replay cannot leave

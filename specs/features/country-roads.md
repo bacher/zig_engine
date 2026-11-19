@@ -9,7 +9,7 @@ created: 2026-10-13
 Add solid and adaptive country road blocks. Supported straight runs become walkable slopes and retain their orientation until a member or endpoint is removed.
 
 ## Context
-Chunks store byte-sized block types, sparse construction metadata, and separate exposed-face meshes. The world-data service owns revisions and sends atomic response packages; the client previews and replays optimistic edits. Player collision currently uses full cubes.
+Chunks store byte-sized block types, sparse construction metadata, and separate exposed-face surfaces. The world-data service owns revisions and sends atomic response packages; the client previews and replays optimistic edits. Player collision currently uses full cubes.
 
 ## Requirements
 - R1: Keys 7 and 8 select solid and adaptive country road blocks, using temporary atlas textures.
@@ -37,10 +37,10 @@ Chunks store byte-sized block types, sparse construction metadata, and separate 
 - AC3: GIVEN a short, overlong, incomplete, unsupported, or ambiguous run WHEN evaluated THEN adaptive members remain full-cube unformed blocks.
 - AC4: GIVEN a formed run WHEN a crossing is added THEN existing orientation and ownership remain unchanged.
 - AC5: GIVEN a formed run WHEN an endpoint or member is removed THEN all surviving members revert and the removed cell stays empty.
-- AC6: GIVEN a custom block next to an ordinary cube WHEN mesh and boundary masks are built THEN the cube's adjacent face remains visible and no custom cube faces are emitted.
+- AC6: GIVEN a custom block next to an ordinary cube WHEN surface and boundary masks are built THEN the cube's adjacent face remains visible and no custom cube faces are emitted.
 - AC7: GIVEN a road block WHEN placement lacks direct support or required support is removed THEN the edit is rejected with shared client/service diagnostics.
 - AC8: GIVEN a supported slope WHEN a grounded player walks uphill, downhill, or diagonally across its sections THEN feet follow the surface without climbing, penetration, or loss of contact.
-- AC9: GIVEN a run crossing a chunk boundary or the wrapped x seam WHEN it forms, reverts, or reloads THEN metadata, meshes, and collision agree across all affected chunks.
+- AC9: GIVEN a run crossing a chunk boundary or the wrapped x seam WHEN it forms, reverts, or reloads THEN metadata, surfaces, and collision agree across all affected chunks.
 - AC10: GIVEN custom geometry WHEN visible and shadow pipelines are exercised THEN it renders with scene depth, lighting, atlas UVs, and shadows.
 - AC11: GIVEN a supported road beneath real or planned blocks WHEN it forms, reverts, or replays THEN its support capabilities and overhead target progress remain unchanged; required-support removal still rejects.
 - AC12: GIVEN a supported road pattern WHEN formation or replay runs THEN there are no above-road reads or surrounding structural-validation passes; immutable member writes still fail without partial publication, and other materials retain their existing support families.
@@ -52,7 +52,7 @@ Preserve byte block storage and the existing ordinary voxel face layout. Keep me
 Speed boosts, additional road materials, diagonal roads, curves, junction geometry, texture artwork, inventory, and disk persistence.
 
 ## Plan
-Use a shared custom-block shape descriptor in the engine and sparse road records in application chunk metadata. Share a road formation/reversion helper between client and service. Persist slope descriptors instead of recomputing the chosen axis at render time. Include custom draw descriptors in both local and service mesh payloads. Extend collision with convex slope volumes and grounded surface following; retain cube collision for unformed adaptive roads. Add support checks to the shared validator.
+Use a shared custom-block shape descriptor in the engine and sparse road records in application chunk metadata. Share a road formation/reversion helper between client and service. Persist slope descriptors instead of recomputing the chosen axis at render time. Include custom draw descriptors in both local and service surface payloads. Extend collision with convex slope volumes and grounded surface following; retain cube collision for unformed adaptive roads. Add support checks to the shared validator.
 
 ### Affected Components
 - `src/engine/voxel/` and rendering pipelines: custom shape descriptors and instanced draws in a separate pass.
@@ -64,7 +64,7 @@ Use a shared custom-block shape descriptor in the engine and sparse road records
 Reserve block value 255 for custom blocks; add country road material selections and sparse road descriptors keyed by local block index. A formed descriptor stores high endpoint, downhill direction, run length, and section index.
 
 ### API Changes
-Chunk mesh payloads also carry custom block draw records; shared shape queries distinguish occupied, occluding, and colliding cells.
+Chunk surface payloads also carry custom block draw records; shared shape queries distinguish occupied, occluding, and colliding cells.
 
 ### Risks
 Optimistic replay and cross-chunk formation must not restore stale slope ownership. Shape collision must preserve fast sweeps, seam wrapping, and ordinary cube behavior. Reversion while a player occupies a newly restored cube uses existing player recovery.
@@ -72,7 +72,7 @@ Optimistic replay and cross-chunk formation must not restore stale slope ownersh
 ## Tasks
 - [x] T1: Add custom shape storage and persistent road formation/reversion.
 - [x] T2: Integrate support validation, service revisions, and client reconciliation.
-- [x] T3: Add custom geometry rendering, meshing exclusions, and road selection.
+- [x] T3: Add custom geometry rendering, surface extraction exclusions, and road selection.
 - [x] T4: Add shape collision, surface following, and targeting.
 - [x] T5: Document road behavior and complete regression coverage.
 - [x] T6: Make structural support shape-independent and verify formation/replay beneath real, planned, and unreadable upper cells through client, authority, and deferred updates.
@@ -96,10 +96,10 @@ and `git diff --check` passed.
 | AC3 | Passed | Road regressions reject lengths 3/13 and unsupported placement, preserve ambiguous crossings, check incomplete-run rollback, and verify full-cube unformed collision. |
 | AC4 | Passed | Crossing regressions verify existing and pending snapshotted ownership survives perpendicular construction, unrelated removal, and snapshot rebasing; newer authoritative ownership takes precedence. |
 | AC5 | Passed | The removal regression verifies both endpoints and first, interior, and last members revert surviving sections across chunk boundaries while keeping the removed cell empty. |
-| AC6 | Passed | The custom-cell mesh regression verifies separate draw records, no ordinary custom faces, and an exposed ordinary face across a chunk boundary; boundary-mask and enclosure checks also pass. |
+| AC6 | Passed | The custom-cell surface regression verifies separate draw records, no ordinary custom faces, and an exposed ordinary face across a chunk boundary; boundary-mask and enclosure checks also pass. |
 | AC7 | Passed | Direct-support regressions verify rejected placement and support removal with shared diagnostics; client/service validation checks pass. |
 | AC8 | Passed | Player regressions cover uphill/downhill travel in every direction, diagonal parallel lanes, continuous contact, jumping, fast falls, standing-space searches, ceiling clearance, and a clear uphill ceiling exit with a clipped lift. |
-| AC9 | Passed | Road snapshot/replay and rejected-edit regressions verify cross-chunk and wrapped-seam metadata, duplicate placement/removal rejection after newer snapshots, coherent pending formation, and preservation of later pending edits. Ordered replay regressions reproduce the delayed snow response followed by endpoint rejection and removed/replaced crossing ownership, verify accepted formations survive later rejection, and preserve authoritative construction markers/timers. Existing boundary invalidation and validation-window tests cover immediate material rollback. The service regression verifies atomic formation/reversion and custom mesh reload after subscription eviction. |
+| AC9 | Passed | Road snapshot/replay and rejected-edit regressions verify cross-chunk and wrapped-seam metadata, duplicate placement/removal rejection after newer snapshots, coherent pending formation, and preservation of later pending edits. Ordered replay regressions reproduce the delayed snow response followed by endpoint rejection and removed/replaced crossing ownership, verify accepted formations survive later rejection, and preserve authoritative construction markers/timers. Existing boundary invalidation and validation-window tests cover immediate material rollback. The service regression verifies atomic formation/reversion and custom surface reload after subscription eviction. |
 | AC10 | Passed | Dawn validates visible and shadow pipelines. Production GPU geometry readback verifies every section of lengths 4/7/12 in all directions, including zero-height ends, normals, actual atlas UVs, and the unformed marker; source review covers atlas, scene depth, lighting, and shadow draw integration. |
 
 Validation is automated and supplemented by source review. No interactive gameplay smoke
@@ -110,7 +110,7 @@ test or rendered-image comparison was performed.
 | Improvement | Decision and rationale |
 | --- | --- |
 | Custom-buffer work | Implemented: ordinary-only chunk changes no longer dirty custom data. Per-chunk upload ranges remain deferred until profiling justifies their allocation/bookkeeping cost. |
-| Custom draw batching | Implemented: one instanced draw per pass reduces submission from 4N calls to four across the forward pass and three shadow cascades. Each block retains its own descriptor and geometry outside ordinary chunk meshes. No end-to-end frame-time claim is made. |
+| Custom draw batching | Implemented: one instanced draw per pass reduces submission from 4N calls to four across the forward pass and three shadow cascades. Each block retains its own descriptor and geometry outside ordinary chunk surfaces. No end-to-end frame-time claim is made. |
 | Collision metadata lookup | Implemented: read material and optional shape together, scanning sparse metadata only for custom cells. A block-index map remains deferred until dense-road profiling demonstrates a need. |
 | Footprint surface calculation | Implemented: standing-space and player collision share the clamped-footprint height helper. |
 | GPU evidence | Expanded geometry/normal/UV checks to every section of 4/7/12 runs in every direction. A full forward/shadow raster harness remains deferred because it needs new scene, texture, lighting, and image-readback fixtures. |

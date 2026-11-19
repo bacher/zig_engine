@@ -28,7 +28,7 @@ The probe additionally checks 474,777 adjacent same-mainland pairs at six select
 
 Fresh full runs executed serially old→exact→approx in one reserved quiet window, seed 12345, nine samples per site/workload, both beach settings. All commands exited 0. The old baseline includes current climate-transition handling and per-column material reuse, matching the exact/approx material path. It is not the older pre-cleanup timing baseline.
 
-Each cell below gives beaches **off / on**, milliseconds. Preparation/traversal rows are single observations; other rows are medians of nine samples. The workload includes the indicated chunk hashes; meshing and GPU/disk work are excluded from those workload rows.
+Each cell below gives beaches **off / on**, milliseconds. Preparation/traversal rows are single observations; other rows are medians of nine samples. The workload includes the indicated chunk hashes; surface extraction and GPU/disk work are excluded from those workload rows.
 
 | Workload | Old | Exact | Approximate |
 |---|---:|---:|---:|
@@ -40,7 +40,7 @@ Each cell below gives beaches **off / on**, milliseconds. Preparation/traversal 
 | Mainland coast column initialization | 0.105 / 0.188 | 0.336 / 0.573 | 0.119 / 0.195 |
 | Dense forest column initialization | 0.186 / 0.201 | 1.932 / 1.944 | 0.203 / 0.211 |
 
-All 11 selected site X/Y/Z coordinates happen to match across these three runs. Generated outputs still differ: `mainland_coast` and `steep_shore` chunk/boundary/climate/mesh digests change in both beach settings. The other 18 of 22 site digests agree for this seed. Coast scalars also differ at many unchanged-digest sites. Absolute regeneration times therefore are not a pure speedup comparison of identical worlds, and this limited measurement cannot distinguish small timing differences from noise. All site positions, medians, face counts and digests are in [site-results.csv](site-results.csv) and the [parsed logs](full-regeneration-summary.json).
+All 11 selected site X/Y/Z coordinates happen to match across these three runs. Generated outputs still differ: `mainland_coast` and `steep_shore` chunk/boundary/climate/surface digests change in both beach settings. The other 18 of 22 site digests agree for this seed. Coast scalars also differ at many unchanged-digest sites. Absolute regeneration times therefore are not a pure speedup comparison of identical worlds, and this limited measurement cannot distinguish small timing differences from noise. All site positions, medians, face counts and digests are in [site-results.csv](site-results.csv) and the [parsed logs](full-regeneration-summary.json).
 
 | Requested-memory counter | Old | Exact | Approximate |
 |---|---:|---:|---:|
@@ -60,8 +60,23 @@ For production mainland, the local conservative rectangle field is zero at actua
 - Fresh full logs: [old](old-full-12345-9.txt), [exact](exact-full-12345-9.txt), [approximate](approx-full-12345-9.txt).
 - [Evidence manifest](evidence-manifest.json): protocol, source inventories, binary/file hashes, site differences and fingerprint terminology. The full source inventories are retained separately in `source-manifests.json`; compact preservation can omit them.
 - Exact source changes: [exact](exact-source.diff), [approximate](approx-source.diff), each relative to the old snapshot. Blank diff context-line spaces are normalized.
-- `probe-source/` retains the standalone query/cross-section harness and its input modules. `plot_cross_section.py` uses ReportLab LinePlot 4.4.9; SVG was rasterized with Sharp. `parse_generation_log.py` parses the raw full logs without rerunning benchmarks.
+- `probe-source/` retains the standalone query/cross-section harness and its input modules. `plot_cross_section.py` uses ReportLab LinePlot 4.4.9; SVG was rasterized with Sharp. `parse_generation_log.py` parses both the archived raw full logs and current benchmark output without rerunning benchmarks.
+
+The parser accepts archived `mesh` and current `surface` record names, preserving the
+names found in its input so the archived summaries remain reproducible. It checks both
+beach settings, derives the site count from `representative_replay sites=...`, and rejects
+missing site timings, face output fields, or startup metrics. Run its regression checks with:
+
+```shell
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s docs/validation/world-generation/coast-comparison -v
+```
+
+The [current-output fixture](fixtures/current-generation-half-12345-1.txt) is the unmodified
+combined output of `zig build benchmark-generation -Doptimize=ReleaseFast -- 12345 1 half`,
+captured on 2026-11-19. It contains 17 sites per beach setting; the three archived logs
+contain 11 each. The tests compare complete parsed archive data against the recorded
+summaries and exercise missing timing, output, startup, and replay records.
 
 No production source was changed by this comparison run. Final integrated production validation is recorded in the [parent validation report](../README.md).
 
-The evidence manifest also records `write_report.py`, an omitted report-generation scratch script retained in the original temporary evidence directory. During repository preservation, `site-results.csv` was converted from CRLF to LF without changing values; its manifest entry hashes the LF copy and preserves the original CRLF hash and byte count. All other included manifest files retain their original bytes. README is not included in that manifest; its final navigation line and this preservation note document the copying changes.
+The evidence manifest also records `write_report.py`, an omitted report-generation scratch script retained in the original temporary evidence directory. During repository preservation, `site-results.csv` was converted from CRLF to LF without changing values; its manifest entry hashes the LF copy and preserves the original CRLF hash and byte count. The parser was subsequently updated for current benchmark names, variable site counts, and complete-record validation; its manifest entry records the current hash and retains the original comparison hash, size, and Git revision. All other included manifest files retain their original bytes. README is not included in that manifest.

@@ -496,8 +496,8 @@ block cells carry no timestamps. A cell has at most one pending event. Removing/
 it cancels its event, and a new placement receives a fresh deadline.
 
 Time processing examines a sorted due prefix and applies one terminal grass transition per
-event. Unknown exposure retains the original deadline. Type changes advance chunk and mesh
-revisions and reach both block and mesh subscribers in complete update packages.
+event. Unknown exposure retains the original deadline. Type changes advance chunk and surface
+revisions and reach both block and surface subscribers in complete update packages.
 
 Pending grass deadlines and unfinished completion initialization persist with the world's
 simulation tick and construction metadata. See [persistence](persistence.md).

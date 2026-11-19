@@ -68,7 +68,7 @@ partitioned simulation remain alternatives. This choice keeps canonical simulati
 persistence responsibilities separate while executing mutations serially; automatic simulation-only
 operations use local APIs. It does not establish capacity for the full economy.
 
-The current service also handles terrain and mesh publication, so sharing its executor can
+The current service also handles terrain and surface publication, so sharing its executor can
 couple simulation progress to that work. Bounded scheduling, explicit conflict precedence,
 safe capture/source holds, and representative mixed-load measurement are necessary. A single
 worker does not provide retry deduplication or protect asynchronous readers automatically.

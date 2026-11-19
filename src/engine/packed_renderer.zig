@@ -1,4 +1,4 @@
-//! Owner-neutral cargo and loose-pallet batches, independent of terrain meshes.
+//! Owner-neutral cargo and loose-pallet batches, independent of terrain surfaces.
 const std = @import("std");
 const zgpu = @import("zgpu");
 const wgpu = zgpu.wgpu;

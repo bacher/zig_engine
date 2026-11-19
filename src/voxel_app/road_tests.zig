@@ -551,10 +551,10 @@ test "custom cells keep neighboring ordinary faces and produce separate draw rec
     const chunk = fixture.world.getChunk(coords).?;
     const side = engine.voxel_chunk.Side;
     try std.testing.expect(!chunk.boundaries[@intFromEnum(side.left)].contains(.left, local));
-    var mesh = @import("world_engine_glue.zig").extractChunkGeometry(std.testing.allocator, chunk, @splat(.{}));
-    defer mesh.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), mesh.custom_blocks.items.len);
-    for (mesh.blocks_grouped_by_side) |faces| try std.testing.expectEqual(@as(usize, 0), faces.items.len);
+    var surface = @import("world_engine_glue.zig").extractChunkGeometry(std.testing.allocator, chunk, @splat(.{}));
+    defer surface.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), surface.custom_blocks.items.len);
+    for (surface.blocks_grouped_by_side) |faces| try std.testing.expectEqual(@as(usize, 0), faces.items.len);
     // The ordinary block is in the adjacent chunk and must expose its right face.
     const other_coords, _ = world.splitBlockCoords(storage(&fixture, .{ -1, 0, 0 }));
     var neighbors: @import("boundary_mask.zig").BoundaryMasks = @splat(.{});

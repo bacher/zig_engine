@@ -7,7 +7,7 @@ names its exact base and resulting revision. The service retains at most
 client's revision, the next publication contains a current snapshot.
 
 Chunk subscriptions discover active sites throughout their full boxes, including
-chunks containing only cavities. Discovery accompanies blocks, meshes, boundary
+chunks containing only cavities. Discovery accompanies blocks, surfaces, boundary
 updates, unreachable chunks, and metadata acknowledgments. Explicit site interest
 continues until unsubscribe, independently of terrain visibility. Resync refreshes
 existing explicit or visible-chunk interest and resolves retired references;
@@ -43,7 +43,7 @@ Transient allocation failures schedule one watchdog retry after 100 ms, includin
 ephemeral services. The wake flag requires no queued allocation. Healthy idle
 services do not poll; dependency and capacity changes also wake relevant work.
 
-The publication cap excludes terrain/mesh payloads, allocator overhead and temporary
+The publication cap excludes terrain/surface payloads, allocator overhead and temporary
 reallocation overlap, client subscription/cache maps, and the separately bounded
 history ring. Status reports publication used/peak bytes, rejected reservations,
 history bytes, and permanently oversized publication payloads. An indivisible
@@ -56,7 +56,7 @@ Run the focused server checks with:
 zig build test-world-service -Dtest-filter='construction transport' --summary all
 ```
 
-These checks cover mesh/cavity discovery, relevant-site filtering, shared-definition
+These checks cover surface/cavity discovery, relevant-site filtering, shared-definition
 caching, exact batched revisions and transfers, retirement composition watermarks,
 history overwrite and snapshot recovery, explicit interest and stale identities,
 multiple unknown-site retirements, shared capacity with unread packages, release

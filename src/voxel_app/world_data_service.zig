@@ -145,9 +145,14 @@ pub const OperationResult = struct {
     player_inventory: ?struct { player_id: u64, material: ?rules.BlockType } = null,
 };
 
-pub const Representation = enum { blocks, mesh };
-const ChunkSideData = @import("engine").voxel_chunk.ChunkSideData;
-const mesher = @import("./world_engine_glue.zig");
+pub const Representation = enum {
+    /// Complete block contents and metadata for local queries and edits.
+    blocks,
+    /// Exposed block faces grouped by side, plus custom block draw records.
+    surface,
+};
+const ChunkSurfaceData = @import("engine").voxel_chunk.ChunkSurfaceData;
+const surface_extractor = @import("./world_engine_glue.zig");
 pub const BoundaryMasks = @import("./boundary_mask.zig").BoundaryMasks;
 
 pub const BlockSnapshot = struct {
@@ -162,7 +167,7 @@ pub const ChunkResponse = struct {
     coords: ChunkCoords,
     operation: ?OperationResult = null,
     chunk_revision: u64 = 0,
-    mesh_revision: u64 = 0,
+    surface_revision: u64 = 0,
     warehouse_refs: ?[]warehouse_stream.Reference = null,
     warehouse_revision: u64 = 0,
     /// Complete independent base-pallet source for this chunk, including loose
@@ -173,12 +178,12 @@ pub const ChunkResponse = struct {
     composition: ?construction_stream.ChunkComposition = null,
     composition_budget: ?*PublicationBudget = null,
     composition_bytes: usize = 0,
-    /// Owned by the receiver. A zero-face mesh does not imply empty block contents.
+    /// Owned by the receiver. A zero-face surface does not imply empty block contents.
     data: union(enum) {
         blocks: BlockSnapshot,
         boundaries: BoundaryMasks,
-        mesh: ChunkSideData,
-        /// Mesh subscription is current, but enclosure makes geometry unnecessary.
+        surface: ChunkSurfaceData,
+        /// Surface subscription is current, but enclosure makes geometry unnecessary.
         unreachable_chunk,
         acknowledgement,
     },
@@ -196,8 +201,8 @@ pub const ChunkResponse = struct {
         }
         switch (self.data) {
             .blocks => |snapshot| snapshot.chunk.deinit(allocator),
-            .mesh => |mesh| {
-                var owned = mesh;
+            .surface => |surface| {
+                var owned = surface;
                 owned.deinit(allocator);
             },
             .boundaries, .unreachable_chunk, .acknowledgement => {},
@@ -206,7 +211,7 @@ pub const ChunkResponse = struct {
 };
 
 /// One mailbox item is an indivisible update. The renderer applies every response before
-/// rebuilding/uploading, so an edit and its neighboring meshes cannot straddle frames.
+/// rebuilding/uploading, so an edit and its neighboring surfaces cannot straddle frames.
 pub const ResponsePackage = struct {
     world_session: u64 = 0,
     responses: std.ArrayList(ChunkResponse) = .empty,
@@ -242,7 +247,7 @@ pub const ResponsePackage = struct {
 const Subscription = struct {
     id: u64,
     mode: Representation,
-    mesh_pending: bool = false,
+    surface_pending: bool = false,
     boundaries_pending: bool = false,
     blocks_pending: bool = false,
     composition_pending: bool = true,
@@ -889,7 +894,7 @@ pub const Client = struct {
     }
 
     /// Sends only intent. Every command gets a result; block-mode replies also carry
-    /// a snapshot, including failures. Mesh-mode results share packages with mesh changes.
+    /// a snapshot, including failures. Surface-mode results share packages with surface changes.
     /// Commands from this endpoint are processed in submission order.
     pub const SubmitError = commands.Error || error{ServiceStopped};
     /// Transport bound only; every constituent still uses one admission slot and
@@ -1039,9 +1044,9 @@ const DeferredWorkLog = struct {
 
 /// Sole authority for generation, block preconditions and revisions. A single worker orders
 /// requests from all clients. Successful operations broadcast the subscribed representation;
-/// related snapshots, neighbor meshes, and command results share one update package.
+/// related snapshots, neighbor surfaces, and command results share one update package.
 pub const WorldDataService = struct {
-    const MeshLoad = struct { client: *Client, coords: ChunkCoords, token: u64 };
+    const SurfaceLoad = struct { client: *Client, coords: ChunkCoords, token: u64 };
     /// Zero is reserved for directly initialized CPU fixtures.
     world_session: u64 = 0,
     construction_publications: std.ArrayList(ConstructionPublication) = .empty,
@@ -1072,9 +1077,9 @@ pub const WorldDataService = struct {
     /// Accessed only by the worker while running.
     clients: std.ArrayList(*Client) = .empty,
     worker_state: WorkerState,
-    mesh_loads: std.ArrayList(MeshLoad) = .empty,
-    next_mesh_load: usize = 0,
-    dirty_meshes: std.AutoHashMapUnmanaged(ChunkId, void) = .empty,
+    surface_loads: std.ArrayList(SurfaceLoad) = .empty,
+    next_surface_load: usize = 0,
+    dirty_surfaces: std.AutoHashMapUnmanaged(ChunkId, void) = .empty,
     store: ?*storage.Store = null,
     catalog: ?storage.BaseCatalog = null,
     read_requests: Mailbox(storage.BaseRead) = .{},
@@ -1372,7 +1377,7 @@ pub const WorldDataService = struct {
     }
 
     /// The game owns simulation time. Pausing or stopping frames does not advance it;
-    /// subscriptions and mesh/block eviction have no effect on transformation deadlines.
+    /// subscriptions and surface/block eviction have no effect on transformation deadlines.
     pub fn advanceTo(self: *WorldDataService, tick: transformations.Tick) void {
         _ = self.pending_tick.fetchMax(tick, .release);
         self.requests.mutex.lockUncancelable(self.io);
@@ -1443,8 +1448,8 @@ pub const WorldDataService = struct {
         self.loaded_ring.deinit(self.allocator);
         self.read_requests.deinit(self.allocator);
         if (self.catalog) |*catalog| catalog.deinit();
-        self.mesh_loads.deinit(self.allocator);
-        self.dirty_meshes.deinit(self.allocator);
+        self.surface_loads.deinit(self.allocator);
+        self.dirty_surfaces.deinit(self.allocator);
         self.clients.deinit(self.allocator);
         self.requests.deinit(self.allocator);
         self.worker_state.deinit(self.allocator);
@@ -1481,7 +1486,7 @@ pub const WorldDataService = struct {
                 // ending, including registration and terminal read completions.
                 self.requests.takeAll(self.io, &batch);
                 if (batch.items.len == 0) break;
-            } else if (self.async_progress or (self.blueprint_task != null and self.blueprint_task.?.future == null and !self.blueprint_task.?.waiting_for_data and !self.blueprint_task.?.waiting_for_journal and !self.blueprint_task.?.waiting_for_capture) or (self.blueprint_road_queue.count != 0 and !self.blueprint_road_waiting) or ((self.construction_work.items.len != 0 or self.construction_grass.items.len != 0) and !self.construction_waiting) or (self.next_mesh_load < self.mesh_loads.items.len and !self.is_shutting_down.load(.monotonic))) {
+            } else if (self.async_progress or (self.blueprint_task != null and self.blueprint_task.?.future == null and !self.blueprint_task.?.waiting_for_data and !self.blueprint_task.?.waiting_for_journal and !self.blueprint_task.?.waiting_for_capture) or (self.blueprint_road_queue.count != 0 and !self.blueprint_road_waiting) or ((self.construction_work.items.len != 0 or self.construction_grass.items.len != 0) and !self.construction_waiting) or (self.next_surface_load < self.surface_loads.items.len and !self.is_shutting_down.load(.monotonic))) {
                 self.requests.takeAll(self.io, &batch);
             } else if (!self.waitForWork(&batch)) break;
             self.drainPersistenceEvents();
@@ -1499,29 +1504,29 @@ pub const WorldDataService = struct {
             self.processBlueprintRoadUpdates();
             self.processTransformations();
 
-            // Coalesce every edited mesh in this batch, including face dependencies, then
+            // Coalesce every edited surface in this batch, including face dependencies, then
             // publish it together with all corresponding block snapshots/acknowledgments.
-            var dirty = self.dirty_meshes.keyIterator();
-            while (dirty.next()) |position| self.publishMesh(self.layout.decodeChunkId(position.*));
-            self.dirty_meshes.clearRetainingCapacity();
+            var dirty = self.dirty_surfaces.keyIterator();
+            while (dirty.next()) |position| self.publishSurface(self.layout.decodeChunkId(position.*));
+            self.dirty_surfaces.clearRetainingCapacity();
             for (self.clients.items) |client| {
                 var subscriptions = client.subscriptions.iterator();
-                while (subscriptions.next()) |entry| if (entry.value_ptr.mode == .mesh and entry.value_ptr.mesh_pending)
-                    self.dirty_meshes.put(self.allocator, entry.key_ptr.*, {}) catch self.failPersistence(error.OutOfMemory);
+                while (subscriptions.next()) |entry| if (entry.value_ptr.mode == .surface and entry.value_ptr.surface_pending)
+                    self.dirty_surfaces.put(self.allocator, entry.key_ptr.*, {}) catch self.failPersistence(error.OutOfMemory);
             }
             self.flushPackages();
             self.publishPersistenceStatus();
 
             // At most one distant load before checking for new edits and block requests.
-            if (self.next_mesh_load < self.mesh_loads.items.len) {
-                const load = self.mesh_loads.items[self.next_mesh_load];
-                self.next_mesh_load += 1;
+            if (self.next_surface_load < self.surface_loads.items.len) {
+                const load = self.surface_loads.items[self.next_surface_load];
+                self.next_surface_load += 1;
                 if (load.client.subscriptions.get(self.layout.encodeChunkCoords(load.coords))) |sub| {
-                    if (sub.id == load.token and sub.mode == .mesh and sub.mesh_pending) self.publishMesh(load.coords);
+                    if (sub.id == load.token and sub.mode == .surface and sub.surface_pending) self.publishSurface(load.coords);
                 }
-                if (self.next_mesh_load == self.mesh_loads.items.len) {
-                    self.mesh_loads.clearRetainingCapacity();
-                    self.next_mesh_load = 0;
+                if (self.next_surface_load == self.surface_loads.items.len) {
+                    self.surface_loads.clearRetainingCapacity();
+                    self.next_surface_load = 0;
                 }
                 self.flushPackages();
             }
@@ -1575,7 +1580,7 @@ pub const WorldDataService = struct {
                     const current = self.worker_state.modified_chunks.get(self.layout.encodeChunkCoords(response.coords));
                     const revision = if (current) |chunk| chunk.chunk_revision else 0;
                     if (response.chunk_revision != revision) continue;
-                    response.mesh_revision = self.worker_state.meshRevision(response.coords);
+                    response.surface_revision = self.worker_state.surfaceRevision(response.coords);
                     const sub = client.subscriptions.getPtr(self.layout.encodeChunkCoords(response.coords)) orelse continue;
                     if (sub.mode != .blocks or sub.id != response.subscription_id) continue;
                     response.data.blocks.neighbors = self.worker_state.tryNeighborBoundaries(self.allocator, response.coords) catch |err| {
@@ -1600,7 +1605,7 @@ pub const WorldDataService = struct {
                         .coords = coords,
                         .subscription_id = sub.id,
                         .chunk_revision = if (chunk) |value| value.chunk_revision else 0,
-                        .mesh_revision = self.worker_state.meshRevision(coords),
+                        .surface_revision = self.worker_state.surfaceRevision(coords),
                         .data = .{ .boundaries = boundaries },
                     }) catch |err| {
                         self.retryConstructionAfterFailure(err);
@@ -1624,7 +1629,7 @@ pub const WorldDataService = struct {
                             .coords = coords,
                             .subscription_id = sub.id,
                             .chunk_revision = if (chunk) |value| value.chunk_revision else 0,
-                            .mesh_revision = self.worker_state.meshRevision(coords),
+                            .surface_revision = self.worker_state.surfaceRevision(coords),
                             .data = .acknowledgement,
                         }) catch |err| {
                             self.retryConstructionAfterFailure(err);
@@ -1687,7 +1692,7 @@ pub const WorldDataService = struct {
     }
 
     fn blockResponse(self: *WorldDataService, coords: ChunkCoords, token: ?u64, chunk: WorldChunk) ChunkResponse {
-        return .{ .coords = coords, .subscription_id = token, .chunk_revision = chunk.chunk_revision, .mesh_revision = self.worker_state.meshRevision(coords), .data = .{ .blocks = .{ .chunk = chunk } } };
+        return .{ .coords = coords, .subscription_id = token, .chunk_revision = chunk.chunk_revision, .surface_revision = self.worker_state.surfaceRevision(coords), .data = .{ .blocks = .{ .chunk = chunk } } };
     }
 
     fn flushConstructionPrefix(self: *WorldDataService, client: *Client) !void {
@@ -1776,14 +1781,14 @@ pub const WorldDataService = struct {
         return std.mem.count(u8, std.mem.asBytes(&chunk.content.blocks.blocks), &.{@intFromEnum(rules.BlockType.pallet)});
     }
 
-    /// Builds once and fans out owned copies only to mesh subscribers awaiting this state.
+    /// Builds once and fans out owned copies only to surface subscribers awaiting this state.
     /// Neighbor blocks are temporary dependencies, independent of player subscriptions.
-    fn publishMesh(self: *WorldDataService, coords: ChunkCoords) void {
+    fn publishSurface(self: *WorldDataService, coords: ChunkCoords) void {
         const position = self.layout.encodeChunkCoords(coords);
         var needed = false;
         for (self.clients.items) |client| {
             if (client.subscriptions.get(position)) |sub| {
-                if (sub.mode == .mesh and sub.mesh_pending) {
+                if (sub.mode == .surface and sub.surface_pending) {
                     needed = true;
                     break;
                 }
@@ -1792,28 +1797,28 @@ pub const WorldDataService = struct {
         if (!needed) return;
         const chunk = self.worker_state.tryLoadAt(self.allocator, coords) catch return;
         defer chunk.deinit(self.allocator);
-        var mesh: ChunkSideData = .{};
+        var surface: ChunkSurfaceData = .{};
         if (chunk.content == .blocks and !chunk.flags.is_unreachable) {
             const neighbors = self.worker_state.tryNeighborBoundaries(self.allocator, coords) catch return;
-            var climate: mesher.ClimateMap = undefined;
+            var climate: surface_extractor.ClimateMap = undefined;
             self.preparedGenerator().fillClimateMap(.{ coords[0], coords[1] }, &climate);
-            mesh = mesher.tryExtractChunkGeometryWithClimate(self.allocator, chunk, neighbors, &climate) catch return;
+            surface = surface_extractor.tryExtractChunkGeometryWithClimate(self.allocator, chunk, neighbors, &climate) catch return;
         }
-        defer mesh.deinit(self.allocator);
+        defer surface.deinit(self.allocator);
         for (self.clients.items) |client| {
             const sub = client.subscriptions.getPtr(position) orelse continue;
-            if (sub.mode != .mesh or !sub.mesh_pending) continue;
-            // Secure the response slot before cloning so failure retains mesh_pending.
+            if (sub.mode != .surface or !sub.surface_pending) continue;
+            // Secure the response slot before cloning so failure retains surface_pending.
             client.pending.responses.ensureUnusedCapacity(self.allocator, 1) catch continue;
-            const copy: ChunkSideData = if (chunk.flags.is_unreachable) .{} else mesh.tryClone(self.allocator) catch continue;
+            const copy: ChunkSurfaceData = if (chunk.flags.is_unreachable) .{} else surface.tryClone(self.allocator) catch continue;
             client.pending.responses.appendAssumeCapacity(.{
                 .coords = coords,
                 .subscription_id = sub.id,
                 .chunk_revision = chunk.chunk_revision,
-                .mesh_revision = self.worker_state.meshRevision(coords),
-                .data = if (chunk.flags.is_unreachable) .unreachable_chunk else .{ .mesh = copy },
+                .surface_revision = self.worker_state.surfaceRevision(coords),
+                .data = if (chunk.flags.is_unreachable) .unreachable_chunk else .{ .surface = copy },
             });
-            sub.mesh_pending = false;
+            sub.surface_pending = false;
         }
     }
 
@@ -2048,9 +2053,9 @@ pub const WorldDataService = struct {
                 // Background dependency loads have no foreground publication to wake.
                 if (!deferred_only) {
                     const loaded_coords = self.layout.decodeChunkId(loaded.id);
-                    self.dirty_meshes.put(self.allocator, loaded.id, {}) catch self.failPersistence(error.OutOfMemory);
+                    self.dirty_surfaces.put(self.allocator, loaded.id, {}) catch self.failPersistence(error.OutOfMemory);
                     for (std.enums.values(Side)) |side| if (world_module.adjacentChunk(self.layout, loaded_coords, side)) |neighbor| {
-                        self.dirty_meshes.put(self.allocator, self.layout.encodeChunkCoords(neighbor), {}) catch self.failPersistence(error.OutOfMemory);
+                        self.dirty_surfaces.put(self.allocator, self.layout.encodeChunkCoords(neighbor), {}) catch self.failPersistence(error.OutOfMemory);
                     };
                 }
                 self.retryPending();
@@ -2130,7 +2135,7 @@ pub const WorldDataService = struct {
                     load.client.subscriptions.put(self.allocator, self.layout.encodeChunkCoords(coords), .{
                         .id = load.request_id,
                         .mode = load.mode,
-                        .mesh_pending = load.mode == .mesh,
+                        .surface_pending = load.mode == .surface,
                     }) catch {
                         self.failPersistence(error.OutOfMemory);
                         continue;
@@ -2146,7 +2151,7 @@ pub const WorldDataService = struct {
                         };
                         load.client.pending.responses.appendAssumeCapacity(self.blockResponse(coords, load.request_id, chunk));
                     } else {
-                        self.mesh_loads.append(self.allocator, .{ .client = load.client, .coords = coords, .token = load.request_id }) catch {
+                        self.surface_loads.append(self.allocator, .{ .client = load.client, .coords = coords, .token = load.request_id }) catch {
                             self.failPersistence(error.OutOfMemory);
                         };
                     }
@@ -2205,12 +2210,12 @@ pub const WorldDataService = struct {
                     for (affected, 0..) |entry, i| {
                         const changed = entry orelse continue;
                         const changed_id = self.layout.encodeChunkCoords(changed);
-                        self.dirty_meshes.put(self.allocator, changed_id, {}) catch @panic("OOM");
+                        self.dirty_surfaces.put(self.allocator, changed_id, {}) catch @panic("OOM");
                         for (self.clients.items) |client| {
                             const sub = client.subscriptions.getPtr(changed_id) orelse continue;
                             if (sub.mode == .blocks and i < 6) sub.boundaries_pending = true;
-                            if (sub.mode == .mesh) {
-                                sub.mesh_pending = true;
+                            if (sub.mode == .surface) {
+                                sub.surface_pending = true;
                             } else if ((i < 6 and result.revealed_neighbors[i] != null) or (i == 6 and client != edit.client)) {
                                 sub.blocks_pending = true;
                             }
@@ -2218,8 +2223,8 @@ pub const WorldDataService = struct {
                     }
                 }
                 const sub = edit.client.subscriptions.get(position);
-                var response = if (result.status == .resource_exhausted or (sub != null and sub.?.mode == .mesh))
-                    ChunkResponse{ .coords = coords, .subscription_id = if (sub) |value| value.id else null, .chunk_revision = result.chunk.chunk_revision, .mesh_revision = self.worker_state.meshRevision(coords), .data = .acknowledgement }
+                var response = if (result.status == .resource_exhausted or (sub != null and sub.?.mode == .surface))
+                    ChunkResponse{ .coords = coords, .subscription_id = if (sub) |value| value.id else null, .chunk_revision = result.chunk.chunk_revision, .surface_revision = self.worker_state.surfaceRevision(coords), .data = .acknowledgement }
                 else
                     self.blockResponse(coords, if (sub) |value| value.id else null, result.chunk);
                 if (response.data == .blocks) reply_moved = true;
@@ -3679,9 +3684,9 @@ pub const WorldDataService = struct {
         // Surface writes and instance publication share one commit. Promotion,
         // revision checks and all capacity growth precede the first soil edit.
         try self.worker_state.modified_chunks.ensureUnusedCapacity(self.allocator, @intCast(additional_chunks));
-        try self.worker_state.mesh_revisions.ensureUnusedCapacity(self.allocator, @intCast(soil.chunk_ids.items.len));
-        try self.dirty_meshes.ensureUnusedCapacity(self.allocator, @intCast(soil.chunk_ids.items.len));
-        const mesh_revision = if (soil.chunk_ids.items.len == 0) self.worker_state.next_mesh_revision else try std.math.add(u64, self.worker_state.next_mesh_revision, 1);
+        try self.worker_state.surface_revisions.ensureUnusedCapacity(self.allocator, @intCast(soil.chunk_ids.items.len));
+        try self.dirty_surfaces.ensureUnusedCapacity(self.allocator, @intCast(soil.chunk_ids.items.len));
+        const surface_revision = if (soil.chunk_ids.items.len == 0) self.worker_state.next_surface_revision else try std.math.add(u64, self.worker_state.next_surface_revision, 1);
         for (soil.chunk_ids.items) |id| {
             try self.worker_state.ensureResident(self.allocator, self.layout.decodeChunkId(id));
             _ = try std.math.add(u64, self.worker_state.modified_chunks.get(id).?.chunk_revision, 1);
@@ -3699,12 +3704,12 @@ pub const WorldDataService = struct {
             const chunk = self.worker_state.modified_chunks.getPtr(self.layout.encodeChunkCoords(coords)).?;
             if (change.clear_grass) chunk.changeType(local, .dirt);
         }
-        self.worker_state.next_mesh_revision = mesh_revision;
+        self.worker_state.next_surface_revision = surface_revision;
         for (soil.chunk_ids.items) |id| {
             const chunk = self.worker_state.modified_chunks.getPtr(id).?;
             cancelBlueprintCoveredGrass(chunk, soil.cancel_grow.getPtr(id).?);
             chunk.chunk_revision += 1;
-            self.worker_state.mesh_revisions.putAssumeCapacity(id, mesh_revision);
+            self.worker_state.surface_revisions.putAssumeCapacity(id, surface_revision);
             if (!WorkerState.hasExecutableTimer(chunk.*)) _ = self.worker_state.timed_chunks.remove(id);
             self.publishMaterialChange(self.layout.decodeChunkId(id));
         }
@@ -3821,7 +3826,7 @@ pub const WorldDataService = struct {
             edit.client.resolved_request = edit.request_id;
             return;
         }
-        var response: ChunkResponse = .{ .coords = coords, .subscription_id = if (edit.client.subscriptions.get(id)) |sub| sub.id else null, .chunk_revision = if (self.worker_state.modified_chunks.get(id)) |chunk| chunk.chunk_revision else 0, .mesh_revision = self.worker_state.meshRevision(coords), .data = .acknowledgement, .operation = .{ .request_id = edit.request_id, .command = edit.command, .status = result.diagnostics.status, .failure = result.diagnostics.failure, .counted = edit.counted } };
+        var response: ChunkResponse = .{ .coords = coords, .subscription_id = if (edit.client.subscriptions.get(id)) |sub| sub.id else null, .chunk_revision = if (self.worker_state.modified_chunks.get(id)) |chunk| chunk.chunk_revision else 0, .surface_revision = self.worker_state.surfaceRevision(coords), .data = .acknowledgement, .operation = .{ .request_id = edit.request_id, .command = edit.command, .status = result.diagnostics.status, .failure = result.diagnostics.failure, .counted = edit.counted } };
         if (edit.operation.player) |transfer| {
             const material = if (self.players.get(transfer.id)) |player| player.inventory else null;
             response.operation.?.player_inventory = .{ .player_id = transfer.id, .material = if (material) |raw| @enumFromInt(raw) else null };
@@ -3977,9 +3982,9 @@ pub const WorldDataService = struct {
         const live = state.liveAllocator(self.allocator);
         try chunk.metadata.reserve(live, 0, indices.len, soil_count);
         _ = try chunk.tryEnsureData(live);
-        try state.mesh_revisions.ensureUnusedCapacity(self.allocator, 7);
-        try self.dirty_meshes.ensureUnusedCapacity(self.allocator, 7);
-        const mesh_revision = try std.math.add(u64, state.next_mesh_revision, 1);
+        try state.surface_revisions.ensureUnusedCapacity(self.allocator, 7);
+        try self.dirty_surfaces.ensureUnusedCapacity(self.allocator, 7);
+        const surface_revision = try std.math.add(u64, state.next_surface_revision, 1);
         // All fallible work is complete. Only target cells enter the current
         // destination; cavity edits and other sites retain their current data.
         for (indices) |index| {
@@ -3991,18 +3996,18 @@ pub const WorldDataService = struct {
             if (material == .dirt) chunk.metadata.timed.scheduleAssumeCapacity(.{ .block = transformations.index(local), .kind = .initialize_grass, .due_tick = instance_id });
         }
         chunk.chunk_revision = revision;
-        state.next_mesh_revision = mesh_revision;
-        state.mesh_revisions.putAssumeCapacity(group.chunk_id, mesh_revision);
+        state.next_surface_revision = surface_revision;
+        state.surface_revisions.putAssumeCapacity(group.chunk_id, surface_revision);
         std.debug.assert(state.blueprints.acceptTransfer(transfer));
         if (self.store != null) self.appendBlueprintJournal(.{ .transfer = .{ .instance_id = instance_id, .chunk_id = group.chunk_id, .terrain_revision = revision } });
         self.markConstructionChanged(instance_id, null, transfer);
         self.publishMaterialChange(coords);
         for (std.enums.values(Side)) |side| if (world_module.adjacentChunk(self.layout, coords, side)) |neighbor| {
             const id = self.layout.encodeChunkCoords(neighbor);
-            state.mesh_revisions.putAssumeCapacity(id, mesh_revision);
-            self.dirty_meshes.putAssumeCapacity(id, {});
+            state.surface_revisions.putAssumeCapacity(id, surface_revision);
+            self.dirty_surfaces.putAssumeCapacity(id, {});
             for (self.clients.items) |client| if (client.subscriptions.getPtr(id)) |sub| {
-                if (sub.mode == .mesh) sub.mesh_pending = true else sub.boundaries_pending = true;
+                if (sub.mode == .surface) sub.surface_pending = true else sub.boundaries_pending = true;
             };
         };
         self.lifecycle.unsaved_work = true;
@@ -4229,26 +4234,26 @@ pub const WorldDataService = struct {
         // requires no support or surrounding-construction validation.
         try plan.reserveCommit(context);
         const additional = std.math.mul(usize, plan.chunk_ids.len, 7) catch return error.Capacity;
-        try self.worker_state.mesh_revisions.ensureUnusedCapacity(self.allocator, @intCast(additional));
-        try self.dirty_meshes.ensureUnusedCapacity(self.allocator, @intCast(additional));
-        const mesh_revision = try std.math.add(u64, self.worker_state.next_mesh_revision, 1);
+        try self.worker_state.surface_revisions.ensureUnusedCapacity(self.allocator, @intCast(additional));
+        try self.dirty_surfaces.ensureUnusedCapacity(self.allocator, @intCast(additional));
+        const surface_revision = try std.math.add(u64, self.worker_state.next_surface_revision, 1);
         for (plan.chunk_ids) |id| _ = try std.math.add(u64, self.worker_state.modified_chunks.get(id).?.chunk_revision, 1);
         // All fallible work precedes these metadata/revision/publication writes.
         plan.applyPrepared(context);
-        self.worker_state.next_mesh_revision = mesh_revision;
+        self.worker_state.next_surface_revision = surface_revision;
         for (plan.chunk_ids) |id| {
             self.worker_state.modified_chunks.getPtr(id).?.chunk_revision += 1;
-            self.worker_state.mesh_revisions.putAssumeCapacity(id, mesh_revision);
+            self.worker_state.surface_revisions.putAssumeCapacity(id, surface_revision);
             const changed = self.layout.decodeChunkId(id);
             self.publishMaterialChange(changed);
             for (std.enums.values(Side)) |side| {
                 const neighbor = world_module.adjacentChunk(self.layout, changed, side) orelse continue;
                 const neighbor_id = self.layout.encodeChunkCoords(neighbor);
-                self.worker_state.mesh_revisions.putAssumeCapacity(neighbor_id, mesh_revision);
-                self.dirty_meshes.putAssumeCapacity(neighbor_id, {});
+                self.worker_state.surface_revisions.putAssumeCapacity(neighbor_id, surface_revision);
+                self.dirty_surfaces.putAssumeCapacity(neighbor_id, {});
                 for (self.clients.items) |client| {
                     const sub = client.subscriptions.getPtr(neighbor_id) orelse continue;
-                    if (sub.mode == .mesh) sub.mesh_pending = true else sub.boundaries_pending = true;
+                    if (sub.mode == .surface) sub.surface_pending = true else sub.boundaries_pending = true;
                 }
             }
         }
@@ -4272,11 +4277,11 @@ pub const WorldDataService = struct {
 
     fn publishMaterialChange(self: *WorldDataService, coords: ChunkCoords) void {
         const id = self.layout.encodeChunkCoords(coords);
-        self.dirty_meshes.put(self.allocator, id, {}) catch @panic("OOM");
+        self.dirty_surfaces.put(self.allocator, id, {}) catch @panic("OOM");
         for (self.clients.items) |client| {
             const sub = client.subscriptions.getPtr(id) orelse continue;
-            if (sub.mode == .mesh) {
-                sub.mesh_pending = true;
+            if (sub.mode == .surface) {
+                sub.surface_pending = true;
             } else sub.blocks_pending = true;
         }
     }
@@ -5229,11 +5234,11 @@ const WorkerState = struct {
     generated_chunks: GeneratedChunkCache = .{},
     /// Successful generated materializations by read/load/promotion paths.
     generated_chunk_count: u64 = 0,
-    /// Retained independently of mesh allocation/subscription lifetime. Untouched inputs
+    /// Retained independently of surface allocation/subscription lifetime. Untouched inputs
     /// have revision zero; a neighboring edit may advance it without a chunk revision change.
-    mesh_revisions: std.AutoHashMapUnmanaged(ChunkId, u64) = .empty,
-    next_mesh_revision: u64 = 0,
-    /// Bounded terrain-height cache, not block or mesh storage. Neighbor meshing otherwise
+    surface_revisions: std.AutoHashMapUnmanaged(ChunkId, u64) = .empty,
+    next_surface_revision: u64 = 0,
+    /// Bounded terrain-height cache, not block or surface storage. Neighbor surface extraction otherwise
     /// repeats the same noise calculations for every z coordinate in a column.
     columns: std.AutoHashMapUnmanaged(u64, ColumnGenerator) = .empty,
     /// Bounded cache for immutable generated planes. Modified chunks keep their own
@@ -5323,8 +5328,8 @@ const WorkerState = struct {
         return masks;
     }
 
-    fn meshRevision(self: *const WorkerState, coords: ChunkCoords) u64 {
-        return self.mesh_revisions.get(self.layout.encodeChunkCoords(coords)) orelse 0;
+    fn surfaceRevision(self: *const WorkerState, coords: ChunkCoords) u64 {
+        return self.surface_revisions.get(self.layout.encodeChunkCoords(coords)) orelse 0;
     }
 
     fn loadAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) WorldChunk {
@@ -5360,7 +5365,7 @@ const WorkerState = struct {
         while (iterator.next()) |chunk| chunk.deinit(self.liveAllocator(allocator));
         self.modified_chunks.deinit(allocator);
         self.generated_chunks.deinit(allocator);
-        self.mesh_revisions.deinit(allocator);
+        self.surface_revisions.deinit(allocator);
         self.columns.deinit(allocator);
         self.boundary_cache.deinit(allocator);
         self.timed_chunks.deinit(allocator);
@@ -5543,7 +5548,7 @@ const WorkerState = struct {
         errdefer reply.deinit(allocator);
         try reply.metadata.reserve(allocator, road_growth, constructed_growth, timer_growth);
         if (operation.action == .put) _ = try reply.tryEnsureData(allocator);
-        try self.mesh_revisions.ensureUnusedCapacity(allocator, @intCast(road_plan.chunk_ids.len + 8));
+        try self.surface_revisions.ensureUnusedCapacity(allocator, @intCast(road_plan.chunk_ids.len + 8));
         try self.timed_chunks.ensureUnusedCapacity(allocator, 2);
         var changed_ids: std.ArrayList(u32) = .empty;
         defer changed_ids.deinit(allocator);
@@ -5559,9 +5564,9 @@ const WorkerState = struct {
             if (std.mem.indexOfScalar(u32, changed_ids.items, id) == null) changed_ids.appendAssumeCapacity(id);
         }
         for (changed_ids.items) |id| _ = try std.math.add(u64, self.modified_chunks.get(id).?.chunk_revision, 1);
-        const next_mesh = try std.math.add(u64, self.next_mesh_revision, 1);
+        const next_surface = try std.math.add(u64, self.next_surface_revision, 1);
 
-        if (self.persistence_service) |service| try service.dirty_meshes.ensureUnusedCapacity(allocator, @intCast(changed_ids.items.len + 7));
+        if (self.persistence_service) |service| try service.dirty_surfaces.ensureUnusedCapacity(allocator, @intCast(changed_ids.items.len + 7));
         // All fallible work is complete. Commit every persistent field/cache together.
         std.debug.assert(target.applyPrepared(live, local, operation.action) == .success);
         if (operation.action == .put) {
@@ -5589,18 +5594,18 @@ const WorkerState = struct {
             self.modified_chunks.getPtr(self.layout.encodeChunkCoords(value)).?.flags.is_unreachable = false;
         };
         road_plan.applyPrepared(road_context);
-        self.next_mesh_revision = next_mesh;
+        self.next_surface_revision = next_surface;
         for (changed_ids.items) |id| {
             const chunk = self.modified_chunks.getPtr(id).?;
             chunk.chunk_revision += 1;
-            self.mesh_revisions.putAssumeCapacity(id, next_mesh);
+            self.surface_revisions.putAssumeCapacity(id, next_surface);
             if (!hasExecutableTimer(chunk.*)) _ = self.timed_chunks.remove(id) else self.timed_chunks.putAssumeCapacity(id, {});
         }
         for (std.enums.values(Side)) |side| {
             const i = @intFromEnum(side);
             if (local[i / 2] != (if (i % 2 == 0) @as(u5, 0) else CHUNK_SIZE - 1)) continue;
             const neighbor = world_module.adjacentChunk(self.layout, coords, side) orelse continue;
-            self.mesh_revisions.putAssumeCapacity(self.layout.encodeChunkCoords(neighbor), next_mesh);
+            self.surface_revisions.putAssumeCapacity(self.layout.encodeChunkCoords(neighbor), next_surface);
         }
         copyPreparedChunk(allocator, target, &reply);
         return .{ .status = .success, .chunk = reply, .revealed_neighbors = revealed, .changed_below = below_coords, .diagnostics = diagnostics };
@@ -5731,16 +5736,16 @@ const WorkerState = struct {
             }
         }
         const revision = std.math.add(u64, source.chunk_revision, 1) catch return false;
-        const mesh_revision = std.math.add(u64, self.next_mesh_revision, 1) catch return false;
-        self.mesh_revisions.ensureUnusedCapacity(allocator, 1) catch return false;
+        const surface_revision = std.math.add(u64, self.next_surface_revision, 1) catch return false;
+        self.surface_revisions.ensureUnusedCapacity(allocator, 1) catch return false;
         self.timed_chunks.ensureUnusedCapacity(allocator, 1) catch return false;
-        if (self.persistence_service) |service| service.dirty_meshes.ensureUnusedCapacity(allocator, 1) catch return false;
+        if (self.persistence_service) |service| service.dirty_surfaces.ensureUnusedCapacity(allocator, 1) catch return false;
         plan.applyPrepared(source);
         if (self.persistence_service) |service| service.commitBlueprintRoadUpdates(road_batch);
         source.chunk_revision = revision;
         if (plan.material_changed) {
-            self.next_mesh_revision = mesh_revision;
-            self.mesh_revisions.putAssumeCapacity(id, mesh_revision);
+            self.next_surface_revision = surface_revision;
+            self.surface_revisions.putAssumeCapacity(id, surface_revision);
         }
         if (!hasExecutableTimer(source.*)) _ = self.timed_chunks.remove(id) else self.timed_chunks.putAssumeCapacity(id, {});
         return true;
@@ -5763,7 +5768,7 @@ test "rejected edits share generated chunks without making authoritative residen
     try std.testing.expectEqual(@as(usize, 1), state.generated_chunks.count());
     try std.testing.expectEqual(@as(usize, 0), state.modified_chunks.count());
     try std.testing.expectEqual(@as(usize, 0), state.timed_chunks.count());
-    try std.testing.expectEqual(@as(usize, 0), state.mesh_revisions.count());
+    try std.testing.expectEqual(@as(usize, 0), state.surface_revisions.count());
 }
 
 test "promotion moves cached generated data once and later reads see real edits" {
@@ -5960,7 +5965,7 @@ fn waitForResponses(client: *Client, out: *std.ArrayList(ChunkResponse), count: 
     while (out.items.len < count) {
         try std.testing.expect(try client.waitResponses(&batch));
         for (batch.items) |response| {
-            // Discovery may precede asynchronous mesh generation. These terrain
+            // Discovery may precede asynchronous surface generation. These terrain
             // fixtures wait for geometry or command results; transport fixtures
             // inspect the independent composition acknowledgments directly.
             if (response.data == .acknowledgement and response.operation == null and response.composition != null) {
@@ -5981,13 +5986,13 @@ fn readStateBlock(state: *WorkerState, block: [3]u32) @import("engine").voxel_ch
     return chunk.content.getBlock(local);
 }
 
-test "service publishes road formation and reversion atomically and retains custom meshes after eviction" {
+test "service publishes road formation and reversion atomically and retains custom surfaces after eviction" {
     const allocator = std.testing.allocator;
     const service = try WorldDataService.create(std.testing.io, allocator, &test_layout, .flat);
     defer service.destroy();
     const editor = try service.createClient();
     const blocks = try service.createClient();
-    const meshes = try service.createClient();
+    const surfaces = try service.createClient();
     const z: u32 = test_layout.size_in_blocks[2] / 2;
     const high = [3]u32{ 31, 65, z };
     const low = [3]u32{ 44, 65, z - 1 };
@@ -6002,15 +6007,15 @@ test "service publishes road formation and reversion atomically and retains cust
     try waitForResponses(editor, &edits, 27);
     for (edits.items) |response| try std.testing.expectEqual(OperationStatus.success, response.operation.?.status);
     _ = blocks.requestChunks(.{ 1, 2 }, low_coords[2], section_coords[2] + 1);
-    const mesh_token = meshes.requestChunksInMode(.{ 1, 2 }, section_coords[2], section_coords[2] + 1, .mesh);
+    const surface_token = surfaces.requestChunksInMode(.{ 1, 2 }, section_coords[2], section_coords[2] + 1, .surface);
     var initial_blocks: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&initial_blocks);
     try waitForResponses(blocks, &initial_blocks, 2);
-    var initial_mesh: std.ArrayList(ChunkResponse) = .empty;
-    defer deinitResponses(&initial_mesh);
-    try waitForResponses(meshes, &initial_mesh, 1);
-    try std.testing.expectEqual(@as(usize, 12), initial_mesh.items[0].data.mesh.custom_blocks.items.len);
-    for (initial_mesh.items[0].data.mesh.custom_blocks.items) |block| try std.testing.expect(block.shape == .adaptive);
+    var initial_surface: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&initial_surface);
+    try waitForResponses(surfaces, &initial_surface, 1);
+    try std.testing.expectEqual(@as(usize, 12), initial_surface.items[0].data.surface.custom_blocks.items.len);
+    for (initial_surface.items[0].data.surface.custom_blocks.items) |block| try std.testing.expect(block.shape == .adaptive);
     _ = editor.submitOperation(.{ .block = low, .action = .{ .put = .country_road_solid } });
     try waitForResponses(editor, &edits, 28);
     var packages: std.ArrayList(ResponsePackage) = .empty;
@@ -6033,17 +6038,17 @@ test "service publishes road formation and reversion atomically and retains cust
         if (@reduce(.And, response.coords == low_coords)) found_endpoint = true;
     }
     try std.testing.expect(found_sections and found_endpoint);
-    var formed_mesh: std.ArrayList(ChunkResponse) = .empty;
-    defer deinitResponses(&formed_mesh);
-    try waitForResponses(meshes, &formed_mesh, 1);
-    for (formed_mesh.items[0].data.mesh.custom_blocks.items) |block| try std.testing.expect(block.shape == .slope);
-    meshes.evictChunk(test_layout.encodeChunkCoords(section_coords), mesh_token);
-    _ = meshes.requestChunksInMode(.{ 1, 2 }, section_coords[2], section_coords[2] + 1, .mesh);
+    var formed_surface: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&formed_surface);
+    try waitForResponses(surfaces, &formed_surface, 1);
+    for (formed_surface.items[0].data.surface.custom_blocks.items) |block| try std.testing.expect(block.shape == .slope);
+    surfaces.evictChunk(test_layout.encodeChunkCoords(section_coords), surface_token);
+    _ = surfaces.requestChunksInMode(.{ 1, 2 }, section_coords[2], section_coords[2] + 1, .surface);
     var reloaded: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&reloaded);
-    try waitForResponses(meshes, &reloaded, 1);
+    try waitForResponses(surfaces, &reloaded, 1);
     try std.testing.expectEqual(section_revision, reloaded.items[0].chunk_revision);
-    for (reloaded.items[0].data.mesh.custom_blocks.items) |block| try std.testing.expect(block.shape == .slope);
+    for (reloaded.items[0].data.surface.custom_blocks.items) |block| try std.testing.expect(block.shape == .slope);
     // Service validation rejects removal of a road's direct support.
     _ = editor.submitOperation(.{ .block = .{ 34, 65, z - 1 }, .action = .remove });
     try waitForResponses(editor, &edits, 29);
@@ -6052,9 +6057,9 @@ test "service publishes road formation and reversion atomically and retains cust
     try waitForResponses(editor, &edits, 30);
     var reverted: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&reverted);
-    try waitForResponses(meshes, &reverted, 1);
+    try waitForResponses(surfaces, &reverted, 1);
     try std.testing.expect(reverted.items[0].chunk_revision > section_revision);
-    for (reverted.items[0].data.mesh.custom_blocks.items) |block| try std.testing.expect(block.shape == .adaptive);
+    for (reverted.items[0].data.surface.custom_blocks.items) |block| try std.testing.expect(block.shape == .adaptive);
 }
 
 test "client and authority agree with only the player's 3x3x3 chunks and ignore extra support beyond 28 cells" {
@@ -6821,21 +6826,21 @@ fn deinitTestPackages(packages: *std.ArrayList(ResponsePackage)) void {
     packages.deinit(std.testing.allocator);
 }
 
-test "boundary edits bundle blocks and neighbor meshes with independent revisions across x wrap" {
+test "boundary edits bundle blocks and neighbor surfaces with independent revisions across x wrap" {
     const allocator = std.testing.allocator;
     const service = try WorldDataService.create(std.testing.io, allocator, &test_layout, .flat);
     defer service.destroy();
     const client = try service.createClient();
     _ = client.requestChunks(.{ 0, 2 }, 3, 4);
     const neighbor = ChunkCoords{ WORLD_SIZE[0] - 1, 2, 3 };
-    const mesh_token = client.requestChunksInMode(.{ neighbor[0], neighbor[1] }, 3, 4, .mesh);
+    const surface_token = client.requestChunksInMode(.{ neighbor[0], neighbor[1] }, 3, 4, .surface);
     var initial: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&initial);
     try waitForResponses(client, &initial, 2);
-    const mesh = initial.items[1];
-    try std.testing.expect(mesh.data == .mesh);
-    try std.testing.expectEqual(0, mesh.data.mesh.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
-    try std.testing.expectEqual(0, mesh.chunk_revision);
+    const surface = initial.items[1];
+    try std.testing.expect(surface.data == .surface);
+    try std.testing.expectEqual(0, surface.data.surface.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
+    try std.testing.expectEqual(0, surface.chunk_revision);
     const edit = client.submitOperation(.{ .block = .{ 0, 2 * CHUNK_SIZE + 8, 3 * CHUNK_SIZE + 8 }, .action = .remove });
     var packages = try takeTestPackages(client);
     defer deinitTestPackages(&packages);
@@ -6845,19 +6850,19 @@ test "boundary edits bundle blocks and neighbor meshes with independent revision
     try std.testing.expectEqual(edit, updates[0].operation.?.request_id);
     try std.testing.expectEqual(1, updates[0].chunk_revision);
     try std.testing.expectEqual(neighbor, updates[1].coords);
-    try std.testing.expectEqual(mesh_token, updates[1].subscription_id);
+    try std.testing.expectEqual(surface_token, updates[1].subscription_id);
     try std.testing.expectEqual(0, updates[1].chunk_revision);
-    try std.testing.expect(updates[1].mesh_revision > mesh.mesh_revision);
-    try std.testing.expectEqual(1, updates[1].data.mesh.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
-    try std.testing.expectEqual([3]u8{ 31, 8, 8 }, updates[1].data.mesh.blocks_grouped_by_side[@intFromEnum(Side.right)].items[0].coords);
+    try std.testing.expect(updates[1].surface_revision > surface.surface_revision);
+    try std.testing.expectEqual(1, updates[1].data.surface.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
+    try std.testing.expectEqual([3]u8{ 31, 8, 8 }, updates[1].data.surface.blocks_grouped_by_side[@intFromEnum(Side.right)].items[0].coords);
 
     const block_token = client.requestChunks(.{ neighbor[0], neighbor[1] }, 3, 4);
-    client.evictChunk(test_layout.encodeChunkCoords(neighbor), mesh_token);
+    client.evictChunk(test_layout.encodeChunkCoords(neighbor), surface_token);
     var promoted: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&promoted);
     try waitForResponses(client, &promoted, 1);
     try std.testing.expectEqual(block_token, promoted.items[0].subscription_id);
-    try std.testing.expectEqual(updates[1].mesh_revision, promoted.items[0].mesh_revision);
+    try std.testing.expectEqual(updates[1].surface_revision, promoted.items[0].surface_revision);
     try std.testing.expectEqual(updates[1].chunk_revision, promoted.items[0].chunk_revision);
 
     client.evictChunk(test_layout.encodeChunkCoords(neighbor), block_token);
@@ -6865,22 +6870,22 @@ test "boundary edits bundle blocks and neighbor meshes with independent revision
     var acknowledgments: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&acknowledgments);
     try waitForResponses(client, &acknowledgments, 1);
-    _ = client.requestChunksInMode(.{ neighbor[0], neighbor[1] }, 3, 4, .mesh);
+    _ = client.requestChunksInMode(.{ neighbor[0], neighbor[1] }, 3, 4, .surface);
     var reloaded: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&reloaded);
     try waitForResponses(client, &reloaded, 1);
     try std.testing.expectEqual(0, reloaded.items[0].chunk_revision);
-    try std.testing.expect(reloaded.items[0].mesh_revision > updates[1].mesh_revision);
-    try std.testing.expectEqual(2, reloaded.items[0].data.mesh.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
+    try std.testing.expect(reloaded.items[0].surface_revision > updates[1].surface_revision);
+    try std.testing.expectEqual(2, reloaded.items[0].data.surface.blocks_grouped_by_side[@intFromEnum(Side.right)].items.len);
 }
 
-test "worker coalesces boundary meshes while preserving all operation acknowledgments" {
+test "worker coalesces boundary surfaces while preserving all operation acknowledgments" {
     const allocator = std.testing.allocator;
     const service = try WorldDataService.create(std.testing.io, allocator, &test_layout, .flat);
     defer service.destroy();
     const client = try service.createClient();
     _ = client.requestChunks(.{ 2, 2 }, 3, 4);
-    _ = client.requestChunksInMode(.{ 3, 2 }, 3, 4, .mesh);
+    _ = client.requestChunksInMode(.{ 3, 2 }, 3, 4, .surface);
     var initial: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&initial);
     try waitForResponses(client, &initial, 2);
@@ -6905,16 +6910,16 @@ test "worker coalesces boundary meshes while preserving all operation acknowledg
     try std.testing.expectEqual(3, updates[2].chunk_revision);
     try std.testing.expectEqual(0, updates[3].chunk_revision);
     // The interior edit does not invalidate the neighbor; only the two boundary edits do.
-    try std.testing.expectEqual(2, updates[3].mesh_revision);
-    try std.testing.expectEqual(0, updates[3].data.mesh.blocks_grouped_by_side[@intFromEnum(Side.left)].items.len);
+    try std.testing.expectEqual(2, updates[3].surface_revision);
+    try std.testing.expectEqual(0, updates[3].data.surface.blocks_grouped_by_side[@intFromEnum(Side.left)].items.len);
 }
 
-test "unreachable mesh subscriptions receive only metadata until reveal while block subscriptions receive blocks" {
+test "unreachable surface subscriptions receive only metadata until reveal while block subscriptions receive blocks" {
     const allocator = std.testing.allocator;
     const service = try WorldDataService.create(std.testing.io, allocator, &test_layout, .flat);
     defer service.destroy();
     const client = try service.createClient();
-    const token = client.requestChunksInMode(.{ 2, 2 }, 2, 3, .mesh);
+    const token = client.requestChunksInMode(.{ 2, 2 }, 2, 3, .surface);
     var responses: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&responses);
     try waitForResponses(client, &responses, 1);
@@ -6938,8 +6943,8 @@ test "unreachable mesh subscriptions receive only metadata until reveal while bl
     for (packages.items[0].responses.items) |response| {
         if (response.subscription_id != token) continue;
         try std.testing.expectEqual(1, response.chunk_revision);
-        try std.testing.expect(response.mesh_revision > responses.items[0].mesh_revision);
-        try std.testing.expectEqual(1, response.data.mesh.blocks_grouped_by_side[@intFromEnum(Side.top)].items.len);
+        try std.testing.expect(response.surface_revision > responses.items[0].surface_revision);
+        try std.testing.expectEqual(1, response.data.surface.blocks_grouped_by_side[@intFromEnum(Side.top)].items.len);
         revealed = true;
     }
     try std.testing.expect(revealed);
@@ -6948,14 +6953,14 @@ test "unreachable mesh subscriptions receive only metadata until reveal while bl
     try std.testing.expectEqual(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE, responses.items[1].data.blocks.chunk.solid_block_count);
 }
 
-test "default terrain 7x7x7 meshes fit the unchanged GPU allocator including fragmentation" {
+test "default terrain 7x7x7 surfaces fit the unchanged GPU allocator including fragmentation" {
     const allocator = std.testing.allocator;
     const service = try WorldDataService.create(std.testing.io, allocator, &test_layout, .{ .terrain = .{ .seed = 12345 } });
     defer service.destroy();
     const client = try service.createClient();
     const origin = test_layout.origin_chunk;
     for (origin[0] - 3..origin[0] + 4) |x| {
-        for (origin[1] - 3..origin[1] + 4) |y| _ = client.requestChunksInMode(.{ @intCast(x), @intCast(y) }, 1, 8, .mesh);
+        for (origin[1] - 3..origin[1] + 4) |y| _ = client.requestChunksInMode(.{ @intCast(x), @intCast(y) }, 1, 8, .surface);
     }
     var responses: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&responses);
@@ -6969,15 +6974,15 @@ test "default terrain 7x7x7 meshes fit the unchanged GPU allocator including fra
     var bytes: usize = 0;
     for (responses.items) |response| {
         if (response.data == .unreachable_chunk) continue;
-        for (response.data.mesh.blocks_grouped_by_side) |side| bytes += 4 * side.items.len;
-        grid.appendChunk(.{ .chunk_coords = response.coords, .chunk_side_data = response.data.mesh.clone(allocator) });
+        for (response.data.surface.blocks_grouped_by_side) |side| bytes += 4 * side.items.len;
+        grid.appendChunk(.{ .chunk_coords = response.coords, .chunk_surface_data = response.data.surface.clone(allocator) });
     }
     try std.testing.expect(bytes > 0);
     try std.testing.expect(grid.hasUploadCapacity());
-    std.debug.print("7x7x7 terrain: {d} KiB of mesh payload; fits 4 MiB slot allocator\n", .{bytes / 1024});
+    std.debug.print("7x7x7 terrain: {d} KiB of surface payload; fits 4 MiB slot allocator\n", .{bytes / 1024});
 }
 
-test "block subscriptions receive coalesced neighbor masks with mesh updates across x wrap" {
+test "block subscriptions receive coalesced neighbor masks with surface updates across x wrap" {
     const allocator = std.testing.allocator;
     const service = try WorldDataService.create(std.testing.io, allocator, &test_layout, .flat);
     defer service.destroy();
@@ -6985,7 +6990,7 @@ test "block subscriptions receive coalesced neighbor masks with mesh updates acr
     const coords = ChunkCoords{ 0, 2, 3 };
     const remote = ChunkCoords{ WORLD_SIZE[0] - 1, 2, 3 };
     const block_token = client.requestChunks(.{ coords[0], coords[1] }, 3, 4);
-    const mesh_token = client.requestChunksInMode(.{ remote[0], remote[1] }, 3, 4, .mesh);
+    const surface_token = client.requestChunksInMode(.{ remote[0], remote[1] }, 3, 4, .surface);
     var initial: std.ArrayList(ChunkResponse) = .empty;
     defer deinitResponses(&initial);
     try waitForResponses(client, &initial, 2);
@@ -7008,7 +7013,7 @@ test "block subscriptions receive coalesced neighbor masks with mesh updates acr
     try std.testing.expectEqual(1, packages.items.len);
     try std.testing.expectEqual(4, packages.items[0].responses.items.len);
     var boundary_count: usize = 0;
-    var mesh_count: usize = 0;
+    var surface_count: usize = 0;
     var ack_count: usize = 0;
     for (packages.items[0].responses.items) |response| {
         if (response.operation != null) ack_count += 1;
@@ -7017,25 +7022,25 @@ test "block subscriptions receive coalesced neighbor masks with mesh updates acr
                 boundary_count += 1;
                 try std.testing.expectEqual(block_token, response.subscription_id.?);
                 try std.testing.expectEqual(coords, response.coords);
-                try std.testing.expectEqual(2, response.mesh_revision);
+                try std.testing.expectEqual(2, response.surface_revision);
                 try std.testing.expect(!updated[0].contains(.left, .{ 0, 8, 8 }));
                 try std.testing.expect(!updated[0].contains(.left, .{ 0, 9, 8 }));
                 try std.testing.expect(updated[0].contains(.left, .{ 0, 10, 8 }));
-                var mesh = mesher.extractChunkSideData(allocator, initial.items[0].data.blocks.chunk.content, updated);
-                defer mesh.deinit(allocator);
-                try std.testing.expectEqual(2, mesh.blocks_grouped_by_side[0].items.len);
+                var surface = surface_extractor.extractChunkSurfaceData(allocator, initial.items[0].data.blocks.chunk.content, updated);
+                defer surface.deinit(allocator);
+                try std.testing.expectEqual(2, surface.blocks_grouped_by_side[0].items.len);
             },
-            .mesh => {
-                mesh_count += 1;
-                try std.testing.expectEqual(mesh_token, response.subscription_id.?);
-                try std.testing.expectEqual(2, response.mesh_revision);
+            .surface => {
+                surface_count += 1;
+                try std.testing.expectEqual(surface_token, response.subscription_id.?);
+                try std.testing.expectEqual(2, response.surface_revision);
             },
             .acknowledgement => {},
             else => return error.UnexpectedBlockSnapshot,
         }
     }
     try std.testing.expectEqual(1, boundary_count);
-    try std.testing.expectEqual(1, mesh_count);
+    try std.testing.expectEqual(1, surface_count);
     try std.testing.expectEqual(2, ack_count);
 
     // An interior edit cannot change the dependency mask of the block subscriber.
@@ -7052,7 +7057,7 @@ test "block subscriptions receive coalesced neighbor masks with mesh updates acr
     try waitForResponses(client, &reloaded, 1);
     try std.testing.expectEqual(reload_token, reloaded.items[0].subscription_id.?);
     try std.testing.expectEqual(0, reloaded.items[0].chunk_revision);
-    try std.testing.expectEqual(2, reloaded.items[0].mesh_revision);
+    try std.testing.expectEqual(2, reloaded.items[0].surface_revision);
     try std.testing.expect(!reloaded.items[0].data.blocks.neighbors.?[0].contains(.left, .{ 0, 8, 8 }));
 }
 
@@ -7127,7 +7132,7 @@ test "boundary-only observers are notified before the edit reply without subscri
     try std.testing.expectEqual(1, observed.items.len);
     try std.testing.expectEqual(token, observed.items[0].subscription_id.?);
     try std.testing.expectEqual(@as(u64, 1), observed.items[0].chunk_revision);
-    try std.testing.expectEqual(2, observed.items[0].mesh_revision);
+    try std.testing.expectEqual(2, observed.items[0].surface_revision);
     try std.testing.expect(observed.items[0].composition != null);
     try std.testing.expect(!observed.items[0].data.boundaries[@intFromEnum(Side.right)].contains(.right, .{ 31, 8, 8 }));
 
@@ -9419,7 +9424,7 @@ const ConstructionTransportFixture = struct {
     }
 };
 
-test "construction transport scopes mesh cavity discovery and caches shared definitions" {
+test "construction transport scopes surface cavity discovery and caches shared definitions" {
     var fixture: ConstructionTransportFixture = undefined;
     try fixture.init();
     defer fixture.deinit();
@@ -9430,7 +9435,7 @@ test "construction transport scopes mesh cavity discovery and caches shared defi
     const first = try fixture.site(1, .{ 0, 0, 70 });
     const second = try fixture.site(2, .{ 0, 32, 70 });
     const a = std.testing.allocator;
-    try fixture.clients[0].subscriptions.put(a, test_layout.encodeChunkCoords(.{ 1, 0, 2 }), .{ .id = 10, .mode = .mesh });
+    try fixture.clients[0].subscriptions.put(a, test_layout.encodeChunkCoords(.{ 1, 0, 2 }), .{ .id = 10, .mode = .surface });
     try fixture.clients[1].subscriptions.put(a, test_layout.encodeChunkCoords(.{ 0, 0, 2 }), .{ .id = 11, .mode = .blocks });
     try fixture.service.publishBlueprintBaseline(&fixture.clients[2]);
     try std.testing.expectEqual(@as(usize, 0), fixture.clients[2].pending.blueprint_changes.items.len);
@@ -9740,7 +9745,7 @@ test "construction transport keeps flattened discovery charged until its respons
     try fixture.setBudget(1024 * 1024);
     const budget = fixture.service.construction_publication_budget.?;
     const client = &fixture.clients[0];
-    try client.subscriptions.put(std.testing.allocator, test_layout.encodeChunkCoords(.{ 0, 0, 2 }), .{ .id = 10, .mode = .mesh });
+    try client.subscriptions.put(std.testing.allocator, test_layout.encodeChunkCoords(.{ 0, 0, 2 }), .{ .id = 10, .mode = .surface });
     fixture.service.flushPackages();
     var responses: std.ArrayList(ChunkResponse) = .empty;
     defer {
@@ -9804,7 +9809,7 @@ test "construction transport resynchronizes stale discovery after a lost retirem
     const identity = try fixture.site(1, .{ 0, 0, 70 });
     const id = test_layout.encodeChunkCoords(.{ 0, 0, 2 });
     const client = &fixture.clients[0];
-    try client.subscriptions.put(a, id, .{ .id = 10, .mode = .mesh });
+    try client.subscriptions.put(a, id, .{ .id = 10, .mode = .surface });
     try fixture.fill(1, 0);
     try fixture.fill(1, 1);
     try fixture.service.prepareConstructionPublication(client);
@@ -9816,7 +9821,7 @@ test "construction transport resynchronizes stale discovery after a lost retirem
     try cache.requestSnapshot(a, identity);
     cache.snapshotInstalled(initial);
     const stale: construction_stream.ChunkComposition = .{ .revision = fixture.service.construction_composition_revision, .sites = &.{.{ .identity = identity, .site_revision = initial.revision }} };
-    try std.testing.expect(try cache.installChunk(a, id, .{ .subscription_id = 10, .chunk_revision = 0, .mesh_revision = 0, .composition_revision = stale.revision }, stale));
+    try std.testing.expect(try cache.installChunk(a, id, .{ .subscription_id = 10, .chunk_revision = 0, .surface_revision = 0, .composition_revision = stale.revision }, stale));
     fixture.clearPending(0);
     const transfer: blueprint_runtime.Transfer = .{ .instance_id = 1, .chunk_id = id, .terrain_revision = 9 };
     try std.testing.expect(fixture.service.worker_state.blueprints.acceptTransfer(transfer));
@@ -9842,9 +9847,9 @@ test "construction transport resynchronizes stale discovery after a lost retirem
     const composition = current.responses.items[0].composition.?;
     try std.testing.expectEqual(@as(usize, 0), composition.sites.len);
     try std.testing.expectEqual(retired.composition_revision, composition.revision);
-    try std.testing.expect(try cache.installChunk(a, id, .{ .subscription_id = 10, .chunk_revision = 9, .mesh_revision = 9, .composition_revision = composition.revision }, composition));
+    try std.testing.expect(try cache.installChunk(a, id, .{ .subscription_id = 10, .chunk_revision = 9, .surface_revision = 9, .composition_revision = composition.revision }, composition));
     try std.testing.expect(Cache.chunkAvailable(&cache, id));
-    try std.testing.expect(!try cache.installChunk(a, id, .{ .subscription_id = 10, .chunk_revision = 0, .mesh_revision = 0, .composition_revision = stale.revision }, stale));
+    try std.testing.expect(!try cache.installChunk(a, id, .{ .subscription_id = 10, .chunk_revision = 0, .surface_revision = 0, .composition_revision = stale.revision }, stale));
 }
 
 test "external command ledger shares Apply intent identity and fences session rotation" {
@@ -9930,7 +9935,7 @@ test "external command ledger replays a player resource outcome without revertin
     try fixture.init();
     defer fixture.deinit();
     const service = &fixture.service;
-    defer service.dirty_meshes.deinit(a);
+    defer service.dirty_surfaces.deinit(a);
     service.world_session = 41;
     service.worker_state.persistence_service = service;
     const client = &fixture.client;
@@ -10146,7 +10151,7 @@ test "authority blueprint fulfillment keeps raw targets air and composes cross-s
     try std.testing.expectEqual(rules.BlockType.none, raw.content.getBlock(.{ 10, 10, 6 }));
     try std.testing.expectEqual(rules.BlockType.none, raw.content.getBlock(.{ 11, 10, 6 }));
     try std.testing.expectEqual(@as(u64, 0), raw.chunk_revision);
-    try std.testing.expectEqual(@as(u64, 0), state.next_mesh_revision);
+    try std.testing.expectEqual(@as(u64, 0), state.next_surface_revision);
     var context: ReadContext = .{ .state = &state, .allocator = a };
     defer context.deinit();
     try std.testing.expectEqual(rules.BlockType.planks, context.reader().get(.{ 10, 10, 70 }).?);
@@ -10168,7 +10173,7 @@ test "authority blueprint batch streams progress without block payload and coupl
     defer service.players.deinit(a);
     defer service.blueprint_journal.deinit(a);
     defer deinitConstructionTestState(&service);
-    defer service.dirty_meshes.deinit(a);
+    defer service.dirty_surfaces.deinit(a);
     var origin: Client = .{ .service = &service };
     var observer: Client = .{ .service = &service };
     defer origin.subscriptions.deinit(a);
@@ -10259,7 +10264,7 @@ test "interleaved fulfillment across 128 sites keeps bounded support work and co
     defer service.blueprint_journal.deinit(a);
     defer deinitConstructionTestState(&service);
     defer service.blueprint_road_queue.deinit(a);
-    defer service.dirty_meshes.deinit(a);
+    defer service.dirty_surfaces.deinit(a);
     var client: Client = .{ .service = &service };
     defer client.pending.deinit(a);
     defer deinitConstructionTestClient(&client);
@@ -10364,7 +10369,7 @@ const BlueprintRoadFixture = struct {
         self.service.source_holds.deinit(a);
         self.service.blueprint_journal.deinit(a);
         deinitConstructionTestState(&self.service);
-        self.service.dirty_meshes.deinit(a);
+        self.service.dirty_surfaces.deinit(a);
         self.service.pending.deinit(a);
     }
 
@@ -10416,7 +10421,7 @@ const BlueprintRoadThroughputTest = struct {
         defer deinitConstructionTestState(&service);
         defer service.blueprint_road_queue.deinit(a);
         defer service.source_holds.deinit(a);
-        defer service.dirty_meshes.deinit(a);
+        defer service.dirty_surfaces.deinit(a);
         defer service.pending.deinit(a);
         var client: Client = .{ .service = &service };
         defer client.pending.deinit(a);
@@ -10564,7 +10569,7 @@ test "blueprint fulfillment queues adaptive road work and delayed safe plans pub
     _ = fixture.service.processBlueprintRoadUpdatesWithBudget(1);
     try std.testing.expect(fixture.slope() != null);
     try std.testing.expectEqual(before + 1, fixture.service.worker_state.modified_chunks.get(id).?.chunk_revision);
-    try std.testing.expect(fixture.service.dirty_meshes.contains(id));
+    try std.testing.expect(fixture.service.dirty_surfaces.contains(id));
     try std.testing.expect(fixture.service.lifecycle.unsaved_work);
 }
 
@@ -10879,7 +10884,7 @@ const BlueprintJournalBudgetTest = struct {
     }
 
     fn cleanup(fixture: *BlueprintSaveFixture) void {
-        fixture.service.dirty_meshes.deinit(fixture.service.allocator);
+        fixture.service.dirty_surfaces.deinit(fixture.service.allocator);
         fixture.service.blueprint_road_queue.deinit(fixture.service.allocator);
         fixture.deinit();
     }
@@ -12113,7 +12118,7 @@ const BlueprintRoadSchedulingTest = struct {
         self.service.source_holds.deinit(a);
         self.service.blueprint_journal.deinit(a);
         deinitConstructionTestState(&self.service);
-        self.service.dirty_meshes.deinit(a);
+        self.service.dirty_surfaces.deinit(a);
         self.service.pending.deinit(a);
     }
 
@@ -12346,7 +12351,7 @@ test "road batches yield once for an asynchronous base read and resume after its
     defer service.catalog.?.deinit();
     defer service.blueprint_road_queue.deinit(a);
     defer service.source_holds.deinit(a);
-    defer service.dirty_meshes.deinit(a);
+    defer service.dirty_surfaces.deinit(a);
     defer service.base_revisions.deinit(a);
     defer service.wal_revisions.deinit(a);
     defer service.read_pending.deinit(a);
@@ -12710,14 +12715,14 @@ test "cold background read failure preserves an independent successful Save" {
     service.requestSaveTransition(101, true);
     try f.waitSave(101);
     const sequence = f.store.sequence;
-    service.dirty_meshes.clearRetainingCapacity();
+    service.dirty_surfaces.clearRetainingCapacity();
     service.processRequest(.{ .chunk_loaded = .{ .id = read.id, .revision = read.revision, .result = error.Io } });
     try std.testing.expectEqual(persistence.Phase.complete, service.status.phase);
     try std.testing.expect(service.status.error_name == null);
     try std.testing.expectEqualStrings("Io", service.status.deferred_work_error_name.?);
     try std.testing.expect(service.deferred_work_log.warning_active);
     try std.testing.expectEqual(sequence, f.store.sequence);
-    try std.testing.expectEqual(@as(u32, 0), service.dirty_meshes.count());
+    try std.testing.expectEqual(@as(u32, 0), service.dirty_surfaces.count());
     try std.testing.expectEqual(@as(usize, 1), service.blueprint_road_queue.count);
 }
 
@@ -13185,7 +13190,7 @@ const BlueprintSoilApplyTest = struct {
             a.destroy(task);
         }
         service.blueprint_retired.deinit(a);
-        service.dirty_meshes.deinit(a);
+        service.dirty_surfaces.deinit(a);
         service.blueprint_road_queue.deinit(a);
         service.read_requests.deinit(a);
         service.read_pending.deinit(a);
@@ -13251,9 +13256,9 @@ const BlueprintSoilApplyTest = struct {
             try std.testing.expectEqual(self.lower.metadata.timed.events.items.len != 0, state.timed_chunks.contains(lower_id));
             try std.testing.expectEqual(self.upper.metadata.timed.events.items.len != 0, state.timed_chunks.contains(upper_id));
             try std.testing.expectEqual(self.generated_chunk_count, state.generated_chunk_count);
-            try std.testing.expectEqual(@as(u64, 0), state.next_mesh_revision);
-            try std.testing.expectEqual(@as(u32, 0), state.mesh_revisions.count());
-            try std.testing.expectEqual(@as(u32, 0), service.dirty_meshes.count());
+            try std.testing.expectEqual(@as(u64, 0), state.next_surface_revision);
+            try std.testing.expectEqual(@as(u32, 0), state.surface_revisions.count());
+            try std.testing.expectEqual(@as(u32, 0), service.dirty_surfaces.count());
             try std.testing.expectEqual(self.overlay_revision, state.blueprints.revision);
             try std.testing.expectEqual(@as(u64, 0), state.blueprints.max_instance_id);
             try std.testing.expectEqual(@as(u32, 0), state.blueprints.instances.count());
@@ -14661,7 +14666,7 @@ const WarehouseAuthorityFixture = struct {
         self.service.blueprint_journal.deinit(a);
         deinitConstructionTestState(&self.service);
         self.service.blueprint_road_queue.deinit(a);
-        self.service.dirty_meshes.deinit(a);
+        self.service.dirty_surfaces.deinit(a);
         if (self.service.catalog) |*catalog| catalog.deinit();
         self.service.worker_state.deinit(a);
         if (self.service.construction_publication_budget) |budget| {
@@ -15003,7 +15008,7 @@ test "warehouse authority object publications coalesce independently of discover
     try std.testing.expect(!fixture.client.warehouse_subscriptions.contains(record.identity.id));
 }
 
-test "warehouse authority publishes loose and member pallet sources to mesh and block subscribers" {
+test "warehouse authority publishes loose and member pallet sources to surface and block subscribers" {
     const a = std.testing.allocator;
     var fixture: WarehouseAuthorityFixture = undefined;
     try fixture.init();
@@ -15014,9 +15019,9 @@ test "warehouse authority publishes loose and member pallet sources to mesh and 
     const record = try service.worker_state.warehouses.register(a, geometry, .dirt);
     const coords: ChunkCoords = .{ 0, 0, 2 };
     const id = test_layout.encodeChunkCoords(coords);
-    for ([_]Representation{ .mesh, .blocks }, 0..) |mode, index| {
-        try fixture.client.subscriptions.put(a, id, .{ .id = index + 1, .mode = mode, .mesh_pending = mode == .mesh, .blocks_pending = mode == .blocks });
-        if (mode == .mesh) service.publishMesh(coords);
+    for ([_]Representation{ .surface, .blocks }, 0..) |mode, index| {
+        try fixture.client.subscriptions.put(a, id, .{ .id = index + 1, .mode = mode, .surface_pending = mode == .surface, .blocks_pending = mode == .blocks });
+        if (mode == .surface) service.publishSurface(coords);
         service.flushPackages();
         const packages = fixture.client.responses.items.items;
         try std.testing.expectEqual(index + 1, packages.len);
@@ -15026,7 +15031,7 @@ test "warehouse authority publishes loose and member pallet sources to mesh and 
         try std.testing.expectEqualSlices(u16, &.{ transformations.index(.{ 10, 10, 6 }), transformations.index(.{ 11, 10, 6 }), transformations.index(.{ 20, 10, 6 }) }, response.pallet_visuals.?);
         try std.testing.expectEqual(@as(usize, 1), response.warehouse_refs.?.len);
         try std.testing.expectEqual(service.worker_state.modified_chunks.get(id).?.chunk_revision, response.pallet_visual_revision);
-        if (mode == .mesh) for (response.data.mesh.blocks_grouped_by_side) |faces| {
+        if (mode == .surface) for (response.data.surface.blocks_grouped_by_side) |faces| {
             for (faces.items) |face| try std.testing.expect(face.block_type != .pallet);
         };
     }
@@ -15053,13 +15058,13 @@ test "warehouse authority bounds full chunk pallet sources and retries after pub
     try service.worker_state.modified_chunks.put(a, id, chunk);
     service.construction_publication_budget = try PublicationBudget.create(a, std.testing.io, 65536, service, WorldDataService.wakeConstructionPublication);
     const budget = service.construction_publication_budget.?;
-    var first: ChunkResponse = .{ .coords = coords, .subscription_id = 1, .data = .{ .mesh = .{} } };
+    var first: ChunkResponse = .{ .coords = coords, .subscription_id = 1, .data = .{ .surface = .{} } };
     defer first.deinit(a);
     try service.composeResponse(&first);
     try std.testing.expectEqual(@as(usize, 32768), first.pallet_visuals.?.len);
     try std.testing.expectEqual(@as(usize, 65536), budget.used.load(.acquire));
     try service.composeResponse(&first); // Identical source is retained at the cap.
-    var blocked: ChunkResponse = .{ .coords = coords, .subscription_id = 2, .data = .{ .mesh = .{} } };
+    var blocked: ChunkResponse = .{ .coords = coords, .subscription_id = 2, .data = .{ .surface = .{} } };
     defer blocked.deinit(a);
     try std.testing.expectError(error.ConstructionPublicationCapacity, service.composeResponse(&blocked));
     try std.testing.expect(blocked.pallet_visuals == null);

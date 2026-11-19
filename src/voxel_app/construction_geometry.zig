@@ -39,15 +39,15 @@ fn constructionMaterial(world: *const World, cell: runtime.Cell, selection: Sele
 fn occludes(world: *const World, cell: runtime.Cell, selection: Selection, predictions: *const Predictions) !bool {
     if (try constructionMaterial(world, cell, selection, predictions)) |material| return material.occludesFaces();
     const coords, const local = @import("world.zig").splitBlockCoords(cell);
-    // A mesh-only subscription has no interior terrain array. Retaining a face
+    // A surface-only subscription has no interior terrain array. Retaining a face
     // hidden inside static terrain is the approved conservative rendering path;
     // collision and actions continue to require complete composed world data.
     const terrain = world.getChunk(coords) orelse return false;
     return terrain.content.getBlock(local).occludesFaces();
 }
 
-pub fn buildChunk(allocator: std.mem.Allocator, world: *const World, id: ChunkId, selection: Selection) !voxel.ChunkSideData {
-    var result: voxel.ChunkSideData = .{};
+pub fn buildChunk(allocator: std.mem.Allocator, world: *const World, id: ChunkId, selection: Selection) !voxel.ChunkSurfaceData {
+    var result: voxel.ChunkSurfaceData = .{};
     errdefer result.deinit(allocator);
     var predictions: Predictions = .empty;
     defer predictions.deinit(allocator);
@@ -83,9 +83,9 @@ fn includeAll(_: *const anyopaque, _: ChunkId, _: runtime.Instance) bool {
     return true;
 }
 
-fn faceCount(mesh: voxel.ChunkSideData) usize {
+fn faceCount(surface: voxel.ChunkSurfaceData) usize {
     var total: usize = 0;
-    for (mesh.blocks_grouped_by_side) |side| total += side.items.len;
+    for (surface.blocks_grouped_by_side) |side| total += side.items.len;
     return total;
 }
 
@@ -119,10 +119,10 @@ test "construction faces cull across chunk seams and preserve the exterior" {
     const selection: Selection = .{ .context = &world, .include = includeAll };
     var total: usize = 0;
     for (world.blueprints.instances.get(1).?.target_groups) |group| {
-        var mesh = try buildChunk(allocator, &world, group.chunk_id, selection);
-        defer mesh.deinit(allocator);
-        try std.testing.expectEqual(@as(usize, 5), faceCount(mesh));
-        total += faceCount(mesh);
+        var surface = try buildChunk(allocator, &world, group.chunk_id, selection);
+        defer surface.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 5), faceCount(surface));
+        total += faceCount(surface);
     }
     try std.testing.expectEqual(@as(usize, 10), total);
 }
@@ -132,9 +132,9 @@ test "dense construction geometry scales with exposed faces" {
     var world = try testWorld(allocator, .{ 10, 10, 10 }, .{ 8, 8, 8 });
     defer world.deinit();
     const selection: Selection = .{ .context = &world, .include = includeAll };
-    var mesh = try buildChunk(allocator, &world, world.blueprints.instances.get(1).?.target_groups[0].chunk_id, selection);
-    defer mesh.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 6 * 8 * 8), faceCount(mesh));
+    var surface = try buildChunk(allocator, &world, world.blueprints.instances.get(1).?.target_groups[0].chunk_id, selection);
+    defer surface.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 6 * 8 * 8), faceCount(surface));
 }
 
 test "supported checkerboard rebar columns exceed the former single allocation limit" {
@@ -170,12 +170,12 @@ test "supported checkerboard rebar columns exceed the former single allocation l
     for (0..32) |y| for (0..32) |x| {
         if ((x + y) % 2 == 0) try std.testing.expect(validator.checkExisting(.{ @intCast(32 + x), @intCast(32 + y), 32 + rules.Limits.mineral_height }) == null);
     };
-    var mesh = try buildChunk(allocator, &world, installed.target_groups[0].chunk_id, .{ .context = &world, .include = includeAll });
-    defer mesh.deinit(allocator);
+    var surface = try buildChunk(allocator, &world, installed.target_groups[0].chunk_id, .{ .context = &world, .include = includeAll });
+    defer surface.deinit(allocator);
     // 512 independently supported columns, each with four exposed sides per
     // level and one top; the raw limestone foundation occludes each bottom.
-    try std.testing.expectEqual(@as(usize, 512 * (4 * rules.Limits.mineral_height + 1)), faceCount(mesh));
-    try std.testing.expect(faceCount(mesh) > 16_384);
+    try std.testing.expectEqual(@as(usize, 512 * (4 * rules.Limits.mineral_height + 1)), faceCount(surface));
+    try std.testing.expect(faceCount(surface) > 16_384);
 }
 
 test "construction faces cull between separate sites and across the wrapped seam" {
@@ -195,10 +195,10 @@ test "construction faces cull between separate sites and across the wrapped seam
         var total: usize = 0;
         for ([_]u64{ 1, 2 }) |id| {
             const group = world.blueprints.instances.get(id).?.target_groups[0];
-            var mesh = try buildChunk(allocator, &world, group.chunk_id, selection);
-            defer mesh.deinit(allocator);
-            try std.testing.expectEqual(@as(usize, 5), faceCount(mesh));
-            total += faceCount(mesh);
+            var surface = try buildChunk(allocator, &world, group.chunk_id, selection);
+            defer surface.deinit(allocator);
+            try std.testing.expectEqual(@as(usize, 5), faceCount(surface));
+            total += faceCount(surface);
         }
         try std.testing.expectEqual(@as(usize, 10), total);
     }
@@ -213,9 +213,9 @@ test "construction geometry preserves enclosed unfulfilled cavities" {
     instance.fulfilled[center / 8] &= ~(@as(u8, 1) << @as(u3, @intCast(center % 8)));
     instance.remaining = 1;
     instance.phase = .building;
-    var mesh = try buildChunk(allocator, &world, instance.target_groups[0].chunk_id, .{ .context = &world, .include = includeAll });
-    defer mesh.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 6 * 8 * 8 + 6), faceCount(mesh));
+    var surface = try buildChunk(allocator, &world, instance.target_groups[0].chunk_id, .{ .context = &world, .include = includeAll });
+    defer surface.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 6 * 8 * 8 + 6), faceCount(surface));
 }
 
 test "construction geometry indexes optimistic fulfillment by exact target and cell" {
@@ -256,9 +256,9 @@ test "construction reference geometry has 32800 faces for 320000 filled targets"
         const start = std.Io.Clock.awake.now(std.testing.io);
         var total: usize = 0;
         for (groups) |group| {
-            var mesh = try buildChunk(allocator, &world, group.chunk_id, selection);
-            total += faceCount(mesh);
-            mesh.deinit(allocator);
+            var surface = try buildChunk(allocator, &world, group.chunk_id, selection);
+            total += faceCount(surface);
+            surface.deinit(allocator);
         }
         sample.* = @intCast(start.durationTo(std.Io.Clock.awake.now(std.testing.io)).nanoseconds);
         try std.testing.expectEqual(@as(usize, 32_800), total);

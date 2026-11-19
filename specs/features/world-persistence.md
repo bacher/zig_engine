@@ -43,7 +43,7 @@ chunk lookup.
 Chunk blocks are byte values in `[z][y][x]` order, with x contiguous. Persistent metadata
 includes construction markers, scheduled transformation kinds/deadlines, and custom road
 ownership/orientation. Chunk flags include a historical revealed/unreachable property.
-Boundary masks, meshes, subscription tokens, and optimistic client edits are derived or
+Boundary masks, surfaces, subscription tokens, and optimistic client edits are derived or
 transient. World ticks were u64 at 60 ticks/second; per-chunk revisions then used u32.
 Several edits could occur during one tick. Player state then belonged to the main thread;
 the demonstration simulation also has private execution state.
@@ -66,7 +66,7 @@ The initial measurement target is approximately 10,000 simultaneously active chu
 smaller worlds supported on 8 GB machines. These are workload/hardware targets, not hard
 chunk limits or measured memory guarantees. Active materialized blocks alone occupy
 312.5 MiB; 2,000-4,000 raw block payloads occupy 62.5-125 MiB before metadata/framing.
-Metadata, meshes, replicas, retained dirty chunks, and work buffers add to those figures.
+Metadata, surfaces, replicas, retained dirty chunks, and work buffers add to those figures.
 Missed saves can accumulate more dirty chunks than one normal interval or the active set.
 Removing COW bounds neither this retained world state nor total process memory. With base-only
 reloads, the exact current revision must reach the installed base before it can be evicted;
@@ -477,7 +477,7 @@ mechanisms without overriding those contracts.
   mutation, including metadata-only and historical-flag changes. Never wrap, reset on reload,
   or reuse an older revision when contents revert to earlier values. Preserve the revision
   in chunk records and installed-base catalogs; derive eviction equality from those identities,
-  not mesh/client revisions. Check eligibility and release residency under the service's
+  not surface/client revisions. Check eligibility and release residency under the service's
   authority so a concurrent mutation or pin acquisition cannot invalidate the decision.
 - R49: Use explicitly assigned material enum values and numeric u8 codec IDs, with
   air 0 and custom cells 255. Preserve their meanings across compatible versions; declaration
@@ -746,7 +746,7 @@ mechanisms without overriding those contracts.
   selection wait for a later pass. Capture, backlog, or resource pressure may postpone work
   beyond the next frame. Use bounded, fair processing while chunks remain resident and
   execution is permitted; retain unprocessed due work without resetting its deadlines.
-  Players, meshes/collision, and dependent commands may observe pre-catch-up terrain; edits
+  Players, surfaces/collision, and dependent commands may observe pre-catch-up terrain; edits
   admitted before timer execution take effect in authoritative order. Recheck current event
   identity/incarnation and expected material so stale timers cannot overwrite newer edits.
   Execute grass transitions in stable (deadline, cell-index) order through the pass's fixed
@@ -1686,7 +1686,7 @@ the implementation. The user authorized this implementation after the design rev
    current persistence work, save, and compact. Shutdown Status defines responsive choices.
 6. Coalesce periodic and pressure-triggered work under the same concurrency/capacity limits.
    Encoded records on disk already support reuse; any optional in-memory cache needs measured
-   benefit and persistent-content identity including metadata, not age or mesh revision.
+   benefit and persistent-content identity including metadata, not age or surface revision.
 
 ### Decision Impact Relative to PR #28
 
@@ -2322,7 +2322,7 @@ these experiments do not set shipping defaults or a process-wide memory ceiling.
 Use R74's 10,000 active chunks and 2,000/4,000 changed chunks per interval as target cases
 on 16 GB hardware, plus measured smaller worlds on 8 GB hardware. Include accumulation
 beyond one interval; active chunks do not bound dirty or timer-pinned residency. These
-counts do not define allocation caps or guarantee that arbitrary metadata/meshes fit.
+counts do not define allocation caps or guarantee that arbitrary metadata/surfaces fit.
 
 Use this workload matrix, comparing each workload with saving inactive and with periodic
 saving/compaction active under otherwise comparable conditions:
@@ -2470,7 +2470,7 @@ as a guaranteed or immediate remedy, especially when storage is slow or unavaila
 
 Track resident current content identity, latest WAL-durable identity, and installed-base
 identity separately. Persistent identities cover blocks, metadata, and historical flags;
-mesh/validation revisions do not substitute for these identities. Preserve identities in
+surface/validation revisions do not substitute for these identities. Preserve identities in
 chunk records so eviction/reload does not reset them. Advance a chunk's persistent revision
 on every published persistent mutation, including a change that restores older content.
 Revisions cannot wrap or be reused. WAL-durable identity supports save acknowledgment/dirty
@@ -2694,7 +2694,7 @@ durability by itself; report that distinction in validation results.
   an in-memory optimization; disk encoding still uses the explicit versioned binary format,
   not native struct bytes or padding.
 - Per-chunk mutation overlays can defer full block copies, but require merged reads,
-  collision/meshing/validation support, bounded overlay depth, and eventual materialization.
+  collision/surface extraction/validation support, bounded overlay depth, and eventual materialization.
   Document this option and defer implementation until measured mutation/capture costs justify it.
 - Nibble-count RLE may improve short-run compression; benchmark against byte counts on real
   terrain and edits before adding a codec version.

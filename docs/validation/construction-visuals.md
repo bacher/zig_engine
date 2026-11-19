@@ -6,7 +6,7 @@ a two-millisecond soft budget and no minimum age. The user approved brief terrai
 mismatches; strict paired publication and persistent GPU staging are removed.
 
 The first PR is based on main `b223e01`. It replaces sources synchronously and retains
-main's terrain/service-mesh paths. GPU resource retirement, subscription checks, source
+main's terrain/service-surface paths. GPU resource retirement, subscription checks, source
 limits and cache invalidation remain required independently of visual coherence.
 
 The newer [construction rendering report](construction-rendering.md) covers filled dynamic
@@ -55,7 +55,7 @@ The cache-first branch passed `zig build install test -Doptimize=ReleaseFast -Db
 56/56 steps, 1,909 tests passed and eight existing skips. `zig build test -Doptimize=Debug -j4 --summary all` passed 48/48 steps, 1,916 tests and one existing skip. Formatting and
 `git diff --check` passed. Client regressions cover own versus neighbor/camera changes,
 committed/no-op blueprint events, prediction rejection and cross-chunk replay, accepted
-versus stale snapshots, mesh-only fulfillment, failure/shrink progress and eviction/reload.
+versus stale snapshots, surface-only fulfillment, failure/shrink progress and eviction/reload.
 The FIFO follow-up is not included in these branch totals.
 
 Reproduce current renderer measurements from the repository root, running separately:
@@ -159,7 +159,7 @@ than running an archived full client. All 60 runs converged to matching final st
 
 At 512 fills/second, the 2,048 fills produce these medians of three per-run statistics:
 
-| Variant | Mesh builds | CPU p95, ms | Total CPU, ms | Latest dirty age p95, ms | First dirty age p95, ms |
+| Variant | Surface builds | CPU p95, ms | Total CPU, ms | Latest dirty age p95, ms | First dirty age p95, ms |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Dynamic immediate | 2,048 | 0.579 | 129.38 | 15.8 | 15.8 |
 | Cache immediate | 2,048 | 0.588 | 126.31 | 15.8 | 15.8 |
@@ -232,6 +232,6 @@ latency or whole-world simulation throughput. The M4 Max is faster than the prop
 4–8-core reference PC. A full-client comparison should hold accepted edits/camera motion
 fixed and measure whole-frame CPU/GPU percentiles, missed deadlines, event-to-visible age,
 backlog convergence and peak retained memory under realistic simulation/service load.
-Include quiet manual edits, busy local construction, the streamed mesh ring, travel,
+Include quiet manual edits, busy local construction, the streamed surface ring, travel,
 representation handoffs and capacity pressure. The ordinary local block core contains
-27 chunks; treating 343 locally meshed chunks as the default would overstate that workload.
+27 chunks; treating 343 locally prepared chunks as the default would overstate that workload.

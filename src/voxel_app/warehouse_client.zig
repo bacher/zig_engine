@@ -1,5 +1,5 @@
 //! Client-owned complete warehouse replicas. Discovery/functional retention and
-//! logical prediction are independent of terrain meshes and GPU residency.
+//! logical prediction are independent of terrain surfaces and GPU residency.
 const std = @import("std");
 const stream = @import("warehouse_stream.zig");
 const state = @import("warehouse_state.zig");

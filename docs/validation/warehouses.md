@@ -81,7 +81,7 @@ The real-service dispatcher test also passed in Debug. These checks cover:
 - Recovery rejects missing members, missing floor and obstructed envelopes before worker startup.
   Codec truncation, malformed aggregate promises, highwaters, duplicate IDs and every-allocation
   failure paths also reject safely.
-- Complete loose/member base-pallet sources for both mesh and block subscriptions, no terrain
+- Complete loose/member base-pallet sources for both surface and block subscriptions, no terrain
   pallet faces, unchanged terrain on stock-only mutation, and a full-chunk 64 KiB source cap
   with release/retry and explicit empty replacement.
 - Warehouse subscription admission beyond the pending-command queue limit; retained live-capacity

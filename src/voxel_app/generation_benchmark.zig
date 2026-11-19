@@ -222,24 +222,24 @@ fn isolatedWorkload(init: std.process.Init, a: std.mem.Allocator, prepared: *con
     }
     var climate: glue.ClimateMap = undefined;
     prepared.fillClimateMap(coords, &climate);
-    var mesh_meter: AllocationMeter = .{ .backing = a };
+    var surface_meter: AllocationMeter = .{ .backing = a };
     var maximum_faces: usize = 0;
     for (samples[0..rounds]) |*sample| {
         const begin = std.Io.Clock.awake.now(init.io);
-        var mesh = try glue.tryExtractChunkGeometryWithClimate(mesh_meter.allocator(), chunk, masks, &climate);
+        var surface = try glue.tryExtractChunkGeometryWithClimate(surface_meter.allocator(), chunk, masks, &climate);
         sample.* = elapsed(init.io, begin);
         var faces: usize = 0;
-        for (mesh.blocks_grouped_by_side) |side| faces += side.items.len;
+        for (surface.blocks_grouped_by_side) |side| faces += side.items.len;
         maximum_faces = @max(maximum_faces, faces);
-        mesh.deinit(mesh_meter.allocator());
+        surface.deinit(surface_meter.allocator());
     }
-    printSamples("meshing_prepared_chunk_and_neighbors", samples, 1);
+    printSamples("surface_extraction_prepared_chunk_and_neighbors", samples, 1);
     const current = try snapshot(a, &cached, z, true);
-    std.debug.print("site={s} chunk_allocations={d} chunk_peak_requested={d} mesh_allocations={d} mesh_resizes={d} mesh_peak_requested={d} max_single_allocation={d} faces={d} face_bytes={d} exceeds_64KiB={any} digest={s}\n", .{ site.label, chunk_meter.allocations, chunk_meter.peak_live_bytes, mesh_meter.allocations, mesh_meter.resizes, mesh_meter.peak_live_bytes, mesh_meter.maximum_request, maximum_faces, current.mesh_bytes, current.mesh_bytes > 64 * 1024, std.fmt.bytesToHex(current.digest, .lower) });
+    std.debug.print("site={s} chunk_allocations={d} chunk_peak_requested={d} surface_allocations={d} surface_resizes={d} surface_peak_requested={d} max_single_allocation={d} faces={d} face_bytes={d} exceeds_64KiB={any} digest={s}\n", .{ site.label, chunk_meter.allocations, chunk_meter.peak_live_bytes, surface_meter.allocations, surface_meter.resizes, surface_meter.peak_live_bytes, surface_meter.maximum_request, maximum_faces, current.surface_bytes, current.surface_bytes > 64 * 1024, std.fmt.bytesToHex(current.digest, .lower) });
 }
 
-pub const Snapshot = struct { digest: [32]u8, faces: usize = 0, mesh_bytes: usize = 0 };
-pub fn snapshot(a: std.mem.Allocator, column: *const Column, z: i32, include_mesh: bool) !Snapshot {
+pub const Snapshot = struct { digest: [32]u8, faces: usize = 0, surface_bytes: usize = 0 };
+pub fn snapshot(a: std.mem.Allocator, column: *const Column, z: i32, include_surface: bool) !Snapshot {
     const prepared = column.prepared.?;
     const chunk = try column.tryGenerateChunk(a, z);
     defer chunk.deinit(a);
@@ -255,7 +255,7 @@ pub fn snapshot(a: std.mem.Allocator, column: *const Column, z: i32, include_mes
     prepared.fillClimateMap(column.coords, &climate);
     h.update(std.mem.asBytes(&climate));
     var result: Snapshot = .{ .digest = undefined };
-    if (include_mesh) {
+    if (include_surface) {
         var masks: glue.BoundaryMasks = @splat(.{});
         const coords = engine.ChunkCoords{ column.coords[0], column.coords[1], z };
         for (std.enums.values(engine.voxel_chunk.Side)) |side| {
@@ -265,13 +265,13 @@ pub fn snapshot(a: std.mem.Allocator, column: *const Column, z: i32, include_mes
             defer neighbor.deinit(a);
             masks[@intFromEnum(side)] = neighbor.boundaries[@intFromEnum(side.getOpposite())];
         }
-        var mesh = try glue.tryExtractChunkGeometryWithClimate(a, chunk, masks, &climate);
-        defer mesh.deinit(a);
-        for (mesh.blocks_grouped_by_side) |faces| {
+        var surface = try glue.tryExtractChunkGeometryWithClimate(a, chunk, masks, &climate);
+        defer surface.deinit(a);
+        for (surface.blocks_grouped_by_side) |faces| {
             result.faces += faces.items.len;
             h.update(std.mem.sliceAsBytes(faces.items));
         }
-        result.mesh_bytes = result.faces * @sizeOf(engine.voxel_chunk.GPU_BlockInfo);
+        result.surface_bytes = result.faces * @sizeOf(engine.voxel_chunk.GPU_BlockInfo);
     }
     h.final(&result.digest);
     return result;
@@ -388,13 +388,13 @@ fn run(init: std.process.Init, seed: u64, rounds: usize, beaches: bool, dimensio
         const restarted = try snapshot(a, &fresh_column, site_z, true);
         if (!std.mem.eql(u8, &representative_digests[representative_index], &revisited.digest) or !std.mem.eql(u8, &representative_digests[representative_index], &restarted.digest)) return error.DerivedRegenerationChanged;
     }
-    std.debug.print("representative_replay sites={d} derived_mesh_boundary_climate_hashes_match_after_eviction_and_restart=true\n", .{representative_sites.len});
+    std.debug.print("representative_replay sites={d} derived_surface_boundary_climate_hashes_match_after_eviction_and_restart=true\n", .{representative_sites.len});
     result = try snapshot(a, &cached, z, true);
     var climate_map: glue.ClimateMap = undefined;
     prepared.fillClimateMap(coords, &climate_map);
     const before = std.Io.Clock.awake.now(init.io);
     const environment = diagnostics.sampleEnvironment(&prepared, 512, 256, 0);
-    std.debug.print("mesh_start faces={d} face_bytes={d} exceeds_64KiB={any} digest={s} sampled_land_percent={d:.3} environment_samples_s={d:.2} metadata_fingerprint={x}\n", .{ result.faces, result.mesh_bytes, result.mesh_bytes > 64 * 1024, std.fmt.bytesToHex(result.digest, .lower), environment.landPercent(), @as(f64, @floatFromInt(environment.samples)) * std.time.ns_per_s / @as(f64, @floatFromInt(@max(1, elapsed(init.io, before)))), environment.fingerprint });
+    std.debug.print("surface_start faces={d} face_bytes={d} exceeds_64KiB={any} digest={s} sampled_land_percent={d:.3} environment_samples_s={d:.2} metadata_fingerprint={x}\n", .{ result.faces, result.surface_bytes, result.surface_bytes > 64 * 1024, std.fmt.bytesToHex(result.digest, .lower), environment.landPercent(), @as(f64, @floatFromInt(environment.samples)) * std.time.ns_per_s / @as(f64, @floatFromInt(@max(1, elapsed(init.io, before)))), environment.fingerprint });
     return result.digest;
 }
 

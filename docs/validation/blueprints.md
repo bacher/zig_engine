@@ -83,7 +83,7 @@ Admission timings start with a ready immutable snapshot and end with a prepared
 publication. They exclude dependency acquisition/generation, the service's staged
 four-chunk-per-turn snapshot copying, final dependency/overlay version checks,
 authority publication, per-client response preparation and delivery, client index
-installation, meshing, and persistence. In particular, the direct admission
+installation, surface extraction, and persistence. In particular, the direct admission
 benchmark does not include the service helper's per-client instance response
 clones. Many concurrent sites, dense preexisting indexes, near-floor immutable
 lookups, and source churn need separate measurements.
@@ -124,7 +124,7 @@ Additional runs measured 7.544–13.722 ms for fills and 0.265–0.292 ms for th
 This is an authority-function fixture using the test allocator. It excludes
 library/site admission, NPC logic, material delivery and player inventory
 transfers, endpoint command admission, frame scheduling, client reconciliation,
-meshing/GPU work, and disk writes. Its controlled batch bypasses the default
+surface extraction/GPU work, and disk writes. Its controlled batch bypasses the default
 256-operation endpoint capacity to isolate fulfillment and coalescing. Normal
 batch boundaries can produce more snapshots. It establishes neither full-game
 throughput nor a per-frame budget. Separate integration tests cover player

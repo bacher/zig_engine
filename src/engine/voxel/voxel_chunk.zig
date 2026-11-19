@@ -235,12 +235,12 @@ comptime {
 
 pub const Layer = enum { terrain, construction };
 
-/// Identifies the complete data/composition and subscription used by a mesh.
+/// Identifies the complete data/composition and subscription used by a surface.
 /// An upload becomes current only after it has successfully replaced its layer.
 pub const GeometryStamp = struct {
     subscription_id: u64 = 0,
     chunk_revision: u64 = 0,
-    mesh_revision: u64 = 0,
+    surface_revision: u64 = 0,
     composition_revision: u64 = 0,
 };
 
@@ -274,7 +274,9 @@ pub const GpuResidenceInfo = struct {
     }
 };
 
-pub const ChunkSideData = struct {
+/// Chunk surface payload: exposed block coordinates/materials grouped by face side,
+/// plus separate custom block draw records. Fully occluded ordinary blocks are omitted.
+pub const ChunkSurfaceData = struct {
     const Self = @This();
 
     blocks_grouped_by_side: [6]BlockCoordList = @splat(BlockCoordList.empty),
@@ -302,27 +304,27 @@ pub const ChunkSideData = struct {
     }
 
     pub fn initWithTestData(allocator: std.mem.Allocator) void {
-        var chunk_side_data: Self = .{};
+        var chunk_surface_data: Self = .{};
 
-        chunk_side_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
-        chunk_side_data.blocks_grouped_by_side[1].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
-        chunk_side_data.blocks_grouped_by_side[2].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
-        chunk_side_data.blocks_grouped_by_side[3].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
-        chunk_side_data.blocks_grouped_by_side[4].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
-        chunk_side_data.blocks_grouped_by_side[5].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        chunk_surface_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        chunk_surface_data.blocks_grouped_by_side[1].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        chunk_surface_data.blocks_grouped_by_side[2].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        chunk_surface_data.blocks_grouped_by_side[3].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        chunk_surface_data.blocks_grouped_by_side[4].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
+        chunk_surface_data.blocks_grouped_by_side[5].append(allocator, .{ .coords = .{ 0, 0, 0 }, .block_type = .stone }) catch unreachable;
 
-        chunk_side_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 1, 1, 0 }, .block_type = .stone }) catch unreachable;
-        chunk_side_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 3, 0 }, .block_type = .dirt }) catch unreachable;
-        chunk_side_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 1, 1, 1 }, .block_type = .dirt }) catch unreachable;
-        chunk_side_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 0, CHUNK_SIZE - 1 }, .block_type = .stone }) catch unreachable;
+        chunk_surface_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 1, 1, 0 }, .block_type = .stone }) catch unreachable;
+        chunk_surface_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 3, 0 }, .block_type = .dirt }) catch unreachable;
+        chunk_surface_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 1, 1, 1 }, .block_type = .dirt }) catch unreachable;
+        chunk_surface_data.blocks_grouped_by_side[0].append(allocator, .{ .coords = .{ 0, 0, CHUNK_SIZE - 1 }, .block_type = .stone }) catch unreachable;
 
-        return chunk_side_data;
+        return chunk_surface_data;
     }
 };
 
 pub const VoxelChunkUpload = struct {
     chunk_coords: ChunkCoords,
-    chunk_side_data: ChunkSideData,
+    chunk_surface_data: ChunkSurfaceData,
     layer: Layer = .terrain,
     geometry_stamp: GeometryStamp = .{},
 };
