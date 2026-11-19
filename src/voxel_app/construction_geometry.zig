@@ -46,8 +46,8 @@ fn occludes(world: *const World, cell: runtime.Cell, selection: Selection, predi
     return terrain.content.getBlock(local).occludesFaces();
 }
 
-pub fn buildChunk(allocator: std.mem.Allocator, world: *const World, id: ChunkId, selection: Selection) !voxel.ChunkSideData {
-    var result: voxel.ChunkSideData = .{};
+pub fn buildChunk(allocator: std.mem.Allocator, world: *const World, id: ChunkId, selection: Selection) !voxel.ChunkSurfaceData {
+    var result: voxel.ChunkSurfaceData = .{};
     errdefer result.deinit(allocator);
     var predictions: Predictions = .empty;
     defer predictions.deinit(allocator);
@@ -83,7 +83,7 @@ fn includeAll(_: *const anyopaque, _: ChunkId, _: runtime.Instance) bool {
     return true;
 }
 
-fn faceCount(surface: voxel.ChunkSideData) usize {
+fn faceCount(surface: voxel.ChunkSurfaceData) usize {
     var total: usize = 0;
     for (surface.blocks_grouped_by_side) |side| total += side.items.len;
     return total;

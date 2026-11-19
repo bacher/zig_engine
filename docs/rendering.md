@@ -157,7 +157,7 @@ regressions compare instanced and individual draws at 20, 34, and 65 cells, incl
 correction masks and a visible-only focused cell. Profile GPU stroke coverage before raising
 the application preview bound; instancing does not reduce screen-space overdraw.
 
-The voxel grid uses the `surface` representation: exposed-face records containing local block coordinates and a render-material ID in four bytes. Six lists group those records by outward face direction; fully occluded ordinary blocks contribute no records. The vertex shader generates six vertices per face and selects atlas UVs using the render material and direction. This compact payload reduces GPU storage and upload bandwidth.
+The voxel grid uses the `surface` representation through `ChunkSurfaceData`: exposed-face records containing local block coordinates and a render-material ID in four bytes, plus separate custom block draw records. Six lists group face records by outward direction; fully occluded ordinary blocks contribute no face records. The vertex shader generates six vertices per face and selects atlas UVs using the render material and direction. This compact payload reduces GPU storage and upload bandwidth.
 
 Its 4 MiB face buffer uses 1 KiB slots grouped into 64 KiB base spans. Ordinary allocations
 retain their size-class packing within a base span. Oversized chunk layers reserve two,

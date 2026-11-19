@@ -7,21 +7,21 @@ pub const ClimateMap = environment.ClimateMap;
 
 pub const BoundaryMasks = @import("./boundary_mask.zig").BoundaryMasks;
 
-pub fn extractChunkSideData(
+pub fn extractChunkSurfaceData(
     allocator: std.mem.Allocator,
     content: ChunkContent,
     neighbors: BoundaryMasks,
-) voxel.ChunkSideData {
-    return tryExtractChunkSideData(allocator, content, neighbors) catch @panic("OOM");
+) voxel.ChunkSurfaceData {
+    return tryExtractChunkSurfaceData(allocator, content, neighbors) catch @panic("OOM");
 }
 
-pub fn tryExtractChunkSideData(allocator: std.mem.Allocator, content: ChunkContent, neighbors: BoundaryMasks) !voxel.ChunkSideData {
+pub fn tryExtractChunkSurfaceData(allocator: std.mem.Allocator, content: ChunkContent, neighbors: BoundaryMasks) !voxel.ChunkSurfaceData {
     const climate: ClimateMap = @splat(@splat(.temperate));
-    return tryExtractChunkSideDataWithClimate(allocator, content, neighbors, &climate);
+    return tryExtractChunkSurfaceDataWithClimate(allocator, content, neighbors, &climate);
 }
 
-pub fn tryExtractChunkSideDataWithClimate(allocator: std.mem.Allocator, content: ChunkContent, neighbors: BoundaryMasks, climate: *const ClimateMap) !voxel.ChunkSideData {
-    var result: voxel.ChunkSideData = .{};
+pub fn tryExtractChunkSurfaceDataWithClimate(allocator: std.mem.Allocator, content: ChunkContent, neighbors: BoundaryMasks, climate: *const ClimateMap) !voxel.ChunkSurfaceData {
+    var result: voxel.ChunkSurfaceData = .{};
     errdefer result.deinit(allocator);
     if (content == .empty) return result;
     for (content.blocks.blocks, 0..) |slice, z| {
@@ -52,21 +52,21 @@ pub fn tryExtractChunkSideDataWithClimate(allocator: std.mem.Allocator, content:
     return result;
 }
 
-pub fn extractChunkGeometry(allocator: std.mem.Allocator, chunk: @import("world.zig").WorldChunk, neighbors: BoundaryMasks) voxel.ChunkSideData {
+pub fn extractChunkGeometry(allocator: std.mem.Allocator, chunk: @import("world.zig").WorldChunk, neighbors: BoundaryMasks) voxel.ChunkSurfaceData {
     return tryExtractChunkGeometry(allocator, chunk, neighbors) catch @panic("OOM");
 }
 
-pub fn tryExtractChunkGeometry(allocator: std.mem.Allocator, chunk: @import("world.zig").WorldChunk, neighbors: BoundaryMasks) !voxel.ChunkSideData {
+pub fn tryExtractChunkGeometry(allocator: std.mem.Allocator, chunk: @import("world.zig").WorldChunk, neighbors: BoundaryMasks) !voxel.ChunkSurfaceData {
     const climate: ClimateMap = @splat(@splat(.temperate));
     return tryExtractChunkGeometryWithClimate(allocator, chunk, neighbors, &climate);
 }
 
-pub fn extractChunkGeometryWithClimate(allocator: std.mem.Allocator, chunk: @import("world.zig").WorldChunk, neighbors: BoundaryMasks, climate: *const ClimateMap) voxel.ChunkSideData {
+pub fn extractChunkGeometryWithClimate(allocator: std.mem.Allocator, chunk: @import("world.zig").WorldChunk, neighbors: BoundaryMasks, climate: *const ClimateMap) voxel.ChunkSurfaceData {
     return tryExtractChunkGeometryWithClimate(allocator, chunk, neighbors, climate) catch @panic("OOM");
 }
 
-pub fn tryExtractChunkGeometryWithClimate(allocator: std.mem.Allocator, chunk: @import("world.zig").WorldChunk, neighbors: BoundaryMasks, climate: *const ClimateMap) !voxel.ChunkSideData {
-    var result = try tryExtractChunkSideDataWithClimate(allocator, chunk.content, neighbors, climate);
+pub fn tryExtractChunkGeometryWithClimate(allocator: std.mem.Allocator, chunk: @import("world.zig").WorldChunk, neighbors: BoundaryMasks, climate: *const ClimateMap) !voxel.ChunkSurfaceData {
+    var result = try tryExtractChunkSurfaceDataWithClimate(allocator, chunk.content, neighbors, climate);
     errdefer result.deinit(allocator);
     for (chunk.metadata.roads.items) |road| {
         const local = @import("block_transformations.zig").coordinates(road.index);
@@ -98,7 +98,7 @@ test "column climate changes covered soil appearance without changing saved mate
     data.blocks[2][5][2] = .dirt;
     data.blocks[2][5][4] = .dirt;
     climate[5] = @splat(.frozen);
-    var surface = try tryExtractChunkSideDataWithClimate(allocator, .{ .blocks = &data }, @splat(.{}), &climate);
+    var surface = try tryExtractChunkSurfaceDataWithClimate(allocator, .{ .blocks = &data }, @splat(.{}), &climate);
     defer surface.deinit(allocator);
     const tops = surface.blocks_grouped_by_side[@intFromEnum(voxel.Side.top)].items;
     for (appearances, 0..) |appearance, i| {
@@ -117,7 +117,7 @@ test "neighbor masks cull matching faces and retain real exterior surfaces" {
     var neighbors: BoundaryMasks = @splat(.{});
     neighbors[@intFromEnum(voxel.Side.left)] = .{ .rows = @splat(std.math.maxInt(u32)) };
     neighbors[@intFromEnum(voxel.Side.top)] = .{ .rows = @splat(std.math.maxInt(u32)) };
-    var surface = extractChunkSideData(allocator, .{ .blocks = &solid }, neighbors);
+    var surface = extractChunkSurfaceData(allocator, .{ .blocks = &solid }, neighbors);
     defer surface.deinit(allocator);
     for (surface.blocks_grouped_by_side, 0..) |faces, i| {
         const expected: usize = if (i == @intFromEnum(voxel.Side.left) or i == @intFromEnum(voxel.Side.top)) 0 else CHUNK_SIZE * CHUNK_SIZE;
@@ -126,7 +126,7 @@ test "neighbor masks cull matching faces and retain real exterior surfaces" {
     var neighbor = WorldChunkData.initSolid();
     neighbor.blocks[7][8][CHUNK_SIZE - 1] = .none;
     neighbors[0] = @import("./boundary_mask.zig").extract(&neighbor)[@intFromEnum(voxel.Side.right)];
-    var opened = extractChunkSideData(allocator, .{ .blocks = &solid }, neighbors);
+    var opened = extractChunkSurfaceData(allocator, .{ .blocks = &solid }, neighbors);
     defer opened.deinit(allocator);
     try std.testing.expectEqual(1, opened.blocks_grouped_by_side[0].items.len);
     try std.testing.expectEqual([3]u8{ 0, 8, 7 }, opened.blocks_grouped_by_side[0].items[0].coords);
@@ -134,7 +134,7 @@ test "neighbor masks cull matching faces and retain real exterior surfaces" {
 
 fn exerciseFallibleSurface(allocator: std.mem.Allocator) !void {
     var solid = @import("world_chunk_data.zig").WorldChunkData.initSolid();
-    var surface = try tryExtractChunkSideData(allocator, .{ .blocks = &solid }, @splat(.{}));
+    var surface = try tryExtractChunkSurfaceData(allocator, .{ .blocks = &solid }, @splat(.{}));
     defer surface.deinit(allocator);
     var copy = try surface.tryClone(allocator);
     defer copy.deinit(allocator);

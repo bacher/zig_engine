@@ -151,7 +151,7 @@ pub const Representation = enum {
     /// Exposed block faces grouped by side, plus custom block draw records.
     surface,
 };
-const ChunkSideData = @import("engine").voxel_chunk.ChunkSideData;
+const ChunkSurfaceData = @import("engine").voxel_chunk.ChunkSurfaceData;
 const surface_extractor = @import("./world_engine_glue.zig");
 pub const BoundaryMasks = @import("./boundary_mask.zig").BoundaryMasks;
 
@@ -182,7 +182,7 @@ pub const ChunkResponse = struct {
     data: union(enum) {
         blocks: BlockSnapshot,
         boundaries: BoundaryMasks,
-        surface: ChunkSideData,
+        surface: ChunkSurfaceData,
         /// Surface subscription is current, but enclosure makes geometry unnecessary.
         unreachable_chunk,
         acknowledgement,
@@ -1797,7 +1797,7 @@ pub const WorldDataService = struct {
         if (!needed) return;
         const chunk = self.worker_state.tryLoadAt(self.allocator, coords) catch return;
         defer chunk.deinit(self.allocator);
-        var surface: ChunkSideData = .{};
+        var surface: ChunkSurfaceData = .{};
         if (chunk.content == .blocks and !chunk.flags.is_unreachable) {
             const neighbors = self.worker_state.tryNeighborBoundaries(self.allocator, coords) catch return;
             var climate: surface_extractor.ClimateMap = undefined;
@@ -1810,7 +1810,7 @@ pub const WorldDataService = struct {
             if (sub.mode != .surface or !sub.surface_pending) continue;
             // Secure the response slot before cloning so failure retains surface_pending.
             client.pending.responses.ensureUnusedCapacity(self.allocator, 1) catch continue;
-            const copy: ChunkSideData = if (chunk.flags.is_unreachable) .{} else surface.tryClone(self.allocator) catch continue;
+            const copy: ChunkSurfaceData = if (chunk.flags.is_unreachable) .{} else surface.tryClone(self.allocator) catch continue;
             client.pending.responses.appendAssumeCapacity(.{
                 .coords = coords,
                 .subscription_id = sub.id,
@@ -6975,7 +6975,7 @@ test "default terrain 7x7x7 surfaces fit the unchanged GPU allocator including f
     for (responses.items) |response| {
         if (response.data == .unreachable_chunk) continue;
         for (response.data.surface.blocks_grouped_by_side) |side| bytes += 4 * side.items.len;
-        grid.appendChunk(.{ .chunk_coords = response.coords, .chunk_side_data = response.data.surface.clone(allocator) });
+        grid.appendChunk(.{ .chunk_coords = response.coords, .chunk_surface_data = response.data.surface.clone(allocator) });
     }
     try std.testing.expect(bytes > 0);
     try std.testing.expect(grid.hasUploadCapacity());
@@ -7026,7 +7026,7 @@ test "block subscriptions receive coalesced neighbor masks with surface updates 
                 try std.testing.expect(!updated[0].contains(.left, .{ 0, 8, 8 }));
                 try std.testing.expect(!updated[0].contains(.left, .{ 0, 9, 8 }));
                 try std.testing.expect(updated[0].contains(.left, .{ 0, 10, 8 }));
-                var surface = surface_extractor.extractChunkSideData(allocator, initial.items[0].data.blocks.chunk.content, updated);
+                var surface = surface_extractor.extractChunkSurfaceData(allocator, initial.items[0].data.blocks.chunk.content, updated);
                 defer surface.deinit(allocator);
                 try std.testing.expectEqual(2, surface.blocks_grouped_by_side[0].items.len);
             },

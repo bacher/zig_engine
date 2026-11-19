@@ -186,7 +186,7 @@ workload and measured scope.
 | Submit a block operation | Apply one `put(type)` or `remove` at validated global storage block coordinates. |
 | Submit up to 64 block operations | Admit the entire packet and execute its individually identified operations in order. |
 
-The two representations are `blocks` and `surface`. Surface payloads contain local block
+The two representations are `blocks` and `surface`. `ChunkSurfaceData` payloads contain local block
 coordinates and render materials for exposed faces, grouped by the six outward sides;
 fully occluded ordinary blocks are omitted. Custom blocks travel as separate draw records.
 The voxel shader generates face vertices from these compact records, reducing GPU storage

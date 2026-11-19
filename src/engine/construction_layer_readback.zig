@@ -33,15 +33,15 @@ fn checkSurface(device: wgpu.Device, mapping: *callbacks.MapResponse, oversized:
     inline for (pools) |name| try std.testing.expectEqual(@as(usize, 0), @field(gctx, name).pool.liveHandleCount());
 }
 
-fn surface(cells: []const [3]u8) !voxel.ChunkSideData {
-    var result: voxel.ChunkSideData = .{};
+fn surface(cells: []const [3]u8) !voxel.ChunkSurfaceData {
+    var result: voxel.ChunkSurfaceData = .{};
     errdefer result.deinit(std.testing.allocator);
     for (&result.blocks_grouped_by_side) |*faces| for (cells) |cell| try faces.append(std.testing.allocator, .{ .coords = cell, .block_type = .planks });
     return result;
 }
 
-fn checkerboardSurface() !voxel.ChunkSideData {
-    var result: voxel.ChunkSideData = .{};
+fn checkerboardSurface() !voxel.ChunkSurfaceData {
+    var result: voxel.ChunkSurfaceData = .{};
     errdefer result.deinit(std.testing.allocator);
     for (0..32) |z| for (0..32) |y| for (0..32) |x| {
         if ((x + y + z) % 2 != 0) continue;
@@ -133,8 +133,8 @@ fn checkDraw(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse, overs
     const readback = device.createBuffer(.{ .size = image_bytes * 2 * 3, .usage = .{ .copy_dst = true, .map_read = true } });
     defer readback.release();
     const coords: @Vector(3, i32) = .{ 1, 1, 1 };
-    try grid.tryAppendChunk(.{ .chunk_coords = coords, .chunk_side_data = try surface(&.{.{ 10, 8, 8 }}), .geometry_stamp = .{ .surface_revision = 1 } });
-    try grid.tryAppendChunk(.{ .chunk_coords = coords, .layer = .construction, .chunk_side_data = if (oversized) try checkerboardSurface() else try surface(&.{.{ 8, 8, 8 }}), .geometry_stamp = .{ .surface_revision = 1 } });
+    try grid.tryAppendChunk(.{ .chunk_coords = coords, .chunk_surface_data = try surface(&.{.{ 10, 8, 8 }}), .geometry_stamp = .{ .surface_revision = 1 } });
+    try grid.tryAppendChunk(.{ .chunk_coords = coords, .layer = .construction, .chunk_surface_data = if (oversized) try checkerboardSurface() else try surface(&.{.{ 8, 8, 8 }}), .geometry_stamp = .{ .surface_revision = 1 } });
     try std.testing.expect(grid.tryUploadToGPU(gctx));
     if (oversized) {
         const resident = grid.chunks.items[1].gpu_residence_info.?;
@@ -143,8 +143,8 @@ fn checkDraw(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse, overs
     }
     for (0..3) |frame| {
         if (frame == 1) {
-            try grid.tryAppendChunk(.{ .chunk_coords = coords, .chunk_side_data = if (oversized) try checkerboardSurface() else try surface(&.{ .{ 8, 8, 8 }, .{ 10, 8, 8 } }), .geometry_stamp = .{ .surface_revision = 2 } });
-            try grid.tryAppendChunk(.{ .chunk_coords = coords, .layer = .construction, .chunk_side_data = .{}, .geometry_stamp = .{ .surface_revision = 2 } });
+            try grid.tryAppendChunk(.{ .chunk_coords = coords, .chunk_surface_data = if (oversized) try checkerboardSurface() else try surface(&.{ .{ 8, 8, 8 }, .{ 10, 8, 8 } }), .geometry_stamp = .{ .surface_revision = 2 } });
+            try grid.tryAppendChunk(.{ .chunk_coords = coords, .layer = .construction, .chunk_surface_data = .{}, .geometry_stamp = .{ .surface_revision = 2 } });
             try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.surface_revision);
             try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .construction).?.surface_revision);
         }
