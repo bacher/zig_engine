@@ -55,6 +55,7 @@ const warehouse_stream = @import("warehouse_stream.zig");
 const warehouse_commands = @import("warehouse_commands.zig");
 const warehouse_tool_module = @import("warehouse_tool.zig");
 const warehouse_layout = @import("warehouse_layout.zig");
+const warehouse_reach = @import("warehouse_reach.zig");
 const warehouse_recognition = @import("warehouse_recognition.zig");
 const packed_geometry = @import("packed_geometry.zig");
 const block_diagnostics = @import("block_diagnostics.zig");
@@ -474,19 +475,9 @@ const Game = struct {
         return (world.physicalBlock(cell) orelse return null) == .pallet;
     }
 
-    fn warehouseWithinReach(game: *Game, geometry: warehouse_layout.Geometry, stock: u16, active: u8) bool {
+    fn warehouseWithinReach(game: *Game, geometry: warehouse_layout.Geometry, order: ?*const warehouse_layout.Layout, stock: u16, active: u8) bool {
         const camera = game.engine.active_scene.?.camera;
-        const order = warehouse_layout.Layout.init(geometry);
-        for (order.columns[0..order.count]) |column| {
-            const cell = geometry.worldCell(game.layout().size_in_blocks, .{ column[0], column[1], 0 }) orelse continue;
-            if (block_targeting.withinReach(game.layout(), camera.position, cell)) return true;
-        }
-        var index: u16 = 0;
-        while (index < stock) : (index += 1) {
-            const cell = geometry.worldCell(game.layout().size_in_blocks, order.slotAt(active, index) orelse continue) orelse continue;
-            if (block_targeting.withinReach(game.layout(), camera.position, cell)) return true;
-        }
-        return false;
+        return warehouse_reach.withinReach(game.layout(), geometry, order, stock, active, camera.position);
     }
 
     fn closeWarehouseDialog(game: *Game) void {
@@ -755,12 +746,12 @@ const Game = struct {
                 for (warehouse_tool_module.materials) |material| {
                     if (zgui.radioButton(@tagName(material), .{ .active = game.warehouse_tool.selected_material == material })) game.warehouse_tool.selected_material = material;
                 }
-                const nearby = game.warehouseWithinReach(candidate.geometry, 0, 0);
+                const nearby = game.warehouseWithinReach(candidate.geometry, null, 0, 0);
                 zgui.beginDisabled(.{ .disabled = !nearby });
                 if (zgui.button("Register warehouse", .{})) {
                     const geometry = warehouse_recognition.recognize(game.layout().size_in_blocks, candidate.aim_cell, .{ .context = &game.world.?, .pallet = warehousePallet }) catch null;
                     if (geometry) |current| {
-                        if (game.warehouseWithinReach(current, 0, 0) and game.warehousePreviewValid(current)) if (game.submitWarehouseAction(.{ .register = .{ .aim_cell = candidate.aim_cell, .material = game.warehouse_tool.selected_material } })) |submission| {
+                        if (game.warehouseWithinReach(current, null, 0, 0) and game.warehousePreviewValid(current)) if (game.submitWarehouseAction(.{ .register = .{ .aim_cell = candidate.aim_cell, .material = game.warehouse_tool.selected_material } })) |submission| {
                             game.warehouse_tool.pending_dialog = submission.request_id;
                         };
                     } else game.warehouse_tool.error_message = warehouse_tool_module.message(.invalid_base);
@@ -775,7 +766,8 @@ const Game = struct {
                     zgui.text("Stock: {d}  Incoming: {d}", .{ record.stock, record.incoming });
                     zgui.text("Target: {d}  Active capacity: {d}  Physical capacity: {d}", .{ @as(u16, record.active) * 4, record.activeCapacity(), record.physicalCapacity() });
                     zgui.text("Automatic work: {s}  Obligations: {d}", .{ if (record.enabled) @as([]const u8, "Enabled") else "Stopped", record.obligations });
-                    const nearby = game.warehouseWithinReach(record.geometry, record.stock, record.active);
+                    const order = &game.world.?.warehouses.objects.getPtr(identity).?.derived_layout;
+                    const nearby = game.warehouseWithinReach(record.geometry, order, record.stock, record.active);
                     zgui.beginDisabled(.{ .disabled = busy or !nearby });
                     if (zgui.button(if (record.enabled) "Stop automatic work" else "Enable automatic work", .{})) {
                         if (game.submitWarehouseAction(if (record.enabled) .{ .stop = identity } else .{ .enable = identity })) |submission| game.warehouse_tool.pending_dialog = submission.request_id;
@@ -4238,6 +4230,7 @@ test "crosshair and fonts follow DPI changes without accumulating style rounding
 
 test {
     _ = menu;
+    _ = warehouse_reach;
     _ = world_map;
     _ = world_module;
     _ = world_generator;
@@ -9169,14 +9162,15 @@ test "warehouse dialog reach follows current camera and includes member edges an
     defer fixture.deinit();
     const game = &fixture.game;
     const geometry = try warehouse_layout.Geometry.fromMinimum(game.layout().size_in_blocks, StreamingTest.toolTarget(), .{ 5, 5 });
+    const order = warehouse_layout.Layout.init(geometry);
     fixture.camera.updatePosition(.{ 7.5, 5.5, 0.5 });
     try std.testing.expect(!block_targeting.withinReach(game.layout(), fixture.camera.position, geometry.origin));
-    try std.testing.expect(game.warehouseWithinReach(geometry, 0, 0));
+    try std.testing.expect(game.warehouseWithinReach(geometry, null, 0, 0));
     fixture.camera.updatePosition(.{ 2.5, 5.5, 9.5 });
-    try std.testing.expect(!game.warehouseWithinReach(geometry, 0, 25));
-    try std.testing.expect(game.warehouseWithinReach(geometry, 150, 25));
+    try std.testing.expect(!game.warehouseWithinReach(geometry, &order, 0, 25));
+    try std.testing.expect(game.warehouseWithinReach(geometry, &order, 150, 25));
     fixture.camera.updatePosition(.{ 2.5, 5.5, 12 });
-    try std.testing.expect(!game.warehouseWithinReach(geometry, 150, 25));
+    try std.testing.expect(!game.warehouseWithinReach(geometry, &order, 150, 25));
 }
 
 test "warehouse Q mode switches require a fresh transfer press and preserve submitted ownership" {

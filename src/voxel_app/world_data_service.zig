@@ -39,6 +39,7 @@ pub const warehouse_stream = @import("warehouse_stream.zig");
 const warehouse_state = @import("warehouse_state.zig");
 const warehouse_claims = @import("warehouse_claims.zig");
 const warehouse_layout = @import("warehouse_layout.zig");
+const warehouse_reach = @import("warehouse_reach.zig");
 const warehouse_recognition = @import("warehouse_recognition.zig");
 const warehouse_wire = @import("persistence/warehouses.zig");
 const PublicationBudget = @import("construction_publication_budget.zig").Budget;
@@ -2286,21 +2287,11 @@ pub const WorldDataService = struct {
     }
 
     fn warehouseGeometryInReach(self: *const WorldDataService, viewpoint: [3]f64, geometry: warehouse_layout.Geometry, record: ?warehouse_state.Record) bool {
-        var y = geometry.bounds.ymin;
-        while (y <= geometry.bounds.ymax) : (y += 1) {
-            var x = geometry.bounds.xmin;
-            while (x <= geometry.bounds.xmax) : (x += 1) {
-                if (self.warehouseCellInReach(viewpoint, geometry.worldCell(self.layout.size_in_blocks, .{ x, y, 0 }).?)) return true;
-            }
-        }
         if (record) |value| {
-            const order = self.worker_state.warehouses.layoutFor(value.identity) orelse return false;
-            for (0..value.stock) |index| {
-                const slot = order.slotAt(value.active, @intCast(index)) orelse return false;
-                if (self.warehouseCellInReach(viewpoint, geometry.worldCell(self.layout.size_in_blocks, slot).?)) return true;
-            }
+            const order = self.worker_state.warehouses.layoutFor(value.identity);
+            return warehouse_reach.withinReach(self.layout, geometry, order, value.stock, value.active, viewpoint);
         }
-        return false;
+        return warehouse_reach.withinReach(self.layout, geometry, null, 0, 0, viewpoint);
     }
 
     /// The pose source is selected by the outer request/evaluation protocol.
@@ -15801,4 +15792,8 @@ test "warehouse authority representative workload measurement" {
     if (@import("builtin").mode != .ReleaseFast) return error.SkipZigTest;
     try WarehouseAuthorityMeasurement.run(false);
     try WarehouseAuthorityMeasurement.run(true);
+}
+
+test {
+    _ = warehouse_reach;
 }
