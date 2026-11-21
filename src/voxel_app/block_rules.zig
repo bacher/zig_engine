@@ -339,7 +339,8 @@ pub const Validator = struct {
     }
 
     fn footprint(self: *Validator, cell: Cell, material: BlockType) ReadError!Evaluation {
-        var result: Failure = .{ .reason = if (material == .sand) .sand_footprint else .earth_footprint, .subject = cell, .limit = 9 };
+        const sand = material == .sand;
+        var result: Failure = .{ .reason = if (sand) .sand_footprint else .earth_footprint, .subject = cell, .limit = if (sand) 9 else 6 };
         for (0..3) |y| {
             for (0..3) |x| {
                 const below = cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -1 };
@@ -347,7 +348,19 @@ pub const Validator = struct {
                 if (support.isStructural() or support == .sand) result.actual += 1 else result.add(below);
             }
         }
-        if (result.actual != 9) return .{ .rejected = result };
+        if (result.actual < result.limit) return .{ .rejected = result };
+
+        const gaps = result.involved[0..result.involved_count];
+        if (gaps.len != 0) {
+            const first_gap = gaps[0];
+            var outer_column = first_gap[0] != cell[0];
+            var outer_row = first_gap[1] != cell[1];
+            for (gaps[1..]) |gap| {
+                outer_column = outer_column and gap[0] == first_gap[0];
+                outer_row = outer_row and gap[1] == first_gap[1];
+            }
+            if (!outer_column and !outer_row) return .{ .rejected = result };
+        }
         return .{ .supported = .{} };
     }
 
@@ -953,14 +966,17 @@ const Fixture = struct {
     }
 };
 
-test "soil needs nine cells; unknown dependencies and world seams are distinct from air" {
+test "soil accepts a line of gaps at world edges and still requires loaded support data" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     try fixture.put(.{ 0, 10, 4 }, .dirt);
-    const seam_removal = fixture.check(.{ fixture.layout.size_in_blocks[0] - 1, 10, 3 }, .none).?;
+    const wrapped_support: Cell = .{ fixture.layout.size_in_blocks[0] - 1, 10, 3 };
+    try std.testing.expect(fixture.check(wrapped_support, .none) == null);
+    try fixture.raw(.{ 0, 11, 3 }, .none);
+    const seam_removal = fixture.check(wrapped_support, .none).?;
     try std.testing.expectEqual(Reason.would_remove_support, seam_removal.reason);
     try std.testing.expectEqual(Reason.earth_footprint, seam_removal.cause.?);
-    try std.testing.expectEqual(Reason.earth_footprint, fixture.check(.{ 20, 0, 4 }, .dirt).?.reason);
+    try std.testing.expect(fixture.check(.{ 20, 0, 4 }, .dirt) == null);
     fixture.missing = .{ 20, 20, 3 };
     const missing = fixture.check(.{ 20, 20, 4 }, .dirt).?;
     try std.testing.expectEqual(Reason.missing_data, missing.reason);
@@ -969,8 +985,43 @@ test "soil needs nine cells; unknown dependencies and world seams are distinct f
     try fixture.raw(.{ 20, 20, 3 }, .none);
     const failure_result = fixture.check(.{ 20, 20, 4 }, .dirt).?;
     try std.testing.expectEqual(8, failure_result.actual);
-    try std.testing.expectEqual(9, failure_result.limit);
+    try std.testing.expectEqual(6, failure_result.limit);
     try std.testing.expectEqual(1, failure_result.involved_count);
+}
+
+test "soil footprint gaps must share one outer edge" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+    const cell: Cell = .{ 20, 20, 4 };
+    const cases = [_]struct { rows: [3][]const u8, valid: bool }{
+        .{ .rows = .{ "OOO", "OOO", "OOO" }, .valid = true },
+        .{ .rows = .{ "OOO", "OOO", "FFF" }, .valid = true },
+        .{ .rows = .{ "FOO", "FOO", "FOO" }, .valid = true },
+        .{ .rows = .{ "FFF", "OOO", "OOO" }, .valid = true },
+        .{ .rows = .{ "OOF", "OOF", "OOF" }, .valid = true },
+        .{ .rows = .{ "FOF", "OOO", "OOO" }, .valid = true },
+        .{ .rows = .{ "FFO", "OOO", "OOO" }, .valid = true },
+        .{ .rows = .{ "OFO", "OOO", "OOO" }, .valid = true },
+        .{ .rows = .{ "OOO", "FOO", "OOO" }, .valid = true },
+        .{ .rows = .{ "OOO", "FOF", "OOO" }, .valid = false },
+        .{ .rows = .{ "OFO", "OOO", "OFO" }, .valid = false },
+        .{ .rows = .{ "FOO", "OOO", "OOF" }, .valid = false },
+        .{ .rows = .{ "FFO", "FOO", "OOO" }, .valid = false },
+        .{ .rows = .{ "OOO", "OFO", "OOO" }, .valid = false },
+        .{ .rows = .{ "FFF", "OOO", "OOF" }, .valid = false },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("unexpected soil placement result for {s}/{s}/{s}\n", .{ case.rows[0], case.rows[1], case.rows[2] });
+        for (case.rows, 0..) |row, y| for (row, 0..) |mark, x| {
+            try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -1 }, if (mark == 'O') .stone else .none);
+        };
+        const result = fixture.check(cell, .dirt);
+        if (case.valid) {
+            try std.testing.expectEqual(null, result);
+        } else {
+            try std.testing.expectEqual(Reason.earth_footprint, (result orelse return error.TestExpectedEqual).reason);
+        }
+    }
 }
 
 test "pallets require exactly one eligible real floor and supply no construction support" {
@@ -1011,7 +1062,7 @@ test "bare and grassy soil support other materials through the same centered thr
         try fixture.raw(.{ 10, 10, 4 }, soil);
         try std.testing.expectEqual(Reason.earth_requires_stable_platform, fixture.check(.{ 10, 10, 5 }, .planks).?.reason);
         // Soil can support the next layer immediately, while each placed cell
-        // continues to require its complete footprint.
+        // continues to require its own footprint.
         for (0..3) |layer| {
             const radius: i64 = 3 - @as(i64, @intCast(layer));
             var y: i64 = -radius;
@@ -1048,11 +1099,12 @@ test "bare and grassy soil fill footprints platforms and road foundations equall
     }
 }
 
-test "grass cover does not change soil own nine-cell footprint requirement" {
+test "grass cover does not change soil's six-cell footprint requirement" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     const cell: Cell = .{ 20, 20, 4 };
     const corner = cell + Cell{ 1, 1, -1 };
+    for ([_]i64{ -1, 0, 1 }) |dx| try fixture.raw(cell + Cell{ dx, -1, -1 }, .none);
     for ([_]BlockType{ .stone, .sand, .grass, .clay, .dirt, .none }) |support| {
         try fixture.raw(corner, support);
         for ([_]BlockType{ .dirt, .grass }) |material| {
@@ -1062,7 +1114,7 @@ test "grass cover does not change soil own nine-cell footprint requirement" {
             const rejected = validator.checkExisting(cell);
             if (support == .none) {
                 try std.testing.expectEqual(Reason.earth_footprint, rejected.?.reason);
-                try std.testing.expectEqual(@as(u32, 8), rejected.?.actual);
+                try std.testing.expectEqual(@as(u32, 5), rejected.?.actual);
             } else try std.testing.expect(rejected == null);
         }
     }
@@ -1125,7 +1177,7 @@ test "ordinary stone supports wood and minerals only through a complete qualifyi
     }
 }
 
-test "stone keeps nine-cell soil and sand footprints and one-cell road support" {
+test "stone provides soil and sand footprint cells and one-cell road support" {
     const cell: Cell = .{ 20, 20, 12 };
     var fixture: Fixture = .{ .read_center = cell };
     defer fixture.deinit();
@@ -1137,7 +1189,7 @@ test "stone keeps nine-cell soil and sand footprints and one-cell road support" 
         const incomplete = fixture.check(cell, material).?;
         try std.testing.expectEqual(if (material == .sand) Reason.sand_footprint else Reason.earth_footprint, incomplete.reason);
         try std.testing.expectEqual(1, incomplete.actual);
-        try std.testing.expectEqual(9, incomplete.limit);
+        try std.testing.expectEqual(if (material == .sand) @as(u32, 9) else 6, incomplete.limit);
     }
     for (0..3) |y| for (0..3) |x| {
         try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -1 }, .stone);

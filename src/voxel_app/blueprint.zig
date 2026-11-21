@@ -470,17 +470,17 @@ test "laterally supported blueprint planks retain soil beneath them" {
     try std.testing.expectEqualSlices(BlockType, &source, result.valid.definition.cells);
 }
 
-test "grass normalization retains the support needed to certify stacked soil" {
+test "grass normalization certifies stacked soil on a six-cell footprint" {
     for ([_]BlockType{ .dirt, .grass }) |earth| {
         var source = [_]BlockType{.none} ** 18;
-        @memset(source[0..9], earth);
+        @memset(source[3..9], earth);
         source[13] = earth;
         var result = try compileTest(.{ 3, 3, 2 }, &source);
         try std.testing.expect(result == .valid);
         defer result.valid.deinit(std.testing.allocator);
-        try std.testing.expectEqual(BlockType.dirt, result.valid.definition.cells[4]);
-        try std.testing.expectEqual(BlockType.dirt, result.valid.definition.cells[13]);
-        try std.testing.expectEqual(earth, source[4]);
+        try std.testing.expectEqual(BlockType.dirt, result.valid.definition.cells[1]);
+        try std.testing.expectEqual(BlockType.dirt, result.valid.definition.cells[7]);
+        try std.testing.expectEqual(earth, source[13]);
     }
 }
 

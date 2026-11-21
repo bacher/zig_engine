@@ -1708,13 +1708,14 @@ test "the default editing API validates before queueing and preserves earth supp
     try std.testing.expectEqual(OperationStatus.constraint_violation, world.setBlock(target, .stone).status);
     try std.testing.expectEqual(0, world.pending_operations.items.len);
     try std.testing.expectEqual(OperationStatus.success, world.setBlock(target, .dirt).status);
-    const support = [3]u32{ 9, 9, 15 };
+    try std.testing.expectEqual(OperationStatus.success, world.setBlock(.{ 9, 10, 15 }, .none).status);
+    const support = [3]u32{ 11, 10, 15 };
     const refused = world.setBlock(support, .none);
     try std.testing.expectEqual(OperationStatus.constraint_violation, refused.status);
     try std.testing.expectEqual(block_rules.Reason.would_remove_support, refused.failure.?.reason);
     try std.testing.expectEqual(block_rules.Reason.earth_footprint, refused.failure.?.cause);
     try std.testing.expect(try world.isBlockSolid(support));
-    try std.testing.expectEqual(1, world.pending_operations.items.len);
+    try std.testing.expectEqual(2, world.pending_operations.items.len);
     const removed = world.setBlock(target, .none);
     try std.testing.expectEqual(OperationStatus.success, removed.status);
     try std.testing.expectEqual(BlockType.dirt, removed.mined_type.?);

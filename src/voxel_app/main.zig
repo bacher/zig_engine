@@ -4796,6 +4796,7 @@ test "placement preview shows missing footprint cells and refreshes after edits,
     for (fixture.scene.block_overlays.cells[1..10]) |hint| {
         try std.testing.expectEqualDeep(placement_preview.problem_color, hint.color);
         try std.testing.expectEqual(@as(i64, preview.block[2]) - 1, hint.cell[2]);
+        if (hint.cell[1] == @as(i64, preview.block[1]) - 1) continue;
         fixture.game.world.?.setBlockUnchecked(.{ @intCast(hint.cell[0]), @intCast(hint.cell[1]), @intCast(hint.cell[2]) }, .stone);
     }
     fixture.game.world.?.pending_operations.clearRetainingCapacity();
@@ -6756,14 +6757,15 @@ test "invalid local placement retains the carried block without submitting a tra
     try fixture.preparePlayerToolTest();
     const game = &fixture.game;
     const target = StreamingTest.toolTarget();
-    game.world.?.setBlockUnchecked(.{ target[0] - 1, target[1] - 1, target[2] - 1 }, .none);
+    // The placement cell is one step toward the camera from the targeted block.
+    game.world.?.setBlockUnchecked(.{ target[0], target[1] - 1, target[2] - 1 }, .none);
     game.world.?.pending_operations.clearRetainingCapacity();
     game.block_interaction.inventory = .dirt;
     game.block_interaction.press(.mouse);
     game.updateBlockTool();
     fixture.engine.frame_delta = 1;
     game.updateBlockTool();
-    try std.testing.expectEqual(voxel_chunk_module.BlockType.dirt, game.heldMaterial().?);
+    try std.testing.expectEqual(@as(?voxel_chunk_module.BlockType, .dirt), game.heldMaterial());
     try std.testing.expectEqual(null, game.block_interaction.pending);
     try std.testing.expectEqual(null, game.block_interaction.holding);
     try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);

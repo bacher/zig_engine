@@ -11,7 +11,7 @@ client data produces `missing_data`, never an assumption that the missing cells 
 | --- | --- |
 | Natural stone (`stone`) | Generated rock; cannot be placed. Mining yields `crushed_stone`. |
 | Crushed stone | Placeable masonry; cannot become natural stone. |
-| Bare soil (`dirt`) | The soil placement/mining item. Needs a filled 3x3 support layer and supplies soil support immediately. |
+| Bare soil (`dirt`) | The soil placement/mining item. Needs at least six supports in its 3×3 footprint, including the center, with any gaps along one outer edge. Supplies soil support immediately. |
 | Grass-covered soil (`grass`) | Surface cover on the same structural soil material, never a separate placeable item. Mining yields `dirt`. |
 | Tree trunk | Vertically supported wood. |
 | Planks | Wood with limited horizontal support propagation. |
@@ -217,19 +217,22 @@ be directly above the center of the cube's top layer. Every cell must contain ba
 natural or crushed stone, rebar, or reinforced concrete. Mixtures are allowed;
 ore, limestone, coal, clay, and deeprock also qualify; wood, water, sand, snow, foliage, and air do not qualify.
 
-A single exposed deeprock cell is also a direct foundation, without requiring a surrounding platform. Soil and sand still require all nine footprint cells. A stable platform supplies a foundation and resets height counters. It can be constructed;
+A single exposed deeprock cell is also a direct foundation, without requiring a surrounding platform. A stable platform supplies a foundation and resets height counters. It can be constructed;
 it does not require natural stone underneath it. Repeatedly building a new platform to
 restart the counters is an intentional building compromise. This also resets the counted
 crushed-stone run at the platform, rather than counting through it.
 
 ## Local support and height
 
-Soil and sand need nine qualifying blocks in the 3x3 layer directly beneath them. Bare or
-grassy soil, stone, geological resources, rebar/concrete, trunks, planks, and sand can fill this
-layer. Water, standalone snow, foliage, and air cannot. Sand remains nonstructural despite
-filling a footprint. A constructed soil block retains its own footprint requirement, so
-removing temporary supports cannot leave it floating. Generated terrain is exempt from
-building validation; natural cliffs and hills remain mineable.
+Soil needs a qualifying block directly below it and at least five more in the surrounding
+3×3 footprint. All gaps must lie in the same outer row or outer column. A qualifying cell
+can separate gaps along that edge. Sand needs all nine qualifying blocks in the same layer.
+
+Bare or grassy soil, stone, geological resources, rebar/concrete, trunks, planks, and sand
+can fill footprint cells. Water, standalone snow, foliage, and air cannot. Sand remains
+nonstructural despite filling a footprint. Removal must preserve the footprint of each
+affected constructed soil or sand block. Generated terrain is exempt from building
+validation; natural cliffs and hills remain mineable.
 
 Bare and grassy soil have identical structural capabilities: they fill footprints, stable
 platforms, and road foundations. Additional soil layers can be placed immediately. Grass
@@ -294,9 +297,8 @@ bridge. Multi-cell gaps need temporary supports, which are a separate future fea
 
 Natural-rock bridge sides retain their separate immediate-below support predicate;
 the platform-only direct-stone rule does not require a full cube beneath each side.
-Such a cube would also fill the cell below the middle gap. Soil/sand keep their
-nine-cell footprints, roads keep their immediate-below predicate, and blueprint
-fulfillment keeps its five-neighbor path.
+Such a cube would also fill the cell below the middle gap. Roads keep their immediate-below
+predicate, and blueprint fulfillment keeps its five-neighbor path.
 
 An independently supported bridge stops the downward six-cell run count, including when
 crushed stone is subsequently placed below it. Seven vertically adjacent crushed cells are
