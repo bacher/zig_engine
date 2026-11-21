@@ -85,12 +85,22 @@ a block is removed. [Construction ownership](construction-state-ownership.md) ·
   pending target cover: exposure schedules growth after 30 simulation minutes, cover
   cancels the timer and clears grass, and removal cancels the old cell's timer. At expiry
   recheck soil identity and cover. Unknown cover defers evaluation with the original
-  deadline. Persist the deadline with its owning cell. [Timed soil rules](../../docs/block-placement.md)
+  deadline. Persist the deadline with its owning cell.
+
+  A completed construction can release its box before world-data initializes its grass.
+  If registration encounters an `initialize_grass` marker, its `due_tick` identifies the
+  construction instance. Before handoff, let world-data finish the existing initialization
+  for that instance and chunk using the queued completion tick and current composed cover.
+  Exposed, still-marked dirt gets a deadline of completion tick plus the ordinary growth
+  delay. Covered dirt gets no timer, and a newer edit or timer takes precedence. While
+  initialization is pending, keep the cells with world-data and defer registration. Recheck
+  bounds, claims and current cell state before committing the transfer. [Timed soil rules](../../docs/block-placement.md)
 - R12. Commit manual removal of a zone cell and its inventory effect in one authoritative
-  operation. Every durable capture includes both effects or neither. A retry with the same
-  command identity in the live session returns the retained result without a second edit
-  or item credit. After restart, resynchronize from saved state under the existing command
-  contract. [Persistence and inventory](../../docs/persistence.md)
+  operation. Every durable capture includes both effects or neither. A same-session retry with
+  the same identity and intent replays a completed result only while the ledger retains
+  that record. Once the acknowledged
+  sequence retires, the retry returns `StaleCommand`. Neither path edits the cell or slot.
+  After restart, resynchronize from saved state under the existing command contract. [Persistence and inventory](../../docs/persistence.md)
 
 ## Clarifications
 
@@ -169,9 +179,10 @@ a block is removed. [Construction ownership](construction-state-ownership.md) ·
   saved and reloaded before grass grows THEN the original deadline fires once and the
   soil becomes grass. Placing cover just above the zone before expiry cancels growth;
   placing it after expiry clears grass. Repeat with a timer already pending at handoff.
-- AC14. GIVEN an empty player slot and an eligible natural stone in the zone WHEN manual
-  removal commits, its acknowledgment is lost, the same command is retried, and a save
-  is reloaded THEN the cell is protected air and the slot holds exactly one crushed stone.
+- AC14. GIVEN a manual extraction of natural stone into an empty slot has committed and its
+  acknowledgment was lost, WHEN the same command is retried while
+  the completed record is retained THEN it returns the original result. After save and
+  reload the cell is protected air and the slot holds exactly one crushed stone.
 - AC15. GIVEN a world of width W WHEN the player selects X from W−1 to 0 THEN the frame
   covers exactly two columns and, after reload, claims at either column conflict while
   an adjacent column remains free. An endpoint exactly W/2 from the anchor cannot commit.
@@ -183,6 +194,14 @@ a block is removed. [Construction ownership](construction-state-ownership.md) ·
   and mining the pallet's own support still fails.
 - AC18. GIVEN a finished box WHEN the confirmation dialog opens THEN the player can see
   the permanent v1 placement restriction and cancel before any claim is created.
+- AC19. GIVEN exposed construction dirt still marked for initialization after its box is
+  released WHEN a zone registration reaches the cell before the initialization pass,
+  commits after initialization, and the world is saved and reloaded before growth THEN
+  the zone owns the dirt and its single deadline. It stays bare until completion tick
+  plus the growth delay, then grows once. Use distinct completion and registration ticks.
+- AC20. GIVEN AC14's command has been acknowledged and retired, and the player has since
+  emptied the slot WHEN the identical command arrives again in the same session THEN it
+  returns `StaleCommand`, the cell remains protected air, and the slot remains empty.
 
 ## Constraints
 
@@ -214,8 +233,8 @@ and UI for editing or retiring a confirmed zone.
 
 - [ ] T1. Implement selection, depth adjustment, HUD and checklist (AC1–AC3, AC11, AC15, AC16, AC18).
 - [ ] T2. Implement atomic registration, overlap checks, composed reads and persistence
-  (AC4, AC6, AC9, AC11–AC15).
+  (AC4, AC6, AC9, AC11–AC15, AC19).
 - [ ] T3. Integrate placement protection and support-safe single-cell extraction
-  with manual interaction and the authoritative edit path (AC4, AC5, AC7, AC8, AC10, AC12–AC14, AC17).
-- [ ] T-val. Run AC1–AC18 through client and service entry points, including the shaft,
+  with manual interaction and the authoritative edit path (AC4, AC5, AC7, AC8, AC10, AC12–AC14, AC17, AC20).
+- [ ] T-val. Run AC1–AC20 through client and service entry points, including the shaft,
   protected supports, and reload after partial excavation.
