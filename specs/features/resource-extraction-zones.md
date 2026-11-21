@@ -26,11 +26,17 @@ a block is removed. [Construction ownership](construction-state-ownership.md) ·
 ## Requirements
 
 - R1. Pressing G during gameplay enters extraction selection. Use the blueprint-style frame
-  and show the current step and its controls in the upper-right HUD. Selection clicks are
-  consumed by the tool.
+  and show the current step and its controls in the upper-right HUD. Entering cancels any unfinished ordinary mining or placement hold. The draft
+  and dialog own mouse and keyboard interaction (including E). On exit a held control
+  must be released and pressed again before it can start an ordinary edit. Already
+  submitted commands still receive their authoritative result.
 - R2. Click a surface block to anchor the first corner. Move the pointer to extend an
   inclusive XY rectangle in either direction on the anchor's horizontal plane. Click to
-  fix the opposite corner. Uneven terrain does not change the top Z.
+  fix the opposite corner. Choose the shorter wrapped X displacement from the anchor
+  as blueprint capture does. An exact half-period tie is invalid. Keep the last valid
+  frame and disable confirmation until the endpoint is valid again. The frame, stored
+  bounds and claim lookups use the same inclusive interval. Uneven terrain does not
+  change the top Z.
 - R3. Start at one layer deep. Vertical mouse movement increases or decreases depth in
   whole blocks while XY and top Z stay fixed. The HUD shows width × length × depth.
   The bottom is top Z − depth + 1. Clamp at the world boundary. Depth selection works
@@ -39,7 +45,8 @@ a block is removed. [Construction ownership](construction-state-ownership.md) ·
   category starts checked. Offer soil (including grass-covered soil), sand, natural stone, metal ore,
   limestone, coal, and clay. Match the material in the ground before any yield conversion.
   Air and immutable deeprock are never resource choices. Require at least one checked
-  category to confirm. Escape in the dialog returns to the box. Canceling the draft
+  category to confirm. Before confirmation, tell the player that placement stays blocked
+  throughout the box after exhaustion and that v1 has no action to remove the zone. Escape in the dialog returns to the box. Canceling the draft
   before confirmation leaves the world untouched.
 - R5. On confirmation the authority validates the current bounds and claims, then commits
   the zone identity, bounds, filter, and transfer of all mutable occupied cells to simulation
@@ -62,6 +69,28 @@ a block is removed. [Construction ownership](construction-state-ownership.md) ·
   If a dependent would lose required support, leave the cell and inventory unchanged and
   return the ordinary diagnostic. Other cells remain eligible for independent checks.
   Designation itself requires no proof that every selected block can eventually be mined.
+- R9. Preview and authority independently check the inclusive volume (including air) and
+  number of distinct intersected source chunks, accounting for alignment and wrapped X.
+  Use checked arithmetic and the shared blueprint capture budgets as initial limits
+  (1,048,576 cells and 256 chunks). Reject overflow or either excess before zone-specific
+  chunk acquisition, retention, or cell copying. Preview reports the exceeded limit and
+  disables confirmation. Authority rejects the whole request without acquiring a claim.
+- R10. Transfer each formed adaptive road section's slope descriptor with its cell. The
+  road planner reads the composed run and routes shape updates to each section's current
+  owner, including surviving sections across a zone boundary. Shape changes on occupied
+  road cells are permitted under the placement restriction. [Country roads](country-roads.md)
+- R11. The soil cell's owner schedules, cancels, and executes grass growth. Transfer each
+  outstanding deadline exactly once at handoff. Subsequent exposure, cover, and removal
+  notify the affected owner across zone boundaries. Use composed physical occupancy and
+  pending target cover: exposure schedules growth after 30 simulation minutes, cover
+  cancels the timer and clears grass, and removal cancels the old cell's timer. At expiry
+  recheck soil identity and cover. Unknown cover defers evaluation with the original
+  deadline. Persist the deadline with its owning cell. [Timed soil rules](../../docs/block-placement.md)
+- R12. Commit manual removal of a zone cell and its inventory effect in one authoritative
+  operation. Every durable capture includes both effects or neither. A retry with the same
+  command identity in the live session returns the retained result without a second edit
+  or item credit. After restart, resynchronize from saved state under the existing command
+  contract. [Persistence and inventory](../../docs/persistence.md)
 
 ## Clarifications
 
@@ -127,6 +156,33 @@ a block is removed. [Construction ownership](construction-state-ownership.md) ·
   and a plank block (absent from the checklist) WHEN the player manually mines each under
   ordinary valid conditions THEN the removals yield crushed stone and planks respectively.
   Both cells remain protected against placement and the filter still selects only soil.
+- AC11. GIVEN independently configurable cell and chunk ceilings WHEN a box meets both
+  limits THEN budget admission succeeds. WHEN a box exceeds either ceiling by one while
+  inside the other, or its volume arithmetic overflows, THEN preview disables confirmation
+  and an independently submitted request fails before source acquisition or copying. No
+  claim or ownership change survives.
+- AC12. GIVEN a formed road with an interior section inside the box and endpoints outside
+  WHEN the zone is confirmed and reloaded THEN the section retains its rendered slope and
+  collision. WHEN an outside endpoint is mined THEN all surviving sections on both sides
+  revert to unformed road geometry and collision, and the endpoint stays empty.
+- AC13. GIVEN buried zone-owned dirt WHEN the covering block is mined and the world is
+  saved and reloaded before grass grows THEN the original deadline fires once and the
+  soil becomes grass. Placing cover just above the zone before expiry cancels growth;
+  placing it after expiry clears grass. Repeat with a timer already pending at handoff.
+- AC14. GIVEN an empty player slot and an eligible natural stone in the zone WHEN manual
+  removal commits, its acknowledgment is lost, the same command is retried, and a save
+  is reloaded THEN the cell is protected air and the slot holds exactly one crushed stone.
+- AC15. GIVEN a world of width W WHEN the player selects X from W−1 to 0 THEN the frame
+  covers exactly two columns and, after reload, claims at either column conflict while
+  an adjacent column remains free. An endpoint exactly W/2 from the anchor cannot commit.
+- AC16. GIVEN an unfinished E hold WHEN the player presses G, holds E through cancellation
+  and returns to gameplay THEN no ordinary edit is submitted until release and a fresh
+  press. Repeat for Mouse1 and for a press that begins inside the checklist.
+- AC17. GIVEN a 5×5 footprint in natural stone with a pallet on the rim WHEN 32 layers
+  are removed top-down THEN all 800 removals succeed, the walls and floor remain intact,
+  and mining the pallet's own support still fails.
+- AC18. GIVEN a finished box WHEN the confirmation dialog opens THEN the player can see
+  the permanent v1 placement restriction and cancel before any claim is created.
 
 ## Constraints
 
@@ -156,10 +212,10 @@ and UI for editing or retiring a confirmed zone.
 
 ## Tasks
 
-- [ ] T1. Implement selection, depth adjustment, HUD and checklist (AC1–AC3).
+- [ ] T1. Implement selection, depth adjustment, HUD and checklist (AC1–AC3, AC11, AC15, AC16, AC18).
 - [ ] T2. Implement atomic registration, overlap checks, composed reads and persistence
-  (AC4, AC6, AC9).
+  (AC4, AC6, AC9, AC11–AC15).
 - [ ] T3. Integrate placement protection and support-safe single-cell extraction
-  with manual interaction and the authoritative edit path (AC4, AC5, AC7, AC8, AC10).
-- [ ] T-val. Run AC1–AC10 through client and service entry points, including the shaft,
+  with manual interaction and the authoritative edit path (AC4, AC5, AC7, AC8, AC10, AC12–AC14, AC17).
+- [ ] T-val. Run AC1–AC18 through client and service entry points, including the shaft,
   protected supports, and reload after partial excavation.

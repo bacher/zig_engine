@@ -2023,3 +2023,32 @@ test "clay uses soil platforms while other geological hosts support directly" {
         try std.testing.expect(fixture.check(cell, .reinforced_concrete) == null);
     }
 }
+
+test "32-layer natural stone shaft preserves the rim and floor" {
+    var fixture: Fixture = .{};
+    defer fixture.deinit();
+
+    const floor_z = 20;
+    const depth = 32;
+    const surface_z = floor_z + depth;
+    const pallet_floor: Cell = .{ 9, 12, surface_z };
+    for (floor_z..surface_z + 1) |z| for (9..16) |y| for (9..16) |x| {
+        try fixture.raw(.{ @intCast(x), @intCast(y), @intCast(z) }, .stone);
+    };
+    try fixture.put(pallet_floor + Cell{ 0, 0, 1 }, .pallet);
+
+    for (0..depth) |layer| for (10..15) |y| for (10..15) |x| {
+        const cell: Cell = .{ @intCast(x), @intCast(y), @intCast(surface_z - layer) };
+        try std.testing.expectEqual(BlockType.crushed_stone, fixture.blocks.get(cell).?.minedType().?);
+        try std.testing.expect(fixture.check(cell, .none) == null);
+        try fixture.raw(cell, .none);
+    };
+
+    for (floor_z..surface_z + 1) |z| for (9..16) |y| for (9..16) |x| {
+        const cell: Cell = .{ @intCast(x), @intCast(y), @intCast(z) };
+        const wall_or_floor = x == 9 or x == 15 or y == 9 or y == 15 or z == floor_z;
+        const expected: BlockType = if (wall_or_floor) .stone else .none;
+        try std.testing.expectEqual(expected, fixture.blocks.get(cell).?);
+    };
+    try std.testing.expectEqual(Reason.would_remove_support, fixture.check(pallet_floor, .none).?.reason);
+}
