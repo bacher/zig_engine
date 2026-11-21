@@ -153,10 +153,11 @@ and the format-7 gate. Other generation requirements and historical measurements
   cannot turn sand into soil or a snow block.
 - R16: Sand never compacts, grows grass, or acquires soil timers. Placing sand requires a
   filled `3 × 3` support layer directly below it; placed sand retains that requirement.
-  Each footprint cell must be an existing structural material or sand; air, water, standalone
-  snow, and foliage do not qualify. Soil may also use sand in its `3 × 3` support footprint,
-  without making sand structural. Natural generated terrain remains exempt from construction
-  validation, as it is today.
+  Structural materials and sand qualify for both sand and soil footprints. Placed soil
+  requires a qualifying center cell and at least five additional qualifying cells in the
+  same `3 × 3` layer. All gaps must share one outer edge. The soil footprint must
+  remain valid after support removal. Natural generated terrain remains exempt from
+  construction validation.
 - R17: Sand cannot provide direct support for buildings, trunks, planks, masonry,
   reinforced materials, or either road type. Soil and sand may use it in their footprints.
   A legal independent lateral construction route may span above sand; water and standalone
@@ -341,10 +342,9 @@ and the format-7 gate. Other generation requirements and historical measurements
   construction and roads resting on its top. No surrounding `3 × 3` area or centred
   `3 × 3 × 3` platform is required; irregular neighboring deeprock heights do not invalidate
   that contact. Construction height counters restart above the foundation, with the first
-  placed block at level one; ordinary height/span limits still apply. Soil and sand retain
-  their separate filled `3 × 3` support footprints, in which deeprock qualifies as structural
-  support and one cell fills one position. Blocks placed above deeprock keep their own
-  material, support rules, and mutability.
+  placed block at level one; ordinary height/span limits still apply. Deeprock fills one
+  position in the soil and sand support footprints defined in R16. Blocks placed above
+  deeprock keep their own material, support rules, and mutability.
 
 ### Preparation failure contract
 
@@ -622,10 +622,11 @@ consolidation tasks remain separate.
 - AC7: GIVEN generated desert land and an ordinary soil block placed there WHEN generating
   and editing THEN natural cover is sand or exposed rock/resource, the placed soil stays
   soil, and sand receives no soil transformations in any climate. [R15–R16]
-- AC8: GIVEN sand or soil placement WHEN its complete `3 × 3` footprint is absent,
-  present, missing from the client, or later removed THEN shared client/service validation
-  respectively rejects, accepts, waits/rejects as unknown, or rejects support removal;
-  generated sand remains mineable under the existing natural-terrain exemption. [R16]
+- AC8: GIVEN sand or soil placement WHEN the `3 × 3` layer below has loaded THEN
+  shared client/service validation accepts exactly the footprints in R16. It rejects
+  removal that would invalidate an affected constructed footprint. Unloaded support
+  cells yield a missing-data result. Generated sand remains mineable under the existing
+  natural-terrain exemption. [R16]
 - AC9: GIVEN a direct sand support WHEN placing roads or construction materials THEN
   placement is rejected, while properly supported soil/sand placement is allowed and sand
   never qualifies as a stable platform. [R17]
@@ -740,8 +741,8 @@ consolidation tasks remain separate.
   `3 × 3 × 3` platform WHEN placing wood/mineral construction or a road directly on it
   THEN the shared client/service rules accept that direct foundation without a `3 × 3`
   area check, start applicable height counters at level one, and retain ordinary height/span
-  limits above it. Soil/sand still require their complete `3 × 3` footprint, and placed
-  blocks do not inherit deeprock's immutability or foundation privileges. [R41]
+  limits above it. Soil and sand use their R16 footprints, and placed blocks do not
+  inherit deeprock's immutability or foundation privileges. [R41]
 - AC36: GIVEN ID 2 / version 1 descriptors for natural and flat profiles WHEN creating,
   saving, and reopening their worlds THEN the profile/settings/seed/layout and canonical
   deeprock match. Legacy ID 0 with empty settings, legacy ID 1, unknown versions/profiles,

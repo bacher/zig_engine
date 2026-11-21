@@ -114,7 +114,7 @@ Initial material examples:
 
 | Material | Proposed construction behavior |
 | --- | --- |
-| Soil, bare or grass-covered | Requires a filled 3 × 3 supporting layer immediately beneath the placed cell. Both forms immediately supply the same support; grass changes the surface only. Successive soil layers need wider foundations, producing pyramid-like forms rather than a freestanding one-cell pillar. There is no manual or timed compaction. See [current placement rules](block-placement.md). |
+| Soil, bare or grass-covered | Requires at least six supports in the 3 × 3 layer immediately below, including the center. Any gaps must share one outer edge. Both forms immediately supply the same support; grass changes the surface only. Successive soil layers need wider foundations, producing pyramid-like forms rather than a freestanding one-cell pillar. There is no manual or timed compaction. See [current placement rules](block-placement.md). |
 | Planks | Can rest on a supporting block and extend horizontally through other planks for up to two unsupported steps, including diagonals. The intended examples are a 5 × 5 platform on a central support, or a six-block beam including its two supported endpoints. |
 | Rebar and reinforced concrete | Can extend horizontally in a similar way, with a larger reach X still to be decided for the long-term design. |
 

@@ -63,8 +63,8 @@ PR #52 already removed validation of old dependents. This follow-up starts from
   A2: No. That would also fill the cell below the middle gap and remove the usual
   air-below bridge. This separate support route remains unchanged.
 - Q3: Does every operation above stone require 27 cells?
-  A3: No. Soil/sand keep their nine-cell footprint and roads keep their immediate
-  below-cell predicate, just as they do above soil today.
+  A3: Roads need one qualifying cell immediately below. Soil and sand use their
+  [local footprint rules](../../docs/block-placement.md#local-support-and-height).
 - Q4: Are manually fabricated structurally invalid recipes certified?
   A4: No. Shape validation alone is not certification. Apply's internal input
   contract relies on the normal immutable compiler/library/save ownership path.
