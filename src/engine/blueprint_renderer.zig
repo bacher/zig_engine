@@ -202,6 +202,9 @@ fn previewSource(allocator: std.mem.Allocator, preview: Preview) PreviewError![]
     return result;
 }
 
+const visibility = @import("chunk_visibility.zig");
+const MiniatureIndex = visibility.Index(ChunkId);
+
 pub const Renderer = struct {
     layout: zgpu.BindGroupLayoutHandle,
     uniform: zgpu.BufferHandle,
@@ -216,6 +219,7 @@ pub const Renderer = struct {
     preview_stats: if (cache_counters_enabled) PreviewCacheStats else void = if (cache_counters_enabled) .{} else {},
     miniature_chunks: std.AutoHashMap(ChunkId, MiniatureChunkCache),
     miniature_cached_instances: u32 = 0,
+    miniature_index: MiniatureIndex = .{},
     miniature_stats: if (cache_counters_enabled) MiniatureCacheStats else void = if (cache_counters_enabled) .{} else {},
 
     pub fn init(gctx: *zgpu.GraphicsContext, atlas_layout: zgpu.BindGroupLayoutHandle, format: wgpu.TextureFormat) Renderer {
@@ -253,6 +257,7 @@ pub const Renderer = struct {
     pub fn deinit(self: Renderer, gctx: *zgpu.GraphicsContext) void {
         var mutable = self;
         mutable.clearMiniatures(gctx);
+        mutable.miniature_index.deinit(mutable.miniature_chunks.allocator);
         mutable.miniature_chunks.deinit();
         if (self.preview_cache) |cache| cache.release(gctx);
         gctx.releaseResource(self.occluded_pipeline);
@@ -294,13 +299,17 @@ pub const Renderer = struct {
 
         // Finish fallible metadata allocation before creating GPU resources.
         // An existing entry needs no allocation, even while the cache shrinks.
-        if (previous == null) try self.miniature_chunks.ensureUnusedCapacity(1);
+        if (previous == null) {
+            try self.miniature_chunks.ensureUnusedCapacity(1);
+            try self.miniature_index.reserve(self.miniature_chunks.allocator, self.miniature_chunks.count() + 1);
+        }
         const byte_size = @sizeOf(MiniatureCell) * cells.len;
         const uniform = gctx.createBuffer(.{ .label = "blueprint miniature chunk transform", .usage = .{ .uniform = true, .copy_dst = true }, .size = @sizeOf(Transform) });
         const instances = gctx.createBuffer(.{ .label = "blueprint miniature chunk cells", .usage = .{ .storage = true, .copy_dst = true }, .size = byte_size });
         const binding = gctx.createBindGroup(self.layout, &.{ .{ .binding = 0, .buffer_handle = uniform, .size = @sizeOf(Transform) }, .{ .binding = 1, .buffer_handle = instances, .size = byte_size } });
         gctx.queue.writeBuffer(gctx.lookupResource(instances).?, 0, MiniatureCell, cells);
         self.miniature_chunks.putAssumeCapacity(id, .{ .chunk = chunk, .revision = revision, .instance_count = count, .uniform = uniform, .instances = instances, .binding = binding });
+        if (previous == null or !@reduce(.And, previous.?.chunk == chunk)) self.miniature_index.dirty = true;
         self.miniature_cached_instances = next_count;
         if (previous) |source| self.releaseMiniatureSource(gctx, source);
         if (cache_counters_enabled) {
@@ -316,6 +325,7 @@ pub const Renderer = struct {
 
     pub fn removeMiniatureChunk(self: *Renderer, gctx: *zgpu.GraphicsContext, id: ChunkId) void {
         const removed = self.miniature_chunks.fetchRemove(id) orelse return;
+        self.miniature_index.dirty = true;
         self.miniature_cached_instances -= removed.value.instance_count;
         self.releaseMiniatureSource(gctx, removed.value);
     }
@@ -323,8 +333,20 @@ pub const Renderer = struct {
     pub fn clearMiniatures(self: *Renderer, gctx: *zgpu.GraphicsContext) void {
         var iterator = self.miniature_chunks.valueIterator();
         while (iterator.next()) |source| self.releaseMiniatureSource(gctx, source.*);
+        self.miniature_index.dirty = true;
         self.miniature_chunks.clearRetainingCapacity();
         self.miniature_cached_instances = 0;
+    }
+
+    pub fn visibleMiniatures(self: *Renderer, camera: *const Camera) ![]const MiniatureIndex.Hit {
+        const index = &self.miniature_index;
+        if (index.needsBuild(camera.layout)) {
+            try index.begin(self.miniature_chunks.allocator, camera.layout, self.miniature_chunks.count());
+            var it = self.miniature_chunks.iterator();
+            while (it.next()) |entry| index.add(entry.value_ptr.chunk, entry.key_ptr.*);
+            index.finish();
+        }
+        return index.query(&visibility.View.init(camera.layout, camera.chunk, camera.clip_from_world_chunked));
     }
 
     pub fn miniatureChunkCount(self: *const Renderer, id: ChunkId) u32 {

@@ -256,6 +256,13 @@ pub const VoxelChunk = struct {
     gpu_residence_info: ?GpuResidenceInfo = null,
     custom_blocks: std.ArrayList(custom_block.Draw) = .empty,
 
+    // First instance and count in the formed/adaptive GPU batches.
+    custom_ranges: [2]struct { first: u32 = 0, count: u32 = 0 } = @splat(.{}),
+
+    pub fn hasGeometry(self: *const Self) bool {
+        return self.gpu_residence_info != null or self.custom_blocks.items.len != 0;
+    }
+
     pub fn init(chunk_origin: ChunkCoords) Self {
         return .{
             .chunk_origin = chunk_origin,
@@ -271,6 +278,14 @@ pub const GpuResidenceInfo = struct {
 
     pub fn vertexCount(self: GpuResidenceInfo, view: usize) u32 {
         return @as(u32, self.faces_count_per_view[view]) * 6;
+    }
+
+    /// A null view submits all six sides in one draw. The shader consumes
+    /// the two complementary three-side lists consecutively in that mode.
+    pub fn drawFaces(self: GpuResidenceInfo, pass: anytype, view: ?u3) void {
+        const vertices = if (view) |v| self.vertexCount(v) else self.vertexCount(0) + self.vertexCount(7);
+        const mode: u32 = if (view) |v| v else 8;
+        if (vertices > 0) pass.draw(vertices, 1, 0, (self.chunk_index << 4) | mode);
     }
 };
 

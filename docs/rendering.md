@@ -4,7 +4,7 @@ The engine has a fixed sequence of WebGPU passes assembled in `Engine.draw`. It 
 
 ## Frame data and pass order
 
-Before encoding passes, the engine fits directional-light cascades, collects object candidates for every cascade and the camera, refreshes dirty/billboard instance transforms, and uploads the changed instance range. The current visibility index returns every registered object for each query.
+Before encoding passes, the engine fits directional-light cascades, collects object candidates for every cascade and the camera, refreshes dirty/billboard instance transforms, and uploads the changed instance range. The scene-object index returns every registered GameObject for each query. Chunk-owned geometry has a separate spatial index.
 
 ```mermaid
 flowchart LR
@@ -189,16 +189,23 @@ atlas texel is transparent. Their cube faces write depth and cast solid shadows.
 materials (IDs 16–20) use tinted existing atlas tiles. Climate cover changes the top
 appearance without changing stored soil or its interaction rules.
 
-Chunk metadata describes eight combinations of three directions, one direction from each axis. The draw's instance index encodes the chunk metadata index and the selected direction combination. The visible pass chooses a combination from the signed camera/chunk delta. When any delta component is zero, it draws opposite combinations 0 and 7 to cover all six sides. This selection affects submitted faces, not the authoritative surface contents.
+Chunk metadata describes eight combinations of three directions, one direction from each axis.
+The instance index encodes the chunk metadata slot and a four-bit mode. The forward pass
+chooses a three-side combination (0–7) from the signed camera/chunk delta. When any component
+is zero, mode 8 covers all six sides. The vertex shader reads combination 0 followed by
+combination 7 in the same draw. Each selected terrain or construction layer costs at most one draw.
 
-Each shadow cascade draws combinations 0 and 7 for every GPU-resident voxel chunk, regardless of camera direction. Thus the same resident geometry supplies both visible and shadow passes. Chunks that have no uploaded faces are absent from that loop; distant unloaded terrain does not cast voxel shadows.
+Each pass queries a bounding volume hierarchy (BVH) over resident chunk coordinates. Voxel layers and blueprint miniatures maintain separate indexes because their residency changes independently. Nodes enclose their entries in chunk-aligned boxes and split along the longest axis. A query rejects an outside subtree, accepts every entry in a fully contained subtree, and descends through intersecting nodes. Camera movement reuses the hierarchy. Voxel edits reuse the resident layer slot. Adding or retiring drawable layers and swap-removing resident slots invalidate the voxel index. The miniature index rebuilds when source coordinates or membership change.
+
+The six planes come from the matrix used to render that pass, including WebGPU’s zero-to-one depth interval. Bounds use the same integer chunk delta and wrapped-X image as the vertex shader. A box touching a plane stays eligible. Each of the three shadow cascades queries its own orthographic volume and draws all six sides of surviving voxel layers. An off-camera chunk can therefore cast a shadow. Cached blueprint miniatures use only the camera query in their overlay pass.
 
 Custom cells (block value 255) do not enter the face lists and do not occlude neighboring
 ordinary faces. Separate descriptors accompany local/service surface payloads. A custom-only
 chunk can have zero ordinary faces. `VoxelGrid` retains its descriptors and uploads 48-byte
-records to a separate 4 MiB storage buffer. The forward pass submits custom blocks as
-separate instances in one draw after ordinary voxel/object geometry, before SSAO. Each shadow cascade also uses one
-instanced custom draw. Both passes share the custom vertex function and restore the scene
+records to a separate 4 MiB storage buffer. Each chunk owns an instance range in each shape
+batch. The camera and shadow passes select whole chunks, including those that touch the
+frustum. Each shape takes at most one draw, from the first selected instance through the
+last. Roads in any gaps go to the GPU in that draw. Both passes share the custom vertex function and restore the scene
 bindings after ordinary object rendering. Road slope planes match CPU collision; unformed
 adaptive roads use temporary inset marker geometry. See [country roads](country-roads.md).
 

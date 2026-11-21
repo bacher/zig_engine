@@ -1,7 +1,6 @@
 const ChunkCoords = @import("../world_math.zig").ChunkCoords;
 const std = @import("std");
 const zgpu = @import("zgpu");
-const wgpu = zgpu.wgpu;
 
 const GPUBuffer = @import("../types.zig").GPUBuffer;
 
@@ -28,6 +27,9 @@ comptime {
 const BLOCKS_PER_SLOT: u32 = VOXEL_GRID_SLOT_SIZE / @sizeOf(GPU_BlockInfo);
 const BLOCKS_PER_SLOT_INV: f32 = 1.0 / @as(f32, @floatFromInt(BLOCKS_PER_SLOT));
 
+const visibility = @import("../chunk_visibility.zig");
+const ChunkIndex = visibility.Index(usize);
+
 const ChunkList = std.ArrayList(VoxelChunk);
 const ChunkUploadList = std.ArrayList(VoxelChunkUpload);
 
@@ -43,6 +45,7 @@ pub const VoxelGrid = struct {
 
     allocator: std.mem.Allocator,
     chunks: ChunkList = .empty,
+    visibility_index: ChunkIndex = .{},
     chunks_to_upload: ChunkUploadList = .empty,
 
     gpu_chunk_info_buffer_manager: SlotBufferManager = .{},
@@ -138,6 +141,7 @@ pub const VoxelGrid = struct {
         gctx.destroyResource(self.gpu_chunk_info_buffer.handle);
         gctx.destroyResource(self.gpu_custom_block_buffer.handle);
         self.custom_upload.deinit(self.allocator);
+        self.visibility_index.deinit(self.allocator);
 
         for (self.chunks.items) |*chunk| chunk.custom_blocks.deinit(self.allocator);
         self.chunks.deinit(self.allocator);
@@ -159,6 +163,7 @@ pub const VoxelGrid = struct {
             chunk.chunk_surface_data.deinit(self.allocator);
         }
 
+        self.visibility_index.dirty = true;
         self.chunks.clearRetainingCapacity();
         self.chunks_to_upload.clearRetainingCapacity();
 
@@ -204,41 +209,44 @@ pub const VoxelGrid = struct {
         }
     }
 
-    fn removeResidentLayer(self: *Self, chunk_coords: ChunkCoords, layer: Layer) void {
+    fn residentIndex(self: *const Self, coords: ChunkCoords, layer: Layer) ?usize {
         for (self.chunks.items, 0..) |*chunk, i| {
-            if (chunk.layer == layer and @reduce(.And, chunk.chunk_origin == chunk_coords)) {
-                if (chunk.gpu_residence_info) |info| {
-                    self.gpu_chunk_info_buffer_manager.freeBlock(info.chunk_index);
-                    self.gpu_block_buffer_manager.freeBlock(info.data_slot_index);
-                }
-
-                self.custom_dirty = self.custom_dirty or chunk.custom_blocks.items.len > 0;
-                chunk.custom_blocks.deinit(self.allocator);
-                _ = self.chunks.swapRemove(i);
-                return;
-            }
+            if (chunk.layer == layer and @reduce(.And, chunk.chunk_origin == coords)) return i;
         }
+        return null;
+    }
+
+    fn releaseResident(self: *Self, chunk: *VoxelChunk) void {
+        if (chunk.gpu_residence_info) |info| {
+            self.gpu_chunk_info_buffer_manager.freeBlock(info.chunk_index);
+            self.gpu_block_buffer_manager.freeBlock(info.data_slot_index);
+        }
+        self.custom_dirty = self.custom_dirty or chunk.custom_blocks.items.len > 0;
+        chunk.custom_blocks.deinit(self.allocator);
+    }
+
+    fn removeResidentLayer(self: *Self, chunk_coords: ChunkCoords, layer: Layer) void {
+        const i = self.residentIndex(chunk_coords, layer) orelse return;
+        self.releaseResident(&self.chunks.items[i]);
+        _ = self.chunks.swapRemove(i);
+        self.visibility_index.dirty = true;
     }
 
     pub fn installedGeometry(self: *const Self, coords: ChunkCoords, layer: Layer) ?GeometryStamp {
-        for (self.chunks.items) |chunk| {
-            if (chunk.layer == layer and @reduce(.And, chunk.chunk_origin == coords)) return chunk.geometry_stamp;
-        }
-        return null;
+        const i = self.residentIndex(coords, layer) orelse return null;
+        return self.chunks.items[i].geometry_stamp;
     }
 
     /// Discovery-only changes can certify already installed, identical bytes.
     /// Content/surface revisions and subscription incarnation must all still match.
     pub fn certifyInstalledGeometry(self: *Self, coords: ChunkCoords, layer: Layer, stamp: GeometryStamp) bool {
-        for (self.chunks.items) |*chunk| {
-            if (chunk.layer != layer or !@reduce(.And, chunk.chunk_origin == coords)) continue;
-            const installed = chunk.geometry_stamp;
-            if (installed.subscription_id != stamp.subscription_id or installed.chunk_revision != stamp.chunk_revision or installed.surface_revision != stamp.surface_revision) return false;
-            if (stamp.composition_revision < installed.composition_revision) return false;
-            chunk.geometry_stamp = stamp;
-            return true;
-        }
-        return false;
+        const i = self.residentIndex(coords, layer) orelse return false;
+        const chunk = &self.chunks.items[i];
+        const installed = chunk.geometry_stamp;
+        if (installed.subscription_id != stamp.subscription_id or installed.chunk_revision != stamp.chunk_revision or installed.surface_revision != stamp.surface_revision) return false;
+        if (stamp.composition_revision < installed.composition_revision) return false;
+        chunk.geometry_stamp = stamp;
+        return true;
     }
 
     fn isReplaced(self: *const Self, chunk: VoxelChunk) bool {
@@ -251,6 +259,7 @@ pub const VoxelGrid = struct {
     /// Simulate the exact allocation sequence, including span fragmentation and rounding,
     /// before writing any part of the frame's uploads. Also usable without a GPU device.
     pub fn hasUploadCapacity(self: *const Self) bool {
+        if (self.chunks_to_upload.items.len == 0) return true;
         var blocks = self.gpu_block_buffer_manager;
         var chunks = self.gpu_chunk_info_buffer_manager;
         var custom_count: usize = 0;
@@ -280,20 +289,42 @@ pub const VoxelGrid = struct {
         _ = self.tryUploadToGPU(gctx);
     }
 
+    const ResidentSlot = struct { index: usize, had_geometry: bool };
+
+    fn install(self: *Self, slot: ResidentSlot, chunk: VoxelChunk) void {
+        self.chunks.items[slot.index] = chunk;
+        if (slot.had_geometry != chunk.hasGeometry()) self.visibility_index.dirty = true;
+    }
+
     /// Replacements and their removals take effect together after every bounded
     /// buffer allocation is known to fit. A retry preserves the displayed frame.
     pub fn tryUploadToGPU(self: *Self, gctx: *zgpu.GraphicsContext) bool {
+        if (self.chunks_to_upload.items.len == 0) {
+            self.uploadCustomBlocks(gctx);
+            return true;
+        }
         if (!self.hasUploadCapacity()) return false;
         self.chunks.ensureUnusedCapacity(self.allocator, self.chunks_to_upload.items.len) catch return false;
+        const slots = self.allocator.alloc(ResidentSlot, self.chunks_to_upload.items.len) catch return false;
+        defer self.allocator.free(slots);
+        self.visibility_index.reserve(self.allocator, self.chunks.items.len + slots.len) catch return false;
         const block_buffer = self.gpu_block_buffer.buffer;
         const chunk_info_buffer = self.gpu_chunk_info_buffer.buffer;
 
-        if (self.chunks_to_upload.items.len > 0) {
-            std.debug.print("Uploading {} voxel chunks to GPU\n", .{self.chunks_to_upload.items.len});
-        }
+        std.debug.print("Uploading {} voxel chunks to GPU\n", .{self.chunks_to_upload.items.len});
 
-        for (self.chunks_to_upload.items) |upload_chunk| self.removeResidentLayer(upload_chunk.chunk_coords, upload_chunk.layer);
-        for (self.chunks_to_upload.items) |*upload_chunk| {
+        // Release all replaced GPU spans before installing any of the new batch.
+        // Keep the CPU slot for an edit at the same coordinate so the BVH stays valid.
+        for (self.chunks_to_upload.items, slots) |upload, *slot| {
+            if (self.residentIndex(upload.chunk_coords, upload.layer)) |i| {
+                slot.* = .{ .index = i, .had_geometry = self.chunks.items[i].hasGeometry() };
+                self.releaseResident(&self.chunks.items[i]);
+            } else {
+                slot.* = .{ .index = self.chunks.items.len, .had_geometry = false };
+                self.chunks.appendAssumeCapacity(.{ .chunk_origin = upload.chunk_coords, .layer = upload.layer });
+            }
+        }
+        for (self.chunks_to_upload.items, slots) |*upload_chunk, slot| {
             self.custom_dirty = self.custom_dirty or upload_chunk.chunk_surface_data.custom_blocks.items.len > 0;
             var total_data_size_total: usize = 0;
             for (upload_chunk.chunk_surface_data.blocks_grouped_by_side) |side| {
@@ -301,7 +332,7 @@ pub const VoxelGrid = struct {
             }
 
             if (total_data_size_total == 0) {
-                self.chunks.appendAssumeCapacity(.{ .chunk_origin = upload_chunk.chunk_coords, .layer = upload_chunk.layer, .geometry_stamp = upload_chunk.geometry_stamp, .custom_blocks = upload_chunk.chunk_surface_data.custom_blocks });
+                self.install(slot, .{ .chunk_origin = upload_chunk.chunk_coords, .layer = upload_chunk.layer, .geometry_stamp = upload_chunk.geometry_stamp, .custom_blocks = upload_chunk.chunk_surface_data.custom_blocks });
                 upload_chunk.chunk_surface_data.custom_blocks = .empty;
                 continue;
             }
@@ -379,7 +410,7 @@ pub const VoxelGrid = struct {
                 };
             }
 
-            self.chunks.appendAssumeCapacity(chunk_inner_data);
+            self.install(slot, chunk_inner_data);
         }
 
         // deinit all chunk side data and clear the upload list
@@ -399,33 +430,58 @@ pub const VoxelGrid = struct {
 
     fn prepareCustomBlocks(self: *Self) bool {
         if (!self.custom_dirty) return false;
-        self.custom_upload.clearRetainingCapacity();
+        var total: u32 = 0;
         self.custom_slope_count = 0;
-        for (self.chunks.items) |chunk| for (chunk.custom_blocks.items) |block| {
-            const slope = if (block.shape == .slope) block.shape.slope else null;
-            self.custom_upload.append(self.allocator, .{
-                .chunk_origin = chunk.chunk_origin,
-                .direction = if (slope) |s| @intFromEnum(s.downhill) else 0,
-                .local_origin = .{ @floatFromInt(block.coords[0]), @floatFromInt(block.coords[1]), @floatFromInt(block.coords[2]) },
-                .adaptive = @intFromBool(slope == null),
-                .high = if (slope) |s| @floatCast(s.high) else 1,
-                .low = if (slope) |s| @floatCast(s.low) else 1,
-            }) catch @panic("OOM");
-            // Keep formed sections first so they retain their 36-vertex draw.
-            if (slope != null) {
-                std.mem.swap(custom.GPU_CustomBlock, &self.custom_upload.items[self.custom_slope_count], &self.custom_upload.items[self.custom_upload.items.len - 1]);
-                self.custom_slope_count += 1;
+        for (self.chunks.items) |chunk| {
+            total += @intCast(chunk.custom_blocks.items.len);
+            for (chunk.custom_blocks.items) |block| self.custom_slope_count += @intFromBool(block.shape == .slope);
+        }
+        self.custom_upload.resize(self.allocator, total) catch @panic("OOM");
+        var next = [2]u32{ 0, self.custom_slope_count };
+        for (self.chunks.items) |*chunk| {
+            const first = next;
+            for (chunk.custom_blocks.items) |block| {
+                const slope = if (block.shape == .slope) block.shape.slope else null;
+                const group: usize = @intFromBool(slope == null);
+                self.custom_upload.items[next[group]] = .{
+                    .chunk_origin = chunk.chunk_origin,
+                    .direction = if (slope) |s| @intFromEnum(s.downhill) else 0,
+                    .local_origin = .{ @floatFromInt(block.coords[0]), @floatFromInt(block.coords[1]), @floatFromInt(block.coords[2]) },
+                    .adaptive = @intFromBool(slope == null),
+                    .high = if (slope) |s| @floatCast(s.high) else 1,
+                    .low = if (slope) |s| @floatCast(s.low) else 1,
+                };
+                next[group] += 1;
             }
-        };
+            for (&chunk.custom_ranges, first, next) |*range, start, end| range.* = .{ .first = start, .count = end - start };
+        }
         self.custom_block_count = @intCast(self.custom_upload.items.len);
         self.custom_dirty = false;
         return true;
     }
 
-    pub fn drawCustomBlocks(self: *const Self, pass: wgpu.RenderPassEncoder) void {
-        if (self.custom_slope_count > 0) pass.draw(custom.slope_vertex_count, self.custom_slope_count, 0, 0);
-        const adaptive_count = self.custom_block_count - self.custom_slope_count;
-        if (adaptive_count > 0) pass.draw(custom.adaptive_vertex_count, adaptive_count, 0, self.custom_slope_count);
+    pub fn visibleChunks(self: *Self, view: *const visibility.View) []const ChunkIndex.Hit {
+        const index = &self.visibility_index;
+        if (index.needsBuild(view.layout)) {
+            index.begin(self.allocator, view.layout, self.chunks.items.len) catch @panic("OOM");
+            for (self.chunks.items, 0..) |chunk, i| {
+                if (chunk.hasGeometry()) index.add(chunk.chunk_origin, i);
+            }
+            index.finish();
+        }
+        return index.query(view);
+    }
+
+    pub fn drawCustomBlocks(self: *const Self, pass: anytype, visible: []const ChunkIndex.Hit) void {
+        if (self.custom_block_count == 0) return;
+        var ranges: [2]visibility.InstanceRange = @splat(.{});
+        for (visible) |hit| {
+            const chunk = &self.chunks.items[hit.id];
+            for (&ranges, chunk.custom_ranges) |*range, r| range.include(r.first, r.first + r.count);
+        }
+        for (ranges, [_]u32{ custom.slope_vertex_count, custom.adaptive_vertex_count }) |range, vertices| {
+            if (range.first < range.end) pass.draw(vertices, range.end - range.first, 0, range.first);
+        }
     }
 };
 
@@ -683,4 +739,54 @@ test "construction upload capacity failure keeps resident display and queued wor
     grid.chunks_to_upload.items[0].layer = .terrain;
     try std.testing.expect(grid.hasUploadCapacity());
     try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.surface_revision);
+}
+
+test "custom-only chunks retain whole instance batches across views and swap removal" {
+    const a = std.testing.allocator;
+    var grid: VoxelGrid = .{ .allocator = a, .gpu_chunk_info_buffer = undefined, .gpu_block_buffer = undefined, .custom_dirty = true };
+    defer {
+        grid.clearChunks();
+        grid.chunks.deinit(a);
+        grid.custom_upload.deinit(a);
+        grid.visibility_index.deinit(a);
+    }
+    const layout = @import("../test_world.zig").layout;
+    for (0..2) |i| {
+        const chunk = try grid.chunks.addOne(a);
+        chunk.* = .{ .chunk_origin = .{ 0, @intCast(i * 20), 0 } };
+        for ([_]u8{ 0, 10, 1 }) |x| {
+            try chunk.custom_blocks.append(a, .{ .coords = .{ x, 0, 0 }, .shape = .adaptive });
+            try chunk.custom_blocks.append(a, .{ .coords = .{ x, 0, 0 }, .shape = .{ .slope = .{ .downhill = .positive_y, .high = 1, .low = 0 } } });
+        }
+    }
+    try std.testing.expect(grid.prepareCustomBlocks());
+    const Draws = struct {
+        records: []const custom.GPU_CustomBlock,
+        count: usize = 0,
+        expected_y: i32,
+        calls: usize = 0,
+        fn draw(self: *@This(), vertices: u32, count: u32, _: u32, first: u32) void {
+            self.calls += 1;
+            for (self.records[first..][0..count]) |record| {
+                std.debug.assert(record.chunk_origin[1] == self.expected_y);
+                const expected: u32 = if (record.adaptive == 1) custom.adaptive_vertex_count else custom.slope_vertex_count;
+                std.debug.assert(vertices == expected);
+                self.count += 1;
+            }
+        }
+    };
+    for ([_]i32{ 0, 20, 20 }, 0..) |y, i| {
+        if (i == 2) {
+            grid.removeChunk(.{ 0, 0, 0 });
+            try std.testing.expect(grid.prepareCustomBlocks());
+        }
+        const view = visibility.View.init(&layout, .{ 0, y, 0 }, @import("zmath").identity());
+        const hits = grid.visibleChunks(&view);
+        try std.testing.expectEqual(1, hits.len);
+        var draws = Draws{ .records = grid.custom_upload.items, .expected_y = y };
+        grid.drawCustomBlocks(&draws, hits);
+        // The x=10 cells ride in the same two draws as x=0 and x=1.
+        try std.testing.expectEqual(6, draws.count);
+        try std.testing.expectEqual(2, draws.calls);
+    }
 }

@@ -882,20 +882,23 @@ const Game = struct {
         game.blueprint_visible_chunks.clearRetainingCapacity();
         game.blueprint_visible_miniatures = 0;
         if (game.blueprint_renderer) |*renderer| {
-            var visible = game.loaded_chunk_ids.keyIterator();
-            while (visible.next()) |id| {
-                if (getChunkDistance(game.layout(), id.*, scene.camera.chunk) > game.render_radius) continue;
-                const count = renderer.miniatureChunkCount(id.*);
-                if (count == 0) continue;
-                game.blueprint_visible_chunks.append(game.allocator, id.*) catch return game.blueprintRenderLimit();
-                game.blueprint_visible_miniatures += count;
+            const visible = renderer.visibleMiniatures(scene.camera) catch return game.blueprintRenderLimit();
+            for (visible) |hit| {
+                if (!game.loaded_chunk_ids.contains(hit.id) or getChunkDistance(game.layout(), hit.id, scene.camera.chunk) > game.render_radius) continue;
+                game.blueprint_visible_chunks.append(game.allocator, hit.id) catch return game.blueprintRenderLimit();
+                game.blueprint_visible_miniatures += renderer.miniatureChunkCount(hit.id);
             }
         }
         const dynamic_capacity = @as(usize, blueprint_renderer.capacity) -| game.blueprint_visible_miniatures;
-        var chunks = game.loaded_chunk_ids.keyIterator();
-        while (chunks.next()) |id| {
-            if (getChunkDistance(game.layout(), id.*, scene.camera.chunk) > game.render_radius) continue;
-            for (world.blueprints.chunkInstances(id.*)) |instance_id| {
+        // A site frame can extend beyond its loaded chunk. Discover frames
+        // through the radius-limited subscription window, including edge chunks.
+        const side: usize = @intCast(2 * game.render_radius + 1);
+        if (world.blueprints.instances.count() != 0) for (0..side) |z| for (0..side) |y| for (0..side) |x| {
+            const offset = ChunkCoords{ @intCast(x), @intCast(y), @intCast(z) } - @as(ChunkCoords, @splat(game.render_radius));
+            const coords = game.layout().normalizeChunkCoords(scene.camera.chunk +| offset) orelse continue;
+            const id = game.layout().encodeChunkCoords(coords);
+            if (!game.loaded_chunk_ids.contains(id)) continue;
+            for (world.blueprints.chunkInstances(id)) |instance_id| {
                 const instance = world.blueprints.instances.get(instance_id) orelse continue;
                 if (!instance.active or visible_frames.contains(instance_id)) continue;
                 visible_frames.put(game.allocator, instance_id, {}) catch return game.blueprintRenderLimit();
@@ -903,7 +906,7 @@ const Game = struct {
                 if (list.items.len + 12 > dynamic_capacity) return game.blueprintRenderLimit();
                 blueprint_renderer.appendFrame(list, game.allocator, scene.camera, .{ instance.origin[0], instance.origin[1], instance.origin[2] }, blueprint.rotatedSize(saved.definition.size, instance.rotation)) catch return game.blueprintRenderLimit();
             }
-        }
+        };
         if (game.blueprint_tool.mode == .capture) {
             if (game.blueprint_tool.selection.stage == .anchor) {
                 if (game.blueprintAnchorTarget()) |target| {
@@ -5572,6 +5575,7 @@ const StreamingTest = struct {
         for (self.game.chunk_packages.items) |*package| package.deinit(allocator);
         self.game.chunk_packages.deinit(allocator);
         self.grid.clearChunks();
+        self.grid.visibility_index.deinit(allocator);
         self.grid.chunks.deinit(allocator);
         self.grid.chunks_to_upload.deinit(allocator);
     }
