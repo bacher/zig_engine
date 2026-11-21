@@ -233,8 +233,10 @@ tests a boundary warehouse once and selects all of its pieces together. Loose pa
 their chunk's box. Visibility queries work on these boxes and cached ranges of instances.
 
 Irregular cargo and its packaging have separate instanced batches. Each pass merges adjacent
-visible ranges within each category, including ranges owned by different warehouses. A gap
-belonging to a rejected warehouse splits the draw. Moving the camera or selecting a shadow
+visible ranges within each category, including ranges owned by different warehouses. The camera and each shadow cascade issue
+at most three draws per category. They skip the two largest internal gaps by instance count
+and submit any smaller gaps along with the visible records. Records before the first visible
+range and after the last are excluded. Moving the camera or selecting a shadow
 cascade only changes the arguments to the draws. Instance buffers stay on the GPU.
 The shared 288-vertex goods template represents either the standard 198-vertex unformed adaptive
 road (90 unused vertices form degenerate triangles) or an eight-cuboid pallet. Pallet cargo is

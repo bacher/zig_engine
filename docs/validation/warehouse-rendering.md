@@ -3,8 +3,8 @@
 The packed renderer is a scene-owned world-geometry path. CPU sources carry flat exterior
 cube faces and shared irregular-model, packaging, loose-pallet and marker instances.
 Global dense GPU buffers batch each category across retained sources. Each warehouse has
-one visibility box. Each pass submits one draw per contiguous range of visible records in
-each category. Cubes use a flat face list. Terrain shaders contain no packaging code.
+one visibility box. Each pass submits up to three draws per category, skipping the two largest
+gaps between visible records. Cubes use a flat face list. Terrain shaders contain no packaging code.
 
 ## Reproduce
 
@@ -37,8 +37,9 @@ expansion and fragment shaders on Dawn. Its 23 cases check:
   and cutout shadow holes. Flat advisory markers do not cast shadows onto their own pallet.
 - Chunk-relative coordinates near the end of a 131,072-chunk x axis and across its wrapped
   seam. The mixed-model and shadow fixtures select a warehouse spanning that seam and skip
-  warehouses in the middle and at the end of the same GPU buffer. The mixed fixture submits
-  one model draw and two packaging draws. The shadow fixture submits two packaging draws.
+  the four- and two-record gaps in the packaging buffer and its invisible tail. Both fixtures
+  bridge a one-record gap and submit three packaging draws. The mixed fixture also submits
+  one model draw.
   An empty view submits zero vertices. Changing the view leaves source upload bytes unchanged.
 
 The 2026-11-18 loose-pallet shadow regression uses the same caller bindings as the engine:
