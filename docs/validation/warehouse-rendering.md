@@ -2,9 +2,9 @@
 
 The packed renderer is a scene-owned world-geometry path. CPU sources carry flat exterior
 cube faces and shared irregular-model, packaging, loose-pallet and marker instances.
-Global dense GPU buffers batch each category across retained sources: one draw for all
-irregular goods and one for all their packaging in each pass. Cubes use one flat face draw,
-without terrain side groups or camera view tables. Terrain shaders contain no packaging code.
+Global dense GPU buffers batch each category across retained sources. Each warehouse has
+one visibility box. Each pass submits one draw per contiguous range of visible records in
+each category. Cubes use a flat face list. Terrain shaders contain no packaging code.
 
 ## Reproduce
 
@@ -36,7 +36,10 @@ expansion and fragment shaders on Dawn. Its 23 cases check:
 - Material icons, disabled-column red crosses with cutout backgrounds, shadow color/depth agreement
   and cutout shadow holes. Flat advisory markers do not cast shadows onto their own pallet.
 - Chunk-relative coordinates near the end of a 131,072-chunk x axis and across its wrapped
-  seam, plus a mixed-model fixture asserting two draws across two independent sources.
+  seam. The mixed-model and shadow fixtures select a warehouse spanning that seam and skip
+  warehouses in the middle and at the end of the same GPU buffer. The mixed fixture submits
+  one model draw and two packaging draws. The shadow fixture submits two packaging draws.
+  An empty view submits zero vertices. Changing the view leaves source upload bytes unchanged.
 
 The 2026-11-18 loose-pallet shadow regression uses the same caller bindings as the engine:
 scene at group 0 and material atlas at group 1, without a sampled shadow-map group. With the
@@ -90,6 +93,9 @@ Measured on 2026-11-15 with Apple M4 Max / Metal, Zig ReleaseSafe. The fixture c
 128 sources, each with 256 irregular items and 256 packaging instances; half the items are
 adaptive roads and half pallets. These are CPU plus asynchronous queue-write measurements,
 not GPU execution times or whole-frame timing.
+These measurements predate warehouse frustum culling. The current CPU estimate also
+includes the spatial index, cached ranges and draw scratch space. The two-draw count below
+applies when the visible records form one contiguous range per category.
 
 | Work or storage | Measurement |
 | --- | ---: |

@@ -167,6 +167,12 @@ fn checkOwned(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse, real
             if (comptime WorldLayout.wrap_x) source_chunk[0] = 0 else camera_chunk[0] -= 1;
             matrix[3][0] -= 32 * 1.6;
         }
+        const warehouse_case = case == .mixed_batch or case == .shadow_top;
+        if (warehouse_case) {
+            camera_chunk[0] = 0;
+            source_chunk[0] = 0;
+            renderer.clear(gctx);
+        }
         if (case == .mixed_batch) matrix[0][0] = 0.8;
         gctx.queue.writeBuffer(origin_buffer, 0, [4]i32, &.{camera_chunk});
         gctx.queue.writeBuffer(clip_buffer, 0, zmath.Mat, &.{matrix});
@@ -201,7 +207,32 @@ fn checkOwned(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse, real
             },
         }
         renderer.removeSource(gctx, 2);
+        renderer.removeSource(gctx, 5);
+        renderer.removeSource(gctx, 6);
         if (case == .mixed_batch) try renderer.upsertSource(gctx, 2, .{ .chunk = source.chunk, .revision = index + 1, .models = &.{.{ .local = .{ 1, 0, 0 }, .material = 23 }}, .packaging = &.{.{ .local = .{ 1, 0, 0 }, .material = 23 }} });
+        var boxes: [2]cargo.Group = undefined;
+        const warehouse_packaging = [_]cargo.Instance{ item, .{ .local = .{ 3, 4, 5 }, .material = 14 }, .{ .local = .{ 25, 25, 25 }, .material = 14 } };
+        if (warehouse_case) {
+            var previous = source.chunk;
+            previous[0] = if (WorldLayout.wrap_x) world.size_in_chunks[0] - 1 else -1;
+            const body = cargo.Box{ .chunk = previous, .local = .{ 31, 0, 0 }, .extent = .{ 5, 5, 6 } };
+            // A second chunk piece of the same warehouse, outside the viewport.
+            try renderer.upsertSource(gctx, 5, .{ .chunk = previous, .revision = 1, .packaging = &.{.{ .local = .{ 31, 4, 5 }, .material = 14 }}, .groups = &.{.{ .box = body, .counts = .{ 0, 0, 1, 0, 0 } }} });
+            // This warehouse shares the visible chunk and sits between the
+            // visible pieces in the GPU buffer, but its entire box is outside.
+            try renderer.upsertSource(gctx, 6, .{
+                .chunk = source.chunk,
+                .revision = 1,
+                .packaging = &.{.{ .local = .{ 10, 10, 10 }, .material = 14 }},
+                .groups = &.{.{ .box = .{ .chunk = source.chunk, .local = .{ 10, 10, 10 }, .extent = .{ 5, 5, 6 } }, .counts = .{ 0, 0, 1, 0, 0 } }},
+            });
+            source.packaging = &warehouse_packaging;
+            boxes = .{
+                .{ .box = body, .counts = .{ 0, @intCast(source.models.len), 2, 0, 0 } },
+                .{ .box = .{ .chunk = source.chunk, .local = .{ 25, 25, 25 }, .extent = .{ 1, 1, 6 } }, .counts = .{ 0, 0, 1, 0, 0 } },
+            };
+            source.groups = &boxes;
+        }
         try renderer.upsertSource(gctx, 1, source);
         renderer.upload(gctx);
         const encoder = device.createCommandEncoder(null);
@@ -217,9 +248,25 @@ fn checkOwned(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse, real
         // Match Engine.draw: shadow passes receive scene + atlas only. Binding
         // the sampled shadow map while writing it would create a feedback hazard.
         if (!shadow) pass.setBindGroup(2, light_binding, &.{0});
-        const draws_before = renderer.stats().draw_calls;
-        renderer.draw(gctx, pass, shadow);
-        if (case == .mixed_batch) try std.testing.expectEqual(@as(u64, 2), renderer.stats().draw_calls - draws_before);
+        const before = renderer.stats();
+        const View = @import("chunk_visibility.zig").View;
+        const view = View.init(&world, .{ camera_chunk[0], camera_chunk[1], camera_chunk[2] }, matrix);
+        if (warehouse_case) {
+            var empty = view;
+            empty.origin[2] += 200;
+            renderer.draw(gctx, pass, shadow, &empty);
+            try std.testing.expectEqual(before.vertex_invocations, renderer.stats().vertex_invocations);
+        }
+        renderer.draw(gctx, pass, shadow, &view);
+        if (warehouse_case) {
+            const after = renderer.stats();
+            try std.testing.expectEqual(before.source_upload_bytes, after.source_upload_bytes);
+            try std.testing.expectEqual(if (shadow) @as(u64, 2) else 3, after.draw_calls + after.shadow_draw_calls - before.draw_calls - before.shadow_draw_calls);
+            // Both cross-chunk pieces survive. The invisible warehouses in the
+            // middle and at the end contribute no vertices in either pass.
+            const expected: u64 = if (shadow) 3 * cargo.packaging_vertex_count else 2 * cargo.model_vertex_count + 4 * cargo.packaging_vertex_count;
+            try std.testing.expectEqual(expected, after.vertex_invocations - before.vertex_invocations);
+        }
         pass.end();
         encoder.copyTextureToBuffer(.{ .texture = if (shadow) shadow_color else color }, .{ .buffer = mapped, .layout = .{ .offset = index * bytes * 2, .bytes_per_row = side * 4, .rows_per_image = side } }, extent);
         encoder.copyTextureToBuffer(.{ .texture = depth, .aspect = .depth_only }, .{ .buffer = mapped, .layout = .{ .offset = index * bytes * 2 + bytes, .bytes_per_row = side * 4, .rows_per_image = side } }, extent);
@@ -390,4 +437,20 @@ fn checkDenseChanges(renderer: *cargo.Renderer, gctx: *zgpu.GraphicsContext) !vo
     try std.testing.expectEqual(@as(usize, 0), renderer.packaging.entries.items.len);
     renderer.clear(gctx);
     try std.testing.expectEqual(@as(usize, 0), renderer.sourceCount());
+
+    // Move the last instance of a three-item source into slot 0. Slot 1
+    // belongs to a different warehouse and must stay out of both cached runs.
+    const items = [_]cargo.Instance{.{ .local = .{ 0, 0, 0 }, .material = 14 }} ** 3;
+    for (0..3) |id| try renderer.upsertSource(gctx, id, .{ .chunk = .{ @intCast(id), 0, 0 }, .revision = 1, .models = if (id == 2) &items else items[0..1] });
+    renderer.removeSource(gctx, 0);
+    renderer.upload(gctx);
+    const runs = renderer.sources.get(2).?.groups[0].runs[1];
+    try std.testing.expectEqual(2, runs.len);
+    var submitted: u32 = 0;
+    for (runs) |r| {
+        for (renderer.models.refs.items[r.first..r.end]) |ref| try std.testing.expectEqual(2, ref.id);
+        submitted += r.end - r.first;
+    }
+    try std.testing.expectEqual(3, submitted);
+    renderer.clear(gctx);
 }

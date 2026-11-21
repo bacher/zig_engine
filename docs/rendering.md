@@ -195,7 +195,7 @@ chooses a three-side combination (0–7) from the signed camera/chunk delta. Whe
 is zero, mode 8 covers all six sides. The vertex shader reads combination 0 followed by
 combination 7 in the same draw. Each selected terrain or construction layer costs at most one draw.
 
-Each pass queries a bounding volume hierarchy (BVH) over resident chunk coordinates. Voxel layers and blueprint miniatures maintain separate indexes because their residency changes independently. Nodes enclose their entries in chunk-aligned boxes and split along the longest axis. A query rejects an outside subtree, accepts every entry in a fully contained subtree, and descends through intersecting nodes. Camera movement reuses the hierarchy. Voxel edits reuse the resident layer slot. The voxel index rebuilds when a layer gains or loses geometry, or when removal moves a drawable layer to a new slot. The miniature index rebuilds when source coordinates or membership change.
+Each pass queries a bounding volume hierarchy (BVH) over resident chunk coordinates. Voxel layers, packed sources and blueprint miniatures maintain separate indexes because their residency changes independently. Nodes enclose their entries in chunk-aligned boxes and split along the longest axis. A query rejects an outside subtree, accepts every entry in a fully contained subtree, and descends through intersecting nodes. Camera movement reuses the hierarchy. Voxel edits reuse the resident layer slot. The voxel index rebuilds when a layer gains or loses geometry, or when removal moves a drawable layer to a new slot. Packed and miniature indexes rebuild when source coordinates or membership change.
 
 The six planes come from the matrix used to render that pass, including WebGPU’s zero-to-one depth interval. Bounds use the same integer chunk delta and wrapped-X image as the vertex shader. A box touching a plane stays eligible. Each of the three shadow cascades queries its own orthographic volume and draws all six sides of surviving voxel layers. An off-camera chunk can therefore cast a shadow. Cached blueprint miniatures use only the camera query in their overlay pass.
 
@@ -226,7 +226,16 @@ face into six vertices; hardware backface culling rejects away-facing triangles.
 faces are culled during source preparation. A full 5×5×6 cubic warehouse has 170 exterior
 unit faces. This count is geometric, not a measured frame-time result.
 
-Irregular cargo and its packaging each use one instanced category draw across retained sources.
+A warehouse has one visibility box covering its registered footprint and all six storage levels
+(up to 5×5×6 cells), including member pallets and empty-base markers. Its pieces share that
+box across chunk boundaries and the wrapped-X seam. Each pass queries the covered chunks,
+tests a boundary warehouse once and selects all of its pieces together. Loose pallets share
+their chunk's box. Visibility queries work on these boxes and cached ranges of instances.
+
+Irregular cargo and its packaging have separate instanced batches. Each pass merges adjacent
+visible ranges within each category, including ranges owned by different warehouses. A gap
+belonging to a rejected warehouse splits the draw. Moving the camera or selecting a shadow
+cascade only changes the arguments to the draws. Instance buffers stay on the GPU.
 The shared 288-vertex goods template represents either the standard 198-vertex unformed adaptive
 road (90 unused vertices form degenerate triangles) or an eight-cuboid pallet. Pallet cargo is
 uniformly scaled to 90% at cell center. Packaging supplies a full-size bottom pallet plus six
