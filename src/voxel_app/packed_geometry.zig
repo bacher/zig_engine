@@ -10,6 +10,7 @@ const ChunkId = @import("consts.zig").ChunkId;
 const stream = @import("warehouse_stream.zig");
 
 pub const Geometry = struct {
+    groups: std.ArrayList(renderer.Group) = .empty,
     faces: std.ArrayList(renderer.Face) = .empty,
     models: std.ArrayList(renderer.Instance) = .empty,
     packaging: std.ArrayList(renderer.Instance) = .empty,
@@ -19,6 +20,7 @@ pub const Geometry = struct {
     visited_slots: usize = 0,
 
     pub fn deinit(self: *Geometry, allocator: std.mem.Allocator) void {
+        self.groups.deinit(allocator);
         self.faces.deinit(allocator);
         self.models.deinit(allocator);
         self.packaging.deinit(allocator);
@@ -34,13 +36,22 @@ pub const Geometry = struct {
     }
 
     pub fn allocatedBytes(self: Geometry) usize {
-        return self.faces.capacity * @sizeOf(renderer.Face) +
+        return self.groups.capacity * @sizeOf(renderer.Group) + self.faces.capacity * @sizeOf(renderer.Face) +
             (self.models.capacity + self.packaging.capacity + self.pallets.capacity) * @sizeOf(renderer.Instance) +
             self.markers.capacity * @sizeOf(renderer.Marker);
     }
 
+    fn counts(self: *const Geometry) @Vector(5, u32) {
+        return .{ @intCast(self.faces.items.len), @intCast(self.models.items.len), @intCast(self.packaging.items.len), @intCast(self.pallets.items.len), @intCast(self.markers.items.len) };
+    }
+
+    fn finishGroup(self: *Geometry, allocator: std.mem.Allocator, box: renderer.Box, start: @Vector(5, u32)) !void {
+        const added = self.counts() - start;
+        if (@reduce(.Or, added != @as(@Vector(5, u32), @splat(0)))) try self.groups.append(allocator, .{ .box = box, .counts = added });
+    }
+
     pub fn source(self: Geometry, chunk: engine.ChunkCoords, revision: u64) renderer.Source {
-        return .{ .chunk = chunk, .revision = revision, .faces = self.faces.items, .models = self.models.items, .packaging = self.packaging.items, .pallets = self.pallets.items, .markers = self.markers.items };
+        return .{ .chunk = chunk, .revision = revision, .groups = self.groups.items, .faces = self.faces.items, .models = self.models.items, .packaging = self.packaging.items, .pallets = self.pallets.items, .markers = self.markers.items };
     }
 };
 
@@ -89,61 +100,83 @@ pub fn buildReferences(allocator: std.mem.Allocator, cache: *const client.Cache,
     for (references) |reference| {
         const entry = cache.objects.get(reference.identity) orelse continue;
         if (entry.retired) continue;
+        const start = result.counts();
         // Registration proves its members independently of terrain residency.
         // An unavailable object may look empty, but its real base stays visible.
         for (entry.derived_layout.columns[0..entry.derived_layout.count]) |column| {
             const cell = reference.geometry.worldCell(cache.world_size, .{ column[0], column[1], 0 }).?;
             if (inChunk(cell, chunk)) pallets.set(localIndex(toLocal(cell)));
         }
-        const record = cache.record(reference.identity) orelse continue;
-        const order = entry.derived_layout;
-        result.visited_objects += 1;
-        const irregular = record.material == .country_road_adaptive or record.material == .pallet;
-        // A bounded temporary occupancy mask avoids searching the column order
-        // for each adjacent face. Its one-cell padding handles exterior faces.
-        var occupied: [8][7][7]bool = @splat(@splat(@splat(false)));
-        var slots: [layout.max_stock]layout.Offset = undefined;
-        var index: u16 = 0;
-        while (index < record.stock) : (index += 1) {
-            const offset = order.slotAt(record.active, index).?;
-            slots[index] = offset;
-            occupied[@as(usize, @intCast(offset[2])) + 1][@as(usize, @intCast(offset[1] - record.geometry.bounds.ymin)) + 1][@as(usize, @intCast(offset[0] - record.geometry.bounds.xmin)) + 1] = true;
+        if (cache.record(reference.identity)) |record| {
+            const order = entry.derived_layout;
+            result.visited_objects += 1;
+            const irregular = record.material == .country_road_adaptive or record.material == .pallet;
+            // A bounded temporary occupancy mask avoids searching the column order
+            // for each adjacent face. Its one-cell padding handles exterior faces.
+            var occupied: [8][7][7]bool = @splat(@splat(@splat(false)));
+            var slots: [layout.max_stock]layout.Offset = undefined;
+            var index: u16 = 0;
+            while (index < record.stock) : (index += 1) {
+                const offset = order.slotAt(record.active, index).?;
+                slots[index] = offset;
+                occupied[@as(usize, @intCast(offset[2])) + 1][@as(usize, @intCast(offset[1] - record.geometry.bounds.ymin)) + 1][@as(usize, @intCast(offset[0] - record.geometry.bounds.xmin)) + 1] = true;
+            }
+            for (slots[0..record.stock]) |offset| {
+                result.visited_slots += 1;
+                const cell = record.geometry.worldCell(cache.world_size, offset).?;
+                if (!inChunk(cell, chunk)) continue;
+                const local = toLocal(cell);
+                cargo.set(localIndex(local));
+                if (irregular) {
+                    const instance: renderer.Instance = .{ .local = local, .material = @intFromEnum(record.material) };
+                    try result.models.append(allocator, instance);
+                    try result.packaging.append(allocator, instance);
+                    continue;
+                }
+                for (std.enums.values(voxel.Side)) |side| {
+                    const direction = side.getOffset();
+                    const x: usize = @intCast(@as(i32, offset[0] - record.geometry.bounds.xmin) + direction[0] + 1);
+                    const y: usize = @intCast(@as(i32, offset[1] - record.geometry.bounds.ymin) + direction[1] + 1);
+                    const z: usize = @intCast(@as(i32, offset[2]) + direction[2] + 1);
+                    if (occupied[z][y][x]) continue;
+                    try result.faces.append(allocator, .{ .local = local, .material = @intFromEnum(record.material), .direction = @intFromEnum(side) });
+                }
+            }
+            for (order.columns[0..order.count], 0..) |column, rank| {
+                if (occupied[1][@as(usize, @intCast(column[1] - record.geometry.bounds.ymin)) + 1][@as(usize, @intCast(column[0] - record.geometry.bounds.xmin)) + 1]) continue;
+                const cell = record.geometry.worldCell(cache.world_size, .{ column[0], column[1], 0 }).?;
+                if (!inChunk(cell, chunk)) continue;
+                const local = toLocal(cell);
+                if (!pallets.isSet(localIndex(local))) continue;
+                try result.markers.append(allocator, .{ .local = local, .material = @intFromEnum(record.material), .disabled = @intFromBool(rank >= record.active) });
+            }
         }
-        for (slots[0..record.stock]) |offset| {
-            result.visited_slots += 1;
-            const cell = record.geometry.worldCell(cache.world_size, offset).?;
+        // Keep the member pallets and their markers with their warehouse even
+        // while stock is unavailable. Remaining bits are independent loose pallets.
+        for (entry.derived_layout.columns[0..entry.derived_layout.count]) |column| {
+            const cell = reference.geometry.worldCell(cache.world_size, .{ column[0], column[1], 0 }).?;
             if (!inChunk(cell, chunk)) continue;
             const local = toLocal(cell);
-            cargo.set(localIndex(local));
-            if (irregular) {
-                const instance: renderer.Instance = .{ .local = local, .material = @intFromEnum(record.material) };
-                try result.models.append(allocator, instance);
-                try result.packaging.append(allocator, instance);
-                continue;
-            }
-            for (std.enums.values(voxel.Side)) |side| {
-                const direction = side.getOffset();
-                const x: usize = @intCast(@as(i32, offset[0] - record.geometry.bounds.xmin) + direction[0] + 1);
-                const y: usize = @intCast(@as(i32, offset[1] - record.geometry.bounds.ymin) + direction[1] + 1);
-                const z: usize = @intCast(@as(i32, offset[2]) + direction[2] + 1);
-                if (occupied[z][y][x]) continue;
-                try result.faces.append(allocator, .{ .local = local, .material = @intFromEnum(record.material), .direction = @intFromEnum(side) });
-            }
+            const bit = localIndex(local);
+            pallets.unset(bit);
+            if (!cargo.isSet(bit)) try result.pallets.append(allocator, .{ .local = local, .material = @intFromEnum(voxel.BlockType.pallet) });
         }
-        for (order.columns[0..order.count], 0..) |column, rank| {
-            if (occupied[1][@as(usize, @intCast(column[1] - record.geometry.bounds.ymin)) + 1][@as(usize, @intCast(column[0] - record.geometry.bounds.xmin)) + 1]) continue;
-            const cell = record.geometry.worldCell(cache.world_size, .{ column[0], column[1], 0 }).?;
-            if (!inChunk(cell, chunk)) continue;
-            const local = toLocal(cell);
-            if (!pallets.isSet(localIndex(local))) continue;
-            try result.markers.append(allocator, .{ .local = local, .material = @intFromEnum(record.material), .disabled = @intFromBool(rank >= record.active) });
-        }
+        const bounds = reference.geometry.bounds;
+        const minimum = reference.geometry.worldCell(cache.world_size, .{ bounds.xmin, bounds.ymin, 0 }).?;
+        const box: renderer.Box = .{
+            .chunk = .{ @intCast(minimum[0] / 32), @intCast(minimum[1] / 32), @intCast(minimum[2] / 32) },
+            .local = .{ @intCast(minimum[0] % 32), @intCast(minimum[1] % 32), @intCast(minimum[2] % 32) },
+            .extent = .{ bounds.width(), bounds.height(), layout.levels },
+        };
+        try result.finishGroup(allocator, box, start);
     }
     // An occupied base already contains its packaging pallet. The real terrain
     // pallet remains authoritative and becomes visible again when the slot empties.
+    const loose_start = result.counts();
     var visible_pallets = pallets.differenceWith(cargo);
     var iterator = visible_pallets.iterator(.{});
     while (iterator.next()) |index| try result.pallets.append(allocator, .{ .local = localCell(@intCast(index)), .material = @intFromEnum(voxel.BlockType.pallet) });
+    try result.finishGroup(allocator, renderer.Box.chunkBox(chunk), loose_start);
     return result;
 }
 
@@ -314,6 +347,10 @@ test "packed external faces cull across chunks and keep irregular cargo in two b
         for (0..2) |z| for (0..2) |y| for (0..2) |x| {
             var built = try buildChunk(allocator, &cache, 1, .{ @intCast(x), @intCast(y), @intCast(z) }, &.{}, &.{}, .{});
             defer built.deinit(allocator);
+            try std.testing.expectEqual(1, built.groups.items.len);
+            const group = built.groups.items[0];
+            try std.testing.expectEqual(renderer.Box{ .chunk = .{ 0, 0, 0 }, .local = .{ 30, 30, 31 }, .extent = .{ 5, 5, 6 } }, group.box);
+            try std.testing.expectEqual(@as(@Vector(5, u32), group.counts), built.counts());
             faces += built.faces.items.len;
             models += built.models.items.len;
             packaging += built.packaging.items.len;
@@ -334,6 +371,9 @@ test "packed markers require real empty bases and share the predicted cargo cut"
     defer empty.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 4), empty.markers.items.len);
     try std.testing.expectEqual(@as(usize, 4), empty.pallets.items.len);
+    try std.testing.expectEqual(1, empty.groups.items.len);
+    try std.testing.expectEqual([3]u8{ 5, 5, 6 }, empty.groups.items[0].box.extent);
+    try std.testing.expectEqual([5]u32{ 0, 0, 0, 4, 4 }, empty.groups.items[0].counts);
     const identity = cache.chunkReferences(1)[0].identity;
     const order = cache.objects.get(identity).?.derived_layout;
     const first = cache.objects.get(identity).?.geometry.worldCell(cache.world_size, order.slotAt(24, 0).?).?;
