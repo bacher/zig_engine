@@ -43,6 +43,8 @@ pub const Reason = enum {
     mining_forbidden,
     immutable_cell,
     warehouse_claim,
+    earth_missing_center,
+    earth_split_gaps,
 };
 
 /// Target-relative coordinates remain continuous across the wrapped x seam.
@@ -341,27 +343,33 @@ pub const Validator = struct {
     fn footprint(self: *Validator, cell: Cell, material: BlockType) ReadError!Evaluation {
         const sand = material == .sand;
         var result: Failure = .{ .reason = if (sand) .sand_footprint else .earth_footprint, .subject = cell, .limit = if (sand) 9 else 6 };
+        var full_rows = [_]bool{true} ** 3;
+        var full_columns = [_]bool{true} ** 3;
+        var center_supported = true;
         for (0..3) |y| {
             for (0..3) |x| {
                 const below = cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -1 };
                 const support = try self.get(below);
-                if (support.isStructural() or support == .sand) result.actual += 1 else result.add(below);
+                if (support.isStructural() or support == .sand) {
+                    result.actual += 1;
+                } else {
+                    full_rows[y] = false;
+                    full_columns[x] = false;
+                    if (x == 1 and y == 1) center_supported = false;
+                    result.add(below);
+                }
             }
         }
         if (result.actual < result.limit) return .{ .rejected = result };
 
-        const gaps = result.involved[0..result.involved_count];
-        if (gaps.len != 0) {
-            const first_gap = gaps[0];
-            var outer_column = first_gap[0] != cell[0];
-            var outer_row = first_gap[1] != cell[1];
-            for (gaps[1..]) |gap| {
-                outer_column = outer_column and gap[0] == first_gap[0];
-                outer_row = outer_row and gap[1] == first_gap[1];
-            }
-            if (!outer_column and !outer_row) return .{ .rejected = result };
-        }
-        return .{ .supported = .{} };
+        // Two adjacent full rows or columns leave room for gaps on one outer edge.
+        const adjacent_rows = full_rows[1] and (full_rows[0] or full_rows[2]);
+        const adjacent_columns = full_columns[1] and (full_columns[0] or full_columns[2]);
+        if (adjacent_rows or adjacent_columns) return .{ .supported = .{} };
+
+        result.reason = if (center_supported) .earth_split_gaps else .earth_missing_center;
+        result.limit = 0;
+        return .{ .rejected = result };
     }
 
     fn height(cell: Cell, material: BlockType, base: State) Evaluation {
@@ -975,52 +983,49 @@ test "soil accepts a line of gaps at world edges and still requires loaded suppo
     try fixture.raw(.{ 0, 11, 3 }, .none);
     const seam_removal = fixture.check(wrapped_support, .none).?;
     try std.testing.expectEqual(Reason.would_remove_support, seam_removal.reason);
-    try std.testing.expectEqual(Reason.earth_footprint, seam_removal.cause.?);
+    try std.testing.expectEqual(Reason.earth_split_gaps, seam_removal.cause.?);
     try std.testing.expect(fixture.check(.{ 20, 0, 4 }, .dirt) == null);
-    fixture.missing = .{ 20, 20, 3 };
-    const missing = fixture.check(.{ 20, 20, 4 }, .dirt).?;
-    try std.testing.expectEqual(Reason.missing_data, missing.reason);
-    try std.testing.expectEqualDeep(fixture.missing.?, missing.involved[1]);
+    const cell: Cell = .{ 20, 20, 4 };
+    const center = cell - Cell{ 0, 0, 1 };
+    const last_corner = cell + Cell{ 1, 1, -1 };
+    for ([_]Cell{ center, last_corner }) |unloaded| {
+        fixture.missing = unloaded;
+        const missing = fixture.check(cell, .dirt).?;
+        try std.testing.expectEqual(Reason.missing_data, missing.reason);
+        try std.testing.expectEqualDeep(unloaded, missing.involved[1]);
+    }
     fixture.missing = null;
-    try fixture.raw(.{ 20, 20, 3 }, .none);
-    const failure_result = fixture.check(.{ 20, 20, 4 }, .dirt).?;
+    try fixture.raw(center, .none);
+    const failure_result = fixture.check(cell, .dirt).?;
+    try std.testing.expectEqual(Reason.earth_missing_center, failure_result.reason);
     try std.testing.expectEqual(8, failure_result.actual);
-    try std.testing.expectEqual(6, failure_result.limit);
+    try std.testing.expectEqual(0, failure_result.limit);
     try std.testing.expectEqual(1, failure_result.involved_count);
 }
 
-test "soil footprint gaps must share one outer edge" {
+test "soil and sand footprint rules match every 3x3 gap pattern" {
     var fixture: Fixture = .{};
     defer fixture.deinit();
     const cell: Cell = .{ 20, 20, 4 };
-    const cases = [_]struct { rows: [3][]const u8, valid: bool }{
-        .{ .rows = .{ "OOO", "OOO", "OOO" }, .valid = true },
-        .{ .rows = .{ "OOO", "OOO", "FFF" }, .valid = true },
-        .{ .rows = .{ "FOO", "FOO", "FOO" }, .valid = true },
-        .{ .rows = .{ "FFF", "OOO", "OOO" }, .valid = true },
-        .{ .rows = .{ "OOF", "OOF", "OOF" }, .valid = true },
-        .{ .rows = .{ "FOF", "OOO", "OOO" }, .valid = true },
-        .{ .rows = .{ "FFO", "OOO", "OOO" }, .valid = true },
-        .{ .rows = .{ "OFO", "OOO", "OOO" }, .valid = true },
-        .{ .rows = .{ "OOO", "FOO", "OOO" }, .valid = true },
-        .{ .rows = .{ "OOO", "FOF", "OOO" }, .valid = false },
-        .{ .rows = .{ "OFO", "OOO", "OFO" }, .valid = false },
-        .{ .rows = .{ "FOO", "OOO", "OOF" }, .valid = false },
-        .{ .rows = .{ "FFO", "FOO", "OOO" }, .valid = false },
-        .{ .rows = .{ "OOO", "OFO", "OOO" }, .valid = false },
-        .{ .rows = .{ "FFF", "OOO", "OOF" }, .valid = false },
+    const outer_edges = [_]u9{
+        0b000_000_111, // First row.
+        0b111_000_000, // Last row.
+        0b001_001_001, // First column.
+        0b100_100_100, // Last column.
     };
-    for (cases) |case| {
-        errdefer std.debug.print("unexpected soil placement result for {s}/{s}/{s}\n", .{ case.rows[0], case.rows[1], case.rows[2] });
-        for (case.rows, 0..) |row, y| for (row, 0..) |mark, x| {
-            try fixture.raw(cell + Cell{ @as(i64, @intCast(x)) - 1, @as(i64, @intCast(y)) - 1, -1 }, if (mark == 'O') .stone else .none);
-        };
-        const result = fixture.check(cell, .dirt);
-        if (case.valid) {
-            try std.testing.expectEqual(null, result);
-        } else {
-            try std.testing.expectEqual(Reason.earth_footprint, (result orelse return error.TestExpectedEqual).reason);
+    for (0..512) |pattern| {
+        const gaps: u9 = @intCast(pattern);
+        errdefer std.debug.print("unexpected footprint result for gap mask {b}\n", .{gaps});
+        for (0..9) |index| {
+            const x: i64 = @intCast(index % 3);
+            const y: i64 = @intCast(index / 3);
+            const gap = gaps & (@as(u9, 1) << @intCast(index)) != 0;
+            try fixture.raw(cell + Cell{ x - 1, y - 1, -1 }, if (gap) .none else .stone);
         }
+        var valid_soil = false;
+        for (outer_edges) |edge| valid_soil = valid_soil or (gaps & ~edge == 0);
+        try std.testing.expectEqual(valid_soil, fixture.check(cell, .dirt) == null);
+        try std.testing.expectEqual(gaps == 0, fixture.check(cell, .sand) == null);
     }
 }
 

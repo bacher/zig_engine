@@ -1713,7 +1713,8 @@ test "the default editing API validates before queueing and preserves earth supp
     const refused = world.setBlock(support, .none);
     try std.testing.expectEqual(OperationStatus.constraint_violation, refused.status);
     try std.testing.expectEqual(block_rules.Reason.would_remove_support, refused.failure.?.reason);
-    try std.testing.expectEqual(block_rules.Reason.earth_footprint, refused.failure.?.cause);
+    try std.testing.expectEqual(block_rules.Reason.earth_split_gaps, refused.failure.?.cause);
+    try std.testing.expectEqual(0, refused.failure.?.limit);
     try std.testing.expect(try world.isBlockSolid(support));
     try std.testing.expectEqual(2, world.pending_operations.items.len);
     const removed = world.setBlock(target, .none);

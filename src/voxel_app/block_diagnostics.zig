@@ -10,7 +10,9 @@ pub fn description(reason: rules.Reason) []const u8 {
     return switch (reason) {
         .material_not_placeable => "This material cannot be placed.",
         .missing_data => "Support cannot be checked: required world cells have not loaded.",
-        .earth_footprint => "Soil needs at least six supports in the 3x3 layer below, including the center. Gaps must share one outer edge.",
+        .earth_footprint => "Soil needs at least six supports in the 3x3 layer below.",
+        .earth_missing_center => "Soil needs a supporting block directly below it.",
+        .earth_split_gaps => "Gaps in the soil's 3x3 support layer must lie along one outer edge.",
         .sand_footprint => "Sand requires a filled 3x3 support layer below it.",
         .mining_forbidden => "This material cannot be mined yet.",
         .immutable_cell => "Deeprock cannot be changed.",

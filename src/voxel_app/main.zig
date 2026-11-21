@@ -4788,6 +4788,8 @@ test "placement preview shows missing footprint cells and refreshes after edits,
     try std.testing.expectEqual(1, validation_calls);
     const preview = fixture.game.current_placement_preview.?;
     try std.testing.expectEqual(@import("block_rules.zig").Reason.earth_footprint, preview.result.failure.?.reason);
+    var message_buffer: [block_diagnostics.message_capacity]u8 = undefined;
+    try std.testing.expectEqualStrings("Soil needs at least six supports in the 3x3 layer below.\nActual: 0; required/limit: 6.", preview.errorMessage(&message_buffer).?);
     try std.testing.expectEqual(10, fixture.scene.block_overlays.count);
     try std.testing.expectEqualDeep(placement_preview.rejected_color, fixture.scene.block_overlays.cells[0].color);
     try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
@@ -4888,13 +4890,14 @@ test "authoritative rejection shows owned diagnostics even after a subscription 
         .subscription_id = null,
         .operation = .{ .request_id = 42, .status = .constraint_violation, .failure = .{
             .reason = .would_remove_support,
-            .cause = .missing_foundation,
+            .cause = .earth_split_gaps,
             .subject = .{ 0, 0, 0 },
+            .actual = 7,
         } },
         .data = .acknowledgement,
     }});
     try std.testing.expectEqual(0, fixture.game.world.?.pending_operations.items.len);
-    try std.testing.expectEqualStrings("Removal would leave an existing construction unsupported.\nCause: A suitable foundation is missing.", fixture.game.block_action_error.message(10).?);
+    try std.testing.expectEqualStrings("Removal would leave an existing construction unsupported.\nCause: Gaps in the soil's 3x3 support layer must lie along one outer edge.", fixture.game.block_action_error.message(10).?);
     // Success replies do not erase an error before its timeout.
     try fixture.apply(&.{.{
         .coords = test_layout.origin_chunk,
@@ -6769,7 +6772,7 @@ test "invalid local placement retains the carried block without submitting a tra
     try std.testing.expectEqual(null, game.block_interaction.pending);
     try std.testing.expectEqual(null, game.block_interaction.holding);
     try std.testing.expectEqual(0, game.world.?.pending_operations.items.len);
-    try std.testing.expect(game.block_action_error.message(0) != null);
+    try std.testing.expectEqualStrings("Soil needs a supporting block directly below it.", game.block_action_error.message(0).?);
 }
 
 test "player work survives unrelated cell edits and cancels a same-material replacement" {
