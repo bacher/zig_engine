@@ -878,7 +878,8 @@ const Game = struct {
         defer visible_frames.deinit(game.allocator);
         // Frames can extend beyond a chunk. Include every loaded footprint chunk in range.
         const side: usize = @intCast(2 * game.render_radius + 1);
-        if (sites.chunks.count() < side * side * side) {
+        // The iterator scans every bucket, including empty buckets retained after eviction.
+        if (sites.chunks.capacity() < side * side * side) {
             var it = sites.chunks.iterator();
             while (it.next()) |entry| {
                 const id = entry.key_ptr.*;
