@@ -181,3 +181,76 @@ test "camera and object projections use the application topology at runtime-sele
         try expectVector(.{ 0.125, 0, 0, 1 }, camera.getLocalPosition(), 0.00001);
     }
 }
+
+test "chunk visibility prunes offscreen subtrees and keeps boundary cells" {
+    const visibility = @import("chunk_visibility.zig");
+    var index: visibility.Index(usize) = .{};
+    defer index.deinit(std.testing.allocator);
+    const far_chunks = 4096;
+    const origin: world_math.ChunkCoords = .{ -17, std.math.minInt(i32), std.math.maxInt(i32) };
+    try index.begin(std.testing.allocator, &layout, far_chunks + 1);
+    index.add(origin, 0);
+    for (0..far_chunks) |i| index.add(.{ origin[0], @intCast(i), 0 }, i + 1);
+    index.finish();
+    var view = visibility.View.init(&layout, origin, zmath.identity());
+    const hits = index.query(&view);
+    try std.testing.expectEqual(1, hits.len);
+    try std.testing.expectEqual(0, hits[0]);
+    try std.testing.expectEqual(3, index.tested_nodes);
+    const corners = [_]zmath.Vec{ .{ 1, 0, 0, 1 }, .{ 2, 0, 0, 1 }, .{ 0, 0, -1, 1 }, .{ 0, 0, -2, 1 } };
+    for (corners, [_]visibility.Relation{ .intersecting, .outside, .intersecting, .outside }) |lo, expected| {
+        try std.testing.expectEqual(expected, view.classify(lo, lo + zmath.Vec{ 1, 1, 1, 0 }));
+    }
+    view.origin[2] -= 20;
+    try std.testing.expectEqual(0, index.query(&view).len);
+}
+
+test "chunk visibility matches homogeneous corner clipping for camera and each light cascade" {
+    const visibility = @import("chunk_visibility.zig");
+    const small = try WorldLayout.init(.{ .size_in_chunks = .{ 16, 16, 8 } });
+    var camera = Camera.init(&small, 1.7);
+    camera.updatePosition(.{ 252.4, 1e9 + 12.35, -1e9 + 4.82 });
+    camera.updateView(utils.matMul(zmath.rotationX(0.23), zmath.rotationY(-0.79)));
+    var light = DirectionalLight.init(.{ .direction = .{ 0.5, 0.5, -1, 0 }, .color = @splat(1), .intensity = 1 });
+    var matrices: [4]zmath.Mat = undefined;
+    matrices[0] = camera.clip_from_world_chunked;
+    for (&light.cascades, matrices[1..]) |*cascade, *matrix| {
+        light.applyCameraFrustum(cascade, &camera);
+        matrix.* = cascade.clip_from_chunk;
+    }
+    var index: visibility.Index(usize) = .{};
+    defer index.deinit(std.testing.allocator);
+    var coords: [16 * 12 * 8]world_math.ChunkCoords = undefined;
+    try index.begin(std.testing.allocator, &small, coords.len);
+    for (&coords, 0..) |*coord, id| {
+        coord.* = .{ @intCast(id % 16), camera.chunk[1] + @as(i32, @intCast(id / 16 % 12)) - 5, camera.chunk[2] + @as(i32, @intCast(id / 192)) - 3 };
+        index.add(coord.*, id);
+    }
+    index.finish();
+    var camera_hits = std.StaticBitSet(coords.len).initEmpty();
+    var offscreen_casters: usize = 0;
+    for (matrices, 0..) |matrix, pass| {
+        const view = visibility.View.init(&small, camera.chunk, matrix);
+        var actual = std.StaticBitSet(coords.len).initEmpty();
+        for (index.query(&view)) |id| {
+            try std.testing.expect(!actual.isSet(id));
+            actual.set(id);
+        }
+        for (coords, 0..) |coord, id| {
+            var outside_all: u6 = 0b111111;
+            const offset = view.chunkOffset(coord);
+            for (0..8) |corner| {
+                const vertex = offset + zmath.Vec{ if (corner & 1 != 0) 32 else 0, if (corner & 2 != 0) 32 else 0, if (corner & 4 != 0) 32 else 0, 0 };
+                const p = utils.matApply(matrix, vertex);
+                const outside = [_]bool{ p[0] < -p[3], p[0] > p[3], p[1] < -p[3], p[1] > p[3], p[2] < 0, p[2] > p[3] };
+                inline for (outside, 0..) |beyond, plane| if (!beyond) {
+                    outside_all &= ~(@as(u6, 1) << plane);
+                };
+            }
+            if (outside_all == 0) try std.testing.expect(actual.isSet(id));
+        }
+        try std.testing.expect(actual.count() > 0 and actual.count() < coords.len / 2);
+        if (pass == 0) camera_hits = actual else offscreen_casters += actual.differenceWith(camera_hits).count();
+    }
+    try std.testing.expect(offscreen_casters > 0);
+}

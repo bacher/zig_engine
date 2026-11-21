@@ -18,13 +18,19 @@ fn voxelVertex(
     instance_index: u32,
     vertex_index: u32,
 ) -> VoxelVertex {
-    let chunk_index = instance_index >> 3;
-    let view_index = instance_index & 0x7u;
-
+    // GpuResidenceInfo.drawFaces packs a three-side view (0..7) or all sides (8).
+    let chunk_index = instance_index >> 4;
+    var view_index = instance_index & 0x7u;
     let chunk_info = chunk_info_array[chunk_index];
+    var face_index = vertex_index / 6;
+    if ((instance_index & 8u) != 0u) {
+        let first_view_faces = chunk_info.view_side_data_indices[0][2] & 0xffffu;
+        if (face_index >= first_view_faces) {
+            view_index = 7u;
+            face_index -= first_view_faces;
+        }
+    }
     let views = chunk_info.view_side_data_indices[view_index];
-
-    let face_index = vertex_index / 6;
 
     var face_indirect_index = 0u;
     var chunk_side = 0u;

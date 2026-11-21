@@ -800,13 +800,12 @@ pub const Engine = struct {
 
                         shadow_map_pass.setPipeline(scene.pipelines.shadow_map_voxel.pipeline_gpu);
                         shadow_map_pass.setBindGroup(1, scene.voxel_bind_group.wgpu_bind_group, &.{});
-                        for (scene.voxel_grid.chunks.items) |chunk| {
+                        const chunk_view = @import("chunk_visibility.zig").View.init(scene.layout, cascade.chunk, cascade.clip_from_chunk);
+                        const visible_chunks = scene.voxel_grid.visibleChunks(&chunk_view);
+                        for (visible_chunks) |slot| {
+                            const chunk = &scene.voxel_grid.chunks.items[slot];
                             const info = chunk.gpu_residence_info orelse continue;
-                            // Opposite views cover all six sides. Shadow visibility must
-                            // not depend on which faces the camera can see.
-                            inline for (.{ 0, 7 }) |view_index| {
-                                shadow_map_pass.draw(info.vertexCount(view_index), 1, 0, (info.chunk_index << 3) + view_index);
-                            }
+                            info.drawFaces(shadow_map_pass, null);
                         }
 
                         for (engine.temp_buffers.rest_objects.items) |game_object| {
@@ -820,7 +819,7 @@ pub const Engine = struct {
                             camera_chunk_uniform.offset,
                         });
                         shadow_map_pass.setBindGroup(1, scene.voxel_bind_group.wgpu_bind_group, &.{});
-                        scene.voxel_grid.drawCustomBlocks(shadow_map_pass);
+                        scene.voxel_grid.drawCustomBlocks(shadow_map_pass, visible_chunks);
 
                         shadow_map_pass.setBindGroup(1, engine.bind_group_minecraft_texture.wgpu_bind_group, &.{});
                         scene.packed_renderer.draw(gctx, shadow_map_pass, true);
@@ -904,11 +903,11 @@ pub const Engine = struct {
 
                     pass.setBindGroup(3, scene.voxel_bind_group.wgpu_bind_group, &.{});
 
-                    for (scene.voxel_grid.chunks.items) |chunk| {
-                        if (chunk.gpu_residence_info == null) {
-                            continue;
-                        }
-                        const info = chunk.gpu_residence_info.?;
+                    const chunk_view = @import("chunk_visibility.zig").View.init(scene.layout, scene.camera.chunk, scene.camera.clip_from_world_chunked);
+                    const visible_chunks = scene.voxel_grid.visibleChunks(&chunk_view);
+                    for (visible_chunks) |slot| {
+                        const chunk = &scene.voxel_grid.chunks.items[slot];
+                        const info = chunk.gpu_residence_info orelse continue;
 
                         const view_direction = scene.layout.getChunkDelta(chunk.chunk_origin, scene.camera.chunk);
 
@@ -916,20 +915,10 @@ pub const Engine = struct {
                         const dy = view_direction[1];
                         const dz = view_direction[2];
 
-                        // if camera is looking at the chunk only from one side of each axis, draw two views covering whole chunk
-                        if (dx == 0 or dy == 0 or dz == 0) {
-                            inline for (.{ 0, 7 }) |view_index| {
-                                pass.draw(info.vertexCount(view_index), 1, 0, (info.chunk_index << 3) + view_index);
-                            }
-                        } else {
-                            // or draw only one view covering the sides of the chunk which is visible from the camera
-                            const view_index: u3 =
-                                @as(u3, @intFromBool(dx < 0)) << 2 |
-                                @as(u3, @intFromBool(dy < 0)) << 1 |
-                                @as(u3, @intFromBool(dz < 0));
-
-                            pass.draw(info.vertexCount(view_index), 1, 0, (info.chunk_index << 3) + view_index);
-                        }
+                        const view_index: ?u3 = if (dx == 0 or dy == 0 or dz == 0) null else @as(u3, @intFromBool(dx < 0)) << 2 |
+                            @as(u3, @intFromBool(dy < 0)) << 1 |
+                            @as(u3, @intFromBool(dz < 0));
+                        info.drawFaces(pass, view_index);
                     }
 
                     const potentially_visible_game_objects_for_camera = engine.temp_buffers.getNextVisibleObjectsChunk();
@@ -984,7 +973,7 @@ pub const Engine = struct {
                     pass.setBindGroup(1, engine.bind_group_minecraft_texture.wgpu_bind_group, &.{});
                     pass.setBindGroup(2, engine.bind_group_shadow_map.wgpu_bind_group, &.{global_light_clip_matrix_array.offset});
                     pass.setBindGroup(3, scene.voxel_bind_group.wgpu_bind_group, &.{});
-                    scene.voxel_grid.drawCustomBlocks(pass);
+                    scene.voxel_grid.drawCustomBlocks(pass, visible_chunks);
                     scene.packed_renderer.draw(gctx, pass, false);
 
                     if (DEBUG_SHOW_WIREFRAME_OBJECTS) {

@@ -72,9 +72,10 @@ Custom descriptors use a separate 4 MiB GPU buffer with 48-byte records. They do
 ordinary voxel face slots. Upload preflight checks both buffers; removals refresh custom
 draws even if ordinary uploads are waiting for capacity. Custom records are rebuilt only
 when resident custom descriptors change; ordinary-only chunk changes leave the buffer clean.
-Instances share up to two draws per pass, grouping formed slopes (36 vertices) separately
-from unformed blocks (198 vertices). Both groups use the custom renderer in the forward
-pass and three shadow cascades. Their geometry stays outside chunk surfaces.
+Each chunk has separate instance ranges for formed slopes (36 vertices) and unformed blocks
+(198 vertices). The forward pass and each shadow cascade cull whole chunks. For each shape,
+a single draw spans the first through last retained instance of the selected chunks. This
+can include roads from intervening chunks. Changing the view only changes the draw range.
 
 Formation and reversion update every affected chunk's revision and travel in the service's
 atomic response packages. Saved orientations survive subscription eviction in service

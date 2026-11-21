@@ -516,6 +516,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
+                .{ .name = "engine_config", .module = voxel_engine_lib.root_module.import_table.get("engine_config").? },
                 .{ .name = "zgpu", .module = zgpu.module("root") },
                 .{ .name = "zmath", .module = zmath.module("root") },
             },

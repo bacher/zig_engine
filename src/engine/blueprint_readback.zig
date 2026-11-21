@@ -223,7 +223,8 @@ fn checkCachedMiniatures(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapRes
         try dynamic.appendSlice(allocator, extras.items);
         const clear_depth: f32 = if (scene_index % 2 == 0) 1 else 0.25;
         try target.draw(gctx, &reference, atlas_binding, &camera, dynamic.items, 2, null, false, allocator, clear_depth, pair_index * 2);
-        try target.drawWithMiniatures(gctx, &renderer, atlas_binding, &camera, extras.items, 0, null, false, allocator, clear_depth, pair_index * 2 + 1, &visible);
+        const ids = try renderer.visibleMiniatures(&camera);
+        try target.drawWithMiniatures(gctx, &renderer, atlas_binding, &camera, extras.items, 0, null, false, allocator, clear_depth, pair_index * 2 + 1, ids);
         pair_index += 1;
         const stats = renderer.miniatureCacheStats();
         try std.testing.expect(stats.counters_enabled);

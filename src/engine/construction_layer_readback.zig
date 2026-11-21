@@ -167,12 +167,17 @@ fn checkDraw(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse, overs
         pass.setBindGroup(2, shadow_binding, &.{0});
         pass.setBindGroup(3, voxel_binding.wgpu_bind_group, &.{});
         var resident_layers: usize = 0;
-        for (grid.chunks.items) |chunk| {
+        const chunk_view = @import("chunk_visibility.zig").View.init(&layout, coords, clip);
+        for (grid.visibleChunks(&chunk_view)) |slot| {
+            const chunk = grid.chunks.items[slot];
             const info = chunk.gpu_residence_info orelse continue;
             resident_layers += 1;
-            // Camera shares the chunk: the production draw loop selects these
-            // two complementary views and draws every resident layer.
-            inline for (.{ 0, 7 }) |view| pass.draw(info.vertexCount(view), 1, 0, (info.chunk_index << 3) + view);
+            // Compare the combined draw with both constituent views, including
+            // the checkerboard whose full face count exceeds 16 bits.
+            if (frame == 1) {
+                info.drawFaces(pass, 0);
+                info.drawFaces(pass, 7);
+            } else info.drawFaces(pass, null);
         }
         try std.testing.expectEqual(@as(usize, if (frame == 2) 1 else 2), resident_layers);
         pass.end();
