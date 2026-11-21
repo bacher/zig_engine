@@ -209,8 +209,8 @@ pub const VoxelGrid = struct {
         }
     }
 
-    fn residentIndex(self: *const Self, coords: ChunkCoords, layer: Layer) ?usize {
-        for (self.chunks.items, 0..) |*chunk, i| {
+    fn residentIndex(residents: []const VoxelChunk, coords: ChunkCoords, layer: Layer) ?usize {
+        for (residents, 0..) |*chunk, i| {
             if (chunk.layer == layer and @reduce(.And, chunk.chunk_origin == coords)) return i;
         }
         return null;
@@ -226,21 +226,23 @@ pub const VoxelGrid = struct {
     }
 
     fn removeResidentLayer(self: *Self, chunk_coords: ChunkCoords, layer: Layer) void {
-        const i = self.residentIndex(chunk_coords, layer) orelse return;
+        const i = residentIndex(self.chunks.items, chunk_coords, layer) orelse return;
+        // Removing a drawable or moving a drawable tail changes the indexed slot IDs.
+        const tail = self.chunks.items.len - 1;
+        if (self.chunks.items[i].hasGeometry() or (i != tail and self.chunks.items[tail].hasGeometry())) self.visibility_index.dirty = true;
         self.releaseResident(&self.chunks.items[i]);
         _ = self.chunks.swapRemove(i);
-        self.visibility_index.dirty = true;
     }
 
     pub fn installedGeometry(self: *const Self, coords: ChunkCoords, layer: Layer) ?GeometryStamp {
-        const i = self.residentIndex(coords, layer) orelse return null;
+        const i = residentIndex(self.chunks.items, coords, layer) orelse return null;
         return self.chunks.items[i].geometry_stamp;
     }
 
     /// Discovery-only changes can certify already installed, identical bytes.
     /// Content/surface revisions and subscription incarnation must all still match.
     pub fn certifyInstalledGeometry(self: *Self, coords: ChunkCoords, layer: Layer, stamp: GeometryStamp) bool {
-        const i = self.residentIndex(coords, layer) orelse return false;
+        const i = residentIndex(self.chunks.items, coords, layer) orelse return false;
         const chunk = &self.chunks.items[i];
         const installed = chunk.geometry_stamp;
         if (installed.subscription_id != stamp.subscription_id or installed.chunk_revision != stamp.chunk_revision or installed.surface_revision != stamp.surface_revision) return false;
@@ -315,8 +317,9 @@ pub const VoxelGrid = struct {
 
         // Release all replaced GPU spans before installing any of the new batch.
         // Keep the CPU slot for an edit at the same coordinate so the BVH stays valid.
+        const residents = self.chunks.items; // Capacity is reserved and queued layer keys are unique.
         for (self.chunks_to_upload.items, slots) |upload, *slot| {
-            if (self.residentIndex(upload.chunk_coords, upload.layer)) |i| {
+            if (residentIndex(residents, upload.chunk_coords, upload.layer)) |i| {
                 slot.* = .{ .index = i, .had_geometry = self.chunks.items[i].hasGeometry() };
                 self.releaseResident(&self.chunks.items[i]);
             } else {
@@ -460,7 +463,9 @@ pub const VoxelGrid = struct {
         return true;
     }
 
-    pub fn visibleChunks(self: *Self, view: *const visibility.View) []const ChunkIndex.Hit {
+    /// Consume or copy these borrowed slot IDs before the next query or residency change.
+    /// Re-query after removal: a swap can make even a copied slot ID name another layer.
+    pub fn visibleChunks(self: *Self, view: *const visibility.View) []const usize {
         const index = &self.visibility_index;
         if (index.needsBuild(view.layout)) {
             index.begin(self.allocator, view.layout, self.chunks.items.len) catch @panic("OOM");
@@ -472,11 +477,11 @@ pub const VoxelGrid = struct {
         return index.query(view);
     }
 
-    pub fn drawCustomBlocks(self: *const Self, pass: anytype, visible: []const ChunkIndex.Hit) void {
+    pub fn drawCustomBlocks(self: *const Self, pass: anytype, visible: []const usize) void {
         if (self.custom_block_count == 0) return;
         var ranges: [2]visibility.InstanceRange = @splat(.{});
-        for (visible) |hit| {
-            const chunk = &self.chunks.items[hit.id];
+        for (visible) |slot| {
+            const chunk = &self.chunks.items[slot];
             for (&ranges, chunk.custom_ranges) |*range, r| range.include(r.first, r.end);
         }
         for (ranges, [_]u32{ custom.slope_vertex_count, custom.adaptive_vertex_count }) |range, vertices| {
@@ -741,6 +746,30 @@ test "construction upload capacity failure keeps resident display and queued wor
     try std.testing.expectEqual(@as(u64, 1), grid.installedGeometry(coords, .terrain).?.surface_revision);
 }
 
+test "empty slot removal preserves the index unless it moves a drawable slot" {
+    const a = std.testing.allocator;
+    var grid: VoxelGrid = .{ .allocator = a, .gpu_chunk_info_buffer = undefined, .gpu_block_buffer = undefined };
+    defer {
+        grid.clearChunks();
+        grid.chunks.deinit(a);
+        grid.visibility_index.deinit(a);
+    }
+    const empty: ChunkCoords = .{ 0, 20, 0 };
+    try grid.chunks.append(a, .{ .chunk_origin = empty });
+    try grid.chunks.append(a, .{ .chunk_origin = @splat(0) });
+    try grid.chunks.items[1].custom_blocks.append(a, .{ .coords = .{ 0, 0, 0 }, .shape = .adaptive });
+    const view = visibility.View.init(&@import("../test_world.zig").layout, @splat(0), @import("zmath").identity());
+    try std.testing.expectEqualSlices(usize, &.{1}, grid.visibleChunks(&view));
+    try grid.chunks.append(a, .{ .chunk_origin = empty, .layer = .construction });
+    grid.removeChunkLayer(empty, .construction);
+    try std.testing.expect(!grid.visibility_index.dirty);
+    grid.removeChunkLayer(empty, .terrain);
+    try std.testing.expect(grid.visibility_index.dirty);
+    try std.testing.expectEqualSlices(usize, &.{0}, grid.visibleChunks(&view));
+    grid.removeChunk(@splat(0));
+    try std.testing.expectEqual(0, grid.visibleChunks(&view).len);
+}
+
 test "custom-only chunks retain whole instance batches across views and swap removal" {
     const a = std.testing.allocator;
     var grid: VoxelGrid = .{ .allocator = a, .gpu_chunk_info_buffer = undefined, .gpu_block_buffer = undefined, .custom_dirty = true };
@@ -751,9 +780,9 @@ test "custom-only chunks retain whole instance batches across views and swap rem
         grid.visibility_index.deinit(a);
     }
     const layout = @import("../test_world.zig").layout;
-    for (0..2) |i| {
+    for ([_]i32{ 0, 20, -1 }) |y| {
         const chunk = try grid.chunks.addOne(a);
-        chunk.* = .{ .chunk_origin = .{ 0, @intCast(i * 20), 0 } };
+        chunk.* = .{ .chunk_origin = .{ 0, y, 0 } };
         for ([_]u8{ 0, 10, 1 }) |x| {
             try chunk.custom_blocks.append(a, .{ .coords = .{ x, 0, 0 }, .shape = .adaptive });
             try chunk.custom_blocks.append(a, .{ .coords = .{ x, 0, 0 }, .shape = .{ .slope = .{ .downhill = .positive_y, .high = 1, .low = 0 } } });
@@ -761,18 +790,12 @@ test "custom-only chunks retain whole instance batches across views and swap rem
     }
     try std.testing.expect(grid.prepareCustomBlocks());
     const Draws = struct {
-        records: []const custom.GPU_CustomBlock,
-        count: usize = 0,
-        expected_y: i32,
-        calls: usize = 0,
+        const Call = struct { vertices: u32, first: u32, count: u32 };
+        calls: [2]Call = undefined,
+        len: usize = 0,
         fn draw(self: *@This(), vertices: u32, count: u32, _: u32, first: u32) void {
-            self.calls += 1;
-            for (self.records[first..][0..count]) |record| {
-                std.debug.assert(record.chunk_origin[1] == self.expected_y);
-                const expected: u32 = if (record.adaptive == 1) custom.adaptive_vertex_count else custom.slope_vertex_count;
-                std.debug.assert(vertices == expected);
-                self.count += 1;
-            }
+            self.calls[self.len] = .{ .vertices = vertices, .first = first, .count = count };
+            self.len += 1;
         }
     };
     for ([_]i32{ 0, 20, 20 }, 0..) |y, i| {
@@ -781,12 +804,25 @@ test "custom-only chunks retain whole instance batches across views and swap rem
             try std.testing.expect(grid.prepareCustomBlocks());
         }
         const view = visibility.View.init(&layout, .{ 0, y, 0 }, @import("zmath").identity());
-        const hits = grid.visibleChunks(&view);
-        try std.testing.expectEqual(1, hits.len);
-        var draws = Draws{ .records = grid.custom_upload.items, .expected_y = y };
-        grid.drawCustomBlocks(&draws, hits);
-        // The x=10 cells ride in the same two draws as x=0 and x=1.
-        try std.testing.expectEqual(6, draws.count);
-        try std.testing.expectEqual(2, draws.calls);
+        const visible = grid.visibleChunks(&view);
+        try std.testing.expectEqual(if (i == 0) @as(usize, 2) else 1, visible.len);
+        var draws: Draws = .{};
+        grid.drawCustomBlocks(&draws, visible);
+        // At y=0 the first and third chunks straddle the frustum. Both draws
+        // span all nine instances of their shape, including the middle chunk.
+        const start: u32 = if (i == 0) 0 else 3;
+        const count: u32 = if (i == 0) 9 else 3;
+        const adaptive_base: u32 = if (i == 2) 6 else 9;
+        try std.testing.expectEqualSlices(Draws.Call, &.{
+            .{ .vertices = custom.slope_vertex_count, .first = start, .count = count },
+            .{ .vertices = custom.adaptive_vertex_count, .first = adaptive_base + start, .count = count },
+        }, draws.calls[0..draws.len]);
+        for (draws.calls, 0..) |call, shape| {
+            for (grid.custom_upload.items[call.first..][0..call.count], call.first..) |record, index| {
+                const slot = (index / 3) % grid.chunks.items.len;
+                try std.testing.expectEqual(grid.chunks.items[slot].chunk_origin[1], record.chunk_origin[1]);
+                try std.testing.expectEqual(shape, record.adaptive);
+            }
+        }
     }
 }

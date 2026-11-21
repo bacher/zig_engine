@@ -802,8 +802,8 @@ pub const Engine = struct {
                         shadow_map_pass.setBindGroup(1, scene.voxel_bind_group.wgpu_bind_group, &.{});
                         const chunk_view = @import("chunk_visibility.zig").View.init(scene.layout, cascade.chunk, cascade.clip_from_chunk);
                         const visible_chunks = scene.voxel_grid.visibleChunks(&chunk_view);
-                        for (visible_chunks) |hit| {
-                            const chunk = &scene.voxel_grid.chunks.items[hit.id];
+                        for (visible_chunks) |slot| {
+                            const chunk = &scene.voxel_grid.chunks.items[slot];
                             const info = chunk.gpu_residence_info orelse continue;
                             info.drawFaces(shadow_map_pass, null);
                         }
@@ -905,8 +905,8 @@ pub const Engine = struct {
 
                     const chunk_view = @import("chunk_visibility.zig").View.init(scene.layout, scene.camera.chunk, scene.camera.clip_from_world_chunked);
                     const visible_chunks = scene.voxel_grid.visibleChunks(&chunk_view);
-                    for (visible_chunks) |hit| {
-                        const chunk = &scene.voxel_grid.chunks.items[hit.id];
+                    for (visible_chunks) |slot| {
+                        const chunk = &scene.voxel_grid.chunks.items[slot];
                         const info = chunk.gpu_residence_info orelse continue;
 
                         const view_direction = scene.layout.getChunkDelta(chunk.chunk_origin, scene.camera.chunk);

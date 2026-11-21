@@ -168,8 +168,8 @@ fn checkDraw(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse, overs
         pass.setBindGroup(3, voxel_binding.wgpu_bind_group, &.{});
         var resident_layers: usize = 0;
         const chunk_view = @import("chunk_visibility.zig").View.init(&layout, coords, clip);
-        for (grid.visibleChunks(&chunk_view)) |hit| {
-            const chunk = grid.chunks.items[hit.id];
+        for (grid.visibleChunks(&chunk_view)) |slot| {
+            const chunk = grid.chunks.items[slot];
             const info = chunk.gpu_residence_info orelse continue;
             resident_layers += 1;
             // Compare the combined draw with both constituent views, including

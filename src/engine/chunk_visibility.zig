@@ -1,5 +1,6 @@
 //! A hierarchy of occupied chunk bounds, shared by perspective and orthographic passes.
 const std = @import("std");
+const builtin = @import("builtin");
 const zm = @import("zmath");
 const WorldLayout = @import("world_layout.zig").WorldLayout;
 const Coord = @import("world_math.zig").ChunkCoords;
@@ -80,14 +81,13 @@ pub fn Index(comptime Id: type) type {
         const Self = @This();
         const Entry = struct { coord: Coord, id: Id };
         const Node = struct { lo: Coord, hi: Coord, start: usize, end: usize, right: usize = 0 };
-        pub const Hit = struct { id: Id, inside: bool };
 
         entries: std.ArrayList(Entry) = .empty,
         nodes: std.ArrayList(Node) = .empty,
-        hits: std.ArrayList(Hit) = .empty,
+        hits: std.ArrayList(Id) = .empty,
         dirty: bool = true,
         x_mask: u32 = 0,
-        tested_nodes: usize = 0,
+        tested_nodes: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
 
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             self.entries.deinit(allocator);
@@ -156,18 +156,19 @@ pub fn Index(comptime Id: type) type {
             self.build(mid, end);
         }
 
-        /// The scratch result lasts until the next query on this index.
-        pub fn query(self: *Self, view: *const View) []const Hit {
+        /// The IDs borrow scratch storage. Consume or copy them before the next
+        /// query, reserve, or change in residency.
+        pub fn query(self: *Self, view: *const View) []const Id {
             std.debug.assert(!self.needsBuild(view.layout));
             self.hits.clearRetainingCapacity();
-            self.tested_nodes = 0;
+            if (builtin.is_test) self.tested_nodes = 0;
             if (self.nodes.items.len != 0) self.visit(0, view);
             return self.hits.items;
         }
 
         fn visit(self: *Self, index: usize, view: *const View) void {
             const node = self.nodes.items[index];
-            self.tested_nodes += 1;
+            if (builtin.is_test) self.tested_nodes += 1;
             const relation = view.chunks(node.lo, node.hi);
             if (relation == .outside) return;
             if (relation == .intersecting and node.right != 0) {
@@ -178,8 +179,7 @@ pub fn Index(comptime Id: type) type {
             // Layers sharing one chunk share its classification.
             const shared = relation == .inside or @reduce(.And, node.lo == node.hi);
             for (self.entries.items[node.start..node.end]) |entry| {
-                const r = if (shared) relation else view.chunks(entry.coord, entry.coord);
-                if (r != .outside) self.hits.appendAssumeCapacity(.{ .id = entry.id, .inside = r == .inside });
+                if (shared or view.chunks(entry.coord, entry.coord) != .outside) self.hits.appendAssumeCapacity(entry.id);
             }
         }
     };

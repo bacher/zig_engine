@@ -195,8 +195,7 @@ test "chunk visibility prunes offscreen subtrees and keeps boundary cells" {
     var view = visibility.View.init(&layout, origin, zmath.identity());
     const hits = index.query(&view);
     try std.testing.expectEqual(1, hits.len);
-    try std.testing.expectEqual(0, hits[0].id);
-    try std.testing.expect(!hits[0].inside);
+    try std.testing.expectEqual(0, hits[0]);
     try std.testing.expectEqual(3, index.tested_nodes);
     const corners = [_]zmath.Vec{ .{ 1, 0, 0, 1 }, .{ 2, 0, 0, 1 }, .{ 0, 0, -1, 1 }, .{ 0, 0, -2, 1 } };
     for (corners, [_]visibility.Relation{ .intersecting, .outside, .intersecting, .outside }) |lo, expected| {
@@ -233,9 +232,9 @@ test "chunk visibility matches homogeneous corner clipping for camera and each l
     for (matrices, 0..) |matrix, pass| {
         const view = visibility.View.init(&small, camera.chunk, matrix);
         var actual = std.StaticBitSet(coords.len).initEmpty();
-        for (index.query(&view)) |hit| {
-            try std.testing.expect(!actual.isSet(hit.id));
-            actual.set(hit.id);
+        for (index.query(&view)) |id| {
+            try std.testing.expect(!actual.isSet(id));
+            actual.set(id);
         }
         for (coords, 0..) |coord, id| {
             var outside_all: u6 = 0b111111;

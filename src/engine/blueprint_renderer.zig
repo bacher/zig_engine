@@ -338,7 +338,8 @@ pub const Renderer = struct {
         self.miniature_cached_instances = 0;
     }
 
-    pub fn visibleMiniatures(self: *Renderer, camera: *const Camera) ![]const MiniatureIndex.Hit {
+    /// Consume or copy these borrowed chunk IDs before the next query or cache residency change.
+    pub fn visibleMiniatures(self: *Renderer, camera: *const Camera) ![]const ChunkId {
         const index = &self.miniature_index;
         if (index.needsBuild(camera.layout)) {
             try index.begin(self.miniature_chunks.allocator, camera.layout, self.miniature_chunks.count());
