@@ -453,7 +453,7 @@ pub const VoxelGrid = struct {
                 };
                 next[group] += 1;
             }
-            for (&chunk.custom_ranges, first, next) |*range, start, end| range.* = .{ .first = start, .count = end - start };
+            for (&chunk.custom_ranges, first, next) |*range, start, end| range.* = .{ .first = start, .end = end };
         }
         self.custom_block_count = @intCast(self.custom_upload.items.len);
         self.custom_dirty = false;
@@ -477,7 +477,7 @@ pub const VoxelGrid = struct {
         var ranges: [2]visibility.InstanceRange = @splat(.{});
         for (visible) |hit| {
             const chunk = &self.chunks.items[hit.id];
-            for (&ranges, chunk.custom_ranges) |*range, r| range.include(r.first, r.first + r.count);
+            for (&ranges, chunk.custom_ranges) |*range, r| range.include(r.first, r.end);
         }
         for (ranges, [_]u32{ custom.slope_vertex_count, custom.adaptive_vertex_count }) |range, vertices| {
             if (range.first < range.end) pass.draw(vertices, range.end - range.first, 0, range.first);

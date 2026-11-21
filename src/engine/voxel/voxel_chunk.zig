@@ -256,8 +256,8 @@ pub const VoxelChunk = struct {
     gpu_residence_info: ?GpuResidenceInfo = null,
     custom_blocks: std.ArrayList(custom_block.Draw) = .empty,
 
-    // First instance and count in the formed/adaptive GPU batches.
-    custom_ranges: [2]struct { first: u32 = 0, count: u32 = 0 } = @splat(.{}),
+    // Half-open instance ranges in the formed/adaptive GPU batches.
+    custom_ranges: [2]@import("../chunk_visibility.zig").InstanceRange = @splat(.{}),
 
     pub fn hasGeometry(self: *const Self) bool {
         return self.gpu_residence_info != null or self.custom_blocks.items.len != 0;
