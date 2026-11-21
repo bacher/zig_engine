@@ -2193,6 +2193,7 @@ test "fallible chunk staging preserves source through every allocation failure" 
 }
 
 test {
+    _ = block_rules;
     _ = @import("timer_kernel.zig");
 }
 
