@@ -53,7 +53,7 @@ pub const Stats = struct {
     vertex_invocations: u64 = 0,
 };
 const Backref = struct { id: u64, position: u32 };
-const CachedGroup = struct { box: Box, counts: grouped.Counts, runs: [category_count][]const Range = @splat(&.{}) };
+const CachedGroup = grouped.CachedGroup;
 const Cache = struct {
     slot: u32,
     revision: u64,
@@ -247,10 +247,11 @@ pub const Renderer = struct {
 
     /// All allocations precede publication. A failure leaves the previous source visible.
     pub fn upsertSource(self: *Renderer, gctx: *zgpu.GraphicsContext, id: u64, source: Source) !void {
-        if (self.sources.get(id)) |old| if (old.revision == source.revision and @reduce(.And, old.chunk == source.chunk)) return;
+        const old = self.sources.get(id);
+        if (old) |previous| if (previous.revision == source.revision and @reduce(.And, previous.chunk == source.chunk)) return;
         for (source.faces) |face| if (face.direction >= 6) return error.InvalidPackedFace;
         for (source.models) |model| if (model.material != 14 and model.material != 23) return error.InvalidPackedModel;
-        const needed = self.chunks.items.len + @intFromBool(self.sources.get(id) == null and self.free_chunks.items.len == 0);
+        const needed = self.chunks.items.len + @intFromBool(old == null and self.free_chunks.items.len == 0);
         var limits: wgpu.SupportedLimits = .{};
         if (!gctx.device.getLimits(&limits)) return error.DeviceLimitsUnavailable;
         const max_chunks = @min(limits.limits.max_buffer_size, limits.limits.max_storage_buffer_binding_size) / 16;
@@ -274,7 +275,6 @@ pub const Renderer = struct {
             groups[0] = .{ .box = Box.chunkBox(source.chunk), .counts = @as(@Vector(5, u32), @intCast(@as(@Vector(5, usize), lengths))) };
             cell_count = 1;
         }
-        const old = self.sources.get(id);
         var previous_cells: usize = 0;
         if (old) |previous| for (previous.groups) |group| {
             previous_cells += group.box.chunkCount();
@@ -449,16 +449,12 @@ pub const Renderer = struct {
     }
     /// Select complete warehouses and coalesce neighboring GPU ranges per category.
     pub fn draw(self: *Renderer, gctx: *zgpu.GraphicsContext, pass: wgpu.RenderPassEncoder, shadow: bool, view: *const visibility.View) void {
-        if (self.plan.index.needsBuild(view.layout)) self.plan.rebuild(self.allocator, view.layout, &self.sources) catch @panic("OOM");
-        const visible = self.plan.query(view);
+        const visible = self.plan.query(view, &self.sources);
         if (visible.len == 0) return;
         for (vertex_counts, 0..) |vertices, i| {
             if (shadow and i == 4) continue;
             self.draw_ranges.clearRetainingCapacity();
-            for (visible) |piece| {
-                const group = &self.sources.getPtr(piece.source).?.groups[piece.group];
-                self.draw_ranges.appendSliceAssumeCapacity(group.runs[i]);
-            }
+            for (visible) |group| self.draw_ranges.appendSliceAssumeCapacity(group.runs[i]);
             if (self.draw_ranges.items.len == 0) continue;
             pass.setPipeline(gctx.lookupResource(if (shadow) self.shadow_pipelines[i] else self.pipelines[i]).?);
             pass.setBindGroup(if (shadow) shadow_source_group else color_source_group, gctx.lookupResource(self.binding).?, &.{});

@@ -121,6 +121,11 @@ fn indexType(comptime Id: type, comptime with_containment: bool) type {
 
         pub fn begin(self: *Self, allocator: std.mem.Allocator, layout: *const WorldLayout, count: usize) !void {
             try self.reserve(allocator, count);
+            self.reset(layout);
+        }
+
+        /// Start a rebuild using storage already reserved when sources changed.
+        pub fn reset(self: *Self, layout: *const WorldLayout) void {
             self.x_mask = layout.id_masks[0];
             self.entries.clearRetainingCapacity();
             self.nodes.clearRetainingCapacity();

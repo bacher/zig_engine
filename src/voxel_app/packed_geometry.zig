@@ -86,8 +86,7 @@ pub fn buildChunk(allocator: std.mem.Allocator, cache: *const client.Cache, id: 
 pub fn buildReferences(allocator: std.mem.Allocator, cache: *const client.Cache, references: []const stream.Reference, chunk: engine.ChunkCoords, pallet_indices: []const u16, extra_pallets: []const u16, filter: PalletFilter) !Geometry {
     var result: Geometry = .{};
     errdefer result.deinit(allocator);
-    var pallets = std.StaticBitSet(32768).initEmpty();
-    var cargo = std.StaticBitSet(32768).initEmpty();
+    var loose_pallets = std.StaticBitSet(32768).initEmpty();
     for ([_][]const u16{ pallet_indices, extra_pallets }) |indices| for (indices) |index| {
         if (index >= 32768) return error.InvalidPalletSource;
         const local = localCell(index);
@@ -95,38 +94,33 @@ pub fn buildReferences(allocator: std.mem.Allocator, cache: *const client.Cache,
         if (filter.material_at) |read| if (read(filter.context, cell)) |material| {
             if (material != .pallet) continue;
         };
-        pallets.set(index);
+        loose_pallets.set(index);
     };
     for (references) |reference| {
         const entry = cache.objects.get(reference.identity) orelse continue;
         if (entry.retired) continue;
         const start = result.counts();
-        // Registration proves its members independently of terrain residency.
-        // An unavailable object may look empty, but its real base stays visible.
-        for (entry.derived_layout.columns[0..entry.derived_layout.count]) |column| {
-            const cell = reference.geometry.worldCell(cache.world_size, .{ column[0], column[1], 0 }).?;
-            if (inChunk(cell, chunk)) pallets.set(localIndex(toLocal(cell)));
-        }
-        if (cache.record(reference.identity)) |record| {
-            const order = entry.derived_layout;
+        const bounds = reference.geometry.bounds;
+        const order = entry.derived_layout;
+        const stock = cache.record(reference.identity);
+        // The one-cell border allows neighbor lookups on every exterior face.
+        var occupied: [8][7][7]bool = @splat(@splat(@splat(false)));
+        if (stock) |record| {
             result.visited_objects += 1;
             const irregular = record.material == .country_road_adaptive or record.material == .pallet;
-            // A bounded temporary occupancy mask avoids searching the column order
-            // for each adjacent face. Its one-cell padding handles exterior faces.
-            var occupied: [8][7][7]bool = @splat(@splat(@splat(false)));
             var slots: [layout.max_stock]layout.Offset = undefined;
             var index: u16 = 0;
             while (index < record.stock) : (index += 1) {
                 const offset = order.slotAt(record.active, index).?;
                 slots[index] = offset;
-                occupied[@as(usize, @intCast(offset[2])) + 1][@as(usize, @intCast(offset[1] - record.geometry.bounds.ymin)) + 1][@as(usize, @intCast(offset[0] - record.geometry.bounds.xmin)) + 1] = true;
+                occupied[@as(usize, @intCast(offset[2])) + 1][@as(usize, @intCast(offset[1] - bounds.ymin)) + 1][@as(usize, @intCast(offset[0] - bounds.xmin)) + 1] = true;
             }
             for (slots[0..record.stock]) |offset| {
                 result.visited_slots += 1;
                 const cell = record.geometry.worldCell(cache.world_size, offset).?;
                 if (!inChunk(cell, chunk)) continue;
                 const local = toLocal(cell);
-                cargo.set(localIndex(local));
+                loose_pallets.unset(localIndex(local));
                 if (irregular) {
                     const instance: renderer.Instance = .{ .local = local, .material = @intFromEnum(record.material) };
                     try result.models.append(allocator, instance);
@@ -135,33 +129,27 @@ pub fn buildReferences(allocator: std.mem.Allocator, cache: *const client.Cache,
                 }
                 for (std.enums.values(voxel.Side)) |side| {
                     const direction = side.getOffset();
-                    const x: usize = @intCast(@as(i32, offset[0] - record.geometry.bounds.xmin) + direction[0] + 1);
-                    const y: usize = @intCast(@as(i32, offset[1] - record.geometry.bounds.ymin) + direction[1] + 1);
+                    const x: usize = @intCast(@as(i32, offset[0] - bounds.xmin) + direction[0] + 1);
+                    const y: usize = @intCast(@as(i32, offset[1] - bounds.ymin) + direction[1] + 1);
                     const z: usize = @intCast(@as(i32, offset[2]) + direction[2] + 1);
                     if (occupied[z][y][x]) continue;
                     try result.faces.append(allocator, .{ .local = local, .material = @intFromEnum(record.material), .direction = @intFromEnum(side) });
                 }
             }
-            for (order.columns[0..order.count], 0..) |column, rank| {
-                if (occupied[1][@as(usize, @intCast(column[1] - record.geometry.bounds.ymin)) + 1][@as(usize, @intCast(column[0] - record.geometry.bounds.xmin)) + 1]) continue;
-                const cell = record.geometry.worldCell(cache.world_size, .{ column[0], column[1], 0 }).?;
-                if (!inChunk(cell, chunk)) continue;
-                const local = toLocal(cell);
-                if (!pallets.isSet(localIndex(local))) continue;
-                try result.markers.append(allocator, .{ .local = local, .material = @intFromEnum(record.material), .disabled = @intFromBool(rank >= record.active) });
-            }
         }
-        // Keep the member pallets and their markers with their warehouse even
-        // while stock is unavailable. Remaining bits are independent loose pallets.
-        for (entry.derived_layout.columns[0..entry.derived_layout.count]) |column| {
+        // Registration supplies the member pallets even before stock arrives.
+        // An occupied base already has a pallet in its cargo geometry.
+        for (order.columns[0..order.count], 0..) |column, rank| {
             const cell = reference.geometry.worldCell(cache.world_size, .{ column[0], column[1], 0 }).?;
             if (!inChunk(cell, chunk)) continue;
             const local = toLocal(cell);
-            const bit = localIndex(local);
-            pallets.unset(bit);
-            if (!cargo.isSet(bit)) try result.pallets.append(allocator, .{ .local = local, .material = @intFromEnum(voxel.BlockType.pallet) });
+            loose_pallets.unset(localIndex(local));
+            const x: usize = @intCast(column[0] - bounds.xmin + 1);
+            const y: usize = @intCast(column[1] - bounds.ymin + 1);
+            if (occupied[1][y][x]) continue;
+            try result.pallets.append(allocator, .{ .local = local, .material = @intFromEnum(voxel.BlockType.pallet) });
+            if (stock) |record| try result.markers.append(allocator, .{ .local = local, .material = @intFromEnum(record.material), .disabled = @intFromBool(rank >= record.active) });
         }
-        const bounds = reference.geometry.bounds;
         const minimum = reference.geometry.worldCell(cache.world_size, .{ bounds.xmin, bounds.ymin, 0 }).?;
         const box: renderer.Box = .{
             .chunk = .{ @intCast(minimum[0] / 32), @intCast(minimum[1] / 32), @intCast(minimum[2] / 32) },
@@ -170,11 +158,8 @@ pub fn buildReferences(allocator: std.mem.Allocator, cache: *const client.Cache,
         };
         try result.finishGroup(allocator, box, start);
     }
-    // An occupied base already contains its packaging pallet. The real terrain
-    // pallet remains authoritative and becomes visible again when the slot empties.
     const loose_start = result.counts();
-    var visible_pallets = pallets.differenceWith(cargo);
-    var iterator = visible_pallets.iterator(.{});
+    var iterator = loose_pallets.iterator(.{});
     while (iterator.next()) |index| try result.pallets.append(allocator, .{ .local = localCell(@intCast(index)), .material = @intFromEnum(voxel.BlockType.pallet) });
     try result.finishGroup(allocator, renderer.Box.chunkBox(chunk), loose_start);
     return result;

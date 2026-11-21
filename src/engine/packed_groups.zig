@@ -2,6 +2,7 @@
 const std = @import("std");
 const vis = @import("chunk_visibility.zig");
 const Coord = @import("world_math.zig").ChunkCoords;
+const WorldLayout = @import("world_layout.zig").WorldLayout;
 const size = @import("chunk_utils.zig").CHUNK_SIZE;
 
 pub const categories = 5;
@@ -61,6 +62,7 @@ pub const Box = struct {
 /// Successive runs in each source category. All pieces of the same box
 /// participate in one visibility decision, including cross-chunk warehouses.
 pub const Group = struct { box: Box, counts: Counts };
+pub const CachedGroup = struct { box: Box, counts: Counts, runs: [categories][]const vis.InstanceRange = @splat(&.{}) };
 const Piece = struct { source: u64, group: usize, next: ?usize };
 const LogicalGroup = struct { head: ?usize = null, visited: bool = false };
 
@@ -68,31 +70,29 @@ pub const Plan = struct {
     index: vis.ContainmentIndex(usize) = .{},
     groups: std.array_hash_map.Auto(Box, LogicalGroup) = .empty,
     pieces: std.ArrayList(Piece) = .empty,
-    candidates: std.ArrayList(usize) = .empty,
-    visible_pieces: std.ArrayList(Piece) = .empty,
+    visible_groups: std.ArrayList(*const CachedGroup) = .empty,
 
     pub fn deinit(self: *Plan, a: std.mem.Allocator) void {
         self.index.deinit(a);
         self.groups.deinit(a);
         self.pieces.deinit(a);
-        self.candidates.deinit(a);
-        self.visible_pieces.deinit(a);
+        self.visible_groups.deinit(a);
     }
 
     pub fn capacityBytes(self: *const Plan) usize {
         return self.index.capacityBytes() + self.groups.capacity() * (@sizeOf(Box) + @sizeOf(LogicalGroup)) +
-            (self.pieces.capacity + self.visible_pieces.capacity) * @sizeOf(Piece) + self.candidates.capacity * @sizeOf(usize);
+            self.pieces.capacity * @sizeOf(Piece) + self.visible_groups.capacity * @sizeOf(*const CachedGroup);
     }
 
     pub fn reserve(self: *Plan, a: std.mem.Allocator, n: usize, cells: usize) !void {
         try self.index.reserve(a, cells);
         try self.groups.ensureTotalCapacity(a, n);
         try self.pieces.ensureTotalCapacity(a, n);
-        try self.candidates.ensureTotalCapacity(a, n);
-        try self.visible_pieces.ensureTotalCapacity(a, n);
+        try self.visible_groups.ensureTotalCapacity(a, n);
     }
 
-    pub fn rebuild(self: *Plan, a: std.mem.Allocator, layout: *const @import("world_layout.zig").WorldLayout, sources: anytype) !void {
+    pub fn rebuild(self: *Plan, layout: *const WorldLayout, sources: anytype) void {
+        self.index.reset(layout);
         self.groups.clearRetainingCapacity();
         self.pieces.clearRetainingCapacity();
         var iter = sources.iterator();
@@ -104,9 +104,6 @@ pub const Plan = struct {
                 entry.value_ptr.head = self.pieces.items.len - 1;
             }
         }
-        var cell_count: usize = 0;
-        for (self.groups.keys()) |box| cell_count += box.chunkCount();
-        try self.index.begin(a, layout, cell_count);
         for (self.groups.keys(), 0..) |box, i| {
             const last = box.lastChunk();
             const span = last - @as(Coord, box.chunk) + @as(Coord, @splat(1));
@@ -117,23 +114,24 @@ pub const Plan = struct {
         self.index.finish();
     }
 
-    pub fn query(self: *Plan, view: *const vis.View) []const Piece {
-        self.candidates.clearRetainingCapacity();
-        self.visible_pieces.clearRetainingCapacity();
-        for (self.index.query(view)) |hit| {
+    /// The result borrows source groups for the duration of the current draw.
+    pub fn query(self: *Plan, view: *const vis.View, sources: anytype) []const *const CachedGroup {
+        if (self.index.needsBuild(view.layout)) self.rebuild(view.layout, sources);
+        self.visible_groups.clearRetainingCapacity();
+        const hits = self.index.query(view);
+        for (hits) |hit| self.groups.values()[hit.id].visited = false;
+        for (hits) |hit| {
             const group = &self.groups.values()[hit.id];
             if (group.visited) continue;
             group.visited = true;
-            self.candidates.appendAssumeCapacity(hit.id);
             if (!hit.inside and !self.groups.keys()[hit.id].visible(view)) continue;
             var next = group.head;
             while (next) |i| {
                 const piece = self.pieces.items[i];
-                self.visible_pieces.appendAssumeCapacity(piece);
+                self.visible_groups.appendAssumeCapacity(&sources.getPtr(piece.source).?.groups[piece.group]);
                 next = piece.next;
             }
         }
-        for (self.candidates.items) |i| self.groups.values()[i].visited = false;
-        return self.visible_pieces.items;
+        return self.visible_groups.items;
     }
 };
