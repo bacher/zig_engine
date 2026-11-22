@@ -77,6 +77,16 @@ pub const View = struct {
 };
 
 pub fn Index(comptime Id: type) type {
+    return indexType(Id, false);
+}
+
+/// For sub-chunk draws that can skip their own box test inside a fully visible chunk.
+pub fn ContainmentIndex(comptime Id: type) type {
+    return indexType(Id, true);
+}
+
+fn indexType(comptime Id: type, comptime with_containment: bool) type {
+    const Hit = if (with_containment) struct { id: Id, inside: bool } else Id;
     return struct {
         const Self = @This();
         const Entry = struct { coord: Coord, id: Id };
@@ -84,7 +94,7 @@ pub fn Index(comptime Id: type) type {
 
         entries: std.ArrayList(Entry) = .empty,
         nodes: std.ArrayList(Node) = .empty,
-        hits: std.ArrayList(Id) = .empty,
+        hits: std.ArrayList(Hit) = .empty,
         dirty: bool = true,
         x_mask: u32 = 0,
         tested_nodes: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
@@ -93,6 +103,10 @@ pub fn Index(comptime Id: type) type {
             self.entries.deinit(allocator);
             self.nodes.deinit(allocator);
             self.hits.deinit(allocator);
+        }
+
+        pub fn capacityBytes(self: *const Self) usize {
+            return self.entries.capacity * @sizeOf(Entry) + self.nodes.capacity * @sizeOf(Node) + self.hits.capacity * @sizeOf(Hit);
         }
 
         pub fn needsBuild(self: *const Self, layout: *const WorldLayout) bool {
@@ -107,6 +121,11 @@ pub fn Index(comptime Id: type) type {
 
         pub fn begin(self: *Self, allocator: std.mem.Allocator, layout: *const WorldLayout, count: usize) !void {
             try self.reserve(allocator, count);
+            self.reset(layout);
+        }
+
+        /// Start a rebuild using storage already reserved when sources changed.
+        pub fn reset(self: *Self, layout: *const WorldLayout) void {
             self.x_mask = layout.id_masks[0];
             self.entries.clearRetainingCapacity();
             self.nodes.clearRetainingCapacity();
@@ -158,7 +177,7 @@ pub fn Index(comptime Id: type) type {
 
         /// The IDs borrow scratch storage. Consume or copy them before the next
         /// query, reserve, or change in residency.
-        pub fn query(self: *Self, view: *const View) []const Id {
+        pub fn query(self: *Self, view: *const View) []const Hit {
             std.debug.assert(!self.needsBuild(view.layout));
             self.hits.clearRetainingCapacity();
             if (builtin.is_test) self.tested_nodes = 0;
@@ -176,10 +195,12 @@ pub fn Index(comptime Id: type) type {
                 self.visit(node.right, view);
                 return;
             }
-            // Layers sharing one chunk share its classification.
+            // Layers and warehouses sharing one chunk share its classification.
             const shared = relation == .inside or @reduce(.And, node.lo == node.hi);
             for (self.entries.items[node.start..node.end]) |entry| {
-                if (shared or view.chunks(entry.coord, entry.coord) != .outside) self.hits.appendAssumeCapacity(entry.id);
+                const entry_relation = if (shared) relation else view.chunks(entry.coord, entry.coord);
+                if (entry_relation == .outside) continue;
+                self.hits.appendAssumeCapacity(if (with_containment) .{ .id = entry.id, .inside = entry_relation == .inside } else entry.id);
             }
         }
     };
