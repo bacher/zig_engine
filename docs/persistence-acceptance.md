@@ -4,8 +4,9 @@ This is a review map for AC1–AC138 in [the feature spec](../specs/features/wor
 
 Commands used by the implementation work are `zig build test-persistence`, `zig build test-capture`, `zig build test-world`, and `zig build test`; the accompanying [validation report](persistence-validation.md) records final run results. Tests imported through the application root include public service and shutdown tests. The capture target imports the real coordinator and actual storage adapter. Performance artifacts are in [benchmarks/persistence-2026-10-19](benchmarks/persistence-2026-10-19/); they measure a persistence pipeline on one machine, without frame-latency evidence.
 
-The current baseline is format 8, which adds warehouse stock and accepted-delivery snapshots
-to the shared transaction; see [warehouse validation](validation/warehouses.md). Construction ownership replaces the original two-stage
+The current baseline is format 9, which adds extraction zones to the shared transaction.
+Format 8 introduced warehouse stock and accepted-delivery snapshots. [Warehouse validation](validation/warehouses.md)
+Construction ownership replaces the original two-stage
 soil timers with terminal grass growth and composed-cover checks. The relevant test names and
 AC69/AC70/AC136/AC137 mappings below reflect that change; older benchmark campaigns retain
 their original scope. [Construction authority validation](validation/construction-authority.md)

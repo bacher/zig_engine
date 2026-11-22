@@ -114,6 +114,8 @@ pub const Engine = struct {
         onRenderOverlay3D: ?*const fn (engine: *Engine, pass: wgpu.RenderPassEncoder, argument: *anyopaque) void = null,
         /// Runs before gameplay input filtering. Return true to consume a UI key.
         onUIKeyPress: ?*const fn (engine: *Engine, key_params: KeyParams, argument: *anyopaque) bool = null,
+        /// Runs before gameplay input filtering. Return true to consume a UI button.
+        onUIMouseButtonPress: ?*const fn (engine: *Engine, params: MouseButtonParams, argument: *anyopaque) bool = null,
         onKeyPress: ?*const fn (engine: *Engine, key_params: KeyParams, argument: *anyopaque) void = null,
         onKeyRelease: ?*const fn (engine: *Engine, key_params: KeyParams, argument: *anyopaque) void = null,
         onMouseButtonPress: ?*const fn (engine: *Engine, params: MouseButtonParams, argument: *anyopaque) void = null,
@@ -557,6 +559,9 @@ pub const Engine = struct {
     }
 
     fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams) void {
+        if (engine.callbacks.onUIMouseButtonPress) |callback| {
+            if (callback(engine, params, engine.callbacks.argument)) return;
+        }
         if (engine.gameplay_input_blocked) return;
         if (engine.callbacks.onMouseButtonPress) |callback|
             callback(engine, params, engine.callbacks.argument);
@@ -1824,11 +1829,12 @@ pub const Engine = struct {
     }
 };
 
-test "input blocking releases the cursor, filters gameplay, and still delivers UI keys" {
+test "input blocking releases the cursor, filters gameplay, and still delivers UI presses" {
     const Probe = struct {
         input_changes: usize = 0,
         presses: usize = 0,
         ui_presses: usize = 0,
+        ui_button_presses: usize = 0,
         fn inputChanged(_: *Engine, argument: *anyopaque) void {
             const self: *@This() = @ptrCast(@alignCast(argument));
             self.input_changes += 1;
@@ -1841,6 +1847,11 @@ test "input blocking releases the cursor, filters gameplay, and still delivers U
         fn key(_: *Engine, _: KeyParams, argument: *anyopaque) void {
             const self: *@This() = @ptrCast(@alignCast(argument));
             self.presses += 1;
+        }
+        fn uiMouse(_: *Engine, params: MouseButtonParams, argument: *anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(argument));
+            self.ui_button_presses += 1;
+            return params.button == .right;
         }
         fn mouse(_: *Engine, _: MouseButtonParams, argument: *anyopaque) void {
             const self: *@This() = @ptrCast(@alignCast(argument));
@@ -1862,6 +1873,7 @@ test "input blocking releases the cursor, filters gameplay, and still delivers U
         .onRender = null,
         .onGameplayInputChanged = Probe.inputChanged,
         .onUIKeyPress = Probe.ui,
+        .onUIMouseButtonPress = Probe.uiMouse,
         .onKeyPress = Probe.key,
         .onMouseButtonPress = Probe.mouse,
     };
@@ -1878,6 +1890,7 @@ test "input blocking releases the cursor, filters gameplay, and still delivers U
     Engine.onKeyPress(&engine, .{ .key = .e, .mods = .{ .control = true } });
     Engine.onMouseButtonPress(&engine, .{ .button = .left, .mods = .{} });
     try std.testing.expectEqual(2, probe.ui_presses);
+    try std.testing.expectEqual(1, probe.ui_button_presses);
     try std.testing.expectEqual(0, probe.presses);
     try std.testing.expectEqualDeep(EngineState{}, engine.state);
     engine.setGameplayInputBlocked(false);
@@ -1886,10 +1899,12 @@ test "input blocking releases the cursor, filters gameplay, and still delivers U
     try std.testing.expectEqual(2, probe.input_changes);
     // Consumed UI keys never leak to gameplay, including when input is enabled.
     Engine.onKeyPress(&engine, .{ .key = .escape, .mods = .{} });
+    Engine.onMouseButtonPress(&engine, .{ .button = .right, .mods = .{} });
     try std.testing.expectEqual(0, probe.presses);
     Engine.onKeyPress(&engine, .{ .key = .e, .mods = .{} });
     Engine.onMouseButtonPress(&engine, .{ .button = .left, .mods = .{} });
     try std.testing.expectEqual(2, probe.presses);
+    try std.testing.expectEqual(3, probe.ui_button_presses);
     engine.setGameplayInputBlocked(false);
     try std.testing.expectEqual(2, probe.input_changes);
     const blur_enabled = engine.state.ssao_blur_enabled;

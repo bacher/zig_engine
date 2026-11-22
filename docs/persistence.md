@@ -34,7 +34,7 @@ versions only, not intermediate development builds, including builds between rel
 
 The game runs one current gameplay/construction logic. It does not select historical rules
 from a world or blueprint. Compatibility with older file encodings is separate: the current
-implementation writes and reads format 8. Formats 1–7 are incompatible development
+implementation reads and writes format 9. Formats 1–8 are incompatible development
 saves and are rejected as whole worlds. The base and WAL readers enforce the supported inclusive
 range through `minimum_readable_version` and `current_write_version`.
 
@@ -46,11 +46,13 @@ saved blueprint libraries, and unfinished construction sites together. Generator
 identity/version guards likewise reject unsupported algorithms. All accepted saves use the
 current game logic.
 
-Version 8 adds simulation-owned warehouses and accepted delivery cargo to the coherent
-terrain/construction/player snapshot. Pallet material has explicit ID 23. Version 7 introduced
+Version 9 adds extraction zone bounds, resource filters, occupied cells, road slopes, and
+soil deadlines to the coherent terrain/construction/player snapshot. Zone bounds keep
+empty cells protected after reload. Version 8 added simulation-owned warehouses and
+accepted delivery cargo. Pallet material has explicit ID 23. Version 7 introduced
 construction lifecycle, target-chunk ownership transfers, and pending
 post-completion grass initialization. Bare and grassy soil share support rules; legacy
-packed-soil value 7 and compaction events are rejected. Both version gates advance together.
+packed-soil value 7 and compaction events are rejected.
 Platform-only direct stone foundations and portable blueprint certification remain.
 
 ## External command sessions

@@ -4,10 +4,10 @@ const format = @import("format.zig");
 const storage = @import("storage.zig");
 const adapter = @import("io.zig");
 const coordinator = @import("coordinator.zig");
-// V8 writes the transaction header, global/player data, blueprint length/data,
-// pending-work length/data and warehouse retention prefix before any chunk.
+// V9 writes the transaction header, global/player data, blueprint length/data,
+// pending-work length/data and warehouse and zone retention prefixes before any chunk.
 // File.write visits the adapter even for the empty player/blueprint/work slices.
-const transaction_prefix_writes = 8;
+const transaction_prefix_writes = 9;
 const Mode = enum { write_stall, sync_stall, write_failure, queued_write_failure, sync_failure, footer_cancel, before_cancel, priority, tiny_output, tiny_working, manifest_limit };
 const Gate = struct {
     io: std.Io,

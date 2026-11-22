@@ -23,7 +23,7 @@ This revision supersedes the conflicting COW decisions in
 
 ## Context
 
-**Current implementation baseline, 2026-11-15.** Persistence is implemented using format 7,
+**Implementation baseline on 2026-11-15.** Persistence used format 7,
 which rejects development formats 1–6. World-data owns terrain and player inventory; a shared
 capture/WAL cut includes simulation-owned construction targets and partial materialization.
 [Construction ownership Q6](construction-state-ownership.md#q6--soil-and-compact-physical-state)
@@ -771,7 +771,7 @@ mechanisms without overriding those contracts.
   passes before readiness, preserving saved ownership without whole-world scans/preloads.
   Runtime cursors/repeat flags remain volatile. See [unfinished world work](deferred-world-work.md)
   for canonical encoding, membership generations, bounds, and validation. Format 4 introduced
-  these keys; the current format-7 gates reject development formats 1–6 without migration.
+  these keys. The current format-9 gates reject development formats 1–8 without migration.
 
 ## Clarifications
 

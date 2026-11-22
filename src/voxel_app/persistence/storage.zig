@@ -6,11 +6,12 @@ const format = @import("format.zig");
 pub const blueprint_records = @import("blueprints.zig");
 const deferred_work = @import("../deferred_world_work.zig");
 pub const warehouse_records = @import("warehouses.zig");
+pub const zone_records = @import("extraction_zones.zig");
 pub const Uuid = [16]u8;
 pub const Digest = [32]u8;
 pub const SnapshotIdentity = struct { sequence: u64, digest: Digest };
-pub const Limits = struct { max_chunks: usize = 1_000_000, max_segments: usize = 128, max_players_bytes: usize = 16 * 1024 * 1024, max_pending_work: usize = 4096, blueprints: blueprint_records.Limits = .{}, warehouses: warehouse_records.Limits = .{} };
-pub const Initial = struct { world_uuid: Uuid, descriptor: []const u8, global: []const u8, players: []const u8, player_count: u64, chunks: []const []const u8 = &.{}, blueprints: []const u8 = &.{}, pending_work: []const u8 = &.{}, warehouses: []const u8 = &.{} };
+pub const Limits = struct { max_chunks: usize = 1_000_000, max_segments: usize = 128, max_players_bytes: usize = 16 * 1024 * 1024, max_pending_work: usize = 4096, blueprints: blueprint_records.Limits = .{}, warehouses: warehouse_records.Limits = .{}, zones: zone_records.Limits = .{} };
+pub const Initial = struct { world_uuid: Uuid, descriptor: []const u8, global: []const u8, players: []const u8, player_count: u64, chunks: []const []const u8 = &.{}, blueprints: []const u8 = &.{}, pending_work: []const u8 = &.{}, warehouses: []const u8 = &.{}, zones: []const u8 = &.{} };
 const HeaderSize = 120;
 const MaxRecord = 1_212_501;
 const Location = struct { file: io.File, offset: u64, length: u32, revision: u64 };
@@ -30,6 +31,7 @@ const Transaction = struct {
     blueprint_changes: blueprint_records.Prepared,
     pending_work: []u8,
     warehouses: ?[]u8 = null,
+    zones: ?[]u8 = null,
 };
 pub const Store = struct {
     allocator: std.mem.Allocator,
@@ -45,12 +47,11 @@ pub const Store = struct {
     /// Canonical complete set belonging to the latest durable snapshot.
     pending_work: []u8 = &.{},
     warehouses: []u8 = &.{},
+    zones: []u8 = &.{},
     sequence: u64,
     digest: Digest,
     base: io.File,
     base_sequence: u64,
-    /// Preserve the snapshot-zero anchor's format version during compaction.
-    base_format_version: u32 = format.current_write_version,
     index: std.AutoHashMap(u32, Location),
     segments: std.ArrayList(Segment) = .empty,
     active: ?usize = null,
@@ -84,6 +85,7 @@ pub const Store = struct {
         if (initial.players.len > limits.max_players_bytes) return error.Capacity;
         try deferred_work.validate(initial.pending_work, desc.dimensions, limits.max_pending_work);
         try validateWarehouses(a, initial.warehouses, desc.dimensions, limits.warehouses);
+        try validateZones(initial.zones, desc.dimensions, limits.zones);
         var blueprints = try blueprint_records.decodeState(a, initial.blueprints, desc.dimensions, limits.blueprints);
         errdefer blueprints.deinit();
         var hash = hasher("ZGW-INIT-1\x00");
@@ -103,6 +105,8 @@ pub const Store = struct {
         hash.update(initial.pending_work);
         hashInt(&hash, u64, initial.warehouses.len);
         hash.update(initial.warehouses);
+        hashInt(&hash, u64, initial.zones.len);
+        hash.update(initial.zones);
         hashInt(&hash, u64, initial.chunks.len);
         if (initial.chunks.len > limits.max_chunks) return error.Capacity;
         var last_id: ?u32 = null;
@@ -127,6 +131,8 @@ pub const Store = struct {
         self.pending_work = pending_work;
         self.warehouses = try a.dupe(u8, initial.warehouses);
         errdefer a.free(self.warehouses);
+        self.zones = try a.dupe(u8, initial.zones);
+        errdefer a.free(self.zones);
         self.blueprints = blueprints;
         errdefer {
             self.index.deinit();
@@ -206,7 +212,13 @@ pub const Store = struct {
         try base.read(&warehouse_prefix, warehouse_start);
         const warehouse_len = get(u64, &warehouse_prefix, 0);
         if (warehouse_len > limits.warehouses.max_bytes) return error.Capacity;
-        const chunk_start = try add(try add(warehouse_start, 8), warehouse_len);
+        const zone_start = try add(try add(warehouse_start, 8), warehouse_len);
+        if (zone_start > size or size - zone_start < 8) return error.Corruption;
+        var zone_prefix: [8]u8 = undefined;
+        try base.read(&zone_prefix, zone_start);
+        const zone_len = get(u64, &zone_prefix, 0);
+        if (zone_len > limits.zones.max_bytes) return error.Capacity;
+        const chunk_start = try add(try add(zone_start, 8), zone_len);
         if (try add(try add(chunk_start, chunk_len), 32) != size) return error.Corruption;
         const descriptor = try readAlloc(a, base, 120, descriptor_len);
         errdefer if (!owned) a.free(descriptor);
@@ -219,7 +231,6 @@ pub const Store = struct {
         try format.validatePlayers(players, player_count);
         var self: Store = .{ .allocator = a, .directory = dir, .limits = limits, .world_uuid = header[24..40].*, .dimensions = desc.dimensions, .descriptor = descriptor, .global = global, .players = players, .player_count = player_count, .sequence = get(u64, &header, 40), .digest = header[48..80].*, .base = base, .base_sequence = get(u64, &header, 40), .index = std.AutoHashMap(u32, Location).init(a) };
         owned = true;
-        self.base_format_version = version;
         errdefer self.deinit();
         const blueprint_bytes = try readAlloc(a, base, blueprint_start + 8, blueprint_len);
         defer a.free(blueprint_bytes);
@@ -228,6 +239,8 @@ pub const Store = struct {
         try deferred_work.validate(self.pending_work, desc.dimensions, limits.max_pending_work);
         self.warehouses = try readAlloc(a, base, warehouse_start + 8, warehouse_len);
         try validateWarehouses(a, self.warehouses, desc.dimensions, limits.warehouses);
+        self.zones = try readAlloc(a, base, zone_start + 8, zone_len);
+        try validateZones(self.zones, desc.dimensions, limits.zones);
         var anchor = hasher("ZGW-INIT-1\x00");
         anchor.update(&self.world_uuid);
         hashInt(&anchor, u32, version);
@@ -245,6 +258,8 @@ pub const Store = struct {
         anchor.update(self.pending_work);
         hashInt(&anchor, u64, warehouse_len);
         anchor.update(self.warehouses);
+        hashInt(&anchor, u64, zone_len);
+        anchor.update(self.zones);
         hashInt(&anchor, u64, chunk_count);
         var cursor = chunk_start;
         var previous: ?u32 = null;
@@ -290,6 +305,7 @@ pub const Store = struct {
         self.blueprints.deinit();
         self.allocator.free(self.pending_work);
         self.allocator.free(self.warehouses);
+        self.allocator.free(self.zones);
         self.* = undefined;
     }
     pub fn snapshotCatalog(self: *const Store) !BaseCatalog {
@@ -345,6 +361,10 @@ pub const Store = struct {
     /// A null warehouse snapshot retains the prior complete state. An empty
     /// non-null slice explicitly replaces it with the empty initial state.
     pub fn beginSnapshotWithSimulation(self: *Store, sequence: u64, global: []const u8, players: []const u8, player_count: u64, changed_count: u64, blueprint_changes: []const u8, pending_work: []const u8, warehouses: ?[]const u8) !void {
+        return self.beginSnapshotWithZones(sequence, global, players, player_count, changed_count, blueprint_changes, pending_work, warehouses, null);
+    }
+
+    pub fn beginSnapshotWithZones(self: *Store, sequence: u64, global: []const u8, players: []const u8, player_count: u64, changed_count: u64, blueprint_changes: []const u8, pending_work: []const u8, warehouses: ?[]const u8, zones: ?[]const u8) !void {
         if (self.phase != .ready or self.transaction != null) return error.WriterBusy;
         if (sequence <= self.sequence) return error.InvalidSequence;
         if (players.len > self.limits.max_players_bytes or changed_count > self.limits.max_chunks) return error.Capacity;
@@ -352,6 +372,7 @@ pub const Store = struct {
         try format.validatePlayers(players, player_count);
         try deferred_work.validate(pending_work, self.dimensions, self.limits.max_pending_work);
         if (warehouses) |bytes| try validateWarehouses(self.allocator, bytes, self.dimensions, self.limits.warehouses);
+        if (zones) |bytes| try validateZones(bytes, self.dimensions, self.limits.zones);
         var prepared = try self.blueprints.prepare(blueprint_changes, self.dimensions, self.limits.blueprints);
         errdefer if (self.transaction == null) prepared.deinit();
         if (self.active == null) try self.newSegment();
@@ -368,7 +389,9 @@ pub const Store = struct {
         errdefer if (self.transaction == null) self.allocator.free(work);
         const warehouse_copy = if (warehouses) |bytes| try self.allocator.dupe(u8, bytes) else null;
         errdefer if (self.transaction == null) if (warehouse_copy) |bytes| self.allocator.free(bytes);
-        var tx: Transaction = .{ .sequence = sequence, .global = g, .players = p, .player_count = player_count, .expected = changed_count, .start = s.end, .cursor = s.end, .hash = hasher("ZGW-WALTX-1\x00"), .chunks = std.AutoHashMap(u32, Location).init(self.allocator), .blueprint_changes = prepared, .pending_work = work, .warehouses = warehouse_copy };
+        const zone_copy = if (zones) |bytes| try self.allocator.dupe(u8, bytes) else null;
+        errdefer if (self.transaction == null) if (zone_copy) |bytes| self.allocator.free(bytes);
+        var tx: Transaction = .{ .sequence = sequence, .global = g, .players = p, .player_count = player_count, .expected = changed_count, .start = s.end, .cursor = s.end, .hash = hasher("ZGW-WALTX-1\x00"), .chunks = std.AutoHashMap(u32, Location).init(self.allocator), .blueprint_changes = prepared, .pending_work = work, .warehouses = warehouse_copy, .zones = zone_copy };
         tx.hash.update(&s.header);
         var header: [84]u8 = @splat(0);
         @memcpy(header[0..8], "ZGTXBEG1");
@@ -397,6 +420,10 @@ pub const Store = struct {
         put(u64, &warehouse_prefix, 0, if (warehouses) |bytes| bytes.len else std.math.maxInt(u64));
         try self.append(&warehouse_prefix);
         if (warehouses) |bytes| try self.append(bytes);
+        var zone_prefix: [8]u8 = undefined;
+        put(u64, &zone_prefix, 0, if (zones) |bytes| bytes.len else std.math.maxInt(u64));
+        try self.append(&zone_prefix);
+        if (zones) |bytes| try self.append(bytes);
     }
     pub fn appendChunk(self: *Store, bytes: []const u8) !void {
         if (self.phase != .appending) return error.WriterBusy;
@@ -463,6 +490,10 @@ pub const Store = struct {
             self.allocator.free(self.warehouses);
             self.warehouses = bytes;
         }
+        if (tx.zones) |bytes| {
+            self.allocator.free(self.zones);
+            self.zones = bytes;
+        }
         tx.blueprint_changes.deinit();
         tx.chunks.deinit();
         self.transaction = null;
@@ -489,6 +520,7 @@ pub const Store = struct {
             tx.blueprint_changes.deinit();
             self.allocator.free(tx.pending_work);
             if (tx.warehouses) |bytes| self.allocator.free(bytes);
+            if (tx.zones) |bytes| self.allocator.free(bytes);
             tx.chunks.deinit();
             self.transaction = null;
         }
@@ -563,11 +595,13 @@ pub const Store = struct {
         errdefer a.free(pending_work);
         const warehouses = try a.dupe(u8, self.warehouses);
         errdefer a.free(warehouses);
+        const zones = try a.dupe(u8, self.zones);
+        errdefer a.free(zones);
         var frozen: Store = .{ .allocator = a, .directory = dir, .limits = self.limits, .world_uuid = self.world_uuid, .dimensions = self.dimensions, .descriptor = descriptor, .global = global, .players = players, .player_count = self.player_count, .sequence = self.sequence, .digest = self.digest, .base = base, .base_sequence = self.base_sequence, .index = std.AutoHashMap(u32, Location).init(a) };
         frozen.pending_work = pending_work;
         frozen.warehouses = warehouses;
+        frozen.zones = zones;
         frozen.blueprints = try self.blueprints.clone(a);
-        frozen.base_format_version = self.base_format_version;
         errdefer {
             frozen.blueprints.deinit();
             frozen.index.deinit();
@@ -840,6 +874,25 @@ pub const Store = struct {
             defer self.allocator.free(warehouse_bytes);
             cursor = try add(cursor, warehouse_len);
             if (!retains_warehouses) try validateWarehouses(self.allocator, warehouse_bytes, self.dimensions, self.limits.warehouses);
+            if (size - cursor < 8) {
+                segment.tail = true;
+                break;
+            }
+            var zone_prefix: [8]u8 = undefined;
+            try file.read(&zone_prefix, cursor);
+            cursor = try add(cursor, 8);
+            const zone_length = get(u64, &zone_prefix, 0);
+            const retains_zones = zone_length == std.math.maxInt(u64);
+            const zone_len = if (retains_zones) 0 else zone_length;
+            if (zone_len > self.limits.zones.max_bytes) return error.Capacity;
+            if (zone_len > size - cursor) {
+                segment.tail = true;
+                break;
+            }
+            const zone_bytes = if (retains_zones) &.{} else try readAlloc(self.allocator, file, cursor, zone_len);
+            defer self.allocator.free(zone_bytes);
+            cursor = try add(cursor, zone_len);
+            if (!retains_zones) try validateZones(zone_bytes, self.dimensions, self.limits.zones);
             var hash = hasher("ZGW-WALTX-1\x00");
             hash.update(&segment.header);
             hash.update(&header);
@@ -851,6 +904,8 @@ pub const Store = struct {
             hash.update(pending_work);
             hash.update(&warehouse_prefix);
             hash.update(warehouse_bytes);
+            hash.update(&zone_prefix);
+            hash.update(zone_bytes);
             var changed = std.AutoHashMap(u32, Location).init(self.allocator);
             defer changed.deinit();
             var n: u64 = 0;
@@ -907,6 +962,8 @@ pub const Store = struct {
                 errdefer self.allocator.free(new_work);
                 const new_warehouses = if (!retains_warehouses) try self.allocator.dupe(u8, warehouse_bytes) else null;
                 errdefer if (new_warehouses) |bytes| self.allocator.free(bytes);
+                const new_zones = if (!retains_zones) try self.allocator.dupe(u8, zone_bytes) else null;
+                errdefer if (new_zones) |bytes| self.allocator.free(bytes);
                 var prepared = try self.blueprints.prepare(blueprint_changes, self.dimensions, self.limits.blueprints);
                 defer prepared.deinit();
                 var it = changed.iterator();
@@ -922,6 +979,10 @@ pub const Store = struct {
                 if (new_warehouses) |bytes| {
                     self.allocator.free(self.warehouses);
                     self.warehouses = bytes;
+                }
+                if (new_zones) |bytes| {
+                    self.allocator.free(self.zones);
+                    self.zones = bytes;
                 }
                 self.sequence = sequence;
                 self.digest = digest;
@@ -1005,7 +1066,8 @@ pub const Store = struct {
         const blueprint_start = try add(player_start, self.players.len);
         const work_start = try add(try add(blueprint_start, 8), blueprint_bytes.len);
         const warehouse_start = try add(try add(work_start, 8), self.pending_work.len);
-        const chunk_start = try add(try add(warehouse_start, 8), self.warehouses.len);
+        const zone_start = try add(try add(warehouse_start, 8), self.warehouses.len);
+        const chunk_start = try add(try add(zone_start, 8), self.zones.len);
         try output.write(self.descriptor, 120);
         try output.write(self.global, 120 + self.descriptor.len);
         try output.write(self.players, player_start);
@@ -1021,6 +1083,10 @@ pub const Store = struct {
         put(u64, &warehouse_prefix, 0, self.warehouses.len);
         try output.write(&warehouse_prefix, warehouse_start);
         try output.write(self.warehouses, warehouse_start + 8);
+        var zone_prefix: [8]u8 = undefined;
+        put(u64, &zone_prefix, 0, self.zones.len);
+        try output.write(&zone_prefix, zone_start);
+        try output.write(self.zones, zone_start + 8);
         var cursor = chunk_start;
         for (ids, 0..) |id, i| {
             try self.checkpoint();
@@ -1037,7 +1103,7 @@ pub const Store = struct {
         }
         var header: [120]u8 = @splat(0);
         @memcpy(header[0..8], "ZGWORLD\x00");
-        put(u32, &header, 8, if (self.sequence == 0) self.base_format_version else format.current_write_version);
+        put(u32, &header, 8, format.current_write_version);
         put(u32, &header, 12, 120);
         put(u64, &header, 16, try add(cursor, 32));
         @memcpy(header[24..40], &self.world_uuid);
@@ -1340,7 +1406,7 @@ test "warehouse persistence retains unchanged snapshots and freezes compaction g
     const start = segment.end;
     try f.store.beginSnapshot(2, &tick, &.{}, 0, 0);
     _ = try f.store.commitSnapshot();
-    try std.testing.expectEqual(@as(u64, 84 + 10 + 8 + 8 + 8 + 56), f.store.segments.items[f.store.active.?].end - start);
+    try std.testing.expectEqual(@as(u64, 84 + 10 + 8 + 8 + 8 + 8 + 56), f.store.segments.items[f.store.active.?].end - start);
     try std.testing.expectEqualSlices(u8, initial, f.store.warehouses);
     var compact = try f.store.prepareCompaction();
     var compact_alive = true;
@@ -2125,7 +2191,7 @@ test "nested creation propagates mkdir namespace and fullflush failures without 
     }
 }
 
-test "incompatible development worlds are rejected by both base and WAL gates" {
+test "version eight development worlds are rejected by both base and WAL gates" {
     const a = std.testing.allocator;
     var model = io.Model.init(a);
     defer model.deinit();
@@ -2136,7 +2202,7 @@ test "incompatible development worlds are rejected by both base and WAL gates" {
     const original_base = try readAlloc(a, f.store.base, 0, try f.store.base.size());
     defer a.free(original_base);
     var old_header: [120]u8 = original_base[0..120].*;
-    put(u32, &old_header, 8, format.minimum_readable_version - 1);
+    put(u32, &old_header, 8, 8);
     try f.store.base.write(&old_header, 0);
     const wal_name = try a.dupeZ(u8, f.store.segments.items[0].name);
     defer a.free(wal_name);
@@ -2161,7 +2227,7 @@ test "incompatible development worlds are rejected by both base and WAL gates" {
         const wal = try dir.file(wal_name, false);
         defer wal.close();
         var header = original_wal;
-        put(u32, &header, 8, format.minimum_readable_version - 1);
+        put(u32, &header, 8, 8);
         var h = hasher("ZGW-WALHDR-1\x00");
         h.update(header[0..88]);
         h.final(header[88..120]);
@@ -2472,7 +2538,7 @@ test "modeled torn pending-work length and keys cannot publish a partial snapsho
         try f.store.beginSnapshotWithState(1, &tick, &.{}, 0, 1, &.{}, &pending);
         const tx = &f.store.transaction.?;
         const file = f.store.segments.items[f.store.active.?].file;
-        try file.truncate(tx.cursor - pending.len - 16 + cut);
+        try file.truncate(tx.cursor - pending.len - 24 + cut);
         try file.sync();
         try model.crash(.lose_unsynced);
         try f.reopen();
@@ -2503,7 +2569,7 @@ test "checksummed unknown pending-work kinds are rejected from base and WAL" {
         defer a.free(original);
         const corrupted = try a.dupe(u8, original);
         defer a.free(corrupted);
-        const work_offset = if (from_wal) original.len - 56 - 8 - pending.len else offset: {
+        const work_offset = if (from_wal) original.len - 56 - 16 - pending.len else offset: {
             const blueprint_start = 120 + descriptor.len + tick.len;
             break :offset blueprint_start + 8 + get(u64, original, blueprint_start) + 8;
         };
@@ -2608,4 +2674,10 @@ fn validateWarehouses(a: std.mem.Allocator, bytes: []const u8, dimensions: [3]u3
     const size: [3]u32 = .{ try std.math.mul(u32, dimensions[0], 32), try std.math.mul(u32, dimensions[1], 32), try std.math.mul(u32, dimensions[2], 32) };
     var decoded = try warehouse_records.decodeState(a, bytes, size, 0, limits);
     defer decoded.deinit(a);
+}
+
+fn validateZones(bytes: []const u8, dimensions: [3]u32, limits: zone_records.Limits) !void {
+    if (bytes.len == 0) return;
+    const size: [3]u32 = .{ try std.math.mul(u32, dimensions[0], 32), try std.math.mul(u32, dimensions[1], 32), try std.math.mul(u32, dimensions[2], 32) };
+    try zone_records.validate(bytes, size, limits);
 }

@@ -2,4 +2,5 @@
 test {
     _ = @import("persistence/tests.zig");
     _ = @import("persistence/warehouses.zig");
+    _ = @import("persistence/extraction_zones.zig");
 }

@@ -174,8 +174,9 @@ a construction's completion must never materialize or retire a warehouse in its 
 extends the shared external-command ledger, while automatic batches use executor-local APIs.
 `warehouse_stream` and `warehouse_client` provide identity-only chunk discovery, independently
 subscribed scalar snapshots, evaluated-command fences and optimistic reconciliation. Movement
-reads packed occupancy separately from support/capture reads. The v8 persistence transaction
-captures terrain, construction, warehouse/delivery records and player inventory together.
+reads packed occupancy separately from support/capture reads. The persistence transaction
+captures terrain, construction, warehouse and delivery records, extraction zones, and player
+inventory together.
 Native evidence and remaining workload limits are in [warehouse validation](validation/warehouses.md).
 
 Packed rendering is independent of terrain surface residency and shaders. Cube goods use flat

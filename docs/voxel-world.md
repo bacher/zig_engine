@@ -265,6 +265,14 @@ When replacing cached blocks with a snapshot, the render client compares the old
 
 The worker batches currently queued requests, coalesces affected surface builds, builds once for the relevant final state, and distributes owned copies to surface subscribers. It sends unchanged blocks again only when needed for a block snapshot, such as a flag-changing reveal; neighbor-only occupancy updates use boundary payloads.
 
+Extraction zones use chunk subscriptions as their delivery boundary. Near players receive a
+baseline for the zone-owned cells in each subscribed chunk. Cell updates refer to the revision
+they extend, and several edits can share one update. The physical view used for rendering,
+targeting and collision includes both sources. A failed revision check requests a fresh baseline
+for the affected chunk. Distant subscriptions receive the complete surface assembled from both
+owners. An edit next to a chunk face can change the neighboring chunk's surface even if all
+its blocks retain their original material. [Extraction zones](../specs/features/resource-extraction-zones.md)
+
 For each client, related snapshots, boundary updates, surface results, and command acknowledgments are placed in one `ResponsePackage`. Final block snapshots are certified against final neighbor inputs before publication. Render consumers apply whole packages before any local rebuild/upload, so related updates cannot be partly applied across rendered frames. Several packages may be consumed in one frame before the one local rebuild phase.
 
 Initial distant surface loads are queued. The worker performs at most one between request batches, checking for newly queued edits/block loads again afterward. A surface build is synchronous on that worker; this is prioritization between builds, not preemption inside a build.
