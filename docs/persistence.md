@@ -209,4 +209,7 @@ zig build bench-persistence -Doptimize=ReleaseSafe -- /tmp/new-benchmark-world 1
 
 Benchmark positional arguments are a **new** save directory, active chunks, changed chunks, cycles, output MiB, working MiB, workload (`terrain`, `raw`, or `heavy`), optional first-write/first-commit-sync delays in milliseconds, and an optional separate capture-working cap in MiB. The earlier working-MiB argument bounds the synthetic workspace including resident block arrays. JSON is emitted on stderr. It uses the production encoder, output queue, WAL, and compactor with reproducible synthetic sources. Its update microbenchmark does not measure the service mutation gate or player/frame latency. Compare repeated runs on the same machine and filesystem; retain workload/capacity settings with reports.
 
+`zig build bench-extraction-save -Doptimize=ReleaseFast` measures capture and reopen after
+one edit in a saved world containing extraction zones. [Extraction zone benchmark](validation/extraction-zone-persistence.md)
+
 The [validation report](persistence-validation.md) records tested contracts, measurements, tuning evidence, and remaining validation limits. Advanced capture policies, allocator pools, and a larger hardware campaign should reuse these tests and workloads.

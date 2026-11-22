@@ -378,6 +378,20 @@ pub fn build(b: *std.Build) void {
     world_service_tests.root_module.addImport("zmath", zmath.module("root"));
     b.step("test-world-service", "Run authority tests directly, including filtered internal regressions").dependOn(&b.addRunArtifact(world_service_tests).step);
 
+    const extraction_save_benchmark = b.addTest(.{
+        .filters = &.{"extraction zone save and reopen benchmark"},
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/voxel_app/extraction_zone_save_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    extraction_save_benchmark.root_module.linkLibrary(voxel_engine_lib);
+    extraction_save_benchmark.root_module.addImport("engine", voxel_engine_lib.root_module);
+    extraction_save_benchmark.root_module.addImport("zmath", zmath.module("root"));
+    b.step("bench-extraction-save", "Measure single-edit saves and recovery at several extraction-zone sizes (use ReleaseFast)").dependOn(&b.addRunArtifact(extraction_save_benchmark).step);
+
     const generated_support_benchmark = b.addTest(.{
         .name = "generated-support-benchmark",
         .root_module = b.createModule(.{

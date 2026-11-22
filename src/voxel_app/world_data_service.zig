@@ -6116,13 +6116,10 @@ const WorkerState = struct {
         return self.zones.chunk(.{ @intCast(coords[0]), @intCast(coords[1]), @intCast(coords[2]) });
     }
 
-    /// Prepare a detached reply before an edit commits. The edit can add one road,
-    /// one constructed cell and at most two deadlines (target and the cell below).
-    fn reserveZoneComposition(self: *const WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords, chunk: *WorldChunk) !void {
-        const zone = self.zoneChunk(coords) orelse return;
-        if (zone.cells.count() == 0) return;
-        _ = try chunk.tryEnsureData(allocator);
-        try chunk.metadata.reserve(allocator, zone.roads.items.len + 1, zone.constructed.items.len + 1, zone.timed.events.items.len + 2);
+    fn reserveZoneComposition(self: *const WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords, chunk: *WorldChunk, edit_capacity: WorldChunk.ZoneCapacity) !void {
+        var capacity = edit_capacity;
+        if (self.zoneChunk(coords)) |zone| capacity.addOwnedChunk(zone);
+        try capacity.reserve(chunk, allocator);
     }
 
     /// Merge disjoint owners into a client/read-only view without changing cell
@@ -6130,21 +6127,12 @@ const WorkerState = struct {
     fn composeZonesPrepared(self: *const WorkerState, coords: ChunkCoords, chunk: *WorldChunk) void {
         const zone = self.zoneChunk(coords) orelse return;
         if (zone.cells.count() == 0) return;
-        const masks = @import("boundary_mask.zig");
-        const unreachable_before = chunk.flags.is_unreachable;
         var cells = zone.cells.iterator();
         while (cells.next()) |entry| {
             const index = entry.key_ptr.*;
-            const local = transformations.coordinates(index);
-            const cell = entry.value_ptr;
-            const dest = &chunk.content.blocks.blocks[local[2]][local[1]][local[0]];
-            std.debug.assert(dest.* == .none);
-            dest.* = cell.material;
-            chunk.solid_block_count += 1;
-            masks.update(&chunk.boundaries, local, cell.material.occludesFaces());
-            if (cell.material == .custom) chunk.metadata.roads.appendAssumeCapacity(.{ .index = index, .slope = cell.slope });
+            std.debug.assert(chunk.content.getBlock(transformations.coordinates(index)) == .none);
+            chunk.applyZoneCellPrepared(index, entry.value_ptr.*, .merge);
         }
-        chunk.metadata.constructed.appendSliceAssumeCapacity(zone.constructed.items);
         // Both owners already order timers by (deadline, cell). Merge backwards
         // into reserved space so unconsumed terrain events can remain in place.
         const events = &chunk.metadata.timed.events;
@@ -6164,14 +6152,13 @@ const WorkerState = struct {
             events.items[i + j - 1] = owned;
             j -= 1;
         }
-        chunk.flags = masks.getFlags(&chunk.boundaries);
-        chunk.flags.is_unreachable = unreachable_before;
+        chunk.refreshZoneFlags();
     }
 
     fn tryLoadAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) !WorldChunk {
         var chunk = try self.tryLoadTerrainAt(allocator, coords);
         errdefer chunk.deinit(allocator);
-        try self.reserveZoneComposition(allocator, coords, &chunk);
+        try self.reserveZoneComposition(allocator, coords, &chunk, .{});
         self.composeZonesPrepared(coords, &chunk);
         return chunk;
     }
@@ -6415,9 +6402,12 @@ const WorkerState = struct {
         errdefer reply.deinit(allocator);
         if (include_reply) {
             reply = try target.tryClone(allocator);
-            try reply.metadata.reserve(allocator, road_growth, constructed_growth, timer_growth);
-            if (operation.action == .put) _ = try reply.tryEnsureData(allocator);
-            try self.reserveZoneComposition(allocator, coords, &reply);
+            try self.reserveZoneComposition(allocator, coords, &reply, .{
+                .blocks = operation.action == .put,
+                .roads = road_growth,
+                .constructed = constructed_growth,
+                .timers = timer_growth,
+            });
         }
         try self.surface_revisions.ensureUnusedCapacity(allocator, @intCast(road_plan.chunk_ids.len + 8));
         try self.timed_chunks.ensureUnusedCapacity(allocator, 2);
@@ -17173,7 +17163,7 @@ test {
     _ = warehouse_reach;
 }
 
-test "extraction zone composed chunk preserves material, provenance, road, timer and shared face" {
+test "extraction zone service and client compose the same mixed chunk" {
     const a = std.testing.allocator;
     var state: WorkerState = .{
         .layout = &test_layout,
@@ -17184,27 +17174,66 @@ test "extraction zone composed chunk preserves material, provenance, road, timer
     const coords: ChunkCoords = .{ 0, 0, 2 };
     const id = test_layout.encodeChunkCoords(coords);
     try state.modified_chunks.put(a, id, WorldChunk.initEmpty());
+    const terrain = state.modified_chunks.getPtr(id).?;
+    const terrain_road = transformations.index(.{ 20, 10, 6 });
+    const terrain_soil = transformations.index(.{ 0, 10, 6 });
+    const initializing_soil = transformations.index(.{ 0, 11, 6 });
+    const zone_soil = transformations.index(.{ 31, 11, 6 });
+    try std.testing.expectEqual(.success, try terrain.tryApply(a, transformations.coordinates(terrain_road), .{ .put = .country_road_adaptive }));
+    try std.testing.expectEqual(.success, try terrain.tryApply(a, transformations.coordinates(terrain_soil), .{ .put = .dirt }));
+    try std.testing.expectEqual(.success, try terrain.tryApply(a, transformations.coordinates(initializing_soil), .{ .put = .dirt }));
+    try terrain.metadata.tryMarkConstructed(a, terrain_road);
+    try terrain.metadata.timed.trySchedule(a, .{ .block = terrain_soil, .kind = .grow_grass, .due_tick = 42 });
+    try terrain.metadata.timed.trySchedule(a, .{ .block = initializing_soil, .kind = .initialize_grass, .due_tick = 80 });
+    terrain.flags.is_unreachable = true;
+    terrain.chunk_revision = 9;
     const road = @import("road_data.zig").Slope{ .downhill = .positive_x, .length = 4, .section = 1, .high_endpoint = .{ 28, 10, 70 } };
     _ = try state.zones.register(a, .{ .min = .{ 30, 10, 70 }, .size = .{ 2, 2, 1 } }, .{}, .{}, &.{
         .{ .cell = .{ 31, 10, 70 }, .value = .{ .material = .stone } },
         .{ .cell = .{ 30, 10, 70 }, .value = .{ .material = .custom, .constructed = true, .slope = road } },
         .{ .cell = .{ 31, 11, 70 }, .value = .{ .material = .dirt, .grass_due = 42 } },
+        .{ .cell = .{ 30, 11, 70 }, .value = .{ .material = .grass, .constructed = true } },
     });
     const chunk = try state.tryLoadAt(a, coords);
     defer chunk.deinit(a);
-    try std.testing.expectEqual(@as(u16, 3), chunk.solid_block_count);
+    try std.testing.expectEqual(@as(u16, 7), chunk.solid_block_count);
     try std.testing.expectEqual(rules.BlockType.stone, chunk.content.getBlock(.{ 31, 10, 6 }));
-    try std.testing.expectEqual(rules.BlockType.none, chunk.content.getBlock(.{ 30, 11, 6 }));
-    try std.testing.expectEqualDeep(road, chunk.metadata.roads.items[0].slope.?);
-    try std.testing.expectEqualSlices(transformations.BlockIndex, &.{transformations.index(.{ 30, 10, 6 })}, chunk.metadata.constructed.items);
-    try std.testing.expectEqual(@as(u64, 42), chunk.metadata.timed.events.items[0].due_tick);
+    try std.testing.expectEqualDeep(road, chunk.metadata.road(transformations.index(.{ 30, 10, 6 })).?.slope.?);
+    try std.testing.expectEqualSlices(transformations.Event, &.{
+        .{ .block = terrain_soil, .kind = .grow_grass, .due_tick = 42 },
+        .{ .block = zone_soil, .kind = .grow_grass, .due_tick = 42 },
+        .{ .block = initializing_soil, .kind = .initialize_grass, .due_tick = 80 },
+    }, chunk.metadata.timed.events.items);
     const deps = try world_module.tryCollectConstructedWithZones(a, &test_layout, &state.modified_chunks, .{ 31, 10, 70 }, &state.zones);
     defer a.free(deps);
-    try std.testing.expectEqualSlices(rules.Cell, &.{.{ 30, 10, 70 }}, deps);
+    try std.testing.expectEqualSlices(rules.Cell, &.{ .{ 20, 10, 70 }, .{ 30, 10, 70 }, .{ 30, 11, 70 } }, deps);
     const boundaries = try state.tryBoundariesAt(a, coords);
     try std.testing.expectEqualDeep(chunk.boundaries, boundaries);
     try std.testing.expect(boundaries[@intFromEnum(Side.right)].contains(.right, .{ 31, 10, 6 }));
-    try std.testing.expect(state.modified_chunks.get(id).?.content == .empty);
+    try std.testing.expect(boundaries[@intFromEnum(Side.left)].contains(.left, .{ 0, 10, 6 }));
+    try std.testing.expectEqual(rules.BlockType.none, terrain.content.getBlock(.{ 31, 10, 6 }));
+
+    var client = try world_module.World.init(a, &test_layout);
+    defer client.deinit();
+    var raw_snapshot = try state.tryLoadTerrainAt(a, coords);
+    errdefer raw_snapshot.deinit(a);
+    const token = 7;
+    var snapshot = try extraction_zone_stream.snapshot(a, &state.zones, @bitCast(coords), id, token, raw_snapshot.chunk_revision);
+    defer snapshot.deinit(a);
+    try client.insertStreamedTerrain(coords, &raw_snapshot, token, chunk.chunk_revision, .{ .snapshot = snapshot });
+    raw_snapshot = WorldChunk.initEmpty();
+    const view = client.getChunk(coords).?;
+    try std.testing.expectEqualDeep(chunk.content.toData(), view.content.toData());
+    try std.testing.expectEqualDeep(chunk.flags, view.flags);
+    try std.testing.expectEqual(chunk.solid_block_count, view.solid_block_count);
+    try std.testing.expectEqualDeep(chunk.boundaries, view.boundaries);
+    try std.testing.expectEqual(chunk.chunk_revision, view.chunk_revision);
+    try std.testing.expectEqualDeep(chunk.cell_changes, view.cell_changes);
+    try std.testing.expectEqualSlices(transformations.Event, chunk.metadata.timed.events.items, view.metadata.timed.events.items);
+    try std.testing.expectEqual(chunk.metadata.roads.items.len, view.metadata.roads.items.len);
+    for (chunk.metadata.roads.items) |section| try std.testing.expectEqualDeep(section, view.metadata.road(section.index).?);
+    try std.testing.expectEqual(chunk.metadata.constructed.items.len, view.metadata.constructed.items.len);
+    for (chunk.metadata.constructed.items) |index| try std.testing.expect(std.mem.indexOfScalar(transformations.BlockIndex, view.metadata.constructed.items, index) != null);
 }
 
 test "extraction zone soil under a blueprint clears grass and cancels growth on its owner" {
@@ -17609,3 +17638,118 @@ test "extraction zone baselines make progress after a lagging reader releases th
     try std.testing.expectEqual(@as(usize, 3), seen.count());
     try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
 }
+
+// The opt-in benchmark uses the private capture boundary to time the executor
+// separately from the writer. Its separate test root owns the sample matrix.
+pub const ExtractionZoneSaveBenchmark = if (@import("builtin").is_test) struct {
+    pub const Occupancy = enum { occupied, partial, exhausted };
+    pub const Workload = struct { count: usize, size: [3]u32, occupancy: Occupancy };
+    pub const Sample = struct {
+        claimed: usize,
+        remaining: usize,
+        dirty_sources: usize = 0,
+        capture_wall_ns: i96 = 0,
+        capture_cpu_ns: i96 = 0,
+        store_open_ns: i96 = 0,
+        service_restore_ns: i96 = 0,
+        zone_bytes: usize = 0,
+        wal_transaction_bytes: u64 = 0,
+        base_bytes: u64 = 0,
+    };
+
+    pub fn sample(workload: Workload) !Sample {
+        const a = std.testing.allocator;
+        const io = std.testing.io;
+        const target: [3]u32 = .{ 1, 1, CHUNK_SIZE + 1 };
+        const claimed = workload.count * @as(usize, workload.size[0]) * workload.size[1] * workload.size[2];
+        const remaining_before_edit = switch (workload.occupancy) {
+            .occupied => claimed,
+            .partial => claimed / 2,
+            .exhausted => @intFromBool(claimed != 0),
+        };
+        var result: Sample = .{ .claimed = claimed, .remaining = remaining_before_edit -| 1 };
+        var uuid: [16]u8 = undefined;
+        try io.randomSecure(&uuid);
+        var temporary = std.testing.tmpDir(.{});
+        defer temporary.cleanup();
+        const path = try temporary.parent_dir.realPathFileAlloc(io, &temporary.sub_path, a);
+        defer a.free(path);
+        const dimensions: [3]u32 = @bitCast(test_layout.size_in_chunks);
+        const descriptor = try format.encodeDescriptor(a, .{ .dimensions = dimensions, .generator_id = format.generator_id, .seed = 0, .settings = &format.flat_settings });
+        defer a.free(descriptor);
+        const global = format.encodeGlobal(0);
+
+        {
+            var store = try storage.Store.create(a, path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{});
+            defer store.deinit();
+            var fixture: BlueprintSaveFixture = undefined;
+            try fixture.init();
+            defer BlueprintJournalBudgetTest.cleanup(&fixture);
+            const service = &fixture.service;
+            service.store = &store;
+            service.players.clearRetainingCapacity();
+            service.worker_state.persistence_service = service;
+            service.worker_state.zones = .init(test_layout.size_in_blocks);
+            try seed(service, workload, target);
+            try std.testing.expectEqual(remaining_before_edit, service.worker_state.zones.material_counts.occupied);
+            try service.beginCapture(1, false);
+            try BlueprintJournalBudgetTest.waitJob(service);
+            try store.compact();
+
+            const removed = service.worker_state.applyOperationFrom(a, .{ .block = target, .action = .remove }, false, false);
+            defer removed.chunk.deinit(a);
+            try std.testing.expectEqual(OperationStatus.success, removed.status);
+            try std.testing.expectEqual(rules.BlockType.crushed_stone, removed.diagnostics.mined_type.?);
+            try std.testing.expectEqual(result.remaining, service.worker_state.zones.material_counts.occupied);
+
+            const capture_start = persistence.now(io);
+            const cpu_start = Io.Clock.cpu_thread.now(io).toNanoseconds();
+            try service.beginCapture(2, false);
+            result.capture_cpu_ns = Io.Clock.cpu_thread.now(io).toNanoseconds() - cpu_start;
+            result.capture_wall_ns = persistence.now(io) - capture_start;
+            result.dirty_sources = service.job.?.sources.len;
+            result.zone_bytes = if (service.job.?.zone_snapshot) |bytes| bytes.len else 0;
+            try std.testing.expectEqual(@as(usize, 1), result.dirty_sources);
+            try BlueprintJournalBudgetTest.waitJob(service);
+            const wal = store.segments.items[store.active.?];
+            result.wal_transaction_bytes = wal.end - wal.header.len;
+        }
+
+        const open_start = persistence.now(io);
+        var reopened = try storage.Store.open(a, path, .{});
+        const restore_start = persistence.now(io);
+        defer reopened.deinit();
+        const restored = try WorldDataService.createPersistent(io, a, &test_layout, .flat, &reopened, .{});
+        result.service_restore_ns = persistence.now(io) - restore_start;
+        result.store_open_ns = restore_start - open_start;
+        defer restored.destroy();
+        result.base_bytes = try reopened.base.size();
+        try std.testing.expectEqual(@as(u64, 2), reopened.sequence);
+        try std.testing.expectEqual(result.zone_bytes, reopened.zones.len);
+        try std.testing.expectEqual(workload.count, restored.worker_state.zones.records.items.len);
+        try std.testing.expectEqual(result.remaining, restored.worker_state.zones.material_counts.occupied);
+        try std.testing.expectEqual(workload.count != 0, restored.worker_state.zones.recordAt(target) != null);
+        try std.testing.expectEqual(null, restored.worker_state.zones.cellAt(target));
+        return result;
+    }
+
+    fn seed(service: *WorldDataService, workload: Workload, target: [3]u32) !void {
+        const state = &service.worker_state.zones;
+        for (0..workload.count) |i| {
+            const bounds: extraction_zone.Bounds = .{
+                .min = .{ @intCast(i % 32 * @max(CHUNK_SIZE, workload.size[0])), @intCast(i / 32 * @max(CHUNK_SIZE, workload.size[1])), CHUNK_SIZE },
+                .size = workload.size,
+            };
+            _ = try service.tryRegisterExtractionZone(.{ .bounds = bounds, .filter = .{} });
+            if (workload.occupancy == .occupied) continue;
+            // Prepare the already-mined fixture outside the timed window.
+            // The measured single removal below follows the normal edit path.
+            var cells = bounds.cells(test_layout.size_in_blocks[0]);
+            while (cells.next()) |cell| {
+                if (std.meta.eql(cell, target)) continue;
+                if (workload.occupancy == .partial and cell[0] % 2 != 0) continue;
+                try std.testing.expect(state.removeCell(cell));
+            }
+        }
+    }
+} else void;

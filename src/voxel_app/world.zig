@@ -149,6 +149,59 @@ pub const WorldChunk = struct {
         return self.content.blocks;
     }
 
+    pub const ZoneCapacity = struct {
+        blocks: bool = false,
+        roads: usize = 0,
+        constructed: usize = 0,
+        timers: usize = 0,
+
+        fn add(self: *ZoneCapacity, value: extraction_zone_state.OwnedCell) void {
+            self.blocks = true;
+            self.roads += @intFromBool(value.material == .custom);
+            self.constructed += @intFromBool(value.constructed);
+            self.timers += @intFromBool(value.grass_due != null);
+        }
+
+        pub fn addOwnedChunk(self: *ZoneCapacity, zone: *const extraction_zone_state.Chunk) void {
+            self.blocks = self.blocks or zone.cells.count() != 0;
+            self.roads += zone.roads.items.len;
+            self.constructed += zone.constructed.items.len;
+            self.timers += zone.timed.events.items.len;
+        }
+
+        pub fn reserve(self: ZoneCapacity, chunk: *WorldChunk, allocator: std.mem.Allocator) !void {
+            try chunk.metadata.reserve(allocator, self.roads, self.constructed, self.timers);
+            if (self.blocks) _ = try chunk.tryEnsureData(allocator);
+        }
+    };
+
+    fn setZoneMaterialPrepared(self: *WorldChunk, index: transformations.BlockIndex, material: BlockType) void {
+        const local = transformations.coordinates(index);
+        const before = self.content.getBlock(local);
+        if (before == material) return;
+        self.content.blocks.blocks[local[2]][local[1]][local[0]] = material;
+        self.solid_block_count = self.solid_block_count - @intFromBool(before != .none) + @intFromBool(material != .none);
+        boundary_mask.update(&self.boundaries, local, material.occludesFaces());
+    }
+
+    /// Compose validated cells into a prepared view with no overlapping metadata.
+    /// Callers appending deadlines order them afterwards. A caller with an ordered
+    /// zone queue can merge that queue separately.
+    pub fn applyZoneCellPrepared(self: *WorldChunk, index: transformations.BlockIndex, value: extraction_zone_state.OwnedCell, comptime timers: enum { append, merge }) void {
+        self.setZoneMaterialPrepared(index, value.material);
+        if (value.material == .custom) self.metadata.roads.appendAssumeCapacity(.{ .index = index, .slope = value.slope });
+        if (value.constructed) self.metadata.constructed.appendAssumeCapacity(index);
+        if (timers == .append) {
+            if (value.grass_due) |due| self.metadata.timed.events.appendAssumeCapacity(.{ .block = index, .kind = .grow_grass, .due_tick = due });
+        }
+    }
+
+    pub fn refreshZoneFlags(self: *WorldChunk) void {
+        const enclosed = self.flags.is_unreachable;
+        self.flags = boundary_mask.getFlags(&self.boundaries);
+        self.flags.is_unreachable = enclosed;
+    }
+
     /// Applies the same preconditions to authoritative commands and optimistic replay.
     /// Revision assignment belongs to the service, not this data manipulation helper.
     pub fn apply(self: *WorldChunk, allocator: std.mem.Allocator, local: [3]u5, action: BlockAction) OperationStatus {
@@ -745,7 +798,7 @@ pub const World = struct {
 
         if (snapshot) |value| {
             var occupied: ZoneCells = .initEmpty();
-            var capacity: ZoneCapacity = .{};
+            var capacity: WorldChunk.ZoneCapacity = .{};
             for (value.cells) |cell| {
                 if (occupied.isSet(cell.index) or claims.len == 0 or
                     !cell.value.valid(self.layout.size_in_blocks) or terrain.content.getBlock(transformations.coordinates(cell.index)) != .none)
@@ -754,7 +807,7 @@ pub const World = struct {
                 capacity.add(cell.value);
             }
             try capacity.reserve(terrain, self.allocator);
-            for (value.cells) |cell| appendZoneCell(terrain, cell.index, cell.value);
+            for (value.cells) |cell| terrain.applyZoneCellPrepared(cell.index, cell.value, .append);
             sortZoneTimers(terrain);
             if (self.extraction_claims.fetchRemove(id)) |entry| self.allocator.free(entry.value);
             self.extraction_claims.putAssumeCapacity(id, claims);
@@ -768,7 +821,7 @@ pub const World = struct {
             if (delta) |value| try self.writeZoneDelta(terrain, old, value);
             old.terrain_revision = raw_revision;
         }
-        refreshZoneFlags(terrain);
+        terrain.refreshZoneFlags();
         terrain.chunk_revision = revision;
         self.retireResolved();
         self.installChunkPrepared(coords, terrain.*);
@@ -790,7 +843,7 @@ pub const World = struct {
         if (history) |authoritative| chunk.cell_changes = authoritative;
         self.validation_revision +%= 1;
         chunk.validation_revision = self.validation_revision;
-        refreshZoneFlags(chunk);
+        chunk.refreshZoneFlags();
         self.revealNeighbors(coords, chunk.flags);
         self.retireResolved();
         self.replayPending();
@@ -820,7 +873,7 @@ pub const World = struct {
     }
 
     fn writeZoneDelta(self: *World, chunk: *WorldChunk, source: *ZoneSource, delta: extraction_zone_stream.Delta) !void {
-        var capacity: ZoneCapacity = .{};
+        var capacity: WorldChunk.ZoneCapacity = .{};
         for (delta.changes) |change| {
             if (change.value) |value| capacity.add(value);
             const previous = chunk.content.getBlock(transformations.coordinates(change.index));
@@ -830,9 +883,9 @@ pub const World = struct {
         for (delta.changes) |change| {
             chunk.metadata.remove(change.index);
             if (change.value) |value| {
-                appendZoneCell(chunk, change.index, value);
+                chunk.applyZoneCellPrepared(change.index, value, .append);
             } else {
-                setZoneMaterial(chunk, change.index, .none);
+                chunk.setZoneMaterialPrepared(change.index, .none);
                 source.occupied.unset(change.index);
             }
         }
@@ -840,27 +893,8 @@ pub const World = struct {
         source.revision = delta.revision;
     }
 
-    const ZoneCapacity = struct {
-        blocks: bool = false,
-        roads: usize = 0,
-        constructed: usize = 0,
-        timers: usize = 0,
-
-        fn add(self: *ZoneCapacity, value: extraction_zone_state.OwnedCell) void {
-            self.blocks = true;
-            self.roads += @intFromBool(value.material == .custom);
-            self.constructed += @intFromBool(value.constructed);
-            self.timers += @intFromBool(value.grass_due != null);
-        }
-
-        fn reserve(self: ZoneCapacity, chunk: *WorldChunk, allocator: std.mem.Allocator) !void {
-            try chunk.metadata.reserve(allocator, self.roads, self.constructed, self.timers);
-            if (self.blocks) _ = try chunk.tryEnsureData(allocator);
-        }
-    };
-
     fn copyZoneOverlay(terrain: *WorldChunk, allocator: std.mem.Allocator, previous: *const WorldChunk, occupied: *const ZoneCells) !void {
-        var capacity: ZoneCapacity = .{};
+        var capacity: WorldChunk.ZoneCapacity = .{};
         var bits = occupied.iterator(.{});
         while (bits.next()) |index| {
             const local = transformations.coordinates(@intCast(index));
@@ -872,27 +906,11 @@ pub const World = struct {
         for (previous.metadata.timed.events.items) |event| capacity.timers += @intFromBool(occupied.isSet(event.block));
         try capacity.reserve(terrain, allocator);
         bits = occupied.iterator(.{});
-        while (bits.next()) |index| setZoneMaterial(terrain, @intCast(index), previous.content.getBlock(transformations.coordinates(@intCast(index))));
+        while (bits.next()) |index| terrain.setZoneMaterialPrepared(@intCast(index), previous.content.getBlock(transformations.coordinates(@intCast(index))));
         for (previous.metadata.roads.items) |road| if (occupied.isSet(road.index)) terrain.metadata.roads.appendAssumeCapacity(road);
         for (previous.metadata.constructed.items) |index| if (occupied.isSet(index)) terrain.metadata.constructed.appendAssumeCapacity(index);
         for (previous.metadata.timed.events.items) |event| if (occupied.isSet(event.block)) terrain.metadata.timed.events.appendAssumeCapacity(event);
         if (capacity.timers != 0) sortZoneTimers(terrain);
-    }
-
-    fn setZoneMaterial(chunk: *WorldChunk, index: transformations.BlockIndex, material: BlockType) void {
-        const local = transformations.coordinates(index);
-        const before = chunk.content.getBlock(local);
-        if (before == material) return;
-        chunk.content.blocks.blocks[local[2]][local[1]][local[0]] = material;
-        chunk.solid_block_count = chunk.solid_block_count - @intFromBool(before != .none) + @intFromBool(material != .none);
-        boundary_mask.update(&chunk.boundaries, local, material.occludesFaces());
-    }
-
-    fn appendZoneCell(chunk: *WorldChunk, index: transformations.BlockIndex, value: extraction_zone_state.OwnedCell) void {
-        setZoneMaterial(chunk, index, value.material);
-        if (value.material == .custom) chunk.metadata.roads.appendAssumeCapacity(.{ .index = index, .slope = value.slope });
-        if (value.constructed) chunk.metadata.constructed.appendAssumeCapacity(index);
-        if (value.grass_due) |due| chunk.metadata.timed.events.appendAssumeCapacity(.{ .block = index, .kind = .grow_grass, .due_tick = due });
     }
 
     fn sortZoneTimers(chunk: *WorldChunk) void {
@@ -901,12 +919,6 @@ pub const World = struct {
                 return a.due_tick < b.due_tick or (a.due_tick == b.due_tick and a.block < b.block);
             }
         }.less);
-    }
-
-    fn refreshZoneFlags(chunk: *WorldChunk) void {
-        const enclosed = chunk.flags.is_unreachable;
-        chunk.flags = boundary_mask.getFlags(&chunk.boundaries);
-        chunk.flags.is_unreachable = enclosed;
     }
 
     /// Restore the current authoritative material/metadata baseline in reverse edit order.
