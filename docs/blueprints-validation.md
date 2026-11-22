@@ -11,8 +11,8 @@ culled construction surface stays visible until its static replacement is instal
 
 Soil has one structural material with optional grass, no compaction, and identical bare/grassy
 support. Admission clears grass below miniatures atomically. Active target soil remains bare;
-ordinary grass scheduling begins after the site completes. Construction introduced world format 7; current warehouse format 8 also rejects earlier
-development saves.
+ordinary grass scheduling begins after the site completes. Construction introduced world format 7.
+The current reader accepts only format 9.
 External Save/Apply and player/observer edits share a bounded live-session retry ledger;
 acknowledged commands require resynchronization rather than replaying older snapshots.
 

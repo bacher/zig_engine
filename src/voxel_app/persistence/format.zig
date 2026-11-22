@@ -1,10 +1,9 @@
 //! Versioned wire codecs. All wire storage is bytes, never native struct layout.
 const std = @import("std");
 const generation_settings = @import("../generation_settings.zig");
-// Version 8 adds warehouse objects and accepted cargo/promise snapshots to the
-// same world transaction. Older development worlds are intentionally rejected.
-pub const current_write_version: u32 = 8;
-pub const minimum_readable_version: u32 = 8;
+// Version 9 adds extraction zones to the same world transaction as terrain and players.
+pub const current_write_version: u32 = 9;
+pub const minimum_readable_version: u32 = 9;
 pub const Uuid = [16]u8;
 pub const Digest = [32]u8;
 pub const cell_count = 32768;

@@ -42,6 +42,11 @@ const warehouse_layout = @import("warehouse_layout.zig");
 const warehouse_reach = @import("warehouse_reach.zig");
 const warehouse_recognition = @import("warehouse_recognition.zig");
 const warehouse_wire = @import("persistence/warehouses.zig");
+const zone_wire = @import("persistence/extraction_zones.zig");
+const extraction_zone = @import("extraction_zone.zig");
+const extraction_zone_state = @import("extraction_zone_state.zig");
+pub const extraction_zone_stream = @import("extraction_zone_stream.zig");
+pub const extraction_zone_commands = @import("extraction_zone_commands.zig");
 const PublicationBudget = @import("construction_publication_budget.zig").Budget;
 pub const commands = @import("construction_commands.zig");
 const background_work_log = std.log.scoped(.background_world_work);
@@ -169,6 +174,11 @@ pub const ChunkResponse = struct {
     chunk_revision: u64 = 0,
     surface_revision: u64 = 0,
     warehouse_refs: ?[]warehouse_stream.Reference = null,
+    extraction_zone_refs: ?[]extraction_zone_state.Record = null,
+    extraction_zone: ?extraction_zone_stream.Update = null,
+    zone_cell_changes: ?@import("cell_changes.zig").History = null,
+    zone_budget: ?*PublicationBudget = null,
+    zone_bytes: usize = 0,
     warehouse_revision: u64 = 0,
     /// Complete independent base-pallet source for this chunk, including loose
     /// pallets. Indices use the canonical x + 32*y + 1024*z block ordering.
@@ -190,6 +200,9 @@ pub const ChunkResponse = struct {
 
     pub fn deinit(self: ChunkResponse, allocator: std.mem.Allocator) void {
         if (self.warehouse_refs) |refs| allocator.free(refs);
+        if (self.extraction_zone_refs) |refs| allocator.free(refs);
+        var owned_zone = self;
+        owned_zone.clearExtraction(allocator);
         if (self.pallet_visuals) |cells| allocator.free(cells);
         if (self.composition) |value| {
             var owned = value;
@@ -207,6 +220,18 @@ pub const ChunkResponse = struct {
             },
             .boundaries, .unreachable_chunk, .acknowledgement => {},
         }
+    }
+
+    fn clearExtraction(self: *ChunkResponse, allocator: std.mem.Allocator) void {
+        if (self.extraction_zone) |*update| update.deinit(allocator);
+        self.extraction_zone = null;
+        self.zone_cell_changes = null;
+        if (self.zone_budget) |budget| {
+            budget.releaseBytes(self.zone_bytes);
+            budget.release();
+        }
+        self.zone_budget = null;
+        self.zone_bytes = 0;
     }
 };
 
@@ -251,6 +276,9 @@ const Subscription = struct {
     boundaries_pending: bool = false,
     blocks_pending: bool = false,
     composition_pending: bool = true,
+    terrain_sent: ?u64 = null,
+    zone_sent: u64 = 0,
+    zone_pallets_sent: usize = 0,
 };
 
 const WarehouseSubscription = struct {
@@ -262,6 +290,7 @@ const WarehouseSubscription = struct {
 };
 const WarehouseControl = struct { client: *Client, identity: warehouse_stream.Identity, token: u64, counted: bool = false };
 const WarehouseRequest = struct { client: *Client, request_id: u64, payload: warehouse_commands.Payload, command: ?commands.Identity = null };
+const ExtractionZoneRequest = struct { client: *Client, request_id: u64, registration: extraction_zone_commands.Registration, command: ?commands.Identity = null, counted: bool = false };
 
 const ConstructionSubscription = struct {
     identity: construction_stream.Identity,
@@ -402,6 +431,7 @@ const Request = union(enum) {
     blueprint_prepared: *BlueprintAdmissionTask,
     blueprint_definition: struct { client: *Client, id: u64, counted: bool = false },
     warehouse: WarehouseRequest,
+    register_extraction_zone: ExtractionZoneRequest,
     warehouse_subscribe: WarehouseControl,
     warehouse_resync: WarehouseControl,
     warehouse_unsubscribe: WarehouseControl,
@@ -435,6 +465,7 @@ const Request = union(enum) {
 fn requestClient(request: Request) *Client {
     return switch (request) {
         .warehouse => |value| value.client,
+        .register_extraction_zone => |value| value.client,
         .operation => |value| value.client,
         .blueprint_save => |value| value.client,
         .blueprint_apply => |value| value.client,
@@ -458,6 +489,7 @@ pub const Client = struct {
     space_responses: Mailbox(StandingSpaceResponse) = .{},
     blueprint_results: Mailbox(BlueprintResult) = .{},
     warehouse_results: Mailbox(warehouse_commands.Result) = .{},
+    extraction_zone_results: Mailbox(extraction_zone_commands.Result) = .{},
     /// Worker-owned successful Save identities, scoped to this endpoint's
     /// lifetime. Automatic transport identities and explicit retry keys differ.
     blueprint_save_keys: std.AutoHashMapUnmanaged(BlueprintSaveKey, u64) = .empty,
@@ -549,7 +581,7 @@ pub const Client = struct {
                 } else if (intent.operation.target != null) return error.InvalidCommandSession;
             }
             if (try self.command_ledger.existing(identity, intent)) |existing| return existing;
-            if (request == .operation and service.outstanding_operations.load(.monotonic) >= service.limits.pending_commands) return error.Busy;
+            if ((request == .operation or request == .register_extraction_zone) and service.outstanding_operations.load(.monotonic) >= service.limits.pending_commands) return error.Busy;
             try service.requests.items.ensureUnusedCapacity(service.allocator, 1);
             service.command_budget.record_limit = service.limits.pending_commands;
             service.command_budget.byte_limit = service.limits.command_intent_bytes;
@@ -562,17 +594,20 @@ pub const Client = struct {
                 .blueprint_save => |*save| save.command = identity,
                 .blueprint_apply => |*apply| apply.command = identity,
                 .warehouse => |*edit| edit.command = identity,
+                .register_extraction_zone => |*registration| registration.command = identity,
                 else => unreachable,
             }
         } else {
-            if (request == .operation and service.outstanding_operations.load(.monotonic) >= service.limits.pending_commands) return error.Busy;
+            if ((request == .operation or request == .register_extraction_zone) and service.outstanding_operations.load(.monotonic) >= service.limits.pending_commands) return error.Busy;
             try service.requests.items.ensureUnusedCapacity(service.allocator, 1);
             submission = .{ .request_id = self.next_request_id, .command = .{ .world_session = service.world_session, .client_session = self.client_session, .sequence = 0 }, .disposition = .queued };
         }
-        if (owned == .operation) {
-            owned.operation.counted = true;
-            _ = service.outstanding_operations.fetchAdd(1, .acq_rel);
+        switch (owned) {
+            .operation => |*edit| edit.counted = true,
+            .register_extraction_zone => |*registration| registration.counted = true,
+            else => {},
         }
+        if (owned == .operation or owned == .register_extraction_zone) _ = service.outstanding_operations.fetchAdd(1, .acq_rel);
         service.requests.items.appendAssumeCapacity(owned);
         self.next_request_id = std.math.add(u64, self.next_request_id, 1) catch @panic("request IDs exhausted");
         self.last_operation_id = submission.request_id;
@@ -585,6 +620,27 @@ pub const Client = struct {
         self.service.requests.mutex.lockUncancelable(self.service.io);
         defer self.service.requests.mutex.unlock(self.service.io);
         return self.submitExternalLocked(command, .{ .operation = .{ .operation = operation, .target = target } }, .{ .operation = .{ .client = self, .request_id = self.next_request_id, .operation = operation, .target = target } });
+    }
+
+    pub fn tryRegisterExtractionZone(self: *Client, registration: extraction_zone_commands.Registration) !commands.Submission {
+        return self.submitExtractionZone(null, registration);
+    }
+
+    pub fn tryRegisterExtractionZoneCommand(self: *Client, command: commands.Identity, registration: extraction_zone_commands.Registration) !commands.Submission {
+        return self.submitExtractionZone(command, registration);
+    }
+
+    fn submitExtractionZone(self: *Client, command: ?commands.Identity, registration: extraction_zone_commands.Registration) !commands.Submission {
+        self.service.requests.mutex.lockUncancelable(self.service.io);
+        defer self.service.requests.mutex.unlock(self.service.io);
+        return self.submitExternalLocked(command, .{ .register_extraction_zone = registration }, .{ .register_extraction_zone = .{ .client = self, .request_id = self.next_request_id, .registration = registration } });
+    }
+
+    pub fn takeExtractionZoneResults(self: *Client, out: *std.ArrayList(extraction_zone_commands.Result)) void {
+        self.extraction_zone_results.takeAll(self.service.io, out);
+        for (out.items) |result| if (result.command) |identity| {
+            _ = self.acknowledgeExternalCommand(identity);
+        };
     }
 
     pub fn tryWarehouseCommand(self: *Client, command: commands.Identity, payload: warehouse_commands.Payload) !commands.Submission {
@@ -893,8 +949,8 @@ pub const Client = struct {
         } });
     }
 
-    /// Sends only intent. Every command gets a result; block-mode replies also carry
-    /// a snapshot, including failures. Surface-mode results share packages with surface changes.
+    /// Sends only intent. Terrain commands give block subscribers an authoritative
+    /// snapshot. Extraction-zone commands acknowledge separately from layer updates.
     /// Commands from this endpoint are processed in submission order.
     pub const SubmitError = commands.Error || error{ServiceStopped};
     /// Transport bound only; every constituent still uses one admission slot and
@@ -1064,6 +1120,7 @@ pub const WorldDataService = struct {
     pending_warehouse_subscriptions: std.ArrayList(WarehouseControl) = .empty,
     /// Worker-owned; avoid taking the external-command lock on simulation-only turns.
     external_blueprint_delivery_pending: bool = false,
+    extraction_zone_delivery_pending: bool = false,
     command_budget: commands.Budget = .{},
     next_client_session: u64 = 1,
     layout: *const WorldLayout,
@@ -1170,6 +1227,8 @@ pub const WorldDataService = struct {
     captured_player_generation: u64 = 0,
     durable_warehouse_revision: u64 = 0,
     captured_warehouse_revision: ?u64 = null,
+    durable_zone_revision: u64 = 0,
+    captured_zone_revision: ?u64 = null,
     initial_tick: u64 = 0,
     const ConstructionWork = struct { instance_id: u64, next_group: usize = 0, attempts_left: usize = 0, stalled: bool = false };
     const Pending = struct { request: Request, since: i96, waiting_for_journal: bool = false };
@@ -1222,6 +1281,7 @@ pub const WorldDataService = struct {
         try io.randomSecure(std.mem.asBytes(&self.world_session));
         if (self.world_session == 0) self.world_session = 1;
         self.worker_state.warehouses = warehouse_state.State.init(self.world_session, @bitCast(self.layout.size_in_blocks));
+        self.worker_state.zones = extraction_zone_state.State.init(self.layout.size_in_blocks);
         self.construction_publication_budget = try PublicationBudget.create(allocator, io, limits.construction_publication_bytes, self, wakeConstructionPublication);
         errdefer if (self.construction_publication_budget) |publication| publication.release();
         // No asynchronous task owns self until initialization is complete.
@@ -1230,6 +1290,7 @@ pub const WorldDataService = struct {
         errdefer self.restored_players.deinit(allocator);
         errdefer self.worker_state.blueprints.deinit(allocator);
         errdefer self.worker_state.warehouses.deinit(allocator);
+        errdefer self.worker_state.zones.deinit(self.worker_state.liveAllocator(allocator));
         errdefer self.blueprint_road_queue.deinit(allocator);
         errdefer self.construction_work.deinit(allocator);
         errdefer self.construction_grass.deinit(allocator);
@@ -1260,6 +1321,7 @@ pub const WorldDataService = struct {
                 try self.restored_players.put(allocator, player.id, player);
             }
             try self.restoreBlueprints(saved);
+            try self.restoreExtractionZones(saved);
             try self.restoreWarehouses(saved);
             try self.restoreDeferredWork(saved);
         }
@@ -1414,6 +1476,7 @@ pub const WorldDataService = struct {
             client.space_responses.deinit(self.allocator);
             client.blueprint_results.deinit(self.allocator);
             client.warehouse_results.deinit(self.allocator);
+            client.extraction_zone_results.deinit(self.allocator);
             client.warehouse_subscriptions.deinit(self.allocator);
             client.blueprint_save_keys.deinit(self.allocator);
             client.subscriptions.deinit(self.allocator);
@@ -1556,6 +1619,7 @@ pub const WorldDataService = struct {
                     self.retryConstructionAfterFailure(err);
                     self.flushConstructionPrefix(client) catch {};
                 };
+                self.clearStagedExtractionPublications(client);
                 // Observer snapshots coalesce to the final authoritative state in this
                 // batch. Retain the subscription intent until owned delivery is secured.
                 var blocks = client.subscriptions.iterator();
@@ -1567,13 +1631,20 @@ pub const WorldDataService = struct {
                         self.retryConstructionAfterFailure(err);
                         continue :clients;
                     };
-                    const chunk = self.worker_state.tryLoadAt(self.allocator, coords) catch |err| {
+                    const chunk = self.worker_state.tryLoadTerrainAt(self.allocator, coords) catch |err| {
                         self.retryConstructionAfterFailure(err);
                         continue :clients;
                     };
                     client.pending.responses.appendAssumeCapacity(self.blockResponse(coords, sub.id, chunk));
                     sub.blocks_pending = false;
                 }
+                self.prepareExtractionPublications(client) catch |err| {
+                    self.retryConstructionAfterFailure(err);
+                    if (err == error.ConstructionPublicationCapacity) {
+                        self.flushExtractionPrefix(client) catch |prefix_error| self.retryConstructionAfterFailure(prefix_error);
+                    } else self.clearStagedExtractionPublications(client);
+                    continue :clients;
+                };
                 // Certify final block snapshots against the final neighboring inputs too.
                 for (client.pending.responses.items) |*response| {
                     if (response.data != .blocks) continue;
@@ -1649,18 +1720,13 @@ pub const WorldDataService = struct {
                         continue;
                     }
                     if (response.composition) |old| if (old.revision != self.construction_composition_revision) self.clearResponseComposition(response);
-                    const id = self.layout.encodeChunkCoords(response.coords);
-                    discovery_bytes += self.worker_state.warehouses.claims.chunkReferences(.{ @intCast(response.coords[0]), @intCast(response.coords[1]), @intCast(response.coords[2]) }).len * @sizeOf(warehouse_stream.Reference);
-                    discovery_bytes += self.palletVisualCount(id) * @sizeOf(u16);
-                    for (self.worker_state.blueprints.chunkInstances(id)) |instance_id| {
-                        const instance = self.worker_state.blueprints.instances.get(instance_id) orelse continue;
-                        if (instance.active) discovery_bytes += @sizeOf(construction_stream.SiteRef);
-                    }
+                    if (self.zoneDeltaKeepsDiscovery(client, response)) continue;
+                    discovery_bytes += self.discoveryBytes(response.coords, self.discoveryZoneClaims(client, response).len);
                 }
                 if (self.construction_publication_budget) |budget| if (discovery_bytes > budget.limit) {
                     self.status.construction_publication_blocked = true;
                     for (client.pending.responses.items) |*response| self.clearResponseComposition(response);
-                    self.flushConstructionPrefix(client) catch |prefix_error| self.retryConstructionAfterFailure(prefix_error);
+                    self.flushExtractionPrefix(client) catch |prefix_error| self.retryConstructionAfterFailure(prefix_error);
                     continue :clients;
                 };
                 for (client.pending.responses.items, 0..) |*response, response_index| {
@@ -1670,9 +1736,9 @@ pub const WorldDataService = struct {
                         break;
                     };
                     if (superseded) continue;
-                    self.composeResponse(response) catch |err| {
+                    self.composeResponseFor(client, response) catch |err| {
                         self.retryConstructionAfterFailure(err);
-                        if (err == error.ConstructionPublicationCapacity) self.flushConstructionPrefix(client) catch |prefix_error| self.retryConstructionAfterFailure(prefix_error);
+                        if (err == error.ConstructionPublicationCapacity) self.flushExtractionPrefix(client) catch |prefix_error| self.retryConstructionAfterFailure(prefix_error);
                         continue :clients;
                     };
                     const id = self.layout.encodeChunkCoords(response.coords);
@@ -1682,17 +1748,182 @@ pub const WorldDataService = struct {
                 }
                 if (client.pending.responses.items.len == 0 and client.pending.blueprint_changes.items.len == 0 and client.pending.construction_updates.items.len == 0 and client.pending.warehouse_updates.items.len == 0) continue;
                 client.pending.world_session = self.world_session;
-                client.responses.tryPush(self.io, self.allocator, client.pending) catch |err| {
+                self.publishClientPackage(client, &client.pending) catch |err| {
                     self.retryConstructionAfterFailure(err);
                     continue :clients;
                 };
-                client.pending = .{};
             }
         }
+        self.flushExtractionZoneOutcomes();
     }
 
     fn blockResponse(self: *WorldDataService, coords: ChunkCoords, token: ?u64, chunk: WorldChunk) ChunkResponse {
         return .{ .coords = coords, .subscription_id = token, .chunk_revision = chunk.chunk_revision, .surface_revision = self.worker_state.surfaceRevision(coords), .data = .{ .blocks = .{ .chunk = chunk } } };
+    }
+
+    fn publishClientPackage(self: *WorldDataService, client: *Client, package: *ResponsePackage) !void {
+        const replies = &client.responses;
+        replies.mutex.lockUncancelable(self.io);
+        defer replies.mutex.unlock(self.io);
+        if (replies.is_closed) return error.ServiceStopped;
+        try replies.items.append(self.allocator, package.*);
+        for (package.responses.items) |response| {
+            const id = self.layout.encodeChunkCoords(response.coords);
+            const sub = client.subscriptions.getPtr(id) orelse continue;
+            if (sub.mode != .blocks or sub.id != response.subscription_id) continue;
+            if (response.pallet_visuals != null) {
+                sub.zone_pallets_sent = if (self.worker_state.zoneChunk(response.coords)) |zone| zone.pallet_indices.items.len else 0;
+            }
+            if (response.data == .blocks) sub.terrain_sent = response.data.blocks.chunk.chunk_revision;
+            if (response.extraction_zone) |update| sub.zone_sent = switch (update) {
+                inline else => |payload| payload.revision,
+            };
+        }
+        package.* = .{};
+        replies.not_empty.signal(self.io);
+    }
+
+    /// A burst of column subscriptions can exceed the shared byte cap even
+    /// though every chunk fits. Transfer one complete terrain/zone pair, then
+    /// retry the remaining chunks as the consumer releases their payloads.
+    fn flushExtractionPrefix(self: *WorldDataService, client: *Client) !void {
+        try self.flushConstructionPrefix(client);
+        const pending = &client.pending.responses;
+        const index = for (pending.items, 0..) |response, i| {
+            if (response.extraction_zone) |update| if (update == .snapshot and response.operation == null) break i;
+        } else return;
+        const pair = pending.orderedRemove(index);
+        const id = self.layout.encodeChunkCoords(pair.coords);
+        const sub = client.subscriptions.getPtr(id).?;
+        // If preparation fails, the next pass must rebuild the complete pair.
+        sub.blocks_pending = true;
+        self.clearStagedExtractionPublications(client);
+        for (pending.items) |*remaining| self.clearResponseComposition(remaining);
+
+        var prefix: ResponsePackage = .{ .world_session = self.world_session };
+        defer prefix.deinit(self.allocator);
+        prefix.responses.append(self.allocator, pair) catch |err| {
+            pair.deinit(self.allocator);
+            return err;
+        };
+        const response = &prefix.responses.items[0];
+        response.data.blocks.neighbors = try self.worker_state.tryNeighborBoundaries(self.allocator, pair.coords);
+        try self.composeResponseFor(client, response);
+        try self.publishClientPackage(client, &prefix);
+        sub.blocks_pending = false;
+        sub.boundaries_pending = false;
+        // A fresh pair supersedes earlier payloads for this subscription,
+        // including a raw response staged before the ownership handoff.
+        var retained: usize = 0;
+        for (pending.items) |remaining| {
+            if (remaining.subscription_id == pair.subscription_id and self.layout.encodeChunkCoords(remaining.coords) == id) {
+                remaining.deinit(self.allocator);
+                if (remaining.operation != null) {
+                    pending.items[retained] = .{ .coords = remaining.coords, .subscription_id = pair.subscription_id, .chunk_revision = remaining.chunk_revision, .operation = remaining.operation, .data = .acknowledgement };
+                    retained += 1;
+                }
+            } else {
+                pending.items[retained] = remaining;
+                retained += 1;
+            }
+        }
+        pending.items.len = retained;
+        sub.composition_pending = false;
+        wakeConstructionPublication(self);
+    }
+
+    fn clearStagedExtractionPublications(self: *WorldDataService, client: *Client) void {
+        var retained: usize = 0;
+        for (client.pending.responses.items) |*response| {
+            if (response.extraction_zone != null and response.data == .acknowledgement and response.operation == null) {
+                response.deinit(self.allocator);
+                continue;
+            }
+            response.clearExtraction(self.allocator);
+            client.pending.responses.items[retained] = response.*;
+            retained += 1;
+        }
+        client.pending.responses.items.len = retained;
+    }
+
+    fn latestTerrainResponse(self: *WorldDataService, client: *Client, id: ChunkId, token: u64) ?usize {
+        var i = client.pending.responses.items.len;
+        while (i != 0) {
+            i -= 1;
+            const response = &client.pending.responses.items[i];
+            if (response.subscription_id == token and response.data == .blocks and self.layout.encodeChunkCoords(response.coords) == id) return i;
+        }
+        return null;
+    }
+
+    fn prepareExtractionPublications(self: *WorldDataService, client: *Client) !void {
+        const state = &self.worker_state;
+        var subscriptions = client.subscriptions.iterator();
+        while (subscriptions.next()) |entry| {
+            const sub = entry.value_ptr;
+            if (sub.mode != .blocks) continue;
+            const id = entry.key_ptr.*;
+            const coords = self.layout.decodeChunkId(id);
+            const canonical: [3]u32 = @bitCast(coords);
+            const revision = state.zones.revisionAt(canonical);
+            if (revision == sub.zone_sent) continue;
+            if (!self.requireBase(id)) return error.DependencyPending;
+            const raw = state.modified_chunks.getPtr(id) orelse return error.DependencyPending;
+            const terrain_slot = self.latestTerrainResponse(client, id, sub.id);
+            const terrain_revision = if (terrain_slot) |slot| client.pending.responses.items[slot].data.blocks.chunk.chunk_revision else sub.terrain_sent;
+            const bytes = if (sub.zone_sent != 0 and terrain_revision != null) extraction_zone_stream.deltaBytes(&state.zones, canonical, sub.zone_sent) else null;
+            if (bytes) |owned_bytes| {
+                const slot = terrain_slot orelse next: {
+                    try client.pending.responses.append(self.allocator, .{
+                        .coords = coords,
+                        .subscription_id = sub.id,
+                        .chunk_revision = raw.chunk_revision,
+                        .surface_revision = state.surfaceRevision(coords),
+                        .data = .acknowledgement,
+                    });
+                    break :next client.pending.responses.items.len - 1;
+                };
+                errdefer if (terrain_slot == null) {
+                    const failed = client.pending.responses.pop().?;
+                    failed.deinit(self.allocator);
+                };
+                const response = &client.pending.responses.items[slot];
+                try self.reserveExtractionResponse(response, owned_bytes, 0);
+                response.extraction_zone = .{ .delta = (try extraction_zone_stream.delta(self.allocator, &state.zones, canonical, id, sub.id, terrain_revision.?, sub.zone_sent)).? };
+                response.zone_cell_changes = raw.cell_changes;
+                response.chunk_revision = raw.chunk_revision;
+                continue;
+            }
+
+            // First interest, handoff and lost history all pair a fresh terrain
+            // source with the complete zone layer in the same package.
+            const slot = if (terrain_slot != null and terrain_revision == raw.chunk_revision)
+                terrain_slot.?
+            else next: {
+                try client.pending.responses.ensureUnusedCapacity(self.allocator, 1);
+                const chunk = try state.tryLoadTerrainAt(self.allocator, coords);
+                const i = client.pending.responses.items.len;
+                client.pending.responses.appendAssumeCapacity(self.blockResponse(coords, sub.id, chunk));
+                break :next i;
+            };
+            const response = &client.pending.responses.items[slot];
+            // Reserve only when a complete pair can fit after earlier packages
+            // release their charges. Retrying a partial pair would wake itself.
+            self.clearResponseComposition(response);
+            try self.reserveExtractionResponse(response, extraction_zone_stream.snapshotBytes(&state.zones, canonical), self.discoveryBytes(coords, 0));
+            response.extraction_zone = .{ .snapshot = try extraction_zone_stream.snapshot(self.allocator, &state.zones, canonical, id, sub.id, raw.chunk_revision) };
+            response.zone_cell_changes = raw.cell_changes;
+        }
+    }
+
+    fn reserveExtractionResponse(self: *WorldDataService, response: *ChunkResponse, bytes: usize, discovery_bytes: usize) !void {
+        if (bytes == 0) return;
+        const budget = self.construction_publication_budget orelse return;
+        if (bytes +| discovery_bytes > budget.limit) self.status.construction_publication_blocked = true;
+        try budget.reserveWithHeadroom(bytes, discovery_bytes);
+        budget.retain();
+        response.zone_budget = budget;
+        response.zone_bytes = bytes;
     }
 
     fn flushConstructionPrefix(self: *WorldDataService, client: *Client) !void {
@@ -1716,6 +1947,8 @@ pub const WorldDataService = struct {
     fn clearResponseComposition(self: *WorldDataService, response: *ChunkResponse) void {
         if (response.warehouse_refs) |refs| self.allocator.free(refs);
         response.warehouse_refs = null;
+        if (response.extraction_zone_refs) |refs| self.allocator.free(refs);
+        response.extraction_zone_refs = null;
         if (response.pallet_visuals) |cells| self.allocator.free(cells);
         response.pallet_visuals = null;
         if (response.composition) |*old| old.deinit(self.allocator);
@@ -1728,13 +1961,51 @@ pub const WorldDataService = struct {
         response.composition_bytes = 0;
     }
 
+    fn discoveryBytes(self: *const WorldDataService, coords: ChunkCoords, zone_count: usize) usize {
+        const id = self.layout.encodeChunkCoords(coords);
+        const warehouses = self.worker_state.warehouses.claims.chunkReferences(@bitCast(coords));
+        var bytes = warehouses.len * @sizeOf(warehouse_stream.Reference) + zone_count * @sizeOf(extraction_zone_state.Record) + self.palletVisualCount(id) * @sizeOf(u16);
+        for (self.worker_state.blueprints.chunkInstances(id)) |instance_id| {
+            const instance = self.worker_state.blueprints.instances.get(instance_id) orelse continue;
+            if (instance.active) bytes += @sizeOf(construction_stream.SiteRef);
+        }
+        return bytes;
+    }
+
+    fn discoveryZoneClaims(self: *const WorldDataService, client: *const Client, response: *const ChunkResponse) []const extraction_zone_state.Id {
+        const sub = client.subscriptions.get(self.layout.encodeChunkCoords(response.coords));
+        if (sub != null and sub.?.id == response.subscription_id and sub.?.mode == .blocks) return &.{};
+        return self.zoneClaims(response.coords);
+    }
+
+    // Claims are immutable between baselines. An edit confined to zone cells
+    // cannot change terrain pallets; zone pallets can only be removed. Keep
+    // the installed discovery while both sources and construction interest agree.
+    fn zoneDeltaKeepsDiscovery(self: *const WorldDataService, client: *const Client, response: *const ChunkResponse) bool {
+        const update = response.extraction_zone orelse return false;
+        if (response.data != .acknowledgement or update != .delta) return false;
+        const sub = client.subscriptions.get(update.delta.chunk_id) orelse return false;
+        const zone = self.worker_state.zoneChunk(response.coords) orelse return false;
+        return sub.id == response.subscription_id and !sub.composition_pending and sub.zone_pallets_sent == zone.pallet_indices.items.len;
+    }
+
+    fn composeResponseFor(self: *WorldDataService, client: *const Client, response: *ChunkResponse) !void {
+        if (self.zoneDeltaKeepsDiscovery(client, response)) return;
+        return self.composeResponseWithClaims(response, self.discoveryZoneClaims(client, response));
+    }
+
     fn composeResponse(self: *WorldDataService, response: *ChunkResponse) !void {
+        return self.composeResponseWithClaims(response, self.zoneClaims(response.coords));
+    }
+
+    fn composeResponseWithClaims(self: *WorldDataService, response: *ChunkResponse, zone_claims: []const extraction_zone_state.Id) !void {
         const id = self.layout.encodeChunkCoords(response.coords);
         // A saved edited chunk must be resident before its auxiliary source can
         // be published. Natural terrain never contains player-built pallets.
         if (!self.requireBase(id)) return error.DependencyPending;
         const pallet_revision = if (self.worker_state.modified_chunks.get(id)) |chunk| chunk.chunk_revision else 0;
-        if (response.composition) |old| if (old.revision == self.construction_composition_revision and response.warehouse_revision == self.warehouse_discovery_revision and response.pallet_visuals != null and response.pallet_visual_revision == pallet_revision) return;
+        const zone_count = if (response.extraction_zone_refs) |refs| refs.len else 0;
+        if (response.composition) |old| if (old.revision == self.construction_composition_revision and response.warehouse_revision == self.warehouse_discovery_revision and zone_count == zone_claims.len and response.pallet_visuals != null and response.pallet_visual_revision == pallet_revision) return;
         var count: usize = 0;
         for (self.worker_state.blueprints.chunkInstances(id)) |instance_id| {
             const instance = self.worker_state.blueprints.instances.get(instance_id) orelse return error.UnknownConstruction;
@@ -1742,7 +2013,7 @@ pub const WorldDataService = struct {
         }
         const warehouse_refs = self.worker_state.warehouses.claims.chunkReferences(.{ @intCast(response.coords[0]), @intCast(response.coords[1]), @intCast(response.coords[2]) });
         const pallet_count = self.palletVisualCount(id);
-        const bytes = count * @sizeOf(construction_stream.SiteRef) + warehouse_refs.len * @sizeOf(warehouse_stream.Reference) + pallet_count * @sizeOf(u16);
+        const bytes = count * @sizeOf(construction_stream.SiteRef) + warehouse_refs.len * @sizeOf(warehouse_stream.Reference) + zone_claims.len * @sizeOf(extraction_zone_state.Record) + pallet_count * @sizeOf(u16);
         if (self.construction_publication_budget) |budget| try budget.reserve(bytes);
         errdefer if (self.construction_publication_budget) |budget| budget.releaseBytes(bytes);
         const composition = try self.chunkComposition(id);
@@ -1752,17 +2023,27 @@ pub const WorldDataService = struct {
         }
         const refs = try self.allocator.dupe(warehouse_stream.Reference, warehouse_refs);
         errdefer self.allocator.free(refs);
+        const zone_refs = try self.allocator.alloc(extraction_zone_state.Record, zone_claims.len);
+        errdefer self.allocator.free(zone_refs);
+        for (zone_claims, zone_refs) |zone_id, *record| record.* = self.worker_state.zones.get(zone_id).?;
         const pallets = try self.allocator.alloc(u16, pallet_count);
         errdefer self.allocator.free(pallets);
+        var index: usize = 0;
         if (self.worker_state.modified_chunks.get(id)) |chunk| if (chunk.content == .blocks) {
-            var index: usize = 0;
             for (std.mem.asBytes(&chunk.content.blocks.blocks), 0..) |material, cell| if (material == @intFromEnum(rules.BlockType.pallet)) {
                 pallets[index] = @intCast(cell);
                 index += 1;
             };
-            std.debug.assert(index == pallets.len);
         };
+        if (self.worker_state.zoneChunk(response.coords)) |zone| {
+            for (zone.pallet_indices.items) |cell| {
+                pallets[index] = cell;
+                index += 1;
+            }
+        }
+        std.debug.assert(index == pallets.len);
         self.clearResponseComposition(response);
+        response.extraction_zone_refs = zone_refs;
         response.warehouse_refs = refs;
         response.warehouse_revision = self.warehouse_discovery_revision;
         response.pallet_visuals = pallets;
@@ -1775,10 +2056,19 @@ pub const WorldDataService = struct {
         }
     }
 
+    fn zoneClaims(self: *const WorldDataService, coords: ChunkCoords) []const extraction_zone_state.Id {
+        const entry = self.worker_state.zoneChunk(coords) orelse return &.{};
+        return entry.claims.items;
+    }
+
     fn palletVisualCount(self: *const WorldDataService, id: ChunkId) usize {
-        const chunk = self.worker_state.modified_chunks.get(id) orelse return 0;
-        if (chunk.content == .empty) return 0;
-        return std.mem.count(u8, std.mem.asBytes(&chunk.content.blocks.blocks), &.{@intFromEnum(rules.BlockType.pallet)});
+        var count: usize = 0;
+        if (self.worker_state.modified_chunks.get(id)) |chunk| {
+            if (chunk.content == .blocks)
+                count = std.mem.count(u8, std.mem.asBytes(&chunk.content.blocks.blocks), &.{@intFromEnum(rules.BlockType.pallet)});
+        }
+        if (self.worker_state.zoneChunk(self.layout.decodeChunkId(id))) |zone| count += zone.pallet_indices.items.len;
+        return count;
     }
 
     /// Builds once and fans out owned copies only to surface subscribers awaiting this state.
@@ -1959,7 +2249,7 @@ pub const WorldDataService = struct {
 
     fn processRequest(self: *WorldDataService, request: Request) void {
         // Only mutations/checkpoints join the retained FIFO. Reads and completions always progress.
-        const ordered = request == .operation or request == .blueprint_save or request == .blueprint_apply or request == .warehouse;
+        const ordered = request == .operation or request == .blueprint_save or request == .blueprint_apply or request == .warehouse or request == .register_extraction_zone;
         if (request == .load_chunks and self.is_shutting_down.load(.acquire)) {
             if (request.load_chunks.counted) _ = self.outstanding_loads.fetchSub(1, .release);
             return;
@@ -1997,6 +2287,7 @@ pub const WorldDataService = struct {
         }
         switch (request) {
             .warehouse => |edit| self.processWarehouse(edit),
+            .register_extraction_zone => |registration| self.processExtractionZone(registration),
             .warehouse_subscribe, .warehouse_resync, .warehouse_unsubscribe => |control| self.processWarehouseControl(request, control),
             .blueprint_definition => |read| {
                 _ = read.client.construction_definitions.remove(read.id);
@@ -2145,7 +2436,7 @@ pub const WorldDataService = struct {
                             load.client.subscriptions.getPtr(self.layout.encodeChunkCoords(coords)).?.blocks_pending = true;
                             continue;
                         };
-                        const chunk = self.worker_state.tryLoadAt(self.allocator, coords) catch {
+                        const chunk = self.worker_state.tryLoadTerrainAt(self.allocator, coords) catch {
                             load.client.subscriptions.getPtr(self.layout.encodeChunkCoords(coords)).?.blocks_pending = true;
                             continue;
                         };
@@ -2169,7 +2460,8 @@ pub const WorldDataService = struct {
                     self.failPersistence(error.OutOfMemory);
                     return;
                 };
-                const result = self.worker_state.applyOperation(self.allocator, edit.operation);
+                const zone_target = self.worker_state.zoneChunk(coords) != null;
+                const result = self.worker_state.applyOperationFrom(self.allocator, edit.operation, edit.client.simulation, !zone_target);
                 var reply_moved = false;
                 defer if (!reply_moved) result.chunk.deinit(self.allocator);
                 if (self.read_discovered or self.operation_deferred) {
@@ -2195,7 +2487,7 @@ pub const WorldDataService = struct {
                 }
                 if (result.status == .success) {
                     for (self.worker_state.road_changes.items) |id| {
-                        if (id != position) self.publishMaterialChange(self.layout.decodeChunkId(id));
+                        if (id != position) self.publishSurfaceChange(self.layout.decodeChunkId(id));
                     }
                     var affected: [7]?ChunkCoords = @splat(null);
                     affected[6] = coords;
@@ -2205,8 +2497,12 @@ pub const WorldDataService = struct {
                             affected[i] = world_module.adjacentChunk(self.layout, coords, side);
                     }
                     if (result.changed_below) |below| {
-                        if (!@reduce(.And, below == coords)) self.publishMaterialChange(below);
+                        if (!@reduce(.And, below == coords)) {
+                            self.publishSurfaceChange(below);
+                            if (result.below_changed_raw) self.markRawTerrainPending(self.layout.encodeChunkCoords(below));
+                        }
                     }
+                    const raw_target_changed = result.target_changed_raw or (result.below_changed_raw and @reduce(.And, result.changed_below.? == coords));
                     for (affected, 0..) |entry, i| {
                         const changed = entry orelse continue;
                         const changed_id = self.layout.encodeChunkCoords(changed);
@@ -2216,14 +2512,14 @@ pub const WorldDataService = struct {
                             if (sub.mode == .blocks and i < 6) sub.boundaries_pending = true;
                             if (sub.mode == .surface) {
                                 sub.surface_pending = true;
-                            } else if ((i < 6 and result.revealed_neighbors[i] != null) or (i == 6 and client != edit.client)) {
+                            } else if ((i < 6 and result.revealed_neighbors[i] != null) or (i == 6 and raw_target_changed and (client != edit.client or zone_target))) {
                                 sub.blocks_pending = true;
                             }
                         }
                     }
                 }
                 const sub = edit.client.subscriptions.get(position);
-                var response = if (result.status == .resource_exhausted or (sub != null and sub.?.mode == .surface))
+                var response = if (zone_target or result.status == .resource_exhausted or (sub != null and sub.?.mode == .surface))
                     ChunkResponse{ .coords = coords, .subscription_id = if (sub) |value| value.id else null, .chunk_revision = result.chunk.chunk_revision, .surface_revision = self.worker_state.surfaceRevision(coords), .data = .acknowledgement }
                 else
                     self.blockResponse(coords, if (sub) |value| value.id else null, result.chunk);
@@ -2285,6 +2581,265 @@ pub const WorldDataService = struct {
 
     fn processWarehouse(self: *WorldDataService, edit: WarehouseRequest) void {
         self.processWarehouseAtView(edit, edit.payload.actor.viewpoint);
+    }
+
+    fn extractionZoneRegistrationAllowed(self: *const WorldDataService, registration: extraction_zone_commands.Registration) !void {
+        const state = &self.worker_state;
+        if (!registration.filter.valid()) return error.InvalidFilter;
+        if (!try state.zones.canRegister(registration.bounds, self.limits.extraction_zone_budgets)) return error.ConflictingClaim;
+        if (self.store) |store| try registration.bounds.validate(self.layout.size_in_blocks, store.limits.zones.zone_budgets);
+        const width = self.layout.size_in_blocks[0];
+        var chunks = registration.bounds.chunks(self.layout.size_in_blocks);
+        while (chunks.next()) |coords| {
+            const id = self.layout.encodeChunkCoords(@bitCast(coords));
+            for (state.blueprints.chunkInstances(id)) |instance_id| {
+                const instance = state.blueprints.instances.get(instance_id) orelse return error.MissingData;
+                if (!instance.active) continue;
+                const definition = state.blueprints.definitions.get(instance.definition_id) orelse return error.MissingData;
+                const bounds: extraction_zone.Bounds = .{ .min = instance.origin, .size = blueprint.rotatedSize(definition.definition.size, instance.rotation) };
+                if (registration.bounds.intersects(width, bounds)) return error.ConflictingClaim;
+            }
+            for (state.warehouses.claims.chunkReferences(coords)) |reference| {
+                if (registration.bounds.intersects(width, warehouseEnvelope(self.layout.size_in_blocks, reference.geometry))) return error.ConflictingClaim;
+            }
+        }
+    }
+
+    fn warehouseEnvelope(world_size: [3]u32, geometry: warehouse_layout.Geometry) extraction_zone.Bounds {
+        return .{
+            .min = geometry.worldCell(world_size, .{ geometry.bounds.xmin - 1, geometry.bounds.ymin - 1, 0 }).?,
+            .size = .{ @as(u32, geometry.bounds.width()) + 2, @as(u32, geometry.bounds.height()) + 2, warehouse_layout.levels },
+        };
+    }
+
+    fn processExtractionZone(self: *WorldDataService, request: ExtractionZoneRequest) void {
+        self.read_discovered = false;
+        self.terminal_read_failure = false;
+        self.operation_deferred = false;
+        const replies = &request.client.extraction_zone_results;
+        if (request.command == null) {
+            replies.mutex.lockUncancelable(self.io);
+            replies.items.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+                replies.mutex.unlock(self.io);
+                self.deferExtractionZone(request, false);
+                self.retryConstructionAfterFailure(err);
+                return;
+            };
+        }
+        defer if (request.command == null) replies.mutex.unlock(self.io);
+        var reply: extraction_zone_commands.Result = .{ .request_id = request.request_id, .command = request.command, .status = .success };
+        if (self.tryRegisterExtractionZone(request.registration)) |record| {
+            reply.zone_id = record.id;
+        } else |err| {
+            if ((err == error.DependencyPending and !self.terminal_read_failure) or err == error.CapturePending or err == error.JournalBackpressure) {
+                self.deferExtractionZone(request, err == error.JournalBackpressure);
+                if (err == error.JournalBackpressure) self.drainBlueprintJournal();
+                return;
+            }
+            reply.status = switch (err) {
+                error.InvalidFilter => .empty_filter,
+                error.InvalidBounds => .invalid_bounds,
+                error.CellBudget, error.Overflow => .cell_budget,
+                error.ChunkBudget => .chunk_budget,
+                error.ConflictingClaim => .overlap,
+                error.MissingData, error.DependencyPending => .missing_data,
+                else => .resource_exhausted,
+            };
+        }
+        if (request.command != null) {
+            self.completeExternal(request.client, request.command, .{ .extraction_zone = reply });
+            self.extraction_zone_delivery_pending = true;
+        } else {
+            replies.items.appendAssumeCapacity(reply);
+            replies.not_empty.signal(self.io);
+        }
+        self.read_discovered = false;
+        request.client.resolved_request = request.request_id;
+        if (request.counted) _ = self.outstanding_operations.fetchSub(1, .release);
+        self.applyEligibleCheckpoint(request.client);
+    }
+
+    fn deferExtractionZone(self: *WorldDataService, request: ExtractionZoneRequest, journal: bool) void {
+        self.pending.pushFront(self.allocator, .{
+            .request = .{ .register_extraction_zone = request },
+            .since = self.processing_since orelse persistence.now(self.io),
+            .waiting_for_journal = journal,
+        }) catch @panic("OOM");
+        self.operation_deferred = true;
+    }
+
+    fn flushExtractionZoneOutcomes(self: *WorldDataService) void {
+        if (!self.extraction_zone_delivery_pending) return;
+        self.extraction_zone_delivery_pending = false;
+        self.requests.mutex.lockUncancelable(self.io);
+        defer self.requests.mutex.unlock(self.io);
+        for (self.clients.items) |client| for (client.command_ledger.records.items) |*record| {
+            if (record.delivered) continue;
+            const outcome = record.outcome orelse continue;
+            if (outcome != .extraction_zone) continue;
+            client.extraction_zone_results.tryPush(self.io, self.allocator, outcome.extraction_zone) catch |err| {
+                self.extraction_zone_delivery_pending = true;
+                self.retryConstructionAfterFailure(err);
+                continue;
+            };
+            record.delivered = true;
+        };
+    }
+
+    fn tryRegisterExtractionZone(self: *WorldDataService, registration: extraction_zone_commands.Registration) !extraction_zone_state.Record {
+        if (self.is_shutting_down.load(.acquire)) return error.ServiceStopped;
+        try self.extractionZoneRegistrationAllowed(registration);
+        const state = &self.worker_state;
+        const world_size = self.layout.size_in_blocks;
+        const bounds = registration.bounds;
+        var touched: std.ArrayList(ChunkId) = .empty;
+        defer touched.deinit(self.allocator);
+        var chunks = bounds.chunks(world_size);
+        while (chunks.next()) |coords| try touched.append(self.allocator, self.layout.encodeChunkCoords(@bitCast(coords)));
+        try self.extractionZoneTerrainCapacity(touched.items);
+        for (touched.items) |id| if (self.source_holds.contains(id)) {
+            if (self.job) |job| job.prioritize(touched.items);
+            return error.CapturePending;
+        };
+        // Check every persisted source before promotion. Each admitted registration
+        // revalidates after a dependency wait and before the physical transfer.
+        for (touched.items) |id| if (!self.requireBase(id)) {
+            if (self.terminal_read_failure) return error.MissingData;
+            return error.DependencyPending;
+        };
+        for (touched.items) |id| try state.ensureResident(self.allocator, self.layout.decodeChunkId(id));
+        for (touched.items) |id| try self.finishExtractionGrassInitialization(bounds, id);
+        try self.extractionZoneRegistrationAllowed(registration);
+
+        var cells: std.ArrayList(extraction_zone_state.SourceCell) = .empty;
+        defer cells.deinit(self.allocator);
+        for (touched.items) |id| {
+            const coords = self.layout.decodeChunkId(id);
+            const chunk = state.modified_chunks.getPtr(id).?;
+            _ = try std.math.add(u64, chunk.chunk_revision, 1);
+            try self.collectExtractionZoneCells(bounds, coords, chunk, &cells);
+        }
+        try self.ensureExtractionZoneSaveCapacity(bounds, cells.items, touched.items);
+        try state.surface_revisions.ensureUnusedCapacity(self.allocator, @intCast(touched.items.len));
+        try self.dirty_surfaces.ensureUnusedCapacity(self.allocator, @intCast(touched.items.len));
+        const revision = try std.math.add(u64, state.next_surface_revision, 1);
+        const live = state.liveAllocator(self.allocator);
+        const record = try state.zones.register(live, bounds, registration.filter, self.limits.extraction_zone_budgets, cells.items);
+
+        // The zone state registration and the terrain part commit on one worker
+        // turn. No allocation, save capture or publication can split the handoff.
+        for (cells.items) |sample| {
+            const coords, const local = world_module.splitBlockCoords(sample.cell);
+            const chunk = state.modified_chunks.getPtr(self.layout.encodeChunkCoords(coords)).?;
+            chunk.content.blocks.blocks[local[2]][local[1]][local[0]] = .none;
+        }
+        state.next_surface_revision = revision;
+        for (touched.items) |id| {
+            const coords = self.layout.decodeChunkId(id);
+            const chunk = state.modified_chunks.getPtr(id).?;
+            clearExtractionZoneMetadata(bounds, world_size[0], coords, chunk);
+            if (chunk.content == .blocks) {
+                const recomputed = WorldChunk.initBlocks(chunk.content.blocks);
+                const was_unreachable = chunk.flags.is_unreachable;
+                chunk.flags = recomputed.flags;
+                chunk.flags.is_unreachable = was_unreachable;
+                chunk.boundaries = recomputed.boundaries;
+                chunk.solid_block_count = recomputed.solid_block_count;
+                if (chunk.solid_block_count == 0) {
+                    chunk.content.deinit(live);
+                    chunk.content = .empty;
+                }
+            }
+            chunk.chunk_revision += 1;
+            state.surface_revisions.putAssumeCapacity(id, revision);
+            if (!WorkerState.hasExecutableTimer(chunk.*)) _ = state.timed_chunks.remove(id);
+            self.publishMaterialChange(coords);
+        }
+        self.lifecycle.unsaved_work = true;
+        return record;
+    }
+
+    fn extractionZoneTerrainCapacity(self: *const WorldDataService, touched: []const ChunkId) !void {
+        if (self.store == null) return;
+        if (touched.len > self.limits.manifest_entries) return error.Capacity;
+        var dirty: usize = 0;
+        var chunks = self.worker_state.modified_chunks.iterator();
+        while (chunks.next()) |entry| {
+            const revision = entry.value_ptr.chunk_revision;
+            if (revision != 0 and self.wal_revisions.get(entry.key_ptr.*) != revision) dirty += 1;
+        }
+        if (dirty > self.limits.manifest_entries) return error.Capacity;
+        for (touched) |id| {
+            const revision = if (self.worker_state.modified_chunks.getPtr(id)) |chunk| chunk.chunk_revision else 0;
+            if (revision == 0 or self.wal_revisions.get(id) == revision) dirty += 1;
+        }
+        if (dirty > self.limits.manifest_entries) return error.JournalBackpressure;
+    }
+
+    fn finishExtractionGrassInitialization(self: *WorldDataService, bounds: extraction_zone.Bounds, id: ChunkId) !void {
+        const coords = self.layout.decodeChunkId(id);
+        const width = self.layout.size_in_blocks[0];
+        const chunk = self.worker_state.modified_chunks.getPtr(id).?;
+        // A single construction/chunk initialization may consume several markers.
+        while (true) {
+            const instance_id = for (chunk.metadata.timed.events.items) |event| {
+                if (event.kind == .initialize_grass and bounds.contains(width, absoluteCell(coords, event.block))) break event.due_tick;
+            } else return;
+            const slot = for (self.construction_grass.items, 0..) |work, index| {
+                if (work.instance.id == instance_id and work.chunk_id == id) break index;
+            } else return error.MissingData;
+            try self.finishConstructionGrass(slot);
+        }
+    }
+
+    fn collectExtractionZoneCells(self: *WorldDataService, bounds: extraction_zone.Bounds, coords: ChunkCoords, chunk: *const WorldChunk, cells: *std.ArrayList(extraction_zone_state.SourceCell)) !void {
+        if (chunk.content == .empty) return;
+        const width = self.layout.size_in_blocks[0];
+        const missing = std.math.maxInt(u32);
+        var sample_index: [CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE]u32 = @splat(missing);
+        for (std.mem.asBytes(&chunk.content.blocks.blocks), 0..) |raw, index| {
+            const material: rules.BlockType = @enumFromInt(raw);
+            if (material == .none or material == .deeprock) continue;
+            const cell = absoluteCell(coords, @intCast(index));
+            if (!bounds.contains(width, cell)) continue;
+            sample_index[index] = std.math.cast(u32, cells.items.len) orelse return error.Overflow;
+            try cells.append(self.allocator, .{ .cell = cell, .value = .{ .material = material } });
+        }
+        for (chunk.metadata.constructed.items) |index| if (sample_index[index] != missing) {
+            cells.items[sample_index[index]].value.constructed = true;
+        };
+        for (chunk.metadata.roads.items) |road| if (sample_index[road.index] != missing) {
+            cells.items[sample_index[road.index]].value.slope = road.slope;
+        };
+        for (chunk.metadata.timed.events.items) |event| if (sample_index[event.block] != missing) {
+            if (event.kind != .grow_grass) return error.MissingData;
+            const value = &cells.items[sample_index[event.block]].value;
+            if (value.material == .dirt) value.grass_due = event.due_tick;
+        };
+    }
+
+    fn clearExtractionZoneMetadata(bounds: extraction_zone.Bounds, width: u32, coords: ChunkCoords, chunk: *WorldChunk) void {
+        var constructed: usize = 0;
+        for (chunk.metadata.constructed.items) |index| {
+            if (bounds.contains(width, absoluteCell(coords, index))) continue;
+            chunk.metadata.constructed.items[constructed] = index;
+            constructed += 1;
+        }
+        chunk.metadata.constructed.items.len = constructed;
+        var roads: usize = 0;
+        for (chunk.metadata.roads.items) |road| {
+            if (bounds.contains(width, absoluteCell(coords, road.index))) continue;
+            chunk.metadata.roads.items[roads] = road;
+            roads += 1;
+        }
+        chunk.metadata.roads.items.len = roads;
+        var timers: usize = 0;
+        for (chunk.metadata.timed.events.items) |event| {
+            if (bounds.contains(width, absoluteCell(coords, event.block))) continue;
+            chunk.metadata.timed.events.items[timers] = event;
+            timers += 1;
+        }
+        chunk.metadata.timed.events.items.len = timers;
     }
 
     fn warehouseCellInReach(self: *const WorldDataService, viewpoint: [3]f64, cell: [3]u32) bool {
@@ -2457,7 +3012,9 @@ pub const WorldDataService = struct {
             if (edit.client.registered_player_id != id or !self.players.contains(id)) return error.InvalidActor;
         }
         if (payload.action == .register) {
-            const record = try state.register(self.allocator, geometry orelse return error.InvalidGeometry, payload.action.register.material);
+            const candidate = geometry orelse return error.InvalidGeometry;
+            if (self.worker_state.zones.intersects(warehouseEnvelope(self.layout.size_in_blocks, candidate))) return error.ConflictingClaim;
+            const record = try state.register(self.allocator, candidate, payload.action.register.material);
             self.warehouseDiscoveryChanged(record.geometry);
             result.warehouse = record;
             return result;
@@ -3377,6 +3934,41 @@ pub const WorldDataService = struct {
         if (try self.persistedConstructionBytes() > saved.limits.blueprints.max_state_bytes) return error.Capacity;
     }
 
+    fn restoreExtractionZones(self: *WorldDataService, saved: *storage.Store) !void {
+        const world_size = self.layout.size_in_blocks;
+        const live = self.worker_state.liveAllocator(self.allocator);
+        var zones = try zone_wire.decodeState(live, saved.zones, world_size, saved.limits.zones);
+        errdefer zones.deinit(live);
+        if (zones.records.items.len != 0) {
+            const constructions = &self.worker_state.blueprints;
+            var instances = constructions.instances.valueIterator();
+            while (instances.next()) |instance| {
+                if (!instance.active) continue;
+                const definition = constructions.definitions.get(instance.definition_id) orelse return error.InvalidExtractionZoneTerrain;
+                if (zones.intersects(.{ .min = instance.origin, .size = blueprint.rotatedSize(definition.definition.size, instance.rotation) })) return error.InvalidExtractionZoneTerrain;
+            }
+            var terrain: RestoreTerrain = .{ .service = self, .store = saved };
+            defer terrain.deinit();
+            var chunks = zones.by_chunk.keyIterator();
+            while (chunks.next()) |coords| {
+                if (!saved.index.contains(self.layout.encodeChunkCoords(@bitCast(coords.*)))) return error.InvalidExtractionZoneTerrain;
+            }
+            for (zones.records.items) |zone| {
+                var cells = zone.bounds.cells(world_size[0]);
+                while (cells.next()) |cell| {
+                    const raw: rules.BlockType = @enumFromInt(try terrain.get(cell));
+                    const immutable = self.worker_state.generator.isCanonicalDeeprock(cell);
+                    if (immutable) {
+                        if (raw != .deeprock or zones.cellAt(cell) != null) return error.InvalidExtractionZoneTerrain;
+                    } else if (raw != .none) return error.InvalidExtractionZoneTerrain;
+                }
+            }
+        }
+        self.worker_state.zones.deinit(live);
+        self.worker_state.zones = zones;
+        self.durable_zone_revision = zones.revision;
+    }
+
     fn restoreWarehouses(self: *WorldDataService, saved: *storage.Store) !void {
         var state = try warehouse_wire.decodeState(self.allocator, saved.warehouses, @bitCast(self.layout.size_in_blocks), self.world_session, saved.limits.warehouses);
         errdefer state.deinit(self.allocator);
@@ -3385,6 +3977,7 @@ pub const WorldDataService = struct {
         var records = state.records.valueIterator();
         while (records.next()) |record| {
             const geometry = record.geometry;
+            if (self.worker_state.zones.intersects(warehouseEnvelope(self.layout.size_in_blocks, geometry))) return error.InvalidWarehouseTerrain;
             const inset = self.worker_state.generator.playableYInset();
             const ymin = @as(i64, geometry.origin[1]) + geometry.bounds.ymin - 1;
             const ymax = @as(i64, geometry.origin[1]) + geometry.bounds.ymax + 1;
@@ -3417,6 +4010,7 @@ pub const WorldDataService = struct {
     }
 
     fn restoredWarehouseMaterial(self: *WorldDataService, terrain: *RestoreTerrain, cell: [3]u32) !rules.BlockType {
+        if (self.worker_state.zones.cellAt(cell)) |owned| return owned.material;
         return switch (self.worker_state.blueprints.physicalAt(cell)) {
             .unknown => error.InvalidWarehouseTerrain,
             .material => |material| material,
@@ -3453,6 +4047,7 @@ pub const WorldDataService = struct {
         const saved = state.definitions.get(apply.definition_id) orelse return error.UnknownDefinition;
         if (saved.owner != apply.owner or !self.players.contains(apply.owner)) return error.WrongOwner;
         if (!blueprint_runtime.validFootprint(self.layout, apply.origin, saved.definition.size, apply.rotation)) return error.InvalidFootprint;
+        if (self.worker_state.zones.intersects(.{ .min = apply.origin, .size = blueprint.rotatedSize(saved.definition.size, apply.rotation) })) return error.Overlap;
         const limits = if (self.store) |store| store.limits.blueprints else blueprint_wire.Limits{};
         if (state.instances.count() >= limits.max_instances) return error.Capacity;
         const id = try std.math.add(u64, state.max_instance_id, 1);
@@ -3671,6 +4266,7 @@ pub const WorldDataService = struct {
             if (sources > self.limits.manifest_entries) return error.JournalBackpressure;
         }
         const proposed = prepared.publication.instance;
+        if (self.worker_state.zones.intersects(.{ .min = proposed.origin, .size = blueprint.rotatedSize(task.definition.size, proposed.rotation) })) return error.Overlap;
         try self.checkWarehouseBlueprintTargets(task.definition, proposed);
         try self.reserveBlueprintJournalWithTerrain(.{ .instance = .{ .id = proposed.id, .definition_id = proposed.definition_id, .owner = proposed.owner, .origin = proposed.origin, .rotation = proposed.rotation } }, additional_chunks);
         var native = try self.constructionWindow(0);
@@ -3701,8 +4297,18 @@ pub const WorldDataService = struct {
         try replies.items.ensureUnusedCapacity(self.allocator, 1);
         for (soil.changes.items) |change| {
             const coords, const local = world_module.splitBlockCoords(change.block);
-            const chunk = self.worker_state.modified_chunks.getPtr(self.layout.encodeChunkCoords(coords)).?;
-            if (change.clear_grass) chunk.changeType(local, .dirt);
+            const id = self.layout.encodeChunkCoords(coords);
+            const chunk = self.worker_state.modified_chunks.getPtr(id).?;
+            if (self.worker_state.zones.cellAt(change.block) != null) {
+                if (change.cancel_grow) self.worker_state.zones.setGrassAssumeCapacity(change.block, null);
+                if (change.clear_grass) {
+                    self.worker_state.zones.setSoilMaterial(change.block, .dirt);
+                    chunk.cell_changes.record(transformations.index(local));
+                }
+            } else {
+                if (change.clear_grass) chunk.changeType(local, .dirt);
+                self.markRawTerrainPending(id);
+            }
         }
         self.worker_state.next_surface_revision = surface_revision;
         for (soil.chunk_ids.items) |id| {
@@ -3711,7 +4317,7 @@ pub const WorldDataService = struct {
             chunk.chunk_revision += 1;
             self.worker_state.surface_revisions.putAssumeCapacity(id, surface_revision);
             if (!WorkerState.hasExecutableTimer(chunk.*)) _ = self.worker_state.timed_chunks.remove(id);
-            self.publishMaterialChange(self.layout.decodeChunkId(id));
+            self.publishSurfaceChange(self.layout.decodeChunkId(id));
         }
         const instance = prepared.publication.instance;
         state.publishPublication(&prepared.publication);
@@ -3935,20 +4541,24 @@ pub const WorldDataService = struct {
             self.construction_grass_cursor %= self.construction_grass.items.len;
             const slot = self.construction_grass_cursor;
             self.construction_grass_cursor += 1;
-            self.initializeConstructionGrass(self.construction_grass.items[slot]) catch |err| {
+            self.finishConstructionGrass(slot) catch |err| {
                 self.retryConstructionAfterFailure(err);
                 if (err == error.JournalBackpressure) self.drainBlueprintJournal();
                 if (err != error.DependencyPending and err != error.CapturePending and err != error.JournalBackpressure) self.noteDeferredWorkFailure(err);
                 if (self.construction_grass_attempts != 0) self.construction_waiting = false;
                 return;
             };
-            const prior_grass_count = self.construction_grass.items.len;
-            _ = self.construction_grass.swapRemove(slot);
-            if (self.blueprint_persisted_budget) |cached| {
-                if (cached.grass_count == prior_grass_count) self.retainPersistedConstructionBudget(cached.bytes - @sizeOf(blueprint_wire.GrassInitialization)) else self.blueprint_persisted_budget = null;
-            }
             // Completing deferred work can release a capacity barrier for another site.
             self.wakeConstructionWork();
+        }
+    }
+
+    fn finishConstructionGrass(self: *WorldDataService, slot: usize) !void {
+        try self.initializeConstructionGrass(self.construction_grass.items[slot]);
+        const prior_grass_count = self.construction_grass.items.len;
+        _ = self.construction_grass.swapRemove(slot);
+        if (self.blueprint_persisted_budget) |cached| {
+            if (cached.grass_count == prior_grass_count) self.retainPersistedConstructionBudget(cached.bytes - @sizeOf(blueprint_wire.GrassInitialization)) else self.blueprint_persisted_budget = null;
         }
     }
 
@@ -4106,13 +4716,7 @@ pub const WorldDataService = struct {
             const seed = @import("block_coordinates.zig").fromStorage(self.layout, center + offset + rules.Cell{ 0, 0, @intCast(level) }) orelse continue;
             const coords, _ = world_module.splitBlockCoords(seed);
             const id = self.layout.encodeChunkCoords(coords);
-            const possible = if (self.worker_state.modified_chunks.get(id)) |chunk|
-                chunk.metadata.roads.items.len != 0
-            else if (self.catalog) |catalog|
-                catalog.revision(id) != null
-            else
-                false;
-            if (possible) batch.add(id);
+            if (self.chunkMayHaveRoads(coords, id)) batch.add(id);
         };
         const limit = if (self.store) |saved| saved.limits.max_pending_work else blueprint_road_updates.capacity;
         try self.blueprint_road_queue.reserveWithLimit(self.allocator, batch, limit);
@@ -4125,17 +4729,18 @@ pub const WorldDataService = struct {
         for (0..2) |level| for (offsets) |offset| {
             const candidate = self.layout.normalizeChunkCoords(coords + offset + ChunkCoords{ 0, 0, @intCast(level) }) orelse continue;
             const id = self.layout.encodeChunkCoords(candidate);
-            const possible = if (self.worker_state.modified_chunks.get(id)) |chunk|
-                chunk.metadata.roads.items.len != 0
-            else if (self.catalog) |catalog|
-                catalog.revision(id) != null
-            else
-                false;
-            if (possible) batch.add(id);
+            if (self.chunkMayHaveRoads(candidate, id)) batch.add(id);
         };
         const limit = if (self.store) |saved| saved.limits.max_pending_work else blueprint_road_updates.capacity;
         try self.blueprint_road_queue.reserveWithLimit(self.allocator, batch, limit);
         return batch;
+    }
+
+    fn chunkMayHaveRoads(self: *const WorldDataService, coords: ChunkCoords, id: ChunkId) bool {
+        if (self.worker_state.zones.chunk(@bitCast(coords))) |zone| if (zone.roads.items.len != 0) return true;
+        if (self.worker_state.modified_chunks.get(id)) |chunk| return chunk.metadata.roads.items.len != 0;
+        if (self.catalog) |catalog| return catalog.revision(id) != null;
+        return false;
     }
 
     fn commitBlueprintRoadUpdates(self: *WorldDataService, batch: blueprint_road_updates.Batch) void {
@@ -4187,7 +4792,9 @@ pub const WorldDataService = struct {
             return true;
         };
         self.blueprint_road_queue.observeRevision(chunk.chunk_revision);
-        if (entry.cursor >= chunk.metadata.roads.items.len) {
+        const coords = self.layout.decodeChunkId(entry.id);
+        const owned_roads = if (self.worker_state.zones.chunk(@bitCast(coords))) |zone| zone.roads.items else &.{};
+        if (entry.cursor >= chunk.metadata.roads.items.len + owned_roads.len) {
             self.clearDeferredWorkFailure();
             if (self.blueprint_road_queue.finish()) {
                 self.processing_deferred_work = false;
@@ -4195,14 +4802,13 @@ pub const WorldDataService = struct {
             }
             return true;
         }
-        const road = chunk.metadata.roads.items[entry.cursor];
-        const coords = self.layout.decodeChunkId(entry.id);
-        const local = transformations.coordinates(road.index);
-        const block: [3]u32 = .{
-            @as(u32, @intCast(coords[0])) * CHUNK_SIZE + local[0],
-            @as(u32, @intCast(coords[1])) * CHUNK_SIZE + local[1],
-            @as(u32, @intCast(coords[2])) * CHUNK_SIZE + local[2],
+        const road: @import("road_data.zig").Road = if (entry.cursor < chunk.metadata.roads.items.len)
+            chunk.metadata.roads.items[entry.cursor]
+        else owned: {
+            const index = owned_roads[entry.cursor - chunk.metadata.roads.items.len];
+            break :owned .{ .index = index, .slope = self.worker_state.zones.cellAt(absoluteCell(coords, index)).?.slope };
         };
+        const block = absoluteCell(coords, road.index);
         self.tryProcessBlueprintRoadSeed(block, road) catch |err| {
             self.blueprint_road_waiting = true;
             if (err != error.DependencyPending and err != error.CapturePending) self.noteDeferredWorkFailure(err);
@@ -4220,7 +4826,7 @@ pub const WorldDataService = struct {
         var read: ReadContext = .{ .state = &self.worker_state, .allocator = self.allocator };
         defer read.deinit();
         self.worker_state.road_changes.clearRetainingCapacity();
-        const context: roads.Context = .{ .allocator = self.allocator, .reader = read.reader(), .chunks = &self.worker_state.modified_chunks, .changed = &self.worker_state.road_changes, .max_plan_changes = self.limits.manifest_entries };
+        const context: roads.Context = .{ .allocator = self.allocator, .reader = read.reader(), .chunks = &self.worker_state.modified_chunks, .changed = &self.worker_state.road_changes, .owned_road_slope = ReadContext.ownedRoadSlope, .max_plan_changes = self.limits.manifest_entries };
         var plan = try context.planAfterEdit(.{ .block = block, .action = .{ .put = .custom } }, previous);
         defer plan.deinit(self.allocator);
         if (read.failure) |err| return err;
@@ -4237,15 +4843,18 @@ pub const WorldDataService = struct {
         try self.worker_state.surface_revisions.ensureUnusedCapacity(self.allocator, @intCast(additional));
         try self.dirty_surfaces.ensureUnusedCapacity(self.allocator, @intCast(additional));
         const surface_revision = try std.math.add(u64, self.worker_state.next_surface_revision, 1);
-        for (plan.chunk_ids) |id| _ = try std.math.add(u64, self.worker_state.modified_chunks.get(id).?.chunk_revision, 1);
+        for (plan.chunk_ids) |id| {
+            try self.worker_state.ensureResident(self.allocator, self.layout.decodeChunkId(id));
+            _ = try std.math.add(u64, self.worker_state.modified_chunks.get(id).?.chunk_revision, 1);
+        }
         // All fallible work precedes these metadata/revision/publication writes.
-        plan.applyPrepared(context);
+        self.worker_state.applyRoadPlan(plan, context, self, null);
         self.worker_state.next_surface_revision = surface_revision;
         for (plan.chunk_ids) |id| {
             self.worker_state.modified_chunks.getPtr(id).?.chunk_revision += 1;
             self.worker_state.surface_revisions.putAssumeCapacity(id, surface_revision);
             const changed = self.layout.decodeChunkId(id);
-            self.publishMaterialChange(changed);
+            self.publishSurfaceChange(changed);
             for (std.enums.values(Side)) |side| {
                 const neighbor = world_module.adjacentChunk(self.layout, changed, side) orelse continue;
                 const neighbor_id = self.layout.encodeChunkCoords(neighbor);
@@ -4276,13 +4885,23 @@ pub const WorldDataService = struct {
     }
 
     fn publishMaterialChange(self: *WorldDataService, coords: ChunkCoords) void {
+        self.publishSurfaceChange(coords);
+        self.markRawTerrainPending(self.layout.encodeChunkCoords(coords));
+    }
+
+    fn publishSurfaceChange(self: *WorldDataService, coords: ChunkCoords) void {
         const id = self.layout.encodeChunkCoords(coords);
         self.dirty_surfaces.put(self.allocator, id, {}) catch @panic("OOM");
         for (self.clients.items) |client| {
             const sub = client.subscriptions.getPtr(id) orelse continue;
-            if (sub.mode == .surface) {
-                sub.surface_pending = true;
-            } else sub.blocks_pending = true;
+            if (sub.mode == .surface) sub.surface_pending = true;
+        }
+    }
+
+    fn markRawTerrainPending(self: *WorldDataService, id: ChunkId) void {
+        for (self.clients.items) |client| {
+            const sub = client.subscriptions.getPtr(id) orelse continue;
+            if (sub.mode == .blocks) sub.blocks_pending = true;
         }
     }
 
@@ -4380,7 +4999,7 @@ pub const WorldDataService = struct {
     /// are at most twelve cells, their candidate seeds add one, and revelation reaches
     /// one face neighbor. Include all z planes touched by covering/uncovering soil.
     fn admissible(self: *WorldDataService, request: Request) bool {
-        if (request == .operation or request == .blueprint_save or request == .blueprint_apply or request == .warehouse) {
+        if (request == .operation or request == .blueprint_save or request == .blueprint_apply or request == .warehouse or request == .register_extraction_zone) {
             if (self.blueprint_task != null) return false;
         }
         if (request != .operation) return true;
@@ -4534,6 +5153,38 @@ pub const WorldDataService = struct {
         self.requests.not_empty.signal(self.io);
     }
 
+    fn ensureExtractionZoneSaveCapacity(self: *const WorldDataService, bounds: extraction_zone.Bounds, cells: []const extraction_zone_state.SourceCell, touched: []const ChunkId) !void {
+        const store = self.store orelse return;
+        const zone = try zone_wire.admissionBound(&self.worker_state.zones, bounds, cells, store.limits.zones);
+        var sources: usize = 0;
+        var scratch: usize = 0;
+        var output: usize = 0;
+        var modified = self.worker_state.modified_chunks.iterator();
+        while (modified.next()) |entry| {
+            const id = entry.key_ptr.*;
+            const chunk = entry.value_ptr;
+            const dirty = chunk.chunk_revision != 0 and self.wal_revisions.get(id) != chunk.chunk_revision;
+            if (!dirty and std.mem.indexOfScalar(ChunkId, touched, id) == null) continue;
+            sources += 1;
+            const source = persistence.Source.freeze(id, 0, chunk);
+            scratch = @max(scratch, try persistence.scratchBound(source));
+            output = @max(output, try persistence.outputBound(source));
+        }
+        if (output > self.limits.output_bytes) return error.OutputCapacityTooSmall;
+        var required = try self.captureWorkingOverhead(sources, scratch);
+        required = try std.math.add(usize, required, output);
+        required = try std.math.add(usize, required, try self.blueprintJournalMemory(self.blueprint_journal_summary, self.blueprint_journal.capacity));
+        if (self.worker_state.warehouses.revision != self.durable_warehouse_revision) {
+            const warehouses = self.worker_state.warehouses.records.count();
+            const deliveries = self.worker_state.warehouses.delivery_state.records.count();
+            required = try std.math.add(usize, required, try std.math.mul(usize, 2, try warehouse_wire.encodedSize(warehouses, deliveries)));
+            required = try std.math.add(usize, required, try warehouse_wire.preparationMemoryBoundCounts(warehouses, deliveries, store.limits.warehouses));
+        }
+        required = try std.math.add(usize, required, try std.math.mul(usize, 2, zone.size));
+        required = try std.math.add(usize, required, zone.scratch);
+        if (required > self.limits.working_bytes) return error.WorkingCapacityExceeded;
+    }
+
     fn beginCapture(self: *WorldDataService, intent: u64, final: bool) !void {
         // Freeze pending obligations with the same terrain/progress prefix.
         defer self.updateSimulationPause();
@@ -4554,6 +5205,10 @@ pub const WorldDataService = struct {
         const warehouse_snapshot_bytes = if (warehouse_changed) try warehouse_wire.encodedSize(self.worker_state.warehouses.records.count(), self.worker_state.warehouses.delivery_state.records.count()) else 0;
         const warehouse_prepare_bytes = if (warehouse_changed) try warehouse_wire.preparationMemoryBoundCounts(self.worker_state.warehouses.records.count(), self.worker_state.warehouses.delivery_state.records.count(), store.limits.warehouses) else 0;
         const warehouse_capture_bytes = try std.math.add(usize, try std.math.mul(usize, warehouse_snapshot_bytes, 2), warehouse_prepare_bytes);
+        const zone_changed = self.worker_state.zones.revision != self.durable_zone_revision;
+        const zone_snapshot_bytes = if (zone_changed) try zone_wire.encodedSize(&self.worker_state.zones, store.limits.zones) else 0;
+        const zone_scratch = if (zone_changed) try zone_wire.encodingScratchBound(&self.worker_state.zones) else 0;
+        const zone_capture_bytes = try std.math.mul(usize, zone_snapshot_bytes, 2);
         for (self.clients.items) |client| {
             client.checkpoint_mutex.lockUncancelable(self.io);
             if (client.latest_checkpoint) |latest| {
@@ -4586,6 +5241,7 @@ pub const WorldDataService = struct {
         preflight_bytes = try std.math.add(usize, preflight_bytes, blueprint_prepare_bytes);
         preflight_bytes = try std.math.add(usize, preflight_bytes, journal_capacity_bytes);
         preflight_bytes = try std.math.add(usize, preflight_bytes, warehouse_capture_bytes);
+        preflight_bytes = try std.math.add(usize, preflight_bytes, try std.math.add(usize, zone_capture_bytes, zone_scratch));
         // A bounded smaller queue lets an admitted journal drain without
         // dropping operations or separating blueprint progress from terrain.
         var job_limits = self.limits;
@@ -4604,6 +5260,8 @@ pub const WorldDataService = struct {
         errdefer self.allocator.free(pending_work);
         const warehouse_snapshot = if (warehouse_changed) try warehouse_wire.encodeState(self.allocator, &self.worker_state.warehouses, store.limits.warehouses) else null;
         errdefer if (warehouse_snapshot) |bytes| self.allocator.free(bytes);
+        const zone_snapshot = if (zone_changed) try zone_wire.encodeState(self.allocator, &self.worker_state.zones, store.limits.zones) else null;
+        errdefer if (zone_snapshot) |bytes| self.allocator.free(bytes);
         var sources: std.ArrayList(persistence.Source) = .empty;
         errdefer sources.deinit(self.allocator);
         try sources.ensureTotalCapacityPrecise(self.allocator, source_count);
@@ -4643,9 +5301,9 @@ pub const WorldDataService = struct {
         const bookkeeping = try std.math.add(usize, try std.math.mul(usize, self.completion_ring.capacity, @sizeOf(persistence.Event)), try std.math.add(usize, try std.math.mul(usize, self.source_holds.capacity(), @sizeOf(u32) + @sizeOf(u64) + 16), try std.math.add(usize, try std.math.mul(usize, sources.capacity, @sizeOf(persistence.Source)), try std.math.add(usize, player_ids.len * @sizeOf(u64), 256))));
         const frozen = try sources.toOwnedSlice(self.allocator);
         errdefer self.allocator.free(frozen);
-        job.* = .{ .allocator = self.allocator, .io = self.io, .store = store, .store_mutex = &self.store_mutex, .limits = job_limits, .notify = .{ .context = self, .send = notifyPersistence }, .epoch = self.capture_epoch, .sequence = try std.math.add(u64, self.status.durable_sequence, 1), .tick = self.worker_state.tick, .final = final, .sources = frozen, .players = players, .player_count = self.players.count(), .blueprint_changes = blueprint_changes, .blueprint_summary = blueprint_summary, .blueprint_journal_reserved_bytes = journal_capacity_bytes, .pending_work = pending_work, .warehouse_snapshot = warehouse_snapshot };
+        job.* = .{ .allocator = self.allocator, .io = self.io, .store = store, .store_mutex = &self.store_mutex, .limits = job_limits, .notify = .{ .context = self, .send = notifyPersistence }, .epoch = self.capture_epoch, .sequence = try std.math.add(u64, self.status.durable_sequence, 1), .tick = self.worker_state.tick, .final = final, .sources = frozen, .players = players, .player_count = self.players.count(), .blueprint_changes = blueprint_changes, .blueprint_summary = blueprint_summary, .blueprint_journal_reserved_bytes = journal_capacity_bytes, .pending_work = pending_work, .warehouse_snapshot = warehouse_snapshot, .zone_snapshot = zone_snapshot };
         const job_manifest = try std.math.mul(usize, source_count, @sizeOf(persistence.Source) + 2 + @sizeOf([]u8));
-        const job_baseline = try std.math.add(usize, warehouse_capture_bytes, try std.math.add(usize, try std.math.add(usize, blueprint_prepare_bytes, try persistence.pendingWorkMemoryBound(pending_work.len)), try std.math.add(usize, job_limits.output_bytes, try std.math.add(usize, job_manifest, try std.math.add(usize, players.len + blueprint_changes.len, try std.math.add(usize, scratch_peak, @sizeOf(persistence.Job)))))));
+        const job_baseline = try std.math.add(usize, try std.math.add(usize, warehouse_capture_bytes, zone_capture_bytes), try std.math.add(usize, try std.math.add(usize, blueprint_prepare_bytes, try persistence.pendingWorkMemoryBound(pending_work.len)), try std.math.add(usize, job_limits.output_bytes, try std.math.add(usize, job_manifest, try std.math.add(usize, players.len + blueprint_changes.len, try std.math.add(usize, scratch_peak, @sizeOf(persistence.Job)))))));
         job.extra_working_bytes = @max(bookkeeping, preflight_bytes - job_baseline);
         for (frozen) |source| self.source_holds.putAssumeCapacity(source.id, source.revision);
         errdefer self.source_holds.clearRetainingCapacity();
@@ -4655,6 +5313,7 @@ pub const WorldDataService = struct {
         self.lifecycle.started(.{ .id = intent, .final = final }, job.epoch, started);
         self.captured_player_generation = self.player_generation;
         self.captured_warehouse_revision = if (warehouse_changed) self.worker_state.warehouses.revision else null;
+        self.captured_zone_revision = if (zone_changed) self.worker_state.zones.revision else null;
         self.captured_work_generation = self.blueprint_road_queue.generation;
         self.captured_blueprint_operations = self.blueprint_journal.items.len;
         self.captured_blueprint_summary = blueprint_summary;
@@ -4702,6 +5361,8 @@ pub const WorldDataService = struct {
                 self.status.wal_committed_ns = committed_at;
                 if (self.captured_warehouse_revision) |revision| self.durable_warehouse_revision = revision;
                 self.captured_warehouse_revision = null;
+                if (self.captured_zone_revision) |revision| self.durable_zone_revision = revision;
+                self.captured_zone_revision = null;
                 for (job.sources) |source| self.wal_revisions.putAssumeCapacity(source.id, source.revision);
                 const committed_ops = self.captured_blueprint_operations;
                 std.debug.assert(committed_ops <= self.blueprint_journal.items.len);
@@ -4725,7 +5386,7 @@ pub const WorldDataService = struct {
                     self.blueprint_journal.deinit(self.allocator);
                     self.blueprint_journal = .empty;
                 }
-                self.lifecycle.unsaved_work = self.player_generation != self.captured_player_generation or remaining_ops != 0 or self.blueprint_road_queue.generation != self.captured_work_generation or self.worker_state.warehouses.revision != self.durable_warehouse_revision;
+                self.lifecycle.unsaved_work = self.player_generation != self.captured_player_generation or remaining_ops != 0 or self.blueprint_road_queue.generation != self.captured_work_generation or self.worker_state.warehouses.revision != self.durable_warehouse_revision or self.worker_state.zones.revision != self.durable_zone_revision;
                 var live = self.worker_state.modified_chunks.iterator();
                 while (live.next()) |entry| if (self.wal_revisions.get(entry.key_ptr.*) != entry.value_ptr.chunk_revision) {
                     self.lifecycle.unsaved_work = true;
@@ -4762,6 +5423,7 @@ pub const WorldDataService = struct {
                 self.job = null;
                 // An uncommitted capture never acknowledges this generation.
                 self.captured_warehouse_revision = null;
+                self.captured_zone_revision = null;
                 const completion = self.lifecycle.finished(finished.epoch, finished.failure).?;
                 job.deinit();
                 self.status.active = false;
@@ -4969,9 +5631,7 @@ pub const WorldDataService = struct {
         }
         for (sites) |site| {
             const block = @import("block_coordinates.zig").fromWorld(self.layout, site - @as(rules.Cell, self.layout.origin_chunk) * @as(rules.Cell, @splat(CHUNK_SIZE))) orelse continue;
-            const coords, const local = world_module.splitBlockCoords(block);
-            const chunk = self.worker_state.modified_chunks.get(self.layout.encodeChunkCoords(coords)) orelse continue;
-            const road = chunk.metadata.road(transformations.index(local)) orelse continue;
+            const road = reader.roadAt(block) orelse continue;
             if (road.slope) |slope| try context.appendRunChunkIds(slope, &self.run_write_ids);
         }
         var ready = true;
@@ -4983,6 +5643,15 @@ pub const WorldDataService = struct {
         if (self.catalog == null) return true;
         var ready = true;
         switch (request) {
+            .register_extraction_zone => |registration| {
+                self.extractionZoneRegistrationAllowed(registration.registration) catch return true;
+                self.terminal_read_failure = false;
+                var chunks = registration.registration.bounds.chunks(self.layout.size_in_blocks);
+                while (chunks.next()) |coords| {
+                    ready = self.requireBase(self.layout.encodeChunkCoords(@bitCast(coords))) and ready;
+                }
+                if (self.terminal_read_failure) return true;
+            },
             .warehouse => |edit| {
                 if (edit.payload.action != .register) return true;
                 const clicked = edit.payload.action.register.aim_cell;
@@ -5070,39 +5739,120 @@ pub const WorldDataService = struct {
         var iterator = self.worker_state.timed_chunks.keyIterator();
         while (iterator.next()) |entry| {
             const chunk = self.worker_state.modified_chunks.get(entry.*) orelse continue;
-            const events = chunk.metadata.timed.events.items;
-            var due_events: usize = 0;
-            var earliest: ?u64 = null;
+            const coords: [3]u32 = @bitCast(self.layout.decodeChunkId(entry.*));
+            const zone_events = if (self.worker_state.zones.chunk(coords)) |zone| zone.timed.events.items else &.{};
+            self.selectDueTimerChunk(entry.*, cutoff, chunk.metadata.timed.events.items, zone_events, &due, &count);
+        }
+        var zones = self.worker_state.zones.grass_chunks.keyIterator();
+        while (zones.next()) |coords| {
+            const id = self.layout.encodeChunkCoords(@bitCast(coords.*));
+            if (self.worker_state.timed_chunks.contains(id)) continue;
+            const events = self.worker_state.zones.chunk(coords.*).?.timed.events.items;
+            self.selectDueTimerChunk(id, cutoff, &.{}, events, &due, &count);
+        }
+        for (due[0..count]) |id| {
+            self.timer_cursor = id +% 1;
+            const coords = self.layout.decodeChunkId(id);
+            const raw_changed = if (self.worker_state.timed_chunks.contains(id)) self.worker_state.transformChunk(self.allocator, coords) else false;
+            const zone_changed = self.transformZoneChunk(coords) catch |err| result: {
+                if (err != error.DependencyPending) self.noteDeferredWorkFailure(err);
+                break :result false;
+            };
+            if (raw_changed or zone_changed) {
+                self.lifecycle.unsaved_work = true;
+                self.publishSurfaceChange(coords);
+                if (raw_changed) self.markRawTerrainPending(id);
+            }
+        }
+    }
+
+    fn selectDueTimerChunk(self: *WorldDataService, id: ChunkId, cutoff: u64, raw: []const transformations.Event, zone: []const transformations.Event, due: []ChunkId, count: *usize) void {
+        var due_events: usize = 0;
+        var earliest: ?u64 = self.status.oldest_timer_deadline;
+        for ([_][]const transformations.Event{ raw, zone }) |events| {
             for (events) |event| {
                 if (event.due_tick > cutoff) break;
                 if (event.kind != .grow_grass) continue;
                 due_events += 1;
                 earliest = if (earliest) |old| @min(old, event.due_tick) else event.due_tick;
             }
-            if (due_events == 0) continue;
-            self.status.timer_due_chunks += 1;
-            self.status.oldest_timer_deadline = if (self.status.oldest_timer_deadline) |old| @min(old, earliest.?) else earliest.?;
-            self.status.timer_due_events += due_events;
-            const distance = entry.* -% self.timer_cursor;
-            var at: usize = 0;
-            while (at < count and due[at] -% self.timer_cursor < distance) : (at += 1) {}
-            if (at == due.len) continue;
-            const new_count = @min(count + 1, due.len);
-            var move = new_count - 1;
-            while (move > at) : (move -= 1) due[move] = due[move - 1];
-            due[at] = entry.*;
-            count = new_count;
         }
-        for (due[0..count]) |id| {
-            self.timer_cursor = id +% 1;
-            const coords = self.layout.decodeChunkId(id);
-            if (self.worker_state.transformChunk(self.allocator, coords)) {
-                self.lifecycle.unsaved_work = true;
-                self.publishMaterialChange(coords);
+        if (due_events == 0) return;
+        self.status.timer_due_chunks += 1;
+        self.status.oldest_timer_deadline = earliest;
+        self.status.timer_due_events += due_events;
+        const distance = id -% self.timer_cursor;
+        var at: usize = 0;
+        while (at < count.* and due[at] -% self.timer_cursor < distance) : (at += 1) {}
+        if (at == due.len) return;
+        const new_count = @min(count.* + 1, due.len);
+        var move = new_count - 1;
+        while (move > at) : (move -= 1) due[move] = due[move - 1];
+        due[at] = id;
+        count.* = new_count;
+    }
+
+    fn transformZoneChunk(self: *WorldDataService, coords: ChunkCoords) !bool {
+        const state = &self.worker_state;
+        const zone = state.zones.chunk(@bitCast(coords)) orelse return false;
+        const events = zone.timed.events.items;
+        if (events.len == 0 or events[0].due_tick > state.tick) return false;
+        self.processing_deferred_work = true;
+        defer self.processing_deferred_work = false;
+        const id = self.layout.encodeChunkCoords(coords);
+        try state.ensureResident(self.allocator, coords);
+        var context: ReadContext = .{ .state = state, .allocator = self.allocator };
+        defer context.deinit();
+        const Outcome = struct { index: transformations.BlockIndex, grow: bool };
+        var outcomes: std.ArrayList(Outcome) = .empty;
+        defer outcomes.deinit(self.allocator);
+        var grown = false;
+        for (events) |event| {
+            if (event.due_tick > state.tick) break;
+            const cell = absoluteCell(coords, event.block);
+            const value = state.zones.cellAt(cell) orelse unreachable;
+            var exposed = value.material == .dirt and !state.pendingAbove(cell);
+            if (exposed and cell[2] + 1 < self.layout.size_in_blocks[2]) {
+                var above = cell;
+                above[2] += 1;
+                // Missing cover leaves the original event and deadline intact.
+                exposed = (ReadContext.read(&context, above) orelse continue) == .none;
+            }
+            try outcomes.append(self.allocator, .{ .index = event.block, .grow = exposed });
+            grown = grown or exposed;
+        }
+        if (context.failure) |err| return err;
+        if (outcomes.items.len == 0) return false;
+        const raw = state.modified_chunks.getPtr(id).?;
+        const revision = try std.math.add(u64, raw.chunk_revision, 1);
+        const surface_revision = if (grown) try std.math.add(u64, state.next_surface_revision, 1) else state.next_surface_revision;
+        try state.surface_revisions.ensureUnusedCapacity(self.allocator, 1);
+        try self.dirty_surfaces.ensureUnusedCapacity(self.allocator, 1);
+        for (outcomes.items) |outcome| {
+            const cell = absoluteCell(coords, outcome.index);
+            state.zones.setGrassAssumeCapacity(cell, null);
+            if (outcome.grow) {
+                state.zones.setSoilMaterial(cell, .grass);
+                raw.cell_changes.record(outcome.index);
             }
         }
+        raw.chunk_revision = revision;
+        if (grown) {
+            state.next_surface_revision = surface_revision;
+            state.surface_revisions.putAssumeCapacity(id, surface_revision);
+        }
+        return true;
     }
 };
+
+fn absoluteCell(coords: ChunkCoords, index: transformations.BlockIndex) [3]u32 {
+    const local = transformations.coordinates(index);
+    return .{
+        @as(u32, @intCast(coords[0])) * CHUNK_SIZE + local[0],
+        @as(u32, @intCast(coords[1])) * CHUNK_SIZE + local[1],
+        @as(u32, @intCast(coords[2])) * CHUNK_SIZE + local[2],
+    };
+}
 
 /// A decoded record must preserve the complete canonical mask before it can
 /// enter resident state. This applies equally to base and WAL-backed reads.
@@ -5148,6 +5898,7 @@ const ReadContext = struct {
     fn mutationAllowed(raw: *anyopaque, block: [3]u32, replacement: rules.BlockType) ?rules.Failure {
         const self: *ReadContext = @ptrCast(@alignCast(raw));
         const cell: rules.Cell = .{ block[0], block[1], block[2] };
+        if (replacement != .none and self.state.zones.recordAt(block) != null) return .{ .reason = .extraction_zone_claim, .subject = cell };
         if (self.state.warehouses.claims.claimed(self.state.layout.size_in_blocks[0], block)) {
             const existing = self.readForMutation(block) orelse return .{ .reason = .missing_data, .subject = cell };
             return if (existing == replacement) null else .{ .reason = .would_invalidate_structure, .subject = cell };
@@ -5182,6 +5933,7 @@ const ReadContext = struct {
             .material => |material| return material,
             .unowned => {},
         }
+        if (self.state.zones.cellAt(block)) |cell| return cell.material;
         const coords, const local = world_module.splitBlockCoords(block);
         const chunk = self.chunkAt(coords) catch |err| {
             if (err != error.DependencyPending) self.failure = err;
@@ -5214,11 +5966,23 @@ const ReadContext = struct {
     fn readShape(context: *anyopaque, block: [3]u32) ?@import("engine").voxel_chunk.custom_block.Shape {
         const self: *ReadContext = @ptrCast(@alignCast(context));
         if (read(context, block) != .custom) return null;
-        const coords, const local = world_module.splitBlockCoords(block);
-        const id = self.state.layout.encodeChunkCoords(coords);
-        const chunk = self.state.modified_chunks.get(id) orelse self.chunks.get(id) orelse self.state.generated_chunks.peek(id).?.*;
-        const road = chunk.metadata.road(transformations.index(local)) orelse return null;
+        const road = self.roadAt(block) orelse return null;
         return road.shape();
+    }
+
+    fn roadAt(self: *ReadContext, block: [3]u32) ?@import("road_data.zig").Road {
+        const coords, const local = world_module.splitBlockCoords(block);
+        const index = transformations.index(local);
+        if (ownedRoadSlope(self, block)) |slope| return .{ .index = index, .slope = slope.* };
+        const id = self.state.layout.encodeChunkCoords(coords);
+        const chunk = self.state.modified_chunks.getPtr(id) orelse self.chunks.getPtr(id) orelse self.state.generated_chunks.peek(id) orelse return null;
+        return chunk.metadata.road(index);
+    }
+
+    fn ownedRoadSlope(raw: *anyopaque, block: [3]u32) ?*?@import("road_data.zig").Slope {
+        const self: *ReadContext = @ptrCast(@alignCast(raw));
+        const cell = self.state.zones.cellPtr(block) orelse return null;
+        return if (cell.material == .custom) &cell.slope else null;
     }
 };
 
@@ -5227,6 +5991,7 @@ const WorkerState = struct {
     generator: PreparedWorldGenerator,
     blueprints: blueprint_runtime.State = .{},
     warehouses: warehouse_state.State = .{},
+    zones: extraction_zone_state.State = .{},
     /// Committed edits survive cache eviction. Untouched chunks are regenerated on demand.
     modified_chunks: std.AutoHashMapUnmanaged(ChunkId, WorldChunk) = .empty,
     /// Immutable generated data, independently bounded and never captured as
@@ -5300,7 +6065,13 @@ const WorkerState = struct {
 
     fn tryBoundariesAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) !BoundaryMasks {
         const id = self.layout.encodeChunkCoords(coords);
-        if (self.modified_chunks.getPtr(id)) |chunk| return chunk.boundaries;
+        if (self.modified_chunks.getPtr(id)) |chunk| {
+            var boundaries = chunk.boundaries;
+            if (self.zoneChunk(coords)) |zone| for (&boundaries, &zone.boundaries) |*terrain, *owned| {
+                for (&terrain.rows, &owned.rows) |*row, bits| row.* |= bits;
+            };
+            return boundaries;
+        }
         // Check persisted ownership before consulting generated cache entries.
         if (self.persistence_service) |service| if (!service.requireBase(id)) return error.DependencyPending;
         if (self.boundary_cache.get(id)) |masks| return masks;
@@ -5341,9 +6112,60 @@ const WorkerState = struct {
         };
     }
 
+    fn zoneChunk(self: *const WorkerState, coords: ChunkCoords) ?*const @import("extraction_zone_state.zig").Chunk {
+        return self.zones.chunk(.{ @intCast(coords[0]), @intCast(coords[1]), @intCast(coords[2]) });
+    }
+
+    fn reserveZoneComposition(self: *const WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords, chunk: *WorldChunk, edit_capacity: WorldChunk.ZoneCapacity) !void {
+        var capacity = edit_capacity;
+        if (self.zoneChunk(coords)) |zone| capacity.addOwnedChunk(zone);
+        try capacity.reserve(chunk, allocator);
+    }
+
+    /// Merge disjoint owners into a client/read-only view without changing cell
+    /// history. Terrain and simulation retain their own authoritative records.
+    fn composeZonesPrepared(self: *const WorkerState, coords: ChunkCoords, chunk: *WorldChunk) void {
+        const zone = self.zoneChunk(coords) orelse return;
+        if (zone.cells.count() == 0) return;
+        var cells = zone.cells.iterator();
+        while (cells.next()) |entry| {
+            const index = entry.key_ptr.*;
+            std.debug.assert(chunk.content.getBlock(transformations.coordinates(index)) == .none);
+            chunk.applyZoneCellPrepared(index, entry.value_ptr.*, .merge);
+        }
+        // Both owners already order timers by (deadline, cell). Merge backwards
+        // into reserved space so unconsumed terrain events can remain in place.
+        const events = &chunk.metadata.timed.events;
+        var i = events.items.len;
+        var j = zone.timed.events.items.len;
+        events.items.len += j;
+        while (j != 0) {
+            const owned = zone.timed.events.items[j - 1];
+            if (i != 0) {
+                const raw = events.items[i - 1];
+                if (raw.due_tick > owned.due_tick or (raw.due_tick == owned.due_tick and raw.block > owned.block)) {
+                    events.items[i + j - 1] = raw;
+                    i -= 1;
+                    continue;
+                }
+            }
+            events.items[i + j - 1] = owned;
+            j -= 1;
+        }
+        chunk.refreshZoneFlags();
+    }
+
     fn tryLoadAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) !WorldChunk {
+        var chunk = try self.tryLoadTerrainAt(allocator, coords);
+        errdefer chunk.deinit(allocator);
+        try self.reserveZoneComposition(allocator, coords, &chunk, .{});
+        self.composeZonesPrepared(coords, &chunk);
+        return chunk;
+    }
+
+    fn tryLoadTerrainAt(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) !WorldChunk {
         const id = self.layout.encodeChunkCoords(coords);
-        if (self.modified_chunks.get(id)) |chunk| return chunk.tryClone(allocator);
+        if (self.modified_chunks.getPtr(id)) |raw| return raw.tryClone(allocator);
         if (self.persistence_service) |service| {
             if (!service.requireBase(id)) return error.DependencyPending;
         }
@@ -5361,6 +6183,7 @@ const WorkerState = struct {
     fn deinit(self: *WorkerState, allocator: std.mem.Allocator) void {
         self.blueprints.deinit(allocator);
         self.warehouses.deinit(allocator);
+        self.zones.deinit(self.liveAllocator(allocator));
         var iterator = self.modified_chunks.valueIterator();
         while (iterator.next()) |chunk| chunk.deinit(self.liveAllocator(allocator));
         self.modified_chunks.deinit(allocator);
@@ -5382,16 +6205,38 @@ const WorkerState = struct {
         chunk: WorldChunk,
         revealed_neighbors: [6]?ChunkCoords,
         changed_below: ?ChunkCoords,
+        target_changed_raw: bool = false,
+        below_changed_raw: bool = false,
         diagnostics: world_module.EditResult,
     };
 
     fn applyOperation(self: *WorkerState, allocator: std.mem.Allocator, operation: BlockOperation) ApplyResult {
-        return self.tryApplyOperation(allocator, operation) catch |err| {
+        return self.applyOperationFrom(allocator, operation, false, true);
+    }
+
+    fn applyOperationFrom(self: *WorkerState, allocator: std.mem.Allocator, operation: BlockOperation, legacy_simulation: bool, include_reply: bool) ApplyResult {
+        // Background edits from the legacy terrain producer do not authorize
+        // extraction from a zone whose ownership may have changed in the FIFO.
+        const result = if (legacy_simulation and operation.action == .remove and self.zones.cellAt(operation.block) != null)
+            self.rejectOperation(allocator, world_module.splitBlockCoords(operation.block)[0], .{ .status = .target_changed }, include_reply)
+        else
+            self.tryApplyOperationWithReply(allocator, operation, include_reply);
+        return result catch |err| {
             if (self.persistence_service) |service| {
                 if (err == error.CapturePending or err == error.DependencyPending) service.operation_deferred = true else service.failPersistence(err);
             }
             return .{ .status = .resource_exhausted, .chunk = WorldChunk.initEmpty(), .revealed_neighbors = @splat(null), .changed_below = null, .diagnostics = .{ .status = .resource_exhausted } };
         };
+    }
+
+    fn rejectOperation(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords, diagnostics: world_module.EditResult, include_reply: bool) !ApplyResult {
+        var reply = WorldChunk.initEmpty();
+        if (include_reply) {
+            reply = try self.tryLoadAt(allocator, coords);
+        } else if (self.modified_chunks.getPtr(self.layout.encodeChunkCoords(coords))) |raw| {
+            reply.chunk_revision = raw.chunk_revision;
+        }
+        return .{ .status = diagnostics.status, .chunk = reply, .revealed_neighbors = @splat(null), .changed_below = null, .diagnostics = diagnostics };
     }
 
     fn ensureResident(self: *WorkerState, allocator: std.mem.Allocator, coords: ChunkCoords) !void {
@@ -5420,12 +6265,16 @@ const WorkerState = struct {
     }
 
     fn tryApplyOperation(self: *WorkerState, allocator: std.mem.Allocator, operation: BlockOperation) !ApplyResult {
+        return self.tryApplyOperationWithReply(allocator, operation, true);
+    }
+
+    fn tryApplyOperationWithReply(self: *WorkerState, allocator: std.mem.Allocator, operation: BlockOperation, include_reply: bool) !ApplyResult {
         self.ordinary_validation_calls +%= 1;
         const live = self.liveAllocator(allocator);
         self.road_changes.clearRetainingCapacity();
         if (operation.action == .remove) if (self.persistence_service) |service| if (service.run_gate_failure) |err| return err;
         const cells: []const rules.Cell = if (operation.action == .remove)
-            try world_module.tryCollectConstructed(allocator, self.layout, &self.modified_chunks, operation.block)
+            try world_module.tryCollectConstructedWithZones(allocator, self.layout, &self.modified_chunks, operation.block, &self.zones)
         else
             &.{};
         defer if (operation.action == .remove) allocator.free(cells);
@@ -5436,6 +6285,7 @@ const WorkerState = struct {
         if (self.persistence_service) |service| if (service.read_discovered) return error.DependencyPending;
         const coords, const local = world_module.splitBlockCoords(operation.block);
         const position = self.layout.encodeChunkCoords(coords);
+        const zone_removal = self.zones.cellAt(operation.block) != null;
         if (operation.player) |transfer| {
             const service = self.persistence_service orelse return error.MissingPlayer;
             const player = service.players.get(transfer.id);
@@ -5450,10 +6300,7 @@ const WorkerState = struct {
                 if (!history.unchangedSince(transformations.index(local), transfer.expected_sequence)) diagnostics = .{ .status = .target_changed };
             }
         }
-        if (diagnostics.status != .success) {
-            const chunk = try (try context.chunkAt(coords)).tryClone(allocator);
-            return .{ .status = diagnostics.status, .chunk = chunk, .revealed_neighbors = @splat(null), .changed_below = null, .diagnostics = diagnostics };
-        }
+        if (diagnostics.status != .success) return self.rejectOperation(allocator, coords, diagnostics, include_reply);
 
         const target_grass = if (operation.action == .put and operation.action.put == .dirt and !self.pendingAbove(operation.block)) exposed: {
             if (operation.block[2] + 1 >= self.layout.size_in_blocks[2]) break :exposed true;
@@ -5465,14 +6312,16 @@ const WorkerState = struct {
         // Materialize unchanged dependencies before obtaining pointers; rehashing may move headers.
         try self.modified_chunks.ensureUnusedCapacity(allocator, 8);
         try self.ensureResident(allocator, coords);
-        const previous_road = self.modified_chunks.get(position).?.metadata.road(transformations.index(local));
-        const previous_flags = self.modified_chunks.get(position).?.flags;
+        const previous_road = context.roadAt(operation.block);
+        const previous_boundaries = try self.tryBoundariesAt(allocator, coords);
+        const previous_flags = @import("boundary_mask.zig").getFlags(&previous_boundaries);
         const road_context: @import("roads.zig").Context = .{
             .allocator = allocator,
             .reader = context.reader(),
             .chunks = &self.modified_chunks,
             .changed = &self.road_changes,
             .virtual_edit = operation,
+            .owned_road_slope = ReadContext.ownedRoadSlope,
         };
         var road_plan = try road_context.planAfterEdit(operation, previous_road);
         defer road_plan.deinit(allocator);
@@ -5486,6 +6335,7 @@ const WorkerState = struct {
             };
         }
         try road_plan.reserveCommit(road_context);
+        for (road_plan.chunk_ids) |id| try self.ensureResident(allocator, self.layout.decodeChunkId(id));
         var revealed: [6]?ChunkCoords = @splat(null);
         if (operation.action == .remove) for (std.enums.values(Side)) |side| {
             const i = @intFromEnum(side);
@@ -5499,27 +6349,32 @@ const WorkerState = struct {
         var below_local: [3]u5 = undefined;
         var below_changed = false;
         var below_metadata = false;
+        var below_zone: ?[3]u32 = null;
         if (operation.block[2] != 0) {
             var below = operation.block;
             below[2] -= 1;
             const bcoords, const blocal = world_module.splitBlockCoords(below);
             try self.ensureResident(allocator, bcoords);
             const bchunk = self.modified_chunks.getPtr(self.layout.encodeChunkCoords(bcoords)).?;
-            const material = bchunk.content.getBlock(blocal);
+            const owned = self.zones.cellAt(below);
+            const material = if (owned) |cell| cell.material else bchunk.content.getBlock(blocal);
             if (material.isEarth() and self.blueprints.memberAt(below) == null) {
                 if (operation.action == .put) {
                     below_changed = material == .grass;
-                    for (bchunk.metadata.timed.events.items) |event| if (event.block == transformations.index(blocal)) {
+                    if (owned) |cell| {
+                        below_metadata = cell.grass_due != null;
+                    } else for (bchunk.metadata.timed.events.items) |event| if (event.block == transformations.index(blocal)) {
                         below_metadata = true;
                         break;
                     };
-                } else if (!self.pendingAbove(below)) {
+                } else if (!self.pendingAbove(below) and (owned == null or material == .dirt)) {
                     below_metadata = true;
-                    try bchunk.metadata.timed.reserve(live, 1);
+                    if (owned != null) try self.zones.reserveGrass(live, below) else try bchunk.metadata.timed.reserve(live, 1);
                 }
                 if (below_changed or below_metadata) {
                     below_coords = bcoords;
                     below_local = blocal;
+                    if (owned != null) below_zone = below;
                 }
             }
         }
@@ -5528,26 +6383,32 @@ const WorkerState = struct {
         const constructed_growth: usize = if (operation.action == .put) 1 else 0;
         const timer_growth: usize = if (target_grass or (below_coords != null and operation.action == .remove and @reduce(.And, below_coords.? == coords))) 1 else 0;
         try target.metadata.reserve(live, road_growth, constructed_growth, timer_growth);
-        _ = try target.prepareApply(live, local, operation.action);
+        if (!zone_removal) _ = try target.prepareApply(live, local, operation.action);
         // Validate both the target and indirect soil/timer writes as one plan.
         // Road section writes were validated by the shared road planner above.
         var writes: [2]mutation_guard.Write = undefined;
         writes[0] = .{ .block = operation.block, .material = if (operation.action == .put) operation.action.put else .none };
         var write_count: usize = 1;
-        if (below_coords != null) {
+        if (below_coords != null and below_zone == null) {
             var below_block = operation.block;
             below_block[2] -= 1;
             writes[1] = .{ .block = below_block, .material = if (below_changed) .dirt else ReadContext.read(&context, below_block) orelse return error.DependencyPending };
             write_count += 1;
         }
         if (mutation_guard.validateWrites(context.reader(), writes[0..write_count])) |failure| {
-            const rejected: world_module.EditResult = .{ .status = .constraint_violation, .failure = failure };
-            return .{ .status = rejected.status, .chunk = try target.tryClone(allocator), .revealed_neighbors = @splat(null), .changed_below = null, .diagnostics = rejected };
+            return self.rejectOperation(allocator, coords, .{ .status = .constraint_violation, .failure = failure }, include_reply);
         }
-        var reply = try target.tryClone(allocator);
+        var reply = WorldChunk.initEmpty();
         errdefer reply.deinit(allocator);
-        try reply.metadata.reserve(allocator, road_growth, constructed_growth, timer_growth);
-        if (operation.action == .put) _ = try reply.tryEnsureData(allocator);
+        if (include_reply) {
+            reply = try target.tryClone(allocator);
+            try self.reserveZoneComposition(allocator, coords, &reply, .{
+                .blocks = operation.action == .put,
+                .roads = road_growth,
+                .constructed = constructed_growth,
+                .timers = timer_growth,
+            });
+        }
         try self.surface_revisions.ensureUnusedCapacity(allocator, @intCast(road_plan.chunk_ids.len + 8));
         try self.timed_chunks.ensureUnusedCapacity(allocator, 2);
         var changed_ids: std.ArrayList(u32) = .empty;
@@ -5568,7 +6429,11 @@ const WorkerState = struct {
 
         if (self.persistence_service) |service| try service.dirty_surfaces.ensureUnusedCapacity(allocator, @intCast(changed_ids.items.len + 7));
         // All fallible work is complete. Commit every persistent field/cache together.
-        std.debug.assert(target.applyPrepared(live, local, operation.action) == .success);
+        if (zone_removal) {
+            std.debug.assert(operation.action == .remove);
+            std.debug.assert(self.zones.removeCell(operation.block));
+            target.cell_changes.record(transformations.index(local));
+        } else std.debug.assert(target.applyPrepared(live, local, operation.action) == .success);
         if (operation.action == .put) {
             target.metadata.markConstructedAssumeCapacity(transformations.index(local));
             if (target_grass) {
@@ -5581,7 +6446,13 @@ const WorkerState = struct {
         }
         if (below_coords) |value| {
             const below = self.modified_chunks.getPtr(self.layout.encodeChunkCoords(value)).?;
-            if (operation.action == .put) {
+            if (below_zone) |cell| {
+                self.zones.setGrassAssumeCapacity(cell, if (operation.action == .put) null else self.tick +| transformations.transformation_delay);
+                if (below_changed) {
+                    self.zones.setSoilMaterial(cell, .dirt);
+                    below.cell_changes.record(transformations.index(below_local));
+                }
+            } else if (operation.action == .put) {
                 below.metadata.timed.cancel(transformations.index(below_local));
                 if (below_changed) below.changeType(below_local, .dirt);
             } else below.metadata.timed.scheduleAssumeCapacity(.{
@@ -5593,7 +6464,7 @@ const WorkerState = struct {
         for (revealed) |neighbor| if (neighbor) |value| {
             self.modified_chunks.getPtr(self.layout.encodeChunkCoords(value)).?.flags.is_unreachable = false;
         };
-        road_plan.applyPrepared(road_context);
+        self.applyRoadPlan(road_plan, road_context, self.persistence_service, if (include_reply) position else null);
         self.next_surface_revision = next_surface;
         for (changed_ids.items) |id| {
             const chunk = self.modified_chunks.getPtr(id).?;
@@ -5607,8 +6478,20 @@ const WorkerState = struct {
             const neighbor = world_module.adjacentChunk(self.layout, coords, side) orelse continue;
             self.surface_revisions.putAssumeCapacity(self.layout.encodeChunkCoords(neighbor), next_surface);
         }
-        copyPreparedChunk(allocator, target, &reply);
-        return .{ .status = .success, .chunk = reply, .revealed_neighbors = revealed, .changed_below = below_coords, .diagnostics = diagnostics };
+        if (include_reply) {
+            const keep_backing = if (self.zoneChunk(coords)) |zone| zone.cells.count() != 0 else false;
+            copyPreparedChunk(allocator, target, &reply, keep_backing);
+            self.composeZonesPrepared(coords, &reply);
+        } else reply.chunk_revision = target.chunk_revision;
+        return .{
+            .status = .success,
+            .chunk = reply,
+            .revealed_neighbors = revealed,
+            .changed_below = below_coords,
+            .target_changed_raw = !zone_removal,
+            .below_changed_raw = below_coords != null and below_zone == null,
+            .diagnostics = diagnostics,
+        };
     }
 
     fn pendingAbove(self: *const WorkerState, block: [3]u32) bool {
@@ -5616,6 +6499,22 @@ const WorkerState = struct {
         var above = block;
         above[2] += 1;
         return self.blueprints.targetAt(above) != null;
+    }
+
+    fn applyRoadPlan(self: *WorkerState, plan: @import("roads.zig").Plan, context: @import("roads.zig").Context, service: ?*WorldDataService, covered_terrain: ?ChunkId) void {
+        for (plan.changes) |change| {
+            const block: [3]u32 = .{ @intCast(change.cell[0]), @intCast(change.cell[1]), @intCast(change.cell[2]) };
+            if (self.zones.cellAt(block)) |cell| {
+                if (!std.meta.eql(cell.slope, change.slope)) self.zones.markCellChanged(block);
+            } else if (service) |owner| {
+                const coords, const local = world_module.splitBlockCoords(block);
+                const id = self.layout.encodeChunkCoords(coords);
+                if (covered_terrain == id) continue;
+                const road = self.modified_chunks.getPtr(id).?.metadata.road(transformations.index(local)) orelse continue;
+                if (!std.meta.eql(road.slope, change.slope)) owner.markRawTerrainPending(id);
+            }
+        }
+        plan.applyPrepared(context);
     }
 
     const BlueprintCommit = struct { diagnostics: world_module.EditResult };
@@ -5645,10 +6544,13 @@ const WorkerState = struct {
         return .{ .diagnostics = .{ .status = .success } };
     }
 
-    fn copyPreparedChunk(allocator: std.mem.Allocator, source: *const WorldChunk, target: *WorldChunk) void {
+    fn copyPreparedChunk(allocator: std.mem.Allocator, source: *const WorldChunk, target: *WorldChunk, keep_backing: bool) void {
         if (source.content == .blocks) {
             std.debug.assert(target.content == .blocks);
             target.content.blocks.* = source.content.blocks.*;
+        } else if (keep_backing) {
+            std.debug.assert(target.content == .blocks);
+            target.content.blocks.* = @import("world_chunk_data.zig").WorldChunkData.initEmpty();
         } else {
             target.content.deinit(allocator);
             target.content = .empty;
@@ -5968,7 +6870,7 @@ fn waitForResponses(client: *Client, out: *std.ArrayList(ChunkResponse), count: 
             // Discovery may precede asynchronous surface generation. These terrain
             // fixtures wait for geometry or command results; transport fixtures
             // inspect the independent composition acknowledgments directly.
-            if (response.data == .acknowledgement and response.operation == null and response.composition != null) {
+            if (response.data == .acknowledgement and response.operation == null and response.extraction_zone == null and response.composition != null) {
                 response.deinit(std.testing.allocator);
                 continue;
             }
@@ -7626,6 +8528,26 @@ const PersistenceFixture = struct {
         }
         return error.TestSaveTimeout;
     }
+    fn registerZone(client: *Client, request: extraction_zone_commands.Registration) !void {
+        const registered = try client.tryRegisterExtractionZone(request);
+        const limit = persistence.now(std.testing.io) + 10 * std.time.ns_per_s;
+        while (true) {
+            const retry = try client.tryRegisterExtractionZoneCommand(registered.command, request);
+            if (retry.outcome) |outcome| {
+                try std.testing.expectEqual(.success, outcome.extraction_zone.status);
+                break;
+            }
+            if (persistence.now(std.testing.io) > limit) return error.TestRegistrationTimeout;
+            try Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        _ = client.acknowledgeExternalCommand(registered.command);
+    }
+    fn reopen(self: *PersistenceFixture) !void {
+        self.service.destroy();
+        self.store.deinit();
+        self.store = try storage.Store.open(std.testing.allocator, self.path, .{});
+        self.service = try WorldDataService.createPersistent(std.testing.io, std.testing.allocator, &self.layout, .flat, &self.store, .{});
+    }
     fn operation(client: *Client, command: BlockOperation) !OperationStatus {
         return (try operationResult(client, command)).status;
     }
@@ -8768,6 +9690,348 @@ const BlueprintSaveFixture = struct {
         return .{ .client = &self.client, .owner = 1, .request_id = id, .name = try a.dupe(u8, "Save fixture"), .candidate = candidate };
     }
 };
+
+test "extraction authority checks aligned source and cell budgets before retaining terrain" {
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    defer service.dirty_surfaces.deinit(std.testing.allocator);
+    service.worker_state.zones = .init(test_layout.size_in_blocks);
+    const width = test_layout.size_in_blocks[0];
+    const registration: extraction_zone_commands.Registration = .{
+        .bounds = .{ .min = .{ width - 1, 31, 63 }, .size = .{ 2, 2, 2 } },
+        .filter = .{},
+    };
+    service.limits.extraction_zone_budgets = .{ .max_cells = 7, .max_source_chunks = 8 };
+    try std.testing.expectError(error.CellBudget, service.tryRegisterExtractionZone(registration));
+    service.limits.extraction_zone_budgets = .{ .max_cells = 8, .max_source_chunks = 7 };
+    try std.testing.expectError(error.ChunkBudget, service.tryRegisterExtractionZone(registration));
+    try std.testing.expectEqual(@as(u64, 0), service.worker_state.generated_chunk_count);
+    try std.testing.expectEqual(@as(u32, 0), service.worker_state.modified_chunks.count());
+    try std.testing.expectEqual(@as(usize, 0), service.worker_state.zones.records.items.len);
+    service.limits.extraction_zone_budgets.max_source_chunks = 8;
+    const record = try service.tryRegisterExtractionZone(registration);
+    try std.testing.expectEqual(@as(u64, 1), record.id);
+    try std.testing.expectEqual(@as(u32, 8), service.worker_state.modified_chunks.count());
+    try std.testing.expectEqual(record.id, service.worker_state.zones.recordAt(.{ 0, 32, 64 }).?.id);
+    try std.testing.expectEqual(record.id, service.worker_state.zones.recordAt(.{ width - 1, 31, 63 }).?.id);
+    try std.testing.expectEqual(null, service.worker_state.zones.recordAt(.{ 1, 32, 64 }));
+    try std.testing.expectError(error.ConflictingClaim, service.tryRegisterExtractionZone(registration));
+}
+
+test "extraction handoff transfers every mutable material while preserving the composed view" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    defer service.dirty_surfaces.deinit(a);
+    const state = &service.worker_state;
+    state.zones = .init(test_layout.size_in_blocks);
+    const coords: ChunkCoords = .{ 0, 0, 0 };
+    const id = test_layout.encodeChunkCoords(coords);
+    try state.ensureResident(a, coords);
+    const initial = state.modified_chunks.getPtr(id).?;
+    const z: u5 = 16;
+    const materials = [_]rules.BlockType{ .grass, .sand, .stone, .metal_ore, .planks };
+    for (materials, 10..) |material, x| initial.changeType(.{ @intCast(x), 10, z }, material);
+    const air = [3]u5{ 15, 10, z };
+    try std.testing.expectEqual(OperationStatus.success, initial.apply(a, air, .remove));
+    initial.metadata.markConstructed(a, transformations.index(.{ 14, 10, z }));
+    const before = try state.tryLoadAt(a, coords);
+    defer before.deinit(a);
+    const record = try service.tryRegisterExtractionZone(.{
+        .bounds = .{ .min = .{ 10, 10, 0 }, .size = .{ 6, 1, z + 1 } },
+        .filter = .{ .sand = false, .stone = false, .limestone = false, .coal = false, .clay = false },
+    });
+    const raw = state.modified_chunks.getPtr(id).?;
+    for (materials, 10..) |material, x| {
+        const local: [3]u5 = .{ @intCast(x), 10, z };
+        try std.testing.expectEqual(rules.BlockType.none, raw.content.getBlock(local));
+        const owned = state.zones.cellAt(.{ @intCast(x), 10, z }).?;
+        try std.testing.expectEqual(material, owned.material);
+        try std.testing.expectEqual(material == .planks, owned.constructed);
+        try std.testing.expectEqual(material == .grass or material == .metal_ore, record.filter.matches(material));
+    }
+    try std.testing.expectEqual(.forbidden, rules.BlockType.metal_ore.miningPolicy());
+    try std.testing.expectEqual(rules.BlockType.deeprock, raw.content.getBlock(.{ 10, 10, 0 }));
+    try std.testing.expectEqual(null, state.zones.cellAt(.{ 10, 10, 0 }));
+    try std.testing.expectEqual(null, state.zones.cellAt(.{ 15, 10, z }));
+    const after = try state.tryLoadAt(a, coords);
+    defer after.deinit(a);
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&before.content.blocks.blocks), std.mem.asBytes(&after.content.blocks.blocks));
+    try std.testing.expectEqualDeep(before.cell_changes, after.cell_changes);
+}
+
+test "extraction handoff finishes construction soil initialization at the queued completion tick" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    defer service.dirty_surfaces.deinit(a);
+    const state = &service.worker_state;
+    state.zones = .init(test_layout.size_in_blocks);
+    const cell: [3]u32 = .{ 10, 10, 64 };
+    const coords, const local = world_module.splitBlockCoords(cell);
+    const id = test_layout.encodeChunkCoords(coords);
+    const index = transformations.index(local);
+    var chunk = WorldChunk.initEmpty();
+    try std.testing.expectEqual(OperationStatus.success, chunk.apply(a, local, .{ .put = .dirt }));
+    chunk.metadata.markConstructed(a, index);
+    chunk.metadata.timed.schedule(a, .{ .block = index, .kind = .initialize_grass, .due_tick = 31 });
+    try state.modified_chunks.put(a, id, chunk);
+    try service.construction_grass.append(a, .{ .instance = .{ .id = 31, .definition_id = 8, .owner = 1, .origin = cell, .rotation = 0 }, .chunk_id = id, .completion_tick = 120 });
+    state.tick = 400;
+    _ = try service.tryRegisterExtractionZone(.{ .bounds = .{ .min = cell, .size = .{ 1, 1, 1 } }, .filter = .{} });
+
+    const deadline = 120 + transformations.transformation_delay;
+    try std.testing.expectEqual(@as(?u64, deadline), state.zones.cellAt(cell).?.grass_due);
+    try std.testing.expect(state.zones.cellAt(cell).?.constructed);
+    try std.testing.expectEqual(@as(usize, 0), service.construction_grass.items.len);
+    try std.testing.expectEqual(@as(usize, 0), state.modified_chunks.get(id).?.metadata.timed.events.items.len);
+    try std.testing.expectEqual(rules.BlockType.none, state.modified_chunks.get(id).?.content.getBlock(local));
+    state.tick = deadline - 1;
+    service.processTransformations();
+    try std.testing.expectEqual(rules.BlockType.dirt, state.zones.cellAt(cell).?.material);
+    state.tick = deadline;
+    service.processTransformations();
+    try std.testing.expectEqual(rules.BlockType.grass, state.zones.cellAt(cell).?.material);
+    try std.testing.expectEqual(null, state.zones.cellAt(cell).?.grass_due);
+    const grown_revision = state.zones.revision;
+    service.processTransformations();
+    try std.testing.expectEqual(grown_revision, state.zones.revision);
+}
+
+test "extraction claims conflict in both registration orders with blueprint cavities and warehouse clearance" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    defer service.dirty_surfaces.deinit(a);
+    defer service.blueprint_retired.deinit(a);
+    const state = &service.worker_state;
+    const size = test_layout.size_in_blocks;
+    state.zones = .init(size);
+    state.warehouses = .init(17, size);
+    try installFulfillmentTestSite(state, a, .{ 100, 10, 180 }, .{ 3, 1, 1 }, &.{ .planks, .none, .planks });
+    const first_warehouse = try warehouse_layout.Geometry.fromMinimum(size, .{ 20, 20, 180 }, .{ 2, 2 });
+    _ = try state.warehouses.register(a, first_warehouse, .dirt);
+
+    try std.testing.expectError(error.ConflictingClaim, service.tryRegisterExtractionZone(.{ .bounds = .{ .min = .{ 101, 10, 180 }, .size = .{ 1, 1, 1 } }, .filter = .{} }));
+    try std.testing.expectError(error.ConflictingClaim, service.tryRegisterExtractionZone(.{ .bounds = .{ .min = .{ 19, 20, 181 }, .size = .{ 1, 1, 1 } }, .filter = .{} }));
+    try std.testing.expectEqual(@as(u32, 0), state.modified_chunks.count());
+
+    const adjacent = try service.tryRegisterExtractionZone(.{ .bounds = .{ .min = .{ 103, 10, 180 }, .size = .{ 1, 1, 1 } }, .filter = .{} });
+    try std.testing.expectEqual(@as(u64, 1), adjacent.id);
+    _ = try service.tryRegisterExtractionZone(.{ .bounds = .{ .min = .{ 121, 10, 180 }, .size = .{ 1, 1, 1 } }, .filter = .{} });
+    try std.testing.expectError(error.Overlap, service.tryBeginBlueprintApplication(.{ .client = &fixture.client, .request_id = 1, .owner = 1, .definition_id = 1, .origin = .{ 120, 10, 180 }, .rotation = 0 }));
+
+    const later_warehouse = try warehouse_layout.Geometry.fromMinimum(size, .{ 40, 20, 180 }, .{ 2, 2 });
+    _ = try service.tryRegisterExtractionZone(.{ .bounds = .{ .min = .{ 39, 20, 181 }, .size = .{ 1, 1, 1 } }, .filter = .{} });
+    const request: WarehouseRequest = .{ .client = &fixture.client, .request_id = 2, .payload = .{
+        .actor = .{ .viewpoint = .{ 0, 0, 0 } },
+        .action = .{ .register = .{ .aim_cell = later_warehouse.origin, .material = .dirt } },
+    } };
+    try std.testing.expectError(error.ConflictingClaim, service.tryWarehouseAction(request, later_warehouse));
+    try std.testing.expectEqual(@as(u32, 1), state.warehouses.records.count());
+    try std.testing.expectEqual(@as(u32, 1), state.blueprints.instances.count());
+}
+
+test "extraction keeps real and planned supports and rejects an old simulation edit" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    defer service.dirty_surfaces.deinit(a);
+    const state = &service.worker_state;
+    state.persistence_service = service;
+    state.zones = .init(test_layout.size_in_blocks);
+    const stone: [3]u32 = .{ 10, 10, 70 };
+    const planned: [3]u32 = .{ 12, 10, 70 };
+    const independent: [3]u32 = .{ 14, 10, 70 };
+    const coords, _ = world_module.splitBlockCoords(stone);
+    const id = test_layout.encodeChunkCoords(coords);
+    var chunk = WorldChunk.initEmpty();
+    for ([_][3]u32{ stone, planned, independent }) |cell| {
+        const local = world_module.splitBlockCoords(cell)[1];
+        try std.testing.expectEqual(OperationStatus.success, chunk.apply(a, local, .{ .put = .stone }));
+    }
+    try std.testing.expectEqual(OperationStatus.success, chunk.apply(a, .{ 10, 10, 7 }, .{ .put = .pallet }));
+    try state.modified_chunks.put(a, id, chunk);
+    try installFulfillmentTestSite(state, a, .{ 12, 10, 71 }, .{ 1, 1, 1 }, &.{.pallet});
+    _ = try service.tryRegisterExtractionZone(.{ .bounds = .{ .min = stone, .size = .{ 5, 1, 1 } }, .filter = .{ .stone = false } });
+    const observed_sequence = state.modified_chunks.get(id).?.cell_changes.sequence;
+    for ([_][3]u32{ stone, planned }, 1..) |cell, request_id| {
+        service.processAdmitted(.{ .operation = .{ .client = &fixture.client, .request_id = request_id, .operation = .{ .block = cell, .action = .remove, .player = .{ .id = 1, .expected_sequence = observed_sequence } } } });
+        const result = fixture.client.pending.responses.items[request_id - 1].operation.?;
+        try std.testing.expectEqual(OperationStatus.constraint_violation, result.status);
+        try std.testing.expectEqual(rules.Reason.would_remove_support, result.failure.?.reason);
+        try std.testing.expectEqual(null, result.player_inventory.?.material);
+        try std.testing.expectEqual(rules.BlockType.stone, state.zones.cellAt(cell).?.material);
+    }
+
+    const remove: BlockOperation = .{ .block = independent, .action = .remove };
+    fixture.client.simulation = true;
+    service.processAdmitted(.{ .operation = .{ .client = &fixture.client, .request_id = 3, .operation = remove } });
+    try std.testing.expectEqual(OperationStatus.target_changed, fixture.client.pending.responses.items[2].operation.?.status);
+    try std.testing.expectEqual(rules.BlockType.stone, state.zones.cellAt(independent).?.material);
+    fixture.client.simulation = false;
+    var manual = remove;
+    manual.player = .{ .id = 1, .expected_sequence = observed_sequence };
+    service.processAdmitted(.{ .operation = .{ .client = &fixture.client, .request_id = 4, .operation = manual } });
+    const mined = fixture.client.pending.responses.items[3].operation.?;
+    try std.testing.expectEqual(OperationStatus.success, mined.status);
+    try std.testing.expectEqual(rules.BlockType.crushed_stone, mined.player_inventory.?.material.?);
+    try std.testing.expectEqual(null, state.zones.cellAt(independent));
+    try std.testing.expect(state.zones.recordAt(independent) != null);
+}
+
+test "extraction manual stone and planks yield inventory with only soil selected" {
+    const fixture = try PersistenceFixture.init(.{});
+    defer fixture.deinit();
+    const client = try fixture.service.createClient();
+    client.publishCheckpoint(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+    const stone: [3]u32 = .{ 11, 10, 47 };
+    const plank: [3]u32 = .{ 16, 10, 48 };
+    const outside: [3]u32 = .{ 5, 10, 48 };
+    const filter: extraction_zone.Filter = .{ .sand = false, .stone = false, .metal_ore = false, .limestone = false, .coal = false, .clay = false };
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = plank, .action = .{ .put = .planks } }));
+    try PersistenceFixture.registerZone(client, .{ .bounds = .{ .min = stone, .size = .{ 6, 1, 2 } }, .filter = filter });
+    const observed_player: @FieldType(BlockOperation, "player") = .{ .id = 1, .expected_sequence = 1 };
+    const crushed = try PersistenceFixture.operationResult(client, .{ .block = stone, .action = .remove, .player = observed_player });
+    try std.testing.expectEqual(OperationStatus.success, crushed.status);
+    try std.testing.expectEqual(rules.BlockType.crushed_stone, crushed.player_inventory.?.material.?);
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = outside, .action = .{ .put = .crushed_stone }, .player = observed_player }));
+    const wood = try PersistenceFixture.operationResult(client, .{ .block = plank, .action = .remove, .player = observed_player });
+    try std.testing.expectEqual(OperationStatus.success, wood.status);
+    try std.testing.expectEqual(rules.BlockType.planks, wood.player_inventory.?.material.?);
+    for ([_][3]u32{ stone, plank }) |cell| {
+        const refused = try PersistenceFixture.operationResult(client, .{ .block = cell, .action = .{ .put = .snow } });
+        try std.testing.expectEqual(rules.Reason.extraction_zone_claim, refused.failure.?.reason);
+    }
+
+    _ = client.requestChunks(.{ 0, 0 }, 1, 2);
+    var replies: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&replies);
+    try waitForResponses(client, &replies, 1);
+    const snapshot = replies.items[0];
+    try std.testing.expectEqualDeep(filter, snapshot.extraction_zone.?.snapshot.claims[0].filter);
+    const blocks = snapshot.data.blocks.chunk.content;
+    try std.testing.expectEqual(rules.BlockType.none, blocks.getBlock(world_module.splitBlockCoords(stone)[1]));
+    try std.testing.expectEqual(rules.BlockType.none, blocks.getBlock(world_module.splitBlockCoords(plank)[1]));
+}
+
+test "extraction near publication shares one exact-base delta with miner and observer" {
+    const a = std.testing.allocator;
+    const service = try WorldDataService.create(std.testing.io, a, &test_layout, .flat);
+    defer service.destroy();
+    const miner = try service.createClient();
+    const observer = try service.createClient();
+    const neighbor = try service.createClient();
+    const origin: [3]u32 = .{ 31, 10, 47 };
+    const z: i32 = @intCast(origin[2] / CHUNK_SIZE);
+    const miner_token = miner.requestChunks(.{ 0, 0 }, z, z + 1);
+    const observer_token = observer.requestChunks(.{ 0, 0 }, z, z + 1);
+    const neighbor_token = neighbor.requestChunks(.{ 1, 0 }, z, z + 1);
+    var miner_views: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&miner_views);
+    var observer_views: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&observer_views);
+    var neighbor_views: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&neighbor_views);
+    try waitForResponses(miner, &miner_views, 1);
+    try waitForResponses(observer, &observer_views, 1);
+    try waitForResponses(neighbor, &neighbor_views, 1);
+    try std.testing.expectEqual(rules.BlockType.stone, miner_views.items[0].data.blocks.chunk.content.getBlock(.{ 31, 10, 15 }));
+
+    try PersistenceFixture.registerZone(miner, .{ .bounds = .{ .min = origin, .size = .{ 1, 10, 1 } }, .filter = .{} });
+    try waitForResponses(miner, &miner_views, 2);
+    try waitForResponses(observer, &observer_views, 2);
+    for ([_]ChunkResponse{ miner_views.items[1], observer_views.items[1] }, [_]u64{ miner_token, observer_token }) |response, token| {
+        const overlay = response.extraction_zone.?.snapshot;
+        try std.testing.expectEqual(token, overlay.subscription_id);
+        try std.testing.expectEqual(@as(usize, 1), overlay.claims.len);
+        try std.testing.expectEqual(@as(usize, 10), overlay.cells.len);
+        try std.testing.expectEqual(response.data.blocks.chunk.chunk_revision, overlay.terrain_revision);
+        try std.testing.expectEqual(rules.BlockType.none, response.data.blocks.chunk.content.getBlock(.{ 31, 10, 15 }));
+    }
+    const baseline = miner_views.items[1].extraction_zone.?.snapshot;
+
+    var operations: [10]BlockOperation = undefined;
+    for (&operations, 10..) |*operation, y| operation.* = .{ .block = .{ 31, @intCast(y), 47 }, .action = .remove };
+    const submitted = try miner.trySubmitOperations(&operations);
+    try waitForResponses(miner, &miner_views, 13);
+    try waitForResponses(observer, &observer_views, 3);
+    try waitForResponses(neighbor, &neighbor_views, 2);
+    var confirmations: usize = 0;
+    var deltas: usize = 0;
+    for (miner_views.items[2..]) |response| {
+        try std.testing.expect(response.data == .acknowledgement);
+        if (response.operation) |result| {
+            try std.testing.expectEqual(submitted.requestId(confirmations), result.request_id);
+            try std.testing.expectEqual(OperationStatus.success, result.status);
+            confirmations += 1;
+        }
+        if (response.extraction_zone) |update| {
+            try std.testing.expectEqual(miner_token, update.delta.subscription_id);
+            try std.testing.expectEqual(baseline.terrain_revision, update.delta.terrain_revision);
+            try std.testing.expectEqual(baseline.revision, update.delta.base_revision);
+            try std.testing.expectEqual(@as(usize, 10), update.delta.changes.len);
+            try std.testing.expectEqual(null, response.pallet_visuals);
+            for (update.delta.changes) |change| try std.testing.expectEqual(null, change.value);
+            deltas += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 10), confirmations);
+    try std.testing.expectEqual(@as(usize, 1), deltas);
+    try std.testing.expectEqual(@as(usize, 3), observer_views.items.len);
+    try std.testing.expectEqual(observer_token, observer_views.items[2].extraction_zone.?.delta.subscription_id);
+    try std.testing.expectEqual(baseline.revision, observer_views.items[2].extraction_zone.?.delta.base_revision);
+    try std.testing.expectEqual(@as(usize, 10), observer_views.items[2].extraction_zone.?.delta.changes.len);
+    try std.testing.expectEqual(null, observer_views.items[2].pallet_visuals);
+    try std.testing.expectEqual(neighbor_token, neighbor_views.items[1].subscription_id.?);
+    try std.testing.expect(neighbor_views.items[1].data == .boundaries);
+    try std.testing.expect(neighbor_views.items[1].extraction_zone == null);
+
+    const reload = observer.requestChunks(.{ 0, 0 }, z, z + 1);
+    try waitForResponses(observer, &observer_views, 4);
+    const refreshed = observer_views.items[3].extraction_zone.?.snapshot;
+    try std.testing.expectEqual(reload, refreshed.subscription_id);
+    try std.testing.expectEqual(@as(usize, 1), refreshed.claims.len);
+    try std.testing.expectEqual(@as(usize, 0), refreshed.cells.len);
+}
+
+test "extraction near publication clears the pallet source when a zone pallet is mined" {
+    const fixture = try PersistenceFixture.init(.{});
+    defer fixture.deinit();
+    const authority = try fixture.service.createClient();
+    const observer = try fixture.service.createClient();
+    const block: [3]u32 = .{ 10, 10, 48 };
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(authority, .{ .block = block, .action = .{ .put = .pallet } }));
+    try PersistenceFixture.registerZone(authority, .{ .bounds = .{ .min = block, .size = .{ 1, 1, 1 } }, .filter = .{} });
+    const token = observer.requestChunks(.{ 0, 0 }, 1, 2);
+    var replies: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&replies);
+    try waitForResponses(observer, &replies, 1);
+    const initial = replies.items[0];
+    const cell_index = transformations.index(world_module.splitBlockCoords(block)[1]);
+    try std.testing.expectEqualSlices(u16, &.{cell_index}, initial.pallet_visuals.?);
+    const removed = try PersistenceFixture.operationResult(authority, .{ .block = block, .action = .remove });
+    try std.testing.expectEqual(OperationStatus.success, removed.status);
+    try std.testing.expectEqual(rules.BlockType.pallet, removed.mined_type.?);
+    try waitForResponses(observer, &replies, 2);
+    const update = replies.items[1];
+    try std.testing.expectEqual(token, update.subscription_id.?);
+    try std.testing.expect(update.data == .acknowledgement);
+    try std.testing.expectEqual(initial.extraction_zone.?.snapshot.revision, update.extraction_zone.?.delta.base_revision);
+    try std.testing.expectEqual(@as(usize, 1), update.extraction_zone.?.delta.changes.len);
+    try std.testing.expectEqual(null, update.extraction_zone.?.delta.changes[0].value);
+    try std.testing.expectEqual(@as(usize, 0), update.pallet_visuals.?.len);
+}
 
 test "Apply captures cavity index sources and retains every narrowed dependency version gate" {
     const a = std.testing.allocator;
@@ -13107,6 +14371,10 @@ const BlueprintSoilApplyTest = struct {
     }
 
     fn initWithSources(self: *@This(), generated: bool) !*BlueprintAdmissionTask {
+        return self.prepareSources(generated, false);
+    }
+
+    fn prepareSources(self: *@This(), generated: bool, claim_foundation: bool) !*BlueprintAdmissionTask {
         const a = std.testing.allocator;
         try self.base.init();
         errdefer self.deinit();
@@ -13153,6 +14421,16 @@ const BlueprintSoilApplyTest = struct {
             }
             service.worker_state.modified_chunks.deinit(a);
             service.worker_state.modified_chunks = .empty;
+        }
+        if (claim_foundation) {
+            service.worker_state.zones = .init(test_layout.size_in_blocks);
+            // This fixture gives grass a synthetic growth timer. The underlying
+            // construction soil model only schedules growth for exposed bare dirt.
+            service.worker_state.modified_chunks.getPtr(lower_id).?.metadata.timed.cancel(transformations.index(.{ 10, 10, 31 }));
+            _ = try service.tryRegisterExtractionZone(.{
+                .bounds = .{ .min = .{ 42, 42, 127 }, .size = .{ 5, 1, 1 } },
+                .filter = .{},
+            });
         }
         try self.base.client.subscriptions.put(a, lower_id, .{ .id = 1, .mode = .blocks });
         try self.base.client.subscriptions.put(a, upper_id, .{ .id = 2, .mode = .blocks });
@@ -13993,6 +15271,88 @@ test "construction ownership coherent save resumes partial transfer and rejects 
         try BlueprintJournalBudgetTest.waitJob(service);
         try std.testing.expectEqual(@as(u32, 0), store.blueprints.grass_initializations.count());
     }
+}
+
+test "extraction zone soil deadlines survive construction handoff, exposure, and restart" {
+    const a = std.testing.allocator;
+    var durable: PreparedBlueprintDrainTest = undefined;
+    try durable.init();
+    defer durable.deinit();
+    durable.cleanupFixture();
+    durable.store.limits.blueprints.max_operations = 16;
+
+    const left: [3]u32 = .{ 31, 10, 70 };
+    const right: [3]u32 = .{ 32, 10, 70 };
+    const cover: [3]u32 = .{ 32, 10, 71 };
+    const completed: u64 = 120;
+    const registered: u64 = 400;
+    const exposed: u64 = 680;
+    const original_due = completed + transformations.transformation_delay;
+    const exposed_due = exposed + transformations.transformation_delay;
+    const filter: extraction_zone.Filter = @bitCast(@as(u8, 1));
+    {
+        var fixture: BlueprintSaveFixture = undefined;
+        try fixture.init();
+        defer BlueprintJournalBudgetTest.cleanup(&fixture);
+        const service = &fixture.service;
+        const state = &service.worker_state;
+        service.store = &durable.store;
+        service.limits.output_bytes = 64 * 1024;
+        state.zones = .init(test_layout.size_in_blocks);
+        try ConstructionOwnershipTest.seed(&fixture);
+        try service.materializeConstructionPortion(1, 0);
+        try service.materializeConstructionPortion(1, 1);
+        state.tick = completed;
+        try service.completeConstruction(1);
+        try std.testing.expectEqual(@as(usize, 2), service.construction_grass.items.len);
+
+        state.tick = registered;
+        _ = try service.tryRegisterExtractionZone(.{ .bounds = .{ .min = left, .size = .{ 2, 1, 1 } }, .filter = filter });
+        try std.testing.expectEqual(@as(usize, 0), service.construction_grass.items.len);
+        try std.testing.expectEqual(@as(?u64, original_due), state.zones.cellAt(left).?.grass_due);
+        const placed = try state.tryApplyOperation(a, .{ .block = cover, .action = .{ .put = .water } });
+        defer placed.chunk.deinit(a);
+        try std.testing.expectEqual(OperationStatus.success, placed.status);
+        try std.testing.expectEqual(null, state.zones.cellAt(right).?.grass_due);
+        state.tick = exposed;
+        const removed = try state.tryApplyOperation(a, .{ .block = cover, .action = .remove });
+        defer removed.chunk.deinit(a);
+        try std.testing.expectEqual(OperationStatus.success, removed.status);
+        try std.testing.expectEqual(@as(?u64, exposed_due), state.zones.cellAt(right).?.grass_due);
+        try service.beginCapture(101, false);
+        try BlueprintJournalBudgetTest.waitJob(service);
+        try std.testing.expectEqual(@as(u32, 0), durable.store.blueprints.grass_initializations.count());
+    }
+
+    durable.store.deinit();
+    durable.store_open = false;
+    durable.store = try storage.Store.open(a, durable.path, .{});
+    durable.store_open = true;
+    var restored: BlueprintSaveFixture = undefined;
+    try restoreConstructionOwnershipFixture(&restored, &durable.store);
+    defer BlueprintJournalBudgetTest.cleanup(&restored);
+    const service = &restored.service;
+    const state = &service.worker_state;
+    try service.restoreExtractionZones(&durable.store);
+    try std.testing.expectEqualDeep(filter, state.zones.recordAt(right).?.filter);
+    try std.testing.expect(state.zones.cellAt(left).?.constructed and state.zones.cellAt(right).?.constructed);
+    try std.testing.expectEqual(@as(?u64, original_due), state.zones.cellAt(left).?.grass_due);
+    try std.testing.expectEqual(@as(?u64, exposed_due), state.zones.cellAt(right).?.grass_due);
+    state.tick = original_due - 1;
+    service.processTransformations();
+    try std.testing.expectEqual(rules.BlockType.dirt, state.zones.cellAt(left).?.material);
+    state.tick = original_due;
+    service.processTransformations();
+    try std.testing.expectEqual(rules.BlockType.grass, state.zones.cellAt(left).?.material);
+    try std.testing.expectEqual(null, state.zones.cellAt(left).?.grass_due);
+    try std.testing.expectEqual(rules.BlockType.dirt, state.zones.cellAt(right).?.material);
+    state.tick = exposed_due;
+    service.processTransformations();
+    try std.testing.expectEqual(rules.BlockType.grass, state.zones.cellAt(right).?.material);
+    try std.testing.expectEqual(null, state.zones.cellAt(right).?.grass_due);
+    const revision = state.zones.revision;
+    service.processTransformations();
+    try std.testing.expectEqual(revision, state.zones.revision);
 }
 
 const ConstructionAuthorityMeasurement = struct {
@@ -15802,3 +17162,594 @@ test "warehouse authority representative workload measurement" {
 test {
     _ = warehouse_reach;
 }
+
+test "extraction zone service and client compose the same mixed chunk" {
+    const a = std.testing.allocator;
+    var state: WorkerState = .{
+        .layout = &test_layout,
+        .generator = try WorldGenerator.prepare(.flat, a, &test_layout),
+        .zones = .init(test_layout.size_in_blocks),
+    };
+    defer state.deinit(a);
+    const coords: ChunkCoords = .{ 0, 0, 2 };
+    const id = test_layout.encodeChunkCoords(coords);
+    try state.modified_chunks.put(a, id, WorldChunk.initEmpty());
+    const terrain = state.modified_chunks.getPtr(id).?;
+    const terrain_road = transformations.index(.{ 20, 10, 6 });
+    const terrain_soil = transformations.index(.{ 0, 10, 6 });
+    const initializing_soil = transformations.index(.{ 0, 11, 6 });
+    const zone_soil = transformations.index(.{ 31, 11, 6 });
+    try std.testing.expectEqual(.success, try terrain.tryApply(a, transformations.coordinates(terrain_road), .{ .put = .country_road_adaptive }));
+    try std.testing.expectEqual(.success, try terrain.tryApply(a, transformations.coordinates(terrain_soil), .{ .put = .dirt }));
+    try std.testing.expectEqual(.success, try terrain.tryApply(a, transformations.coordinates(initializing_soil), .{ .put = .dirt }));
+    try terrain.metadata.tryMarkConstructed(a, terrain_road);
+    try terrain.metadata.timed.trySchedule(a, .{ .block = terrain_soil, .kind = .grow_grass, .due_tick = 42 });
+    try terrain.metadata.timed.trySchedule(a, .{ .block = initializing_soil, .kind = .initialize_grass, .due_tick = 80 });
+    terrain.flags.is_unreachable = true;
+    terrain.chunk_revision = 9;
+    const road = @import("road_data.zig").Slope{ .downhill = .positive_x, .length = 4, .section = 1, .high_endpoint = .{ 28, 10, 70 } };
+    _ = try state.zones.register(a, .{ .min = .{ 30, 10, 70 }, .size = .{ 2, 2, 1 } }, .{}, .{}, &.{
+        .{ .cell = .{ 31, 10, 70 }, .value = .{ .material = .stone } },
+        .{ .cell = .{ 30, 10, 70 }, .value = .{ .material = .custom, .constructed = true, .slope = road } },
+        .{ .cell = .{ 31, 11, 70 }, .value = .{ .material = .dirt, .grass_due = 42 } },
+        .{ .cell = .{ 30, 11, 70 }, .value = .{ .material = .grass, .constructed = true } },
+    });
+    const chunk = try state.tryLoadAt(a, coords);
+    defer chunk.deinit(a);
+    try std.testing.expectEqual(@as(u16, 7), chunk.solid_block_count);
+    try std.testing.expectEqual(rules.BlockType.stone, chunk.content.getBlock(.{ 31, 10, 6 }));
+    try std.testing.expectEqualDeep(road, chunk.metadata.road(transformations.index(.{ 30, 10, 6 })).?.slope.?);
+    try std.testing.expectEqualSlices(transformations.Event, &.{
+        .{ .block = terrain_soil, .kind = .grow_grass, .due_tick = 42 },
+        .{ .block = zone_soil, .kind = .grow_grass, .due_tick = 42 },
+        .{ .block = initializing_soil, .kind = .initialize_grass, .due_tick = 80 },
+    }, chunk.metadata.timed.events.items);
+    const deps = try world_module.tryCollectConstructedWithZones(a, &test_layout, &state.modified_chunks, .{ 31, 10, 70 }, &state.zones);
+    defer a.free(deps);
+    try std.testing.expectEqualSlices(rules.Cell, &.{ .{ 20, 10, 70 }, .{ 30, 10, 70 }, .{ 30, 11, 70 } }, deps);
+    const boundaries = try state.tryBoundariesAt(a, coords);
+    try std.testing.expectEqualDeep(chunk.boundaries, boundaries);
+    try std.testing.expect(boundaries[@intFromEnum(Side.right)].contains(.right, .{ 31, 10, 6 }));
+    try std.testing.expect(boundaries[@intFromEnum(Side.left)].contains(.left, .{ 0, 10, 6 }));
+    try std.testing.expectEqual(rules.BlockType.none, terrain.content.getBlock(.{ 31, 10, 6 }));
+
+    var client = try world_module.World.init(a, &test_layout);
+    defer client.deinit();
+    var raw_snapshot = try state.tryLoadTerrainAt(a, coords);
+    errdefer raw_snapshot.deinit(a);
+    const token = 7;
+    var snapshot = try extraction_zone_stream.snapshot(a, &state.zones, @bitCast(coords), id, token, raw_snapshot.chunk_revision);
+    defer snapshot.deinit(a);
+    try client.insertStreamedTerrain(coords, &raw_snapshot, token, chunk.chunk_revision, .{ .snapshot = snapshot });
+    raw_snapshot = WorldChunk.initEmpty();
+    const view = client.getChunk(coords).?;
+    try std.testing.expectEqualDeep(chunk.content.toData(), view.content.toData());
+    try std.testing.expectEqualDeep(chunk.flags, view.flags);
+    try std.testing.expectEqual(chunk.solid_block_count, view.solid_block_count);
+    try std.testing.expectEqualDeep(chunk.boundaries, view.boundaries);
+    try std.testing.expectEqual(chunk.chunk_revision, view.chunk_revision);
+    try std.testing.expectEqualDeep(chunk.cell_changes, view.cell_changes);
+    try std.testing.expectEqualSlices(transformations.Event, chunk.metadata.timed.events.items, view.metadata.timed.events.items);
+    try std.testing.expectEqual(chunk.metadata.roads.items.len, view.metadata.roads.items.len);
+    for (chunk.metadata.roads.items) |section| try std.testing.expectEqualDeep(section, view.metadata.road(section.index).?);
+    try std.testing.expectEqual(chunk.metadata.constructed.items.len, view.metadata.constructed.items.len);
+    for (chunk.metadata.constructed.items) |index| try std.testing.expect(std.mem.indexOfScalar(transformations.BlockIndex, view.metadata.constructed.items, index) != null);
+}
+
+test "extraction zone soil under a blueprint clears grass and cancels growth on its owner" {
+    var fixture: BlueprintSoilApplyTest = undefined;
+    const task = try fixture.prepareSources(false, true);
+    defer fixture.deinit();
+    const service = &fixture.base.service;
+    const state = &service.worker_state;
+    const grass: [3]u32 = .{ 42, 42, 127 };
+    const dirt: [3]u32 = .{ 46, 42, 127 };
+    try std.testing.expectEqual(rules.BlockType.grass, state.zones.cellAt(grass).?.material);
+    try std.testing.expectEqual(@as(?u64, 100), state.zones.cellAt(dirt).?.grass_due);
+    try service.commitBlueprintApplication(task);
+    try std.testing.expectEqual(rules.BlockType.dirt, state.zones.cellAt(grass).?.material);
+    try std.testing.expectEqual(null, state.zones.cellAt(dirt).?.grass_due);
+    try std.testing.expectEqual(rules.BlockType.none, state.modified_chunks.get(BlueprintSoilApplyTest.lower_id).?.content.getBlock(.{ 10, 10, 31 }));
+}
+
+fn waitForExtractionClientView(client: *Client, view: *world_module.World, coords: ChunkCoords, ready: ?*const fn (WorldChunk) bool) !WorldChunk {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const deadline = persistence.now(io) + 10 * std.time.ns_per_s;
+    var responses: std.ArrayList(ChunkResponse) = .empty;
+    defer responses.deinit(a);
+    while (persistence.now(io) < deadline) {
+        {
+            client.takeResponses(&responses);
+            defer {
+                for (responses.items) |response| response.deinit(a);
+                responses.clearRetainingCapacity();
+            }
+            for (responses.items) |*response| {
+                const token = response.subscription_id orelse continue;
+                switch (response.data) {
+                    .blocks => |*snapshot| {
+                        if (response.zone_cell_changes) |history| snapshot.chunk.cell_changes = history;
+                        view.insertStreamedTerrain(response.coords, &snapshot.chunk, token, response.chunk_revision, response.extraction_zone) catch |err| switch (err) {
+                            error.StaleChunk => continue,
+                            else => return err,
+                        };
+                        response.data = .acknowledgement;
+                    },
+                    .acknowledgement => if (response.extraction_zone) |update| {
+                        if (update != .delta) return error.UnpairedZoneBaseline;
+                        _ = try view.applyExtractionDelta(response.coords, token, response.chunk_revision, update.delta, response.zone_cell_changes);
+                    },
+                    else => {},
+                }
+            }
+        }
+        if (view.getChunk(coords)) |chunk| {
+            if (ready == null or ready.?(chunk)) return chunk;
+        }
+        try Io.sleep(io, .fromMilliseconds(1), .awake);
+    }
+    return error.TestZoneViewTimeout;
+}
+
+test "extraction zone public mining retry saves protected air and exactly one inventory item" {
+    const f = try PersistenceFixture.init(.{});
+    defer f.deinit();
+    const client = try f.service.createClient();
+    client.publishCheckpoint(.{ .id = 1, .feet = .{ 0, 0, 0 }, .yaw = 0, .pitch = 0 });
+    const stone: [3]u32 = .{ f.layout.size_in_blocks[0] - 1, 10, 20 };
+    const request: extraction_zone_commands.Registration = .{
+        .bounds = .{ .min = stone, .size = .{ 2, 1, 1 } },
+        .filter = .{ .stone = false },
+    };
+    try PersistenceFixture.registerZone(client, request);
+    const mine: BlockOperation = .{ .block = stone, .action = .remove, .player = .{ .id = 1, .expected_sequence = 0 } };
+    const command = client.nextExternalCommand();
+    _ = try client.trySubmitOperationCommand(command, mine, null);
+    const saved = try f.waitSave(f.service.requestSave(false));
+    try std.testing.expectEqual(.complete, saved.phase);
+    const replay = try client.trySubmitOperationCommand(command, mine, null);
+    try std.testing.expectEqual(.replayed, replay.disposition);
+    try std.testing.expectEqual(OperationStatus.success, replay.outcome.?.operation.status);
+    try std.testing.expectEqual(rules.BlockType.crushed_stone, replay.outcome.?.operation.mined_type.?);
+
+    // Spend the item elsewhere on the live server, then deliver the old command.
+    try std.testing.expect(client.acknowledgeExternalCommand(command));
+    const place: BlockOperation = .{ .block = .{ 10, 10, 48 }, .action = .{ .put = .crushed_stone }, .player = .{ .id = 1, .expected_sequence = 0 } };
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, place));
+    try std.testing.expectError(error.StaleCommand, client.trySubmitOperationCommand(command, mine, null));
+    const empty_slot = try PersistenceFixture.operationResult(client, place);
+    try std.testing.expectEqual(null, empty_slot.player_inventory.?.material);
+
+    // Discard unsaved activity. Reopen the durable save made before the later placement.
+    try f.reopen();
+    try std.testing.expectEqual(@as(?u8, @intFromEnum(rules.BlockType.crushed_stone)), f.service.restoredPlayer(1).?.inventory);
+    const reopened_client = try f.service.createClient();
+    const viewer = try f.service.createClient();
+    _ = viewer.requestChunks(.{ 0, 0 }, 0, 1);
+    _ = viewer.requestChunks(.{ f.layout.size_in_chunks[0] - 1, 0 }, 0, 1);
+    var views: std.ArrayList(ChunkResponse) = .empty;
+    defer deinitResponses(&views);
+    try waitForResponses(viewer, &views, 2);
+    for (views.items) |response| {
+        const snapshot = response.extraction_zone.?.snapshot;
+        try std.testing.expectEqual(response.data.blocks.chunk.chunk_revision, snapshot.terrain_revision);
+        try std.testing.expectEqual(@as(usize, 1), snapshot.claims.len);
+        try std.testing.expectEqualDeep(request.filter, snapshot.claims[0].filter);
+        try std.testing.expectEqualDeep(request.bounds, snapshot.claims[0].bounds);
+        if (response.coords[0] == 0) {
+            try std.testing.expectEqual(@as(usize, 1), snapshot.cells.len);
+            try std.testing.expectEqual(rules.BlockType.stone, snapshot.cells[0].value.material);
+        } else {
+            try std.testing.expectEqual(@as(usize, 0), snapshot.cells.len);
+            try std.testing.expectEqual(rules.BlockType.none, response.data.blocks.chunk.content.getBlock(.{ 31, 10, 20 }));
+        }
+    }
+    const blocked = try PersistenceFixture.operationResult(reopened_client, .{ .block = stone, .action = .{ .put = .water } });
+    try std.testing.expectEqual(rules.Reason.extraction_zone_claim, blocked.failure.?.reason);
+    const already_mined = try PersistenceFixture.operation(reopened_client, .{ .block = stone, .action = .remove });
+    try std.testing.expectEqual(OperationStatus.already_removed, already_mined);
+    const other = try PersistenceFixture.operationResult(reopened_client, .{ .block = .{ 0, 10, 20 }, .action = .remove });
+    try std.testing.expectEqual(OperationStatus.success, other.status);
+    try std.testing.expectEqual(rules.BlockType.crushed_stone, other.mined_type.?);
+    const wrapped = try PersistenceFixture.operationResult(reopened_client, .{ .block = .{ 0, 10, 20 }, .action = .{ .put = .water } });
+    try std.testing.expectEqual(rules.Reason.extraction_zone_claim, wrapped.failure.?.reason);
+    const neighbor = [3]u32{ 1, 10, 20 };
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(reopened_client, .{ .block = neighbor, .action = .remove }));
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(reopened_client, .{ .block = neighbor, .action = .{ .put = .water } }));
+}
+
+test "extraction zone road across a claim retains its slope after restart and reverts on endpoint removal" {
+    const f = try PersistenceFixture.init(.{});
+    defer f.deinit();
+    const client = try f.service.createClient();
+    const z = f.layout.size_in_blocks[2] / 2;
+    const high = [3]u32{ 31, 65, z };
+    const low = [3]u32{ 36, 65, z - 1 };
+    for (31..36) |x| try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{
+        .block = .{ @intCast(x), 65, z - 1 },
+        .action = .{ .put = .snow },
+    }));
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = .{ low[0], 65, z - 2 }, .action = .{ .put = .snow } }));
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = high, .action = .{ .put = .country_road_solid } }));
+    for (32..36) |x| try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{
+        .block = .{ @intCast(x), 65, z },
+        .action = .{ .put = .country_road_adaptive },
+    }));
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = low, .action = .{ .put = .country_road_solid } }));
+    try PersistenceFixture.registerZone(client, .{ .bounds = .{ .min = .{ 33, 65, z }, .size = .{ 1, 1, 1 } }, .filter = .{} });
+    try std.testing.expectEqual(.complete, (try f.waitSave(f.service.requestSave(true))).phase);
+    try f.reopen();
+    const reader = try f.service.createClient();
+    const editor = try f.service.createClient();
+    var view = try world_module.World.init(std.testing.allocator, &f.layout);
+    defer view.deinit();
+    _ = reader.requestChunks(.{ 1, 2 }, 2, 3);
+    const coords: ChunkCoords = .{ 1, 2, 2 };
+    const baseline = try waitForExtractionClientView(reader, &view, coords, null);
+    const formed = baseline.metadata.roads.items;
+    try std.testing.expectEqual(@as(usize, 4), formed.len);
+    for (formed) |entry| try std.testing.expectEqual(@as(u32, 4), entry.slope.?.length);
+    try std.testing.expect(view.customShape(.{ 33, 65, z }).? == .slope);
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(editor, .{ .block = high, .action = .remove }));
+    const chunk = try waitForExtractionClientView(reader, &view, coords, struct {
+        fn ready(current: WorldChunk) bool {
+            if (current.metadata.roads.items.len != 4) return false;
+            for (current.metadata.roads.items) |entry| if (entry.slope != null) return false;
+            return true;
+        }
+    }.ready);
+    for (32..36) |x| {
+        try std.testing.expectEqual(rules.BlockType.custom, chunk.content.getBlock(.{ @intCast(x - 32), 1, 0 }));
+    }
+    for (chunk.metadata.roads.items) |entry| try std.testing.expectEqual(null, entry.slope);
+    try std.testing.expect(view.customShape(.{ 33, 65, z }).? == .adaptive);
+}
+
+test "extraction zone soil gained and inherited deadlines survive restart and follow outside cover" {
+    const f = try PersistenceFixture.init(.{});
+    defer f.deinit();
+    const client = try f.service.createClient();
+    for (10..13) |x| try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{
+        .block = .{ @intCast(x), 10, 48 },
+        .action = .{ .put = .dirt },
+    }));
+    const cover = [3]u32{ 10, 10, 49 };
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = cover, .action = .{ .put = .snow } }));
+    try PersistenceFixture.registerZone(client, .{ .bounds = .{ .min = .{ 10, 10, 48 }, .size = .{ 3, 1, 1 } }, .filter = .{} });
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(client, .{ .block = cover, .action = .remove }));
+    try std.testing.expectEqual(.complete, (try f.waitSave(f.service.requestSave(true))).phase);
+    try f.reopen();
+    const editor = try f.service.createClient();
+    const viewer = try f.service.createClient();
+    var view = try world_module.World.init(std.testing.allocator, &f.layout);
+    defer view.deinit();
+    const coords: ChunkCoords = .{ 0, 0, 1 };
+    _ = viewer.requestChunks(.{ 0, 0 }, 1, 2);
+    const restored = try waitForExtractionClientView(viewer, &view, coords, null);
+    try std.testing.expectEqual(@as(usize, 3), restored.metadata.timed.events.items.len);
+    for (restored.metadata.timed.events.items) |event| try std.testing.expectEqual(transformations.transformation_delay, event.due_tick);
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(editor, .{ .block = .{ 12, 10, 49 }, .action = .{ .put = .snow } }));
+    const covered = try waitForExtractionClientView(viewer, &view, coords, struct {
+        fn ready(current: WorldChunk) bool {
+            return current.metadata.timed.events.items.len == 2 and current.content.getBlock(.{ 12, 10, 17 }) == .snow;
+        }
+    }.ready);
+    try std.testing.expectEqual(@as(usize, 2), covered.metadata.timed.events.items.len);
+    f.service.advanceTo(transformations.transformation_delay);
+    const grown = try waitForExtractionClientView(viewer, &view, coords, struct {
+        fn ready(current: WorldChunk) bool {
+            return current.content.getBlock(.{ 10, 10, 16 }) == .grass and current.content.getBlock(.{ 11, 10, 16 }) == .grass;
+        }
+    }.ready);
+    try std.testing.expectEqual(rules.BlockType.grass, grown.content.getBlock(.{ 10, 10, 16 }));
+    try std.testing.expectEqual(rules.BlockType.grass, grown.content.getBlock(.{ 11, 10, 16 }));
+    try std.testing.expectEqual(rules.BlockType.dirt, grown.content.getBlock(.{ 12, 10, 16 }));
+    try std.testing.expectEqual(@as(usize, 0), grown.metadata.timed.events.items.len);
+    try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(editor, .{ .block = cover, .action = .{ .put = .snow } }));
+    const cleared = try waitForExtractionClientView(viewer, &view, coords, struct {
+        fn ready(current: WorldChunk) bool {
+            return current.content.getBlock(.{ 10, 10, 16 }) == .dirt and current.content.getBlock(.{ 10, 10, 17 }) == .snow;
+        }
+    }.ready);
+    try std.testing.expectEqual(rules.BlockType.dirt, cleared.content.getBlock(.{ 10, 10, 16 }));
+    try std.testing.expectEqual(@as(usize, 0), cleared.metadata.timed.events.items.len);
+}
+
+test "extraction zone shafts preserve the surrounding walls and pallet support through the service" {
+    const a = std.testing.allocator;
+    const layout = try WorldLayout.init(.{ .size_in_chunks = .{ 4, 4, 4 } });
+    const top: u32 = 47;
+    for ([_]u32{ 8, 32 }) |depth| {
+        const generator: WorldGenerator = if (depth == 32) .flat else .{ .terrain = .{
+            .seed = 111,
+            .params = .{ .base_height = top + 1, .height_amplitude = 0, .dirt_depth = 3 },
+        } };
+        const service = try WorldDataService.create(std.testing.io, a, &layout, generator);
+        defer service.destroy();
+        const editor = try service.createClient();
+        const bottom = top - depth + 1;
+        const rim = [3]u32{ 9, 12, top };
+        try std.testing.expectEqual(OperationStatus.success, try PersistenceFixture.operation(editor, .{ .block = .{ 9, 12, top + 1 }, .action = .{ .put = .pallet } }));
+        try PersistenceFixture.registerZone(editor, .{ .bounds = .{ .min = .{ 10, 10, bottom }, .size = .{ 5, 5, depth } }, .filter = .{} });
+        for (0..depth) |layer| for (10..15) |y| for (10..15) |x| {
+            const result = try PersistenceFixture.operationResult(editor, .{ .block = .{ @intCast(x), @intCast(y), top - @as(u32, @intCast(layer)) }, .action = .remove });
+            try std.testing.expectEqual(OperationStatus.success, result.status);
+            const expected: rules.BlockType = if (depth == 8 and layer < 4) .dirt else .crushed_stone;
+            try std.testing.expectEqual(expected, result.mined_type.?);
+        };
+        const refused = try PersistenceFixture.operationResult(editor, .{ .block = rim, .action = .remove });
+        try std.testing.expectEqual(rules.Reason.would_remove_support, refused.failure.?.reason);
+        const viewer = try service.createClient();
+        const first_chunk: i32 = @intCast((bottom - 1) / CHUNK_SIZE);
+        const last_chunk: i32 = @intCast(top / CHUNK_SIZE);
+        _ = viewer.requestChunks(.{ 0, 0 }, first_chunk, last_chunk + 1);
+        var view = try world_module.World.init(a, &layout);
+        defer view.deinit();
+        var level = first_chunk;
+        while (level <= last_chunk) : (level += 1) {
+            const chunk = try waitForExtractionClientView(viewer, &view, .{ 0, 0, level }, null);
+            const base: u32 = @as(u32, @intCast(level)) * CHUNK_SIZE;
+            for (@max(base, bottom - 1)..@min(base + CHUNK_SIZE, top + 1)) |z| for (9..16) |y| for (9..16) |x| {
+                const wall = x == 9 or x == 15 or y == 9 or y == 15 or z < bottom;
+                const expected: rules.BlockType = if (!wall) .none else if (depth == 8 and z == top) .grass else if (depth == 8 and top - z < 4) .dirt else .stone;
+                const material = chunk.content.getBlock(.{ @intCast(x), @intCast(y), @intCast(z - base) });
+                if (x == rim[0] and y == rim[1] and z == top and depth == 8) {
+                    try std.testing.expectEqual(rules.BlockType.dirt, material);
+                } else try std.testing.expectEqual(expected, material);
+            };
+        }
+    }
+}
+
+test "extraction far surfaces coalesce ten removals and expose either owner across a chunk face" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    defer service.dirty_surfaces.deinit(a);
+    service.worker_state.zones = .init(test_layout.size_in_blocks);
+    const top = test_layout.size_in_blocks[2] / 2 - CHUNK_SIZE / 2 - 1;
+    const level: i32 = @intCast(top / CHUNK_SIZE);
+    const chunks = [_]ChunkCoords{ .{ 0, 0, level }, .{ 1, 0, level } };
+    _ = try service.tryRegisterExtractionZone(.{
+        .bounds = .{ .min = .{ 31, 4, top - 9 }, .size = .{ 1, 20, 10 } },
+        .filter = .{},
+    });
+    // The observer holds only surfaces on both sides of the seam. Warm up its
+    // initial snapshots before measuring the incremental mining workload.
+    for (chunks, 1..) |coords, token| {
+        try fixture.client.subscriptions.put(a, test_layout.encodeChunkCoords(coords), .{ .id = token, .mode = .surface, .surface_pending = true });
+        service.publishSurface(coords);
+    }
+    fixture.client.pending.deinit(a);
+    fixture.client.pending = .{};
+    service.dirty_surfaces.clearRetainingCapacity();
+
+    var payload_bytes: usize = 0;
+    var publication_ns: i96 = 0;
+    for (0..10) |layer| for ([_]bool{ true, false }) |mine_zone| {
+        const x: u32 = if (mine_zone) 31 else 32;
+        const first_y: u32 = if (mine_zone) 4 else 14;
+        const z = top - @as(u32, @intCast(layer));
+        for (0..10) |offset| {
+            service.processAdmitted(.{ .operation = .{
+                .client = &fixture.client,
+                .request_id = fixture.client.nextRequestId(),
+                .operation = .{ .block = .{ x, first_y + @as(u32, @intCast(offset)), z }, .action = .remove },
+            } });
+        }
+        for (fixture.client.pending.responses.items) |reply| try std.testing.expectEqual(OperationStatus.success, reply.operation.?.status);
+        const before = persistence.now(std.testing.io);
+        var dirty = service.dirty_surfaces.keyIterator();
+        while (dirty.next()) |id| service.publishSurface(test_layout.decodeChunkId(id.*));
+        publication_ns += persistence.now(std.testing.io) - before;
+        var seen = [_]bool{ false, false };
+        for (fixture.client.pending.responses.items) |reply| {
+            if (reply.operation != null) continue;
+            try std.testing.expect(reply.data == .surface);
+            const which: usize = @intCast(reply.coords[0]);
+            try std.testing.expect(!seen[which]);
+            seen[which] = true;
+            const surface = reply.data.surface;
+            for (surface.blocks_grouped_by_side) |faces| payload_bytes += std.mem.sliceAsBytes(faces.items).len;
+            payload_bytes += std.mem.sliceAsBytes(surface.custom_blocks.items).len;
+            if (which != @intFromBool(mine_zone)) continue;
+            const side: Side = if (mine_zone) .left else .right;
+            var exposed: usize = 0;
+            for (surface.blocks_grouped_by_side[@intFromEnum(side)].items) |face| {
+                if (face.coords[0] == (if (mine_zone) @as(u8, 0) else 31) and face.coords[1] >= first_y and face.coords[1] < first_y + 10 and face.coords[2] == z % CHUNK_SIZE) exposed += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 10), exposed);
+        }
+        try std.testing.expect(seen[0] and seen[1]);
+        fixture.client.pending.deinit(a);
+        fixture.client.pending = .{};
+        service.dirty_surfaces.clearRetainingCapacity();
+    };
+    if (@import("builtin").mode == .ReleaseFast)
+        std.debug.print("\nextraction far observer: 200 removals, 20 batches, 40 full surfaces, {d} geometry bytes, {d} ns surface build and copy\n", .{ payload_bytes, publication_ns });
+}
+
+test "extraction zone baselines make progress after a lagging reader releases the publication budget" {
+    const a = std.testing.allocator;
+    var fixture: BlueprintSaveFixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const service = &fixture.service;
+    defer service.dirty_surfaces.deinit(a);
+    service.worker_state.zones = .init(test_layout.size_in_blocks);
+    const budget_bytes = @sizeOf(extraction_zone_stream.Record) + CHUNK_SIZE * @sizeOf(extraction_zone_stream.Cell);
+    const budget = try PublicationBudget.create(a, std.testing.io, budget_bytes, service, WorldDataService.wakeConstructionPublication);
+    service.construction_publication_budget = budget;
+    defer {
+        service.construction_publication_budget = null;
+        budget.detach();
+        budget.release();
+    }
+    const zone = try service.tryRegisterExtractionZone(.{
+        .bounds = .{ .min = .{ 0, 10, 20 }, .size = .{ 3 * CHUNK_SIZE, 1, 1 } },
+        .filter = .{},
+    });
+    for (0..3) |x| {
+        const id = test_layout.encodeChunkId(x, 0, 0);
+        try fixture.client.subscriptions.put(a, id, .{ .id = x + 1, .mode = .blocks, .blocks_pending = true });
+    }
+
+    var seen: std.StaticBitSet(3) = .initEmpty();
+    for (0..3) |_| {
+        service.flushPackages();
+        var packages: std.ArrayList(ResponsePackage) = .empty;
+        defer deinitTestPackages(&packages);
+        fixture.client.takePackages(&packages);
+        var baselines: usize = 0;
+        for (packages.items) |package| for (package.responses.items) |response| {
+            if (response.data != .blocks) continue;
+            const x: usize = @intCast(response.coords[0]);
+            try std.testing.expect(x < 3 and !seen.isSet(x));
+            seen.set(x);
+            const update = response.extraction_zone orelse return error.MissingPairedZoneBaseline;
+            try std.testing.expect(update == .snapshot);
+            const snapshot = update.snapshot;
+            try std.testing.expectEqual(test_layout.encodeChunkId(x, 0, 0), snapshot.chunk_id);
+            try std.testing.expectEqual(response.subscription_id.?, snapshot.subscription_id);
+            try std.testing.expectEqual(response.data.blocks.chunk.chunk_revision, snapshot.terrain_revision);
+            try std.testing.expectEqualSlices(extraction_zone_stream.Record, &.{zone}, snapshot.claims);
+            try std.testing.expectEqual(@as(usize, CHUNK_SIZE), snapshot.cells.len);
+            try std.testing.expectEqual(rules.BlockType.stone, snapshot.cells[0].value.material);
+            try std.testing.expectEqual(rules.BlockType.none, response.data.blocks.chunk.content.getBlock(.{ 0, 10, 20 }));
+            baselines += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), baselines);
+        try std.testing.expectEqual(budget_bytes, budget.used.load(.acquire));
+
+        // The consumer owns the current package while the service retries.
+        // It must never publish a bare terrain half for another claimed chunk.
+        service.flushPackages();
+        var premature: std.ArrayList(ResponsePackage) = .empty;
+        defer deinitTestPackages(&premature);
+        fixture.client.takePackages(&premature);
+        for (premature.items) |package| for (package.responses.items) |response| {
+            try std.testing.expect(response.data != .blocks and response.extraction_zone == null);
+        };
+        try std.testing.expectEqual(budget_bytes, budget.used.load(.acquire));
+    }
+    try std.testing.expectEqual(@as(usize, 3), seen.count());
+    try std.testing.expectEqual(@as(usize, 0), budget.used.load(.acquire));
+}
+
+// The opt-in benchmark uses the private capture boundary to time the executor
+// separately from the writer. Its separate test root owns the sample matrix.
+pub const ExtractionZoneSaveBenchmark = if (@import("builtin").is_test) struct {
+    pub const Occupancy = enum { occupied, partial, exhausted };
+    pub const Workload = struct { count: usize, size: [3]u32, occupancy: Occupancy };
+    pub const Sample = struct {
+        claimed: usize,
+        remaining: usize,
+        dirty_sources: usize = 0,
+        capture_wall_ns: i96 = 0,
+        capture_cpu_ns: i96 = 0,
+        store_open_ns: i96 = 0,
+        service_restore_ns: i96 = 0,
+        zone_bytes: usize = 0,
+        wal_transaction_bytes: u64 = 0,
+        base_bytes: u64 = 0,
+    };
+
+    pub fn sample(workload: Workload) !Sample {
+        const a = std.testing.allocator;
+        const io = std.testing.io;
+        const target: [3]u32 = .{ 1, 1, CHUNK_SIZE + 1 };
+        const claimed = workload.count * @as(usize, workload.size[0]) * workload.size[1] * workload.size[2];
+        const remaining_before_edit = switch (workload.occupancy) {
+            .occupied => claimed,
+            .partial => claimed / 2,
+            .exhausted => @intFromBool(claimed != 0),
+        };
+        var result: Sample = .{ .claimed = claimed, .remaining = remaining_before_edit -| 1 };
+        var uuid: [16]u8 = undefined;
+        try io.randomSecure(&uuid);
+        var temporary = std.testing.tmpDir(.{});
+        defer temporary.cleanup();
+        const path = try temporary.parent_dir.realPathFileAlloc(io, &temporary.sub_path, a);
+        defer a.free(path);
+        const dimensions: [3]u32 = @bitCast(test_layout.size_in_chunks);
+        const descriptor = try format.encodeDescriptor(a, .{ .dimensions = dimensions, .generator_id = format.generator_id, .seed = 0, .settings = &format.flat_settings });
+        defer a.free(descriptor);
+        const global = format.encodeGlobal(0);
+
+        {
+            var store = try storage.Store.create(a, path, .{ .world_uuid = uuid, .descriptor = descriptor, .global = &global, .players = &.{}, .player_count = 0 }, .{});
+            defer store.deinit();
+            var fixture: BlueprintSaveFixture = undefined;
+            try fixture.init();
+            defer BlueprintJournalBudgetTest.cleanup(&fixture);
+            const service = &fixture.service;
+            service.store = &store;
+            service.players.clearRetainingCapacity();
+            service.worker_state.persistence_service = service;
+            service.worker_state.zones = .init(test_layout.size_in_blocks);
+            try seed(service, workload, target);
+            try std.testing.expectEqual(remaining_before_edit, service.worker_state.zones.material_counts.occupied);
+            try service.beginCapture(1, false);
+            try BlueprintJournalBudgetTest.waitJob(service);
+            try store.compact();
+
+            const removed = service.worker_state.applyOperationFrom(a, .{ .block = target, .action = .remove }, false, false);
+            defer removed.chunk.deinit(a);
+            try std.testing.expectEqual(OperationStatus.success, removed.status);
+            try std.testing.expectEqual(rules.BlockType.crushed_stone, removed.diagnostics.mined_type.?);
+            try std.testing.expectEqual(result.remaining, service.worker_state.zones.material_counts.occupied);
+
+            const capture_start = persistence.now(io);
+            const cpu_start = Io.Clock.cpu_thread.now(io).toNanoseconds();
+            try service.beginCapture(2, false);
+            result.capture_cpu_ns = Io.Clock.cpu_thread.now(io).toNanoseconds() - cpu_start;
+            result.capture_wall_ns = persistence.now(io) - capture_start;
+            result.dirty_sources = service.job.?.sources.len;
+            result.zone_bytes = if (service.job.?.zone_snapshot) |bytes| bytes.len else 0;
+            try std.testing.expectEqual(@as(usize, 1), result.dirty_sources);
+            try BlueprintJournalBudgetTest.waitJob(service);
+            const wal = store.segments.items[store.active.?];
+            result.wal_transaction_bytes = wal.end - wal.header.len;
+        }
+
+        const open_start = persistence.now(io);
+        var reopened = try storage.Store.open(a, path, .{});
+        const restore_start = persistence.now(io);
+        defer reopened.deinit();
+        const restored = try WorldDataService.createPersistent(io, a, &test_layout, .flat, &reopened, .{});
+        result.service_restore_ns = persistence.now(io) - restore_start;
+        result.store_open_ns = restore_start - open_start;
+        defer restored.destroy();
+        result.base_bytes = try reopened.base.size();
+        try std.testing.expectEqual(@as(u64, 2), reopened.sequence);
+        try std.testing.expectEqual(result.zone_bytes, reopened.zones.len);
+        try std.testing.expectEqual(workload.count, restored.worker_state.zones.records.items.len);
+        try std.testing.expectEqual(result.remaining, restored.worker_state.zones.material_counts.occupied);
+        try std.testing.expectEqual(workload.count != 0, restored.worker_state.zones.recordAt(target) != null);
+        try std.testing.expectEqual(null, restored.worker_state.zones.cellAt(target));
+        return result;
+    }
+
+    fn seed(service: *WorldDataService, workload: Workload, target: [3]u32) !void {
+        const state = &service.worker_state.zones;
+        for (0..workload.count) |i| {
+            const bounds: extraction_zone.Bounds = .{
+                .min = .{ @intCast(i % 32 * @max(CHUNK_SIZE, workload.size[0])), @intCast(i / 32 * @max(CHUNK_SIZE, workload.size[1])), CHUNK_SIZE },
+                .size = workload.size,
+            };
+            _ = try service.tryRegisterExtractionZone(.{ .bounds = bounds, .filter = .{} });
+            if (workload.occupancy == .occupied) continue;
+            // Prepare the already-mined fixture outside the timed window.
+            // The measured single removal below follows the normal edit path.
+            var cells = bounds.cells(test_layout.size_in_blocks[0]);
+            while (cells.next()) |cell| {
+                if (std.meta.eql(cell, target)) continue;
+                if (workload.occupancy == .partial and cell[0] % 2 != 0) continue;
+                try std.testing.expect(state.removeCell(cell));
+            }
+        }
+    }
+} else void;

@@ -34,7 +34,7 @@ versions only, not intermediate development builds, including builds between rel
 
 The game runs one current gameplay/construction logic. It does not select historical rules
 from a world or blueprint. Compatibility with older file encodings is separate: the current
-implementation writes and reads format 8. Formats 1–7 are incompatible development
+implementation reads and writes format 9. Formats 1–8 are incompatible development
 saves and are rejected as whole worlds. The base and WAL readers enforce the supported inclusive
 range through `minimum_readable_version` and `current_write_version`.
 
@@ -46,11 +46,17 @@ saved blueprint libraries, and unfinished construction sites together. Generator
 identity/version guards likewise reject unsupported algorithms. All accepted saves use the
 current game logic.
 
-Version 8 adds simulation-owned warehouses and accepted delivery cargo to the coherent
-terrain/construction/player snapshot. Pallet material has explicit ID 23. Version 7 introduced
+Version 9 adds extraction zone bounds, resource filters, occupied cells, road slopes, and
+soil deadlines to the shared save transaction. When a zone changes, the WAL records the
+complete zone image alongside the changed terrain chunks and current player inventory.
+Zone bounds keep empty cells protected after reload. Saving only changed zone chunks is a
+[follow-up improvement](../specs/features/resource-extraction-zones.md#follow-up-improvements).
+
+Version 8 added simulation-owned warehouses and
+accepted delivery cargo. Pallet material has explicit ID 23. Version 7 introduced
 construction lifecycle, target-chunk ownership transfers, and pending
 post-completion grass initialization. Bare and grassy soil share support rules; legacy
-packed-soil value 7 and compaction events are rejected. Both version gates advance together.
+packed-soil value 7 and compaction events are rejected.
 Platform-only direct stone foundations and portable blueprint certification remain.
 
 ## External command sessions
@@ -206,5 +212,8 @@ zig build bench-persistence -Doptimize=ReleaseSafe -- /tmp/new-benchmark-world 1
 ```
 
 Benchmark positional arguments are a **new** save directory, active chunks, changed chunks, cycles, output MiB, working MiB, workload (`terrain`, `raw`, or `heavy`), optional first-write/first-commit-sync delays in milliseconds, and an optional separate capture-working cap in MiB. The earlier working-MiB argument bounds the synthetic workspace including resident block arrays. JSON is emitted on stderr. It uses the production encoder, output queue, WAL, and compactor with reproducible synthetic sources. Its update microbenchmark does not measure the service mutation gate or player/frame latency. Compare repeated runs on the same machine and filesystem; retain workload/capacity settings with reports.
+
+`zig build bench-extraction-save -Doptimize=ReleaseFast` measures capture and reopen after
+one edit in a saved world containing extraction zones. [Extraction zone benchmark](validation/extraction-zone-persistence.md)
 
 The [validation report](persistence-validation.md) records tested contracts, measurements, tuning evidence, and remaining validation limits. Advanced capture policies, allocator pools, and a larger hardware campaign should reuse these tests and workloads.

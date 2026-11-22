@@ -43,6 +43,7 @@ pub const Reason = enum {
     mining_forbidden,
     immutable_cell,
     warehouse_claim,
+    extraction_zone_claim,
     earth_missing_center,
     earth_split_gaps,
 };

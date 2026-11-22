@@ -17,6 +17,7 @@ pub fn description(reason: rules.Reason) []const u8 {
         .mining_forbidden => "This material cannot be mined yet.",
         .immutable_cell => "Deeprock cannot be changed.",
         .warehouse_claim => "This space is reserved by a warehouse.",
+        .extraction_zone_claim => "Blocks cannot be placed in an extraction zone.",
         .earth_requires_stable_platform => "Building on soil requires a filled 3x3x3 platform below the block.",
         .incompatible_support => "The material below cannot support this block.",
         .missing_foundation => "A suitable foundation is missing.",

@@ -18,6 +18,7 @@ pub const Limits = struct {
     /// Native construction arrays/maps and detached preparation capacity estimate;
     /// independent from encoded blueprint-state and terrain snapshot limits.
     construction_state_bytes: usize = 256 * 1024 * 1024,
+    extraction_zone_budgets: @import("../extraction_zone.zig").Budgets = .{},
     manifest_entries: usize = 65536,
     pending_commands: usize = 256,
     /// Per-client live warehouse interests, independent of queued control work.
@@ -123,6 +124,8 @@ pub const Job = struct {
     /// Null retains the preceding complete warehouse state; owned immutable
     /// bytes otherwise belong to the same complete-operation capture fence.
     warehouse_snapshot: ?[]u8 = null,
+    /// A detached zone snapshot shares this Job's block and inventory cut.
+    zone_snapshot: ?[]u8 = null,
     /// The service supplies exact new-instance bitmap sizes. Direct callers
     /// derive a conservative summary without reading the writer-owned State.
     blueprint_summary: ?blueprints.PrepareSummary = null,
@@ -195,6 +198,7 @@ pub const Job = struct {
         self.working_reserved_bytes = try std.math.add(usize, self.limits.output_bytes, try std.math.add(usize, manifest, try std.math.add(usize, self.players.len + self.blueprint_changes.len, scratch + @sizeOf(Job))));
         self.working_reserved_bytes = try std.math.add(usize, self.working_reserved_bytes, blueprint_prepare);
         if (self.warehouse_snapshot) |bytes| self.working_reserved_bytes = try std.math.add(usize, self.working_reserved_bytes, try std.math.add(usize, try std.math.mul(usize, bytes.len, 2), try warehouses.preparationMemoryBound(bytes, self.store.limits.warehouses)));
+        if (self.zone_snapshot) |bytes| self.working_reserved_bytes = try std.math.add(usize, self.working_reserved_bytes, try std.math.mul(usize, bytes.len, 2));
         self.working_reserved_bytes = try std.math.add(usize, self.working_reserved_bytes, try pendingWorkMemoryBound(self.pending_work.len));
         self.working_reserved_bytes = try std.math.add(usize, self.working_reserved_bytes, self.extra_working_bytes);
         if (self.working_reserved_bytes > self.limits.working_bytes) return error.WorkingCapacityExceeded;
@@ -281,6 +285,7 @@ pub const Job = struct {
         self.allocator.free(self.blueprint_changes);
         self.allocator.free(self.pending_work);
         if (self.warehouse_snapshot) |bytes| self.allocator.free(bytes);
+        if (self.zone_snapshot) |bytes| self.allocator.free(bytes);
         self.allocator.destroy(self);
     }
     fn emit(self: *Job, event: Event) void {
@@ -389,7 +394,7 @@ pub const Job = struct {
         self.store_mutex.lockUncancelable(self.io);
         defer self.store_mutex.unlock(self.io);
         const global = format.encodeGlobal(self.tick);
-        try self.store.beginSnapshotWithSimulation(self.sequence, &global, self.players, self.player_count, self.sources.len, self.blueprint_changes, self.pending_work, self.warehouse_snapshot);
+        try self.store.beginSnapshotWithZones(self.sequence, &global, self.players, self.player_count, self.sources.len, self.blueprint_changes, self.pending_work, self.warehouse_snapshot, self.zone_snapshot);
         while (true) {
             self.mutex.lockUncancelable(self.io);
             while (self.output_head == self.output.items.len and !self.encoder_finished)

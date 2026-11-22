@@ -1,6 +1,6 @@
 # Simulation notes
 
-These notes capture gameplay intent, constraints, and architecture decisions for the upcoming simulation. They accompany the [game vision](game-vision.md) and [design principles](../DESIGN_PRINCIPLES.md). Construction ownership, warehouse state and their shared capture are implemented. The broader economy, routing and automatic supplier allocation remain planned. These notes retain alternatives where no choice has been made; the selected first-version warehouse execution does not determine the full economy's scaling architecture.
+These notes capture gameplay intent, constraints, and architecture decisions for the upcoming simulation. They accompany the [game vision](game-vision.md) and [design principles](../DESIGN_PRINCIPLES.md). Construction ownership, warehouses, and extraction zones share an implemented save boundary. The broader economy, routing and automatic supplier allocation remain planned. These notes retain alternatives where no choice has been made; the selected first-version warehouse execution does not determine the full economy's scaling architecture.
 
 The [open questions](simulation-open-questions.md) track remaining decisions. The implemented foundation follows [construction ownership first, then warehouses](../specs/features/construction-state-ownership.md#q8--construction-first-then-warehouse-integration), sharing the simulation-state and capture boundary while retaining distinct records, world-query semantics, and publication policies. The [warehouse specification](../specs/features/warehouses.md) settles first-version storage behavior; full logistics allocation and other marked follow-ups remain separate work.
 
@@ -42,8 +42,9 @@ Each mutable fact needs a clear authoritative source and a defined way to coordi
 
 | State | Responsible component |
 | --- | --- |
-| Base terrain outside simulation-owned construction targets, chunk storage/loading, and terrain publication | World-data service |
+| Base terrain, including immutable deeprock, chunk storage/loading, and terrain publication | World-data service |
 | Active construction target cells, their physical contents, progress, and saved state until handback | Simulation on the service executor |
+| Extraction zone bounds, resource filters, and remaining mutable blocks | Simulation on the service executor |
 | Accepted operations and deliveries, their timing, paid costs, and obligations | Simulation |
 | Persistent warehouse objects, stock, incoming capacity, configuration, geometry, and lifecycle | Simulation |
 | Indexes for discovering work, dependencies, and routing | Simulation, updated from relevant world changes |
@@ -138,7 +139,7 @@ unsafe concurrent memory access.
 
 ## Simulation state and startup
 
-The simulation maintains task state and indexes plus the selected simulation-owned warehouse and construction-target records, according to the responsibility split above. Ordinary base terrain remains in world-data chunks. Opening a world must resume simulation in all areas containing active event emitters without scanning the whole world. The concrete representations and recovery mechanism have not been designed.
+The simulation maintains task state and indexes plus the simulation-owned warehouse, extraction-zone and construction-target records, according to the responsibility split above. Ordinary base terrain remains in world-data chunks. Opening a world must resume simulation in all areas containing active event emitters without scanning the whole world. The concrete representations and recovery mechanism have not been designed.
 
 ## World time and no offline progress
 

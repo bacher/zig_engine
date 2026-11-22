@@ -1,7 +1,7 @@
 ---
 service: zig_engine
 created: 2026-11-21
-status: draft
+status: implemented
 ---
 
 # Designate resource extraction zones
@@ -101,6 +101,17 @@ a block is removed. [Construction ownership](construction-state-ownership.md) ·
   that record. Once the acknowledged
   sequence retires, the retry returns `StaleCommand`. Neither path edits the cell or slot.
   After restart, resynchronize from saved state under the existing command contract. [Persistence and inventory](../../docs/persistence.md)
+
+- R13. Near block subscriptions receive the terrain and a baseline for the extraction-owned
+  portion of that chunk. The client installs both before exposing the handoff to readers.
+  During normal mining, send changed zone cells once per worker publication batch to interested
+  near observers. The miner also receives the command result and slot outcome. Reject stale
+  tokens and recover a missing base revision for the affected chunk. An unrelated zone portion
+  outside the subscription generates no client updates.
+- R14. Distant surface subscriptions receive complete geometry for affected chunks. Coalesce
+  multiple excavations in a worker batch and rebuild from the final physical state. A removal at
+  a chunk face can expose a neighbor's face regardless of which side owns the removed cell.
+  Surface visibility here means exposure to air, including enclosed cavities.
 
 ## Clarifications
 
@@ -203,6 +214,14 @@ a block is removed. [Construction ownership](construction-state-ownership.md) ·
   emptied the slot WHEN the identical command arrives again in the same session THEN it
   returns `StaleCommand`, the cell remains protected air, and the slot remains empty.
 
+- AC21. GIVEN two near clients watching one extraction chunk WHEN ten zone cells are mined
+  in one publication batch THEN the observer receives one update containing the ten changes,
+  the miner receives its command results, and the batch sends neither client a whole block
+  chunk for those removals. A newly subscribed client sees the same final physical state.
+- AC22. GIVEN a distant observer at a shared chunk face WHEN ten zone cells are removed in a
+  batch THEN one complete surface per affected subscribed chunk exposes the adjoining terrain.
+  Mining terrain on the other side exposes the surviving zone cells in the same way.
+
 ## Constraints
 
 Use the existing world topology, including wrapped X, finite Y/Z, and unique canonical cells
@@ -231,10 +250,49 @@ and UI for editing or retiring a confirmed zone.
 
 ## Tasks
 
-- [ ] T1. Implement selection, depth adjustment, HUD and checklist (AC1–AC3, AC11, AC15, AC16, AC18).
-- [ ] T2. Implement atomic registration, overlap checks, composed reads and persistence
+- [x] T1. Implement selection, depth adjustment, HUD and checklist (AC1–AC3, AC11, AC15, AC16, AC18).
+- [x] T2. Implement atomic registration, overlap checks, composed reads and persistence
   (AC4, AC6, AC9, AC11–AC15, AC19).
-- [ ] T3. Integrate placement protection and support-safe single-cell extraction
+- [x] T3. Integrate placement protection and support-safe single-cell extraction
   with manual interaction and the authoritative edit path (AC4, AC5, AC7, AC8, AC10, AC12–AC14, AC17, AC20).
-- [ ] T-val. Run AC1–AC20 through client and service entry points, including the shaft,
-  protected supports, and reload after partial excavation.
+- [x] T4. Deliver near zone snapshots and deltas, and coalesce distant surfaces (AC21–AC22).
+- [x] T-val. Verify AC1–AC22 through client and service entry points, including shafts, protected
+  supports, reload after partial excavation, and near and distant publication.
+
+### Validation
+
+The game tests exercise the G sequence from a surface hit through the resource dialog,
+including a buried 5×5×8 preview, release of held controls, and confirmation through the
+world service. The service tests excavate a 5×5×8 mixed shaft and a 5×5×32 natural-stone
+shaft, inspect the resulting walls and floor, and reject mining the pallet's support.
+
+Restart tests cover a partially mined zone spanning the wrapped X seam, a road slope
+whose endpoint belongs to terrain, and grass deadlines inherited from terrain or a
+completed construction. The inventory test replays a mining command before acknowledgment,
+spends the item, rejects the retired command, and reopens the earlier save with the item
+and the corresponding hole. Run the full suite with `zig build test`.
+
+The near transport test submits ten removals together to a miner and an observer. Both
+receive one exact-base update with ten tombstones. The miner also receives ten command
+results. The adjoining near chunk receives its neighbor occupancy update, and fresh
+interest in the exhausted zone receives the claim with no occupied cells.
+
+The distant transport workload places the zone along a shared chunk face. Ten batches
+remove zone stone, and ten remove adjoining terrain stone. One observer receives 40
+complete surfaces for 200 removals. The native face and custom-block arrays total
+264,240 bytes, averaging 13,212 bytes per ten-removal batch. At one such batch per second
+the geometry payload would average 13.2 kB/s per observer. This excludes metadata, any
+future network framing, and the initial load. A ReleaseFast run took 13.0 ms of service
+wall time across all 20 batches for building and copying the surfaces. To repeat, run
+`zig build test-world-service -Doptimize=ReleaseFast -Dtest-filter='extraction far surfaces'`.
+
+### Follow-up improvements
+
+- Evaluate saving only the extraction-zone chunks changed since the last durable capture.
+  Format 9 already saves changed terrain chunks individually. A change to any zone currently
+  replaces the complete zone image. After mining one block from a full 128×128×64 zone,
+  preparing the capture took 81.8 ms on the service executor and produced 3,146,222 bytes
+  of zone data (ReleaseFast, median of three runs). Compare executor time, WAL bytes and
+  reopen time on the same workloads. Recovery must preserve the bounds and filter of an
+  exhausted zone, clear the last occupied cell of a depleted chunk, and restore the terrain
+  and inventory from the same commit. [Measurements and reproduction](../../docs/validation/extraction-zone-persistence.md)

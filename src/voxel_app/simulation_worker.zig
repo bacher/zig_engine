@@ -7,6 +7,7 @@ const Client = service_module.Client;
 const ChunkResponse = service_module.ChunkResponse;
 const world = @import("./world.zig");
 const consts = @import("./consts.zig");
+const zone_stream = @import("extraction_zone_stream.zig");
 
 /// A minimal NPC simulation. Its only world access is through its own service endpoint.
 /// It finds the surface at the central chunk's midpoint, then puts/removes one dirt block
@@ -93,7 +94,14 @@ pub const SimulationWorker = struct {
                     received[@intCast(z)] = true;
                     count += 1;
                 }
-                surface_z = @max(surface_z, surfaceAboveChunk(response.data.blocks.chunk, z));
+                const zone_cells: []const zone_stream.Cell = if (response.extraction_zone) |update|
+                    switch (update) {
+                        .snapshot => |snapshot| snapshot.cells,
+                        .delta => &.{},
+                    }
+                else
+                    &.{};
+                surface_z = @max(surface_z, surfaceAboveChunk(response.data.blocks.chunk, zone_cells, z));
             }
             responses.clearRetainingCapacity();
         }
@@ -159,15 +167,23 @@ pub const SimulationWorker = struct {
     }
 };
 
-fn surfaceAboveChunk(chunk: world.WorldChunk, chunk_z: i32) u32 {
+fn surfaceAboveChunk(chunk: world.WorldChunk, zone_cells: []const zone_stream.Cell, chunk_z: i32) u32 {
+    const center = consts.CHUNK_SIZE / 2;
+    const chunk_bottom = @as(u32, @intCast(chunk_z)) * consts.CHUNK_SIZE;
+    var zone_height: u32 = 0;
+    for (zone_cells) |cell| {
+        const local = @import("block_transformations.zig").coordinates(cell.index);
+        if (local[0] == center and local[1] == center)
+            zone_height = @max(zone_height, chunk_bottom + local[2] + 1);
+    }
     var z: u32 = consts.CHUNK_SIZE;
     while (z > 0) {
         z -= 1;
-        if (chunk.content.getBlock(.{ consts.CHUNK_SIZE / 2, consts.CHUNK_SIZE / 2, @intCast(z) }) != .none) {
-            return @as(u32, @intCast(chunk_z)) * consts.CHUNK_SIZE + z + 1;
+        if (chunk.content.getBlock(.{ center, center, @intCast(z) }) != .none) {
+            return @max(zone_height, chunk_bottom + z + 1);
         }
     }
-    return 0;
+    return zone_height;
 }
 
 fn nextAction(action: world.BlockAction, status: world.OperationStatus) world.BlockAction {
@@ -184,11 +200,16 @@ test "simulation alternates on success and retries conflicting puts" {
 test "simulation surface is above the center block, including at chunk boundaries" {
     var chunk = world.WorldChunk.initEmpty();
     defer chunk.deinit(std.testing.allocator);
-    try std.testing.expectEqual(0, surfaceAboveChunk(chunk, 3));
+    try std.testing.expectEqual(0, surfaceAboveChunk(chunk, &.{}, 3));
     _ = chunk.apply(std.testing.allocator, .{ 0, 0, 31 }, .{ .put = .stone });
-    try std.testing.expectEqual(0, surfaceAboveChunk(chunk, 3));
+    try std.testing.expectEqual(0, surfaceAboveChunk(chunk, &.{}, 3));
+    const zone_cells = [_]zone_stream.Cell{
+        .{ .index = @import("block_transformations.zig").index(.{ 16, 16, 22 }), .value = .{ .material = .stone } },
+        .{ .index = @import("block_transformations.zig").index(.{ 15, 16, 30 }), .value = .{ .material = .sand } },
+    };
+    try std.testing.expectEqual(3 * consts.CHUNK_SIZE + 23, surfaceAboveChunk(chunk, &zone_cells, 3));
     _ = chunk.apply(std.testing.allocator, .{ 16, 16, 31 }, .{ .put = .stone });
-    try std.testing.expectEqual(4 * consts.CHUNK_SIZE, surfaceAboveChunk(chunk, 3));
+    try std.testing.expectEqual(4 * consts.CHUNK_SIZE, surfaceAboveChunk(chunk, &.{}, 3));
 }
 
 test "simulation can be canceled during startup" {

@@ -19,6 +19,8 @@ const roads = @import("roads.zig");
 pub const block_rules = @import("block_rules.zig");
 const blueprint = @import("blueprint.zig");
 const construction_stream = @import("construction_stream.zig");
+const extraction_zone_stream = @import("extraction_zone_stream.zig");
+const extraction_zone_state = @import("extraction_zone_state.zig");
 pub const blueprint_runtime = @import("blueprint_runtime.zig");
 
 /// Synchronous notifications for committed changes only. Footprint slices are
@@ -145,6 +147,59 @@ pub const WorldChunk = struct {
             self.content = .{ .blocks = data };
         }
         return self.content.blocks;
+    }
+
+    pub const ZoneCapacity = struct {
+        blocks: bool = false,
+        roads: usize = 0,
+        constructed: usize = 0,
+        timers: usize = 0,
+
+        fn add(self: *ZoneCapacity, value: extraction_zone_state.OwnedCell) void {
+            self.blocks = true;
+            self.roads += @intFromBool(value.material == .custom);
+            self.constructed += @intFromBool(value.constructed);
+            self.timers += @intFromBool(value.grass_due != null);
+        }
+
+        pub fn addOwnedChunk(self: *ZoneCapacity, zone: *const extraction_zone_state.Chunk) void {
+            self.blocks = self.blocks or zone.cells.count() != 0;
+            self.roads += zone.roads.items.len;
+            self.constructed += zone.constructed.items.len;
+            self.timers += zone.timed.events.items.len;
+        }
+
+        pub fn reserve(self: ZoneCapacity, chunk: *WorldChunk, allocator: std.mem.Allocator) !void {
+            try chunk.metadata.reserve(allocator, self.roads, self.constructed, self.timers);
+            if (self.blocks) _ = try chunk.tryEnsureData(allocator);
+        }
+    };
+
+    fn setZoneMaterialPrepared(self: *WorldChunk, index: transformations.BlockIndex, material: BlockType) void {
+        const local = transformations.coordinates(index);
+        const before = self.content.getBlock(local);
+        if (before == material) return;
+        self.content.blocks.blocks[local[2]][local[1]][local[0]] = material;
+        self.solid_block_count = self.solid_block_count - @intFromBool(before != .none) + @intFromBool(material != .none);
+        boundary_mask.update(&self.boundaries, local, material.occludesFaces());
+    }
+
+    /// Compose validated cells into a prepared view with no overlapping metadata.
+    /// Callers appending deadlines order them afterwards. A caller with an ordered
+    /// zone queue can merge that queue separately.
+    pub fn applyZoneCellPrepared(self: *WorldChunk, index: transformations.BlockIndex, value: extraction_zone_state.OwnedCell, comptime timers: enum { append, merge }) void {
+        self.setZoneMaterialPrepared(index, value.material);
+        if (value.material == .custom) self.metadata.roads.appendAssumeCapacity(.{ .index = index, .slope = value.slope });
+        if (value.constructed) self.metadata.constructed.appendAssumeCapacity(index);
+        if (timers == .append) {
+            if (value.grass_due) |due| self.metadata.timed.events.appendAssumeCapacity(.{ .block = index, .kind = .grow_grass, .due_tick = due });
+        }
+    }
+
+    pub fn refreshZoneFlags(self: *WorldChunk) void {
+        const enclosed = self.flags.is_unreachable;
+        self.flags = boundary_mask.getFlags(&self.boundaries);
+        self.flags.is_unreachable = enclosed;
     }
 
     /// Applies the same preconditions to authoritative commands and optimistic replay.
@@ -408,24 +463,34 @@ pub const Testing = if (@import("builtin").is_test) struct {
 } else struct {};
 
 pub fn tryCollectConstructed(allocator: std.mem.Allocator, layout: *const WorldLayout, chunks: *const ChunksHashMap, target: [3]u32) ![]block_rules.Cell {
+    return tryCollectConstructedWithZones(allocator, layout, chunks, target, null);
+}
+
+fn appendConstructed(allocator: std.mem.Allocator, layout: *const WorldLayout, cells: *std.ArrayList(block_rules.Cell), center: block_rules.Cell, coords: ChunkCoords, indices: []const transformations.BlockIndex) !void {
+    for (indices) |index| {
+        const local = transformations.coordinates(index);
+        const cell: block_rules.Cell = .{
+            @as(i64, coords[0]) * CHUNK_SIZE + local[0],
+            @as(i64, coords[1]) * CHUNK_SIZE + local[1],
+            @as(i64, coords[2]) * CHUNK_SIZE + local[2],
+        };
+        if (block_rules.distance(layout, cell, center) <= block_rules.Limits.support_radius)
+            try cells.append(allocator, cell);
+    }
+}
+
+pub fn tryCollectConstructedWithZones(allocator: std.mem.Allocator, layout: *const WorldLayout, chunks: *const ChunksHashMap, target: [3]u32, zones: ?*const @import("extraction_zone_state.zig").State) ![]block_rules.Cell {
     if (comptime @import("builtin").is_test) _ = Testing.constructed_collection_calls.fetchAdd(1, .monotonic);
     var cells: std.ArrayList(block_rules.Cell) = .empty;
     errdefer cells.deinit(allocator);
     const center: block_rules.Cell = .{ target[0], target[1], target[2] };
     const window = validationChunks(layout, target);
     for (window.ids[0..window.count]) |id| {
-        const chunk = chunks.get(id) orelse continue;
         const coords = layout.decodeChunkId(id);
-        for (chunk.metadata.constructed.items) |index| {
-            const local = transformations.coordinates(index);
-            const cell: block_rules.Cell = .{
-                @as(i64, coords[0]) * CHUNK_SIZE + local[0],
-                @as(i64, coords[1]) * CHUNK_SIZE + local[1],
-                @as(i64, coords[2]) * CHUNK_SIZE + local[2],
-            };
-            if (block_rules.distance(layout, cell, center) <= block_rules.Limits.support_radius)
-                try cells.append(allocator, cell);
-        }
+        if (chunks.getPtr(id)) |chunk|
+            try appendConstructed(allocator, layout, &cells, center, coords, chunk.metadata.constructed.items);
+        if (zones) |state|
+            try appendConstructed(allocator, layout, &cells, center, coords, state.constructedInChunk(.{ @intCast(coords[0]), @intCast(coords[1]), @intCast(coords[2]) }));
     }
     const Order = struct {
         layout: *const WorldLayout,
@@ -590,11 +655,25 @@ pub fn validateCompletedEdit(allocator: std.mem.Allocator, physical: block_rules
 /// Main-thread cache: authoritative snapshots with unacknowledged local operations replayed
 /// on top. Receiving a failed operation's snapshot rolls it back without losing later edits.
 pub const World = struct {
+    const ZoneCells = std.StaticBitSet(CHUNK_SIZE * CHUNK_SIZE * CHUNK_SIZE);
+    const ZoneSource = struct {
+        subscription_id: u64,
+        terrain_revision: u64,
+        revision: u64,
+        valid: bool = true,
+        // Material and shapes live in the composed client cache. This mask
+        // identifies which baseline cells to retain across raw terrain updates.
+        occupied: ZoneCells = .initEmpty(),
+    };
+
     layout: *const WorldLayout,
     allocator: std.mem.Allocator,
     chunks: ChunksHashMap = .empty,
     blueprints: blueprint_runtime.State = .{},
     warehouses: @import("warehouse_client.zig").Cache = .{},
+    /// Claims only grow during a subscription: v1 has no edit or retirement action.
+    extraction_claims: std.AutoHashMapUnmanaged(ChunkId, []const extraction_zone_state.Record) = .empty,
+    extraction_sources: std.AutoHashMapUnmanaged(ChunkId, ZoneSource) = .empty,
     construction_availability: ?struct {
         context: *const anyopaque,
         chunk_available: *const fn (*const anyopaque, ChunkId) bool,
@@ -634,6 +713,10 @@ pub const World = struct {
         self.chunks.deinit(self.allocator);
         self.blueprints.deinit(self.allocator);
         self.warehouses.deinit(self.allocator);
+        var claims = self.extraction_claims.valueIterator();
+        while (claims.next()) |records| self.allocator.free(records.*);
+        self.extraction_claims.deinit(self.allocator);
+        self.extraction_sources.deinit(self.allocator);
         for (self.pending_operations.items) |*pending| {
             pending.road_undo.deinit(self.allocator);
             pending.road_formations.deinit(self.allocator);
@@ -660,6 +743,12 @@ pub const World = struct {
         try self.chunks.ensureUnusedCapacity(self.allocator, 1);
         try self.rollbackPending();
         self.retireResolved();
+        self.installChunkPrepared(coords, chunk);
+        self.replayPending();
+    }
+
+    fn installChunkPrepared(self: *World, coords: ChunkCoords, chunk: WorldChunk) void {
+        const position = self.layout.encodeChunkCoords(coords);
         var updated = chunk;
         if (self.chunks.getPtr(position)) |previous| {
             // An in-flight snapshot must never undo an optimistic reveal.
@@ -677,8 +766,159 @@ pub const World = struct {
         updated.validation_revision = self.validation_revision;
         self.chunks.putAssumeCapacity(position, updated);
         self.revealNeighbors(coords, updated.flags);
-        // A pending operation can affect sections outside the replaced chunk.
+    }
+
+    /// Consumes the incoming terrain on success. A paired zone snapshot replaces
+    /// the zone source. An ordinary terrain snapshot retains the existing source.
+    pub fn insertStreamedTerrain(self: *World, coords: ChunkCoords, terrain: *WorldChunk, subscription: u64, revision: u64, update: ?extraction_zone_stream.Update) !void {
+        const id = self.layout.encodeChunkCoords(coords);
+        const source = self.extraction_sources.getPtr(id);
+        if (update == null and source == null) return self.insertChunk(coords, terrain.*);
+        if (self.chunks.getPtr(id)) |old| if (revision < old.chunk_revision) return error.StaleChunk;
+        const raw_revision = terrain.chunk_revision;
+        const snapshot = if (update != null and update.? == .snapshot) update.?.snapshot else null;
+        const delta = if (update != null and update.? == .delta) update.?.delta else null;
+        if (snapshot) |value| {
+            if (value.chunk_id != id or value.subscription_id != subscription or value.terrain_revision != raw_revision) return error.ZoneResyncRequired;
+            if (source) |old| if (old.subscription_id == subscription and value.revision < old.revision) return error.StaleChunk;
+        } else if (source) |old| {
+            if (!old.valid or old.subscription_id != subscription or raw_revision < old.terrain_revision) return error.ZoneResyncRequired;
+            if (delta) |value| try self.checkZoneDelta(id, subscription, raw_revision, old, value);
+        } else if (delta != null) return error.ZoneResyncRequired;
+
+        const claims: []const extraction_zone_state.Record = if (snapshot) |value| try self.allocator.dupe(extraction_zone_state.Record, value.claims) else &.{};
+        errdefer self.allocator.free(claims);
+        if (snapshot != null) {
+            try self.extraction_claims.ensureUnusedCapacity(self.allocator, 1);
+            try self.extraction_sources.ensureUnusedCapacity(self.allocator, 1);
+        }
+        try self.chunks.ensureUnusedCapacity(self.allocator, 1);
+        try self.rollbackPending();
+        errdefer self.replayPending();
+
+        if (snapshot) |value| {
+            var occupied: ZoneCells = .initEmpty();
+            var capacity: WorldChunk.ZoneCapacity = .{};
+            for (value.cells) |cell| {
+                if (occupied.isSet(cell.index) or claims.len == 0 or
+                    !cell.value.valid(self.layout.size_in_blocks) or terrain.content.getBlock(transformations.coordinates(cell.index)) != .none)
+                    return error.ZoneResyncRequired;
+                occupied.set(cell.index);
+                capacity.add(cell.value);
+            }
+            try capacity.reserve(terrain, self.allocator);
+            for (value.cells) |cell| terrain.applyZoneCellPrepared(cell.index, cell.value, .append);
+            sortZoneTimers(terrain);
+            if (self.extraction_claims.fetchRemove(id)) |entry| self.allocator.free(entry.value);
+            self.extraction_claims.putAssumeCapacity(id, claims);
+            self.extraction_sources.putAssumeCapacity(id, .{ .subscription_id = subscription, .terrain_revision = raw_revision, .revision = value.revision, .occupied = occupied });
+        } else {
+            const previous = self.chunks.getPtr(id) orelse return error.ZoneResyncRequired;
+            const old = source.?;
+            // Rebase ordinary terrain independently while preserving the last
+            // settled zone data, including road shapes and growth deadlines.
+            try copyZoneOverlay(terrain, self.allocator, previous, &old.occupied);
+            if (delta) |value| try self.writeZoneDelta(terrain, old, value);
+            old.terrain_revision = raw_revision;
+        }
+        terrain.refreshZoneFlags();
+        terrain.chunk_revision = revision;
+        self.retireResolved();
+        self.installChunkPrepared(coords, terrain.*);
         self.replayPending();
+    }
+
+    pub fn applyExtractionDelta(self: *World, coords: ChunkCoords, subscription: u64, revision: u64, delta: extraction_zone_stream.Delta, history: ?@import("cell_changes.zig").History) !bool {
+        const id = self.layout.encodeChunkCoords(coords);
+        const source = self.extraction_sources.getPtr(id) orelse return error.ZoneResyncRequired;
+        const chunk = self.chunks.getPtr(id) orelse return error.ZoneResyncRequired;
+        if (!source.valid or source.subscription_id != subscription or delta.chunk_id != id or delta.subscription_id != subscription) return error.ZoneResyncRequired;
+        if (delta.revision <= source.revision) return false;
+        if (revision < chunk.chunk_revision) return error.ZoneResyncRequired;
+        try self.checkZoneDelta(id, subscription, source.terrain_revision, source, delta);
+        try self.rollbackPending();
+        errdefer self.replayPending();
+        try self.writeZoneDelta(chunk, source, delta);
+        chunk.chunk_revision = revision;
+        if (history) |authoritative| chunk.cell_changes = authoritative;
+        self.validation_revision +%= 1;
+        chunk.validation_revision = self.validation_revision;
+        chunk.refreshZoneFlags();
+        self.revealNeighbors(coords, chunk.flags);
+        self.retireResolved();
+        self.replayPending();
+        self.releaseEmptyBacking(id);
+        return true;
+    }
+
+    pub fn invalidateExtractionSource(self: *World, id: ChunkId) void {
+        if (self.extraction_sources.getPtr(id)) |source| source.valid = false;
+    }
+
+    pub fn extractionSourceValid(self: *const World, id: ChunkId) bool {
+        return if (self.extraction_sources.getPtr(id)) |source| source.valid else true;
+    }
+
+    fn checkZoneDelta(self: *const World, id: ChunkId, token: u64, terrain_revision: u64, source: *const ZoneSource, delta: extraction_zone_stream.Delta) !void {
+        if (delta.chunk_id != id or delta.subscription_id != token or delta.terrain_revision != terrain_revision or
+            delta.base_revision != source.revision or delta.revision <= source.revision) return error.ZoneResyncRequired;
+        var previous: ?transformations.BlockIndex = null;
+        for (delta.changes) |change| {
+            if (previous) |index| if (change.index <= index) return error.ZoneResyncRequired;
+            previous = change.index;
+            // New claims require a baseline, and excavated cells stay empty.
+            if (!source.occupied.isSet(change.index)) return error.ZoneResyncRequired;
+            if (change.value) |value| if (!value.valid(self.layout.size_in_blocks)) return error.ZoneResyncRequired;
+        }
+    }
+
+    fn writeZoneDelta(self: *World, chunk: *WorldChunk, source: *ZoneSource, delta: extraction_zone_stream.Delta) !void {
+        var capacity: WorldChunk.ZoneCapacity = .{};
+        for (delta.changes) |change| {
+            if (change.value) |value| capacity.add(value);
+            const previous = chunk.content.getBlock(transformations.coordinates(change.index));
+            if (previous == .deeprock) return error.ZoneResyncRequired;
+        }
+        try capacity.reserve(chunk, self.allocator);
+        for (delta.changes) |change| {
+            chunk.metadata.remove(change.index);
+            if (change.value) |value| {
+                chunk.applyZoneCellPrepared(change.index, value, .append);
+            } else {
+                chunk.setZoneMaterialPrepared(change.index, .none);
+                source.occupied.unset(change.index);
+            }
+        }
+        if (capacity.timers != 0) sortZoneTimers(chunk);
+        source.revision = delta.revision;
+    }
+
+    fn copyZoneOverlay(terrain: *WorldChunk, allocator: std.mem.Allocator, previous: *const WorldChunk, occupied: *const ZoneCells) !void {
+        var capacity: WorldChunk.ZoneCapacity = .{};
+        var bits = occupied.iterator(.{});
+        while (bits.next()) |index| {
+            const local = transformations.coordinates(@intCast(index));
+            if (terrain.content.getBlock(local) != .none) return error.ZoneResyncRequired;
+            capacity.blocks = capacity.blocks or previous.content.getBlock(local) != .none;
+        }
+        for (previous.metadata.roads.items) |road| capacity.roads += @intFromBool(occupied.isSet(road.index));
+        for (previous.metadata.constructed.items) |index| capacity.constructed += @intFromBool(occupied.isSet(index));
+        for (previous.metadata.timed.events.items) |event| capacity.timers += @intFromBool(occupied.isSet(event.block));
+        try capacity.reserve(terrain, allocator);
+        bits = occupied.iterator(.{});
+        while (bits.next()) |index| terrain.setZoneMaterialPrepared(@intCast(index), previous.content.getBlock(transformations.coordinates(@intCast(index))));
+        for (previous.metadata.roads.items) |road| if (occupied.isSet(road.index)) terrain.metadata.roads.appendAssumeCapacity(road);
+        for (previous.metadata.constructed.items) |index| if (occupied.isSet(index)) terrain.metadata.constructed.appendAssumeCapacity(index);
+        for (previous.metadata.timed.events.items) |event| if (occupied.isSet(event.block)) terrain.metadata.timed.events.appendAssumeCapacity(event);
+        if (capacity.timers != 0) sortZoneTimers(terrain);
+    }
+
+    fn sortZoneTimers(chunk: *WorldChunk) void {
+        std.mem.sort(transformations.Event, chunk.metadata.timed.events.items, {}, struct {
+            fn less(_: void, a: transformations.Event, b: transformations.Event) bool {
+                return a.due_tick < b.due_tick or (a.due_tick == b.due_tick and a.block < b.block);
+            }
+        }.less);
     }
 
     /// Restore the current authoritative material/metadata baseline in reverse edit order.
@@ -845,6 +1085,7 @@ pub const World = struct {
 
     pub fn customShape(self: *const World, block: [3]u32) ?@import("engine").voxel_chunk.custom_block.Shape {
         const coords, const local = splitBlockCoords(block);
+        if (self.extraction_sources.count() != 0 and !self.extractionSourceValid(self.layout.encodeChunkCoords(coords))) return null;
         const chunk = self.getChunk(coords) orelse return null;
         if (chunk.content.getBlock(local) != .custom) return null;
         const road = chunk.metadata.road(transformations.index(local)) orelse return null;
@@ -857,7 +1098,7 @@ pub const World = struct {
     }
 
     pub fn reader(self: *const World) block_rules.Reader {
-        return .{ .layout = self.layout, .context = @constCast(self), .block_at = readBlock, .custom_shape_at = readShape, .immutable_at = immutableAt, .mutation_allowed = warehouseMutationAllowed, .playable_y_inset = self.playable_y_inset };
+        return .{ .layout = self.layout, .context = @constCast(self), .block_at = readBlock, .custom_shape_at = readShape, .immutable_at = immutableAt, .mutation_allowed = claimedMutationAllowed, .playable_y_inset = self.playable_y_inset };
     }
 
     /// Captures the merged local logical view without treating missing blocks as
@@ -1094,7 +1335,9 @@ pub const World = struct {
     /// Submitted operations survive eviction until acknowledged. Their results must never
     /// resurrect an evicted chunk; the subscription token decides whether to accept the data.
     pub fn removeChunk(self: *World, coords: ChunkCoords) void {
-        self.chunks.fetchRemove(self.layout.encodeChunkCoords(coords)).?.value.deinit(self.allocator);
+        const id = self.layout.encodeChunkCoords(coords);
+        self.chunks.fetchRemove(id).?.value.deinit(self.allocator);
+        self.forgetExtractionClaims(id);
     }
 
     pub fn getChunk(self: *const World, coords: ChunkCoords) ?WorldChunk {
@@ -1113,10 +1356,38 @@ pub const World = struct {
         return self.warehouses.occupancy(self.layout.encodeChunkCoords(coords), self.layout.size_in_blocks[0], block);
     }
 
-    fn warehouseMutationAllowed(context: *anyopaque, block: [3]u32, replacement: BlockType) ?block_rules.Failure {
+    pub fn installExtractionClaims(self: *World, id: ChunkId, records: []const @import("extraction_zone_state.zig").Record) !void {
+        const previous = self.extraction_claims.get(id) orelse &.{};
+        if (records.len <= previous.len) return;
+        const copy = try self.allocator.dupe(@import("extraction_zone_state.zig").Record, records);
+        errdefer self.allocator.free(copy);
+        try self.extraction_claims.put(self.allocator, id, copy);
+        self.allocator.free(previous);
+        if (self.chunks.getPtr(id)) |chunk| {
+            self.validation_revision +%= 1;
+            chunk.validation_revision = self.validation_revision;
+        }
+    }
+
+    pub fn forgetExtractionClaims(self: *World, id: ChunkId) void {
+        if (self.extraction_claims.fetchRemove(id)) |entry| self.allocator.free(entry.value);
+        _ = self.extraction_sources.remove(id);
+    }
+
+    fn claimedMutationAllowed(context: *anyopaque, block: [3]u32, replacement: BlockType) ?block_rules.Failure {
         const self: *const World = @ptrCast(@alignCast(context));
         const coords, _ = splitBlockCoords(block);
-        if (self.warehouses.claimed(self.layout.encodeChunkCoords(coords), self.layout.size_in_blocks[0], block)) {
+        const id = self.layout.encodeChunkCoords(coords);
+        if (replacement != .none) {
+            for (self.extraction_claims.get(id) orelse &.{}) |zone| {
+                if (!zone.bounds.contains(self.layout.size_in_blocks[0], block)) continue;
+                // Timers and road shape changes can update an occupied cell.
+                const existing = self.physicalBlock(block) orelse return .{ .reason = .missing_data, .subject = .{ block[0], block[1], block[2] } };
+                if (existing == .none) return .{ .reason = .extraction_zone_claim, .subject = .{ block[0], block[1], block[2] } };
+                break;
+            }
+        }
+        if (self.warehouses.claimed(id, self.layout.size_in_blocks[0], block)) {
             const before = self.physicalBlock(block) orelse return .{ .reason = .missing_data, .subject = .{ block[0], block[1], block[2] } };
             if (before != replacement) return .{ .reason = .warehouse_claim, .subject = .{ block[0], block[1], block[2] } };
         }
@@ -1158,6 +1429,7 @@ pub const World = struct {
     pub fn physicalBlock(self: *const World, block: [3]u32) ?BlockType {
         const coords, const local = splitBlockCoords(block);
         const id = self.layout.encodeChunkCoords(coords);
+        if (self.extraction_sources.count() != 0 and !self.extractionSourceValid(id)) return null;
         if (self.construction_availability) |availability| {
             if (!availability.chunk_available(availability.context, id)) return null;
         }
@@ -2193,6 +2465,7 @@ test "fallible chunk staging preserves source through every allocation failure" 
 }
 
 test {
+    _ = roads;
     _ = block_rules;
     _ = @import("timer_kernel.zig");
 }
@@ -3360,4 +3633,29 @@ test "failed blueprint preflight never notifies or fulfills preceding changes" {
     try log.expect(&.{});
     try std.testing.expect(!client.blueprints.instances.get(1).?.isFulfilled(0));
     try std.testing.expect(client.blueprints.targetAt(.{ 31, 10, 10 }) != null);
+}
+
+test "zone claim discovery invalidates cached placements and permits manual mining of unchecked stone" {
+    const a = std.testing.allocator;
+    var world = try World.init(a, &test_layout);
+    defer world.deinit();
+    const stone: [3]u32 = .{ 10, 12, 70 };
+    const air: [3]u32 = .{ 11, 12, 70 };
+    try setTestPhysical(&world, stone, .stone);
+    const coords, _ = splitBlockCoords(stone);
+    const id = test_layout.encodeChunkCoords(coords);
+    const before = world.validationWindow(air);
+    const record: @import("extraction_zone_state.zig").Record = .{
+        .id = 1,
+        .bounds = .{ .min = stone, .size = .{ 2, 1, 1 } },
+        .filter = .{ .stone = false },
+    };
+    try world.installExtractionClaims(id, &.{record});
+    try std.testing.expect(!before.isCurrent(&world));
+    try std.testing.expectEqual(block_rules.Reason.extraction_zone_claim, world.previewOperation(.{ .block = air, .action = .{ .put = .water } }).failure.?.reason);
+    const put_outside = world.previewOperation(.{ .block = .{ 12, 12, 70 }, .action = .{ .put = .water } });
+    try std.testing.expectEqual(OperationStatus.success, put_outside.status);
+    const mine = world.previewOperation(.{ .block = stone, .action = .remove });
+    try std.testing.expectEqual(OperationStatus.success, mine.status);
+    try std.testing.expectEqual(BlockType.crushed_stone, mine.mined_type.?);
 }

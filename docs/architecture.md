@@ -12,8 +12,8 @@ The project is a Zig 3D engine with two executable applications. The engine supp
 The voxel world has four distinct kinds of state:
 
 1. World-data-owned terrain and player inventory.
-2. Simulation-owned construction targets and lifecycle, backed by immutable blueprint definitions.
-3. The main thread's composed terrain/construction cache, with unacknowledged local edits applied on top of authoritative snapshots.
+2. Simulation-owned construction targets and lifecycle, warehouse stock and deliveries, and extraction zone claims and blocks.
+3. The main thread’s cache of terrain, construction targets, and extraction-zone blocks, with unacknowledged local edits applied on top of authoritative snapshots.
 4. The engine's GPU geometry, which represents exposed faces rather than complete block contents.
 
 Changes flow from application commands to the service and back through subscriptions. Rendering consumes the resulting geometry; it does not decide whether a block edit is valid.
@@ -31,6 +31,7 @@ flowchart TD
     Service --> Generator[Deterministic terrain generator]
     Service -->|terrain blocks, masks, or faces| Main
     Service -->|construction snapshots and progress deltas| Main
+    Service -->|extraction zone snapshots and changed cells| Main
     Main --> Cache[Composed optimistic world cache]
     Cache -->|local face extraction| Upload[GPU upload queue]
     Main --> Upload
@@ -174,8 +175,9 @@ a construction's completion must never materialize or retire a warehouse in its 
 extends the shared external-command ledger, while automatic batches use executor-local APIs.
 `warehouse_stream` and `warehouse_client` provide identity-only chunk discovery, independently
 subscribed scalar snapshots, evaluated-command fences and optimistic reconciliation. Movement
-reads packed occupancy separately from support/capture reads. The v8 persistence transaction
-captures terrain, construction, warehouse/delivery records and player inventory together.
+reads packed occupancy separately from support/capture reads. The persistence transaction
+captures terrain, construction, warehouse and delivery records, extraction zones, and player
+inventory together.
 Native evidence and remaining workload limits are in [warehouse validation](validation/warehouses.md).
 
 Packed rendering is independent of terrain surface residency and shaders. Cube goods use flat

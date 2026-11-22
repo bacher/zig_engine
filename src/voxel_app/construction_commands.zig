@@ -12,6 +12,7 @@ pub const Intent = union(enum) {
     apply: struct { owner: u64, definition_id: u64, origin: [3]u32, rotation: u2 },
     save: struct { owner: u64, name: []const u8, definition: blueprint.Definition },
     warehouse: @import("warehouse_commands.zig").Payload,
+    register_extraction_zone: @import("extraction_zone_commands.zig").Registration,
 
     pub fn eql(a: Intent, b: Intent) bool {
         if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
@@ -19,6 +20,7 @@ pub const Intent = union(enum) {
             .operation => |value| std.meta.eql(value, b.operation),
             .apply => |value| std.meta.eql(value, b.apply),
             .warehouse => |value| std.meta.eql(value, b.warehouse),
+            .register_extraction_zone => |value| std.meta.eql(value, b.register_extraction_zone),
             .save => |value| value.owner == b.save.owner and std.mem.eql(u8, value.name, b.save.name) and
                 std.meta.eql(value.definition.size, b.save.definition.size) and value.definition.target_count == b.save.definition.target_count and
                 std.mem.eql(rules.BlockType, value.definition.cells, b.save.definition.cells),
@@ -53,6 +55,7 @@ pub const Outcome = union(enum) {
     operation: struct { status: world.OperationStatus, failure: ?rules.Failure = null, mined_type: ?rules.BlockType = null },
     blueprint: @import("blueprint_result.zig").Result,
     warehouse: @import("warehouse_commands.zig").Result,
+    extraction_zone: @import("extraction_zone_commands.zig").Result,
 };
 pub const Submission = struct {
     request_id: u64,

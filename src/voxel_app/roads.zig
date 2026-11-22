@@ -36,6 +36,9 @@ pub const Context = struct {
     reader: rules.Reader,
     chunks: *world.ChunksHashMap,
     changed: *std.ArrayList(u32),
+    /// Simulation-owned road sections keep their slope beside their material.
+    /// A null result leaves lookup with terrain. Plans never retain this pointer.
+    owned_road_slope: ?*const fn (*anyopaque, [3]u32) ?*?data.Slope = null,
     undo: ?*std.ArrayList(Undo) = null,
     formed: ?*std.ArrayList(data.Slope) = null,
     planned: ?*std.ArrayList(Change) = null,
@@ -127,9 +130,13 @@ pub const Context = struct {
                 };
             }
         }
-        const coords, const local = world.splitBlockCoords(.{ @intCast(normalized[0]), @intCast(normalized[1]), @intCast(normalized[2]) });
+        const block: [3]u32 = .{ @intCast(normalized[0]), @intCast(normalized[1]), @intCast(normalized[2]) };
+        const coords, const local = world.splitBlockCoords(block);
+        const index = @import("block_transformations.zig").index(local);
+        if (self.owned_road_slope) |lookup| if (lookup(self.reader.context, block)) |slope|
+            return .{ .index = index, .slope = slope.* };
         const chunk = self.chunks.get(self.reader.layout.encodeChunkCoords(coords)) orelse return null;
-        return chunk.metadata.road(@import("block_transformations.zig").index(local));
+        return chunk.metadata.road(index);
     }
 
     fn unformed(self: Context, cell: Cell) bool {
@@ -173,18 +180,22 @@ pub const Context = struct {
             };
             return;
         }
-        const chunk = self.chunks.getPtr(id) orelse return;
-        const road = chunk.metadata.roadPtr(@import("block_transformations.zig").index(local)) orelse return;
+        const block: [3]u32 = .{ @intCast(normalized[0]), @intCast(normalized[1]), @intCast(normalized[2]) };
+        const owned_slope = if (self.owned_road_slope) |lookup| lookup(self.reader.context, block) else null;
+        const destination = owned_slope orelse terrain: {
+            const chunk = self.chunks.getPtr(id) orelse return;
+            const road = chunk.metadata.roadPtr(@import("block_transformations.zig").index(local)) orelse return;
+            break :terrain &road.slope;
+        };
         if (self.undo) |entries| {
-            const block: [3]u32 = .{ @intCast(normalized[0]), @intCast(normalized[1]), @intCast(normalized[2]) };
             var seen = false;
             for (entries.items) |entry| if (std.meta.eql(entry.block, block)) {
                 seen = true;
                 break;
             };
-            if (!seen) entries.append(self.allocator, .{ .block = block, .slope = road.slope }) catch @panic("OOM");
+            if (!seen) entries.append(self.allocator, .{ .block = block, .slope = destination.* }) catch @panic("OOM");
         }
-        road.slope = slope;
+        destination.* = slope;
         self.mark(id);
     }
 
@@ -348,4 +359,63 @@ fn sameRun(a: data.Slope, b: data.Slope) bool {
 
 test {
     _ = @import("road_tests.zig");
+}
+
+test "mining a terrain endpoint reverts a road section owned by an extraction zone" {
+    const a = std.testing.allocator;
+    const layout = &@import("test_world.zig").layout;
+    const high: [3]u32 = .{ 29, 10, 70 };
+    const owned: [3]u32 = .{ 32, 10, 70 };
+    const Source = struct {
+        slope: ?data.Slope,
+
+        fn lookup(raw: *anyopaque, block: [3]u32) ?*?data.Slope {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return if (std.meta.eql(block, owned)) &self.slope else null;
+        }
+
+        fn read(_: *anyopaque, block: [3]u32) ?rules.BlockType {
+            if (block[1] == 10 and block[2] == 70 and block[0] > 29 and block[0] <= 33) return .custom;
+            return .none;
+        }
+    };
+    var source: Source = .{ .slope = null };
+    var chunks: world.ChunksHashMap = .empty;
+    defer {
+        var iter = chunks.valueIterator();
+        while (iter.next()) |chunk| chunk.deinit(a);
+        chunks.deinit(a);
+    }
+    for (0..4) |section| {
+        const slope: data.Slope = .{ .high_endpoint = high, .downhill = .positive_x, .length = 4, .section = @intCast(section) };
+        const block: [3]u32 = .{ 30 + @as(u32, @intCast(section)), 10, 70 };
+        if (std.meta.eql(block, owned)) {
+            source.slope = slope;
+            continue;
+        }
+        const coords, const local = world.splitBlockCoords(block);
+        const entry = try chunks.getOrPut(a, layout.encodeChunkCoords(coords));
+        if (!entry.found_existing) entry.value_ptr.* = world.WorldChunk.initEmpty();
+        try entry.value_ptr.metadata.roads.append(a, .{ .index = @import("block_transformations.zig").index(local), .slope = slope });
+    }
+    var changed: std.ArrayList(u32) = .empty;
+    defer changed.deinit(a);
+    const operation: world.BlockOperation = .{ .block = high, .action = .remove };
+    const context: Context = .{
+        .allocator = a,
+        .reader = .{ .layout = layout, .context = &source, .block_at = Source.read },
+        .chunks = &chunks,
+        .changed = &changed,
+        .owned_road_slope = Source.lookup,
+        .virtual_edit = operation,
+    };
+    var plan = try context.planAfterEdit(operation, null);
+    defer plan.deinit(a);
+    try std.testing.expect(source.slope != null);
+    try plan.reserveCommit(context);
+    plan.applyPrepared(context);
+    try std.testing.expectEqual(@as(usize, 2), changed.items.len);
+    try std.testing.expect(source.slope == null);
+    var iter = chunks.valueIterator();
+    while (iter.next()) |chunk| for (chunk.metadata.roads.items) |road| try std.testing.expect(road.slope == null);
 }

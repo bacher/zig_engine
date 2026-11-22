@@ -40,8 +40,15 @@ pub const Budget = struct {
     }
 
     pub fn reserve(self: *Budget, bytes: usize) !void {
+        return self.reserveWithHeadroom(bytes, 0);
+    }
+
+    /// Leave room for the discovery metadata of the same indivisible snapshot.
+    /// Only the worker reserves new bytes; consumers can release them concurrently.
+    pub fn reserveWithHeadroom(self: *Budget, bytes: usize, headroom: usize) !void {
+        const required = bytes +| headroom;
         var previous = self.used.load(.acquire);
-        while (bytes <= self.limit -| previous) {
+        while (required <= self.limit -| previous) {
             if (self.used.cmpxchgWeak(previous, previous + bytes, .acq_rel, .acquire)) |actual| {
                 previous = actual;
             } else {
@@ -50,10 +57,10 @@ pub const Budget = struct {
             }
         }
         _ = self.rejections.fetchAdd(1, .monotonic);
-        if (bytes <= self.limit) {
+        if (required <= self.limit) {
             self.waiting.store(true, .release);
             // Pair with a release that raced the failed reservation.
-            if (bytes <= self.limit -| self.used.load(.acquire)) self.notify();
+            if (required <= self.limit -| self.used.load(.acquire)) self.notify();
         }
         return error.ConstructionPublicationCapacity;
     }

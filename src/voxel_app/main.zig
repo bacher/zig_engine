@@ -48,6 +48,10 @@ const blueprint = @import("blueprint.zig");
 const blueprint_capture = @import("blueprint_capture.zig");
 const BlueprintTool = @import("blueprint_tool.zig").BlueprintTool;
 const blueprint_renderer = @import("engine").blueprint_renderer;
+const ExtractionDraft = @import("extraction_tool.zig").Draft;
+const extraction_zone = @import("extraction_zone.zig");
+const extraction_commands = @import("extraction_zone_commands.zig");
+const extraction_stream = @import("extraction_zone_stream.zig");
 const construction_stream = @import("construction_stream.zig");
 const construction_client = @import("construction_client.zig");
 const construction_geometry = @import("construction_geometry.zig");
@@ -129,6 +133,14 @@ const Game = struct {
     current_placement_preview: ?placement_preview.Preview = null,
     block_action_error: block_messages.TimedError = .{},
     blueprint_tool: BlueprintTool = .{},
+    extraction_draft: ExtractionDraft = .{},
+    extraction_click: bool = false,
+    extraction_key_needs_release: bool = false,
+    extraction_mouse_needs_release: bool = false,
+    extraction_pending: ?struct { request_id: u64, generation: u64 } = null,
+    extraction_results: std.ArrayList(extraction_commands.Result) = .empty,
+    extraction_status: ?[]const u8 = null,
+    extraction_status_until: f64 = 0,
     construction_cache: construction_client.Cache = .{},
     warehouse_tool: warehouse_tool_module.Tool = .{},
     warehouse_subscriptions_dirty: bool = false,
@@ -176,6 +188,7 @@ const Game = struct {
     fn clearToolInputs(game: *Game) void {
         game.block_interaction.loseFocus();
         game.blueprint_tool.press.loseFocus();
+        game.extraction_click = false;
         game.warehouse_tool.cancelHold();
         game.tool_commands.clearRetainingCapacity();
         game.jump_requested = false;
@@ -186,7 +199,119 @@ const Game = struct {
 
     fn updateBlueprintInputBlock(game: *Game) void {
         game.clearToolInputs();
-        game.engine.setGameplayInputBlocked(game.overlay != .none or game.blueprint_tool.controlsBlocked() or game.warehouse_tool.dialog != null);
+        game.engine.setGameplayInputBlocked(game.overlay != .none or game.blueprint_tool.controlsBlocked() or game.warehouse_tool.dialog != null or game.extraction_draft.stage == .resources);
+    }
+
+    fn enterExtractionDraft(game: *Game) void {
+        if (game.world == null or game.overlay != .none or game.blueprint_tool.mode != .none or game.blueprint_tool.chooser_open or game.warehouse_tool.dialog != null) return;
+        if (game.control_mode != .player) {
+            game.block_action_error.show("Extraction zones require player control.", game.engine.time);
+            return;
+        }
+        // Unfinished ordinary edits stop here. Physical controls retain their
+        // release requirement even when opening or closing a dialog clears inputs.
+        game.extraction_key_needs_release = game.extraction_key_needs_release or game.block_interaction.key_down;
+        game.extraction_mouse_needs_release = game.extraction_mouse_needs_release or game.block_interaction.mouse_down;
+        game.extraction_draft.enter();
+        game.extraction_status = null;
+        game.updateBlueprintInputBlock();
+    }
+
+    fn leaveExtractionDraft(game: *Game) void {
+        game.extraction_draft.leave();
+        game.updateBlueprintInputBlock();
+    }
+
+    fn backToExtractionBox(game: *Game) void {
+        game.extraction_draft.stage = .ready;
+        game.updateBlueprintInputBlock();
+    }
+
+    fn updateExtractionTool(game: *Game) void {
+        if (game.world_client) |client| client.takeExtractionZoneResults(&game.extraction_results);
+        for (game.extraction_results.items) |result| game.acceptExtractionResult(result);
+        game.extraction_results.clearRetainingCapacity();
+        if (!game.extraction_draft.active()) return;
+
+        const input = game.engine.input_controller;
+        if (!input.focused or input.focus_changed) {
+            game.extraction_click = false;
+            return;
+        }
+        const draft = &game.extraction_draft;
+        const world_size: [3]u32 = game.layout().size_in_blocks;
+        switch (draft.stage) {
+            .anchor => draft.updateAnchor(game.extractionSurfaceTarget()),
+            .footprint => draft.updateFootprint(world_size, game.extractionEndpoint(draft.anchor.?)),
+            .depth => draft.adjustDepth(world_size, input.cursor_position_delta[1]),
+            else => {},
+        }
+        if (game.extraction_click) {
+            game.extraction_click = false;
+            draft.confirmClick(world_size);
+        }
+    }
+
+    fn extractionSurfaceTarget(game: *Game) ?[3]u32 {
+        const scene = game.engine.active_scene orelse return null;
+        const world = if (game.world) |*world| world else return null;
+        const camera = scene.camera;
+        return block_targeting.findTargetWithReach(world, camera.position, camera.forwardDirection(), .removing, @sqrt(blueprint_capture.range_squared)) catch null;
+    }
+
+    fn extractionEndpoint(game: *Game, anchor: [3]u32) ?[2]i64 {
+        if (game.extractionSurfaceTarget()) |hit| return .{ hit[0], hit[1] };
+        // A ray that misses terrain can still reach the anchor's top plane.
+        const scene = game.engine.active_scene orelse return null;
+        const camera = scene.camera;
+        const direction = camera.forwardDirection();
+        if (direction[2] == 0) return null;
+        const origin: Position = @floatFromInt(game.layout().origin_chunk);
+        const eye = camera.position + origin * @as(Position, @splat(consts.CHUNK_SIZE));
+        const top: f64 = @floatFromInt(@as(u64, anchor[2]) + 1);
+        const distance = (top - eye[2]) / direction[2];
+        if (!std.math.isFinite(distance) or distance < 0 or distance > @sqrt(blueprint_capture.range_squared)) return null;
+        const hit = eye + direction * @as(Position, @splat(distance));
+        const width: f64 = @floatFromInt(game.layout().size_in_blocks[0]);
+        const length: f64 = @floatFromInt(game.layout().size_in_blocks[1]);
+        if (!std.math.isFinite(hit[0]) or !std.math.isFinite(hit[1]) or hit[1] < 0 or hit[1] >= length) return null;
+        return .{ @intFromFloat(@floor(@mod(hit[0], width))), @intFromFloat(@floor(hit[1])) };
+    }
+
+    fn submitExtractionZone(game: *Game) void {
+        const draft = &game.extraction_draft;
+        draft.checkBudget(game.layout().size_in_blocks);
+        if (!draft.canSubmit() or game.extraction_pending != null) return;
+        const client = game.world_client orelse return;
+        const submitted = client.tryRegisterExtractionZone(.{ .bounds = draft.bounds.?, .filter = draft.filter }) catch {
+            game.showExtractionStatus("Could not submit the extraction zone. Try again.");
+            return;
+        };
+        game.extraction_status = null;
+        game.extraction_pending = .{ .request_id = submitted.request_id, .generation = draft.generation };
+    }
+
+    fn acceptExtractionResult(game: *Game, result: extraction_commands.Result) void {
+        if (!game.commandResultCurrent(result.command)) return;
+        const pending = game.extraction_pending orelse return;
+        if (pending.request_id != result.request_id) return;
+        game.extraction_pending = null;
+        game.showExtractionStatus(switch (result.status) {
+            .success => "Extraction zone created.",
+            .invalid_bounds => "The authority rejected the extraction box bounds.",
+            .empty_filter => "Choose at least one resource for extraction.",
+            .cell_budget => "The authority rejected the box because it exceeds the cell limit.",
+            .chunk_budget => "The authority rejected the box because it exceeds the source chunk limit.",
+            .overlap => "The box overlaps an extraction zone, construction site, or warehouse.",
+            .missing_data => "The authority could not load the selected ground. Try again.",
+            .resource_exhausted => "The authority ran out of resources while creating the zone. Try again.",
+        });
+        if (result.status == .success and game.extraction_draft.active() and game.extraction_draft.generation == pending.generation) game.leaveExtractionDraft();
+    }
+
+    fn showExtractionStatus(game: *Game, message: []const u8) void {
+        game.extraction_status = message;
+        game.extraction_status_until = game.engine.real_time + block_messages.action_error_duration;
     }
 
     fn discardBlueprintDraft(game: *Game) void {
@@ -871,6 +996,63 @@ const Game = struct {
         }
     }
 
+    fn drawExtractionUI(game: *Game) void {
+        const draft = &game.extraction_draft;
+        const pending = game.extraction_pending != null;
+        const status = if (game.engine.real_time < game.extraction_status_until) game.extraction_status else null;
+        if (!draft.active() and !pending and status == null) return;
+
+        const screen = zgui.io.getDisplaySize();
+        zgui.setNextWindowPos(.{ .x = screen[0] - 16, .y = 16, .pivot_x = 1 });
+        _ = zgui.begin("Extraction zone status", .{ .flags = .{ .always_auto_resize = true, .no_title_bar = true, .no_collapse = true, .no_saved_settings = true, .no_focus_on_appearing = true, .no_mouse_inputs = true, .no_nav_inputs = true, .no_nav_focus = true } });
+        if (draft.active()) {
+            zgui.textUnformatted("Extraction zone");
+            zgui.textUnformatted(switch (draft.stage) {
+                .anchor => "Mouse1 selects the first corner",
+                .footprint => "Aim at the opposite corner and click Mouse1",
+                .depth => "Mouse up/down adjusts depth. Mouse1 fixes it.",
+                .ready => "Enter chooses resources",
+                .resources => "Choose resources for automated extraction",
+                .inactive => unreachable,
+            });
+            if (draft.bounds) |bounds| zgui.text("{d} × {d} × {d}", .{ bounds.size[0], bounds.size[1], bounds.size[2] });
+            if (draft.issue) |issue| zgui.textUnformatted(issue.message());
+            zgui.textUnformatted(if (draft.stage == .resources) "Esc returns to the box" else "Esc or G cancels the draft");
+        }
+        if (pending) zgui.textUnformatted("Creating extraction zone…");
+        if (status) |message| zgui.textUnformatted(message);
+        zgui.end();
+
+        if (draft.stage != .resources) return;
+        zgui.setNextWindowPos(.{ .x = screen[0] / 2, .y = screen[1] / 2, .pivot_x = 0.5, .pivot_y = 0.5 });
+        _ = zgui.begin("Extraction resources", .{ .flags = .{ .always_auto_resize = true, .no_collapse = true, .no_saved_settings = true } });
+        defer zgui.end();
+        zgui.textUnformatted("Choose which resources can be extracted automatically.");
+        zgui.beginDisabled(.{ .disabled = pending });
+        inline for (.{
+            .{ "soil", "Soil (including grass-covered soil)" },
+            .{ "sand", "Sand" },
+            .{ "stone", "Natural stone" },
+            .{ "metal_ore", "Metal ore (yield unavailable)" },
+            .{ "limestone", "Limestone (yield unavailable)" },
+            .{ "coal", "Coal (yield unavailable)" },
+            .{ "clay", "Clay (yield unavailable)" },
+        }) |category| {
+            var checked = @field(draft.filter, category[0]);
+            if (zgui.checkbox(category[1], .{ .v = &checked })) @field(draft.filter, category[0]) = checked;
+        }
+        zgui.endDisabled();
+        zgui.separator();
+        zgui.textUnformatted("Placement stays blocked throughout the box");
+        zgui.textUnformatted("even after resources are exhausted.");
+        zgui.textUnformatted("This version has no action to remove an extraction zone.");
+        zgui.beginDisabled(.{ .disabled = pending or !draft.canSubmit() });
+        if (zgui.button("Create extraction zone", .{})) game.submitExtractionZone();
+        zgui.endDisabled();
+        zgui.sameLine(.{});
+        if (zgui.button("Back to box", .{})) game.backToExtractionBox();
+    }
+
     fn appendSiteFrames(game: *Game, camera: *const Camera, capacity: usize) !void {
         const sites = &game.world.?.blueprints;
         if (sites.chunks.count() == 0) return;
@@ -926,6 +1108,13 @@ const Game = struct {
         }
         const dynamic_capacity = @as(usize, blueprint_renderer.capacity) -| game.blueprint_visible_miniatures;
         game.appendSiteFrames(scene.camera, dynamic_capacity) catch return game.blueprintRenderLimit();
+        const extraction = &game.extraction_draft;
+        if (extraction.active()) {
+            const frame = extraction.bounds orelse if (extraction.target) |target| @as(extraction_zone.Bounds, .{ .min = target, .size = .{ 1, 1, 1 } }) else return;
+            if (list.items.len + blueprint_renderer.frame_instance_count > dynamic_capacity) return game.showExtractionStatus("The extraction frame exceeds the rendering budget.");
+            blueprint_renderer.appendFrame(list, game.allocator, scene.camera, .{ frame.min[0], frame.min[1], frame.min[2] }, frame.size) catch return game.showExtractionStatus("Could not draw the extraction frame.");
+            game.blueprint_selection_frame_start = @intCast(list.items.len - blueprint_renderer.frame_instance_count);
+        }
         if (game.blueprint_tool.mode == .capture) {
             if (game.blueprint_tool.selection.stage == .anchor) {
                 if (game.blueprintAnchorTarget()) |target| {
@@ -981,7 +1170,7 @@ const Game = struct {
 
     fn setOverlay(game: *Game, overlay: Overlay) void {
         if (game.exit_requested or overlay == game.overlay) return;
-        if ((game.blueprint_tool.chooser_open or game.blueprint_tool.mode != .none) and overlay != .none) return;
+        if ((game.blueprint_tool.chooser_open or game.blueprint_tool.mode != .none or game.extraction_draft.active()) and overlay != .none) return;
         if (game.overlay == .world_map and game.map_teleport != null) return;
         if (game.overlay == .world_map) game.cancelMapTeleport();
         game.overlay = overlay;
@@ -1161,6 +1350,7 @@ const Game = struct {
         game.map_state.deinit(game.engine.gctx);
         game.tool_commands.deinit(game.allocator);
         game.blueprint_tool.deinit(game.allocator);
+        game.extraction_results.deinit(game.allocator);
         game.blueprint_render_instances.deinit(game.allocator);
         game.deinitMiniatureState();
         if (game.blueprint_renderer) |renderer| renderer.deinit(game.engine.gctx);
@@ -1208,11 +1398,12 @@ const Game = struct {
         // Player input remains independent of surface work and GPU upload capacity.
         game.updateGameplay(has_new_chunks);
         game.updateBlueprintTool();
+        game.updateExtractionTool();
         game.flushBlockOperations();
         game.updatePersistence();
         game.updateChunksAroundCamera(has_new_chunks);
         game.evictConstructionSources();
-        if (!game.engine.gameplay_input_blocked and game.blueprint_tool.mode == .none) game.updateBlockFocus();
+        if (!game.engine.gameplay_input_blocked and game.blueprint_tool.mode == .none and !game.extraction_draft.active()) game.updateBlockFocus();
         game.rebuildDirtyChunks();
         game.rebuildPackedChunks();
         if (!game.rebuildConstructionChunks()) return;
@@ -1301,6 +1492,7 @@ const Game = struct {
 
     fn beginExit(game: *Game) void {
         if (game.exit_requested) return;
+        game.extraction_draft.leave();
         game.leaveBlueprintTool();
         game.exit_requested = true;
         game.overlay = .none;
@@ -1336,7 +1528,7 @@ const Game = struct {
     fn updateGameplay(game: *Game, terrain_changed: bool) void {
         if (game.exit_requested or game.engine.paused) return;
         if (game.player != null) game.updatePlayer(terrain_changed);
-        if (!game.engine.gameplay_input_blocked and game.blueprint_tool.mode == .none) game.updateBlockTool();
+        if (!game.engine.gameplay_input_blocked and game.blueprint_tool.mode == .none and !game.extraction_draft.active()) game.updateBlockTool();
     }
 
     fn updatePlayer(game: *Game, terrain_changed: bool) void {
@@ -1356,15 +1548,17 @@ const Game = struct {
         // UI captures controls without suspending gravity or terrain collisions.
         var player_input: player_module.Input = .{};
         if (!engine.gameplay_input_blocked) {
-            player.look(input.cursor_position_delta);
-            const forward = @as(i8, @intFromBool(input.isKeyPressed(.w))) - @as(i8, @intFromBool(input.isKeyPressed(.s)));
-            const right = @as(i8, @intFromBool(input.isKeyPressed(.d))) - @as(i8, @intFromBool(input.isKeyPressed(.a)));
-            player_input = .{
-                .forward = @floatFromInt(forward),
-                .right = @floatFromInt(right),
-                .jump_pressed = game.jump_requested,
-                .jump_down = input.isKeyPressed(.space),
-            };
+            if (!game.extraction_draft.active() or game.extraction_draft.aims()) player.look(input.cursor_position_delta);
+            if (!game.extraction_draft.active()) {
+                const forward = @as(i8, @intFromBool(input.isKeyPressed(.w))) - @as(i8, @intFromBool(input.isKeyPressed(.s)));
+                const right = @as(i8, @intFromBool(input.isKeyPressed(.d))) - @as(i8, @intFromBool(input.isKeyPressed(.a)));
+                player_input = .{
+                    .forward = @floatFromInt(forward),
+                    .right = @floatFromInt(right),
+                    .jump_pressed = game.jump_requested,
+                    .jump_down = input.isKeyPressed(.space),
+                };
+            }
         }
         const result = player.update(&game.world.?, player_input, elapsed, engine.time) catch |err| {
             std.debug.print("player update failed: {}\n", .{err});
@@ -1519,6 +1713,11 @@ const Game = struct {
             const id = game.layout().encodeChunkCoords(response.coords);
             const token = game.chunk_subscriptions.get(id) orelse continue;
             if (token != response.subscription_id) continue;
+            if (response.extraction_zone_refs) |records| {
+                world.installExtractionClaims(id, records) catch return false;
+                game.allocator.free(records);
+                response.extraction_zone_refs = null;
+            }
             if (response.warehouse_refs) |references| {
                 _ = world.warehouses.installChunk(game.allocator, id, token, response.warehouse_revision, references) catch return false;
                 game.markPackedChunkDirty(id);
@@ -1570,12 +1769,10 @@ const Game = struct {
         }
         for (package.responses.items) |*owned_response| {
             var response = owned_response.*;
+            defer response.deinit(game.allocator);
             const id = game.layout().encodeChunkCoords(response.coords);
             const token = game.chunk_subscriptions.get(id);
-            if (token == null or token != response.subscription_id) {
-                response.deinit(game.allocator);
-                continue;
-            }
+            if (token == null or token != response.subscription_id) continue;
             if (response.composition) |composition| {
                 for (game.construction_cache.chunkReferences(id)) |reference| game.queueConstructionEviction(reference.identity.id);
                 const stamp: construction_stream.GeometryStamp = .{
@@ -1585,14 +1782,10 @@ const Game = struct {
                     .composition_revision = composition.revision,
                 };
                 const installed = game.construction_cache.installChunk(game.allocator, id, stamp, composition) catch {
-                    response.deinit(game.allocator);
                     if (game.chunk_modes.remove(id)) game.construction_cache.invalidateReadView();
                     continue;
                 };
-                if (!installed) {
-                    response.deinit(game.allocator);
-                    continue;
-                }
+                if (!installed) continue;
                 var owned = composition;
                 owned.deinit(game.allocator);
                 response.composition = null;
@@ -1608,20 +1801,38 @@ const Game = struct {
                 game.markConstructionChunkAndNeighborsDirty(response.coords);
             }
             switch (response.data) {
-                .acknowledgement => {},
-                .blocks => |snapshot| {
-                    if ((game.chunk_modes.get(id) orelse .blocks) != .blocks) {
-                        response.deinit(game.allocator);
+                .acknowledgement => if (response.extraction_zone) |update| {
+                    if (game.chunk_modes.get(id) != .blocks) continue;
+                    if (game.block_snapshot_tokens.get(id) != token or update != .delta) {
+                        game.invalidateExtractionChunk(id);
                         continue;
                     }
+                    const previous = if (world.getChunk(response.coords)) |chunk| chunk.boundaries else null;
+                    const installed = world.applyExtractionDelta(response.coords, token.?, response.chunk_revision, update.delta, response.zone_cell_changes) catch {
+                        game.invalidateExtractionChunk(id);
+                        continue;
+                    };
+                    if (installed) {
+                        game.markChunkSnapshotDirty(response.coords, previous);
+                        if (game.construction_cache.chunks.getPtr(id)) |chunk| {
+                            chunk.data.chunk_revision = @max(chunk.data.chunk_revision, response.chunk_revision);
+                            chunk.data.surface_revision = @max(chunk.data.surface_revision, response.surface_revision);
+                        }
+                    }
+                },
+                .blocks => |*snapshot| {
+                    if ((game.chunk_modes.get(id) orelse .blocks) != .blocks) continue;
                     // Re-promotion can retain blocks while neighbors were prepared with
                     // fallback planes. Its first accepted snapshot reloads that dependency.
                     const previous_boundaries: ?world_engine.BoundaryMasks = if (game.block_snapshot_tokens.get(id) == token)
                         (if (world.getChunk(response.coords)) |chunk| chunk.boundaries else null)
                     else
                         null;
-                    world.insertChunk(response.coords, snapshot.chunk) catch |err| {
-                        if (err == error.OutOfMemory) {
+                    if (response.zone_cell_changes) |history| snapshot.chunk.cell_changes = history;
+                    world.insertStreamedTerrain(response.coords, &snapshot.chunk, token.?, response.chunk_revision, response.extraction_zone) catch |err| {
+                        if (err == error.ZoneResyncRequired) {
+                            game.invalidateExtractionChunk(id);
+                        } else if (err == error.OutOfMemory) {
                             // Keep the subscription identity for normal eviction, but
                             // invalidate its mode so the next streaming pass requests
                             // a fresh authoritative snapshot. No payload or extra queue
@@ -1629,34 +1840,29 @@ const Game = struct {
                             if (game.chunk_modes.remove(id)) game.construction_cache.invalidateReadView();
                             _ = game.block_snapshot_tokens.remove(id);
                         }
-                        response.deinit(game.allocator);
                         continue;
                     };
                     game.block_snapshot_tokens.put(game.allocator, id, token.?) catch @panic("OOM");
                     game.loadChunkIfNeeded(response.coords[0], response.coords[1], response.coords[2]);
                     if (snapshot.neighbors) |masks| game.installBoundaries(response.coords, masks, response.surface_revision);
                     game.markChunkSnapshotDirty(response.coords, previous_boundaries);
+                    response.data = .acknowledgement;
                 },
                 .boundaries => |masks| {
                     if (game.chunk_modes.get(id) != .blocks) continue;
                     game.installBoundaries(response.coords, masks, response.surface_revision);
                 },
                 .surface, .unreachable_chunk => {
-                    if (game.chunk_modes.get(id) != .surface) {
-                        response.deinit(game.allocator);
-                        continue;
-                    }
+                    if (game.chunk_modes.get(id) != .surface) continue;
                     if (game.surface_versions.get(id)) |old| {
-                        if (response.surface_revision < old.surface_revision) {
-                            response.deinit(game.allocator);
-                            continue;
-                        }
+                        if (response.surface_revision < old.surface_revision) continue;
                     }
                     game.engine.active_scene.?.voxel_grid.appendChunk(.{
                         .chunk_coords = response.coords,
                         .chunk_surface_data = if (response.data == .surface) response.data.surface else .{},
                         .geometry_stamp = game.construction_cache.geometryStamp(id) orelse .{},
                     });
+                    response.data = .acknowledgement;
                     game.loaded_chunk_ids.put(game.allocator, id, {}) catch @panic("OOM");
                     game.surface_versions.put(game.allocator, id, .{ .chunk_revision = response.chunk_revision, .surface_revision = response.surface_revision }) catch @panic("OOM");
                     _ = game.dirty_chunk_ids.remove(id);
@@ -1699,6 +1905,13 @@ const Game = struct {
             if (world.reader().get(.{ block[0], block[1], block[2] }) != before.material) game.markChunksAroundBlockDirty(block);
         }
         return true;
+    }
+
+    fn invalidateExtractionChunk(game: *Game, id: u32) void {
+        game.world.?.invalidateExtractionSource(id);
+        _ = game.block_snapshot_tokens.remove(id);
+        // Normal near streaming asks for a new token and paired baseline.
+        if (game.chunk_modes.remove(id)) game.construction_cache.invalidateReadView();
     }
 
     fn applyConstructionUpdate(game: *Game, update: construction_stream.Update) !void {
@@ -1896,6 +2109,7 @@ const Game = struct {
         const id = game.layout().encodeChunkCoords(coords);
         if (game.chunk_subscriptions.contains(id) and game.chunk_modes.get(id) == mode) return;
         const token = game.world_client.?.tryRequestChunksInMode(.{ coords[0], coords[1] }, coords[2], coords[2] + 1, mode) catch return;
+        game.world.?.invalidateExtractionSource(id);
         game.engine.active_scene.?.voxel_grid.cancelPendingChunkLayer(coords, .terrain);
         game.engine.active_scene.?.voxel_grid.cancelPendingChunkLayer(coords, .construction);
         game.chunk_subscriptions.put(game.allocator, id, token) catch @panic("OOM");
@@ -2029,6 +2243,7 @@ const Game = struct {
         _ = game.construction_dirty_chunks.remove(chunk_id);
         game.construction_cache.evictChunk(game.allocator, chunk_id);
         game.world.?.warehouses.removeChunk(game.allocator, chunk_id);
+        game.world.?.forgetExtractionClaims(chunk_id);
         game.packed_cache.releaseTerrain(game.allocator, chunk_id);
         game.warehouse_subscriptions_dirty = true;
         if (game.blueprint_renderer) |*renderer| renderer.removeMiniatureChunk(game.engine.gctx, chunk_id);
@@ -2677,7 +2892,7 @@ const Game = struct {
         const adjacent_id = game.layout().encodeChunkCoords(adjacent);
         // A demoted neighbor may retain blocks for its display, but those blocks
         // no longer receive updates. Its authoritative fallback plane is newer.
-        if (game.chunk_modes.get(adjacent_id) == .surface) return null;
+        if (game.chunk_modes.get(adjacent_id) == .surface or !game.world.?.extractionSourceValid(adjacent_id)) return null;
         return game.world.?.chunks.getPtr(adjacent_id);
     }
 };
@@ -2872,6 +3087,7 @@ pub fn main(init: std.process.Init) !void {
             .onRenderOverlay3D = onRenderOverlay3D,
             .onRenderWorldOverlay3D = onRenderWorldOverlay3D,
             .onUIKeyPress = onUIKeyPress,
+            .onUIMouseButtonPress = onUIMouseButtonPress,
             .onKeyPress = onKeyPress,
             .onKeyRelease = onKeyRelease,
             .onMouseButtonPress = onMouseButtonPress,
@@ -3059,6 +3275,7 @@ fn onGameplayInputChanged(engine: *Engine, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
     game.block_interaction.loseFocus();
     game.blueprint_tool.press.loseFocus();
+    game.extraction_click = false;
     game.warehouse_tool.cancelHold();
     game.tool_commands.clearRetainingCapacity();
     game.jump_requested = false;
@@ -3108,6 +3325,17 @@ fn onUIKeyPress(engine: *Engine, key_params: KeyParams, game_opaque: *anyopaque)
 
 fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
     if (game.exit_requested) return true;
+    if (game.extraction_draft.active()) {
+        switch (key_params.key) {
+            .escape => if (game.extraction_draft.stage == .resources) game.backToExtractionBox() else game.leaveExtractionDraft(),
+            .g => if (!key_params.mods.control) game.leaveExtractionDraft(),
+            .e => game.extraction_key_needs_release = true,
+            .enter, .kp_enter => if (game.extraction_draft.openResources(game.layout().size_in_blocks)) game.updateBlueprintInputBlock(),
+            else => {},
+        }
+        return true;
+    }
+    if (key_params.key == .e and game.extraction_key_needs_release) return true;
     if (game.warehouse_tool.dialog != null) {
         if (key_params.key == .escape) game.closeWarehouseDialog();
         return true;
@@ -3143,6 +3371,10 @@ fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
         },
     }
     switch (key_params.key) {
+        .g => {
+            if (!key_params.mods.control) game.enterExtractionDraft();
+            return true;
+        },
         .escape => {
             game.setOverlay(if (game.overlay == .none) .menu else .none);
             return true;
@@ -3156,11 +3388,11 @@ fn handleUIKeyPress(game: *Game, key_params: KeyParams) bool {
 }
 
 fn handleKeyPress(game: *Game, key_params: KeyParams) void {
-    if (game.exit_requested or game.engine.gameplay_input_blocked) return;
+    if (game.exit_requested or game.engine.gameplay_input_blocked or game.extraction_draft.active()) return;
     if (game.blueprint_tool.mode != .none and key_params.key != .space) return;
     switch (key_params.key) {
         .x => if (game.control_mode == .spectator) game.queueBlockAction(.remove),
-        .e => if (!key_params.mods.control) {
+        .e => if (!key_params.mods.control and !game.extraction_key_needs_release) {
             if (game.control_mode == .player) game.block_interaction.press(.key) else game.queueBlockAction(.{ .place = game.selected_material });
         },
         .one, .two, .three, .four, .five, .six, .seven, .eight, .nine => {
@@ -3196,6 +3428,7 @@ fn onKeyRelease(_: *Engine, params: KeyParams, game_opaque: *anyopaque) void {
 
 fn handleKeyRelease(game: *Game, params: KeyParams) void {
     if (params.key == .e) {
+        game.extraction_key_needs_release = false;
         game.block_interaction.release(.key);
         game.warehouse_tool.release(.key);
         // Capture uses immediate presses, so a release before the next frame
@@ -3211,10 +3444,28 @@ fn onMouseButtonRelease(_: *Engine, params: MouseButtonParams, game_opaque: *any
 
 fn handleMouseButtonRelease(game: *Game, params: MouseButtonParams) void {
     if (params.button == .left) {
+        game.extraction_mouse_needs_release = false;
         game.block_interaction.release(.mouse);
         game.warehouse_tool.release(.mouse);
         game.blueprint_tool.press.mouse_down = false;
     }
+}
+
+fn onUIMouseButtonPress(engine: *Engine, params: MouseButtonParams, game_opaque: *anyopaque) bool {
+    if (!engine.gameplay_input_blocked or !engine.window_context.window.getAttribute(.focused)) return false;
+    const game: *Game = @ptrCast(@alignCast(game_opaque));
+    return handleExtractionMousePress(game, params);
+}
+
+fn handleExtractionMousePress(game: *Game, params: MouseButtonParams) bool {
+    const active = game.extraction_draft.active();
+    if (params.button != .left) return active;
+    if (active) {
+        const stage = game.extraction_draft.stage;
+        if (!game.extraction_mouse_needs_release and (stage == .anchor or stage == .footprint or stage == .depth)) game.extraction_click = true;
+        game.extraction_mouse_needs_release = true;
+    }
+    return active or game.extraction_mouse_needs_release;
 }
 
 fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams, game_opaque: *anyopaque) void {
@@ -3224,6 +3475,7 @@ fn onMouseButtonPress(engine: *Engine, params: MouseButtonParams, game_opaque: *
 }
 
 fn handleMouseButtonPress(game: *Game, params: MouseButtonParams) void {
+    if (handleExtractionMousePress(game, params)) return;
     if (game.exit_requested or game.engine.gameplay_input_blocked) return;
     if (game.blueprint_tool.mode != .none) {
         if (params.button == .left and (game.blueprint_tool.mode == .capture or game.blueprint_tool.mode == .preview)) game.blueprint_tool.press.press(.mouse);
@@ -3274,17 +3526,22 @@ fn onRenderOverlay3D(engine: *Engine, pass: wgpu.RenderPassEncoder, game_opaque:
 
 fn onRender(engine: *Engine, _: wgpu.RenderPassEncoder, game_opaque: *anyopaque) void {
     const game: *Game = @ptrCast(@alignCast(game_opaque));
+    if (game.overlay == .none and (!engine.gameplay_input_blocked or game.extraction_draft.active())) block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
     if (game.overlay == .none and !engine.gameplay_input_blocked) {
-        block_messages.draw(game.current_placement_preview, &game.block_action_error, engine.time);
-        drawCrosshair();
-        if (game.control_mode == .player) if (game.block_interaction.holding) |hold| {
-            drawBlockActionProgress(hold);
-        };
+        if (game.extraction_draft.active()) {
+            if (game.extraction_draft.aims()) drawCrosshair();
+        } else {
+            drawCrosshair();
+            if (game.control_mode == .player) if (game.block_interaction.holding) |hold| {
+                drawBlockActionProgress(hold);
+            };
+        }
     }
     if (game.overlay == .world_map) if (game.world_data) |service| if (engine.active_scene) |scene| {
         game.handleMapAction(game.map_state.draw(game.allocator, engine.gctx, service.preparedGenerator(), game.mapView(scene)));
     };
     game.drawBlueprintUI();
+    game.drawExtractionUI();
     game.drawWarehouseUI();
     drawPersistence(game);
     if (game.overlay == .menu) if (menu.draw(engine.paused)) |action| game.handleMenuAction(action);
@@ -5576,6 +5833,7 @@ const StreamingTest = struct {
         const allocator = self.game.allocator;
         self.game.tool_commands.deinit(allocator);
         self.game.blueprint_tool.deinit(allocator);
+        self.game.extraction_results.deinit(allocator);
         self.game.blueprint_render_instances.deinit(allocator);
         self.game.deinitMiniatureState();
         self.input.pressed_keys.deinit();
@@ -5652,6 +5910,199 @@ fn singleTestBlock(local: [3]u5, revision: u64) WorldChunk {
     _ = chunk.apply(std.testing.allocator, local, .{ .put = .stone });
     chunk.chunk_revision = revision;
     return chunk;
+}
+
+test "near extraction composes terrain, preserves optimistic inventory, and recovers a missing delta" {
+    const a = std.testing.allocator;
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const world = &game.world.?;
+    const coords = game.layout().origin_chunk;
+    const id = game.layout().encodeChunkCoords(coords);
+    const face_local: [3]u5 = .{ 31, 10, 5 };
+    const other_local: [3]u5 = .{ 31, 11, 5 };
+    const face = @import("extraction_zone_state.zig").worldCell(@bitCast(coords), transformations.index(face_local));
+    const other = @import("extraction_zone_state.zig").worldCell(@bitCast(coords), transformations.index(other_local));
+    const claim: extraction_stream.Record = .{ .id = 1, .bounds = .{ .min = face, .size = .{ 1, 2, 1 } }, .filter = .{} };
+    const owned = [_]extraction_stream.Cell{
+        .{ .index = transformations.index(face_local), .value = .{ .material = .stone } },
+        .{ .index = transformations.index(other_local), .value = .{ .material = .dirt, .constructed = true, .grass_due = 123 } },
+    };
+    try fixture.subscribe(coords, 7, .blocks);
+    try fixture.apply(&.{.{
+        .coords = coords,
+        .subscription_id = 7,
+        .chunk_revision = 4,
+        .surface_revision = 4,
+        .data = .{ .blocks = .{ .chunk = singleTestBlock(.{ 25, 10, 5 }, 4) } },
+        .extraction_zone = .{ .snapshot = .{ .chunk_id = id, .subscription_id = 7, .terrain_revision = 4, .revision = 12, .claims = try a.dupe(extraction_stream.Record, &.{claim}), .cells = try a.dupe(extraction_stream.Cell, &owned) } },
+    }});
+    try std.testing.expectEqual(.stone, world.physicalBlock(face).?);
+    try std.testing.expect(try world.isBlockSolid(face));
+    try std.testing.expect(world.getChunk(coords).?.boundaries[@intFromEnum(Side.right)].contains(.right, face_local));
+    try std.testing.expectEqualSlices(u15, &.{owned[1].index}, world.getChunk(coords).?.metadata.constructed.items);
+
+    // The next ordinary terrain snapshot excludes all zone-owned material.
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 7, .chunk_revision = 5, .surface_revision = 5, .data = .{ .blocks = .{ .chunk = singleTestBlock(.{ 24, 10, 5 }, 5) } } }});
+    try std.testing.expectEqual(.stone, world.physicalBlock(face).?);
+    try std.testing.expectEqual(.dirt, world.physicalBlock(other).?);
+    try std.testing.expectEqual(@as(u64, 123), world.getChunk(coords).?.metadata.timed.events.items[0].due_tick);
+
+    world.setBlockUnchecked(face, .none);
+    world.pending_operations.items[0].request_id = 40;
+    game.block_interaction.inventory = .crushed_stone;
+    game.block_interaction.pending = .{ .request_id = 40 };
+    var history: @import("cell_changes.zig").History = .{};
+    history.record(owned[0].index);
+    const remove = [_]extraction_stream.Change{.{ .index = owned[0].index, .value = null }};
+    try fixture.apply(&.{.{
+        .coords = coords,
+        .subscription_id = 7,
+        .chunk_revision = 6,
+        .surface_revision = 6,
+        .operation = .{ .request_id = 40, .status = .success, .player_inventory = .{ .player_id = game.player_id, .material = .crushed_stone } },
+        .data = .acknowledgement,
+        .extraction_zone = .{ .delta = .{ .chunk_id = id, .subscription_id = 7, .terrain_revision = 5, .base_revision = 12, .revision = 13, .changes = try a.dupe(extraction_stream.Change, &remove) } },
+        .zone_cell_changes = history,
+    }});
+    try std.testing.expectEqual(.crushed_stone, game.block_interaction.inventory.?);
+    try std.testing.expectEqual(null, game.block_interaction.pending);
+    try std.testing.expect(!try world.isBlockSolid(face));
+    try std.testing.expect(!world.getChunk(coords).?.boundaries[@intFromEnum(Side.right)].contains(.right, face_local));
+    try std.testing.expectEqualDeep(history, world.getChunk(coords).?.cell_changes);
+    try std.testing.expectEqual(.extraction_zone_claim, world.previewOperation(.{ .block = face, .action = .{ .put = .water } }).failure.?.reason);
+    game.rebuildDirtyChunks();
+    for (fixture.upload(coords).chunk_surface_data.blocks_grouped_by_side[@intFromEnum(Side.right)].items) |rendered| {
+        try std.testing.expect(rendered.coords[0] != 31 or rendered.coords[1] != face_local[1] or rendered.coords[2] != face_local[2]);
+    }
+
+    // The aggregate revision may be newer than the paired raw terrain fence.
+    history.record(owned[1].index);
+    const grow = [_]extraction_stream.Change{.{ .index = owned[1].index, .value = .{ .material = .grass, .constructed = true } }};
+    try fixture.apply(&.{.{
+        .coords = coords,
+        .subscription_id = 7,
+        .chunk_revision = 8,
+        .surface_revision = 8,
+        .data = .{ .blocks = .{ .chunk = singleTestBlock(.{ 23, 10, 5 }, 7) } },
+        .extraction_zone = .{ .delta = .{ .chunk_id = id, .subscription_id = 7, .terrain_revision = 7, .base_revision = 13, .revision = 14, .changes = try a.dupe(extraction_stream.Change, &grow) } },
+        .zone_cell_changes = history,
+    }});
+    try std.testing.expectEqual(@as(u64, 7), world.extraction_sources.getPtr(id).?.terrain_revision);
+    try std.testing.expectEqual(@as(u64, 8), world.getChunk(coords).?.chunk_revision);
+    try std.testing.expectEqualDeep(history, world.getChunk(coords).?.cell_changes);
+    try std.testing.expectEqual(.grass, world.physicalBlock(other).?);
+    try std.testing.expect(!try world.isBlockSolid(face));
+
+    const missed = [_]extraction_stream.Change{.{ .index = owned[1].index, .value = null }};
+    try fixture.apply(&.{.{
+        .coords = coords,
+        .subscription_id = 7,
+        .chunk_revision = 10,
+        .surface_revision = 10,
+        .data = .acknowledgement,
+        .extraction_zone = .{ .delta = .{ .chunk_id = id, .subscription_id = 7, .terrain_revision = 7, .base_revision = 15, .revision = 16, .changes = try a.dupe(extraction_stream.Change, &missed) } },
+    }});
+    try std.testing.expectEqual(null, game.chunk_modes.get(id));
+    try std.testing.expectError(error.ChunkNotReceived, world.isBlockSolid(other));
+
+    // Resubscribe with a fresh token. A delayed old delta cannot revive the source.
+    try fixture.subscribe(coords, 8, .blocks);
+    try fixture.apply(&.{.{
+        .coords = coords,
+        .subscription_id = 8,
+        .chunk_revision = 11,
+        .surface_revision = 11,
+        .data = .{ .blocks = .{ .chunk = singleTestBlock(.{ 24, 10, 5 }, 11) } },
+        .extraction_zone = .{ .snapshot = .{ .chunk_id = id, .subscription_id = 8, .terrain_revision = 11, .revision = 16, .claims = try a.dupe(extraction_stream.Record, &.{claim}), .cells = try a.dupe(extraction_stream.Cell, owned[1..]) } },
+    }});
+    try fixture.apply(&.{.{
+        .coords = coords,
+        .subscription_id = 7,
+        .chunk_revision = 12,
+        .surface_revision = 12,
+        .data = .acknowledgement,
+        .extraction_zone = .{ .delta = .{ .chunk_id = id, .subscription_id = 7, .terrain_revision = 7, .base_revision = 16, .revision = 17, .changes = try a.dupe(extraction_stream.Change, &missed) } },
+    }});
+    try std.testing.expectEqual(.dirt, world.physicalBlock(other).?);
+    try std.testing.expect(!try world.isBlockSolid(face));
+    try std.testing.expectEqual(@as(?u64, 8), game.block_snapshot_tokens.get(id));
+
+    const resurrect = [_]extraction_stream.Change{.{ .index = owned[0].index, .value = owned[0].value }};
+    try fixture.apply(&.{.{
+        .coords = coords,
+        .subscription_id = 8,
+        .chunk_revision = 12,
+        .data = .acknowledgement,
+        .extraction_zone = .{ .delta = .{ .chunk_id = id, .subscription_id = 8, .terrain_revision = 11, .base_revision = 16, .revision = 17, .changes = try a.dupe(extraction_stream.Change, &resurrect) } },
+    }});
+    try std.testing.expectEqual(null, game.chunk_modes.get(id));
+    try std.testing.expectEqual(.none, world.getChunk(coords).?.content.getBlock(face_local));
+
+    try fixture.subscribe(coords, 9, .surface);
+    try fixture.apply(&.{.{ .coords = coords, .subscription_id = 9, .chunk_revision = 11, .surface_revision = 11, .data = .{ .surface = .{} } }});
+    try std.testing.expect(!world.hasChunk(coords));
+    try std.testing.expect(!world.extraction_sources.contains(id));
+    try std.testing.expect(!world.extraction_claims.contains(id));
+    try std.testing.expectError(error.ChunkNotReceived, world.isBlockSolid(other));
+
+    try fixture.subscribe(coords, 10, .blocks);
+    try fixture.apply(&.{.{
+        .coords = coords,
+        .subscription_id = 10,
+        .chunk_revision = 12,
+        .data = .acknowledgement,
+        .extraction_zone = .{ .delta = .{ .chunk_id = id, .subscription_id = 10, .terrain_revision = 11, .base_revision = 16, .revision = 17, .changes = try a.dupe(extraction_stream.Change, &missed) } },
+    }});
+    try std.testing.expectEqual(null, game.chunk_modes.get(id));
+    try std.testing.expect(!world.hasChunk(coords));
+}
+
+test "near extraction service handoff and delta reach the normal Game subscription" {
+    const a = std.testing.allocator;
+    const service = try WorldDataService.create(std.testing.io, a, &test_layout, .flat);
+    defer service.destroy();
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    game.world_client = try service.createClient();
+    const editor = try service.createClient();
+    const block: [3]u32 = .{ 40, 40, test_layout.size_in_blocks[2] / 2 - consts.CHUNK_SIZE / 2 - 1 };
+    const coords, const local = world_module.splitBlockCoords(block);
+    const id = game.layout().encodeChunkCoords(coords);
+    game.requestChunkMode(coords, .blocks);
+    for (0..5000) |_| {
+        _ = game.receiveChunks();
+        if (game.world.?.physicalBlock(block) != null) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    try std.testing.expectEqual(.stone, game.world.?.physicalBlock(block) orelse return error.MissingInitialTerrain);
+
+    _ = try editor.tryRegisterExtractionZone(.{ .bounds = .{ .min = block, .size = .{ 1, 1, 1 } }, .filter = .{} });
+    for (0..5000) |_| {
+        _ = game.receiveChunks();
+        if (game.world.?.extraction_sources.contains(id)) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    const source_before = game.world.?.extraction_sources.getPtr(id) orelse return error.MissingZoneBaseline;
+    const terrain_revision = source_before.terrain_revision;
+    const zone_revision = source_before.revision;
+    try std.testing.expect(try game.world.?.isBlockSolid(block));
+
+    _ = try editor.trySubmitOperation(.{ .block = block, .action = .remove });
+    for (0..5000) |_| {
+        _ = game.receiveChunks();
+        if (game.world.?.physicalBlock(block) == .none) break;
+        try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+    }
+    const source_after = game.world.?.extraction_sources.getPtr(id) orelse return error.MissingZoneDelta;
+    try std.testing.expectEqual(terrain_revision, source_after.terrain_revision);
+    try std.testing.expect(source_after.revision > zone_revision);
+    try std.testing.expect(!source_after.occupied.isSet(transformations.index(local)));
+    try std.testing.expect(!try game.world.?.isBlockSolid(block));
 }
 
 test "block snapshots rebuild only the chunk and changed face neighbors" {
@@ -7351,6 +7802,210 @@ test "quick blueprint key and mouse presses survive release before the next fram
     try std.testing.expect(!game.blueprint_tool.press.mouse_down);
     game.discardBlueprintDraft();
     try std.testing.expectEqual(null, game.blueprint_tool.press.requested);
+}
+
+test "extraction draft targets the surface, keeps anchor height, and renders buried depth" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.preparePlayerToolTest();
+    const game = &fixture.game;
+    const left: MouseButtonParams = .{ .button = .left, .mods = .{} };
+    const anchor = StreamingTest.toolTarget();
+    const endpoint = [3]u32{ anchor[0] + 4, anchor[1] + 4, anchor[2] + 2 };
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .g, .mods = .{} }));
+    handleMouseButtonPress(game, left);
+    handleMouseButtonRelease(game, left);
+    game.updateExtractionTool();
+    try std.testing.expectEqual(anchor, game.extraction_draft.anchor.?);
+
+    fixture.camera.updatePosition(.{ 4.5, 7.5, 5 });
+    fixture.camera.updateView(zmath.rotationX(math.pi / 2.0));
+    try std.testing.expectEqual(null, game.extractionSurfaceTarget());
+    try std.testing.expectEqual([2]i64{ endpoint[0], endpoint[1] }, game.extractionEndpoint(anchor).?);
+    game.world.?.setBlockUnchecked(endpoint, .stone);
+    try std.testing.expectEqual(endpoint, game.extractionSurfaceTarget().?);
+    handleMouseButtonPress(game, left);
+    handleMouseButtonRelease(game, left);
+    game.updateExtractionTool();
+    try std.testing.expectEqual(.depth, game.extraction_draft.stage);
+    try std.testing.expectEqualDeep(extraction_zone.Bounds{ .min = anchor, .size = .{ 5, 5, 1 } }, game.extraction_draft.bounds.?);
+
+    // Depth changes independently of a target or any look movement.
+    game.player = PlayerController.init(std.testing.allocator, .{ 4.5, 7.5, 5 });
+    const pitch = game.player.?.pitch;
+    fixture.input.cursor_position_delta = .{ 25, 7 * ExtractionDraft.pixels_per_block };
+    game.updateGameplay(false);
+    game.updateExtractionTool();
+    try std.testing.expectEqual(pitch, game.player.?.pitch);
+    try std.testing.expectEqual(@as(f32, 0), game.player.?.yaw);
+    const buried = game.extraction_draft.bounds.?;
+    try std.testing.expectEqual([3]u32{ 5, 5, 8 }, buried.size);
+    try std.testing.expectEqual(anchor[2], buried.min[2] + buried.size[2] - 1);
+    game.buildBlueprintRenderInstances();
+    try std.testing.expectEqual(@as(?u32, 0), game.blueprint_selection_frame_start);
+    try std.testing.expectEqual(blueprint_renderer.frame_instance_count, game.blueprint_render_instances.items.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 8.035), game.blueprint_render_instances.items[8].scale[2], 0.001);
+    fixture.input.cursor_position_delta = .{ 0, -7 * ExtractionDraft.pixels_per_block };
+    handleMouseButtonPress(game, left);
+    handleMouseButtonRelease(game, left);
+    game.updateExtractionTool();
+    try std.testing.expectEqual(.ready, game.extraction_draft.stage);
+    try std.testing.expectEqual(@as(u32, 1), game.extraction_draft.bounds.?.size[2]);
+}
+
+test "extraction draft cancels ordinary holds and consumes E and Mouse1 until release" {
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    try fixture.preparePlayerToolTest();
+    const game = &fixture.game;
+    const g: KeyParams = .{ .key = .g, .mods = .{} };
+    const e: KeyParams = .{ .key = .e, .mods = .{} };
+    const escape: KeyParams = .{ .key = .escape, .mods = .{} };
+    const left: MouseButtonParams = .{ .button = .left, .mods = .{} };
+    for ([_]player_interaction.Source{ .key, .mouse }) |source| {
+        if (source == .key) handleKeyPress(game, e) else handleMouseButtonPress(game, left);
+        game.updateBlockTool();
+        try std.testing.expect(game.block_interaction.holding != null);
+        try std.testing.expect(handleUIKeyPress(game, g));
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+        try std.testing.expect(handleUIKeyPress(game, escape));
+        if (source == .key) handleKeyPress(game, e) else handleMouseButtonPress(game, left);
+        game.updateBlockTool();
+        try std.testing.expectEqual(null, game.block_interaction.holding);
+        try std.testing.expectEqual(null, game.block_interaction.pending);
+        if (source == .key) {
+            handleKeyRelease(game, e);
+            handleKeyPress(game, e);
+        } else {
+            handleMouseButtonRelease(game, left);
+            handleMouseButtonPress(game, left);
+        }
+        game.updateBlockTool();
+        try std.testing.expect(game.block_interaction.holding != null);
+        handleKeyRelease(game, e);
+        handleMouseButtonRelease(game, left);
+    }
+
+    game.block_interaction.pending = .{ .request_id = 77 };
+    try std.testing.expect(handleUIKeyPress(game, g));
+    game.extraction_draft.stage = .ready;
+    game.extraction_draft.bounds = .{ .min = StreamingTest.toolTarget(), .size = .{ 1, 1, 1 } };
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .enter, .mods = .{} }));
+    try std.testing.expect(game.engine.gameplay_input_blocked);
+    try std.testing.expect(handleUIKeyPress(game, e));
+    try std.testing.expect(handleExtractionMousePress(game, left));
+    try fixture.apply(&.{.{
+        .coords = game.layout().origin_chunk,
+        .subscription_id = 0,
+        .operation = .{ .request_id = 77, .status = .success, .player_inventory = .{ .player_id = game.player_id, .material = .dirt } },
+        .data = .acknowledgement,
+    }});
+    try std.testing.expectEqual(.dirt, game.block_interaction.inventory.?);
+    try std.testing.expectEqual(null, game.block_interaction.pending);
+    try std.testing.expect(handleUIKeyPress(game, escape));
+    try std.testing.expectEqual(.ready, game.extraction_draft.stage);
+    try std.testing.expect(!game.engine.gameplay_input_blocked);
+    try std.testing.expect(handleUIKeyPress(game, escape));
+    handleKeyPress(game, e);
+    handleMouseButtonPress(game, left);
+    try std.testing.expectEqual(null, game.block_interaction.requested);
+    handleMouseButtonRelease(game, left);
+    handleMouseButtonPress(game, left);
+    try std.testing.expectEqual(.mouse, game.block_interaction.requested.?);
+}
+
+test "extraction draft stays unavailable to the spectator and checklist draws within the display" {
+    zgui.init(std.testing.allocator);
+    defer zgui.deinit();
+    zgui.io.setIniFilename(null);
+    zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
+    _ = zgui.io.addFontFromFile("content/Roboto-Medium.ttf", 16);
+    zgui.io.setDisplaySize(560, 480);
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    const g: KeyParams = .{ .key = .g, .mods = .{} };
+    game.control_mode = .spectator;
+    try std.testing.expect(handleUIKeyPress(game, g));
+    try std.testing.expect(!game.extraction_draft.active());
+    try std.testing.expectEqualStrings("Extraction zones require player control.", game.block_action_error.message(0).?);
+    game.control_mode = .player;
+    try std.testing.expect(handleUIKeyPress(game, g));
+    game.extraction_draft.stage = .ready;
+    game.extraction_draft.bounds = .{ .min = StreamingTest.toolTarget(), .size = .{ 5, 5, 8 } };
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .enter, .mods = .{} }));
+    try std.testing.expect(game.extraction_draft.canSubmit());
+    game.extraction_draft.filter = @bitCast(@as(u8, 0));
+    game.submitExtractionZone();
+    try std.testing.expect(!game.extraction_draft.canSubmit());
+    try std.testing.expectEqual(null, game.extraction_pending);
+    for (0..2) |frame| {
+        zgui.newFrame();
+        game.drawExtractionUI();
+        if (frame > 0) {
+            _ = zgui.begin("Extraction resources", .{});
+            const position = zgui.getWindowPos();
+            const size = zgui.getWindowSize();
+            const screen = zgui.io.getDisplaySize();
+            try std.testing.expect(position[0] >= 0 and position[1] >= 0);
+            try std.testing.expect(position[0] + size[0] <= screen[0]);
+            try std.testing.expect(position[1] + size[1] <= screen[1]);
+            zgui.end();
+        }
+        zgui.render();
+    }
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expectEqual(.ready, game.extraction_draft.stage);
+    try std.testing.expect(handleUIKeyPress(game, .{ .key = .escape, .mods = .{} }));
+    try std.testing.expect(!game.extraction_draft.active());
+    try std.testing.expectEqual(@as(usize, 0), game.world.?.pending_operations.items.len);
+}
+
+test "extraction draft submits only a confirmed selection and handles authority results" {
+    const service = try WorldDataService.create(std.testing.io, std.testing.allocator, &test_layout, .flat);
+    defer service.destroy();
+    var fixture: StreamingTest = .{};
+    fixture.init();
+    defer fixture.deinit();
+    const game = &fixture.game;
+    game.world_client = try service.createClient();
+    const g: KeyParams = .{ .key = .g, .mods = .{} };
+    const enter: KeyParams = .{ .key = .enter, .mods = .{} };
+    const escape: KeyParams = .{ .key = .escape, .mods = .{} };
+    const bounds: extraction_zone.Bounds = .{ .min = StreamingTest.toolTarget(), .size = .{ 5, 5, 8 } };
+    for ([_]bool{ false, true }) |confirm| {
+        try std.testing.expect(handleUIKeyPress(game, g));
+        game.extraction_draft.stage = .ready;
+        game.extraction_draft.bounds = bounds;
+        try std.testing.expect(handleUIKeyPress(game, enter));
+        try std.testing.expectEqual(.resources, game.extraction_draft.stage);
+        game.extraction_draft.budgets.max_cells = 199;
+        game.submitExtractionZone();
+        try std.testing.expectEqual(null, game.extraction_pending);
+        try std.testing.expectEqual(.cell_budget, game.extraction_draft.issue.?);
+        game.extraction_draft.budgets.max_cells = 200;
+        if (!confirm) {
+            game.extraction_draft.filter = @bitCast(@as(u8, 0));
+            game.submitExtractionZone();
+            try std.testing.expectEqual(null, game.extraction_pending);
+            try std.testing.expect(handleUIKeyPress(game, escape));
+            try std.testing.expect(handleUIKeyPress(game, escape));
+            continue;
+        }
+        game.submitExtractionZone();
+        try std.testing.expect(game.extraction_pending != null);
+        for (0..5000) |_| {
+            game.updateExtractionTool();
+            if (game.extraction_pending == null) break;
+            try std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake);
+        }
+        try std.testing.expectEqual(null, game.extraction_pending);
+        try std.testing.expectEqualStrings("Extraction zone created.", game.extraction_status.?);
+        try std.testing.expectEqual(.inactive, game.extraction_draft.stage);
+    }
 }
 
 test "pending target placement preview uses the dedicated fulfillment identity" {
