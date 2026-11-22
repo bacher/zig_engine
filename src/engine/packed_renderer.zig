@@ -447,7 +447,7 @@ pub const Renderer = struct {
         self.relocated.clearRetainingCapacity();
         inline for (.{ "faces", "models", "packaging", "pallets", "markers" }) |name| @field(self, name).upload(gctx, &self.counters);
     }
-    /// Select complete warehouses and coalesce neighboring GPU ranges per category.
+    /// Select complete warehouses and submit at most three draws per category.
     pub fn draw(self: *Renderer, gctx: *zgpu.GraphicsContext, pass: wgpu.RenderPassEncoder, shadow: bool, view: *const visibility.View) void {
         const visible = self.plan.query(view, &self.sources);
         if (visible.len == 0) return;
@@ -458,7 +458,7 @@ pub const Renderer = struct {
             if (self.draw_ranges.items.len == 0) continue;
             pass.setPipeline(gctx.lookupResource(if (shadow) self.shadow_pipelines[i] else self.pipelines[i]).?);
             pass.setBindGroup(if (shadow) shadow_source_group else color_source_group, gctx.lookupResource(self.binding).?, &.{});
-            for (mergeAdjacent(self.draw_ranges.items)) |r| {
+            for (planDrawRanges(self.draw_ranges.items)) |r| {
                 const count = r.end - r.first;
                 pass.draw(vertices, count, 0, r.first);
                 if (shadow) self.counters.shadow_draw_calls += 1 else self.counters.draw_calls += 1;
@@ -468,22 +468,46 @@ pub const Renderer = struct {
     }
 };
 
-fn mergeAdjacent(ranges: []Range) []const Range {
+fn planDrawRanges(ranges: []Range) []const Range {
+    if (ranges.len < 2) return ranges;
     std.mem.sort(Range, ranges, {}, struct {
         fn less(_: void, a: Range, b: Range) bool {
             return a.first < b.first;
         }
     }.less);
-    var used: usize = 0;
-    for (ranges) |r| {
-        if (used > 0 and ranges[used - 1].end == r.first) {
-            ranges[used - 1].end = r.end;
-        } else {
+    // Three draws can skip two internal gaps. All instances in a category
+    // cost the same number of vertices, so keep the two largest gaps.
+    const Gap = struct { index: usize = 0, size: u32 = 0 };
+    var largest: Gap = .{};
+    var second: Gap = .{};
+    for (ranges[1..], 1..) |r, i| {
+        const gap: Gap = .{ .index = i, .size = r.first - ranges[i - 1].end };
+        if (gap.size > largest.size) {
+            second = largest;
+            largest = gap;
+        } else if (gap.size > second.size) second = gap;
+    }
+    var used: usize = 1;
+    for (ranges[1..], 1..) |r, i| {
+        if (i == largest.index or i == second.index) {
             ranges[used] = r;
             used += 1;
-        }
+        } else ranges[used - 1].end = r.end;
     }
     return ranges[0..used];
+}
+
+test "packed cargo draw budget keeps the earliest equal gaps in a fragmented category" {
+    var runs: [20]Range = undefined;
+    for (&runs, 0..) |*r, i| {
+        const first: u32 = @intCast(2 * (runs.len - i));
+        r.* = .{ .first = first, .end = first + 1 };
+    }
+    try std.testing.expectEqualSlices(Range, &.{
+        .{ .first = 2, .end = 3 },
+        .{ .first = 4, .end = 5 },
+        .{ .first = 6, .end = 41 },
+    }, planDrawRanges(&runs));
 }
 
 comptime {

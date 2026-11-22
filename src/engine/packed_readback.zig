@@ -210,8 +210,12 @@ fn checkOwned(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse, real
         renderer.removeSource(gctx, 5);
         renderer.removeSource(gctx, 6);
         if (case == .mixed_batch) try renderer.upsertSource(gctx, 2, .{ .chunk = source.chunk, .revision = index + 1, .models = &.{.{ .local = .{ 1, 0, 0 }, .material = 23 }}, .packaging = &.{.{ .local = .{ 1, 0, 0 }, .material = 23 }} });
-        var boxes: [2]cargo.Group = undefined;
-        const warehouse_packaging = [_]cargo.Instance{ item, .{ .local = .{ 3, 4, 5 }, .material = 14 }, .{ .local = .{ 25, 25, 25 }, .material = 14 } };
+        var boxes: [6]cargo.Group = undefined;
+        const hidden_item = cargo.Instance{ .local = .{ 25, 25, 25 }, .material = 14 };
+        const far_piece = cargo.Instance{ .local = .{ 3, 4, 5 }, .material = 14 };
+        const warehouse_packaging = [_]cargo.Instance{ item, far_piece } ++
+            ([_]cargo.Instance{hidden_item} ** 4) ++ [_]cargo.Instance{far_piece} ++
+            ([_]cargo.Instance{hidden_item} ** 2) ++ [_]cargo.Instance{ far_piece, hidden_item };
         if (warehouse_case) {
             var previous = source.chunk;
             previous[0] = if (WorldLayout.wrap_x) world.size_in_chunks[0] - 1 else -1;
@@ -227,9 +231,14 @@ fn checkOwned(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse, real
                 .groups = &.{.{ .box = .{ .chunk = source.chunk, .local = .{ 10, 10, 10 }, .extent = .{ 5, 5, 6 } }, .counts = .{ 0, 0, 1, 0, 0 } }},
             });
             source.packaging = &warehouse_packaging;
+            const hidden = cargo.Box{ .chunk = source.chunk, .local = .{ 25, 25, 25 }, .extent = .{ 1, 1, 6 } };
             boxes = .{
                 .{ .box = body, .counts = .{ 0, @intCast(source.models.len), 2, 0, 0 } },
-                .{ .box = .{ .chunk = source.chunk, .local = .{ 25, 25, 25 }, .extent = .{ 1, 1, 6 } }, .counts = .{ 0, 0, 1, 0, 0 } },
+                .{ .box = hidden, .counts = .{ 0, 0, 4, 0, 0 } },
+                .{ .box = body, .counts = .{ 0, 0, 1, 0, 0 } },
+                .{ .box = hidden, .counts = .{ 0, 0, 2, 0, 0 } },
+                .{ .box = body, .counts = .{ 0, 0, 1, 0, 0 } },
+                .{ .box = hidden, .counts = .{ 0, 0, 1, 0, 0 } },
             };
             source.groups = &boxes;
         }
@@ -261,10 +270,10 @@ fn checkOwned(gctx: *zgpu.GraphicsContext, mapping: *callbacks.MapResponse, real
         if (warehouse_case) {
             const after = renderer.stats();
             try std.testing.expectEqual(before.source_upload_bytes, after.source_upload_bytes);
-            try std.testing.expectEqual(if (shadow) @as(u64, 2) else 3, after.draw_calls + after.shadow_draw_calls - before.draw_calls - before.shadow_draw_calls);
-            // Both cross-chunk pieces survive. The invisible warehouses in the
-            // middle and at the end contribute no vertices in either pass.
-            const expected: u64 = if (shadow) 3 * cargo.packaging_vertex_count else 2 * cargo.model_vertex_count + 4 * cargo.packaging_vertex_count;
+            try std.testing.expectEqual(if (shadow) @as(u64, 3) else 4, after.draw_calls + after.shadow_draw_calls - before.draw_calls - before.shadow_draw_calls);
+            // Three packaging draws skip the four- and two-record gaps. The
+            // one-record internal gap is submitted, the trailing record is skipped.
+            const expected: u64 = if (shadow) 6 * cargo.packaging_vertex_count else 2 * cargo.model_vertex_count + 7 * cargo.packaging_vertex_count;
             try std.testing.expectEqual(expected, after.vertex_invocations - before.vertex_invocations);
         }
         pass.end();
