@@ -24,3 +24,4 @@
 - [ ] Add natural-world and downsampling regressions for the world-map raster (see [missing test coverage](docs/world-map.md#test-improvement-natural-terrain-and-downsampling)).
 
 - [ ] Complete [construction ownership follow-ups](specs/features/construction-state-ownership.md#follow-ups): end-to-end/target-PC validation, ownership comparison, optional compact snapshots, and mixed workload validation with [warehouses](specs/features/warehouses.md#implementation-evidence-and-remaining-work). Warehouse gameplay is implemented; sustained target-PC and whole-frame validation remain open.
+- [ ] Evaluate [saving only changed extraction-zone chunks](specs/features/resource-extraction-zones.md#follow-up-improvements) after a zone edit.

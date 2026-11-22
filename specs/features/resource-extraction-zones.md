@@ -256,8 +256,8 @@ and UI for editing or retiring a confirmed zone.
 - [x] T3. Integrate placement protection and support-safe single-cell extraction
   with manual interaction and the authoritative edit path (AC4, AC5, AC7, AC8, AC10, AC12–AC14, AC17, AC20).
 - [x] T4. Deliver near zone snapshots and deltas, and coalesce distant surfaces (AC21–AC22).
-- [x] T-val. Run AC1–AC20 through client and service entry points, including the shaft,
-  protected supports, and reload after partial excavation.
+- [x] T-val. Verify AC1–AC22 through client and service entry points, including shafts, protected
+  supports, reload after partial excavation, and near and distant publication.
 
 ### Validation
 
@@ -285,3 +285,14 @@ the geometry payload would average 13.2 kB/s per observer. This excludes metadat
 future network framing, and the initial load. A ReleaseFast run took 13.0 ms of service
 wall time across all 20 batches for building and copying the surfaces. To repeat, run
 `zig build test-world-service -Doptimize=ReleaseFast -Dtest-filter='extraction far surfaces'`.
+
+### Follow-up improvements
+
+- Evaluate saving only the extraction-zone chunks changed since the last durable capture.
+  Format 9 already saves changed terrain chunks individually. A change to any zone currently
+  replaces the complete zone image. After mining one block from a full 128×128×64 zone,
+  preparing the capture took 81.8 ms on the service executor and produced 3,146,222 bytes
+  of zone data (ReleaseFast, median of three runs). Compare executor time, WAL bytes and
+  reopen time on the same workloads. Recovery must preserve the bounds and filter of an
+  exhausted zone, clear the last occupied cell of a depleted chunk, and restore the terrain
+  and inventory from the same commit. [Measurements and reproduction](../../docs/validation/extraction-zone-persistence.md)

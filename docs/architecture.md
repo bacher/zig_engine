@@ -12,8 +12,8 @@ The project is a Zig 3D engine with two executable applications. The engine supp
 The voxel world has four distinct kinds of state:
 
 1. World-data-owned terrain and player inventory.
-2. Simulation-owned construction targets and lifecycle, backed by immutable blueprint definitions.
-3. The main thread's composed terrain/construction cache, with unacknowledged local edits applied on top of authoritative snapshots.
+2. Simulation-owned construction targets and lifecycle, warehouse stock and deliveries, and extraction zone claims and blocks.
+3. The main thread’s cache of terrain, construction targets, and extraction-zone blocks, with unacknowledged local edits applied on top of authoritative snapshots.
 4. The engine's GPU geometry, which represents exposed faces rather than complete block contents.
 
 Changes flow from application commands to the service and back through subscriptions. Rendering consumes the resulting geometry; it does not decide whether a block edit is valid.
@@ -31,6 +31,7 @@ flowchart TD
     Service --> Generator[Deterministic terrain generator]
     Service -->|terrain blocks, masks, or faces| Main
     Service -->|construction snapshots and progress deltas| Main
+    Service -->|extraction zone snapshots and changed cells| Main
     Main --> Cache[Composed optimistic world cache]
     Cache -->|local face extraction| Upload[GPU upload queue]
     Main --> Upload

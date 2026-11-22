@@ -47,8 +47,12 @@ identity/version guards likewise reject unsupported algorithms. All accepted sav
 current game logic.
 
 Version 9 adds extraction zone bounds, resource filters, occupied cells, road slopes, and
-soil deadlines to the coherent terrain/construction/player snapshot. Zone bounds keep
-empty cells protected after reload. Version 8 added simulation-owned warehouses and
+soil deadlines to the shared save transaction. When a zone changes, the WAL records the
+complete zone image alongside the changed terrain chunks and current player inventory.
+Zone bounds keep empty cells protected after reload. Saving only changed zone chunks is a
+[follow-up improvement](../specs/features/resource-extraction-zones.md#follow-up-improvements).
+
+Version 8 added simulation-owned warehouses and
 accepted delivery cargo. Pallet material has explicit ID 23. Version 7 introduced
 construction lifecycle, target-chunk ownership transfers, and pending
 post-completion grass initialization. Bare and grassy soil share support rules; legacy
